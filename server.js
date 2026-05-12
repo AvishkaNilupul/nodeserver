@@ -7,6 +7,14 @@ const Code = require("./models/Code");
 const app = express();
 
 // =========================
+// TRUST PROXY
+// =========================
+
+// Required behind VPS / nginx / Cloudflare
+
+app.set("trust proxy", true);
+
+// =========================
 // CONFIG
 // =========================
 
@@ -103,9 +111,7 @@ app.post("/validate", async (req, res) => {
 
     const { code } = req.body;
 
-    // =========================
     // Validate input
-    // =========================
 
     if (!code) {
 
@@ -117,12 +123,10 @@ app.post("/validate", async (req, res) => {
     }
 
     // =========================
-    // Get REAL IP
+    // Get REAL user IP
     // =========================
 
-    const ip =
-      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-      req.socket.remoteAddress;
+    const ip = req.ip;
 
     console.log("Detected IP:", ip);
 
@@ -231,9 +235,7 @@ app.post("/generate", async (req, res) => {
       key
     } = req.body;
 
-    // =========================
     // Validate admin key
-    // =========================
 
     if (key !== ADMIN_KEY) {
 
@@ -244,9 +246,7 @@ app.post("/generate", async (req, res) => {
 
     }
 
-    // =========================
     // Validate fields
-    // =========================
 
     if (!account || !password) {
 
