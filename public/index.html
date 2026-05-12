@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Redeem Code</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <div class="container">
+    <h2>Redeem Code</h2>
+
+    <input id="code" placeholder="Enter your code">
+    <button onclick="submitCode()" id="btn">Submit</button>
+
+    <p id="message"></p>
+  </div>
+
+<script>
+async function submitCode() {
+  const code = document.getElementById("code").value;
+  const message = document.getElementById("message");
+  const btn = document.getElementById("btn");
+
+  message.innerText = "";
+  message.className = "";
+
+  if (!code) {
+    message.innerText = "Please enter a code";
+    message.classList.add("error");
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerText = "Checking...";
+
+  try {
+    const res = await fetch("/validate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ code })
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+      // 🔥 STORE account + password
+      localStorage.setItem("accountData", JSON.stringify({
+        account: data.account,
+        password: data.password
+      }));
+
+      // 🔥 REDIRECT to result page
+      window.location.href = "/result.html";
+
+    } else {
+      message.innerText = data.message;
+      message.classList.add("error");
+    }
+
+  } catch (err) {
+    message.innerText = "Something went wrong";
+    message.classList.add("error");
+  }
+
+  btn.disabled = false;
+  btn.innerText = "Submit";
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Account Details</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <div class="container">
+    <h2>Account Details</h2>
+
+    <p><strong>Username:</strong></p>
+    <p id="account"></p>
+
+    <p><strong>Password:</strong></p>
+    <p id="password"></p>
+  </div>
+
+  <script>
+    const data = JSON.parse(localStorage.getItem("accountData"));
+
+    if (!data) {
+      window.location.href = "/";
+    } else {
+      document.getElementById("account").innerText = data.account;
+      document.getElementById("password").innerText = data.password;
+    }
+  </script>
+
+</body>
+</html>

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generate Code</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <div class="container">
+    <h2>Generate Account Code</h2>
+
+    <input id="account" placeholder="Enter account/username">
+    <input id="password" placeholder="Enter password">
+    <input id="key" placeholder="Admin key">
+
+    <button onclick="generateCode()" id="btn">Generate</button>
+
+    <p id="result"></p>
+  </div>
+
+  <script>
+    async function generateCode() {
+      const account = document.getElementById("account").value;
+      const password = document.getElementById("password").value;
+      const key = document.getElementById("key").value;
+
+      const result = document.getElementById("result");
+      const btn = document.getElementById("btn");
+
+      result.innerText = "";
+      result.className = "";
+
+      if (!account || !password || !key) {
+        result.innerText = "All fields are required";
+        result.classList.add("error");
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = "Generating...";
+
+      try {
+        const res = await fetch("/generate", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            account: account,
+            password: password,
+            key: key
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          result.innerText = "Generated Code: " + data.code;
+          result.classList.add("success");
+        } else {
+          result.innerText = "Failed to generate";
+          result.classList.add("error");
+        }
+
+      } catch (err) {
+        result.innerText = "Server error";
+        result.classList.add("error");
+      }
+
+      btn.disabled = false;
+      btn.innerText = "Generate";
+    }
+  </script>
+
+</body>
+</html>
