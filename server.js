@@ -7,14 +7,6 @@ const Code = require("./models/Code");
 const app = express();
 
 // =========================
-// TRUST PROXY
-// =========================
-
-// Required for Cloudflare / nginx / VPS
-
-app.set("trust proxy", true);
-
-// =========================
 // CONFIG
 // =========================
 
@@ -125,17 +117,6 @@ app.post("/validate", async (req, res) => {
     }
 
     // =========================
-    // Get REAL user IP
-    // =========================
-
-    const ip =
-      req.headers["cf-connecting-ip"] ||
-      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-      req.socket.remoteAddress;
-
-    console.log("Detected IP:", ip);
-
-    // =========================
     // Find code
     // =========================
 
@@ -154,55 +135,57 @@ app.post("/validate", async (req, res) => {
 
     }
 
-    console.log("Stored IP:", found.allowedIP);
-
     // =========================
-    // First-time IP lock
+    // Expiration check
     // =========================
 
-    if (!found.allowedIP) {
+    if (found.redeemedAt) {
 
-      found.allowedIP = ip;
+      const now = Date.now();
+
+      const redeemedTime =
+        new Date(found.redeemedAt).getTime();
+
+      const twoDays =
+        2 * 24 * 60 * 60 * 1000;
+
+      // Expired
+
+      if (now - redeemedTime > twoDays) {
+
+        await Code.deleteOne({
+          _id: found._id
+        });
+
+        console.log(
+          `🗑️ Expired code deleted: ${found.code}`
+        );
+
+        return res.json({
+          success: false,
+          message:
+            "This code has expired"
+        });
+
+      }
+
+    } else {
+
+      // First redeem
+
+      found.redeemedAt = new Date();
 
       await found.save();
 
       console.log(
-        "🔒 Saved first IP:",
-        found.allowedIP
+        `✅ First redeem: ${found.code}`
       );
-
-    }
-
-    // =========================
-    // Block different IPs
-    // =========================
-
-    if (
-      String(found.allowedIP).trim() !==
-      String(ip).trim()
-    ) {
-
-      console.log(
-        "❌ Blocked IP:",
-        ip
-      );
-
-      return res.json({
-        success: false,
-        message:
-          "This code is already used by another user"
-      });
 
     }
 
     // =========================
     // Success
     // =========================
-
-    console.log(
-      "✅ Redeem success for IP:",
-      ip
-    );
 
     return res.json({
       success: true,
@@ -291,14 +274,14 @@ app.post("/generate", async (req, res) => {
     const newCode = new Code({
       code,
       account,
-      password
+      password,
+      redeemedAt: null
     });
 
     await newCode.save();
 
     console.log(
-      "🎟️ Generated code:",
-      code
+      `🎟️ Generated code: ${code}`
     );
 
     // =========================

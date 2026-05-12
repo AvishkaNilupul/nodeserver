@@ -2,8 +2,6 @@ const mongoose = require("mongoose");
 
 const codeSchema = new mongoose.Schema({
 
-  // Redeem code
-
   code: {
     type: String,
     required: true,
@@ -12,15 +10,11 @@ const codeSchema = new mongoose.Schema({
     trim: true
   },
 
-  // Account username
-
   account: {
     type: String,
     required: true,
     trim: true
   },
-
-  // Account password
 
   password: {
     type: String,
@@ -28,18 +22,15 @@ const codeSchema = new mongoose.Schema({
     trim: true
   },
 
-  // Locked IP
+  // First redeem timestamp
 
-  allowedIP: {
-    type: String,
-    default: null,
-    trim: true
+  redeemedAt: {
+    type: Date,
+    default: null
   }
 
 }, {
-
   timestamps: true
-
 });
 
 module.exports = mongoose.model(
