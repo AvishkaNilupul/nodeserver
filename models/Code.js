@@ -27,6 +27,13 @@ const codeSchema = new mongoose.Schema({
   redeemedAt: {
     type: Date,
     default: null
+  },
+
+  // Browser/device lock token
+
+  deviceToken: {
+    type: String,
+    default: null
   }
 
 }, {

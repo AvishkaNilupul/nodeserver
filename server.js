@@ -101,7 +101,10 @@ app.post("/validate", async (req, res) => {
 
   try {
 
-    const { code } = req.body;
+    const {
+      code,
+      deviceToken
+    } = req.body;
 
     // =========================
     // Validate input
@@ -169,17 +172,41 @@ app.post("/validate", async (req, res) => {
 
       }
 
-    } else {
+    }
 
-      // First redeem
+    // =========================
+    // First redeem
+    // =========================
+
+    if (!found.deviceToken) {
+
+      found.deviceToken = deviceToken;
 
       found.redeemedAt = new Date();
 
       await found.save();
 
       console.log(
-        `✅ First redeem: ${found.code}`
+        "🔒 Locked to device:",
+        deviceToken
       );
+
+    }
+
+    // =========================
+    // Block other devices
+    // =========================
+
+    if (
+      String(found.deviceToken) !==
+      String(deviceToken)
+    ) {
+
+      return res.json({
+        success: false,
+        message:
+          "This code has already been redeemed on another device"
+      });
 
     }
 
@@ -275,7 +302,8 @@ app.post("/generate", async (req, res) => {
       code,
       account,
       password,
-      redeemedAt: null
+      redeemedAt: null,
+      deviceToken: null
     });
 
     await newCode.save();

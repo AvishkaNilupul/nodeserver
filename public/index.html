@@ -1,74 +1,182 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 <head>
+
+  <meta charset="UTF-8" />
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+
   <title>Redeem Code</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
   <link rel="stylesheet" href="style.css">
+
 </head>
 
 <body>
 
   <div class="container">
+
     <h2>Redeem Code</h2>
 
-    <input id="code" placeholder="Enter your code">
-    <button onclick="submitCode()" id="btn">Submit</button>
+    <input
+      id="code"
+      placeholder="Enter your redeem code"
+      autocomplete="off"
+    >
+
+    <button
+      onclick="submitCode()"
+      id="btn"
+    >
+      Submit
+    </button>
 
     <p id="message"></p>
+
   </div>
 
 <script>
+
 async function submitCode() {
-  const code = document.getElementById("code").value;
-  const message = document.getElementById("message");
-  const btn = document.getElementById("btn");
+
+  const code =
+    document.getElementById("code")
+    .value
+    .trim()
+    .toUpperCase();
+
+  const message =
+    document.getElementById("message");
+
+  const btn =
+    document.getElementById("btn");
+
+  // =========================
+  // Reset UI
+  // =========================
 
   message.innerText = "";
+
   message.className = "";
 
+  // =========================
+  // Validate input
+  // =========================
+
   if (!code) {
-    message.innerText = "Please enter a code";
+
+    message.innerText =
+      "Please enter a code";
+
     message.classList.add("error");
+
     return;
   }
 
+  // =========================
+  // Generate browser token
+  // =========================
+
+  let deviceToken =
+    localStorage.getItem("deviceToken");
+
+  if (!deviceToken) {
+
+    deviceToken =
+      crypto.randomUUID();
+
+    localStorage.setItem(
+      "deviceToken",
+      deviceToken
+    );
+
+  }
+
+  // =========================
+  // Loading state
+  // =========================
+
   btn.disabled = true;
+
   btn.innerText = "Checking...";
 
   try {
+
     const res = await fetch("/validate", {
+
       method: "POST",
+
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type":
+          "application/json"
       },
-      body: JSON.stringify({ code })
+
+      body: JSON.stringify({
+        code,
+        deviceToken
+      })
+
     });
 
     const data = await res.json();
 
-    if (data.success) {
-      // 🔥 STORE account + password
-      localStorage.setItem("accountData", JSON.stringify({
-        account: data.account,
-        password: data.password
-      }));
+    // =========================
+    // Success
+    // =========================
 
-      // 🔥 REDIRECT to result page
-      window.location.href = "/result.html";
+    if (data.success) {
+
+      // Save account details
+
+      localStorage.setItem(
+        "accountData",
+        JSON.stringify({
+          account: data.account,
+          password: data.password
+        })
+      );
+
+      // Redirect
+
+      window.location.href =
+        "/result.html";
 
     } else {
-      message.innerText = data.message;
+
+      // Error message
+
+      message.innerText =
+        data.message;
+
       message.classList.add("error");
+
     }
 
   } catch (err) {
-    message.innerText = "Something went wrong";
+
+    console.error(err);
+
+    message.innerText =
+      "Something went wrong";
+
     message.classList.add("error");
+
   }
 
+  // =========================
+  // Reset button
+  // =========================
+
   btn.disabled = false;
+
   btn.innerText = "Submit";
+
 }
+
 </script>
 
 </body>
