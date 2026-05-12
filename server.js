@@ -13,6 +13,15 @@ const app = express();
 const ADMIN_KEY = "Avishka123";
 
 // =========================
+// TRUST PROXY
+// =========================
+
+// Important for real IP detection
+// behind VPS / Cloudflare / nginx
+
+app.set("trust proxy", true);
+
+// =========================
 // Middleware
 // =========================
 
@@ -22,7 +31,8 @@ app.use(express.urlencoded({
   extended: true
 }));
 
-// Serve static public folder
+// Serve public folder
+
 app.use(express.static(
   path.join(__dirname, "public")
 ));
@@ -103,6 +113,7 @@ app.post("/validate", async (req, res) => {
     const { code } = req.body;
 
     // Validate input
+
     if (!code) {
 
       return res.status(400).json({
@@ -112,17 +123,24 @@ app.post("/validate", async (req, res) => {
 
     }
 
-    // Get user IP
-    const ip =
-      req.headers["x-forwarded-for"]?.split(",")[0] ||
-      req.socket.remoteAddress;
+    // =========================
+    // Get REAL user IP
+    // =========================
 
+    const ip = req.ip;
+
+    console.log("Detected IP:", ip);
+
+    // =========================
     // Find code
+    // =========================
+
     const found = await Code.findOne({
       code
     });
 
     // Invalid code
+
     if (!found) {
 
       return res.json({
@@ -132,17 +150,31 @@ app.post("/validate", async (req, res) => {
 
     }
 
-    // Lock first IP
+    // =========================
+    // First-time IP lock
+    // =========================
+
     if (!found.allowedIP) {
 
       found.allowedIP = ip;
 
       await found.save();
 
+      console.log(
+        `🔒 Code locked to IP: ${ip}`
+      );
+
     }
 
+    // =========================
     // Block different IPs
+    // =========================
+
     if (found.allowedIP !== ip) {
+
+      console.log(
+        `❌ Blocked IP: ${ip}`
+      );
 
       return res.json({
         success: false,
@@ -152,7 +184,10 @@ app.post("/validate", async (req, res) => {
 
     }
 
+    // =========================
     // Success
+    // =========================
+
     return res.json({
       success: true,
       account: found.account,
@@ -190,6 +225,7 @@ app.post("/generate", async (req, res) => {
     } = req.body;
 
     // Validate admin key
+
     if (key !== ADMIN_KEY) {
 
       return res.status(403).json({
@@ -200,6 +236,7 @@ app.post("/generate", async (req, res) => {
     }
 
     // Validate fields
+
     if (!account || !password) {
 
       return res.status(400).json({
@@ -211,7 +248,7 @@ app.post("/generate", async (req, res) => {
     }
 
     // =========================
-    // Generate unique redeem code
+    // Generate UNIQUE code
     // =========================
 
     let code;
@@ -227,7 +264,10 @@ app.post("/generate", async (req, res) => {
 
     }
 
+    // =========================
     // Save to database
+    // =========================
+
     const newCode = new Code({
       code,
       account,
@@ -236,7 +276,10 @@ app.post("/generate", async (req, res) => {
 
     await newCode.save();
 
+    // =========================
     // Success response
+    // =========================
+
     return res.json({
       success: true,
       code
