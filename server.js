@@ -205,7 +205,7 @@ app.post("/validate", async (req, res) => {
       return res.json({
         success: false,
         message:
-          "This code has already been redeemed on another device"
+          "This code has already been redeemed"
       });
 
     }
