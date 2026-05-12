@@ -13,15 +13,6 @@ const app = express();
 const ADMIN_KEY = "Avishka123";
 
 // =========================
-// TRUST PROXY
-// =========================
-
-// Important for real IP detection
-// behind VPS / Cloudflare / nginx
-
-app.set("trust proxy", true);
-
-// =========================
 // Middleware
 // =========================
 
@@ -112,7 +103,9 @@ app.post("/validate", async (req, res) => {
 
     const { code } = req.body;
 
+    // =========================
     // Validate input
+    // =========================
 
     if (!code) {
 
@@ -124,10 +117,12 @@ app.post("/validate", async (req, res) => {
     }
 
     // =========================
-    // Get REAL user IP
+    // Get REAL IP
     // =========================
 
-    const ip = req.ip;
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.socket.remoteAddress;
 
     console.log("Detected IP:", ip);
 
@@ -150,6 +145,8 @@ app.post("/validate", async (req, res) => {
 
     }
 
+    console.log("Stored IP:", found.allowedIP);
+
     // =========================
     // First-time IP lock
     // =========================
@@ -161,7 +158,8 @@ app.post("/validate", async (req, res) => {
       await found.save();
 
       console.log(
-        `🔒 Code locked to IP: ${ip}`
+        "🔒 Saved first IP:",
+        found.allowedIP
       );
 
     }
@@ -170,10 +168,14 @@ app.post("/validate", async (req, res) => {
     // Block different IPs
     // =========================
 
-    if (found.allowedIP !== ip) {
+    if (
+      String(found.allowedIP).trim() !==
+      String(ip).trim()
+    ) {
 
       console.log(
-        `❌ Blocked IP: ${ip}`
+        "❌ Blocked IP:",
+        ip
       );
 
       return res.json({
@@ -187,6 +189,11 @@ app.post("/validate", async (req, res) => {
     // =========================
     // Success
     // =========================
+
+    console.log(
+      "✅ Redeem success for IP:",
+      ip
+    );
 
     return res.json({
       success: true,
@@ -224,7 +231,9 @@ app.post("/generate", async (req, res) => {
       key
     } = req.body;
 
+    // =========================
     // Validate admin key
+    // =========================
 
     if (key !== ADMIN_KEY) {
 
@@ -235,7 +244,9 @@ app.post("/generate", async (req, res) => {
 
     }
 
+    // =========================
     // Validate fields
+    // =========================
 
     if (!account || !password) {
 
@@ -265,7 +276,7 @@ app.post("/generate", async (req, res) => {
     }
 
     // =========================
-    // Save to database
+    // Save code
     // =========================
 
     const newCode = new Code({
@@ -275,6 +286,11 @@ app.post("/generate", async (req, res) => {
     });
 
     await newCode.save();
+
+    console.log(
+      "🎟️ Generated code:",
+      code
+    );
 
     // =========================
     // Success response
