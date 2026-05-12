@@ -1,31 +1,525 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+
   <title>Account Details</title>
-  <link rel="stylesheet" href="style.css">
+
+  <style>
+
+    /* =========================
+       Base
+    ========================= */
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+
+      background:
+        radial-gradient(circle at top, #0b1220, #020617);
+
+      color: #e2e8f0;
+
+      min-height: 100vh;
+
+      display: flex;
+      justify-content: center;
+      align-items: center;
+
+      padding: 24px;
+    }
+
+    /* =========================
+       Wrapper
+    ========================= */
+
+    .wrapper {
+      width: 100%;
+      max-width: 720px;
+
+      display: flex;
+      flex-direction: column;
+
+      gap: 22px;
+    }
+
+    /* =========================
+       Container
+    ========================= */
+
+    .container {
+      background: rgba(30, 41, 59, 0.72);
+
+      backdrop-filter: blur(12px);
+
+      border-radius: 20px;
+
+      padding: 30px;
+
+      border: 1px solid rgba(255,255,255,0.06);
+
+      box-shadow:
+        0 0 30px rgba(239, 68, 68, 0.10),
+        inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+
+    /* =========================
+       Headings
+    ========================= */
+
+    h2 {
+      font-size: 30px;
+      font-weight: 700;
+
+      margin-bottom: 24px;
+
+      letter-spacing: 0.4px;
+    }
+
+    .instructions-title {
+      font-size: 24px;
+      font-weight: 700;
+
+      margin-bottom: 20px;
+    }
+
+    /* =========================
+       Account Box
+    ========================= */
+
+    .account-box {
+      display: grid;
+
+      grid-template-columns: 1fr 1fr;
+
+      gap: 18px;
+    }
+
+    .info-item {
+      background: rgba(2, 6, 23, 0.82);
+
+      border: 1px solid rgba(255,255,255,0.05);
+
+      border-radius: 16px;
+
+      padding: 18px;
+
+      transition: 0.25s ease;
+    }
+
+    .info-item:hover {
+      border-color: rgba(239, 68, 68, 0.35);
+
+      box-shadow:
+        0 0 14px rgba(239, 68, 68, 0.15);
+    }
+
+    .label {
+      font-size: 12px;
+
+      color: #94a3b8;
+
+      margin-bottom: 8px;
+
+      text-transform: uppercase;
+
+      letter-spacing: 1px;
+    }
+
+    .value {
+      font-size: 18px;
+      font-weight: 600;
+
+      color: #f8fafc;
+
+      word-break: break-word;
+    }
+
+    /* =========================
+       Instructions
+    ========================= */
+
+    .instructions {
+      display: flex;
+      flex-direction: column;
+
+      gap: 18px;
+    }
+
+    .step {
+      display: flex;
+      align-items: flex-start;
+
+      gap: 16px;
+
+      background: rgba(2, 6, 23, 0.72);
+
+      border: 1px solid rgba(255,255,255,0.04);
+
+      border-radius: 16px;
+
+      padding: 18px;
+
+      transition: 0.2s ease;
+    }
+
+    .step:hover {
+      border-color: rgba(239, 68, 68, 0.20);
+    }
+
+    .step-number {
+      min-width: 36px;
+      height: 36px;
+
+      border-radius: 50%;
+
+      background:
+        linear-gradient(135deg, #ef4444, #dc2626);
+
+      display: flex;
+      justify-content: center;
+      align-items: center;
+
+      color: white;
+
+      font-size: 15px;
+      font-weight: bold;
+
+      flex-shrink: 0;
+    }
+
+    .step-text {
+      color: #cbd5e1;
+
+      font-size: 15px;
+
+      line-height: 1.75;
+    }
+
+    .step-text a {
+      color: #f87171;
+
+      text-decoration: none;
+
+      font-weight: 600;
+    }
+
+    .step-text a:hover {
+      text-decoration: underline;
+    }
+
+    /* =========================
+       Warning Box
+    ========================= */
+
+    .warning-box {
+      margin-top: 20px;
+
+      background: rgba(127, 29, 29, 0.18);
+
+      border: 1px solid rgba(248, 113, 113, 0.25);
+
+      border-left: 5px solid #ef4444;
+
+      border-radius: 16px;
+
+      padding: 20px;
+    }
+
+    .warning-title {
+      color: #f87171;
+
+      font-size: 16px;
+      font-weight: 700;
+
+      margin-bottom: 12px;
+
+      text-transform: uppercase;
+
+      letter-spacing: 1px;
+    }
+
+    .warning-text {
+      color: #fecaca;
+
+      font-size: 15px;
+
+      line-height: 1.7;
+    }
+
+    /* =========================
+       Tablet
+    ========================= */
+
+    @media (max-width: 768px) {
+
+      .wrapper {
+        max-width: 100%;
+      }
+
+      .account-box {
+        grid-template-columns: 1fr;
+      }
+
+      h2 {
+        font-size: 24px;
+      }
+
+      .instructions-title {
+        font-size: 21px;
+      }
+
+    }
+
+    /* =========================
+       Mobile
+    ========================= */
+
+    @media (max-width: 480px) {
+
+      body {
+        align-items: flex-start;
+
+        padding: 16px;
+      }
+
+      .container {
+        padding: 20px;
+      }
+
+      h2 {
+        font-size: 22px;
+
+        margin-bottom: 18px;
+      }
+
+      .instructions-title {
+        font-size: 19px;
+      }
+
+      .step {
+        padding: 14px;
+
+        gap: 12px;
+      }
+
+      .step-number {
+        min-width: 30px;
+        height: 30px;
+
+        font-size: 13px;
+      }
+
+      .step-text {
+        font-size: 13px;
+
+        line-height: 1.65;
+      }
+
+      .value {
+        font-size: 15px;
+      }
+
+      .warning-box {
+        padding: 16px;
+      }
+
+      .warning-title {
+        font-size: 14px;
+      }
+
+      .warning-text {
+        font-size: 13px;
+      }
+
+    }
+
+  </style>
 </head>
 
 <body>
 
-  <div class="container">
-    <h2>Account Details</h2>
+  <div class="wrapper">
 
-    <p><strong>Username:</strong></p>
-    <p id="account"></p>
+    <!-- =========================
+         Account Details
+    ========================== -->
 
-    <p><strong>Password:</strong></p>
-    <p id="password"></p>
+    <div class="container">
+
+      <h2>Account Details</h2>
+
+      <div class="account-box">
+
+        <div class="info-item">
+
+          <div class="label">
+            Username
+          </div>
+
+          <div class="value" id="account"></div>
+
+        </div>
+
+        <div class="info-item">
+
+          <div class="label">
+            Password
+          </div>
+
+          <div class="value" id="password"></div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- =========================
+         Instructions
+    ========================== -->
+
+    <div class="container">
+
+      <div class="instructions-title">
+        Instructions
+      </div>
+
+      <div class="instructions">
+
+        <!-- Step 1 -->
+
+        <div class="step">
+
+          <div class="step-number">
+            1
+          </div>
+
+          <div class="step-text">
+
+            Log in to the received Twitch account, then go to
+
+            <a
+              href="https://www.twitch.tv/drops/inventory"
+              target="_blank"
+            >
+              twitch.tv/drops/inventory
+            </a>
+
+            and scroll to the bottom of the page, to the
+            <strong>"Received"</strong> section.
+
+          </div>
+
+        </div>
+
+        <!-- Step 2 -->
+
+        <div class="step">
+
+          <div class="step-number">
+            2
+          </div>
+
+          <div class="step-text">
+
+            Click on the purple
+            <strong>"Connect"</strong>
+            button, which is located below the item you want to add to your account.
+
+          </div>
+
+        </div>
+
+        <!-- Step 3 -->
+
+        <div class="step">
+
+          <div class="step-number">
+            3
+          </div>
+
+          <div class="step-text">
+
+            Connect the account by following the instructions shown on the site where the connection is made.
+
+          </div>
+
+        </div>
+
+        <!-- Step 4 -->
+
+        <div class="step">
+
+          <div class="step-number">
+            4
+          </div>
+
+          <div class="step-text">
+
+            Please note that after connecting, you may need to click additional buttons.
+
+            For example, for Rust, you need to click the
+            <strong>"Activate Drops"</strong>
+            button and after that
+            <strong>"Check for missing drops"</strong>.
+
+            Be careful after connecting.
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- =========================
+           Warning
+      ========================== -->
+
+      <div class="warning-box">
+
+        <div class="warning-title">
+          Warning
+        </div>
+
+        <div class="warning-text">
+
+          Items older than six months aren't showing up in Twitch's inventory.
+
+          <br><br>
+
+          You'll get everything as described if you follow the instructions, thanks!
+
+        </div>
+
+      </div>
+
+    </div>
+
   </div>
 
   <script>
+
     const data = JSON.parse(localStorage.getItem("accountData"));
 
     if (!data) {
+
       window.location.href = "/";
+
     } else {
+
       document.getElementById("account").innerText = data.account;
+
       document.getElementById("password").innerText = data.password;
+
     }
+
   </script>
 
 </body>
