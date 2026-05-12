@@ -1,5 +1,4 @@
-const ADMIN_KEY = "Avishka123"; 
-
+const ADMIN_KEY = "Avishka123";
 
 const express = require("express");
 const mongoose = require("mongoose");
@@ -12,35 +11,43 @@ app.use(express.json());
 app.use(express.static("public"));
 
 // ✅ MongoDB connection
-mongoose.connect("mongodb://avishka:Avishka123@ac-ufnccre-shard-00-00.vsigmq3.mongodb.net:27017,ac-ufnccre-shard-00-01.vsigmq3.mongodb.net:27017,ac-ufnccre-shard-00-02.vsigmq3.mongodb.net:27017/codesDB?ssl=true&replicaSet=atlas-ur8a1h-shard-0&authSource=admin&appName=redeemer")
-  .then(() => console.log("MongoDB connected"))
-  .catch(err => console.log(err));
+mongoose.connect(
+  "mongodb://avishka:Avishka123@ac-ufnccre-shard-00-00.vsigmq3.mongodb.net:27017,ac-ufnccre-shard-00-01.vsigmq3.mongodb.net:27017,ac-ufnccre-shard-00-02.vsigmq3.mongodb.net:27017/codesDB?ssl=true&replicaSet=atlas-ur8a1h-shard-0&authSource=admin&appName=redeemer"
+)
+.then(() => console.log("MongoDB connected"))
+.catch(err => console.log(err));
 
 // ✅ test route
 app.get("/", (req, res) => {
   res.send("Server is running");
 });
 
-// ✅ validation route
-// 🔹 VALIDATE ROUTE
+// ✅ VALIDATE ROUTE
 app.post("/validate", async (req, res) => {
   try {
     const { code } = req.body;
-    const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+
+    // get user IP
+    const ip =
+      req.headers["x-forwarded-for"] ||
+      req.socket.remoteAddress;
 
     const found = await Code.findOne({ code });
 
     if (!found) {
-      return res.json({ success: false, message: "Invalid code" });
+      return res.json({
+        success: false,
+        message: "Invalid code"
+      });
     }
 
-    // lock first IP
+    // first user locks the code to their IP
     if (!found.allowedIP) {
       found.allowedIP = ip;
       await found.save();
     }
 
-    // block other IPs
+    // deny other IPs
     if (found.allowedIP !== ip) {
       return res.json({
         success: false,
@@ -48,8 +55,8 @@ app.post("/validate", async (req, res) => {
       });
     }
 
-    // 🔥 RETURN DATA instead of redirect
-    res.json({
+    // return account data
+    return res.json({
       success: true,
       account: found.account,
       password: found.password
@@ -57,20 +64,31 @@ app.post("/validate", async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false });
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
   }
 });
 
-// 🔹 GENERATE ROUTE
+// ✅ GENERATE ROUTE
 app.post("/generate", async (req, res) => {
   try {
     const { account, password, key } = req.body;
 
+    // admin auth
     if (key !== ADMIN_KEY) {
-      return res.status(403).json({ success: false });
+      return res.status(403).json({
+        success: false,
+        message: "Invalid admin key"
+      });
     }
 
-    const code = Math.random().toString(36).substring(2, 10);
+    // generate random code
+    const code = Math.random()
+      .toString(36)
+      .substring(2, 10);
 
     const newCode = new Code({
       code,
@@ -80,15 +98,24 @@ app.post("/generate", async (req, res) => {
 
     await newCode.save();
 
-    res.json({ success: true, code });
+    return res.json({
+      success: true,
+      code
+    });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false });
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
   }
 });
 
-// ✅ start server
-app.listen(3000, () => {
-  console.log("Server started on http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+
+// ✅ IMPORTANT: bind publicly for container hosting
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server started on http://0.0.0.0:${PORT}`);
 });
