@@ -50,8 +50,7 @@
     ========================= */
 
     .sidebar {
-
-      width: 280px;
+      width: 300px;
 
       background:
         rgba(15,23,42,0.95);
@@ -71,9 +70,34 @@
       border-bottom:
         1px solid rgba(255,255,255,0.06);
 
-      font-size: 22px;
+      display: flex;
 
-      font-weight: 700;
+      justify-content: space-between;
+
+      align-items: center;
+    }
+
+    .sidebar-header h2 {
+      font-size: 22px;
+    }
+
+    .logout-btn {
+
+      background:
+        rgba(239,68,68,0.15);
+
+      border:
+        1px solid rgba(239,68,68,0.25);
+
+      color: #f87171;
+
+      padding: 8px 12px;
+
+      border-radius: 10px;
+
+      cursor: pointer;
+
+      font-size: 13px;
     }
 
     .users {
@@ -121,6 +145,83 @@
 
       background:
         rgba(239,68,68,0.08);
+    }
+
+    /* =========================
+       Unread State
+    ========================= */
+
+    .user.unread {
+
+      border-color:
+        rgba(239,68,68,0.7);
+
+      box-shadow:
+        0 0 16px rgba(239,68,68,0.22);
+
+      animation:
+        pulseGlow 1.4s infinite;
+    }
+
+    @keyframes pulseGlow {
+
+      0% {
+
+        box-shadow:
+          0 0 10px rgba(239,68,68,0.15);
+
+      }
+
+      50% {
+
+        box-shadow:
+          0 0 22px rgba(239,68,68,0.35);
+
+      }
+
+      100% {
+
+        box-shadow:
+          0 0 10px rgba(239,68,68,0.15);
+
+      }
+
+    }
+
+    .user-content {
+
+      display: flex;
+
+      justify-content: space-between;
+
+      align-items: center;
+
+      gap: 10px;
+    }
+
+    .unread-badge {
+
+      background: #ef4444;
+
+      color: white;
+
+      min-width: 24px;
+
+      height: 24px;
+
+      border-radius: 999px;
+
+      display: flex;
+
+      justify-content: center;
+
+      align-items: center;
+
+      font-size: 12px;
+
+      font-weight: 700;
+
+      padding: 0 8px;
     }
 
     /* =========================
@@ -275,10 +376,6 @@
         0 0 14px rgba(239,68,68,0.35);
     }
 
-    /* =========================
-       Mobile
-    ========================= */
-
     @media (max-width: 768px) {
 
       body {
@@ -290,7 +387,7 @@
 
         width: 100%;
 
-        height: 220px;
+        height: 240px;
 
         border-right: none;
 
@@ -306,15 +403,36 @@
 
 <body>
 
-<!-- =========================
-     Sidebar
-========================= -->
+<script>
+
+const auth =
+  localStorage.getItem(
+    "adminAuth"
+  );
+
+if (auth !== "true") {
+
+  window.location.href =
+    "/admin-login.html";
+
+}
+
+</script>
+
+<!-- Sidebar -->
 
 <div class="sidebar">
 
   <div class="sidebar-header">
 
-    Live Support
+    <h2>Live Support</h2>
+
+    <button
+      class="logout-btn"
+      onclick="logout()"
+    >
+      Logout
+    </button>
 
   </div>
 
@@ -325,9 +443,7 @@
 
 </div>
 
-<!-- =========================
-     Chat
-========================= -->
+<!-- Chat -->
 
 <div class="chat">
 
@@ -360,15 +476,7 @@
 
 <script>
 
-// =========================
-// Socket.IO
-// =========================
-
 const socket = io();
-
-// =========================
-// Elements
-// =========================
 
 const usersDiv =
   document.getElementById(
@@ -390,11 +498,23 @@ const input =
     "messageInput"
   );
 
+let selectedUser = null;
+
+
 // =========================
-// State
+// Logout
 // =========================
 
-let selectedUser = null;
+function logout() {
+
+  localStorage.removeItem(
+    "adminAuth"
+  );
+
+  window.location.href =
+    "/admin-login.html";
+
+}
 
 // =========================
 // Load Users
@@ -402,13 +522,21 @@ let selectedUser = null;
 
 async function loadUsers() {
 
-  const res =
+  const usersRes =
     await fetch("/users");
 
   const users =
-    await res.json();
+    await usersRes.json();
+
+  const messagesRes =
+    await fetch("/messages");
+
+  const messages =
+    await messagesRes.json();
 
   usersDiv.innerHTML = "";
+
+  users.reverse();
 
   users.forEach((userId) => {
 
@@ -417,9 +545,90 @@ async function loadUsers() {
 
     div.className = "user";
 
-    div.innerText = userId;
+    if (
+      userId === selectedUser
+    ) {
 
-    div.onclick = () => {
+      div.classList.add(
+        "active"
+      );
+
+    }
+
+    // =========================
+    // Unread Count
+    // =========================
+
+    const unreadCount =
+
+      messages.filter(
+
+        (msg) =>
+
+          msg.userId === userId
+
+          &&
+
+          msg.sender === "user"
+
+          &&
+
+          !msg.readByAdmin
+
+      ).length;
+
+    if (unreadCount > 0) {
+
+      div.classList.add(
+        "unread"
+      );
+
+    }
+
+    // =========================
+    // Layout
+    // =========================
+
+    const wrapper =
+      document.createElement("div");
+
+    wrapper.className =
+      "user-content";
+
+    const text =
+      document.createElement("span");
+
+    text.innerText =
+      userId;
+
+    wrapper.appendChild(text);
+
+    // Badge
+
+    if (unreadCount > 0) {
+
+      const badge =
+        document.createElement("div");
+
+      badge.className =
+        "unread-badge";
+
+      badge.innerText =
+        unreadCount;
+
+      wrapper.appendChild(
+        badge
+      );
+
+    }
+
+    div.appendChild(wrapper);
+
+    // =========================
+    // Click
+    // =========================
+
+    div.onclick = async () => {
 
       document
         .querySelectorAll(".user")
@@ -441,15 +650,40 @@ async function loadUsers() {
       chatHeader.innerText =
         `Chat with ${userId}`;
 
+      // Mark Read
+
+      await fetch(
+        "/mark-read",
+        {
+
+          method: "POST",
+
+          headers: {
+
+            "Content-Type":
+              "application/json"
+
+          },
+
+          body: JSON.stringify({
+            userId
+          })
+
+        }
+      );
+
       loadMessages(userId);
+
+      loadUsers();
 
     };
 
     usersDiv.appendChild(div);
 
   });
-
+ 
 }
+
 
 loadUsers();
 

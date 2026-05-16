@@ -10,15 +10,21 @@ const Code = require("./models/Code");
 
 const app = express();
 
-const server = http.createServer(app);
+const server =
+  http.createServer(app);
 
-const io = new Server(server);
+const io =
+  new Server(server);
 
 // =========================
 // CONFIG
 // =========================
 
-const ADMIN_KEY = "Avishka123";
+const ADMIN_KEY =
+  "Avishka123";
+
+const ADMIN_PANEL_PASSWORD =
+  "AvishkaAdmin";
 
 // =========================
 // Middleware
@@ -44,7 +50,9 @@ mongoose.connect(
 
 .then(() => {
 
-  console.log("✅ MongoDB connected");
+  console.log(
+    "✅ MongoDB connected"
+  );
 
 })
 
@@ -69,7 +77,11 @@ const messagesFile =
 
 // Create file if missing
 
-if (!fs.existsSync(messagesFile)) {
+if (
+  !fs.existsSync(
+    messagesFile
+  )
+) {
 
   fs.writeFileSync(
     messagesFile,
@@ -135,18 +147,21 @@ function addMessage(
   const messages =
     loadMessages();
 
-  messages.push({
+    messages.push({
 
-    userId,
+      userId,
 
-    sender,
+      sender,
 
-    message,
+      message,
 
-    timestamp:
-      Date.now()
+      timestamp:
+        Date.now(),
 
-  });
+      readByAdmin:
+        sender === "admin"
+
+    });
 
   saveMessages(messages);
 
@@ -165,7 +180,11 @@ function generateRedeemCode() {
 
     let result = "";
 
-    for (let i = 0; i < length; i++) {
+    for (
+      let i = 0;
+      i < length;
+      i++
+    ) {
 
       result += chars.charAt(
 
@@ -187,10 +206,8 @@ function generateRedeemCode() {
 }
 
 // =========================
-// Routes
+// Home Route
 // =========================
-
-// Home
 
 app.get("/", (req, res) => {
 
@@ -205,437 +222,560 @@ app.get("/", (req, res) => {
 });
 
 // =========================
+// Admin Login
+// =========================
+
+app.post(
+  "/admin-login",
+  (req, res) => {
+
+    const {
+      password
+    } = req.body;
+
+    if (
+      password ===
+      ADMIN_PANEL_PASSWORD
+    ) {
+
+      return res.json({
+        success: true
+      });
+
+    }
+
+    return res.json({
+      success: false
+    });
+
+  }
+);
+
+// =========================
 // Get Messages
 // =========================
 
-app.get("/messages", (req, res) => {
+app.get(
+  "/messages",
+  (req, res) => {
 
-  const messages =
-    loadMessages();
+    const messages =
+      loadMessages();
 
-  res.json(messages);
+    res.json(messages);
 
-});
+  }
+);
 
 // =========================
 // Get Users
 // =========================
 
-app.get("/users", (req, res) => {
+app.get(
+  "/users",
+  (req, res) => {
 
-  const messages =
-    loadMessages();
+    const messages =
+      loadMessages();
 
-  const uniqueUsers =
-    [...new Set(
+    const uniqueUsers =
 
-      messages.map(
-        (msg) => msg.userId
-      )
+      [...new Set(
 
-    )];
+        messages.map(
+          (msg) =>
+            msg.userId
+        )
 
-  res.json(uniqueUsers);
+      )];
 
-});
+    res.json(
+      uniqueUsers
+    );
+
+  }
+);
 
 // =========================
 // Validate Route
 // =========================
 
-app.post("/validate", async (req, res) => {
-
-  try {
+app.post(
+  "/mark-read",
+  (req, res) => {
 
     const {
-      code,
-      deviceToken
+      userId
     } = req.body;
 
-    if (!code) {
+    const messages =
+      loadMessages();
 
-      return res.status(400).json({
+    messages.forEach((msg) => {
 
-        success: false,
+      if (
 
-        message:
-          "Code is required"
+        msg.userId === userId
 
-      });
+        &&
 
-    }
+        msg.sender === "user"
 
-    const found =
-      await Code.findOne({
-        code
-      });
+      ) {
 
-    if (!found) {
+        msg.readByAdmin = true;
 
-      return res.json({
+      }
 
-        success: false,
+    });
 
-        message:
-          "Invalid code"
+    saveMessages(messages);
 
-      });
+    res.json({
+      success: true
+    });
 
-    }
+  }
+);
 
-    // =========================
-    // First redeem
-    // =========================
+// =========================
+// Generate Route
+// =========================
 
-    if (!found.deviceToken) {
+// =========================
+// Validate Route
+// =========================
 
-      found.deviceToken =
-        deviceToken;
+app.post(
+  "/validate",
+  async (req, res) => {
 
-      found.redeemedAt =
-        new Date();
+    try {
 
-      await found.save();
+      const {
+        code,
+        deviceToken
+      } = req.body;
 
-    }
+      if (!code) {
 
-    // =========================
-    // Different device blocked
-    // =========================
+        return res
+          .status(400)
+          .json({
 
-    if (
-      found.deviceToken !==
-      deviceToken
-    ) {
+            success: false,
 
-      return res.json({
+            message:
+              "Code is required"
 
-        success: false,
+          });
 
-        message:
-          "This code has already been redeemed"
+      }
 
-      });
+      const found =
+        await Code.findOne({
+          code
+        });
 
-    }
-
-    // =========================
-    // Expire after 2 days
-    // =========================
-
-    if (found.redeemedAt) {
-
-      const twoDays =
-        2 * 24 * 60 * 60 * 1000;
-
-      const expired =
-
-        Date.now() -
-
-        new Date(
-          found.redeemedAt
-        ).getTime()
-
-        > twoDays;
-
-      if (expired) {
+      if (!found) {
 
         return res.json({
 
           success: false,
 
           message:
-            "This code has expired"
+            "Invalid code"
 
         });
 
       }
 
-    }
+      // =========================
+      // First Redeem
+      // =========================
 
-    // =========================
-    // Success
-    // =========================
+      if (
+        !found.deviceToken
+      ) {
 
-    return res.json({
+        found.deviceToken =
+          deviceToken;
 
-      success: true,
+        found.redeemedAt =
+          new Date();
 
-      account:
-        found.account,
+        await found.save();
 
-      password:
-        found.password
+      }
 
-    });
+      // =========================
+      // Device Lock
+      // =========================
 
-  } catch (err) {
+      if (
 
-    console.error(
-      "❌ Validate error:",
-      err
-    );
+        found.deviceToken !==
+        deviceToken
 
-    return res.status(500).json({
+      ) {
 
-      success: false,
+        return res.json({
 
-      message:
-        "Server error"
+          success: false,
 
-    });
+          message:
+            "This code has already been redeemed"
 
-  }
+        });
 
-});
+      }
 
-// =========================
-// Generate Route
-// =========================
+      // =========================
+      // Expiration
+      // =========================
 
-app.post("/generate", async (req, res) => {
+      if (
+        found.redeemedAt
+      ) {
 
-  try {
+        const twoDays =
 
-    const {
-      account,
-      password,
-      key
-    } = req.body;
+          2 *
+          24 *
+          60 *
+          60 *
+          1000;
 
-    if (key !== ADMIN_KEY) {
+        const expired =
 
-      return res.status(403).json({
+          Date.now()
 
-        success: false,
+          -
 
-        message:
-          "Invalid admin key"
+          new Date(
+            found.redeemedAt
+          ).getTime()
+
+          >
+
+          twoDays;
+
+        if (expired) {
+
+          return res.json({
+
+            success: false,
+
+            message:
+              "This code has expired"
+
+          });
+
+        }
+
+      }
+
+      // =========================
+      // Success
+      // =========================
+
+      return res.json({
+
+        success: true,
+
+        account:
+          found.account,
+
+        password:
+          found.password
 
       });
 
-    }
+    } catch (err) {
 
-    if (
-      !account ||
-      !password
-    ) {
+      console.error(
+        "❌ Validate error:",
+        err
+      );
 
-      return res.status(400).json({
+      return res
+        .status(500)
+        .json({
 
-        success: false,
+          success: false,
 
-        message:
-          "Account and password are required"
+          message:
+            "Server error"
 
-      });
-
-    }
-
-    let code;
-
-    let exists = true;
-
-    while (exists) {
-
-      code =
-        generateRedeemCode();
-
-      exists =
-        await Code.findOne({
-          code
         });
 
     }
 
-    const newCode =
-      new Code({
+  }
+);
 
-        code,
+app.post(
+  "/generate",
+  async (req, res) => {
 
+    try {
+
+      const {
         account,
+        password,
+        key
+      } = req.body;
 
-        password
+      if (
+        key !==
+        ADMIN_KEY
+      ) {
+
+        return res
+          .status(403)
+          .json({
+
+            success: false,
+
+            message:
+              "Invalid admin key"
+
+          });
+
+      }
+
+      if (
+        !account ||
+        !password
+      ) {
+
+        return res
+          .status(400)
+          .json({
+
+            success: false,
+
+            message:
+              "Account and password are required"
+
+          });
+
+      }
+
+      let code;
+
+      let exists = true;
+
+      while (exists) {
+
+        code =
+          generateRedeemCode();
+
+        exists =
+          await Code.findOne({
+            code
+          });
+
+      }
+
+      const newCode =
+        new Code({
+
+          code,
+
+          account,
+
+          password
+
+        });
+
+      await newCode.save();
+
+      return res.json({
+
+        success: true,
+
+        code
 
       });
 
-    await newCode.save();
+    } catch (err) {
 
-    return res.json({
+      console.error(
+        "❌ Generate error:",
+        err
+      );
 
-      success: true,
+      return res
+        .status(500)
+        .json({
 
-      code
+          success: false,
 
-    });
+          message:
+            "Server error"
 
-  } catch (err) {
+        });
 
-    console.error(
-      "❌ Generate error:",
-      err
-    );
-
-    return res.status(500).json({
-
-      success: false,
-
-      message:
-        "Server error"
-
-    });
+    }
 
   }
-
-});
+);
 
 // =========================
 // Socket.IO
 // =========================
 
-io.on("connection", (socket) => {
+io.on(
+  "connection",
+  (socket) => {
 
-  console.log(
-    "✅ Connected:",
-    socket.id
-  );
+    console.log(
+      "✅ Connected:",
+      socket.id
+    );
 
-  // =========================
-  // User joins
-  // =========================
+    // =========================
+    // Join User
+    // =========================
 
-  socket.on(
-    "join-user",
-    (userId) => {
+    socket.on(
+      "join-user",
+      (userId) => {
 
-      socket.join(userId);
-
-      console.log(
-        "👤 Joined:",
-        userId
-      );
-
-      const messages =
-        loadMessages();
-
-      const userMessages =
-        messages.filter(
-          (msg) =>
-            msg.userId ===
-            userId
+        socket.join(
+          userId
         );
 
-      socket.emit(
-        "chat-history",
-        userMessages
-      );
+        console.log(
+          "👤 Joined:",
+          userId
+        );
 
-    }
-  );
+        const messages =
+          loadMessages();
 
-  // =========================
-  // Customer message
-  // =========================
+        const userMessages =
 
-  socket.on(
-    "user-message",
-    (data) => {
+          messages.filter(
+            (msg) =>
 
-      addMessage(
+              msg.userId ===
+              userId
+          );
 
-        data.userId,
+        socket.emit(
+          "chat-history",
+          userMessages
+        );
 
-        "user",
+      }
+    );
 
-        data.message
+    // =========================
+    // User Message
+    // =========================
 
-      );
+    socket.on(
+      "user-message",
+      (data) => {
 
-      io.emit(
-        "new-message",
-        {
+        addMessage(
 
-          userId:
-            data.userId,
+          data.userId,
 
-          sender:
-            "user",
+          "user",
 
-          message:
-            data.message
+          data.message
 
-        }
-      );
+        );
 
-    }
-  );
+        io.emit(
+          "new-message",
+          {
 
-  // =========================
-  // Admin message
-  // =========================
+            userId:
+              data.userId,
 
-  socket.on(
-    "admin-message",
-    (data) => {
+            sender:
+              "user",
 
-      addMessage(
+            message:
+              data.message
 
-        data.userId,
+          }
+        );
 
-        "admin",
+      }
+    );
 
-        data.message
+    // =========================
+    // Admin Message
+    // =========================
 
-      );
+    socket.on(
+      "admin-message",
+      (data) => {
 
-      io.to(
-        data.userId
-      ).emit(
-        "admin-reply",
-        {
+        addMessage(
 
-          message:
-            data.message
+          data.userId,
 
-        }
-      );
+          "admin",
 
-      io.emit(
-        "new-message",
-        {
+          data.message
 
-          userId:
-            data.userId,
+        );
 
-          sender:
-            "admin",
+        io.to(
+          data.userId
+        ).emit(
+          "admin-reply",
+          {
 
-          message:
-            data.message
+            message:
+              data.message
 
-        }
-      );
+          }
+        );
 
-    }
-  );
+        io.emit(
+          "new-message",
+          {
 
-  // =========================
-  // Disconnect
-  // =========================
+            userId:
+              data.userId,
 
-  socket.on(
-    "disconnect",
-    () => {
+            sender:
+              "admin",
 
-      console.log(
-        "❌ Disconnected:",
-        socket.id
-      );
+            message:
+              data.message
 
-    }
-  );
+          }
+        );
 
-});
+      }
+    );
+
+    // =========================
+    // Disconnect
+    // =========================
+
+    socket.on(
+      "disconnect",
+      () => {
+
+        console.log(
+          "❌ Disconnected:",
+          socket.id
+        );
+
+      }
+    );
+
+  }
+);
 
 // =========================
 // 404

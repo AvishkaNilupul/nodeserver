@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>Admin Login</title>
+
+  <style>
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+
+      font-family:
+        'Segoe UI',
+        Tahoma,
+        sans-serif;
+
+      background:
+        radial-gradient(
+          circle at top,
+          #0b1220,
+          #020617
+        );
+
+      display: flex;
+
+      justify-content: center;
+      align-items: center;
+
+      min-height: 100vh;
+
+      padding: 20px;
+    }
+
+    .card {
+
+      width: 100%;
+      max-width: 420px;
+
+      background:
+        rgba(15,23,42,0.82);
+
+      border:
+        1px solid
+        rgba(255,255,255,0.06);
+
+      border-radius: 22px;
+
+      padding: 36px;
+
+      color: white;
+
+      box-shadow:
+        0 0 30px rgba(239,68,68,0.12);
+    }
+
+    h1 {
+
+      font-size: 32px;
+
+      margin-bottom: 14px;
+    }
+
+    p {
+
+      color: #94a3b8;
+
+      line-height: 1.7;
+
+      margin-bottom: 24px;
+    }
+
+    input {
+
+      width: 100%;
+
+      padding: 16px;
+
+      border: none;
+
+      outline: none;
+
+      border-radius: 14px;
+
+      background: #020617;
+
+      color: white;
+
+      margin-bottom: 16px;
+
+      border:
+        1px solid
+        rgba(255,255,255,0.06);
+    }
+
+    input:focus {
+
+      border-color:
+        rgba(239,68,68,0.55);
+
+      box-shadow:
+        0 0 14px rgba(239,68,68,0.15);
+    }
+
+    button {
+
+      width: 100%;
+
+      padding: 16px;
+
+      border: none;
+
+      border-radius: 14px;
+
+      background:
+        linear-gradient(
+          135deg,
+          #ef4444,
+          #dc2626
+        );
+
+      color: white;
+
+      font-size: 15px;
+
+      font-weight: 600;
+
+      cursor: pointer;
+
+      transition: 0.2s ease;
+    }
+
+    button:hover {
+
+      transform: translateY(-1px);
+
+      box-shadow:
+        0 0 16px rgba(239,68,68,0.35);
+    }
+
+    #message {
+
+      margin-top: 14px;
+
+      text-align: center;
+
+      color: #f87171;
+
+      min-height: 20px;
+    }
+
+    @media (max-width: 480px) {
+
+      .card {
+
+        padding: 28px 22px;
+      }
+
+      h1 {
+
+        font-size: 28px;
+      }
+
+    }
+
+  </style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+  <h1>Admin Login</h1>
+
+  <p>
+    Enter the admin password
+    to access the live support panel.
+  </p>
+
+  <input
+    type="password"
+    id="password"
+    placeholder="Enter admin password"
+    autocomplete="off"
+  >
+
+  <button onclick="login()">
+    Access Panel
+  </button>
+
+  <div id="message"></div>
+
+</div>
+
+<script>
+
+// =========================
+// Login
+// =========================
+
+async function login() {
+
+  const password =
+
+    document
+      .getElementById(
+        "password"
+      )
+      .value;
+
+  const message =
+
+    document
+      .getElementById(
+        "message"
+      );
+
+  message.innerText = "";
+
+  try {
+
+    const res = await fetch(
+      "/admin-login",
+      {
+
+        method: "POST",
+
+        headers: {
+
+          "Content-Type":
+            "application/json"
+
+        },
+
+        body: JSON.stringify({
+          password
+        })
+
+      }
+    );
+
+    const data =
+      await res.json();
+
+    if (data.success) {
+
+      localStorage.setItem(
+        "adminAuth",
+        "true"
+      );
+
+      window.location.href =
+        "/admin.html";
+
+    } else {
+
+      message.innerText =
+        "Invalid password";
+
+    }
+
+  } catch {
+
+    message.innerText =
+      "Server error";
+
+  }
+
+}
+
+// =========================
+// Enter Key
+// =========================
+
+document
+  .getElementById(
+    "password"
+  )
+  .addEventListener(
+    "keypress",
+    (e) => {
+
+      if (e.key === "Enter") {
+
+        login();
+
+      }
+
+    }
+  );
+
+</script>
+
+</body>
+</html>
