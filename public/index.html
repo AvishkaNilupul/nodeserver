@@ -18,42 +18,330 @@
 
 <body>
 
-  <div class="container">
+<div class="redeem-wrapper">
 
-    <h2>Redeem Code</h2>
+  <div class="redeem-card">
 
-    <input
-      id="code"
-      placeholder="Enter your redeem code"
-      autocomplete="off"
-    >
+    <!-- =========================
+         Header
+    ========================= -->
 
-    <button
-      onclick="submitCode()"
-      id="btn"
-    >
-      Submit
-    </button>
+    <div class="redeem-header">
 
-    <p id="message"></p>
+      <h1>Redeem Code</h1>
+
+      <p>
+        Enter your redeem code below
+        to access your account details.
+      </p>
+
+    </div>
+
+    <!-- =========================
+         Input
+    ========================= -->
+
+    <div class="redeem-form">
+
+      <input
+        id="code"
+        placeholder="Enter your redeem code"
+        autocomplete="off"
+      >
+
+      <button
+        onclick="submitCode()"
+        id="btn"
+      >
+        Redeem
+      </button>
+
+      <p id="message"></p>
+
+    </div>
 
   </div>
 
+</div>
+
+<style>
+
+/* =========================
+   Reset
+========================= */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* =========================
+   Body
+========================= */
+
+body {
+
+  font-family:
+    'Segoe UI',
+    Tahoma,
+    sans-serif;
+
+  background:
+    radial-gradient(
+      circle at top,
+      #0b1220,
+      #020617
+    );
+
+  color: #e2e8f0;
+
+  min-height: 100vh;
+
+  display: flex;
+  justify-content: center;
+  align-items: center;
+
+  padding: 24px;
+}
+
+/* =========================
+   Wrapper
+========================= */
+
+.redeem-wrapper {
+
+  width: 100%;
+
+  display: flex;
+
+  justify-content: center;
+  align-items: center;
+}
+
+/* =========================
+   Card
+========================= */
+
+.redeem-card {
+
+  width: 100%;
+
+  max-width: 420px;
+
+  background:
+    rgba(15,23,42,0.78);
+
+  backdrop-filter: blur(14px);
+
+  border:
+    1px solid
+    rgba(255,255,255,0.06);
+
+  border-radius: 22px;
+
+  padding: 36px;
+
+  box-shadow:
+    0 0 35px rgba(239,68,68,0.12),
+    inset 0 1px 0 rgba(255,255,255,0.03);
+}
+
+/* =========================
+   Header
+========================= */
+
+.redeem-header {
+
+  margin-bottom: 28px;
+}
+
+.redeem-header h1 {
+
+  font-size: 34px;
+
+  font-weight: 700;
+
+  margin-bottom: 12px;
+
+  color: #f8fafc;
+}
+
+.redeem-header p {
+
+  color: #94a3b8;
+
+  line-height: 1.7;
+
+  font-size: 15px;
+}
+
+/* =========================
+   Form
+========================= */
+
+.redeem-form {
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 16px;
+}
+
+/* =========================
+   Input
+========================= */
+
+input {
+
+  width: 100%;
+
+  padding: 16px;
+
+  border: none;
+
+  outline: none;
+
+  border-radius: 14px;
+
+  background: #020617;
+
+  color: white;
+
+  font-size: 15px;
+
+  border:
+    1px solid
+    rgba(255,255,255,0.06);
+
+  transition: 0.2s ease;
+}
+
+input:focus {
+
+  border-color:
+    rgba(239,68,68,0.55);
+
+  box-shadow:
+    0 0 16px rgba(239,68,68,0.18);
+}
+
+/* =========================
+   Button
+========================= */
+
+button {
+
+  width: 100%;
+
+  padding: 16px;
+
+  border: none;
+
+  border-radius: 14px;
+
+  background:
+    linear-gradient(
+      135deg,
+      #ef4444,
+      #dc2626
+    );
+
+  color: white;
+
+  font-size: 15px;
+
+  font-weight: 600;
+
+  cursor: pointer;
+
+  transition: 0.2s ease;
+}
+
+button:hover {
+
+  transform: translateY(-1px);
+
+  box-shadow:
+    0 0 16px rgba(239,68,68,0.35);
+}
+
+button:disabled {
+
+  opacity: 0.7;
+
+  cursor: not-allowed;
+}
+
+/* =========================
+   Message
+========================= */
+
+#message {
+
+  min-height: 20px;
+
+  text-align: center;
+
+  font-size: 14px;
+}
+
+.error {
+
+  color: #f87171;
+}
+
+.success {
+
+  color: #4ade80;
+}
+
+/* =========================
+   Mobile
+========================= */
+
+@media (max-width: 480px) {
+
+  .redeem-card {
+
+    padding: 28px 22px;
+  }
+
+  .redeem-header h1 {
+
+    font-size: 28px;
+  }
+
+}
+
+</style>
+
 <script>
+
+// =========================
+// Submit Code
+// =========================
 
 async function submitCode() {
 
   const code =
-    document.getElementById("code")
-    .value
-    .trim()
-    .toUpperCase();
+
+    document
+      .getElementById("code")
+      .value
+      .trim()
+      .toUpperCase();
 
   const message =
-    document.getElementById("message");
+
+    document
+      .getElementById("message");
 
   const btn =
-    document.getElementById("btn");
+
+    document
+      .getElementById("btn");
 
   // =========================
   // Reset UI
@@ -64,25 +352,31 @@ async function submitCode() {
   message.className = "";
 
   // =========================
-  // Validate input
+  // Validate Input
   // =========================
 
   if (!code) {
 
     message.innerText =
-      "Please enter a code";
+      "Please enter a redeem code";
 
-    message.classList.add("error");
+    message.classList.add(
+      "error"
+    );
 
     return;
+
   }
 
   // =========================
-  // Generate browser token
+  // Persistent Device Token
   // =========================
 
   let deviceToken =
-    localStorage.getItem("deviceToken");
+
+    localStorage.getItem(
+      "deviceToken"
+    );
 
   if (!deviceToken) {
 
@@ -90,39 +384,52 @@ async function submitCode() {
       crypto.randomUUID();
 
     localStorage.setItem(
+
       "deviceToken",
+
       deviceToken
+
     );
 
   }
 
   // =========================
-  // Loading state
+  // Loading State
   // =========================
 
   btn.disabled = true;
 
-  btn.innerText = "Checking...";
+  btn.innerText =
+    "Checking...";
 
   try {
 
-    const res = await fetch("/validate", {
+    const res = await fetch(
+      "/validate",
+      {
 
-      method: "POST",
+        method: "POST",
 
-      headers: {
-        "Content-Type":
-          "application/json"
-      },
+        headers: {
 
-      body: JSON.stringify({
-        code,
-        deviceToken
-      })
+          "Content-Type":
+            "application/json"
 
-    });
+        },
 
-    const data = await res.json();
+        body: JSON.stringify({
+
+          code,
+
+          deviceToken
+
+        })
+
+      }
+    );
+
+    const data =
+      await res.json();
 
     // =========================
     // Success
@@ -130,29 +437,36 @@ async function submitCode() {
 
     if (data.success) {
 
-      // Save account details
+    localStorage.setItem(
 
-      localStorage.setItem(
-        "accountData",
-        JSON.stringify({
-          account: data.account,
-          password: data.password
-        })
-      );
+      "accountData",
 
-      // Redirect
+      JSON.stringify({
+
+        account:
+          data.account,
+
+        password:
+          data.password,
+
+        redeemCode:
+          code
+
+      })
+
+    );
 
       window.location.href =
         "/result.html";
 
     } else {
 
-      // Error message
-
       message.innerText =
         data.message;
 
-      message.classList.add("error");
+      message.classList.add(
+        "error"
+      );
 
     }
 
@@ -163,17 +477,20 @@ async function submitCode() {
     message.innerText =
       "Something went wrong";
 
-    message.classList.add("error");
+    message.classList.add(
+      "error"
+    );
 
   }
 
   // =========================
-  // Reset button
+  // Reset Button
   // =========================
 
   btn.disabled = false;
 
-  btn.innerText = "Submit";
+  btn.innerText =
+    "Redeem";
 
 }
 

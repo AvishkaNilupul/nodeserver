@@ -1,10 +1,18 @@
 const express = require("express");
-const mongoose = require("mongoose");
+const http = require("http");
 const path = require("path");
+const fs = require("fs");
+const mongoose = require("mongoose");
+
+const { Server } = require("socket.io");
 
 const Code = require("./models/Code");
 
 const app = express();
+
+const server = http.createServer(app);
+
+const io = new Server(server);
 
 // =========================
 // CONFIG
@@ -21,8 +29,6 @@ app.use(express.json());
 app.use(express.urlencoded({
   extended: true
 }));
-
-// Serve public folder
 
 app.use(express.static(
   path.join(__dirname, "public")
@@ -52,6 +58,101 @@ mongoose.connect(
 });
 
 // =========================
+// Messages File
+// =========================
+
+const messagesFile =
+  path.join(
+    __dirname,
+    "messages.json"
+  );
+
+// Create file if missing
+
+if (!fs.existsSync(messagesFile)) {
+
+  fs.writeFileSync(
+    messagesFile,
+    "[]"
+  );
+
+}
+
+// =========================
+// Load Messages
+// =========================
+
+function loadMessages() {
+
+  try {
+
+    const data =
+      fs.readFileSync(
+        messagesFile,
+        "utf8"
+      );
+
+    return JSON.parse(data);
+
+  } catch {
+
+    return [];
+
+  }
+
+}
+
+// =========================
+// Save Messages
+// =========================
+
+function saveMessages(messages) {
+
+  fs.writeFileSync(
+
+    messagesFile,
+
+    JSON.stringify(
+      messages,
+      null,
+      2
+    )
+
+  );
+
+}
+
+// =========================
+// Add Message
+// =========================
+
+function addMessage(
+  userId,
+  sender,
+  message
+) {
+
+  const messages =
+    loadMessages();
+
+  messages.push({
+
+    userId,
+
+    sender,
+
+    message,
+
+    timestamp:
+      Date.now()
+
+  });
+
+  saveMessages(messages);
+
+}
+
+// =========================
 // Redeem Code Generator
 // =========================
 
@@ -67,29 +168,74 @@ function generateRedeemCode() {
     for (let i = 0; i < length; i++) {
 
       result += chars.charAt(
-        Math.floor(Math.random() * chars.length)
+
+        Math.floor(
+          Math.random() *
+          chars.length
+        )
+
       );
 
     }
 
     return result;
+
   }
 
-  // Format:
-  // XXXX-XXXXX-XXXX-XXXX
-
   return `${part(4)}-${part(5)}-${part(4)}-${part(4)}`;
+
 }
 
 // =========================
-// Home Route
+// Routes
 // =========================
+
+// Home
 
 app.get("/", (req, res) => {
 
   res.sendFile(
-    path.join(__dirname, "public", "index.html")
+    path.join(
+      __dirname,
+      "public",
+      "index.html"
+    )
   );
+
+});
+
+// =========================
+// Get Messages
+// =========================
+
+app.get("/messages", (req, res) => {
+
+  const messages =
+    loadMessages();
+
+  res.json(messages);
+
+});
+
+// =========================
+// Get Users
+// =========================
+
+app.get("/users", (req, res) => {
+
+  const messages =
+    loadMessages();
+
+  const uniqueUsers =
+    [...new Set(
+
+      messages.map(
+        (msg) => msg.userId
+      )
+
+    )];
+
+  res.json(uniqueUsers);
 
 });
 
@@ -106,71 +252,34 @@ app.post("/validate", async (req, res) => {
       deviceToken
     } = req.body;
 
-    // =========================
-    // Validate input
-    // =========================
-
     if (!code) {
 
       return res.status(400).json({
+
         success: false,
-        message: "Code is required"
+
+        message:
+          "Code is required"
+
       });
 
     }
 
-    // =========================
-    // Find code
-    // =========================
-
-    const found = await Code.findOne({
-      code
-    });
-
-    // Invalid code
+    const found =
+      await Code.findOne({
+        code
+      });
 
     if (!found) {
 
       return res.json({
+
         success: false,
-        message: "Invalid code"
+
+        message:
+          "Invalid code"
+
       });
-
-    }
-
-    // =========================
-    // Expiration check
-    // =========================
-
-    if (found.redeemedAt) {
-
-      const now = Date.now();
-
-      const redeemedTime =
-        new Date(found.redeemedAt).getTime();
-
-      const twoDays =
-        2 * 24 * 60 * 60 * 1000;
-
-      // Expired
-
-      if (now - redeemedTime > twoDays) {
-
-        await Code.deleteOne({
-          _id: found._id
-        });
-
-        console.log(
-          `🗑️ Expired code deleted: ${found.code}`
-        );
-
-        return res.json({
-          success: false,
-          message:
-            "This code has expired"
-        });
-
-      }
 
     }
 
@@ -180,33 +289,67 @@ app.post("/validate", async (req, res) => {
 
     if (!found.deviceToken) {
 
-      found.deviceToken = deviceToken;
+      found.deviceToken =
+        deviceToken;
 
-      found.redeemedAt = new Date();
+      found.redeemedAt =
+        new Date();
 
       await found.save();
-
-      console.log(
-        "🔒 Locked to device:",
-        deviceToken
-      );
 
     }
 
     // =========================
-    // Block other devices
+    // Different device blocked
     // =========================
 
     if (
-      String(found.deviceToken) !==
-      String(deviceToken)
+      found.deviceToken !==
+      deviceToken
     ) {
 
       return res.json({
+
         success: false,
+
         message:
           "This code has already been redeemed"
+
       });
+
+    }
+
+    // =========================
+    // Expire after 2 days
+    // =========================
+
+    if (found.redeemedAt) {
+
+      const twoDays =
+        2 * 24 * 60 * 60 * 1000;
+
+      const expired =
+
+        Date.now() -
+
+        new Date(
+          found.redeemedAt
+        ).getTime()
+
+        > twoDays;
+
+      if (expired) {
+
+        return res.json({
+
+          success: false,
+
+          message:
+            "This code has expired"
+
+        });
+
+      }
 
     }
 
@@ -215,9 +358,15 @@ app.post("/validate", async (req, res) => {
     // =========================
 
     return res.json({
+
       success: true,
-      account: found.account,
-      password: found.password
+
+      account:
+        found.account,
+
+      password:
+        found.password
+
     });
 
   } catch (err) {
@@ -228,8 +377,12 @@ app.post("/validate", async (req, res) => {
     );
 
     return res.status(500).json({
+
       success: false,
-      message: "Server error"
+
+      message:
+        "Server error"
+
     });
 
   }
@@ -250,75 +403,70 @@ app.post("/generate", async (req, res) => {
       key
     } = req.body;
 
-    // =========================
-    // Validate admin key
-    // =========================
-
     if (key !== ADMIN_KEY) {
 
       return res.status(403).json({
+
         success: false,
-        message: "Invalid admin key"
+
+        message:
+          "Invalid admin key"
+
       });
 
     }
 
-    // =========================
-    // Validate fields
-    // =========================
-
-    if (!account || !password) {
+    if (
+      !account ||
+      !password
+    ) {
 
       return res.status(400).json({
+
         success: false,
+
         message:
           "Account and password are required"
+
       });
 
     }
 
-    // =========================
-    // Generate UNIQUE code
-    // =========================
-
     let code;
+
     let exists = true;
 
     while (exists) {
 
-      code = generateRedeemCode();
+      code =
+        generateRedeemCode();
 
-      exists = await Code.findOne({
-        code
-      });
+      exists =
+        await Code.findOne({
+          code
+        });
 
     }
 
-    // =========================
-    // Save code
-    // =========================
+    const newCode =
+      new Code({
 
-    const newCode = new Code({
-      code,
-      account,
-      password,
-      redeemedAt: null,
-      deviceToken: null
-    });
+        code,
+
+        account,
+
+        password
+
+      });
 
     await newCode.save();
 
-    console.log(
-      `🎟️ Generated code: ${code}`
-    );
-
-    // =========================
-    // Success response
-    // =========================
-
     return res.json({
+
       success: true,
+
       code
+
     });
 
   } catch (err) {
@@ -329,8 +477,12 @@ app.post("/generate", async (req, res) => {
     );
 
     return res.status(500).json({
+
       success: false,
-      message: "Server error"
+
+      message:
+        "Server error"
+
     });
 
   }
@@ -338,14 +490,166 @@ app.post("/generate", async (req, res) => {
 });
 
 // =========================
-// 404 Route
+// Socket.IO
+// =========================
+
+io.on("connection", (socket) => {
+
+  console.log(
+    "✅ Connected:",
+    socket.id
+  );
+
+  // =========================
+  // User joins
+  // =========================
+
+  socket.on(
+    "join-user",
+    (userId) => {
+
+      socket.join(userId);
+
+      console.log(
+        "👤 Joined:",
+        userId
+      );
+
+      const messages =
+        loadMessages();
+
+      const userMessages =
+        messages.filter(
+          (msg) =>
+            msg.userId ===
+            userId
+        );
+
+      socket.emit(
+        "chat-history",
+        userMessages
+      );
+
+    }
+  );
+
+  // =========================
+  // Customer message
+  // =========================
+
+  socket.on(
+    "user-message",
+    (data) => {
+
+      addMessage(
+
+        data.userId,
+
+        "user",
+
+        data.message
+
+      );
+
+      io.emit(
+        "new-message",
+        {
+
+          userId:
+            data.userId,
+
+          sender:
+            "user",
+
+          message:
+            data.message
+
+        }
+      );
+
+    }
+  );
+
+  // =========================
+  // Admin message
+  // =========================
+
+  socket.on(
+    "admin-message",
+    (data) => {
+
+      addMessage(
+
+        data.userId,
+
+        "admin",
+
+        data.message
+
+      );
+
+      io.to(
+        data.userId
+      ).emit(
+        "admin-reply",
+        {
+
+          message:
+            data.message
+
+        }
+      );
+
+      io.emit(
+        "new-message",
+        {
+
+          userId:
+            data.userId,
+
+          sender:
+            "admin",
+
+          message:
+            data.message
+
+        }
+      );
+
+    }
+  );
+
+  // =========================
+  // Disconnect
+  // =========================
+
+  socket.on(
+    "disconnect",
+    () => {
+
+      console.log(
+        "❌ Disconnected:",
+        socket.id
+      );
+
+    }
+  );
+
+});
+
+// =========================
+// 404
 // =========================
 
 app.use((req, res) => {
 
   res.status(404).json({
+
     success: false,
-    message: "Route not found"
+
+    message:
+      "Route not found"
+
   });
 
 });
@@ -354,12 +658,17 @@ app.use((req, res) => {
 // Start Server
 // =========================
 
-const PORT = process.env.PORT || 3000;
+const PORT =
+  process.env.PORT || 3000;
 
-app.listen(PORT, "0.0.0.0", () => {
+server.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
 
-  console.log(
-    `🚀 Server started on http://0.0.0.0:${PORT}`
-  );
+    console.log(
+      `🚀 Server started on http://0.0.0.0:${PORT}`
+    );
 
-});
+  }
+);
