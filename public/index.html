@@ -338,7 +338,63 @@ async function submitTag() {
   btn.innerText =
     "Checking...";
 
-  try {
+try {
+
+  const response = await fetch(
+
+    "/submit-gamertag",
+
+    {
+
+      method:"POST",
+
+      headers:{
+
+        "Content-Type":
+          "application/json"
+
+      },
+
+      body:JSON.stringify({
+
+        gamerTag
+
+      })
+
+    }
+
+  );
+
+  const data =
+    await response.json();
+
+  if(!data.success){
+
+    throw new Error(
+      "Submit failed"
+    );
+
+  }
+
+  localStorage.setItem(
+
+    "gamerTag",
+
+    gamerTag
+
+  );
+
+  message.innerText =
+    "Success";
+
+  message.classList.add(
+    "success"
+  );
+
+  window.location.href =
+    "/result.html";
+
+}
 
     // save locally
 

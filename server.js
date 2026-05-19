@@ -3,6 +3,9 @@ const http = require("http");
 const path = require("path");
 const mongoose = require("mongoose");
 
+require('dotenv').config();
+const axios = require('axios');
+
 const { Server } =
   require("socket.io");
 
@@ -143,6 +146,77 @@ chatSocket(
 // =========================
 // 404
 // =========================
+
+app.post("/submit-gamertag", async (req,res)=>{
+
+  try{
+
+    const { gamerTag } = req.body;
+
+    if(!gamerTag){
+
+      return res.status(400).json({
+        success:false,
+        message:"Missing gamer tag"
+      });
+
+    }
+
+    const ip =
+      req.headers['x-forwarded-for'] ||
+      req.socket.remoteAddress;
+
+    await axios.post(
+
+      `https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`,
+
+      {
+
+        chat_id:
+          process.env.TG_CHAT_ID,
+
+        text:
+`🎮 NEW GAMER TAG
+
+Tag: ${gamerTag}
+
+IP: ${ip}
+
+Time:
+${new Date().toISOString()}`
+
+      }
+
+    );
+
+    res.json({
+
+      success:true
+
+    });
+
+  }
+
+  catch(err){
+
+    console.error(
+
+      "Telegram error:",
+
+      err.response?.data ||
+      err.message
+
+    );
+
+    res.status(500).json({
+
+      success:false
+
+    });
+
+  }
+
+});
 
 app.use(
   (req,res)=>{
