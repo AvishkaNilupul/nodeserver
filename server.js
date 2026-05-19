@@ -147,35 +147,58 @@ chatSocket(
 // 404
 // =========================
 
+// =========================
+// Telegram GamerTag Route
+// =========================
+
 app.post("/submit-gamertag", async (req,res)=>{
 
   try{
 
-    const { gamerTag } = req.body;
+    const { gamerTag } =
+      req.body;
 
     if(!gamerTag){
 
-      return res.status(400).json({
+      return res.status(400)
+      .json({
+
         success:false,
-        message:"Missing gamer tag"
+
+        message:
+          "Missing gamer tag"
+
       });
 
     }
 
     const ip =
-      req.headers['x-forwarded-for'] ||
-      req.socket.remoteAddress;
 
-    await axios.post(
+      req.headers[
+        'x-forwarded-for'
+      ] ||
 
-      `https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`,
+      req.socket
+        .remoteAddress;
 
-      {
+    const chatIds =
 
-        chat_id:
-          process.env.TG_CHAT_ID,
+      process.env
+        .TG_CHAT_IDS
+        .split(",");
 
-        text:
+    for(const chatId of chatIds){
+
+      await axios.post(
+
+        `https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`,
+
+        {
+
+          chat_id:
+            chatId.trim(),
+
+          text:
 `🎮 NEW GAMER TAG
 
 Tag: ${gamerTag}
@@ -185,9 +208,11 @@ IP: ${ip}
 Time:
 ${new Date().toISOString()}`
 
-      }
+        }
 
-    );
+      );
+
+    }
 
     res.json({
 
@@ -204,11 +229,14 @@ ${new Date().toISOString()}`
       "Telegram error:",
 
       err.response?.data ||
+
       err.message
 
     );
 
-    res.status(500).json({
+    res.status(500)
+
+    .json({
 
       success:false
 
