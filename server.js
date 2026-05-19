@@ -1,14 +1,28 @@
 const express = require("express");
 const http = require("http");
 const path = require("path");
-const fs = require("fs");
 const mongoose = require("mongoose");
 
-const { Server } = require("socket.io");
+const { Server } =
+  require("socket.io");
 
-const Code = require("./models/Code");
+const config =
+  require("./config/config");
 
-const app = express();
+const authRoutes =
+  require("./routes/authRoutes");
+
+const redeemRoutes =
+  require("./routes/redeemRoutes");
+
+const chatRoutes =
+  require("./routes/chatRoutes");
+
+const chatSocket =
+  require("./socket/chatSocket");
+
+const app =
+  express();
 
 const server =
   http.createServer(app);
@@ -17,798 +31,154 @@ const io =
   new Server(server);
 
 // =========================
-// CONFIG
-// =========================
-
-const ADMIN_KEY =
-  "Avishka123";
-
-const ADMIN_PANEL_PASSWORD =
-  "AvishkaAdmin";
-
-// =========================
 // Middleware
 // =========================
 
-app.use(express.json());
+app.use(
+  express.json()
+);
 
-app.use(express.urlencoded({
-  extended: true
-}));
+app.use(
+  express.urlencoded({
 
-app.use(express.static(
-  path.join(__dirname, "public")
-));
+    extended:true
+
+  })
+);
+
+app.use(
+
+  express.static(
+
+    path.join(
+      __dirname,
+      "public"
+    )
+
+  )
+
+);
 
 // =========================
-// MongoDB Connection
+// MongoDB
 // =========================
 
 mongoose.connect(
-  "mongodb://avishka:Avishka123@ac-ufnccre-shard-00-00.vsigmq3.mongodb.net:27017,ac-ufnccre-shard-00-01.vsigmq3.mongodb.net:27017,ac-ufnccre-shard-00-02.vsigmq3.mongodb.net:27017/codesDB?ssl=true&replicaSet=atlas-ur8a1h-shard-0&authSource=admin&appName=redeemer"
+
+  config.MONGO_URI
+
 )
 
-.then(() => {
+.then(()=>{
 
   console.log(
+
     "✅ MongoDB connected"
+
   );
 
 })
 
-.catch((err) => {
+.catch((err)=>{
 
   console.error(
+
     "❌ MongoDB connection error:",
+
     err
+
   );
 
 });
-
-// =========================
-// Messages File
-// =========================
-
-const messagesFile =
-  path.join(
-    __dirname,
-    "messages.json"
-  );
-
-// Create file if missing
-
-if (
-  !fs.existsSync(
-    messagesFile
-  )
-) {
-
-  fs.writeFileSync(
-    messagesFile,
-    "[]"
-  );
-
-}
-
-// =========================
-// Load Messages
-// =========================
-
-function loadMessages() {
-
-  try {
-
-    const data =
-      fs.readFileSync(
-        messagesFile,
-        "utf8"
-      );
-
-    return JSON.parse(data);
-
-  } catch {
-
-    return [];
-
-  }
-
-}
-
-// =========================
-// Save Messages
-// =========================
-
-function saveMessages(messages) {
-
-  fs.writeFileSync(
-
-    messagesFile,
-
-    JSON.stringify(
-      messages,
-      null,
-      2
-    )
-
-  );
-
-}
-
-// =========================
-// Add Message
-// =========================
-
-function addMessage(
-  userId,
-  sender,
-  message
-) {
-
-  const messages =
-    loadMessages();
-
-    messages.push({
-
-      userId,
-
-      sender,
-
-      message,
-
-      timestamp:
-        Date.now(),
-
-      readByAdmin:
-        sender === "admin"
-
-    });
-
-  saveMessages(messages);
-
-}
-
-// =========================
-// Redeem Code Generator
-// =========================
-
-function generateRedeemCode() {
-
-  const chars =
-    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-  function part(length) {
-
-    let result = "";
-
-    for (
-      let i = 0;
-      i < length;
-      i++
-    ) {
-
-      result += chars.charAt(
-
-        Math.floor(
-          Math.random() *
-          chars.length
-        )
-
-      );
-
-    }
-
-    return result;
-
-  }
-
-  return `${part(4)}-${part(5)}-${part(4)}-${part(4)}`;
-
-}
 
 // =========================
 // Home Route
 // =========================
 
-app.get("/", (req, res) => {
-
-  res.sendFile(
-    path.join(
-      __dirname,
-      "public",
-      "index.html"
-    )
-  );
-
-});
-
-// =========================
-// Admin Login
-// =========================
-
-app.post(
-  "/admin-login",
-  (req, res) => {
-
-    const {
-      password
-    } = req.body;
-
-    if (
-      password ===
-      ADMIN_PANEL_PASSWORD
-    ) {
-
-      return res.json({
-        success: true
-      });
-
-    }
-
-    return res.json({
-      success: false
-    });
-
-  }
-);
-
-// =========================
-// Get Messages
-// =========================
-
 app.get(
-  "/messages",
-  (req, res) => {
+  "/",
+  (req,res)=>{
 
-    const messages =
-      loadMessages();
+    res.sendFile(
 
-    res.json(messages);
+      path.join(
 
-  }
-);
+        __dirname,
 
-// =========================
-// Get Users
-// =========================
+        "public",
 
-app.get(
-  "/users",
-  (req, res) => {
+        "index.html"
 
-    const messages =
-      loadMessages();
+      )
 
-    const uniqueUsers =
-
-      [...new Set(
-
-        messages.map(
-          (msg) =>
-            msg.userId
-        )
-
-      )];
-
-    res.json(
-      uniqueUsers
     );
 
   }
 );
 
 // =========================
-// Validate Route
+// Routes
 // =========================
 
-app.post(
-  "/mark-read",
-  (req, res) => {
-
-    const {
-      userId
-    } = req.body;
-
-    const messages =
-      loadMessages();
-
-    messages.forEach((msg) => {
-
-      if (
-
-        msg.userId === userId
-
-        &&
-
-        msg.sender === "user"
-
-      ) {
-
-        msg.readByAdmin = true;
-
-      }
-
-    });
-
-    saveMessages(messages);
-
-    res.json({
-      success: true
-    });
-
-  }
+app.use(
+  authRoutes
 );
 
-// =========================
-// Generate Route
-// =========================
-
-// =========================
-// Validate Route
-// =========================
-
-app.post(
-  "/validate",
-  async (req, res) => {
-
-    try {
-
-      const {
-        code,
-        deviceToken
-      } = req.body;
-
-      if (!code) {
-
-        return res
-          .status(400)
-          .json({
-
-            success: false,
-
-            message:
-              "Code is required"
-
-          });
-
-      }
-
-      const found =
-        await Code.findOne({
-          code
-        });
-
-      if (!found) {
-
-        return res.json({
-
-          success: false,
-
-          message:
-            "Invalid code"
-
-        });
-
-      }
-
-      // =========================
-      // First Redeem
-      // =========================
-
-      if (
-        !found.deviceToken
-      ) {
-
-        found.deviceToken =
-          deviceToken;
-
-        found.redeemedAt =
-          new Date();
-
-        await found.save();
-
-      }
-
-      // =========================
-      // Device Lock
-      // =========================
-
-      if (
-
-        found.deviceToken !==
-        deviceToken
-
-      ) {
-
-        return res.json({
-
-          success: false,
-
-          message:
-            "This code has already been redeemed"
-
-        });
-
-      }
-
-      // =========================
-      // Expiration
-      // =========================
-
-      if (
-        found.redeemedAt
-      ) {
-
-        const twoDays =
-
-          2 *
-          24 *
-          60 *
-          60 *
-          1000;
-
-        const expired =
-
-          Date.now()
-
-          -
-
-          new Date(
-            found.redeemedAt
-          ).getTime()
-
-          >
-
-          twoDays;
-
-        if (expired) {
-
-          return res.json({
-
-            success: false,
-
-            message:
-              "This code has expired"
-
-          });
-
-        }
-
-      }
-
-      // =========================
-      // Success
-      // =========================
-
-      return res.json({
-
-        success: true,
-
-        account:
-          found.account,
-
-        password:
-          found.password
-
-      });
-
-    } catch (err) {
-
-      console.error(
-        "❌ Validate error:",
-        err
-      );
-
-      return res
-        .status(500)
-        .json({
-
-          success: false,
-
-          message:
-            "Server error"
-
-        });
-
-    }
-
-  }
+app.use(
+  redeemRoutes
 );
 
-app.post(
-  "/generate",
-  async (req, res) => {
-
-    try {
-
-      const {
-        account,
-        password,
-        key
-      } = req.body;
-
-      if (
-        key !==
-        ADMIN_KEY
-      ) {
-
-        return res
-          .status(403)
-          .json({
-
-            success: false,
-
-            message:
-              "Invalid admin key"
-
-          });
-
-      }
-
-      if (
-        !account ||
-        !password
-      ) {
-
-        return res
-          .status(400)
-          .json({
-
-            success: false,
-
-            message:
-              "Account and password are required"
-
-          });
-
-      }
-
-      let code;
-
-      let exists = true;
-
-      while (exists) {
-
-        code =
-          generateRedeemCode();
-
-        exists =
-          await Code.findOne({
-            code
-          });
-
-      }
-
-      const newCode =
-        new Code({
-
-          code,
-
-          account,
-
-          password
-
-        });
-
-      await newCode.save();
-
-      return res.json({
-
-        success: true,
-
-        code
-
-      });
-
-    } catch (err) {
-
-      console.error(
-        "❌ Generate error:",
-        err
-      );
-
-      return res
-        .status(500)
-        .json({
-
-          success: false,
-
-          message:
-            "Server error"
-
-        });
-
-    }
-
-  }
+app.use(
+  chatRoutes
 );
 
 // =========================
 // Socket.IO
 // =========================
 
-io.on(
-  "connection",
-  (socket) => {
-
-    console.log(
-      "✅ Connected:",
-      socket.id
-    );
-
-    // =========================
-    // Join User
-    // =========================
-
-    socket.on(
-      "join-user",
-      (userId) => {
-
-        socket.join(
-          userId
-        );
-
-        console.log(
-          "👤 Joined:",
-          userId
-        );
-
-        const messages =
-          loadMessages();
-
-        const userMessages =
-
-          messages.filter(
-            (msg) =>
-
-              msg.userId ===
-              userId
-          );
-
-        socket.emit(
-          "chat-history",
-          userMessages
-        );
-
-      }
-    );
-
-    // =========================
-    // User Message
-    // =========================
-
-    socket.on(
-      "user-message",
-      (data) => {
-
-        addMessage(
-
-          data.userId,
-
-          "user",
-
-          data.message
-
-        );
-
-        io.emit(
-          "new-message",
-          {
-
-            userId:
-              data.userId,
-
-            sender:
-              "user",
-
-            message:
-              data.message
-
-          }
-        );
-
-      }
-    );
-
-    // =========================
-    // Admin Message
-    // =========================
-
-    socket.on(
-      "admin-message",
-      (data) => {
-
-        addMessage(
-
-          data.userId,
-
-          "admin",
-
-          data.message
-
-        );
-
-        io.to(
-          data.userId
-        ).emit(
-          "admin-reply",
-          {
-
-            message:
-              data.message
-
-          }
-        );
-
-        io.emit(
-          "new-message",
-          {
-
-            userId:
-              data.userId,
-
-            sender:
-              "admin",
-
-            message:
-              data.message
-
-          }
-        );
-
-      }
-    );
-
-    // =========================
-    // Disconnect
-    // =========================
-
-    socket.on(
-      "disconnect",
-      () => {
-
-        console.log(
-          "❌ Disconnected:",
-          socket.id
-        );
-
-      }
-    );
-
-  }
+chatSocket(
+  io
 );
 
 // =========================
 // 404
 // =========================
 
-app.use((req, res) => {
+app.use(
+  (req,res)=>{
 
-  res.status(404).json({
+    res.status(404)
 
-    success: false,
+    .json({
 
-    message:
-      "Route not found"
+      success:false,
 
-  });
+      message:
+        "Route not found"
 
-});
+    });
+
+  }
+);
 
 // =========================
 // Start Server
 // =========================
 
-const PORT =
-  process.env.PORT || 3000;
-
 server.listen(
-  PORT,
+
+  config.PORT,
+
   "0.0.0.0",
-  () => {
+
+  ()=>{
 
     console.log(
-      `🚀 Server started on http://0.0.0.0:${PORT}`
+
+      `🚀 Server started on http://0.0.0.0:${config.PORT}`
+
     );
 
   }
+
 );

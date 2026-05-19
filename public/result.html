@@ -3,242 +3,307 @@
 
 <head>
 
-  <meta charset="UTF-8" />
+<meta charset="UTF-8">
 
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  />
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1.0"
+>
 
-  <title>Account Details</title>
+<title>Live Support</title>
 
-  <link rel="stylesheet" href="style.css">
+<script src="/socket.io/socket.io.js"></script>
 
-  <script src="/socket.io/socket.io.js"></script>
+<style>
+
+*{
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+}
+
+body{
+
+  font-family:
+    'Segoe UI',
+    Tahoma,
+    sans-serif;
+
+  background:
+    radial-gradient(
+      circle at top,
+      #0b1220,
+      #020617
+    );
+
+  color:white;
+
+  height:100vh;
+
+  display:flex;
+  justify-content:center;
+  align-items:center;
+
+  padding:24px;
+}
+
+.chat-container{
+
+  width:100%;
+  max-width:950px;
+
+  height:85vh;
+
+  background:
+    rgba(15,23,42,0.78);
+
+  border:
+    1px solid
+    rgba(255,255,255,0.06);
+
+  border-radius:22px;
+
+  backdrop-filter:blur(14px);
+
+  overflow:hidden;
+
+  display:flex;
+
+  flex-direction:column;
+}
+
+.chat-header{
+
+  padding:24px;
+
+  border-bottom:
+    1px solid
+    rgba(255,255,255,0.06);
+
+  background:
+    rgba(2,6,23,0.45);
+}
+.status-row{
+
+  display:flex;
+
+  align-items:center;
+
+  gap:10px;
+
+  margin-top:8px;
+
+}
+
+.status-dot{
+
+  width:10px;
+
+  height:10px;
+
+  border-radius:50%;
+
+  background:#22c55e;
+
+  box-shadow:
+    0 0 12px #22c55e;
+
+  animation:
+    pulse 1.6s infinite;
+
+}
+
+@keyframes pulse{
+
+  0%{
+
+    opacity:1;
+
+    transform:scale(1);
+
+  }
+
+  50%{
+
+    opacity:0.45;
+
+    transform:scale(1.18);
+
+  }
+
+  100%{
+
+    opacity:1;
+
+    transform:scale(1);
+
+  }
+
+}
+
+.chat-header h1{
+
+  font-size:30px;
+
+  margin-bottom:10px;
+}
+
+.chat-header p{
+
+  color:#94a3b8;
+}
+
+#messages{
+
+  flex:1;
+
+  overflow-y:auto;
+
+  padding:24px;
+
+  display:flex;
+
+  flex-direction:column;
+
+  gap:14px;
+}
+
+.message{
+
+  max-width:75%;
+
+  padding:16px;
+
+  border-radius:16px;
+
+  line-height:1.6;
+
+  word-break:break-word;
+}
+
+.user{
+
+  align-self:flex-end;
+
+  background:
+    linear-gradient(
+      135deg,
+      #ef4444,
+      #dc2626
+    );
+
+  color:white;
+}
+
+.admin{
+
+  align-self:flex-start;
+
+  background:
+    rgba(30,41,59,0.9);
+
+  color:#93c5fd;
+}
+
+.chat-bottom{
+
+  padding:20px;
+
+  display:flex;
+
+  gap:14px;
+
+  border-top:
+    1px solid
+    rgba(255,255,255,0.06);
+}
+
+input{
+
+  flex:1;
+
+  padding:16px;
+
+  border:none;
+
+  outline:none;
+
+  border-radius:14px;
+
+  background:#020617;
+
+  color:white;
+
+  border:
+    1px solid
+    rgba(255,255,255,0.06);
+}
+
+button{
+
+  padding:16px 24px;
+
+  border:none;
+
+  border-radius:14px;
+
+  cursor:pointer;
+
+  font-weight:600;
+
+  color:white;
+
+  background:
+    linear-gradient(
+      135deg,
+      #ef4444,
+      #dc2626
+    );
+}
+
+button:hover{
+
+  box-shadow:
+    0 0 16px rgba(239,68,68,0.35);
+}
+
+</style>
 
 </head>
 
 <body>
 
-<div class="wrapper">
+<div class="chat-container">
 
-  <!-- =========================
-       Account Details
-  ========================= -->
+  <div class="chat-header">
 
-  <div class="container">
+    <h1>Live Support</h1>
 
-    <h2>Account Details</h2>
+    <div class="status-row">
 
-    <div class="account-box">
+  <div
+    class="status-dot"
+  ></div>
 
-      <div class="info-item">
-
-        <div class="label">
-          Username
-        </div>
-
-        <div
-          class="value"
-          id="account"
-        ></div>
-
-      </div>
-
-      <div class="info-item">
-
-        <div class="label">
-          Password
-        </div>
-
-        <div
-          class="value"
-          id="password"
-        ></div>
-
-      </div>
-
-    </div>
-
-  </div>
-
-  <!-- =========================
-       Instructions
-  ========================= -->
-
-  <div class="container">
-
-    <div class="instructions-title">
-      Instructions
-    </div>
-
-    <div class="instructions">
-
-      <div class="step">
-
-        <div class="step-number">
-          1
-        </div>
-
-        <div class="step-text">
-
-          Log in to the received Twitch account,
-          then go to:
-
-          <br><br>
-
-          <a
-            href="https://www.twitch.tv/drops/inventory"
-            target="_blank"
-          >
-            https://www.twitch.tv/drops/inventory
-          </a>
-
-          <br><br>
-
-          Scroll to the bottom of the page,
-          to the
-          <strong>"Received"</strong>
-          section.
-
-        </div>
-
-      </div>
-
-      <div class="step">
-
-        <div class="step-number">
-          2
-        </div>
-
-        <div class="step-text">
-
-          Click on the purple
-          <strong>"Connect"</strong>
-          button located below the item
-          you want to add to your account.
-
-        </div>
-
-      </div>
-
-      <div class="step">
-
-        <div class="step-number">
-          3
-        </div>
-
-        <div class="step-text">
-
-          Connect the account by following
-          the instructions shown on the
-          external connection page.
-
-        </div>
-
-      </div>
-
-      <div class="step">
-
-        <div class="step-number">
-          4
-        </div>
-
-        <div class="step-text">
-
-          After connecting, additional
-          actions may still be required.
-
-          <br><br>
-
-          Example:
-          Rust may require clicking
-          <strong>"Activate Drops"</strong>
-          and later
-          <strong>"Check for missing drops"</strong>.
-
-        </div>
-
-      </div>
-
-    </div>
-
-    <!-- =========================
-         Warning
-    ========================= -->
-
-    <div class="warning-box">
-
-      <div class="warning-title">
-        Warning
-      </div>
-
-      <div class="warning-text">
-
-        Items older than six months
-        aren't showing up in Twitch's inventory.
-
-        <br><br>
-
-        You'll receive everything as described
-        if you follow the instructions carefully.
-
-        Thanks!
-
-      </div>
-
-    </div>
-
-  </div>
+  <p id="subtitle"></p>
 
 </div>
 
-<!-- =========================
-     Chat Widget
-========================= -->
-
-<div class="chat-widget">
-
-  <!-- Toggle -->
-
-  <div
-    class="chat-toggle"
-    onclick="toggleChat()"
-  >
-    💬
   </div>
 
-  <!-- Chat Box -->
+  <div id="messages"></div>
 
-  <div
-    class="chat-box"
-    id="chatBox"
-  >
+  <div class="chat-bottom">
 
-    <div class="chat-header">
+    <input
+      id="messageInput"
+      placeholder="Type your message..."
+      autocomplete="off"
+    >
 
-      Live Support
-
-    </div>
-
-    <div
-      class="chat-messages"
-      id="chatMessages"
-    ></div>
-
-    <div class="chat-bottom">
-
-      <input
-        id="chatInput"
-        placeholder="Type message..."
-        autocomplete="off"
-      >
-
-      <button onclick="sendMessage()">
-        Send
-      </button>
-
-    </div>
+    <button onclick="sendMessage()">
+      Send
+    </button>
 
   </div>
 
@@ -247,189 +312,190 @@
 <script>
 
 // =========================
-// Load Account
+// Gamer Tag
 // =========================
 
-const data =
-  JSON.parse(
-    localStorage.getItem(
-      "accountData"
-    )
+const gamerTag =
+
+  localStorage.getItem(
+    "gamerTag"
   );
 
-if (!data) {
+if(!gamerTag){
 
-  window.location.href = "/";
-
-} else {
-
-  document.getElementById(
-    "account"
-  ).innerText = data.account;
-
-  document.getElementById(
-    "password"
-  ).innerText = data.password;
+  window.location.href="/";
 
 }
 
+// subtitle
+
+document
+  .getElementById(
+    "subtitle"
+  )
+  .innerText =
+
+    `Support Online • Connected as ${gamerTag}`;
+
 // =========================
-// Socket.IO
+// Socket
 // =========================
 
 const socket = io();
 
-// =========================
-// Persistent User ID
-// =========================
-
-const userId =
-  data.redeemCode;
-
-// Join room
-
 socket.emit(
   "join-user",
-  userId
+  gamerTag
 );
 
 // =========================
-// Chat Elements
+// Elements
 // =========================
 
-const chatBox =
+const messages =
   document.getElementById(
-    "chatBox"
+    "messages"
   );
 
-const chatMessages =
+const input =
   document.getElementById(
-    "chatMessages"
+    "messageInput"
   );
-
-const chatInput =
-  document.getElementById(
-    "chatInput"
-  );
-
-// =========================
-// Toggle Chat
-// =========================
-
-function toggleChat() {
-
-  chatBox.style.display =
-
-    chatBox.style.display ===
-    "flex"
-
-      ? "none"
-
-      : "flex";
-
-}
 
 // =========================
 // Add Message
 // =========================
 
 function addMessage(
+
   text,
   className
-) {
+
+){
 
   const div =
-    document.createElement("div");
+
+    document.createElement(
+      "div"
+    );
 
   div.classList.add(
-    "chat-message",
+
+    "message",
+
     className
+
   );
 
-  div.innerText = text;
+  // preserve formatting
 
-  chatMessages.appendChild(div);
+  div.style.whiteSpace =
+    "pre-wrap";
 
-  chatMessages.scrollTop =
-    chatMessages.scrollHeight;
+  div.style.wordBreak =
+    "break-word";
+
+  div.textContent =
+    text;
+
+  messages.appendChild(
+    div
+  );
+
+  messages.scrollTop =
+
+    messages.scrollHeight;
 
 }
-
 // =========================
-// Load History
+// History
 // =========================
 
 socket.on(
   "chat-history",
-  (history) => {
+  (history)=>{
 
-    chatMessages.innerHTML = "";
+    messages.innerHTML="";
 
-    history.forEach((msg) => {
+    history.forEach(
+      (msg)=>{
 
-      addMessage(
+        addMessage(
 
-        `${
-          msg.sender === "admin"
+          `${
+            msg.sender==="admin"
+
             ? "Support"
+
             : "You"
-        }: ${msg.message}`,
+          }: ${msg.message}`,
 
-        msg.sender === "admin"
+          msg.sender==="admin"
 
-          ? "chat-admin"
+          ? "admin"
 
-          : "chat-user"
+          : "user"
 
-      );
+        );
 
-    });
+      }
+    );
 
   }
 );
 
 // =========================
-// Send Message
+// Send
 // =========================
 
-function sendMessage() {
+function sendMessage(){
 
   const message =
-    chatInput.value.trim();
+    input.value.trim();
 
-  if (!message) return;
+  if(!message) return;
 
   socket.emit(
+
     "user-message",
+
     {
 
-      userId,
+      userId:
+        gamerTag,
 
       message
 
     }
+
   );
 
   addMessage(
+
     `You: ${message}`,
-    "chat-user"
+
+    "user"
+
   );
 
-  chatInput.value = "";
+  input.value="";
 
 }
 
 // =========================
-// Admin Reply
+// Reply
 // =========================
 
 socket.on(
   "admin-reply",
-  (data) => {
+  (data)=>{
 
     addMessage(
+
       `Support: ${data.message}`,
-      "chat-admin"
+
+      "admin"
+
     );
 
   }
@@ -439,11 +505,13 @@ socket.on(
 // Enter Key
 // =========================
 
-chatInput.addEventListener(
+input.addEventListener(
   "keypress",
-  (e) => {
+  (e)=>{
 
-    if (e.key === "Enter") {
+    if(
+      e.key==="Enter"
+    ){
 
       sendMessage();
 

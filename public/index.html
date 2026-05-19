@@ -10,9 +10,7 @@
     content="width=device-width, initial-scale=1.0"
   />
 
-  <title>Redeem Code</title>
-
-  <link rel="stylesheet" href="style.css">
+  <title>Enter Gamer Tag</title>
 
 </head>
 
@@ -22,34 +20,34 @@
 
   <div class="redeem-card">
 
-    <!-- =========================
-         Header
-    ========================= -->
+    <!-- Header -->
 
     <div class="redeem-header">
 
-      <h1>Redeem Code</h1>
+      <h1>Enter Gamer Tag</h1>
 
+      <p>
+        Enter your gamer tag
+        to continue.
+      </p>
 
     </div>
 
-    <!-- =========================
-         Input
-    ========================= -->
+    <!-- Form -->
 
     <div class="redeem-form">
 
       <input
-        id="code"
-        placeholder="Enter your redeem code"
+        id="gamerTag"
+        placeholder="Enter your gamer tag"
         autocomplete="off"
       >
 
       <button
-        onclick="submitCode()"
+        onclick="submitTag()"
         id="btn"
       >
-        Redeem
+        Continue
       </button>
 
       <p id="message"></p>
@@ -62,19 +60,15 @@
 
 <style>
 
-/* =========================
-   Reset
-========================= */
+/* Reset */
 
 * {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
 }
 
-/* =========================
-   Body
-========================= */
+/* Body */
 
 body {
 
@@ -90,128 +84,118 @@ body {
       #020617
     );
 
-  color: #e2e8f0;
+  color:#e2e8f0;
 
-  min-height: 100vh;
+  min-height:100vh;
 
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  display:flex;
+  justify-content:center;
+  align-items:center;
 
-  padding: 24px;
+  padding:24px;
 }
 
-/* =========================
-   Wrapper
-========================= */
+/* Wrapper */
 
 .redeem-wrapper {
 
-  width: 100%;
+  width:100%;
 
-  display: flex;
+  display:flex;
 
-  justify-content: center;
-  align-items: center;
+  justify-content:center;
+  align-items:center;
 }
 
-/* =========================
-   Card
-========================= */
+/* Card */
 
 .redeem-card {
 
-  width: 100%;
+  width:100%;
 
-  max-width: 420px;
+  max-width:420px;
 
   background:
     rgba(15,23,42,0.78);
 
-  backdrop-filter: blur(14px);
+  backdrop-filter:blur(14px);
 
   border:
     1px solid
     rgba(255,255,255,0.06);
 
-  border-radius: 22px;
+  border-radius:22px;
 
-  padding: 36px;
+  padding:36px;
 
   box-shadow:
     0 0 35px rgba(239,68,68,0.12),
     inset 0 1px 0 rgba(255,255,255,0.03);
 }
 
-/* =========================
-   Header
-========================= */
+/* Header */
 
 .redeem-header {
 
-  margin-bottom: 28px;
+  margin-bottom:28px;
 }
 
 .redeem-header h1 {
 
-  font-size: 34px;
+  font-size:34px;
 
-  font-weight: 700;
+  font-weight:700;
 
-  margin-bottom: 12px;
+  margin-bottom:12px;
 
-  color: #f8fafc;
+  color:#f8fafc;
 }
 
 .redeem-header p {
 
-  color: #94a3b8;
+  color:#94a3b8;
 
-  line-height: 1.7;
+  line-height:1.7;
 
-  font-size: 15px;
+  font-size:15px;
 }
 
-/* =========================
-   Form
-========================= */
+/* Form */
 
 .redeem-form {
 
-  display: flex;
+  display:flex;
 
-  flex-direction: column;
+  flex-direction:column;
 
-  gap: 16px;
+  gap:16px;
 }
 
-/* =========================
-   Input
-========================= */
+/* Input */
 
 input {
 
-  width: 100%;
+  width:100%;
 
-  padding: 16px;
+  padding:16px;
 
-  border: none;
+  border:none;
 
-  outline: none;
+  outline:none;
 
-  border-radius: 14px;
+  border-radius:14px;
 
-  background: #020617;
+  background:#020617;
 
-  color: white;
+  color:white;
 
-  font-size: 15px;
+  font-size:15px;
 
   border:
     1px solid
     rgba(255,255,255,0.06);
 
-  transition: 0.2s ease;
+  transition:0.2s ease;
 }
 
 input:focus {
@@ -223,19 +207,17 @@ input:focus {
     0 0 16px rgba(239,68,68,0.18);
 }
 
-/* =========================
-   Button
-========================= */
+/* Button */
 
 button {
 
-  width: 100%;
+  width:100%;
 
-  padding: 16px;
+  padding:16px;
 
-  border: none;
+  border:none;
 
-  border-radius: 14px;
+  border-radius:14px;
 
   background:
     linear-gradient(
@@ -244,20 +226,20 @@ button {
       #dc2626
     );
 
-  color: white;
+  color:white;
 
-  font-size: 15px;
+  font-size:15px;
 
-  font-weight: 600;
+  font-weight:600;
 
-  cursor: pointer;
+  cursor:pointer;
 
-  transition: 0.2s ease;
+  transition:0.2s ease;
 }
 
 button:hover {
 
-  transform: translateY(-1px);
+  transform:translateY(-1px);
 
   box-shadow:
     0 0 16px rgba(239,68,68,0.35);
@@ -265,48 +247,44 @@ button:hover {
 
 button:disabled {
 
-  opacity: 0.7;
+  opacity:0.7;
 
-  cursor: not-allowed;
+  cursor:not-allowed;
 }
 
-/* =========================
-   Message
-========================= */
+/* Message */
 
 #message {
 
-  min-height: 20px;
+  min-height:20px;
 
-  text-align: center;
+  text-align:center;
 
-  font-size: 14px;
+  font-size:14px;
 }
 
 .error {
 
-  color: #f87171;
+  color:#f87171;
 }
 
 .success {
 
-  color: #4ade80;
+  color:#4ade80;
 }
 
-/* =========================
-   Mobile
-========================= */
+/* Mobile */
 
-@media (max-width: 480px) {
+@media (max-width:480px) {
 
   .redeem-card {
 
-    padding: 28px 22px;
+    padding:28px 22px;
   }
 
   .redeem-header h1 {
 
-    font-size: 28px;
+    font-size:28px;
   }
 
 }
@@ -315,83 +293,45 @@ button:disabled {
 
 <script>
 
-// =========================
-// Submit Code
-// =========================
+async function submitTag() {
 
-async function submitCode() {
-
-  const code =
+  const gamerTag =
 
     document
-      .getElementById("code")
+      .getElementById(
+        "gamerTag"
+      )
       .value
-      .trim()
-      .toUpperCase();
+      .trim();
 
   const message =
 
     document
-      .getElementById("message");
+      .getElementById(
+        "message"
+      );
 
   const btn =
 
     document
-      .getElementById("btn");
-
-  // =========================
-  // Reset UI
-  // =========================
+      .getElementById(
+        "btn"
+      );
 
   message.innerText = "";
-
   message.className = "";
 
-  // =========================
-  // Validate Input
-  // =========================
-
-  if (!code) {
+  if (!gamerTag) {
 
     message.innerText =
-      "Please enter a redeem code";
+      "Please enter your gamer tag";
 
     message.classList.add(
       "error"
     );
 
     return;
-
   }
-
-  // =========================
-  // Persistent Device Token
-  // =========================
-
-  let deviceToken =
-
-    localStorage.getItem(
-      "deviceToken"
-    );
-
-  if (!deviceToken) {
-
-    deviceToken =
-      crypto.randomUUID();
-
-    localStorage.setItem(
-
-      "deviceToken",
-
-      deviceToken
-
-    );
-
-  }
-
-  // =========================
-  // Loading State
-  // =========================
 
   btn.disabled = true;
 
@@ -400,73 +340,31 @@ async function submitCode() {
 
   try {
 
-    const res = await fetch(
-      "/validate",
-      {
-
-        method: "POST",
-
-        headers: {
-
-          "Content-Type":
-            "application/json"
-
-        },
-
-        body: JSON.stringify({
-
-          code,
-
-          deviceToken
-
-        })
-
-      }
-    );
-
-    const data =
-      await res.json();
-
-    // =========================
-    // Success
-    // =========================
-
-    if (data.success) {
+    // save locally
 
     localStorage.setItem(
 
-      "accountData",
+      "gamerTag",
 
-      JSON.stringify({
-
-        account:
-          data.account,
-
-        password:
-          data.password,
-
-        redeemCode:
-          code
-
-      })
+      gamerTag
 
     );
 
-      window.location.href =
-        "/result.html";
+    message.innerText =
+      "Success";
 
-    } else {
+    message.classList.add(
+      "success"
+    );
 
-      message.innerText =
-        data.message;
+    // redirect
 
-      message.classList.add(
-        "error"
-      );
+    window.location.href =
+      "/result.html";
 
-    }
+  }
 
-  } catch (err) {
+  catch(err){
 
     console.error(err);
 
@@ -479,14 +377,10 @@ async function submitCode() {
 
   }
 
-  // =========================
-  // Reset Button
-  // =========================
-
   btn.disabled = false;
 
   btn.innerText =
-    "Redeem";
+    "Continue";
 
 }
 

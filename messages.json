@@ -1,38 +1,9 @@
 [
   {
-    "userId": "e6473313-6c3d-4eb0-9e17-616f2d21dd0b",
-    "sender": "user",
-    "message": "hi",
-    "timestamp": 1778958963566
-  },
-  {
-    "userId": "66f3857e-737a-4932-a97a-bc02e2e1df9c",
-    "sender": "user",
-    "message": "hi",
-    "timestamp": 1778959199156
-  },
-  {
-    "userId": "e6473313-6c3d-4eb0-9e17-616f2d21dd0b",
+    "userId": "kariponnaya",
     "sender": "admin",
-    "message": "hi",
-    "timestamp": 1778959211766
-  },
-  {
-    "userId": "66f3857e-737a-4932-a97a-bc02e2e1df9c",
-    "sender": "admin",
-    "message": "hi",
-    "timestamp": 1778959216039
-  },
-  {
-    "userId": "66f3857e-737a-4932-a97a-bc02e2e1df9c",
-    "sender": "admin",
-    "message": "sup?",
-    "timestamp": 1778959230700
-  },
-  {
-    "userId": "6XMM-XCLLB-M77Y-B7UA",
-    "sender": "user",
-    "message": "hi",
-    "timestamp": 1778959453428
+    "message": "Wait for admin to contact you to deliver your items in-game.",
+    "timestamp": 1779216867415,
+    "readByAdmin": true
   }
 ]
