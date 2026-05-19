@@ -3,74 +3,26 @@
 
 <head>
 
-  <meta charset="UTF-8" />
+<meta charset="UTF-8">
 
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  />
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1.0"
+>
 
-  <title>Enter Gamer Tag</title>
-
-</head>
-
-<body>
-
-<div class="redeem-wrapper">
-
-  <div class="redeem-card">
-
-    <!-- Header -->
-
-    <div class="redeem-header">
-
-      <h1>Enter Gamer Tag</h1>
-
-      <p>
-        Enter your gamer tag
-        to continue.
-      </p>
-
-    </div>
-
-    <!-- Form -->
-
-    <div class="redeem-form">
-
-      <input
-        id="gamerTag"
-        placeholder="Enter your gamer tag"
-        autocomplete="off"
-      >
-
-      <button
-        onclick="submitTag()"
-        id="btn"
-      >
-        Continue
-      </button>
-
-      <p id="message"></p>
-
-    </div>
-
-  </div>
-
-</div>
+<title>Enter Gamer Tag</title>
 
 <style>
 
 /* Reset */
 
-* {
+*{
   margin:0;
   padding:0;
   box-sizing:border-box;
 }
 
-/* Body */
-
-body {
+body{
 
   font-family:
     'Segoe UI',
@@ -89,27 +41,28 @@ body {
   min-height:100vh;
 
   display:flex;
+
   justify-content:center;
+
   align-items:center;
 
   padding:24px;
+
 }
 
-/* Wrapper */
-
-.redeem-wrapper {
+.redeem-wrapper{
 
   width:100%;
 
   display:flex;
 
   justify-content:center;
+
   align-items:center;
+
 }
 
-/* Card */
-
-.redeem-card {
+.redeem-card{
 
   width:100%;
 
@@ -131,16 +84,16 @@ body {
   box-shadow:
     0 0 35px rgba(239,68,68,0.12),
     inset 0 1px 0 rgba(255,255,255,0.03);
+
 }
 
-/* Header */
-
-.redeem-header {
+.redeem-header{
 
   margin-bottom:28px;
+
 }
 
-.redeem-header h1 {
+.redeem-header h1{
 
   font-size:34px;
 
@@ -149,31 +102,30 @@ body {
   margin-bottom:12px;
 
   color:#f8fafc;
+
 }
 
-.redeem-header p {
+.redeem-header p{
 
   color:#94a3b8;
 
   line-height:1.7;
 
   font-size:15px;
+
 }
 
-/* Form */
-
-.redeem-form {
+.redeem-form{
 
   display:flex;
 
   flex-direction:column;
 
   gap:16px;
+
 }
 
-/* Input */
-
-input {
+input{
 
   width:100%;
 
@@ -195,21 +147,19 @@ input {
     1px solid
     rgba(255,255,255,0.06);
 
-  transition:0.2s ease;
 }
 
-input:focus {
+input:focus{
 
   border-color:
     rgba(239,68,68,0.55);
 
   box-shadow:
     0 0 16px rgba(239,68,68,0.18);
+
 }
 
-/* Button */
-
-button {
+button{
 
   width:100%;
 
@@ -234,69 +184,87 @@ button {
 
   cursor:pointer;
 
-  transition:0.2s ease;
 }
 
-button:hover {
-
-  transform:translateY(-1px);
-
-  box-shadow:
-    0 0 16px rgba(239,68,68,0.35);
-}
-
-button:disabled {
+button:disabled{
 
   opacity:0.7;
 
   cursor:not-allowed;
+
 }
 
-/* Message */
-
-#message {
+#message{
 
   min-height:20px;
 
   text-align:center;
 
   font-size:14px;
+
 }
 
-.error {
+.error{
 
   color:#f87171;
+
 }
 
-.success {
+.success{
 
   color:#4ade80;
-}
-
-/* Mobile */
-
-@media (max-width:480px) {
-
-  .redeem-card {
-
-    padding:28px 22px;
-  }
-
-  .redeem-header h1 {
-
-    font-size:28px;
-  }
 
 }
 
 </style>
 
+</head>
+
+<body>
+
+<div class="redeem-wrapper">
+
+  <div class="redeem-card">
+
+    <div class="redeem-header">
+
+      <h1>Enter Gamer Tag</h1>
+
+      <p>
+        Enter your gamer tag
+        to continue.
+      </p>
+
+    </div>
+
+    <div class="redeem-form">
+
+      <input
+        id="gamerTag"
+        placeholder="Enter your gamer tag"
+        autocomplete="off"
+      >
+
+      <button
+        onclick="submitTag()"
+        id="btn"
+      >
+        Continue
+      </button>
+
+      <p id="message"></p>
+
+    </div>
+
+  </div>
+
+</div>
+
 <script>
 
-async function submitTag() {
+async function submitTag(){
 
   const gamerTag =
-
     document
       .getElementById(
         "gamerTag"
@@ -305,14 +273,12 @@ async function submitTag() {
       .trim();
 
   const message =
-
     document
       .getElementById(
         "message"
       );
 
   const btn =
-
     document
       .getElementById(
         "btn"
@@ -321,7 +287,7 @@ async function submitTag() {
   message.innerText = "";
   message.className = "";
 
-  if (!gamerTag) {
+  if(!gamerTag){
 
     message.innerText =
       "Please enter your gamer tag";
@@ -331,6 +297,7 @@ async function submitTag() {
     );
 
     return;
+
   }
 
   btn.disabled = true;
@@ -338,65 +305,44 @@ async function submitTag() {
   btn.innerText =
     "Checking...";
 
-try {
+  try{
 
-  const response = await fetch(
+    const response =
+      await fetch(
 
-    "/submit-gamertag",
+        "/submit-gamertag",
 
-    {
+        {
 
-      method:"POST",
+          method:"POST",
 
-      headers:{
+          headers:{
 
-        "Content-Type":
-          "application/json"
+            "Content-Type":
+              "application/json"
 
-      },
+          },
 
-      body:JSON.stringify({
+          body:JSON.stringify({
 
-        gamerTag
+            gamerTag
 
-      })
+          })
+
+        }
+
+      );
+
+    const data =
+      await response.json();
+
+    if(!data.success){
+
+      throw new Error(
+        "Submit failed"
+      );
 
     }
-
-  );
-
-  const data =
-    await response.json();
-
-  if(!data.success){
-
-    throw new Error(
-      "Submit failed"
-    );
-
-  }
-
-  localStorage.setItem(
-
-    "gamerTag",
-
-    gamerTag
-
-  );
-
-  message.innerText =
-    "Success";
-
-  message.classList.add(
-    "success"
-  );
-
-  window.location.href =
-    "/result.html";
-
-}
-
-    // save locally
 
     localStorage.setItem(
 
@@ -413,10 +359,12 @@ try {
       "success"
     );
 
-    // redirect
+    setTimeout(()=>{
 
-    window.location.href =
-      "/result.html";
+      window.location.href =
+        "/result.html";
+
+    },500);
 
   }
 
@@ -433,10 +381,14 @@ try {
 
   }
 
-  btn.disabled = false;
+  finally{
 
-  btn.innerText =
-    "Continue";
+    btn.disabled = false;
+
+    btn.innerText =
+      "Continue";
+
+  }
 
 }
 
