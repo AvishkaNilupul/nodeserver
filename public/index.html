@@ -262,6 +262,21 @@ button:disabled{
 
 <script>
 
+  // auto login
+
+const existingTag =
+
+  localStorage.getItem(
+    "gamerTag"
+  );
+
+if(existingTag){
+
+  window.location.href =
+    "/result.html";
+
+}
+
 async function submitTag(){
 
   const gamerTag =
