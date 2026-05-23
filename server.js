@@ -229,15 +229,50 @@ app.post("/submit-gamertag", async (req,res)=>{
       });
 
     }
-
     const ip =
 
       req.headers[
-        'x-forwarded-for'
-      ] ||
+        "cf-connecting-ip"
+      ]
+
+      ||
+
+      req.headers[
+        "x-forwarded-for"
+      ]?.split(",")[0]
+
+      ||
 
       req.socket
-        .remoteAddress;
+        .remoteAddress
+
+      ||
+
+      "Unknown";
+
+      console.log({
+
+        cf:
+
+          req.headers[
+            "cf-connecting-ip"
+          ],
+
+        forwarded:
+
+          req.headers[
+            "x-forwarded-for"
+          ],
+
+        remote:
+
+          req.socket
+            .remoteAddress,
+
+        finalIp:
+          ip
+
+      });
 
     const chatIds =
 
