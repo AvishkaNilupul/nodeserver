@@ -436,6 +436,11 @@
 
 <script>
 
+  const notificationSound =
+  new Audio(
+    "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+  );
+
 const auth =
   localStorage.getItem(
     "adminAuth"
@@ -793,6 +798,19 @@ socket.on(
     // refresh sidebar
 
     loadUsers();
+    // play sound for new user messages
+
+    if(
+
+      data.sender === "user"
+
+    ){
+
+      notificationSound
+        .play()
+        .catch(()=>{});
+
+    }
 
     // =========================
     // Auto open new customer
