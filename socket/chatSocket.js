@@ -1,3 +1,8 @@
+
+require('dotenv').config();
+const axios =
+  require('axios');
+
 const {
 
   loadMessages,
@@ -136,7 +141,7 @@ function chatSocket(
 
         "user-message",
 
-        (data)=>{
+        async (data)=>{
 
           addMessage(
 
@@ -147,6 +152,64 @@ function chatSocket(
             data.message
 
           );
+        // =========================
+        // Telegram Chat Alert
+        // =========================
+
+          try{
+
+            const chatIds =
+
+              process.env
+                .TG_CHAT_IDS
+                .split(",");
+
+            for(const chatId of chatIds){
+
+              await axios.post(
+
+                `https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`,
+
+                {
+
+                  chat_id:
+                    chatId.trim(),
+
+              text:
+              `💬 NEW CHAT MESSAGE
+
+              👤 User:
+              ${data.userId}
+
+              📝 Message:
+              ${data.message}
+
+              Time:
+              ${new Date().toISOString()}`
+
+                }
+
+              );
+
+            }
+
+          }
+
+          catch(err){
+
+            console.error(
+
+              "Telegram chat error:",
+
+              err.response?.data ||
+
+              err.message
+
+            );
+
+          }
+
+          
 
           io.emit(
 
