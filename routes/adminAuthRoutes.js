@@ -17,60 +17,110 @@ router.post(
 
   async (req,res)=>{
 
-const password =
+    try{
 
-  req.body?.password;
+      const password =
 
-if(
+        req.body?.password;
 
-  !password
+      if(
 
-){
+        !password
 
-  return res
-    .status(400)
-    .json({
+      ){
 
-      success:false,
+        return res
+          .status(400)
+          .json({
 
-      message:
-        "Password required"
+            success:false,
 
-    });
+            message:
+              "Password required"
 
-}
+          });
 
-    const ok =
+      }
 
-      await bcrypt.compare(
+      if(
 
-        password,
-
-        process.env
+        !process.env
           .ADMIN_HASH
 
-      );
+      ){
 
-    if(!ok){
+        return res
+          .status(500)
+          .json({
 
-      return res
-      .status(401)
-      .json({
+            success:false,
 
-        success:false
+            message:
+              "Server config error"
+
+          });
+
+      }
+
+      const ok =
+
+        await bcrypt.compare(
+
+          password,
+
+          process.env
+            .ADMIN_HASH
+
+        );
+
+      if(!ok){
+
+        return res
+          .status(401)
+          .json({
+
+            success:false,
+
+            message:
+              "Invalid password"
+
+          });
+
+      }
+
+      req.session.admin =
+        true;
+
+      res.json({
+
+        success:true
 
       });
 
     }
 
-    req.session.admin =
-      true;
+    catch(err){
 
-    res.json({
+      console.error(
 
-      success:true
+        "Admin login error:",
 
-    });
+        err
+
+      );
+
+      res.status(500)
+
+      .json({
+
+        success:false,
+
+        message:
+          "Server error"
+
+      });
+
+    }
 
   }
 
@@ -83,6 +133,7 @@ router.post(
   (req,res)=>{
 
     req.session.destroy(
+
       ()=>{
 
         res.json({
@@ -92,6 +143,7 @@ router.post(
         });
 
       }
+
     );
 
   }
