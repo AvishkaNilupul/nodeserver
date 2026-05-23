@@ -207,10 +207,6 @@
 
 <script>
 
-// =========================
-// Login
-// =========================
-
 async function login(){
 
   const password =
@@ -229,7 +225,7 @@ async function login(){
         "message"
       );
 
-  message.innerText="";
+  message.innerText = "";
 
   try{
 
@@ -295,9 +291,7 @@ async function login(){
 
   catch(err){
 
-    console.error(
-      err
-    );
+    console.error(err);
 
     message.innerText =
       "Server error";
@@ -306,88 +300,29 @@ async function login(){
 
 }
 
-  const password =
-
-    document
-      .getElementById(
-        "password"
-      )
-      .value;
-
-  const message =
-
-    document
-      .getElementById(
-        "message"
-      );
-
-  message.innerText = "";
-
-  try {
-
-    const res = await fetch(
-      "/admin-login",
-      {
-
-        method: "POST",
-
-        headers: {
-
-          "Content-Type":
-            "application/json"
-
-        },
-
-        body: JSON.stringify({
-          password
-        })
-
-      }
-    );
-
-    const data =
-      await res.json();
-
-    if (data.success) {
-
-
-      window.location.href =
-        "/admin.html";
-
-    } else {
-
-      message.innerText =
-        "Invalid password";
-
-    }
-
-  } catch {
-
-    message.innerText =
-      "Server error";
-
-  }
-
-
-// =========================
-// Enter Key
-// =========================
-
 document
   .getElementById(
     "password"
   )
   .addEventListener(
-    "keypress",
-    (e) => {
 
-      if (e.key === "Enter") {
+    "keypress",
+
+    (e)=>{
+
+      if(
+
+        e.key ===
+        "Enter"
+
+      ){
 
         login();
 
       }
 
     }
+
   );
 
 </script>
