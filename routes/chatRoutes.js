@@ -27,6 +27,41 @@ router.get(
   }
 );
 
+router.post(
+  "/clear-chat",
+  (req,res)=>{
+
+    const {
+      userId
+    } = req.body;
+
+    let messages =
+      loadMessages();
+
+    messages =
+      messages.filter(
+
+        msg=>
+
+          msg.userId
+          !==
+          userId
+
+      );
+
+    saveMessages(
+      messages
+    );
+
+    res.json({
+
+      success:true
+
+    });
+
+  }
+);
+
 router.get(
   "/users",
   (req,res)=>{

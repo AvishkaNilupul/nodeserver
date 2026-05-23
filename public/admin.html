@@ -15,6 +15,37 @@
   <script src="/socket.io/socket.io.js"></script>
 
   <style>
+    .chat-header-row{
+
+  display:flex;
+
+  justify-content:space-between;
+
+  align-items:center;
+
+  padding:24px;
+
+  border-bottom:
+    1px solid rgba(255,255,255,0.06);
+
+}
+
+.clear-btn{
+
+  background:
+    rgba(239,68,68,0.15);
+
+  border:
+    1px solid rgba(239,68,68,0.35);
+
+  color:#f87171;
+
+  padding:10px 14px;
+
+  border-radius:10px;
+
+  cursor:pointer;
+}
 
     * {
       margin: 0;
@@ -447,10 +478,25 @@ if (auth !== "true") {
 
 <div class="chat">
 
+<div class="chat-header-row">
+
   <div
     class="chat-header"
     id="chatHeader"
   >
+
+    Select a customer
+
+  </div>
+
+  <button
+    class="clear-btn"
+    onclick="clearChat()"
+  >
+    Clear Chat
+  </button>
+
+</div>
 
     Select a customer
 
@@ -882,6 +928,65 @@ input.addEventListener(
 
   }
 );
+
+async function clearChat(){
+
+  if(!selectedUser){
+
+    alert(
+      "Select a chat first"
+    );
+
+    return;
+
+  }
+
+  if(
+
+    !confirm(
+
+      `Delete chat with ${selectedUser}?`
+
+    )
+
+  ) return;
+
+  await fetch(
+
+    "/clear-chat",
+
+    {
+
+      method:"POST",
+
+      headers:{
+
+        "Content-Type":
+          "application/json"
+
+      },
+
+      body:JSON.stringify({
+
+        userId:
+          selectedUser
+
+      })
+
+    }
+
+  );
+
+  messagesDiv.innerHTML="";
+
+  selectedUser=null;
+
+  chatHeader.innerText=
+    "Select a customer";
+
+  loadUsers();
+
+}
 
 </script>
 
