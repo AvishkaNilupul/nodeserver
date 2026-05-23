@@ -84,9 +84,6 @@ app.disable(
   "x-powered-by"
 );
 
-app.use(
-  adminAuthRoutes
-);
 
 app.set(
   "trust proxy",
@@ -151,6 +148,10 @@ app.use(
 
   })
 
+);
+
+app.use(
+  adminAuthRoutes
 );
 
 app.use(
