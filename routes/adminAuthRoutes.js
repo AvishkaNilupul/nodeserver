@@ -17,6 +17,16 @@ router.post(
 
   async (req,res)=>{
 
+    console.log({
+
+      headers:
+        req.headers,
+
+      body:
+        req.body
+
+    });
+
     try{
 
       const password =
@@ -72,6 +82,16 @@ router.post(
             .ADMIN_HASH
 
         );
+
+      console.log({
+
+        receivedPassword:
+          password,
+
+        compareResult:
+          ok
+
+      });
 
       if(!ok){
 
