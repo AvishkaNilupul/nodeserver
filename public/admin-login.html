@@ -211,7 +211,100 @@
 // Login
 // =========================
 
-async function login() {
+async function login(){
+
+  const password =
+
+    document
+      .getElementById(
+        "password"
+      )
+      .value
+      .trim();
+
+  const message =
+
+    document
+      .getElementById(
+        "message"
+      );
+
+  message.innerText="";
+
+  try{
+
+    const res =
+
+      await fetch(
+
+        "/admin-login",
+
+        {
+
+          method:"POST",
+
+          headers:{
+
+            "Content-Type":
+              "application/json"
+
+          },
+
+          credentials:
+            "same-origin",
+
+          body:JSON.stringify({
+
+            password
+
+          })
+
+        }
+
+      );
+
+    const data =
+      await res.json();
+
+    if(
+
+      res.ok
+
+      &&
+
+      data.success
+
+    ){
+
+      window.location.href =
+        "/admin.html";
+
+    }
+
+    else{
+
+      message.innerText =
+
+        data.message
+        ||
+        "Invalid password";
+
+    }
+
+  }
+
+  catch(err){
+
+    console.error(
+      err
+    );
+
+    message.innerText =
+      "Server error";
+
+  }
+
+}
 
   const password =
 
@@ -257,10 +350,6 @@ async function login() {
 
     if (data.success) {
 
-      localStorage.setItem(
-        "adminAuth",
-        "true"
-      );
 
       window.location.href =
         "/admin.html";
@@ -279,7 +368,6 @@ async function login() {
 
   }
 
-}
 
 // =========================
 // Enter Key
