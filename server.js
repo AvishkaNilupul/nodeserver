@@ -6,6 +6,12 @@ const mongoose = require("mongoose");
 require('dotenv').config();
 const axios = require('axios');
 
+const helmet =
+  require("helmet");
+
+const validator =
+  require("validator");
+
 const { Server } =
   require("socket.io");
 
@@ -27,11 +33,32 @@ const chatSocket =
 const app =
   express();
 
+app.disable(
+  "x-powered-by"
+);
+
+app.set(
+  "trust proxy",
+  true
+);
+
 const server =
   http.createServer(app);
 
 const io =
-  new Server(server);
+  new Server(
+
+    server,
+
+    {
+
+      maxHttpBufferSize:
+
+        1e5
+
+    }
+
+  );
 
 let globalEntries = [];
 
@@ -43,17 +70,30 @@ const WINDOW_MS =
 // =========================
 // Middleware
 // =========================
-
 app.use(
-  express.json()
+  helmet()
 );
 
 app.use(
-  express.urlencoded({
 
-    extended:true
+  express.json({
+
+    limit:"100kb"
 
   })
+
+);
+
+app.use(
+
+  express.urlencoded({
+
+    extended:true,
+
+    limit:"100kb"
+
+  })
+
 );
 
 app.use(
@@ -162,8 +202,20 @@ app.post("/submit-gamertag", async (req,res)=>{
 
   try{
 
-    const { gamerTag } =
-      req.body;
+    let { gamerTag } =
+        req.body;
+
+      gamerTag =
+
+        validator
+          .escape(
+
+            String(
+              gamerTag || ""
+            )
+
+          )
+          .trim();
 
     // =========================
     // Global Limit
