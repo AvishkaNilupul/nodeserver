@@ -17,11 +17,28 @@ router.post(
 
   async (req,res)=>{
 
-    const {
+const password =
 
-      password
+  req.body?.password;
 
-    } = req.body;
+if(
+
+  !password
+
+){
+
+  return res
+    .status(400)
+    .json({
+
+      success:false,
+
+      message:
+        "Password required"
+
+    });
+
+}
 
     const ok =
 
