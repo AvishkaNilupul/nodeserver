@@ -71,7 +71,13 @@ const WINDOW_MS =
 // Middleware
 // =========================
 app.use(
-  helmet()
+
+  helmet({
+
+    contentSecurityPolicy:false
+
+  })
+
 );
 
 app.use(
