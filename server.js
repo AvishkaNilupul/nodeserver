@@ -3,6 +3,16 @@ const http = require("http");
 const path = require("path");
 const mongoose = require("mongoose");
 
+const adminAuthRoutes =
+  require(
+    "./routes/adminAuthRoutes"
+  );
+
+const session =
+  require(
+    "express-session"
+  );
+
 require('dotenv').config();
 const axios = require('axios');
 
@@ -33,8 +43,49 @@ const chatSocket =
 const app =
   express();
 
+app.use(
+
+  session({
+
+    secret:
+
+      process.env
+        .SESSION_SECRET,
+
+    resave:false,
+
+    saveUninitialized:false,
+
+    cookie:{
+
+      httpOnly:true,
+
+      secure:true,
+
+      sameSite:"strict",
+
+      maxAge:
+
+        1000
+        *
+        60
+        *
+        60
+        *
+        12
+
+    }
+
+  })
+
+);
+
 app.disable(
   "x-powered-by"
+);
+
+app.use(
+  adminAuthRoutes
 );
 
 app.set(

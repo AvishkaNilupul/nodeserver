@@ -1,3 +1,12 @@
+const joinedUsers =
+  new Set();
+
+const cooldowns =
+  new Map();
+const validator =
+  require(
+    "validator"
+  );
 
 require('dotenv').config();
 const axios =
@@ -37,6 +46,34 @@ function chatSocket(
 
         (userId)=>{
 
+          if(
+
+            typeof userId
+            !==
+            "string"
+
+          ){
+
+            return;
+
+          }
+
+          userId =
+
+            validator.escape(
+
+              userId
+                .trim()
+                .slice(0,50)
+
+            );
+
+          if(!userId){
+
+            return;
+
+          }
+
           socket.join(
             userId
           );
@@ -48,8 +85,24 @@ function chatSocket(
 
           // tell admin immediately
 
-          io.emit(
+          if(
 
+            joinedUsers.has(
+              userId
+            )
+
+          ){
+
+            return;
+
+          }
+
+          joinedUsers.add(
+            userId
+          );
+
+          io.emit(
+          
             "new-message",
 
             {
@@ -143,6 +196,90 @@ function chatSocket(
 
         async (data)=>{
 
+          if(
+
+            !data
+
+            ||
+
+            typeof data.userId
+            !==
+            "string"
+
+            ||
+
+            typeof data.message
+            !==
+            "string"
+
+          ){
+
+            return;
+
+          }
+
+          data.userId =
+
+            validator.escape(
+
+              data.userId
+                .trim()
+                .slice(0,50)
+
+            );
+
+          data.message =
+
+            validator.escape(
+
+              data.message
+                .trim()
+                .slice(0,1000)
+
+            );
+
+          if(!data.message){
+
+            return;
+
+          }
+          const key =
+
+            `${socket.id}`;
+
+
+          const now =
+            Date.now();
+
+          const last =
+
+            cooldowns.get(
+              key
+            );
+
+          if(
+
+            last
+
+            &&
+
+            now - last
+            < 1000
+
+          ){
+
+            return;
+
+          }
+
+          cooldowns.set(
+
+            key,
+
+            now
+
+          );
+
           addMessage(
 
             data.userId,
@@ -158,11 +295,20 @@ function chatSocket(
 
           try{
 
-            const chatIds =
+              const chatIds =
 
-              process.env
-                .TG_CHAT_IDS
-                .split(",");
+                process.env
+                  .TG_CHAT_IDS
+
+                  ?
+
+                  process.env
+                    .TG_CHAT_IDS
+                    .split(",")
+
+                  :
+
+                  [];
 
             for(const chatId of chatIds){
 
@@ -175,17 +321,17 @@ function chatSocket(
                   chat_id:
                     chatId.trim(),
 
-              text:
-              `💬 NEW CHAT MESSAGE
+text:
+`💬 NEW CHAT MESSAGE
 
-              👤 User:
-              ${data.userId}
+👤 User:
+${data.userId}
 
-              📝 Message:
-              ${data.message}
+📝 Message:
+${data.message}
 
-              Time:
-              ${new Date().toISOString()}`
+Time:
+${new Date().toISOString()}`
 
                 }
 
@@ -244,6 +390,80 @@ function chatSocket(
 
         (data)=>{
 
+          if(
+
+            !data
+
+            ||
+
+            typeof data.userId
+            !==
+            "string"
+
+            ||
+
+            typeof data.message
+            !==
+            "string"
+
+          ){
+
+            return;
+
+          }
+
+          data.userId =
+
+            validator.escape(
+
+              data.userId
+                .trim()
+                .slice(0,50)
+
+            );
+
+          data.message =
+
+            validator.escape(
+
+              data.message
+                .trim()
+                .slice(0,1000)
+
+            );
+            const key =
+
+              `admin-${socket.id}`;
+
+            const now =
+              Date.now();
+
+            const last =
+
+              cooldowns.get(
+                key
+              );
+
+            if(
+
+              last
+
+              &&
+
+              now - last
+              < 300
+
+            ){
+
+              return;
+
+            }
+
+            cooldowns.set(
+              key,
+              now
+            );
+
           addMessage(
 
             data.userId,
@@ -297,12 +517,19 @@ function chatSocket(
       // =========================
       // Disconnect
       // =========================
-
       socket.on(
 
         "disconnect",
 
         ()=>{
+
+          cooldowns.delete(
+            socket.id
+          );
+
+          cooldowns.delete(
+            `admin-${socket.id}`
+          );
 
           console.log(
             "❌ Disconnected:",
@@ -312,12 +539,12 @@ function chatSocket(
         }
 
       );
-
-    }
+          }
 
   );
 
 }
+
 
 module.exports =
   chatSocket;
