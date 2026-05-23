@@ -33,6 +33,13 @@ const server =
 const io =
   new Server(server);
 
+let globalEntries = [];
+
+const MAX_USERS = 5;
+
+const WINDOW_MS =
+  10 * 60 * 1000;
+
 // =========================
 // Middleware
 // =========================
@@ -157,6 +164,57 @@ app.post("/submit-gamertag", async (req,res)=>{
 
     const { gamerTag } =
       req.body;
+
+    // =========================
+    // Global Limit
+    // =========================
+
+    const now =
+      Date.now();
+
+    // remove expired
+
+    globalEntries =
+
+      globalEntries.filter(
+
+        time =>
+
+          now - time
+          <
+          WINDOW_MS
+
+      );
+
+    // limit reached
+
+    if(
+
+      globalEntries.length
+      >=
+      MAX_USERS
+
+    ){
+
+      return res.status(429)
+
+      .json({
+
+        success:false,
+
+        message:
+
+          "Server busy. Please try again later."
+
+      });
+
+    }
+
+    // consume slot
+
+    globalEntries.push(
+      now
+    );
 
     if(!gamerTag){
 
