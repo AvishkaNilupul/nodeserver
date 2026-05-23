@@ -60,7 +60,7 @@ app.use(
 
       httpOnly:true,
 
-      secure:true,
+      secure:"auto",
 
       sameSite:"strict",
 
