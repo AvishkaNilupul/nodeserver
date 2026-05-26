@@ -443,34 +443,19 @@ if(
 
 ){
 
-  const url =
+  div.textContent =
 
-    text.substring(
+    text.startsWith(
+      "Support:"
+    )
 
-      text.indexOf(
-        "[IMAGE]"
-      ) + 7
+    ?
 
-    );
+    "Support sent an image"
 
-  const img =
+    :
 
-    document
-      .createElement(
-        "img"
-      );
-
-  img.src = url;
-
-  img.style.maxWidth =
-    "260px";
-
-  img.style.borderRadius =
-    "12px";
-
-  div.appendChild(
-    img
-  );
+    "You sent an image";
 
 }
 
@@ -480,7 +465,6 @@ else{
     text;
 
 }
-
   messages.appendChild(
     div
   );
