@@ -445,9 +445,12 @@ if(
 
   const url =
 
-    text.replace(
-      "[IMAGE]",
-      ""
+    text.substring(
+
+      text.indexOf(
+        "[IMAGE]"
+      ) + 7
+
     );
 
   const img =
