@@ -634,23 +634,42 @@ document
 
           );
 
-        console.log(
-          "STATUS:",
-          res.status
-        );
+        const data =
 
-        const text =
+          await res.json();
 
-          await res.text();
+        if(
 
-        console.log(
-          "SERVER:",
-          text
-        );
+          data.success
 
-        alert(
-          `Status: ${res.status}\n${text}`
-        );
+        ){
+
+          socket.emit(
+
+            "user-message",
+
+            {
+
+              userId:
+                gamerTag,
+
+              message:
+
+                `[IMAGE]${data.url}`
+
+            }
+
+          );
+
+        }
+
+        else{
+
+          alert(
+            "Upload failed"
+          );
+
+        }
 
       }
 
@@ -661,7 +680,7 @@ document
         );
 
         alert(
-          err.message
+          "Image upload failed"
         );
 
       }
