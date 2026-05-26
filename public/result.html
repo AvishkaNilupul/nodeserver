@@ -427,14 +427,14 @@ function addMessage(
 
   );
 
-  // preserve formatting
-
   div.style.whiteSpace =
     "pre-wrap";
 
   div.style.wordBreak =
     "break-word";
 
+  div.textContent =
+    text;
 
   messages.appendChild(
     div
