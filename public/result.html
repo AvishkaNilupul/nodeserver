@@ -311,15 +311,6 @@ button:hover{
 
 <script>
 
-const replySound =
-
-  new Audio(
-    "https://notificationsounds.com/storage/sounds/file-sounds-1150-pristine.mp3"
-  );
-
-replySound.volume =
-  0.8;
-
 // =========================
 // Gamer Tag
 // =========================
@@ -497,37 +488,18 @@ function sendMessage(){
 // =========================
 
 socket.on(
-
   "admin-reply",
-
   (data)=>{
 
     addMessage(
 
-      "admin",
+      `Support: ${data.message}`,
 
-      data.message
+      "admin"
 
     );
 
-    if(
-
-      document.hidden
-
-      ||
-
-      !document.hasFocus()
-
-    ){
-
-      replySound
-        .play()
-        .catch(()=>{});
-
-    }
-
   }
-
 );
 
 // =========================
