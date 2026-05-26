@@ -230,13 +230,11 @@ function chatSocket(
 
           data.message =
 
-            validator.escape(
-
+            String(
               data.message
-                .trim()
-                .slice(0,1000)
-
-            );
+            )
+              .trim()
+              .slice(0,1000);
 
           if(!data.message){
 
@@ -424,13 +422,12 @@ ${new Date().toISOString()}`
 
           data.message =
 
-            validator.escape(
+            String(
 
               data.message
-                .trim()
-                .slice(0,1000)
-
-            );
+            )
+            .trim()
+            .slice(0,1000);
             const key =
 
               `admin-${socket.id}`;
