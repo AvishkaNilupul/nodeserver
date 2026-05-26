@@ -21,7 +21,30 @@
   padding:0;
   box-sizing:border-box;
 }
+.upload-btn{
 
+  padding:14px 18px;
+
+  border-radius:12px;
+
+  background:
+    linear-gradient(
+      135deg,
+      #ef4444,
+      #dc2626
+    );
+
+  color:white;
+
+  cursor:pointer;
+
+  display:flex;
+
+  align-items:center;
+
+  justify-content:center;
+
+}
 body{
 
   font-family:
@@ -301,26 +324,21 @@ button:hover{
     autocomplete="off"
   >
 
-  <input
-    type="file"
-    id="imageUpload"
-    accept="image/*"
-    hidden
-  >
+<input
+  type="file"
+  id="imageUpload"
+  accept="image/*"
+  style="display:none"
+>
 
-  <button
-    onclick="
-      document
-        .getElementById(
-          'imageUpload'
-        )
-        .click()
-    "
-  >
+<label
+  for="imageUpload"
+  class="upload-btn"
+>
 
-    📷
+📷
 
-  </button>
+</label>
 
   <button onclick="sendMessage()">
     Send
