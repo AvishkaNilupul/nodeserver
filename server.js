@@ -25,6 +25,11 @@ function requireAdmin(
 
 }
 
+const multer =
+  require(
+    "multer"
+  );
+
 const adminAuthRoutes =
   require(
     "./routes/adminAuthRoutes"
@@ -64,6 +69,27 @@ const chatSocket =
 
 const app =
   express();
+
+const upload =
+
+  multer({
+
+    dest:
+      "public/uploads/",
+
+    limits:{
+
+      fileSize:
+
+        5
+        *
+        1024
+        *
+        1024
+
+    }
+
+  });
 
 app.use(
 
@@ -139,7 +165,49 @@ const WINDOW_MS =
 
 // =========================
 // Middleware
+
 // =========================
+
+app.post(
+
+  "/upload-image",
+
+  upload.single(
+    "image"
+  ),
+
+  (req,res)=>{
+
+    if(
+
+      !req.file
+
+    ){
+
+      return res
+        .status(400)
+        .json({
+
+          success:false
+
+        });
+
+    }
+
+    res.json({
+
+      success:true,
+
+      url:
+
+        `/uploads/${req.file.filename}`
+
+    });
+
+  }
+
+);
+
 app.use(
 
   helmet({

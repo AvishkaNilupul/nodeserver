@@ -293,19 +293,40 @@ button:hover{
 
   <div id="messages"></div>
 
-  <div class="chat-bottom">
+<div class="chat-bottom">
 
-    <input
-      id="messageInput"
-      placeholder="Type your message..."
-      autocomplete="off"
-    >
+  <input
+    id="messageInput"
+    placeholder="Type your message..."
+    autocomplete="off"
+  >
 
-    <button onclick="sendMessage()">
-      Send
-    </button>
+  <input
+    type="file"
+    id="imageUpload"
+    accept="image/*"
+    hidden
+  >
 
-  </div>
+  <button
+    onclick="
+      document
+        .getElementById(
+          'imageUpload'
+        )
+        .click()
+    "
+  >
+
+    📷
+
+  </button>
+
+  <button onclick="sendMessage()">
+    Send
+  </button>
+
+</div>
 
 </div>
 
@@ -396,8 +417,48 @@ function addMessage(
   div.style.wordBreak =
     "break-word";
 
+if(
+
+  text.includes(
+    "[IMAGE]"
+  )
+
+){
+
+  const url =
+
+    text.replace(
+      "[IMAGE]",
+      ""
+    );
+
+  const img =
+
+    document
+      .createElement(
+        "img"
+      );
+
+  img.src = url;
+
+  img.style.maxWidth =
+    "260px";
+
+  img.style.borderRadius =
+    "12px";
+
+  div.appendChild(
+    img
+  );
+
+}
+
+else{
+
   div.textContent =
     text;
+
+}
 
   messages.appendChild(
     div
@@ -502,6 +563,88 @@ socket.on(
   }
 );
 
+document
+  .getElementById(
+    "imageUpload"
+  )
+  .addEventListener(
+
+    "change",
+
+    async (e)=>{
+
+      const file =
+
+        e.target
+          .files[0];
+
+      if(!file){
+
+        return;
+
+      }
+
+      const formData =
+
+        new FormData();
+
+      formData.append(
+
+        "image",
+
+        file
+
+      );
+
+      const res =
+
+        await fetch(
+
+          "/upload-image",
+
+          {
+
+            method:
+              "POST",
+
+            body:
+              formData
+
+          }
+
+        );
+
+      const data =
+        await res.json();
+
+      if(
+
+        data.success
+
+      ){
+
+        socket.emit(
+
+          "user-message",
+
+          {
+
+            userId:
+              gamerTag,
+
+            message:
+
+              `[IMAGE]${data.url}`
+
+          }
+
+        );
+
+      }
+
+    }
+
+  );
 // =========================
 // Enter Key
 // =========================
