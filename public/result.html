@@ -435,36 +435,7 @@ function addMessage(
   div.style.wordBreak =
     "break-word";
 
-if(
 
-  text.includes(
-    "[IMAGE]"
-  )
-
-){
-
-  div.textContent =
-
-    text.startsWith(
-      "Support:"
-    )
-
-    ?
-
-    "Support sent an image"
-
-    :
-
-    "You sent an image";
-
-}
-
-else{
-
-  div.textContent =
-    text;
-
-}
   messages.appendChild(
     div
   );
@@ -479,36 +450,82 @@ else{
 // =========================
 
 socket.on(
+
   "chat-history",
+
   (history)=>{
 
-    messages.innerHTML="";
+    messages.innerHTML = "";
 
     history.forEach(
+
       (msg)=>{
+
+        let text;
+
+        if(
+
+          msg.message.startsWith(
+            "[IMAGE]"
+          )
+
+        ){
+
+          text =
+
+            msg.sender==="admin"
+
+            ?
+
+            "Support sent an image"
+
+            :
+
+            "You sent an image";
+
+        }
+
+        else{
+
+          text =
+
+            `${
+              msg.sender==="admin"
+
+              ?
+
+              "Support"
+
+              :
+
+              "You"
+
+            }: ${msg.message}`;
+
+        }
 
         addMessage(
 
-          `${
-            msg.sender==="admin"
-
-            ? "Support"
-
-            : "You"
-          }: ${msg.message}`,
+          text,
 
           msg.sender==="admin"
 
-          ? "admin"
+          ?
 
-          : "user"
+          "admin"
+
+          :
+
+          "user"
 
         );
 
       }
+
     );
 
   }
+
 );
 
 // =========================
