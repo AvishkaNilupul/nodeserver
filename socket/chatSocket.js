@@ -85,37 +85,35 @@ function chatSocket(
 
           // tell admin immediately
 
-          if(
+if(
 
-            joinedUsers.has(
-              userId
-            )
+  !joinedUsers.has(
+    userId
+  )
 
-          ){
+){
 
-            return;
+  joinedUsers.add(
+    userId
+  );
 
-          }
+  io.emit(
 
-          joinedUsers.add(
-            userId
-          );
+    "new-message",
 
-          io.emit(
-          
-            "new-message",
+    {
 
-            {
+      userId,
 
-              userId,
+      sender:"user",
 
-              sender:"user",
+      message:"__joined__"
 
-              message:"__joined__"
+    }
 
-            }
+  );
 
-          );
+}
 
           let messages =
             loadMessages();
