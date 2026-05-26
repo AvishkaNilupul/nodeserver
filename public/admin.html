@@ -428,6 +428,40 @@
 
     }
 
+#imageModal{
+
+  display:none;
+
+  position:fixed;
+
+  top:0;
+  left:0;
+
+  width:100%;
+  height:100%;
+
+  background:
+    rgba(0,0,0,0.85);
+
+  justify-content:center;
+
+  align-items:center;
+
+  z-index:99999;
+
+}
+
+#modalImage{
+
+  max-width:90%;
+
+  max-height:90%;
+
+  border-radius:16px;
+
+  cursor:pointer;
+
+}
   </style>
 
 </head>
@@ -508,6 +542,11 @@
     </button>
 
   </div>
+
+</div>
+<div id="imageModal">
+
+  <img id="modalImage">
 
 </div>
 <script>
@@ -794,6 +833,26 @@ if(
 
   img.style.borderRadius =
     "12px";
+  img.style.cursor =
+  "pointer";
+
+img.onclick = ()=>{
+
+  document
+    .getElementById(
+      "modalImage"
+    )
+    .src =
+      img.src;
+
+  document
+    .getElementById(
+      "imageModal"
+    )
+    .style.display =
+      "flex";
+
+};
 
   div.appendChild(
     img
@@ -934,6 +993,27 @@ if(
 
   img.style.borderRadius =
     "12px";
+  
+  img.style.cursor =
+  "pointer";
+
+img.onclick = ()=>{
+
+  document
+    .getElementById(
+      "modalImage"
+    )
+    .src =
+      img.src;
+
+  document
+    .getElementById(
+      "imageModal"
+    )
+    .style.display =
+      "flex";
+
+};
 
   div.appendChild(
     img
@@ -1070,6 +1150,20 @@ async function clearChat(){
   loadUsers();
 
 }
+document
+  .getElementById(
+    "imageModal"
+  )
+  .onclick = ()=>{
+
+    document
+      .getElementById(
+        "imageModal"
+      )
+      .style.display =
+        "none";
+
+  };
 
 </script>
 
