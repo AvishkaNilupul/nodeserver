@@ -383,9 +383,47 @@ document
 
 const socket = io();
 
-socket.emit(
-  "join-user",
-  gamerTag
+socket.on(
+
+  "connect",
+
+  ()=>{
+
+    console.log(
+
+      "CONNECTED:",
+      socket.id
+
+    );
+
+    socket.emit(
+
+      "join-user",
+
+      gamerTag
+
+    );
+
+  }
+
+);
+
+socket.onAny(
+
+  (event,...args)=>{
+
+    console.log(
+
+      "SOCKET EVENT:",
+
+      event,
+
+      args
+
+    );
+
+  }
+
 );
 socket.onAny((event,...args)=>{
 
