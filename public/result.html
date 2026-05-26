@@ -461,11 +461,15 @@ socket.on(
 
       (msg)=>{
 
+        const message =
+
+          msg.message || "";
+
         let text;
 
         if(
 
-          msg.message.startsWith(
+          message.startsWith(
             "[IMAGE]"
           )
 
@@ -500,7 +504,7 @@ socket.on(
 
               "You"
 
-            }: ${msg.message}`;
+            }: ${message}`;
 
         }
 
@@ -527,7 +531,6 @@ socket.on(
   }
 
 );
-
 // =========================
 // Send
 // =========================
