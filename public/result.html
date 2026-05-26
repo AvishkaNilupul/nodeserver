@@ -614,23 +614,81 @@ document
 
       );
 
-      const res =
+try{
 
-        await fetch(
+  const res =
 
-          "/upload-image",
+    await fetch(
 
-          {
+      "/upload-image",
 
-            method:
-              "POST",
+      {
 
-            body:
-              formData
+        method:
+          "POST",
 
-          }
+        body:
+          formData
 
-        );
+      }
+
+    );
+
+  const data =
+
+    await res.json();
+
+  if(
+
+    data.success
+
+  ){
+
+    socket.emit(
+
+      "user-message",
+
+      {
+
+        userId,
+
+        message:
+
+          `[IMAGE]${data.url}`
+
+      }
+
+    );
+
+  }
+
+  else{
+
+    alert(
+      "Upload failed"
+    );
+
+  }
+
+}
+
+catch(err){
+
+  console.error(
+
+    "Upload error:",
+
+    err
+
+  );
+
+  alert(
+
+    "Image upload failed"
+
+  );
+
+}
 
       const data =
         await res.json();
