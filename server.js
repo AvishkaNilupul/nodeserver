@@ -3,6 +3,28 @@ const http = require("http");
 const path = require("path");
 const mongoose = require("mongoose");
 
+function requireAdmin(
+
+  req,res,next
+
+){
+
+  if(
+
+    req.session?.admin
+
+  ){
+
+    return next();
+
+  }
+
+  return res.redirect(
+    "/admin-login.html"
+  );
+
+}
+
 const adminAuthRoutes =
   require(
     "./routes/adminAuthRoutes"
@@ -152,6 +174,32 @@ app.use(
 
 app.use(
   adminAuthRoutes
+);
+
+app.get(
+
+  "/admin.html",
+
+  requireAdmin,
+
+  (req,res)=>{
+
+    res.sendFile(
+
+      path.join(
+
+        __dirname,
+
+        "public",
+
+        "admin.html"
+
+      )
+
+    );
+
+  }
+
 );
 
 app.use(
