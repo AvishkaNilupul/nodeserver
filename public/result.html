@@ -591,129 +591,77 @@ document
 
     async (e)=>{
 
-      const file =
+      try{
 
-        e.target
-          .files[0];
+        const file =
 
-      if(!file){
+          e.target
+            .files[0];
 
-        return;
+        if(!file){
 
-      }
+          return;
 
-      const formData =
+        }
 
-        new FormData();
+        const formData =
 
-      formData.append(
+          new FormData();
 
-        "image",
+        formData.append(
 
-        file
+          "image",
 
-      );
+          file
 
-try{
+        );
 
-  const res =
+        const res =
 
-    await fetch(
+          await fetch(
 
-      "/upload-image",
+            "/upload-image",
 
-      {
+            {
 
-        method:
-          "POST",
+              method:
+                "POST",
 
-        body:
-          formData
+              body:
+                formData
 
-      }
+            }
 
-    );
+          );
 
-  const data =
+        console.log(
+          "STATUS:",
+          res.status
+        );
 
-    await res.json();
+        const text =
 
-  if(
+          await res.text();
 
-    data.success
+        console.log(
+          "SERVER:",
+          text
+        );
 
-  ){
-
-    socket.emit(
-
-      "user-message",
-
-      {
-
-        userId,
-
-        message:
-
-          `[IMAGE]${data.url}`
+        alert(
+          `Status: ${res.status}\n${text}`
+        );
 
       }
 
-    );
+      catch(err){
 
-  }
+        console.error(
+          err
+        );
 
-  else{
-
-    alert(
-      "Upload failed"
-    );
-
-  }
-
-}
-
-catch(err){
-
-  console.error(
-
-    "Upload error:",
-
-    err
-
-  );
-
-  alert(
-
-    "Image upload failed"
-
-  );
-
-}
-
-      const data =
-        await res.json();
-
-      if(
-
-        data.success
-
-      ){
-
-        socket.emit(
-
-          "user-message",
-
-          {
-
-            userId:
-              gamerTag,
-
-            message:
-
-              `[IMAGE]${data.url}`
-
-          }
-
+        alert(
+          err.message
         );
 
       }
