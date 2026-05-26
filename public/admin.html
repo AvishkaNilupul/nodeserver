@@ -765,8 +765,48 @@ async function loadMessages(
 
     );
 
-    div.innerText =
-      msg.message;
+if(
+
+  msg.message
+    .startsWith(
+      "[IMAGE]"
+    )
+
+){
+
+  const img =
+
+    document
+      .createElement(
+        "img"
+      );
+
+  img.src =
+
+    msg.message
+      .replace(
+        "[IMAGE]",
+        ""
+      );
+
+  img.style.maxWidth =
+    "260px";
+
+  img.style.borderRadius =
+    "12px";
+
+  div.appendChild(
+    img
+  );
+
+}
+
+else{
+
+  div.innerText =
+    msg.message;
+
+}
 
     messagesDiv.appendChild(div);
 
@@ -865,8 +905,48 @@ socket.on(
     div.style.wordBreak =
       "break-word";
 
-    div.textContent =
-      data.message;
+if(
+
+  data.message
+    .startsWith(
+      "[IMAGE]"
+    )
+
+){
+
+  const img =
+
+    document
+      .createElement(
+        "img"
+      );
+
+  img.src =
+
+    data.message
+      .replace(
+        "[IMAGE]",
+        ""
+      );
+
+  img.style.maxWidth =
+    "260px";
+
+  img.style.borderRadius =
+    "12px";
+
+  div.appendChild(
+    img
+  );
+
+}
+
+else{
+
+  div.textContent =
+    data.message;
+
+}
 
     messagesDiv.appendChild(
       div
