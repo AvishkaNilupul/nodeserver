@@ -691,30 +691,38 @@ document
 
           await res.json();
 
-        if(
+if(
 
-          data.success
+  data.success
 
-        ){
+){
 
-          socket.emit(
+  socket.emit(
 
-            "user-message",
+    "user-message",
 
-            {
+    {
 
-              userId:
-                gamerTag,
+      userId:
+        gamerTag,
 
-              message:
+      message:
 
-                `[IMAGE]${data.url}`
+        `[IMAGE]${data.url}`
 
-            }
+    }
 
-          );
+  );
 
-        }
+  addMessage(
+
+    "You sent an image",
+
+    "user"
+
+  );
+
+}
 
         else{
 
