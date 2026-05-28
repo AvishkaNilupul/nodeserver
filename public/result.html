@@ -572,7 +572,7 @@ const input =
   document.getElementById(
     "messageInput"
   );
-
+let userTypingTimer;
 // =========================
 // Add Message
 // =========================
@@ -940,7 +940,49 @@ if(
 // =========================
 // Enter Key
 // =========================
+input.addEventListener(
 
+  "input",
+
+  ()=>{
+
+    socket.emit(
+
+      "user-typing",
+
+      gamerTag
+
+    );
+
+    clearTimeout(
+
+      userTypingTimer
+
+    );
+
+    userTypingTimer =
+
+      setTimeout(
+
+        ()=>{
+
+          socket.emit(
+
+            "user-stop-typing",
+
+            gamerTag
+
+          );
+
+        },
+
+        1200
+
+      );
+
+  }
+
+);
 input.addEventListener(
   "keypress",
   (e)=>{

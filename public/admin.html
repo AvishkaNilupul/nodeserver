@@ -462,6 +462,17 @@
   cursor:pointer;
 
 }
+#adminTypingIndicator{
+
+  display:none;
+
+  color:#94a3b8;
+
+  padding:12px 20px;
+
+  font-size:14px;
+
+}
   </style>
 
 </head>
@@ -529,6 +540,14 @@
 
   <div id="messages"></div>
 
+<div
+  id="adminTypingIndicator"
+>
+
+Customer is typing...
+
+</div>
+
 <div class="bottom">
 
     <input
@@ -589,7 +608,11 @@ const messagesDiv =
   document.getElementById(
     "messages"
   );
+const adminTypingIndicator =
 
+  document.getElementById(
+    "adminTypingIndicator"
+  );
 const chatHeader =
   document.getElementById(
     "chatHeader"
@@ -906,6 +929,53 @@ else{
 // =========================
 // Live Updates
 // =========================
+socket.on(
+
+  "user-typing",
+
+  (userId)=>{
+
+    if(
+
+      userId ===
+      selectedUser
+
+    ){
+
+      adminTypingIndicator
+        .style.display =
+
+          "block";
+
+    }
+
+  }
+
+);
+
+socket.on(
+
+  "user-stop-typing",
+
+  (userId)=>{
+
+    if(
+
+      userId ===
+      selectedUser
+
+    ){
+
+      adminTypingIndicator
+        .style.display =
+
+          "none";
+
+    }
+
+  }
+
+);
 socket.on(
   "new-message",
   (data) => {

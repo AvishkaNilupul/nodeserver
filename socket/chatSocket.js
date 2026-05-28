@@ -443,6 +443,70 @@ socket.on(
   }
 
 );
+
+// =========================
+// User Typing
+// =========================
+
+socket.on(
+
+  "user-typing",
+
+  (userId)=>{
+
+    if(
+
+      typeof userId
+      !==
+      "string"
+
+    ){
+
+      return;
+
+    }
+
+    io.emit(
+
+      "user-typing",
+
+      userId
+
+    );
+
+  }
+
+);
+
+socket.on(
+
+  "user-stop-typing",
+
+  (userId)=>{
+
+    if(
+
+      typeof userId
+      !==
+      "string"
+
+    ){
+
+      return;
+
+    }
+
+    io.emit(
+
+      "user-stop-typing",
+
+      userId
+
+    );
+
+  }
+
+);
       // =========================
       // Admin Message
       // =========================
