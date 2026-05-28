@@ -48,6 +48,53 @@ function requireAdmin(
 
 }
 
+
+const fs =
+  require("fs");
+
+app.get(
+
+  "/test-log",
+
+  requireAdmin,
+
+  (req,res)=>{
+
+    try{
+
+      const data =
+
+        fs.readFileSync(
+
+          "/root/logs/logs-TwitchUser-an4yqq57xti7.log",
+
+          "utf8"
+
+        );
+
+      res.send(
+        `<pre>${data}</pre>`
+      );
+
+    }
+
+    catch(err){
+
+      res.json({
+
+        success:false,
+
+        error:
+          err.message
+
+      });
+
+    }
+
+  }
+
+);
+
 const multer =
   require(
     "multer"
