@@ -693,14 +693,44 @@ Customer is typing...
   <div id="guideBox">
 
     <h2>Twitch Quick Guide</h2>
+    <select
+  id="guideCategory"
+>
 
+  <option value="">
+
+    Manual Entry
+
+  </option>
+
+  <option>
+
+    Rust
+
+  </option>
+
+  <option>
+
+    Twitch
+
+  </option>
+
+  <option>
+
+    Steam
+
+  </option>
+
+</select>
     <input
       id="guideUser"
+      oninput="clearCategory()"
       placeholder="Twitch Username"
     >
 
     <input
       id="guidePass"
+      oninput="clearCategory()"
       placeholder="Twitch Password"
       type="password"
     >
@@ -783,6 +813,15 @@ async function logout(){
 // =========================
 // Load Users
 // =========================
+function clearCategory(){
+
+  document
+    .getElementById(
+      "guideCategory"
+    )
+    .value = "";
+
+}
 
 async function loadUsers() {
 
@@ -1447,10 +1486,9 @@ function closeGuideModal(){
 
 }
 
-function submitGuide(){
+async function submitGuide(){
 
-  const username =
-
+  let username =
     document
       .getElementById(
         "guideUser"
@@ -1458,8 +1496,7 @@ function submitGuide(){
       .value
       .trim();
 
-  const password =
-
+  let password =
     document
       .getElementById(
         "guidePass"
@@ -1467,7 +1504,77 @@ function submitGuide(){
       .value
       .trim();
 
-  if(
+  const category =
+
+    document
+      .getElementById(
+        "guideCategory"
+      )
+      .value;
+
+  // =========================
+  // Inventory Mode
+  // =========================
+
+  if(category){
+
+    try{
+
+      const res =
+
+        await fetch(
+
+          `/items/next/${category}`
+
+        );
+
+      const data =
+
+        await res.json();
+
+      if(
+
+        !data.success
+
+      ){
+
+        alert(
+
+          data.message
+
+        );
+
+        return;
+
+      }
+
+      username =
+        data.item.username;
+
+      password =
+        data.item.password;
+
+    }
+
+    catch{
+
+      alert(
+
+        "Inventory fetch failed"
+
+      );
+
+      return;
+
+    }
+
+  }
+
+  // =========================
+  // Manual Mode
+  // =========================
+
+  else if(
 
     !username
     ||
@@ -1476,14 +1583,14 @@ function submitGuide(){
   ){
 
     alert(
-      "Fill all fields"
+      "Fill fields or choose category"
     );
 
     return;
 
   }
 
-const message =
+  const message =
 
 `📋 TWITCH DROP GUIDE
 
@@ -1505,7 +1612,6 @@ Scroll down to the "Received" section.
 Rust:
 • Activate Drops
 • Check for missing drops`;
-
 
   socket.emit(
 
@@ -1534,10 +1640,15 @@ Rust:
     )
     .value = "";
 
+  document
+    .getElementById(
+      "guideCategory"
+    )
+    .value = "";
+
   closeGuideModal();
 
 }
-
 function sendReply() {
 
   if (!selectedUser) {
