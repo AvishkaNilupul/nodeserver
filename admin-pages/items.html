@@ -290,6 +290,27 @@ Save Item
 <input
 
   id="searchInput"
+  <div
+
+id="statsBar"
+
+style="
+display:grid;
+grid-template-columns:
+repeat(
+auto-fit,
+minmax(
+220px,
+1fr
+)
+);
+gap:14px;
+margin:24px 0;
+"
+
+>
+
+</div>
 
   placeholder="Search accounts..."
 
@@ -435,8 +456,79 @@ async function loadItems(){
       .getElementById(
         "itemsList"
       );
+  const statsBar =
+
+  document
+    .getElementById(
+      "statsBar"
+    );
 
   list.innerHTML="";
+
+  statsBar.innerHTML="";
+
+  const totalValue =
+
+  items.reduce(
+
+    (sum,item)=>
+
+      sum +
+
+      Number(
+        item.value
+        ||0
+      ),
+
+    0
+
+  );
+
+const availableValue =
+
+  items
+
+  .filter(
+    i=>!i.used
+  )
+
+  .reduce(
+
+    (sum,item)=>
+
+      sum +
+
+      Number(
+        item.value
+        ||0
+      ),
+
+    0
+
+  );
+
+const soldValue =
+
+  items
+
+  .filter(
+    i=>i.used
+  )
+
+  .reduce(
+
+    (sum,item)=>
+
+      sum +
+
+      Number(
+        item.value
+        ||0
+      ),
+
+    0
+
+  );
 
   const grouped = {};
 
@@ -487,6 +579,76 @@ async function loadItems(){
     }
 
   );
+
+  statsBar.innerHTML =
+
+`
+
+<div class="item">
+
+<h3>
+
+💰 Inventory Value
+
+</h3>
+
+<h2>
+
+$${totalValue.toFixed(2)}
+
+</h2>
+
+</div>
+
+<div class="item">
+
+<h3>
+
+🟢 Available Value
+
+</h3>
+
+<h2>
+
+$${availableValue.toFixed(2)}
+
+</h2>
+
+</div>
+
+<div class="item">
+
+<h3>
+
+🔴 Sold Value
+
+</h3>
+
+<h2>
+
+$${soldValue.toFixed(2)}
+
+</h2>
+
+</div>
+
+<div class="item">
+
+<h3>
+
+📦 Total Items
+
+</h3>
+
+<h2>
+
+${items.length}
+
+</h2>
+
+</div>
+
+`;
 
   Object.keys(
 
@@ -651,6 +813,28 @@ color:#64748b;
 ">
 
 | ${item.notes}
+
+${
+  item.value
+
+  ?
+
+  `<span style="
+color:#22c55e;
+">
+
+| $
+
+${Number(
+  item.value
+).toFixed(2)}
+
+</span>`
+
+  :
+
+  ""
+}
 
 </span>`
 
