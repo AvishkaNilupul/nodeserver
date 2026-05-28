@@ -673,6 +673,14 @@ function addMessage(
 
     messages.scrollHeight;
 
+    socket.emit(
+
+  "message-seen",
+
+  gamerTag
+
+);
+
 }
 socket.on(
 

@@ -473,6 +473,17 @@
   font-size:14px;
 
 }
+.seen-status{
+
+  font-size:12px;
+
+  color:#94a3b8;
+
+  margin-top:6px;
+
+  text-align:right;
+
+}
   </style>
 
 </head>
@@ -624,7 +635,8 @@ const input =
   );
 let typingTimer;
 let selectedUser = null;
-
+let lastAdminBubble =
+  null;
 
 // =========================
 // Logout
@@ -918,6 +930,17 @@ else{
 }
 
     messagesDiv.appendChild(div);
+    if(
+
+  msg.sender ===
+  "admin"
+
+){
+
+  lastAdminBubble =
+    div;
+
+}
 
   });
 
@@ -929,6 +952,65 @@ else{
 // =========================
 // Live Updates
 // =========================
+socket.on(
+
+  "message-seen",
+
+  (userId)=>{
+
+    if(
+
+      userId !==
+      selectedUser
+
+    ){
+
+      return;
+
+    }
+
+    if(
+
+      !lastAdminBubble
+
+    ){
+
+      return;
+
+    }
+
+    let seen =
+
+      lastAdminBubble
+        .querySelector(
+          ".seen-status"
+        );
+
+    if(!seen){
+
+      seen =
+
+        document
+          .createElement(
+            "div"
+          );
+
+      seen.className =
+        "seen-status";
+
+      lastAdminBubble
+        .appendChild(
+          seen
+        );
+
+    }
+
+    seen.innerText =
+      "Seen";
+
+  }
+
+);
 socket.on(
 
   "user-typing",
@@ -1128,6 +1210,17 @@ else{
     messagesDiv.appendChild(
       div
     );
+    if(
+
+  data.sender ===
+  "admin"
+
+){
+
+  lastAdminBubble =
+    div;
+
+}
 
     messagesDiv.scrollTop =
       messagesDiv.scrollHeight;
