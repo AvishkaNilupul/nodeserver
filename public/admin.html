@@ -1300,42 +1300,57 @@ function sendGuide(){
   ){
 
     alert(
-
       "Select a customer first"
-
     );
 
     return;
 
   }
 
+  const username =
+
+    prompt(
+      "Enter Twitch username:"
+    );
+
+  if(
+    username===null
+  ) return;
+
+  const password =
+
+    prompt(
+      "Enter Twitch password:"
+    );
+
+  if(
+    password===null
+  ) return;
+
   const message =
 
 `📋 TWITCH DROP GUIDE
 
-1. Log in to the received Twitch account.
+🔑 Login
 
-Go to:
+User: ${username}
+Pass: ${password}
+
+1. Go:
 
 https://www.twitch.tv/drops/inventory
 
-Scroll down to the "Received" section.
+2. Scroll to the "Received" section.
 
-2. Click the purple "Connect" button below the item you want to add.
+3. Press the purple "Connect" button.
 
-3. Follow the instructions shown on the connected website.
+4. Follow the connection steps.
 
-4. Important:
+Extra steps may be required.
 
-Some games require extra steps.
-
-Example:
-
-• Rust → click "Activate Drops"
-
-• Then press "Check for missing drops"
-
-`;
+Rust:
+• Activate Drops
+• Check for missing drops`;
 
   socket.emit(
 
