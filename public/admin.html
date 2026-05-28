@@ -529,7 +529,7 @@
 
   <div id="messages"></div>
 
-  <div class="bottom">
+<div class="bottom">
 
     <input
       id="messageInput"
@@ -537,11 +537,30 @@
       autocomplete="off"
     >
 
+<input
+  type="file"
+  id="adminImageUpload"
+  accept="image/*"
+  style="display:none"
+>
+
+<label
+  for="adminImageUpload"
+>
+
+<button type="button">
+
+📷
+
+</button>
+
+</label>
+
     <button onclick="sendReply()">
       Send
     </button>
 
-  </div>
+</div>
 
 </div>
 <div id="imageModal">
@@ -1078,6 +1097,127 @@ function sendReply() {
 // =========================
 // Enter Key
 // =========================
+document
+  .getElementById(
+    "adminImageUpload"
+  )
+  .addEventListener(
+
+    "change",
+
+    async (e)=>{
+
+      if(
+
+        !selectedUser
+
+      ){
+
+        alert(
+          "Select a customer first"
+        );
+
+        return;
+
+      }
+
+      try{
+
+        const file =
+
+          e.target
+            .files[0];
+
+        if(!file){
+
+          return;
+
+        }
+
+        const formData =
+
+          new FormData();
+
+        formData.append(
+
+          "image",
+
+          file
+
+        );
+
+        const res =
+
+          await fetch(
+
+            "/upload-image",
+
+            {
+
+              method:
+                "POST",
+
+              body:
+                formData
+
+            }
+
+          );
+
+        const data =
+
+          await res.json();
+
+        if(
+
+          data.success
+
+        ){
+
+          socket.emit(
+
+            "admin-message",
+
+            {
+
+              userId:
+                selectedUser,
+
+              message:
+
+                `[IMAGE]${data.url}`
+
+            }
+
+          );
+
+        }
+
+        else{
+
+          alert(
+            "Upload failed"
+          );
+
+        }
+
+      }
+
+      catch(err){
+
+        console.error(
+          err
+        );
+
+        alert(
+          "Image upload failed"
+        );
+
+      }
+
+    }
+
+  );
 
 input.addEventListener(
   "keypress",
