@@ -269,7 +269,31 @@ app.get(
   }
 
 );
+app.get(
 
+  "/items",
+
+  requireAdmin,
+
+  (req,res)=>{
+
+    res.sendFile(
+
+      path.join(
+
+        __dirname,
+
+        "admin-pages",
+
+        "items.html"
+
+      )
+
+    );
+
+  }
+
+);
 app.use(
 
   express.static(
