@@ -1427,6 +1427,107 @@ function sendGuide(){
       "flex";
 
 }
+
+function closeGuideModal(){
+
+  document
+    .getElementById(
+      "guideModal"
+    )
+    .style.display =
+      "none";
+
+}
+
+function submitGuide(){
+
+  const username =
+
+    document
+      .getElementById(
+        "guideUser"
+      )
+      .value
+      .trim();
+
+  const password =
+
+    document
+      .getElementById(
+        "guidePass"
+      )
+      .value
+      .trim();
+
+  if(
+
+    !username
+    ||
+    !password
+
+  ){
+
+    alert(
+      "Fill all fields"
+    );
+
+    return;
+
+  }
+
+  const message =
+
+`📋 TWITCH DROP GUIDE
+
+🔑 Login
+
+User: ${username}
+Pass: ${password}
+
+1. Go:
+https://www.twitch.tv/drops/inventory
+
+2. Scroll to "Received".
+
+3. Click "Connect".
+
+4. Follow instructions.
+
+Rust:
+• Activate Drops
+• Check for missing drops`;
+
+  socket.emit(
+
+    "admin-message",
+
+    {
+
+      userId:
+        selectedUser,
+
+      message
+
+    }
+
+  );
+
+  document
+    .getElementById(
+      "guideUser"
+    )
+    .value = "";
+
+  document
+    .getElementById(
+      "guidePass"
+    )
+    .value = "";
+
+  closeGuideModal();
+
+}
+
 function sendReply() {
 
   if (!selectedUser) {
