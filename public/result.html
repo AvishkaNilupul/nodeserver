@@ -290,6 +290,80 @@ button:hover{
     0 0 16px rgba(239,68,68,0.35);
 }
 
+#imageModal{
+
+  display:none;
+
+  position:fixed;
+
+  top:0;
+  left:0;
+
+  width:100%;
+  height:100%;
+
+  background:
+    rgba(0,0,0,0.88);
+
+  justify-content:center;
+
+  align-items:center;
+
+  z-index:99999;
+
+}
+
+#modalImage{
+
+  max-width:92%;
+
+  max-height:92%;
+
+  border-radius:18px;
+
+  cursor:pointer;
+
+}
+
+@media(max-width:768px){
+
+  .chat-container{
+
+    height:100vh;
+
+    border-radius:0;
+
+  }
+
+  .chat-header h1{
+
+    font-size:24px;
+
+  }
+
+  .message{
+
+    max-width:90%;
+
+    font-size:15px;
+
+  }
+
+  .chat-bottom{
+
+    padding:14px;
+
+    gap:10px;
+
+  }
+
+  input{
+
+    padding:14px;
+
+  }
+
+}
 </style>
 
 </head>
@@ -345,6 +419,11 @@ button:hover{
   </button>
 
 </div>
+
+</div>
+<div id="imageModal">
+
+  <img id="modalImage">
 
 </div>
 
@@ -451,7 +530,6 @@ const input =
 // =========================
 // Add Message
 // =========================
-
 function addMessage(
 
   text,
@@ -479,8 +557,67 @@ function addMessage(
   div.style.wordBreak =
     "break-word";
 
-  div.textContent =
-    text;
+  if(
+
+    text.startsWith(
+      "[IMAGE]"
+    )
+
+  ){
+
+    const img =
+
+      document
+        .createElement(
+          "img"
+        );
+
+    img.src =
+
+      text.replace(
+        "[IMAGE]",
+        ""
+      );
+
+    img.style.maxWidth =
+      "260px";
+
+    img.style.borderRadius =
+      "14px";
+
+    img.style.cursor =
+      "pointer";
+
+    img.onclick = ()=>{
+
+      document
+        .getElementById(
+          "modalImage"
+        )
+        .src =
+          img.src;
+
+      document
+        .getElementById(
+          "imageModal"
+        )
+        .style.display =
+          "flex";
+
+    };
+
+    div.appendChild(
+      img
+    );
+
+  }
+
+  else{
+
+    div.textContent =
+      text;
+
+  }
 
   messages.appendChild(
     div
@@ -492,146 +629,48 @@ function addMessage(
 
 }
 // =========================
-// History
-// =========================
-
-socket.on(
-
-  "chat-history",
-
-  (history)=>{
-
-    messages.innerHTML = "";
-
-    history.forEach(
-
-      (msg)=>{
-
-        const message =
-
-          msg.message || "";
-
-        let text;
-
-        if(
-
-          message.startsWith(
-            "[IMAGE]"
-          )
-
-        ){
-
-          text =
-
-            msg.sender==="admin"
-
-            ?
-
-            "Support sent an image"
-
-            :
-
-            "You sent an image";
-
-        }
-
-        else{
-
-          text =
-
-            `${
-              msg.sender==="admin"
-
-              ?
-
-              "Support"
-
-              :
-
-              "You"
-
-            }: ${message}`;
-
-        }
-
-        addMessage(
-
-          text,
-
-          msg.sender==="admin"
-
-          ?
-
-          "admin"
-
-          :
-
-          "user"
-
-        );
-
-      }
-
-    );
-
-  }
-
-);
-// =========================
-// Send
-// =========================
-
-function sendMessage(){
-
-  const message =
-    input.value.trim();
-
-  if(!message) return;
-
-  socket.emit(
-
-    "user-message",
-
-    {
-
-      userId:
-        gamerTag,
-
-      message
-
-    }
-
-  );
-
-  addMessage(
-
-    `You: ${message}`,
-
-    "user"
-
-  );
-
-  input.value="";
-
-}
-
-// =========================
 // Reply
 // =========================
 
 socket.on(
+
   "admin-reply",
+
   (data)=>{
 
-    addMessage(
+    if(
 
-      `Support: ${data.message}`,
+      data.message
+        .startsWith(
+          "[IMAGE]"
+        )
 
-      "admin"
+    ){
 
-    );
+      addMessage(
+
+        data.message,
+
+        "admin"
+
+      );
+
+    }
+
+    else{
+
+      addMessage(
+
+        `Support: ${data.message}`,
+
+        "admin"
+
+      );
+
+    }
 
   }
+
 );
 
 document
@@ -767,7 +806,20 @@ input.addEventListener(
 
   }
 );
+document
+  .getElementById(
+    "imageModal"
+  )
+  .onclick = ()=>{
 
+    document
+      .getElementById(
+        "imageModal"
+      )
+      .style.display =
+        "none";
+
+  };
 </script>
 
 </body>
