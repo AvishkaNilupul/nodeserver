@@ -164,6 +164,13 @@ button:hover{
 
 @media(max-width:768px){
 
+    .formGrid{
+
+  grid-template-columns:
+  1fr !important;
+
+}
+
   body{
 
     padding:20px;
@@ -206,6 +213,20 @@ onclick="addCategory()"
 
 </div>
 
+<div
+
+class="formGrid"
+
+style="
+display:grid;
+grid-template-columns:
+1fr 1fr;
+gap:14px;
+margin-bottom:14px;
+"
+
+>
+
 <input
 id="username"
 placeholder="Username"
@@ -220,6 +241,7 @@ placeholder="Password"
 id="notes"
 placeholder="Notes"
 >
+
 <input
 
 id="value"
@@ -233,6 +255,8 @@ min="0"
 step="0.01"
 
 >
+
+</div>
 
 <button
 onclick="addItem()"
