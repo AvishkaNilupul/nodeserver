@@ -1,4 +1,4 @@
-```html
+
 <!DOCTYPE html>
 <html>
 
@@ -218,6 +218,15 @@ Save Item
 </button>
 
 <hr style="margin:28px 0;">
+<input
+
+  id="searchInput"
+
+  placeholder="Search accounts..."
+
+  oninput="loadItems()"
+
+>
 
 <div id="itemsList">
 
@@ -230,14 +239,21 @@ async function loadItems(){
   const res =
 
     await fetch(
-
       "/items/list"
-
     );
 
   const items =
 
     await res.json();
+
+  const search =
+
+    document
+      .getElementById(
+        "searchInput"
+      )
+      .value
+      .toLowerCase();
 
   const list =
 
@@ -248,97 +264,276 @@ async function loadItems(){
 
   list.innerHTML="";
 
-  items.reverse();
+  const grouped = {};
 
   items.forEach(
 
-    (item)=>{
+    item=>{
+
+      if(
+
+        search
+
+        &&
+
+        !JSON.stringify(
+          item
+        )
+
+        .toLowerCase()
+
+        .includes(
+          search
+        )
+
+      ){
+
+        return;
+
+      }
+
+      if(
+
+        !grouped[
+          item.category
+        ]
+
+      ){
+
+        grouped[
+          item.category
+        ]=[];
+
+      }
+
+      grouped[
+        item.category
+      ].push(item);
+
+    }
+
+  );
+
+  Object.keys(
+
+    grouped
+
+  ).forEach(
+
+    category=>{
+
+      const categoryItems =
+
+        grouped[
+          category
+        ];
+
+      const available =
+
+        categoryItems
+        .filter(
+          i=>!i.used
+        )
+        .length;
+
+      const used =
+
+        categoryItems
+        .filter(
+          i=>i.used
+        )
+        .length;
 
       list.innerHTML +=
 
 `
-<div class="item ${item.used ? 'used' : ''}">
+<div class="item">
 
-<div class="itemHeader">
+<div style="
+
+display:flex;
+
+justify-content:space-between;
+
+align-items:center;
+
+margin-bottom:14px;
+
+">
 
 <div>
 
-<b>
+<h2 style="
+margin:0;
+">
 
-${item.category}
+${category}
 
-</b>
+</h2>
+
+<div style="
+font-size:13px;
+color:#94a3b8;
+">
+
+🟢 ${available}
+
+•
+
+🔴 ${used}
+
+•
+
+${categoryItems.length}
 
 </div>
 
-<div class="status">
+</div>
+
+<button
+
+onclick="toggleCategory('${category}')"
+
+>
+
+Toggle
+
+</button>
+
+</div>
+
+<div
+
+id="cat-${category}"
+
+>
+
+`;
+
+      [...categoryItems]
+
+      .reverse()
+
+      .forEach(
+
+        item=>{
+
+          list.innerHTML +=
+
+`
+<div style="
+
+display:flex;
+
+justify-content:space-between;
+
+align-items:center;
+
+padding:10px;
+
+margin-bottom:8px;
+
+border-radius:12px;
+
+background:
 
 ${
   item.used
 
   ?
 
-  `<span class="usedText">
-
-  🔴 USED
-
-  </span>`
+  "rgba(127,29,29,.35)"
 
   :
 
-  `<span class="available">
+  "#1e293b"
+};
 
-  🟢 AVAILABLE
+">
 
-  </span>`
-}
+<div>
 
-</div>
+<b>
 
-</div>
-
-<div class="row">
-
-👤 User:
 ${item.username}
 
-</div>
+</b>
 
-<div class="row">
+<span style="
+color:#94a3b8;
+">
 
-🔑 Pass:
-${item.password}
+| ${item.password}
 
-</div>
+</span>
 
 ${
   item.notes
 
   ?
 
-  `<div class="row">
+  `<span style="
+color:#64748b;
+">
 
-  📝 ${item.notes}
+| ${item.notes}
 
-  </div>`
+</span>`
 
   :
 
   ""
-
 }
 
+</div>
+
+<div style="
+display:flex;
+gap:12px;
+align-items:center;
+">
+
+<span>
+
+${
+  item.used
+
+  ?
+
+  "🔴 Used"
+
+  :
+
+  "🟢 Ready"
+}
+
+</span>
+
 <button
-
-class="deleteBtn"
-
-onclick="deleteItem('${item.id}')"
-
->
+onclick="
+deleteItem(
+'${item.id}'
+)
+">
 
 Delete
 
 </button>
+
+</div>
+
+</div>
+
+`;
+
+        }
+
+      );
+
+      list.innerHTML +=
+
+`
+</div>
 
 </div>
 `;
@@ -433,6 +628,38 @@ async function addItem(){
 
 }
 
+
+function toggleCategory(
+
+  category
+
+){
+
+  const box =
+
+    document
+      .getElementById(
+
+        `cat-${category}`
+
+      );
+
+  box.style.display =
+
+    box.style.display
+    ===
+    "none"
+
+    ?
+
+    "block"
+
+    :
+
+    "none";
+
+}
+
 async function deleteItem(id){
 
   await fetch(
@@ -458,4 +685,4 @@ loadItems();
 </body>
 
 </html>
-```
+
