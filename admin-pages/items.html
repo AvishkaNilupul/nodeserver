@@ -3,7 +3,73 @@
 
 <head>
 
-  <title>Items</title>
+<title>
+
+Items Manager
+
+</title>
+
+<style>
+
+body{
+
+  background:#020617;
+
+  color:white;
+
+  font-family:sans-serif;
+
+  padding:40px;
+
+}
+
+input,select{
+
+  width:100%;
+
+  padding:12px;
+
+  margin-bottom:12px;
+
+  border-radius:10px;
+
+  border:none;
+
+  background:#1e293b;
+
+  color:white;
+
+}
+
+button{
+
+  padding:12px 18px;
+
+  border:none;
+
+  border-radius:10px;
+
+  cursor:pointer;
+
+  background:#ef4444;
+
+  color:white;
+
+}
+
+.item{
+
+  background:#0f172a;
+
+  padding:16px;
+
+  border-radius:12px;
+
+  margin-top:14px;
+
+}
+
+</style>
 
 </head>
 
@@ -11,15 +77,223 @@
 
 <h1>
 
-Admin Items Page
+Items Manager
 
 </h1>
 
-<p>
+<select id="category">
 
-Future item management here.
+  <option>
 
-</p>
+    Twitch
+
+  </option>
+
+  <option>
+
+    Rust
+
+  </option>
+
+  <option>
+
+    Steam
+
+  </option>
+
+</select>
+
+<input
+  id="username"
+  placeholder="Username"
+>
+
+<input
+  id="password"
+  placeholder="Password"
+>
+
+<input
+  id="notes"
+  placeholder="Notes"
+>
+
+<button
+  onclick="addItem()"
+>
+
+Save Item
+
+</button>
+
+<hr>
+
+<div id="itemsList">
+
+</div>
+
+<script>
+
+async function loadItems(){
+
+  const res =
+
+    await fetch(
+      "/items/list"
+    );
+
+  const items =
+
+    await res.json();
+
+  const list =
+
+    document
+      .getElementById(
+        "itemsList"
+      );
+
+  list.innerHTML="";
+
+  items.reverse();
+
+  items.forEach(
+
+    (item)=>{
+
+      list.innerHTML +=
+
+`
+<div class="item">
+
+<b>
+${item.category}
+</b>
+
+<br>
+
+User:
+${item.username}
+
+<br>
+
+Pass:
+${item.password}
+
+<br>
+
+${item.notes||""}
+
+<br><br>
+
+<button
+onclick="deleteItem('${item.id}')"
+>
+
+Delete
+
+</button>
+
+</div>
+`;
+
+    }
+
+  );
+
+}
+
+async function addItem(){
+
+  const category =
+
+    document
+      .getElementById(
+        "category"
+      )
+      .value;
+
+  const username =
+
+    document
+      .getElementById(
+        "username"
+      )
+      .value;
+
+  const password =
+
+    document
+      .getElementById(
+        "password"
+      )
+      .value;
+
+  const notes =
+
+    document
+      .getElementById(
+        "notes"
+      )
+      .value;
+
+  await fetch(
+
+    "/items/add",
+
+    {
+
+      method:"POST",
+
+      headers:{
+
+        "Content-Type":
+          "application/json"
+
+      },
+
+      body:JSON.stringify({
+
+        category,
+        username,
+        password,
+        notes
+
+      })
+
+    }
+
+  );
+
+  loadItems();
+
+}
+
+async function deleteItem(
+
+  id
+
+){
+
+  await fetch(
+
+    `/items/delete/${id}`,
+
+    {
+
+      method:"DELETE"
+
+    }
+
+  );
+
+  loadItems();
+
+}
+
+loadItems();
+
+</script>
 
 </body>
 
