@@ -46,6 +46,18 @@ function loadItems(){
 
       )
 
+    ).map(
+
+      item=>({
+
+        used:false,
+
+        usedAt:null,
+
+        ...item
+
+      })
+
     );
 
   }
@@ -94,36 +106,95 @@ function addItem(
   const items =
     loadItems();
 
-  items.push({
+items.push({
 
-    id:
+  id:
 
-      Date.now()
-      .toString(),
+    Date.now()
+    .toString(),
 
-    category,
+  category,
 
-    username,
+  username,
 
-    password,
+  password,
 
-    notes,
+  notes,
 
-    createdAt:
-      Date.now()
+  used:false,
 
-  });
+  usedAt:null,
+
+  createdAt:
+    Date.now()
+
+});
 
   saveItems(
     items
   );
 
 }
+function getNextItem(
 
+  category
+
+){
+
+  const items =
+    loadItems();
+
+  const item =
+
+    items.find(
+
+      i=>
+
+        i.category
+          .toLowerCase()
+
+        ===
+
+        category
+          .toLowerCase()
+
+        &&
+
+        !i.used
+
+    );
+
+  if(
+
+    !item
+
+  ){
+
+    return null;
+
+  }
+
+  item.used =
+    true;
+
+  item.usedAt =
+    Date.now();
+
+  saveItems(
+    items
+  );
+
+  return item;
+
+}
 module.exports = {
 
   loadItems,
+
   saveItems,
-  addItem
+
+  addItem,
+
+  getNextItem
 
 };

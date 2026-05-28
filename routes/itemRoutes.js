@@ -14,8 +14,12 @@ const validator =
 const {
 
   loadItems,
+
   addItem,
-  saveItems
+
+  saveItems,
+
+  getNextItem
 
 } = require(
   "../utils/items"
@@ -183,6 +187,53 @@ router.delete(
   }
 
 );
+// =========================
+// GET NEXT ITEM
+// =========================
 
+router.get(
+
+  "/items/next/:category",
+
+  (req,res)=>{
+
+    const item =
+
+      getNextItem(
+
+        req.params.category
+
+      );
+
+    if(
+
+      !item
+
+    ){
+
+      return res
+        .status(404)
+        .json({
+
+          success:false,
+
+          message:
+            "No available items"
+
+        });
+
+    }
+
+    res.json({
+
+      success:true,
+
+      item
+
+    });
+
+  }
+
+);
 module.exports =
   router;
