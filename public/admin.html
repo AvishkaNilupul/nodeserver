@@ -484,6 +484,81 @@
   text-align:right;
 
 }
+#guideModal{
+
+  display:none;
+
+  position:fixed;
+
+  inset:0;
+
+  background:
+    rgba(0,0,0,0.45);
+
+  backdrop-filter:
+    blur(10px);
+
+  justify-content:center;
+
+  align-items:center;
+
+  z-index:99999;
+
+}
+
+#guideBox{
+
+  width:420px;
+
+  max-width:90%;
+
+  background:
+    rgba(15,23,42,0.96);
+
+  border:
+    1px solid rgba(255,255,255,0.08);
+
+  border-radius:22px;
+
+  padding:28px;
+
+  box-shadow:
+    0 20px 60px rgba(0,0,0,0.45);
+
+}
+
+#guideBox h2{
+
+  margin-bottom:22px;
+
+}
+
+#guideBox input{
+
+  width:100%;
+
+  margin-bottom:16px;
+
+}
+
+.guideButtons{
+
+  display:flex;
+
+  justify-content:flex-end;
+
+  gap:12px;
+
+  margin-top:8px;
+
+}
+
+.cancelBtn{
+
+  background:
+    rgba(239,68,68,0.18);
+
+}
   </style>
 
 </head>
@@ -611,6 +686,43 @@ Customer is typing...
 <div id="imageModal">
 
   <img id="modalImage">
+
+</div>
+<div id="guideModal">
+
+  <div id="guideBox">
+
+    <h2>Twitch Quick Guide</h2>
+
+    <input
+      id="guideUser"
+      placeholder="Twitch Username"
+    >
+
+    <input
+      id="guidePass"
+      placeholder="Twitch Password"
+      type="password"
+    >
+
+    <div class="guideButtons">
+
+      <button
+        class="cancelBtn"
+        onclick="closeGuideModal()"
+      >
+        Cancel
+      </button>
+
+      <button
+        onclick="submitGuide()"
+      >
+        Send
+      </button>
+
+    </div>
+
+  </div>
 
 </div>
 <script>
@@ -1307,65 +1419,12 @@ function sendGuide(){
 
   }
 
-  const username =
-
-    prompt(
-      "Enter Twitch username:"
-    );
-
-  if(
-    username===null
-  ) return;
-
-  const password =
-
-    prompt(
-      "Enter Twitch password:"
-    );
-
-  if(
-    password===null
-  ) return;
-
-  const message =
-
-`📋 TWITCH DROP GUIDE
-
-🔑 Login
-
-User: ${username}
-Pass: ${password}
-
-1. Go:
-
-https://www.twitch.tv/drops/inventory
-
-2. Scroll to the "Received" section.
-
-3. Press the purple "Connect" button.
-
-4. Follow the connection steps.
-
-Extra steps may be required.
-
-Rust:
-• Activate Drops
-• Check for missing drops`;
-
-  socket.emit(
-
-    "admin-message",
-
-    {
-
-      userId:
-        selectedUser,
-
-      message
-
-    }
-
-  );
+  document
+    .getElementById(
+      "guideModal"
+    )
+    .style.display =
+      "flex";
 
 }
 function sendReply() {
@@ -1677,8 +1736,32 @@ document
         "none";
 
   };
+document
+  .getElementById(
+    "guideModal"
+  )
 
+  .addEventListener(
+
+    "click",
+
+    (e)=>{
+
+      if(
+
+        e.target.id
+        ===
+        "guideModal"
+
+      ){
+
+        closeGuideModal();
+
+      }
+
+    }
+
+  );
 </script>
-
 </body>
 </html>
