@@ -932,6 +932,44 @@ else{
     messagesDiv.appendChild(div);
     if(
 
+  msg.sender==="admin"
+
+  &&
+
+  msg.seen
+
+){
+
+  const seen =
+
+    document
+      .createElement(
+        "div"
+      );
+
+  seen.className =
+    "seen-status";
+
+  seen.innerText =
+    "Seen";
+
+  div.appendChild(
+    seen
+  );
+
+}
+if(
+
+  msg.sender ===
+  "admin"
+
+){
+
+  lastAdminBubble =
+    div;
+
+}if(
+
   msg.sender ===
   "admin"
 

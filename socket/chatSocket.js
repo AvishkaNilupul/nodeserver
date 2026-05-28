@@ -530,6 +530,46 @@ socket.on(
 
     }
 
+    const messages =
+      loadMessages();
+
+    let changed =
+      false;
+
+    messages.forEach(
+
+      (msg)=>{
+
+        if(
+
+          msg.userId===userId
+
+          &&
+
+          msg.sender==="admin"
+
+        ){
+
+          msg.seen =
+            true;
+
+          changed =
+            true;
+
+        }
+
+      }
+
+    );
+
+    if(changed){
+
+      saveMessages(
+        messages
+      );
+
+    }
+
     io.emit(
 
       "message-seen",

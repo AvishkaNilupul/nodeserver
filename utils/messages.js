@@ -99,7 +99,10 @@ function addMessage(
       Date.now(),
 
     readByAdmin:
-      sender === "admin"
+      sender === "admin",
+
+    seen:
+      false
 
   });
 
@@ -108,7 +111,6 @@ function addMessage(
   );
 
 }
-
 module.exports = {
 
   loadMessages,
