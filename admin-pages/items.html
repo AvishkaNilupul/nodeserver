@@ -184,15 +184,27 @@ Items Manager
 
 </h1>
 
+<div
+style="
+display:flex;
+gap:12px;
+margin-bottom:14px;
+"
+>
+
 <select id="category">
 
-  <option>Twitch</option>
-
-  <option>Rust</option>
-
-  <option>Steam</option>
-
 </select>
+
+<button
+onclick="addCategory()"
+>
+
++ Category
+
+</button>
+
+</div>
 
 <input
 id="username"
@@ -233,7 +245,112 @@ Save Item
 </div>
 
 <script>
+function loadCategories(){
 
+  const saved =
+
+    JSON.parse(
+
+      localStorage.getItem(
+        "itemCategories"
+      )
+
+      ||
+
+      '["Twitch","Rust","Steam"]'
+
+    );
+
+  const select =
+
+    document
+      .getElementById(
+        "category"
+      );
+
+  select.innerHTML="";
+
+  saved.forEach(
+
+    cat=>{
+
+      select.innerHTML +=
+
+      `<option>
+
+        ${cat}
+
+      </option>`;
+
+    }
+
+  );
+
+}
+
+function addCategory(){
+
+  const name =
+
+    prompt(
+      "Category name:"
+    );
+
+  if(
+
+    !name
+
+  ) return;
+
+  const categories =
+
+    JSON.parse(
+
+      localStorage.getItem(
+
+        "itemCategories"
+
+      )
+
+      ||
+
+      '[]'
+
+    );
+
+  if(
+
+    categories.includes(
+      name
+    )
+
+  ){
+
+    alert(
+      "Already exists"
+    );
+
+    return;
+
+  }
+
+  categories.push(
+    name
+  );
+
+  localStorage.setItem(
+
+    "itemCategories",
+
+    JSON.stringify(
+      categories
+    )
+
+  );
+
+  loadCategories();
+
+}
 async function loadItems(){
 
   const res =
@@ -677,6 +794,8 @@ async function deleteItem(id){
   loadItems();
 
 }
+
+loadCategories();
 
 loadItems();
 
