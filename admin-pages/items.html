@@ -1,3 +1,4 @@
+```html
 <!DOCTYPE html>
 <html>
 
@@ -17,9 +18,15 @@ body{
 
   color:white;
 
-  font-family:sans-serif;
+  font-family:'Segoe UI',sans-serif;
 
   padding:40px;
+
+}
+
+h1{
+
+  margin-bottom:24px;
 
 }
 
@@ -27,17 +34,21 @@ input,select{
 
   width:100%;
 
-  padding:12px;
+  padding:14px;
 
-  margin-bottom:12px;
+  margin-bottom:14px;
 
-  border-radius:10px;
+  border-radius:12px;
 
   border:none;
+
+  outline:none;
 
   background:#1e293b;
 
   color:white;
+
+  font-size:14px;
 
 }
 
@@ -47,7 +58,7 @@ button{
 
   border:none;
 
-  border-radius:10px;
+  border-radius:12px;
 
   cursor:pointer;
 
@@ -55,17 +66,109 @@ button{
 
   color:white;
 
+  font-weight:600;
+
+}
+
+button:hover{
+
+  opacity:.92;
+
+}
+
+#itemsList{
+
+  display:grid;
+
+  gap:18px;
+
+  margin-top:22px;
+
 }
 
 .item{
 
   background:#0f172a;
 
-  padding:16px;
+  padding:20px;
 
-  border-radius:12px;
+  border-radius:18px;
 
-  margin-top:14px;
+  border:
+
+    1px solid
+
+    rgba(255,255,255,.08);
+
+}
+
+.item.used{
+
+  background:
+
+    rgba(127,29,29,.30);
+
+  border:
+
+    1px solid
+
+    #ef4444;
+
+}
+
+.itemHeader{
+
+  display:flex;
+
+  justify-content:space-between;
+
+  align-items:center;
+
+  margin-bottom:18px;
+
+}
+
+.status{
+
+  font-size:13px;
+
+  font-weight:700;
+
+}
+
+.available{
+
+  color:#22c55e;
+
+}
+
+.usedText{
+
+  color:#ef4444;
+
+}
+
+.row{
+
+  margin-bottom:10px;
+
+  color:#cbd5e1;
+
+}
+
+.deleteBtn{
+
+  margin-top:18px;
+
+}
+
+@media(max-width:768px){
+
+  body{
+
+    padding:20px;
+
+  }
 
 }
 
@@ -83,50 +186,38 @@ Items Manager
 
 <select id="category">
 
-  <option>
+  <option>Twitch</option>
 
-    Twitch
+  <option>Rust</option>
 
-  </option>
-
-  <option>
-
-    Rust
-
-  </option>
-
-  <option>
-
-    Steam
-
-  </option>
+  <option>Steam</option>
 
 </select>
 
 <input
-  id="username"
-  placeholder="Username"
+id="username"
+placeholder="Username"
 >
 
 <input
-  id="password"
-  placeholder="Password"
+id="password"
+placeholder="Password"
 >
 
 <input
-  id="notes"
-  placeholder="Notes"
+id="notes"
+placeholder="Notes"
 >
 
 <button
-  onclick="addItem()"
+onclick="addItem()"
 >
 
 Save Item
 
 </button>
 
-<hr>
+<hr style="margin:28px 0;">
 
 <div id="itemsList">
 
@@ -139,7 +230,9 @@ async function loadItems(){
   const res =
 
     await fetch(
+
       "/items/list"
+
     );
 
   const items =
@@ -164,30 +257,83 @@ async function loadItems(){
       list.innerHTML +=
 
 `
-<div class="item">
+<div class="item ${item.used ? 'used' : ''}">
+
+<div class="itemHeader">
+
+<div>
 
 <b>
+
 ${item.category}
+
 </b>
 
-<br>
+</div>
 
-User:
+<div class="status">
+
+${
+  item.used
+
+  ?
+
+  `<span class="usedText">
+
+  🔴 USED
+
+  </span>`
+
+  :
+
+  `<span class="available">
+
+  🟢 AVAILABLE
+
+  </span>`
+}
+
+</div>
+
+</div>
+
+<div class="row">
+
+👤 User:
 ${item.username}
 
-<br>
+</div>
 
-Pass:
+<div class="row">
+
+🔑 Pass:
 ${item.password}
 
-<br>
+</div>
 
-${item.notes||""}
+${
+  item.notes
 
-<br><br>
+  ?
+
+  `<div class="row">
+
+  📝 ${item.notes}
+
+  </div>`
+
+  :
+
+  ""
+
+}
 
 <button
+
+class="deleteBtn"
+
 onclick="deleteItem('${item.id}')"
+
 >
 
 Delete
@@ -265,15 +411,29 @@ async function addItem(){
 
   );
 
+  document
+    .getElementById(
+      "username"
+    )
+    .value="";
+
+  document
+    .getElementById(
+      "password"
+    )
+    .value="";
+
+  document
+    .getElementById(
+      "notes"
+    )
+    .value="";
+
   loadItems();
 
 }
 
-async function deleteItem(
-
-  id
-
-){
+async function deleteItem(id){
 
   await fetch(
 
@@ -298,3 +458,4 @@ loadItems();
 </body>
 
 </html>
+```
