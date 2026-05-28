@@ -198,6 +198,8 @@ app.post(
 
   "/upload-image",
 
+  requireAdmin,
+
   upload.single(
     "image"
   ),
