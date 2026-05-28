@@ -407,8 +407,6 @@ app.use(
 );
 app.use(
 
-  "/items",
-
   requireAdmin,
 
   itemRoutes
