@@ -5,7 +5,9 @@ const mongoose = require("mongoose");
 
 function requireAdmin(
 
-  req,res,next
+  req,
+  res,
+  next
 
 ){
 
@@ -19,9 +21,30 @@ function requireAdmin(
 
   }
 
-  return res.redirect(
-    "/admin-login.html"
-  );
+  if(
+
+    req.accepts(
+      "html"
+    )
+
+  ){
+
+    return res.redirect(
+      "/admin-login.html"
+    );
+
+  }
+
+  return res
+    .status(401)
+    .json({
+
+      success:false,
+
+      message:
+        "Unauthorized"
+
+    });
 
 }
 
@@ -383,7 +406,13 @@ app.use(
   chatRoutes
 );
 app.use(
+
+  "/items",
+
+  requireAdmin,
+
   itemRoutes
+
 );
 // =========================
 // Socket.IO
