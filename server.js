@@ -63,7 +63,10 @@ const redeemRoutes =
 
 const chatRoutes =
   require("./routes/chatRoutes");
-
+const itemRoutes =
+  require(
+    "./routes/itemRoutes"
+  );
 const chatSocket =
   require("./socket/chatSocket");
 
@@ -379,7 +382,9 @@ app.use(
 app.use(
   chatRoutes
 );
-
+app.use(
+  itemRoutes
+);
 // =========================
 // Socket.IO
 // =========================
