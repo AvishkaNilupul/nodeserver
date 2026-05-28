@@ -504,39 +504,6 @@ socket.onAny(
   }
 
 );
-
-  "connect",
-
-  ()=>{
-
-    console.log(
-
-      "CONNECTED:",
-      socket.id
-
-    );
-
-    socket.emit(
-
-      "join-user",
-
-      gamerTag
-
-    );
-
-  }
-
-);
-
-socket.onAny((event,...args)=>{
-
-  console.log(
-    "SOCKET EVENT:",
-    event,
-    args
-  );
-
-});
 // =========================
 // Elements
 // =========================
