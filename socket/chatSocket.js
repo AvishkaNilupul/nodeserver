@@ -15,6 +15,7 @@ const axios =
 const {
 
   loadMessages,
+  saveMessages,
   addMessage
 
 } = require(
@@ -97,23 +98,8 @@ if(
     userId
   );
 
-  io.emit(
-
-    "new-message",
-
-    {
-
-      userId,
-
-      sender:"user",
-
-      message:"__joined__"
-
-    }
-
-  );
-
 }
+
 
           let messages =
             loadMessages();
