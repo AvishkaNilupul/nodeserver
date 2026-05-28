@@ -761,10 +761,18 @@ let lastAdminBubble =
 // Logout
 // =========================
 
-function logout() {
+async function logout(){
 
-  localStorage.removeItem(
-    "adminAuth"
+  await fetch(
+
+    "/admin-logout",
+
+    {
+
+      method:"POST"
+
+    }
+
   );
 
   window.location.href =
