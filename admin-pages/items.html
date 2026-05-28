@@ -289,8 +289,15 @@ Save Item
 <hr style="margin:28px 0;">
 <input
 
-  id="searchInput"
-  <div
+id="searchInput"
+
+placeholder="Search accounts..."
+
+oninput="loadItems()"
+
+>
+
+<div
 
 id="statsBar"
 
@@ -311,12 +318,6 @@ margin:24px 0;
 >
 
 </div>
-
-  placeholder="Search accounts..."
-
-  oninput="loadItems()"
-
->
 
 <div id="itemsList">
 
@@ -467,9 +468,32 @@ async function loadItems(){
 
   statsBar.innerHTML="";
 
-  const totalValue =
 
-  items.reduce(
+const filteredItems =
+
+  items.filter(
+
+    item=>
+
+      !search
+
+      ||
+
+      JSON.stringify(
+        item
+      )
+
+      .toLowerCase()
+
+      .includes(
+        search
+      )
+
+  );
+
+const totalValue =
+
+  filteredItems.reduce(
 
     (sum,item)=>
 
@@ -486,7 +510,7 @@ async function loadItems(){
 
 const availableValue =
 
-  items
+  filteredItems
 
   .filter(
     i=>!i.used
@@ -509,7 +533,7 @@ const availableValue =
 
 const soldValue =
 
-  items
+  filteredItems
 
   .filter(
     i=>i.used
@@ -529,34 +553,12 @@ const soldValue =
     0
 
   );
-
+  
   const grouped = {};
 
-  items.forEach(
+  filteredItems.forEach(
 
     item=>{
-
-      if(
-
-        search
-
-        &&
-
-        !JSON.stringify(
-          item
-        )
-
-        .toLowerCase()
-
-        .includes(
-          search
-        )
-
-      ){
-
-        return;
-
-      }
 
       if(
 
@@ -592,7 +594,11 @@ const soldValue =
 
 </h3>
 
-<h2>
+<h2 style="
+font-size:34px;
+margin:10px 0 0;
+color:#22c55e;
+">
 
 $${totalValue.toFixed(2)}
 
@@ -642,7 +648,7 @@ $${soldValue.toFixed(2)}
 
 <h2>
 
-${items.length}
+${filteredItems.length}
 
 </h2>
 
@@ -814,6 +820,13 @@ color:#64748b;
 
 | ${item.notes}
 
+</span>`
+
+  :
+
+  ""
+}
+
 ${
   item.value
 
@@ -826,7 +839,7 @@ color:#22c55e;
 | $
 
 ${Number(
-  item.value
+item.value
 ).toFixed(2)}
 
 </span>`
@@ -836,12 +849,6 @@ ${Number(
   ""
 }
 
-</span>`
-
-  :
-
-  ""
-}
 
 </div>
 
