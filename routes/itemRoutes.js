@@ -59,10 +59,15 @@ router.post(
 
     let {
 
-      category,
-      username,
-      password,
-      notes
+    category,
+
+    username,
+
+    password,
+
+    notes,
+
+    value
 
     } = req.body;
 
@@ -131,10 +136,15 @@ router.post(
 
     addItem(
 
-      category,
-      username,
-      password,
-      notes
+        category,
+
+        username,
+
+        password,
+
+        notes,
+
+        value
 
     );
 

@@ -97,9 +97,14 @@ function saveItems(
 function addItem(
 
   category,
+
   username,
+
   password,
-  notes=""
+
+  notes="",
+
+  value=0
 
 ){
 
@@ -120,6 +125,10 @@ items.push({
   password,
 
   notes,
+
+  value:
+  Number(value)
+  || 0,
 
   used:false,
 
