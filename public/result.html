@@ -526,14 +526,6 @@ socket.on(
 
     );
 
-    socket.emit(
-
-      "join-user",
-
-      gamerTag
-
-    );
-
   }
 
 );
@@ -717,36 +709,36 @@ socket.on(
 
   (history)=>{
 
-    messages.innerHTML = "";
+    messages.innerHTML="";
 
     history.forEach(
 
       (msg)=>{
 
         addMessage(
-
           msg.message,
-
           msg.sender==="admin"
-
           ?
-
           "admin"
-
           :
-
           "user"
-
         );
 
       }
 
     );
 
+    socket.emit(
+
+      "message-seen",
+
+      gamerTag
+
+    );
+
   }
 
 );
-
 function sendMessage(){
 
   const message =
@@ -825,6 +817,13 @@ socket.on(
       );
 
     }
+    socket.emit(
+
+  "message-seen",
+
+  gamerTag
+
+);
 
   }
 

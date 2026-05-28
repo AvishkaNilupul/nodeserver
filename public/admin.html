@@ -1262,6 +1262,13 @@ function sendReply() {
   );
 
   input.value = "";
+  socket.emit(
+
+  "admin-stop-typing",
+
+  selectedUser
+
+);
 
 }
 
