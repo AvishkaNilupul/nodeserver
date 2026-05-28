@@ -504,6 +504,30 @@ socket.onAny(
   }
 
 );
+
+  "connect",
+
+  ()=>{
+
+    console.log(
+
+      "CONNECTED:",
+      socket.id
+
+    );
+
+    socket.emit(
+
+      "join-user",
+
+      gamerTag
+
+    );
+
+  }
+
+);
+
 socket.onAny((event,...args)=>{
 
   console.log(
@@ -626,6 +650,81 @@ function addMessage(
   messages.scrollTop =
 
     messages.scrollHeight;
+
+}
+
+socket.on(
+
+  "chat-history",
+
+  (history)=>{
+
+    messages.innerHTML = "";
+
+    history.forEach(
+
+      (msg)=>{
+
+        addMessage(
+
+          msg.message,
+
+          msg.sender==="admin"
+
+          ?
+
+          "admin"
+
+          :
+
+          "user"
+
+        );
+
+      }
+
+    );
+
+  }
+
+);
+
+function sendMessage(){
+
+  const message =
+
+    input.value.trim();
+
+  if(!message){
+
+    return;
+
+  }
+
+  socket.emit(
+
+    "user-message",
+
+    {
+
+      userId:
+        gamerTag,
+
+      message
+
+    }
+
+  );
+
+  addMessage(
+
+    `You: ${message}`,
+
+    "user"
+
+  );
+
+  input.value = "";
 
 }
 // =========================
