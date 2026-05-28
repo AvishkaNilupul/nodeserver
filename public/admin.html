@@ -958,17 +958,22 @@ socket.on(
   "message-seen",
 
   (userId)=>{
+
     console.log(
 
-  "SEEN EVENT:",
+      "SEEN EVENT RECEIVED",
 
-  userId,
+      {
 
-  selectedUser,
+        userId,
 
-  lastAdminBubble
+        selectedUser,
 
-);
+        lastAdminBubble
+
+      }
+
+    );
 
     if(
 
@@ -976,6 +981,10 @@ socket.on(
       selectedUser
 
     ){
+
+      console.log(
+        "wrong user"
+      );
 
       return;
 
@@ -986,6 +995,10 @@ socket.on(
       !lastAdminBubble
 
     ){
+
+      console.log(
+        "no bubble"
+      );
 
       return;
 
