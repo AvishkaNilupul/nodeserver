@@ -364,6 +364,49 @@ button:hover{
   }
 
 }
+#typingIndicator{
+
+  display:none;
+
+  align-self:flex-start;
+
+  background:
+    rgba(30,41,59,0.9);
+
+  color:#94a3b8;
+
+  padding:12px 16px;
+
+  border-radius:16px;
+
+  margin:0 24px 16px;
+
+  animation:
+    pulseTyping 1.2s infinite;
+
+}
+
+@keyframes pulseTyping{
+
+  0%{
+
+    opacity:1;
+
+  }
+
+  50%{
+
+    opacity:0.45;
+
+  }
+
+  100%{
+
+    opacity:1;
+
+  }
+
+}
 </style>
 
 </head>
@@ -389,6 +432,14 @@ button:hover{
   </div>
 
   <div id="messages"></div>
+
+<div
+  id="typingIndicator"
+>
+
+Support is typing...
+
+</div>
 
 <div class="chat-bottom">
 
@@ -512,7 +563,11 @@ const messages =
   document.getElementById(
     "messages"
   );
+const typingIndicator =
 
+  document.getElementById(
+    "typingIndicator"
+  );
 const input =
   document.getElementById(
     "messageInput"
@@ -619,7 +674,35 @@ function addMessage(
     messages.scrollHeight;
 
 }
+socket.on(
 
+  "support-typing",
+
+  ()=>{
+
+    typingIndicator
+      .style.display =
+
+        "block";
+
+  }
+
+);
+
+socket.on(
+
+  "support-stop-typing",
+
+  ()=>{
+
+    typingIndicator
+      .style.display =
+
+        "none";
+
+  }
+
+);
 socket.on(
 
   "chat-history",

@@ -377,6 +377,73 @@ ${new Date().toISOString()}`
       );
 
       // =========================
+// Typing Indicator
+// =========================
+
+socket.on(
+
+  "admin-typing",
+
+  (userId)=>{
+
+    if(
+
+      typeof userId
+      !==
+      "string"
+
+    ){
+
+      return;
+
+    }
+
+    io.to(
+
+      userId
+
+    ).emit(
+
+      "support-typing"
+
+    );
+
+  }
+
+);
+
+socket.on(
+
+  "admin-stop-typing",
+
+  (userId)=>{
+
+    if(
+
+      typeof userId
+      !==
+      "string"
+
+    ){
+
+      return;
+
+    }
+
+    io.to(
+
+      userId
+
+    ).emit(
+
+      "support-stop-typing"
+
+    );
+
+  }
+
+);
+      // =========================
       // Admin Message
       // =========================
 

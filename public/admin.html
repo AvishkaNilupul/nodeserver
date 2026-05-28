@@ -599,7 +599,7 @@ const input =
   document.getElementById(
     "messageInput"
   );
-
+let typingTimer;
 let selectedUser = null;
 
 
@@ -1228,16 +1228,75 @@ document
   );
 
 input.addEventListener(
-  "keypress",
-  (e) => {
 
-    if (e.key === "Enter") {
+  "input",
+
+  ()=>{
+
+    if(
+
+      !selectedUser
+
+    ){
+
+      return;
+
+    }
+
+    socket.emit(
+
+      "admin-typing",
+
+      selectedUser
+
+    );
+
+    clearTimeout(
+      typingTimer
+    );
+
+    typingTimer =
+
+      setTimeout(
+
+        ()=>{
+
+          socket.emit(
+
+            "admin-stop-typing",
+
+            selectedUser
+
+          );
+
+        },
+
+        1200
+
+      );
+
+  }
+
+);
+
+input.addEventListener(
+
+  "keypress",
+
+  (e)=>{
+
+    if(
+
+      e.key==="Enter"
+
+    ){
 
       sendReply();
 
     }
 
   }
+
 );
 
 async function clearChat(){
