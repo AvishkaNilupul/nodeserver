@@ -522,7 +522,16 @@ socket.on(
     console.log(
 
       "CONNECTED:",
+
       socket.id
+
+    );
+
+    socket.emit(
+
+      "join-user",
+
+      gamerTag
 
     );
 
@@ -665,13 +674,6 @@ function addMessage(
 
     messages.scrollHeight;
 
-    socket.emit(
-
-  "message-seen",
-
-  gamerTag
-
-);
 
 }
 socket.on(
