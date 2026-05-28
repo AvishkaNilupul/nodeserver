@@ -508,7 +508,7 @@
 
 #guideBox{
 
-  width:420px;
+  width:500px;
 
   max-width:90%;
 
@@ -520,7 +520,7 @@
 
   border-radius:22px;
 
-  padding:28px;
+  padding:34px;
 
   box-shadow:
     0 20px 60px rgba(0,0,0,0.45);
@@ -529,7 +529,7 @@
 
 #guideBox h2{
 
-  margin-bottom:22px;
+  margin-bottom:28px;
 
 }
 
@@ -540,7 +540,27 @@
   margin-bottom:16px;
 
 }
+#guideBox select{
 
+  width:100%;
+
+  padding:14px;
+
+  margin-bottom:16px;
+
+  border:none;
+
+  outline:none;
+
+  border-radius:14px;
+
+  background:#1e293b;
+
+  color:white;
+
+  font-size:14px;
+
+}
 .guideButtons{
 
   display:flex;
@@ -693,8 +713,9 @@ Customer is typing...
   <div id="guideBox">
 
     <h2>Twitch Quick Guide</h2>
-    <select
+<select
   id="guideCategory"
+  onchange="toggleManualFields()"
 >
 
   <option value="">
@@ -822,7 +843,51 @@ function clearCategory(){
     .value = "";
 
 }
+function toggleManualFields(){
 
+  const selected =
+
+    document
+      .getElementById(
+        "guideCategory"
+      )
+      .value;
+
+  const user =
+
+    document
+      .getElementById(
+        "guideUser"
+      );
+
+  const pass =
+
+    document
+      .getElementById(
+        "guidePass"
+      );
+
+  if(selected){
+
+    user.style.display =
+      "none";
+
+    pass.style.display =
+      "none";
+
+  }
+
+  else{
+
+    user.style.display =
+      "block";
+
+    pass.style.display =
+      "block";
+
+  }
+
+}
 async function loadUsers() {
 
   const usersRes =
