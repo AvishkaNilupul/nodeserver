@@ -546,6 +546,13 @@
     >
       Clear Chat
     </button>
+    <button
+  class="clear-btn"
+  onclick="sendGuide()"
+  style="margin-left:10px;"
+>
+  Quick Guide
+</button>
 
   </div>
 
@@ -1284,7 +1291,68 @@ else{
 // =========================
 // Send Reply
 // =========================
+function sendGuide(){
 
+  if(
+
+    !selectedUser
+
+  ){
+
+    alert(
+
+      "Select a customer first"
+
+    );
+
+    return;
+
+  }
+
+  const message =
+
+`📋 TWITCH DROP GUIDE
+
+1. Log in to the received Twitch account.
+
+Go to:
+
+https://www.twitch.tv/drops/inventory
+
+Scroll down to the "Received" section.
+
+2. Click the purple "Connect" button below the item you want to add.
+
+3. Follow the instructions shown on the connected website.
+
+4. Important:
+
+Some games require extra steps.
+
+Example:
+
+• Rust → click "Activate Drops"
+
+• Then press "Check for missing drops"
+
+`;
+
+  socket.emit(
+
+    "admin-message",
+
+    {
+
+      userId:
+        selectedUser,
+
+      message
+
+    }
+
+  );
+
+}
 function sendReply() {
 
   if (!selectedUser) {
