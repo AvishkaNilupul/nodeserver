@@ -952,11 +952,23 @@ else{
 // =========================
 // Live Updates
 // =========================
+
 socket.on(
 
   "message-seen",
 
   (userId)=>{
+    console.log(
+
+  "SEEN EVENT:",
+
+  userId,
+
+  selectedUser,
+
+  lastAdminBubble
+
+);
 
     if(
 

@@ -507,7 +507,40 @@ socket.on(
   }
 
 );
-socket
+
+// =========================
+// Message Seen
+// =========================
+
+socket.on(
+
+  "message-seen",
+
+  (userId)=>{
+
+    if(
+
+      typeof userId
+      !==
+      "string"
+
+    ){
+
+      return;
+
+    }
+
+    io.emit(
+
+      "message-seen",
+
+      userId
+
+    );
+
+  }
+
+);
       // =========================
       // Admin Message
       // =========================
