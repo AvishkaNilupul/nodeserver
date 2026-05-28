@@ -713,34 +713,10 @@ Customer is typing...
   <div id="guideBox">
 
     <h2>Twitch Quick Guide</h2>
-<select
+    <select
   id="guideCategory"
   onchange="toggleManualFields()"
 >
-
-  <option value="">
-
-    Manual Entry
-
-  </option>
-
-  <option>
-
-    Rust
-
-  </option>
-
-  <option>
-
-    Twitch
-
-  </option>
-
-  <option>
-
-    Steam
-
-  </option>
 
 </select>
     <input
@@ -834,6 +810,59 @@ async function logout(){
 // =========================
 // Load Users
 // =========================
+function loadGuideCategories(){
+
+  const saved =
+
+    JSON.parse(
+
+      localStorage.getItem(
+        "itemCategories"
+      )
+
+      ||
+
+      '["Twitch","Rust","Steam"]'
+
+    );
+
+  const select =
+
+    document
+      .getElementById(
+        "guideCategory"
+      );
+
+  select.innerHTML =
+
+`
+<option value="">
+
+Manual Entry
+
+</option>
+`;
+
+  saved.forEach(
+
+    cat=>{
+
+      select.innerHTML +=
+
+`
+<option>
+
+${cat}
+
+</option>
+`;
+
+    }
+
+  );
+
+}
+
 function clearCategory(){
 
   document
@@ -2049,6 +2078,7 @@ document
     }
 
   );
+loadGuideCategories();
 </script>
 </body>
 </html>
