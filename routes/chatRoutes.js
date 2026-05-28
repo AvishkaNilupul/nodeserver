@@ -13,8 +13,47 @@ const {
   "../utils/messages"
 );
 
+function requireAdmin(
+
+  req,
+  res,
+  next
+
+){
+
+  if(
+
+    req.session?.admin
+
+  ){
+
+    return next();
+
+  }
+
+  return res
+    .status(401)
+    .json({
+
+      success:false,
+
+      message:
+        "Unauthorized"
+
+    });
+
+}
+
+// ====================
+// GET ALL MESSAGES
+// ====================
+
 router.get(
+
   "/messages",
+
+  requireAdmin,
+
   (req,res)=>{
 
     const messages =
@@ -25,10 +64,19 @@ router.get(
     );
 
   }
+
 );
 
+// ====================
+// CLEAR CHAT
+// ====================
+
 router.post(
+
   "/clear-chat",
+
+  requireAdmin,
+
   (req,res)=>{
 
     const {
@@ -60,10 +108,19 @@ router.post(
     });
 
   }
+
 );
 
+// ====================
+// GET USERS
+// ====================
+
 router.get(
+
   "/users",
+
+  requireAdmin,
+
   (req,res)=>{
 
     const messages =
@@ -74,7 +131,7 @@ router.get(
       [...new Set(
 
         messages.map(
-          msg =>
+          msg=>
             msg.userId
         )
 
@@ -85,10 +142,19 @@ router.get(
     );
 
   }
+
 );
 
+// ====================
+// MARK READ
+// ====================
+
 router.post(
+
   "/mark-read",
+
+  requireAdmin,
+
   (req,res)=>{
 
     const {
@@ -99,9 +165,10 @@ router.post(
       loadMessages();
 
     messages.forEach(
+
       (msg)=>{
 
-        if (
+        if(
 
           msg.userId
           ===
@@ -113,7 +180,7 @@ router.post(
           ===
           "user"
 
-        ) {
+        ){
 
           msg.readByAdmin =
             true;
@@ -121,6 +188,7 @@ router.post(
         }
 
       }
+
     );
 
     saveMessages(
@@ -134,6 +202,7 @@ router.post(
     });
 
   }
+
 );
 
 module.exports =
