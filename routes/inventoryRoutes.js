@@ -102,7 +102,6 @@ router.post(
   (req,res)=>{
 
     const inventory =
-
       loadInventory();
 
     const item =
@@ -138,6 +137,106 @@ router.post(
 
     item.usedAt =
       Date.now();
+
+    saveInventory(
+      inventory
+    );
+
+    res.json({
+
+      success:true
+
+    });
+
+  }
+
+);
+
+// ====================
+// MARK UNUSED
+// ====================
+
+router.post(
+
+  "/inventory/mark-unused/:id",
+
+  (req,res)=>{
+
+    const inventory =
+      loadInventory();
+
+    const item =
+
+      inventory.find(
+
+        i=>
+
+          i.id
+          ===
+          req.params.id
+
+      );
+
+    if(
+
+      !item
+
+    ){
+
+      return res
+        .status(404)
+        .json({
+
+          success:false
+
+        });
+
+    }
+
+    item.used =
+      false;
+
+    item.usedAt =
+      null;
+
+    saveInventory(
+      inventory
+    );
+
+    res.json({
+
+      success:true
+
+    });
+
+  }
+
+);
+
+// ====================
+// DELETE ACCOUNT
+// ====================
+
+router.delete(
+
+  "/inventory/delete/:id",
+
+  (req,res)=>{
+
+    let inventory =
+      loadInventory();
+
+    inventory =
+
+      inventory.filter(
+
+        item=>
+
+          item.id
+          !==
+          req.params.id
+
+      );
 
     saveInventory(
       inventory
