@@ -408,7 +408,63 @@ async function markUsed(
   loadInventory();
 
 }
+async function markUnused(
 
+  id
+
+){
+
+  await fetch(
+
+    `/inventory/mark-unused/${id}`,
+
+    {
+
+      method:"POST"
+
+    }
+
+  );
+
+  loadInventory();
+
+}
+
+async function deleteAccount(
+
+  id
+
+){
+
+  if(
+
+    !confirm(
+
+      "Delete account?"
+
+    )
+
+  ){
+
+    return;
+
+  }
+
+  await fetch(
+
+    `/inventory/delete/${id}`,
+
+    {
+
+      method:"DELETE"
+
+    }
+
+  );
+
+  loadInventory();
+
+}
 async function loadInventory(){
 
   const res =
@@ -524,7 +580,9 @@ ${category}
 
 </div>
 
-${grouped[
+${
+
+grouped[
   category
 ]
 
@@ -581,8 +639,30 @@ Mark Used
 `
 
 <button
+
+onclick="markUnused(
+
+'${item.id}'
+
+)"
+
+style="
+background:#2563eb;
+margin-right:8px;
+"
+
+>
+
+Unused
+
+</button>
+
+<button
+
 class="usedDone"
+
 disabled
+
 >
 
 Used ✓
@@ -592,6 +672,25 @@ Used ✓
 `
 
 }
+
+<button
+
+onclick="deleteAccount(
+
+'${item.id}'
+
+)"
+
+style="
+background:#dc2626;
+margin-left:8px;
+"
+
+>
+
+Delete
+
+</button>
 
 </div>
 
@@ -611,7 +710,6 @@ Used ✓
   );
 
 }
-
 loadCategories();
 
 loadInventory();
