@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<title>
+
+Inventory
+
+</title>
+
+<style>
+
+body{
+
+  background:#020617;
+
+  color:white;
+
+  font-family:
+    'Segoe UI',
+    sans-serif;
+
+  padding:30px;
+
+}
+
+input,select{
+
+  width:100%;
+
+  padding:12px;
+
+  border:none;
+
+  border-radius:10px;
+
+  background:#1e293b;
+
+  color:white;
+
+}
+
+button{
+
+  border:none;
+
+  border-radius:10px;
+
+  padding:12px 18px;
+
+  cursor:pointer;
+
+  color:white;
+
+}
+
+.saveBtn{
+
+  background:#22c55e;
+
+}
+
+.usedBtn{
+
+  background:#eab308;
+
+}
+
+.usedDone{
+
+  background:#16a34a;
+
+  cursor:default;
+
+}
+
+.card{
+
+  background:#0f172a;
+
+  border-radius:16px;
+
+  padding:20px;
+
+  margin-bottom:20px;
+
+}
+
+.grid{
+
+  display:grid;
+
+  grid-template-columns:
+
+    repeat(
+      auto-fit,
+      minmax(
+        220px,
+        1fr
+      )
+    );
+
+  gap:16px;
+
+}
+
+.account{
+
+  background:#111827;
+
+  padding:14px;
+
+  border-radius:12px;
+
+  margin-bottom:10px;
+
+}
+
+.used{
+
+  opacity:.55;
+
+}
+
+.categoryHeader{
+
+  display:flex;
+
+  justify-content:
+    space-between;
+
+  margin-bottom:12px;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>
+
+Inventory
+
+</h1>
+
+<div class="card">
+
+<div class="grid">
+
+<div>
+
+<select
+id="category"
+>
+
+</select>
+
+</div>
+
+<div>
+
+<input
+id="newCategory"
+placeholder="New Category"
+>
+
+</div>
+
+<div>
+
+<input
+id="username"
+placeholder="Username"
+>
+
+</div>
+
+<div>
+
+<input
+id="password"
+placeholder="Password"
+>
+
+</div>
+
+</div>
+
+<br>
+
+<button
+
+class="saveBtn"
+
+onclick="addAccount()"
+
+>
+
+Add Account
+
+</button>
+
+</div>
+
+<input
+
+id="search"
+
+placeholder="Search..."
+
+oninput="loadInventory()"
+
+>
+
+<br><br>
+
+<div
+id="inventoryList"
+>
+
+</div>
+
+<script>
+
+function loadCategories(){
+
+  const cats =
+
+    JSON.parse(
+
+      localStorage.getItem(
+        "inventoryCategories"
+      )
+
+      ||
+
+      '["Rust","Steam","Twitch"]'
+
+    );
+
+  const select =
+
+    document
+      .getElementById(
+        "category"
+      );
+
+  select.innerHTML="";
+
+  cats.forEach(
+
+    cat=>{
+
+      select.innerHTML +=
+
+`
+<option>
+
+${cat}
+
+</option>
+`;
+
+    }
+
+  );
+
+}
+
+async function addAccount(){
+
+  const newCat =
+
+    document
+      .getElementById(
+        "newCategory"
+      )
+      .value
+      .trim();
+
+  if(
+
+    newCat
+
+  ){
+
+    const cats =
+
+      JSON.parse(
+
+        localStorage.getItem(
+          "inventoryCategories"
+        )
+
+        ||
+
+        "[]"
+
+      );
+
+    if(
+
+      !cats.includes(
+        newCat
+      )
+
+    ){
+
+      cats.push(
+        newCat
+      );
+
+      localStorage.setItem(
+
+        "inventoryCategories",
+
+        JSON.stringify(
+          cats
+        )
+
+      );
+
+    }
+
+    loadCategories();
+
+    document
+      .getElementById(
+        "category"
+      )
+      .value =
+        newCat;
+
+  }
+
+  await fetch(
+
+    "/inventory/add",
+
+    {
+
+      method:"POST",
+
+      headers:{
+
+        "Content-Type":
+          "application/json"
+
+      },
+
+      body:JSON.stringify({
+
+        category:
+
+          document
+            .getElementById(
+              "category"
+            )
+            .value,
+
+        username:
+
+          document
+            .getElementById(
+              "username"
+            )
+            .value,
+
+        password:
+
+          document
+            .getElementById(
+              "password"
+            )
+            .value
+
+      })
+
+    }
+
+  );
+
+  loadInventory();
+
+}
+
+async function markUsed(
+
+  id
+
+){
+
+  await fetch(
+
+    `/inventory/mark-used/${id}`,
+
+    {
+
+      method:"POST"
+
+    }
+
+  );
+
+  loadInventory();
+
+}
+
+async function loadInventory(){
+
+  const res =
+
+    await fetch(
+      "/inventory/list"
+    );
+
+  const data =
+
+    await res.json();
+
+  const search =
+
+    document
+      .getElementById(
+        "search"
+      )
+      .value
+      .toLowerCase();
+
+  const list =
+
+    document
+      .getElementById(
+        "inventoryList"
+      );
+
+  list.innerHTML="";
+
+  const grouped = {};
+
+  data.forEach(
+
+    item=>{
+
+      if(
+
+        search
+
+        &&
+
+        !JSON.stringify(
+          item
+        )
+
+        .toLowerCase()
+
+        .includes(
+          search
+        )
+
+      ){
+
+        return;
+
+      }
+
+      if(
+
+        !grouped[
+          item.category
+        ]
+
+      ){
+
+        grouped[
+          item.category
+        ]=[];
+
+      }
+
+      grouped[
+        item.category
+      ]
+
+      .push(
+        item
+      );
+
+    }
+
+  );
+
+  Object.keys(
+
+    grouped
+
+  )
+
+  .sort()
+
+  .forEach(
+
+    category=>{
+
+      list.innerHTML +=
+
+`
+<div class="card">
+
+<div class="categoryHeader">
+
+<h2>
+
+${category}
+
+(${grouped[
+  category
+].length})
+
+</h2>
+
+</div>
+
+${grouped[
+  category
+]
+
+.map(
+
+item=>`
+
+<div class="account ${
+
+item.used
+?
+"used"
+:
+""
+
+}">
+
+${item.username}
+
+|
+
+${item.password}
+
+<br><br>
+
+${
+
+!item.used
+
+?
+
+`
+
+<button
+
+class="usedBtn"
+
+onclick="markUsed(
+
+'${item.id}'
+
+)"
+
+>
+
+Mark Used
+
+</button>
+
+`
+
+:
+
+`
+
+<button
+class="usedDone"
+disabled
+>
+
+Used ✓
+
+</button>
+
+`
+
+}
+
+</div>
+
+`
+
+)
+
+.join("")
+
+}
+
+</div>
+`;
+
+    }
+
+  );
+
+}
+
+loadCategories();
+
+loadInventory();
+
+</script>
+
+</body>
+
+</html>

@@ -93,6 +93,10 @@ const itemRoutes =
   require(
     "./routes/itemRoutes"
   );
+const inventoryRoutes =
+  require(
+    "./routes/inventoryRoutes"
+  );
 const chatSocket =
   require("./socket/chatSocket");
 
@@ -460,6 +464,13 @@ app.use(
   requireAdmin,
 
   itemRoutes
+
+);
+app.use(
+
+  requireAdmin,
+
+  inventoryRoutes
 
 );
 // =========================
