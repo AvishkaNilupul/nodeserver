@@ -165,6 +165,12 @@ id="category"
 <input
 id="newCategory"
 placeholder="New Category"
+style="margin-bottom:10px;"
+>
+
+<input
+id="categoryNote"
+placeholder="Category Note"
 >
 
 </div>
@@ -225,6 +231,34 @@ id="inventoryList"
 
 <script>
 
+const categoryNotes =
+
+  JSON.parse(
+
+    localStorage.getItem(
+      "inventoryCategoryNotes"
+    )
+
+    ||
+
+    "{}"
+
+  );
+
+const collapsedCategories =
+
+  JSON.parse(
+
+    localStorage.getItem(
+      "inventoryCollapsed"
+    )
+
+    ||
+
+    "{}"
+
+  );
+
 function loadCategories(){
 
   const cats =
@@ -256,13 +290,7 @@ function loadCategories(){
 
       select.innerHTML +=
 
-`
-<option>
-
-${cat}
-
-</option>
-`;
+`<option>${cat}</option>`;
 
     }
 
@@ -280,6 +308,49 @@ async function addAccount(){
       )
       .value
       .trim();
+
+  const selectedCategory =
+
+    document
+      .getElementById(
+        "category"
+      )
+      .value;
+
+  const note =
+
+    document
+      .getElementById(
+        "categoryNote"
+      )
+      .value
+      .trim();
+
+  if(
+
+    note
+
+  ){
+
+    categoryNotes[
+
+      newCat ||
+
+      selectedCategory
+
+    ] = note;
+
+    localStorage.setItem(
+
+      "inventoryCategoryNotes",
+
+      JSON.stringify(
+        categoryNotes
+      )
+
+    );
+
+  }
 
   if(
 
@@ -386,12 +457,7 @@ async function addAccount(){
   loadInventory();
 
 }
-
-async function markUsed(
-
-  id
-
-){
+async function markUsed(id){
 
   await fetch(
 
@@ -408,11 +474,8 @@ async function markUsed(
   loadInventory();
 
 }
-async function markUnused(
 
-  id
-
-){
+async function markUnused(id){
 
   await fetch(
 
@@ -430,18 +493,12 @@ async function markUnused(
 
 }
 
-async function deleteAccount(
-
-  id
-
-){
+async function deleteAccount(id){
 
   if(
 
     !confirm(
-
       "Delete account?"
-
     )
 
   ){
@@ -465,6 +522,37 @@ async function deleteAccount(
   loadInventory();
 
 }
+
+function toggleCategory(
+
+  category
+
+){
+
+  collapsedCategories[
+    category
+  ] =
+
+    !collapsedCategories[
+      category
+    ];
+
+  localStorage.setItem(
+
+    "inventoryCollapsed",
+
+    JSON.stringify(
+
+      collapsedCategories
+
+    )
+
+  );
+
+  loadInventory();
+
+}
+
 async function loadInventory(){
 
   const res =
@@ -568,6 +656,8 @@ async function loadInventory(){
 
 <div class="categoryHeader">
 
+<div>
+
 <h2>
 
 ${category}
@@ -578,9 +668,86 @@ ${category}
 
 </h2>
 
+${
+
+categoryNotes[
+  category
+]
+
+?
+
+`
+
+<div
+style="
+color:#94a3b8;
+font-size:13px;
+margin-top:6px;
+"
+
+>
+
+${categoryNotes[
+  category
+]}
+
+</div>
+
+`
+
+:
+
+""
+
+}
+
+</div>
+
+<button
+
+onclick="toggleCategory(
+
+'${category}'
+
+)"
+
+style="
+background:#334155;
+"
+
+>
+
+${
+
+collapsedCategories[
+  category
+]
+
+?
+
+"Expand"
+
+:
+
+"Collapse"
+
+}
+
+</button>
+
 </div>
 
 ${
+
+collapsedCategories[
+  category
+]
+
+?
+
+""
+
+:
 
 grouped[
   category
@@ -617,15 +784,8 @@ ${
 `
 
 <button
-
 class="usedBtn"
-
-onclick="markUsed(
-
-'${item.id}'
-
-)"
-
+onclick="markUsed('${item.id}')"
 >
 
 Mark Used
@@ -639,18 +799,11 @@ Mark Used
 `
 
 <button
-
-onclick="markUnused(
-
-'${item.id}'
-
-)"
-
+onclick="markUnused('${item.id}')"
 style="
 background:#2563eb;
 margin-right:8px;
 "
-
 >
 
 Unused
@@ -658,11 +811,8 @@ Unused
 </button>
 
 <button
-
 class="usedDone"
-
 disabled
-
 >
 
 Used ✓
@@ -674,18 +824,11 @@ Used ✓
 }
 
 <button
-
-onclick="deleteAccount(
-
-'${item.id}'
-
-)"
-
+onclick="deleteAccount('${item.id}')"
 style="
 background:#dc2626;
 margin-left:8px;
 "
-
 >
 
 Delete
@@ -710,6 +853,7 @@ Delete
   );
 
 }
+
 loadCategories();
 
 loadInventory();
