@@ -374,6 +374,31 @@ app.get(
   }
 
 );
+app.get(
+
+  "/inventory",
+
+  requireAdmin,
+
+  (req,res)=>{
+
+    res.sendFile(
+
+      path.join(
+
+        __dirname,
+
+        "admin-pages",
+
+        "inventory.html"
+
+      )
+
+    );
+
+  }
+
+);
 app.use(
 
   express.static(
