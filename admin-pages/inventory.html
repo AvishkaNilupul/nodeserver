@@ -227,6 +227,9 @@ onclick="addAccount()"
 >
 
 Add Account
+
+</button>
+
 <button
 
 onclick="bulkAdd()"
@@ -240,7 +243,6 @@ margin-left:10px;
 
 Mass Add
 
-</button>
 </button>
 
 </div>
@@ -266,76 +268,48 @@ id="inventoryList"
 <script>
 
 const categoryNotes =
-
   JSON.parse(
-
     localStorage.getItem(
       "inventoryCategoryNotes"
-    )
-
-    ||
-
-    "{}"
-
+    ) || "{}"
   );
 
 const collapsedCategories =
-
   JSON.parse(
-
     localStorage.getItem(
       "inventoryCollapsed"
-    )
-
-    ||
-
-    "{}"
-
+    ) || "{}"
   );
 
 function loadCategories(){
 
   const cats =
-
     JSON.parse(
-
       localStorage.getItem(
         "inventoryCategories"
-      )
-
-      ||
-
+      ) ||
       '["Rust","Steam","Twitch"]'
-
     );
 
   const select =
-
-    document
-      .getElementById(
-        "category"
-      );
+    document.getElementById(
+      "category"
+    );
 
   select.innerHTML="";
 
-  cats.forEach(
+  cats.forEach(cat=>{
 
-    cat=>{
+    select.innerHTML +=
+      `<option>${cat}</option>`;
 
-      select.innerHTML +=
-
-`<option>${cat}</option>`;
-
-    }
-
-  );
+  });
 
 }
 
 async function addAccount(){
 
   const newCat =
-
     document
       .getElementById(
         "newCategory"
@@ -344,7 +318,6 @@ async function addAccount(){
       .trim();
 
   const selectedCategory =
-
     document
       .getElementById(
         "category"
@@ -352,7 +325,6 @@ async function addAccount(){
       .value;
 
   const note =
-
     document
       .getElementById(
         "categoryNote"
@@ -360,58 +332,35 @@ async function addAccount(){
       .value
       .trim();
 
-  if(
-
-    note
-
-  ){
+  if(note){
 
     categoryNotes[
-
       newCat ||
-
       selectedCategory
-
     ] = note;
 
     localStorage.setItem(
-
       "inventoryCategoryNotes",
-
       JSON.stringify(
         categoryNotes
       )
-
     );
 
   }
 
-  if(
-
-    newCat
-
-  ){
+  if(newCat){
 
     const cats =
-
       JSON.parse(
-
         localStorage.getItem(
           "inventoryCategories"
-        )
-
-        ||
-
-        "[]"
-
+        ) || "[]"
       );
 
     if(
-
       !cats.includes(
         newCat
       )
-
     ){
 
       cats.push(
@@ -419,13 +368,8 @@ async function addAccount(){
       );
 
       localStorage.setItem(
-
         "inventoryCategories",
-
-        JSON.stringify(
-          cats
-        )
-
+        JSON.stringify(cats)
       );
 
     }
@@ -436,8 +380,7 @@ async function addAccount(){
       .getElementById(
         "category"
       )
-      .value =
-        newCat;
+      .value = newCat;
 
   }
 
@@ -450,16 +393,13 @@ async function addAccount(){
       method:"POST",
 
       headers:{
-
         "Content-Type":
-          "application/json"
-
+        "application/json"
       },
 
       body:JSON.stringify({
 
         category:
-
           document
             .getElementById(
               "category"
@@ -467,7 +407,6 @@ async function addAccount(){
             .value,
 
         username:
-
           document
             .getElementById(
               "username"
@@ -475,7 +414,6 @@ async function addAccount(){
             .value,
 
         password:
-
           document
             .getElementById(
               "password"
@@ -491,10 +429,10 @@ async function addAccount(){
   loadInventory();
 
 }
+
 async function bulkAdd(){
 
   const category =
-
     document
       .getElementById(
         "category"
@@ -502,7 +440,6 @@ async function bulkAdd(){
       .value;
 
   const raw =
-
     document
       .getElementById(
         "bulkInput"
@@ -510,16 +447,10 @@ async function bulkAdd(){
       .value
       .trim();
 
-  if(
-
-    !raw
-
-  ){
+  if(!raw){
 
     alert(
-
       "Paste accounts first."
-
     );
 
     return;
@@ -527,42 +458,25 @@ async function bulkAdd(){
   }
 
   const lines =
-
     raw.split("\n");
 
-  for(
-
-    const line
-
-    of
-
-    lines
-
-  ){
+  for(const line of lines){
 
     const parts =
-
       line
         .trim()
         .split(":");
 
     if(
-
-      parts.length
-      < 2
-
+      parts.length < 2
     ){
-
       continue;
-
     }
 
     const username =
-      parts[0]
-      .trim();
+      parts[0].trim();
 
     const password =
-
       parts
         .slice(1)
         .join(":")
@@ -577,18 +491,14 @@ async function bulkAdd(){
         method:"POST",
 
         headers:{
-
           "Content-Type":
-            "application/json"
-
+          "application/json"
         },
 
         body:JSON.stringify({
 
           category,
-
           username,
-
           password
 
         })
@@ -603,11 +513,12 @@ async function bulkAdd(){
     .getElementById(
       "bulkInput"
     )
-    .value = "";
+    .value="";
 
   loadInventory();
 
 }
+
 async function markUsed(id){
 
   await fetch(
@@ -615,9 +526,7 @@ async function markUsed(id){
     `/inventory/mark-used/${id}`,
 
     {
-
       method:"POST"
-
     }
 
   );
@@ -633,9 +542,7 @@ async function markUnused(id){
     `/inventory/mark-unused/${id}`,
 
     {
-
       method:"POST"
-
     }
 
   );
@@ -647,15 +554,11 @@ async function markUnused(id){
 async function deleteAccount(id){
 
   if(
-
     !confirm(
       "Delete account?"
     )
-
   ){
-
     return;
-
   }
 
   await fetch(
@@ -663,9 +566,7 @@ async function deleteAccount(id){
     `/inventory/delete/${id}`,
 
     {
-
       method:"DELETE"
-
     }
 
   );
@@ -673,58 +574,34 @@ async function deleteAccount(id){
   loadInventory();
 
 }
-function deleteCategory(
 
-  category
-
-){
+function deleteCategory(category){
 
   if(
-
     !confirm(
-
       `Delete category "${category}" ?`
-
     )
-
   ){
-
     return;
-
   }
 
   let cats =
-
     JSON.parse(
-
       localStorage.getItem(
         "inventoryCategories"
-      )
-
-      ||
-
-      "[]"
-
+      ) || "[]"
     );
 
   cats =
-
     cats.filter(
-
-      c=>
-
-        c !==
-        category
-
+      c=>c!==category
     );
 
   localStorage.setItem(
 
     "inventoryCategories",
 
-    JSON.stringify(
-      cats
-    )
+    JSON.stringify(cats)
 
   );
 
@@ -743,29 +620,18 @@ function deleteCategory(
   );
 
   loadCategories();
-
   loadInventory();
 
 }
 
-function editCategoryNote(
-
-  category
-
-){
+function editCategoryNote(category){
 
   const current =
-
     categoryNotes[
       category
-    ]
-
-    ||
-
-    "";
+    ] || "";
 
   const newNote =
-
     prompt(
 
       `Edit note for ${category}`,
@@ -775,15 +641,9 @@ function editCategoryNote(
     );
 
   if(
-
-    newNote
-    ===
-    null
-
+    newNote===null
   ){
-
     return;
-
   }
 
   categoryNotes[
@@ -803,28 +663,23 @@ function editCategoryNote(
   loadInventory();
 
 }
-function toggleCategory(
 
-  category
-
-){
+function toggleCategory(category){
 
   collapsedCategories[
     category
   ] =
 
-    !collapsedCategories[
-      category
-    ];
+  !collapsedCategories[
+    category
+  ];
 
   localStorage.setItem(
 
     "inventoryCollapsed",
 
     JSON.stringify(
-
       collapsedCategories
-
     )
 
   );
@@ -836,17 +691,14 @@ function toggleCategory(
 async function loadInventory(){
 
   const res =
-
     await fetch(
       "/inventory/list"
     );
 
   const data =
-
     await res.json();
 
   const search =
-
     document
       .getElementById(
         "search"
@@ -855,7 +707,6 @@ async function loadInventory(){
       .toLowerCase();
 
   const list =
-
     document
       .getElementById(
         "inventoryList"
@@ -863,73 +714,55 @@ async function loadInventory(){
 
   list.innerHTML="";
 
-  const grouped = {};
+  const grouped={};
 
-  data.forEach(
+  data.forEach(item=>{
 
-    item=>{
+    if(
 
-      if(
+      search &&
 
+      !JSON.stringify(
+        item
+      )
+
+      .toLowerCase()
+
+      .includes(
         search
+      )
 
-        &&
+    ){
+      return;
+    }
 
-        !JSON.stringify(
-          item
-        )
-
-        .toLowerCase()
-
-        .includes(
-          search
-        )
-
-      ){
-
-        return;
-
-      }
-
-      if(
-
-        !grouped[
-          item.category
-        ]
-
-      ){
-
-        grouped[
-          item.category
-        ]=[];
-
-      }
+    if(
+      !grouped[
+        item.category
+      ]
+    ){
 
       grouped[
         item.category
-      ]
-
-      .push(
-        item
-      );
+      ]=[];
 
     }
 
-  );
+    grouped[
+      item.category
+    ]
 
-  Object.keys(
+    .push(item);
 
-    grouped
+  });
 
-  )
+  Object.keys(grouped)
 
   .sort()
 
-  .forEach(
+  .forEach(category=>{
 
-    category=>{
-
-      list.innerHTML +=
+    list.innerHTML +=
 
 `
 <div class="card">
@@ -964,7 +797,6 @@ color:#94a3b8;
 font-size:13px;
 margin-top:6px;
 "
-
 >
 
 ${categoryNotes[
@@ -986,57 +818,31 @@ ${categoryNotes[
 <div>
 
 <button
-
-onclick="editCategoryNote(
-
-'${category}'
-
-)"
-
+onclick="editCategoryNote('${category}')"
 style="
 background:#2563eb;
 margin-right:8px;
 "
-
 >
-
 Edit Note
-
 </button>
 
 <button
-
-onclick="deleteCategory(
-
-'${category}'
-
-)"
-
+onclick="deleteCategory('${category}')"
 style="
 background:#dc2626;
 margin-right:8px;
 "
-
 >
-
 Delete Cat
-
 </button>
 
 <button
-
-onclick="toggleCategory(
-
-'${category}'
-
-)"
-
+onclick="toggleCategory('${category}')"
 style="
 background:#334155;
 "
-
 >
-
 ${
 
 collapsedCategories[
@@ -1052,38 +858,9 @@ collapsedCategories[
 "Collapse"
 
 }
-
 </button>
 
 </div>
-
-'${category}'
-
-)"
-
-style="
-background:#334155;
-"
-
->
-
-${
-
-collapsedCategories[
-  category
-]
-
-?
-
-"Expand"
-
-:
-
-"Collapse"
-
-}
-
-</button>
 
 </div>
 
@@ -1137,9 +914,7 @@ ${
 class="usedBtn"
 onclick="markUsed('${item.id}')"
 >
-
 Mark Used
-
 </button>
 
 `
@@ -1155,18 +930,14 @@ background:#2563eb;
 margin-right:8px;
 "
 >
-
 Unused
-
 </button>
 
 <button
 class="usedDone"
 disabled
 >
-
 Used ✓
-
 </button>
 
 `
@@ -1180,9 +951,7 @@ background:#dc2626;
 margin-left:8px;
 "
 >
-
 Delete
-
 </button>
 
 </div>
@@ -1198,14 +967,11 @@ Delete
 </div>
 `;
 
-    }
-
-  );
+  });
 
 }
 
 loadCategories();
-
 loadInventory();
 
 </script>
