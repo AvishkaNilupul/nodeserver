@@ -673,7 +673,136 @@ async function deleteAccount(id){
   loadInventory();
 
 }
+function deleteCategory(
 
+  category
+
+){
+
+  if(
+
+    !confirm(
+
+      `Delete category "${category}" ?`
+
+    )
+
+  ){
+
+    return;
+
+  }
+
+  let cats =
+
+    JSON.parse(
+
+      localStorage.getItem(
+        "inventoryCategories"
+      )
+
+      ||
+
+      "[]"
+
+    );
+
+  cats =
+
+    cats.filter(
+
+      c=>
+
+        c !==
+        category
+
+    );
+
+  localStorage.setItem(
+
+    "inventoryCategories",
+
+    JSON.stringify(
+      cats
+    )
+
+  );
+
+  delete categoryNotes[
+    category
+  ];
+
+  localStorage.setItem(
+
+    "inventoryCategoryNotes",
+
+    JSON.stringify(
+      categoryNotes
+    )
+
+  );
+
+  loadCategories();
+
+  loadInventory();
+
+}
+
+function editCategoryNote(
+
+  category
+
+){
+
+  const current =
+
+    categoryNotes[
+      category
+    ]
+
+    ||
+
+    "";
+
+  const newNote =
+
+    prompt(
+
+      `Edit note for ${category}`,
+
+      current
+
+    );
+
+  if(
+
+    newNote
+    ===
+    null
+
+  ){
+
+    return;
+
+  }
+
+  categoryNotes[
+    category
+  ] = newNote;
+
+  localStorage.setItem(
+
+    "inventoryCategoryNotes",
+
+    JSON.stringify(
+      categoryNotes
+    )
+
+  );
+
+  loadInventory();
+
+}
 function toggleCategory(
 
   category
@@ -854,9 +983,79 @@ ${categoryNotes[
 
 </div>
 
+<div>
+
+<button
+
+onclick="editCategoryNote(
+
+'${category}'
+
+)"
+
+style="
+background:#2563eb;
+margin-right:8px;
+"
+
+>
+
+Edit Note
+
+</button>
+
+<button
+
+onclick="deleteCategory(
+
+'${category}'
+
+)"
+
+style="
+background:#dc2626;
+margin-right:8px;
+"
+
+>
+
+Delete Cat
+
+</button>
+
 <button
 
 onclick="toggleCategory(
+
+'${category}'
+
+)"
+
+style="
+background:#334155;
+"
+
+>
+
+${
+
+collapsedCategories[
+  category
+]
+
+?
+
+"Expand"
+
+:
+
+"Collapse"
+
+}
+
+</button>
+
+</div>
 
 '${category}'
 
