@@ -190,7 +190,28 @@ placeholder="Username"
 id="password"
 placeholder="Password"
 >
+<textarea
 
+id="bulkInput"
+
+placeholder="Mass Add
+
+username:password
+user2:pass2
+user3:pass3"
+
+style="
+width:100%;
+height:160px;
+padding:12px;
+border:none;
+border-radius:10px;
+background:#1e293b;
+color:white;
+resize:vertical;
+"
+
+></textarea>
 </div>
 
 </div>
@@ -206,7 +227,20 @@ onclick="addAccount()"
 >
 
 Add Account
+<button
 
+onclick="bulkAdd()"
+
+style="
+background:#2563eb;
+margin-left:10px;
+"
+
+>
+
+Mass Add
+
+</button>
 </button>
 
 </div>
@@ -453,6 +487,123 @@ async function addAccount(){
     }
 
   );
+
+  loadInventory();
+
+}
+async function bulkAdd(){
+
+  const category =
+
+    document
+      .getElementById(
+        "category"
+      )
+      .value;
+
+  const raw =
+
+    document
+      .getElementById(
+        "bulkInput"
+      )
+      .value
+      .trim();
+
+  if(
+
+    !raw
+
+  ){
+
+    alert(
+
+      "Paste accounts first."
+
+    );
+
+    return;
+
+  }
+
+  const lines =
+
+    raw.split("\n");
+
+  for(
+
+    const line
+
+    of
+
+    lines
+
+  ){
+
+    const parts =
+
+      line
+        .trim()
+        .split(":");
+
+    if(
+
+      parts.length
+      < 2
+
+    ){
+
+      continue;
+
+    }
+
+    const username =
+      parts[0]
+      .trim();
+
+    const password =
+
+      parts
+        .slice(1)
+        .join(":")
+        .trim();
+
+    await fetch(
+
+      "/inventory/add",
+
+      {
+
+        method:"POST",
+
+        headers:{
+
+          "Content-Type":
+            "application/json"
+
+        },
+
+        body:JSON.stringify({
+
+          category,
+
+          username,
+
+          password
+
+        })
+
+      }
+
+    );
+
+  }
+
+  document
+    .getElementById(
+      "bulkInput"
+    )
+    .value = "";
 
   loadInventory();
 
