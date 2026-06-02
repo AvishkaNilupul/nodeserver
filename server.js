@@ -518,167 +518,30 @@ app.post("/submit-gamertag", async (req,res)=>{
 
   try{
 
-    let { gamerTag } =
-        req.body;
+    let { gamerTag } = req.body;
 
-      gamerTag =
-
-        validator
-          .escape(
-
-            String(
-              gamerTag || ""
-            )
-
-          )
-          .trim();
-
-    // =========================
-    // Global Limit
-    // =========================
-
-    const now =
-      Date.now();
-
-    // remove expired
-
-    globalEntries =
-
-      globalEntries.filter(
-
-        time =>
-
-          now - time
-          <
-          WINDOW_MS
-
-      );
-
-    // limit reached
-
-    if(
-
-      globalEntries.length
-      >=
-      MAX_USERS
-
-    ){
-
-      return res.status(429)
-
-      .json({
-
-        success:false,
-
-        message:
-
-          "Server busy. Please try again later."
-
-      });
-
-    }
-
-    // consume slot
-
-    globalEntries.push(
-      now
-    );
+    gamerTag = validator
+      .escape(String(gamerTag || ""))
+      .trim();
 
     if(!gamerTag){
 
-      return res.status(400)
-      .json({
-
+      return res.status(400).json({
         success:false,
-
-        message:
-          "Missing gamer tag"
-
+        message:"Missing gamer tag"
       });
 
     }
-    const ip =
 
-      req.headers[
-        "cf-connecting-ip"
-      ]
+    console.log(
+      "GamerTag received:",
+      gamerTag
+    );
 
-      ||
+    // TEMP: skip telegram completely
 
-      req.headers[
-        "x-forwarded-for"
-      ]?.split(",")[0]
-
-      ||
-
-      req.socket
-        .remoteAddress
-
-      ||
-
-      "Unknown";
-
-      console.log({
-
-        cf:
-
-          req.headers[
-            "cf-connecting-ip"
-          ],
-
-        forwarded:
-
-          req.headers[
-            "x-forwarded-for"
-          ],
-
-        remote:
-
-          req.socket
-            .remoteAddress,
-
-        finalIp:
-          ip
-
-      });
-
-    const chatIds =
-
-      process.env
-        .TG_CHAT_IDS
-        .split(",");
-
-    for(const chatId of chatIds){
-
-      await axios.post(
-
-        `https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`,
-
-        {
-
-          chat_id:
-            chatId.trim(),
-
-          text:
-`🎮 NEW GAMER TAG
-
-Tag: ${gamerTag}
-
-IP: ${ip}
-
-Time:
-${new Date().toISOString()}`
-
-        }
-
-      );
-
-    }
-
-    res.json({
-
+    return res.json({
       success:true
-
     });
 
   }
@@ -686,21 +549,12 @@ ${new Date().toISOString()}`
   catch(err){
 
     console.error(
-
-      "Telegram error:",
-
-      err.response?.data ||
-
-      err.message
-
+      "submit-gamertag error:",
+      err
     );
 
-    res.status(500)
-
-    .json({
-
+    return res.status(500).json({
       success:false
-
     });
 
   }
