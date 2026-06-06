@@ -36,7 +36,19 @@ function loadOrderIds(){
 
   try{
 
-    return JSON.parse(
+    console.log(
+      "ORDER FILE:",
+      orderIdsFile
+    );
+
+    console.log(
+      "FILE EXISTS:",
+      fs.existsSync(
+        orderIdsFile
+      )
+    );
+
+    const raw =
 
       fs.readFileSync(
 
@@ -44,20 +56,31 @@ function loadOrderIds(){
 
         "utf8"
 
-      )
+      );
 
+    console.log(
+      "RAW FILE:",
+      raw
+    );
+
+    return JSON.parse(
+      raw
     );
 
   }
 
-  catch{
+  catch(err){
+
+    console.log(
+      "LOAD ERROR:",
+      err
+    );
 
     return [];
 
   }
 
 }
-
 function saveOrderIds(
 
   orderIds
