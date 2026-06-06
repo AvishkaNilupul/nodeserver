@@ -430,10 +430,12 @@ console.log(req.body);
         });
 
     }
+    console.log("LOADING ORDER IDS");
 
     const orderIds =
 
       loadOrderIds();
+      console.log(orderIds);
 
     const order =
 

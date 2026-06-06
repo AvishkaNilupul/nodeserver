@@ -390,13 +390,17 @@ body:JSON.stringify({
     const data =
       await response.json();
 
-    if(!data.success){
+if(!data.success){
 
-      throw new Error(
-        "Submit failed"
-      );
+  throw new Error(
 
-    }
+    data.message ||
+
+    "Submit failed"
+
+  );
+
+}
 
     localStorage.setItem(
 
@@ -430,18 +434,18 @@ body:JSON.stringify({
 
   }
 
-  catch(err){
+catch(err){
 
-    console.error(err);
+  console.error(err);
 
-    message.innerText =
-      "Something went wrong";
+  message.innerText =
+    err.message;
 
-    message.classList.add(
-      "error"
-    );
+  message.classList.add(
+    "error"
+  );
 
-  }
+}
 
   finally{
 
