@@ -335,8 +335,6 @@ app.use(
 app.post("/submit-gamertag", async (req,res)=>{
 
   try{
-    console.log("SUBMIT REQUEST");
-console.log(req.body);
 
     let {
 
@@ -436,12 +434,11 @@ console.log(req.body);
         });
 
     }
-    console.log("LOADING ORDER IDS");
+
 
     const orderIds =
 
       loadOrderIds();
-      console.log(orderIds);
 
     const order =
 
@@ -642,6 +639,7 @@ console.error(
 app.use(
   adminAuthRoutes
 );
+
 app.get(
 
   "/orders",
@@ -667,43 +665,7 @@ app.get(
   }
 
 );
-app.get(
 
-  "/orders",
-
-  requireAdmin,
-
-  (req,res)=>{
-
-    res.sendFile(
-
-      path.join(
-
-        __dirname,
-
-        "admin-pages",
-
-        "orders.html"
-
-      )
-
-    );
-
-  }
-
-);
-const orderRoutes =
-  require(
-    "./routes/orderRoutes"
-  );
-
-app.use(
-
-  requireAdmin,
-
-  orderRoutes
-
-);
 app.get(
 
   "/admin.html",
