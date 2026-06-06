@@ -167,12 +167,19 @@ if(order){
 
     "admin",
 
+`[ACCOUNT]
+${order.username}
+${order.password}`
+
+  );
+
+  addMessage(
+
+    userId,
+
+    "admin",
+
 `📋 TWITCH DROP GUIDE
-
-🔑 Login
-
-User: ${order.username}
-Pass: ${order.password}
 
 1. Log in → https://www.twitch.tv/drops/inventory
 
@@ -201,7 +208,6 @@ Rust:
   );
 
 }
-
   messages =
     loadMessages();
 
