@@ -329,6 +329,8 @@ app.use(
 app.post("/submit-gamertag", async (req,res)=>{
 
   try{
+    console.log("SUBMIT REQUEST");
+console.log(req.body);
 
     let {
 
@@ -608,15 +610,15 @@ ${new Date().toISOString()}`
 
   catch(err){
 
-    console.error(
+console.error(
+  "SUBMIT ERROR:"
+);
 
-      "Telegram error:",
+console.error(err);
 
-      err.response?.data ||
-
-      err.message
-
-    );
+console.error(
+  err.stack
+);
 
     res.status(500)
 
