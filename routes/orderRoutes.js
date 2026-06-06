@@ -43,11 +43,13 @@ router.post(
 
   (req,res)=>{
 
-    const {
+const {
 
-      orderId
+  orderId,
+  username,
+  password
 
-    } = req.body;
+} = req.body;
 
     if(
 
@@ -69,25 +71,33 @@ router.post(
 
       loadOrderIds();
 
-    orders.push({
+orders.push({
 
-      id:
-        Date.now()
-        .toString(),
+  id:
+    Date.now()
+    .toString(),
 
-      orderId:
-        orderId.trim(),
+  orderId:
+    orderId.trim(),
 
-      used:false,
+  username:
+    (username || "")
+    .trim(),
 
-      gamerTag:null,
+  password:
+    (password || "")
+    .trim(),
 
-      usedAt:null,
+  used:false,
 
-      createdAt:
-        Date.now()
+  gamerTag:null,
 
-    });
+  usedAt:null,
+
+  createdAt:
+    Date.now()
+
+});
 
     saveOrderIds(
       orders

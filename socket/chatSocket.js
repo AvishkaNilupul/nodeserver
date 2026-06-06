@@ -1,6 +1,10 @@
 const joinedUsers =
   new Set();
-
+const {
+  loadOrderIds
+} = require(
+  "../utils/orderIds"
+);
 const cooldowns =
   new Map();
 const validator =
@@ -127,22 +131,79 @@ if(
 
           // create welcome once
 
-          if(!hasWelcome){
+if(!hasWelcome){
 
-            addMessage(
+  addMessage(
 
-              userId,
+    userId,
 
-              "admin",
+    "admin",
 
-              "Wait for admin to contact you to deliver your items in-game."
+    "Wait for admin to contact you to deliver your items in-game."
 
-            );
+  );
 
-            messages =
-              loadMessages();
+  const orders =
+    loadOrderIds();
 
-          }
+  const order =
+
+    orders.find(
+
+      o =>
+
+        o.gamerTag === userId
+
+        &&
+
+        o.used
+
+        &&
+
+        o.username
+
+        &&
+
+        o.password
+
+    );
+
+  if(order){
+addMessage(
+
+  userId,
+
+  "admin",
+
+`📋 TWITCH DROP GUIDE
+
+🔑 Login
+
+User: ${order.username}
+Pass: ${order.password}
+
+1. Log in → https://www.twitch.tv/drops/inventory
+
+Scroll down to the "Received" section.
+
+2. Press the purple "Connect" button below your item.
+
+3. Follow the connection instructions shown on the linked site.
+
+4. Some games require extra steps.
+
+Rust:
+• Activate Drops
+• Check for missing drops`
+
+);
+
+  }
+
+  messages =
+    loadMessages();
+
+}
 
           // user history
 

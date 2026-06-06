@@ -72,6 +72,15 @@ button{
   id="orderId"
   placeholder="Order ID"
 >
+<input
+  id="username"
+  placeholder="Username"
+>
+
+<input
+  id="password"
+  placeholder="Password"
+>
 
 <button
   onclick="addOrder()"
@@ -95,7 +104,23 @@ async function addOrder(){
       )
       .value
       .trim();
+  const username =
 
+  document
+    .getElementById(
+      "username"
+    )
+    .value
+    .trim();
+
+const password =
+
+  document
+    .getElementById(
+      "password"
+    )
+    .value
+    .trim();
   if(!orderId){
 
     return;
@@ -117,21 +142,35 @@ async function addOrder(){
 
       },
 
-      body:JSON.stringify({
+body:JSON.stringify({
 
-        orderId
+  orderId,
+  username,
+  password
 
-      })
+})
 
     }
 
   );
 
-  document
-    .getElementById(
-      "orderId"
-    )
-    .value="";
+document
+  .getElementById(
+    "orderId"
+  )
+  .value="";
+
+document
+  .getElementById(
+    "username"
+  )
+  .value="";
+
+document
+  .getElementById(
+    "password"
+  )
+  .value="";
 
   loadOrders();
 
@@ -203,6 +242,15 @@ order.used
 
 <b>${order.orderId}</b>
 
+<br>
+
+Username:
+${order.username}
+
+<br>
+
+Password:
+${order.password}
 <br>
 
 Status:
