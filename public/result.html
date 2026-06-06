@@ -229,47 +229,66 @@ body{
 }
 .account-card{
 
-  background:
-    linear-gradient(
-      135deg,
-      #111827,
-      #1e293b
-    );
-
-  border:
-    1px solid
-    rgba(34,197,94,.4);
+  background:#111827;
 
   border-radius:16px;
 
-  padding:18px;
+  padding:20px;
 
-  min-width:300px;
+  width:100%;
+
+  max-width:420px;
+
+  border:1px solid rgba(34,197,94,.25);
 
 }
-
 .account-title{
 
   color:#22c55e;
 
+  font-size:22px;
+
   font-weight:700;
 
-  font-size:18px;
-
-  margin-bottom:15px;
+  margin-bottom:18px;
 
 }
-
 .account-row{
 
-  background:
-    rgba(255,255,255,.04);
+  background:#1e293b;
 
-  padding:12px;
+  padding:14px;
 
-  border-radius:10px;
+  border-radius:12px;
+
+  margin-bottom:12px;
+
+}
+.account-status{
+
+  color:#22c55e;
 
   margin-top:10px;
+
+  font-size:14px;
+
+}
+.account-value{
+
+  color:white;
+
+  font-size:16px;
+
+  font-weight:600;
+
+}
+.account-label{
+
+  color:#94a3b8;
+
+  font-size:13px;
+
+  margin-bottom:6px;
 
 }
 .chat-bottom{
@@ -665,7 +684,7 @@ if(
   const password =
     lines[2] || "";
 
-  div.innerHTML = `
+div.innerHTML = `
 
 <div class="account-card">
 
@@ -674,13 +693,27 @@ if(
 </div>
 
 <div class="account-row">
-<b>Username</b><br>
-${username}
+  <div class="account-label">
+    Username
+  </div>
+
+  <div class="account-value">
+    ${username}
+  </div>
 </div>
 
 <div class="account-row">
-<b>Password</b><br>
-${password}
+  <div class="account-label">
+    Password
+  </div>
+
+  <div class="account-value">
+    ${password}
+  </div>
+</div>
+
+<div class="account-status">
+✓ Ready to claim
 </div>
 
 </div>
