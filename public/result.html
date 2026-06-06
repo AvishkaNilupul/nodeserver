@@ -21,6 +21,19 @@
   padding:0;
   box-sizing:border-box;
 }
+.copy-btn{
+
+  margin-top:10px;
+
+  background:#22c55e;
+
+  padding:8px 12px;
+
+  border-radius:8px;
+
+  font-size:13px;
+
+}
 .upload-btn{
 
   padding:14px 18px;
@@ -237,7 +250,7 @@ body{
 
   width:100%;
 
-  max-width:420px;
+  max-width:520px;
 
   border:1px solid rgba(34,197,94,.25);
 
@@ -660,6 +673,17 @@ function addMessage(
     className
 
   );
+  if(
+  text.startsWith("[ACCOUNT]")
+){
+
+  div.style.background =
+    "transparent";
+
+  div.style.padding =
+    "0";
+
+}
 
   div.style.whiteSpace =
     "pre-wrap";
@@ -689,7 +713,7 @@ div.innerHTML = `
 <div class="account-card">
 
 <div class="account-title">
-🎮 Account Delivered
+🎁 Twitch Account Ready
 </div>
 
 <div class="account-row">
@@ -697,23 +721,35 @@ div.innerHTML = `
     Username
   </div>
 
-  <div class="account-value">
-    ${username}
-  </div>
+<div class="account-value">
+  ${username}
 </div>
+
+<button
+  class="copy-btn"
+  onclick="copyText('${username}')"
+>
+📋 Copy Username
+</button>
 
 <div class="account-row">
   <div class="account-label">
     Password
   </div>
 
-  <div class="account-value">
-    ${password}
-  </div>
+<div class="account-value">
+  ${password}
 </div>
 
+<button
+  class="copy-btn"
+  onclick="copyText('${password}')"
+>
+📋 Copy Password
+</button>
+
 <div class="account-status">
-✓ Ready to claim
+✓ Account delivered successfully
 </div>
 
 </div>
@@ -900,55 +936,38 @@ function sendMessage(){
 // =========================
 // Reply
 // =========================
+function copyText(text){
 
+  navigator.clipboard.writeText(
+    text
+  );
+
+}
 socket.on(
 
   "admin-reply",
 
   (data)=>{
 
-    if(
+    addMessage(
 
-      data.message
-        .startsWith(
-          "[IMAGE]"
-        )
+      data.message,
 
-    ){
+      "admin"
 
-      addMessage(
+    );
 
-        data.message,
-
-        "admin"
-
-      );
-
-    }
-
-    else{
-
-      addMessage(
-
-        `Support: ${data.message}`,
-
-        "admin"
-
-      );
-
-    }
     socket.emit(
 
-  "message-seen",
+      "message-seen",
 
-  gamerTag
+      gamerTag
 
-);
+    );
 
   }
 
 );
-
 document
   .getElementById(
     "imageUpload"
