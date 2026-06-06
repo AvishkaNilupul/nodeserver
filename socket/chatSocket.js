@@ -110,38 +110,27 @@ if(
 
           // welcome check
 
-          const hasWelcome =
+const hasWelcome =
 
-            messages.some(
+  messages.some(
 
-              msg=>
+    msg=>
 
-                msg.userId
-                ===
-                userId
+      msg.userId===userId
 
-                &&
+      &&
 
-                msg.message
-                ===
+      msg.message.includes(
+        "📋 TWITCH DROP GUIDE"
+      )
 
-                "Wait for admin to contact you to deliver your items in-game."
-
-            );
+  );
 
           // create welcome once
 
 if(!hasWelcome){
 
-  addMessage(
 
-    userId,
-
-    "admin",
-
-    "Wait for admin to contact you to deliver your items in-game."
-
-  );
 
   const orders =
     loadOrderIds();
@@ -168,12 +157,15 @@ if(!hasWelcome){
 
     );
 
-  if(order){
-addMessage(
 
-  userId,
 
-  "admin",
+if(order){
+
+  addMessage(
+
+    userId,
+
+    "admin",
 
 `📋 TWITCH DROP GUIDE
 
@@ -196,9 +188,19 @@ Rust:
 • Activate Drops
 • Check for missing drops`
 
-);
+  );
 
-  }
+  addMessage(
+
+    userId,
+
+    "admin",
+
+    "If you have any issue please text here. Admin will help you."
+
+  );
+
+}
 
   messages =
     loadMessages();
