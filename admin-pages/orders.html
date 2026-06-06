@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>Orders</title>
+
+<style>
+
+body{
+
+  font-family:sans-serif;
+
+  background:#0f172a;
+
+  color:white;
+
+  padding:20px;
+
+}
+
+input{
+
+  padding:10px;
+
+  width:300px;
+
+}
+
+button{
+
+  padding:10px;
+
+  margin-left:10px;
+
+  cursor:pointer;
+
+}
+
+.order{
+
+  background:#1e293b;
+
+  padding:12px;
+
+  margin-top:10px;
+
+  border-radius:8px;
+
+}
+
+.used{
+
+  border-left:4px solid #22c55e;
+
+}
+
+.unused{
+
+  border-left:4px solid #ef4444;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>Order Manager</h1>
+
+<input
+  id="orderId"
+  placeholder="Order ID"
+>
+
+<button
+  onclick="addOrder()"
+>
+Add Order
+</button>
+
+<hr>
+
+<div id="orders"></div>
+
+<script>
+
+async function addOrder(){
+
+  const orderId =
+
+    document
+      .getElementById(
+        "orderId"
+      )
+      .value
+      .trim();
+
+  if(!orderId){
+
+    return;
+
+  }
+
+  await fetch(
+
+    "/orders/add",
+
+    {
+
+      method:"POST",
+
+      headers:{
+
+        "Content-Type":
+        "application/json"
+
+      },
+
+      body:JSON.stringify({
+
+        orderId
+
+      })
+
+    }
+
+  );
+
+  document
+    .getElementById(
+      "orderId"
+    )
+    .value="";
+
+  loadOrders();
+
+}
+
+async function deleteOrder(id){
+
+  if(
+    !confirm(
+      "Delete order?"
+    )
+  ){
+    return;
+  }
+
+  await fetch(
+
+    `/orders/delete/${id}`,
+
+    {
+
+      method:"DELETE"
+
+    }
+
+  );
+
+  loadOrders();
+
+}
+
+async function loadOrders(){
+
+  const res =
+
+    await fetch(
+      "/orders/list"
+    );
+
+  const data =
+    await res.json();
+
+  const container =
+
+    document
+      .getElementById(
+        "orders"
+      );
+
+  container.innerHTML="";
+
+  data.forEach(order=>{
+
+    container.innerHTML += `
+
+<div class="order ${
+
+order.used
+
+?
+
+"used"
+
+:
+
+"unused"
+
+}">
+
+<b>${order.orderId}</b>
+
+<br>
+
+Status:
+
+${
+
+order.used
+
+?
+
+"USED"
+
+:
+
+"UNUSED"
+
+}
+
+<button
+style="
+float:right;
+background:red;
+color:white;
+"
+onclick="deleteOrder('${order.id}')"
+>
+Delete
+</button>
+
+</div>
+
+`;
+
+  });
+
+}
+
+loadOrders();
+
+</script>
+
+</body>
+</html>

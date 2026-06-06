@@ -55,7 +55,10 @@ const multer =
   require(
     "multer"
   );
-
+const orderRoutes =
+  require(
+    "./routes/orderRoutes"
+  );
 const adminAuthRoutes =
   require(
     "./routes/adminAuthRoutes"
@@ -207,6 +210,9 @@ const WINDOW_MS =
 // Middleware
 
 // =========================
+
+
+
 app.get(
 
   "/test-log",
@@ -636,7 +642,68 @@ console.error(
 app.use(
   adminAuthRoutes
 );
+app.get(
 
+  "/orders",
+
+  requireAdmin,
+
+  (req,res)=>{
+
+    res.sendFile(
+
+      path.join(
+
+        __dirname,
+
+        "admin-pages",
+
+        "orders.html"
+
+      )
+
+    );
+
+  }
+
+);
+app.get(
+
+  "/orders",
+
+  requireAdmin,
+
+  (req,res)=>{
+
+    res.sendFile(
+
+      path.join(
+
+        __dirname,
+
+        "admin-pages",
+
+        "orders.html"
+
+      )
+
+    );
+
+  }
+
+);
+const orderRoutes =
+  require(
+    "./routes/orderRoutes"
+  );
+
+app.use(
+
+  requireAdmin,
+
+  orderRoutes
+
+);
 app.get(
 
   "/admin.html",
@@ -809,6 +876,13 @@ app.use(
   requireAdmin,
 
   inventoryRoutes
+
+);
+app.use(
+
+  requireAdmin,
+
+  orderRoutes
 
 );
 // =========================
