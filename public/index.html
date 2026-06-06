@@ -239,11 +239,17 @@ button:disabled{
 
     <div class="redeem-form">
 
-      <input
-        id="gamerTag"
-        placeholder="Enter your gamer tag"
-        autocomplete="off"
-      >
+<input
+  id="gamerTag"
+  placeholder="Enter your gamer tag"
+  autocomplete="off"
+>
+
+<input
+  id="orderId"
+  placeholder="Enter your Order ID"
+  autocomplete="off"
+>
 
       <button
         onclick="submitTag()"
@@ -270,7 +276,21 @@ const existingTag =
     "gamerTag"
   );
 
-if(existingTag){
+const existingOrderId =
+
+  localStorage.getItem(
+    "orderId"
+  );
+
+if(
+
+  existingTag
+
+  &&
+
+  existingOrderId
+
+){
 
   window.location.href =
     "/result.html";
@@ -280,13 +300,21 @@ if(existingTag){
 async function submitTag(){
 
   const gamerTag =
+    
     document
       .getElementById(
         "gamerTag"
       )
       .value
       .trim();
+  const orderId =
 
+  document
+    .getElementById(
+      "orderId"
+    )
+    .value
+    .trim();
   const message =
     document
       .getElementById(
@@ -302,18 +330,27 @@ async function submitTag(){
   message.innerText = "";
   message.className = "";
 
-  if(!gamerTag){
+if(
 
-    message.innerText =
-      "Please enter your gamer tag";
+  !gamerTag
 
-    message.classList.add(
-      "error"
-    );
+  ||
 
-    return;
+  !orderId
 
-  }
+){
+
+  message.innerText =
+
+    "Please enter gamer tag and order ID";
+
+  message.classList.add(
+    "error"
+  );
+
+  return;
+
+}
 
   btn.disabled = true;
 
@@ -338,11 +375,13 @@ async function submitTag(){
 
           },
 
-          body:JSON.stringify({
+body:JSON.stringify({
 
-            gamerTag
+  gamerTag,
 
-          })
+  orderId
+
+})
 
         }
 
@@ -364,6 +403,14 @@ async function submitTag(){
       "gamerTag",
 
       gamerTag
+
+    );
+
+    localStorage.setItem(
+
+      "orderId",
+
+      orderId
 
     );
 

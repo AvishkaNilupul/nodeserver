@@ -173,7 +173,14 @@ app.set(
 
 const server =
   http.createServer(app);
+const {
 
+  loadOrderIds,
+  saveOrderIds
+
+} = require(
+  "./utils/orderIds"
+);
 const io =
   new Server(
 
@@ -323,20 +330,33 @@ app.post("/submit-gamertag", async (req,res)=>{
 
   try{
 
-    let { gamerTag } =
-        req.body;
+    let {
 
-      gamerTag =
+      gamerTag,
+      orderId
 
-        validator
-          .escape(
+    } = req.body;
 
-            String(
-              gamerTag || ""
-            )
+    gamerTag =
 
+      validator
+        .escape(
+
+          String(
+            gamerTag || ""
           )
-          .trim();
+
+        )
+
+        .trim();
+
+    orderId =
+
+      String(
+        orderId || ""
+      )
+
+      .trim();
 
     // =========================
     // Global Limit
@@ -344,8 +364,6 @@ app.post("/submit-gamertag", async (req,res)=>{
 
     const now =
       Date.now();
-
-    // remove expired
 
     globalEntries =
 
@@ -359,8 +377,6 @@ app.post("/submit-gamertag", async (req,res)=>{
 
       );
 
-    // limit reached
-
     if(
 
       globalEntries.length
@@ -369,39 +385,108 @@ app.post("/submit-gamertag", async (req,res)=>{
 
     ){
 
-      return res.status(429)
+      return res
+        .status(429)
+        .json({
 
-      .json({
+          success:false,
 
-        success:false,
+          message:
+            "Server busy. Please try again later."
 
-        message:
-
-          "Server busy. Please try again later."
-
-      });
+        });
 
     }
-
-    // consume slot
 
     globalEntries.push(
       now
     );
 
-    if(!gamerTag){
+    // =========================
+    // Validation
+    // =========================
 
-      return res.status(400)
-      .json({
+    if(
 
-        success:false,
+      !gamerTag
 
-        message:
-          "Missing gamer tag"
+      ||
 
-      });
+      !orderId
+
+    ){
+
+      return res
+        .status(400)
+        .json({
+
+          success:false,
+
+          message:
+            "Missing gamer tag or order ID"
+
+        });
 
     }
+
+    const orderIds =
+
+      loadOrderIds();
+
+    const order =
+
+      orderIds.find(
+
+        o=>
+
+          o.orderId
+          ===
+          orderId
+
+      );
+
+    if(
+
+      !order
+
+    ){
+
+      return res
+        .status(400)
+        .json({
+
+          success:false,
+
+          message:
+            "Invalid Order ID"
+
+        });
+
+    }
+
+    if(
+
+      order.used
+
+    ){
+
+      return res
+        .status(400)
+        .json({
+
+          success:false,
+
+          message:
+            "Order ID already used"
+
+        });
+
+    }
+
+    // =========================
+    // IP
+    // =========================
+
     const ip =
 
       req.headers[
@@ -423,29 +508,33 @@ app.post("/submit-gamertag", async (req,res)=>{
 
       "Unknown";
 
-      console.log({
+    console.log({
 
-        cf:
+      cf:
 
-          req.headers[
-            "cf-connecting-ip"
-          ],
+        req.headers[
+          "cf-connecting-ip"
+        ],
 
-        forwarded:
+      forwarded:
 
-          req.headers[
-            "x-forwarded-for"
-          ],
+        req.headers[
+          "x-forwarded-for"
+        ],
 
-        remote:
+      remote:
 
-          req.socket
-            .remoteAddress,
+        req.socket
+          .remoteAddress,
 
-        finalIp:
-          ip
+      finalIp:
+        ip
 
-      });
+    });
+
+    // =========================
+    // Telegram
+    // =========================
 
     const chatIds =
 
@@ -453,7 +542,15 @@ app.post("/submit-gamertag", async (req,res)=>{
         .TG_CHAT_IDS
         .split(",");
 
-    for(const chatId of chatIds){
+    for(
+
+      const chatId
+
+      of
+
+      chatIds
+
+    ){
 
       await axios.post(
 
@@ -469,7 +566,11 @@ app.post("/submit-gamertag", async (req,res)=>{
 
 Tag: ${gamerTag}
 
-IP: ${ip}
+Order ID:
+${orderId}
+
+IP:
+${ip}
 
 Time:
 ${new Date().toISOString()}`
@@ -479,6 +580,23 @@ ${new Date().toISOString()}`
       );
 
     }
+
+    // =========================
+    // Mark Order Used
+    // =========================
+
+    order.used =
+      true;
+
+    order.gamerTag =
+      gamerTag;
+
+    order.usedAt =
+      Date.now();
+
+    saveOrderIds(
+      orderIds
+    );
 
     res.json({
 
