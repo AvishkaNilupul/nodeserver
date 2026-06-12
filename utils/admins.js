@@ -1,6 +1,18 @@
 const fs = require("fs");
 const path = require("path");
+const fs = require("fs");
+const path = require("path");
 
+const adminsFile =
+  path.join(
+    __dirname,
+    "../admins.json"
+  );
+
+console.log(
+  "Admins file path:",
+  adminsFile
+);
 const adminsFile =
   path.join(
     __dirname,
