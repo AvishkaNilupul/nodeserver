@@ -47,12 +47,14 @@ function chatSocket(io) {
         const order = await getOrderByGamerTag(userId);
         if (!order) return;
 
-        // Authenticate the buyer. If the order already has a chatToken, the
-        // client must present a matching one. Legacy orders created before
-        // tokens existed bind the first token presented.
-        if (order.chatToken) {
-          if (token !== order.chatToken) return;
-        } else if (typeof token === "string" && token) {
+        // Buyer auth. A client that presents a token must match the one bound
+        // to the order; the first token seen is bound. Clients that present no
+        // token (older buyer pages) are still allowed in, identified by their
+        // gamertag, so the chat works without any frontend changes.
+        if (token && order.chatToken && token !== order.chatToken) {
+          return;
+        }
+        if (token && !order.chatToken) {
           order.chatToken = token;
           await order.save();
         }
