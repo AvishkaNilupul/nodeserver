@@ -3,6 +3,7 @@
 <html>
 
 <head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
 
 <title>
 
@@ -11,32 +12,41 @@ Items Manager
 </title>
 
 <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    :root { --accent: #4f46e5; --accent2: #6366f1; --ink: #0f172a; --muted: #6b7280; --line: #eef1f5; }
-    body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: #f6f7fb; color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
 
-    .nav { width: 236px; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
+  .themebtn{cursor:pointer;}
+  .theme-fab{position:fixed;top:16px;right:16px;z-index:80;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 18px rgba(15,23,42,.12);transition:background .15s;}
+  .theme-fab:hover{background:var(--surface-2);}
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root { --accent: #4f46e5; --accent2: #6366f1; --ink: #0f172a; --muted: #6b7280;  }
+    body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+
+    .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
     .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
     .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
     .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
     .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
     .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
-    .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: #475569; text-decoration: none; font-size: 14px; font-weight: 500; }
-    .nav .links a:hover { background: #f4f6fb; }
+    .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+    .nav .links a:hover { background: var(--surface-2); }
     .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
     .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
     .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
     .nav .me .who { line-height: 1.2; min-width: 0; }
     .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
     .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
-    .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: #fff; color: #9aa2b1; display: grid; place-items: center; cursor: pointer; }
+    .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
     .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
 
     .page { flex: 1; overflow-y: auto; padding: 30px 34px; min-width: 0; }
     .page h1 { font-size: 22px; font-weight: 800; margin-bottom: 22px; }
-    input, select, textarea { width: 100%; padding: 12px 14px; margin-bottom: 6px; border-radius: 12px; border: 1.5px solid #e7eaf0; outline: none; background: #f8fafc; color: var(--ink); font-size: 14px; font-family: inherit; }
-    input:focus, select:focus, textarea:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
-    input::placeholder, textarea::placeholder { color: #94a3b8; }
+    input, select, textarea { width: 100%; padding: 12px 14px; margin-bottom: 6px; border-radius: 12px; border: 1.5px solid var(--line); outline: none; background: var(--surface-2); color: var(--ink); font-size: 14px; font-family: inherit; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+    input::placeholder, textarea::placeholder { color: var(--muted); }
     button { padding: 12px 18px; border: none; border-radius: 11px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 14px; }
     button:hover { opacity: 0.95; }
     h2 { font-weight: 800; }
@@ -44,13 +54,13 @@ Items Manager
 
     /* Items page components */
     #itemsList { display: grid; gap: 18px; margin-top: 22px; }
-    .item { background: #fff; padding: 20px; border-radius: 18px; border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
+    .item { background: var(--surface); padding: 20px; border-radius: 18px; border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
     .item.used { background: #fef2f2; border: 1px solid #fecaca; }
     .itemHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
     .status { font-size: 13px; font-weight: 700; }
     .available { color: #059669; }
     .usedText { color: #dc2626; }
-    .row { margin-bottom: 10px; color: #475569; }
+    .row { margin-bottom: 10px; color: var(--muted); }
     .deleteBtn { margin-top: 18px; }
     #statsBar .item h3 { font-size: 13px; color: var(--muted); font-weight: 600; }
     #statsBar .item h2 { font-size: 30px; margin: 6px 0 0; }
@@ -71,10 +81,12 @@ Items Manager
       <a href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
       <a class="active" href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
       <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+    <a href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
   </nav>
   <div class="me">
     <span class="av" id="meAvatar">--</span>
     <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout themebtn" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
     <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
   </div>
 </aside>
@@ -149,7 +161,7 @@ margin-bottom:14px;
 <label style="
 display:block;
 margin-bottom:8px;
-color:#94a3b8;
+color:var(--muted);
 font-size:13px;
 ">
 
@@ -171,7 +183,7 @@ placeholder="Username"
 <label style="
 display:block;
 margin-bottom:8px;
-color:#94a3b8;
+color:var(--muted);
 font-size:13px;
 ">
 
@@ -191,7 +203,7 @@ placeholder="Password"
 <label style="
 display:block;
 margin-bottom:8px;
-color:#94a3b8;
+color:var(--muted);
 font-size:13px;
 ">
 
@@ -211,7 +223,7 @@ placeholder="Notes"
 <label style="
 display:block;
 margin-bottom:8px;
-color:#94a3b8;
+color:var(--muted);
 font-size:13px;
 ">
 
@@ -694,7 +706,7 @@ ${category}
 
 <div style="
 font-size:13px;
-color:#94a3b8;
+color:var(--muted);
 ">
 
 🟢 ${available}
@@ -767,7 +779,7 @@ ${
 
   :
 
-  "#f4f6fb"
+  "var(--surface-2)"
 };
 
 ">
@@ -781,7 +793,7 @@ ${item.username}
 </b>
 
 <span style="
-color:#94a3b8;
+color:var(--muted);
 ">
 
 | ${item.password}
@@ -794,7 +806,7 @@ ${
   ?
 
   `<span style="
-color:#64748b;
+color:var(--muted);
 ">
 
 | ${item.notes}
@@ -1069,6 +1081,7 @@ loadItems();
     } catch (e) { /* non-fatal */ }
   })();
 </script>
+<script src="/theme.js"></script>
 </body>
 
 </html>

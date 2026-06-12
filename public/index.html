@@ -2,6 +2,7 @@
 <html lang="en">
 
 <head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Redeem your order</title>
@@ -14,6 +15,13 @@
   />
 
   <style>
+
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;color-scheme:dark;}
+  .themebtn{cursor:pointer;}
+  .theme-fab{position:fixed;top:16px;right:16px;z-index:80;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 18px rgba(15,23,42,.12);transition:background .15s;}
+  .theme-fab:hover{background:var(--surface-2);}
+
     * {
       margin: 0;
       padding: 0;
@@ -32,20 +40,20 @@
       align-items: center;
       justify-content: center;
       padding: 24px;
-      color: #0f172a;
+      color: var(--ink);
       background:
         radial-gradient(1000px 500px at 100% -10%, #eef2ff 0%, transparent 60%),
         radial-gradient(900px 500px at -10% 110%, #faf5ff 0%, transparent 55%),
-        #f6f7fb;
+        var(--bg);
     }
 
     .redeem-card {
       width: 100%;
       max-width: 430px;
-      background: #fff;
+      background: var(--surface);
       border-radius: 22px;
       padding: 40px 36px;
-      border: 1px solid #eceef3;
+      border: 1px solid var(--line);
       box-shadow:
         0 24px 60px rgba(31, 41, 55, 0.1),
         0 2px 6px rgba(31, 41, 55, 0.04);
@@ -76,7 +84,7 @@
     }
 
     .brand .name span {
-      color: #6b7280;
+      color: var(--muted);
       font-weight: 500;
       display: block;
       font-size: 11.5px;
@@ -90,7 +98,7 @@
     }
 
     .redeem-header p {
-      color: #6b7280;
+      color: var(--muted);
       font-size: 14.5px;
       line-height: 1.6;
       margin-bottom: 28px;
@@ -100,7 +108,7 @@
       display: block;
       font-size: 12.5px;
       font-weight: 600;
-      color: #475569;
+      color: var(--muted);
       margin: 0 0 7px 2px;
     }
 
@@ -113,7 +121,7 @@
       position: absolute;
       left: 14px;
       top: 41px;
-      color: #9aa2b1;
+      color: var(--muted);
       pointer-events: none;
     }
 
@@ -122,9 +130,9 @@
       padding: 14px 14px 14px 42px;
       border-radius: 12px;
       outline: none;
-      background: #f8fafc;
-      border: 1.5px solid #e7eaf0;
-      color: #0f172a;
+      background: var(--surface-2);
+      border: 1.5px solid var(--line);
+      color: var(--ink);
       font-size: 15px;
       font-family: inherit;
       transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
@@ -135,7 +143,7 @@
     }
 
     input:focus {
-      background: #fff;
+      background: var(--surface);
       border-color: var(--accent);
       box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
     }
@@ -185,7 +193,7 @@
       margin-top: 22px;
       text-align: center;
       font-size: 12.5px;
-      color: #94a3b8;
+      color: var(--muted);
       display: flex;
       gap: 6px;
       align-items: center;
@@ -195,6 +203,7 @@
 </head>
 
 <body>
+<button class="theme-fab" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
   <div class="redeem-wrapper">
     <div class="redeem-card">
       <div class="brand">
@@ -225,11 +234,6 @@
         <button onclick="submitTag()" id="btn">Continue</button>
 
         <p id="message"></p>
-
-        <div class="foot">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="9" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
-          Secure checkout · Instant delivery
-        </div>
       </div>
     </div>
   </div>
@@ -297,5 +301,6 @@
       }
     }
   </script>
+<script src="/theme.js"></script>
 </body>
 </html>
