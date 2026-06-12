@@ -83,6 +83,16 @@ if(
 
 }
 
+console.log(
+  "Username received:",
+  username
+);
+
+console.log(
+  "All admins:",
+  loadAdmins()
+);
+
 const admin =
 
   loadAdmins().find(
@@ -92,6 +102,11 @@ const admin =
       a.username === username
 
   );
+
+console.log(
+  "Found admin:",
+  admin
+);
 
 if(
 
@@ -111,7 +126,6 @@ if(
     });
 
 }
-
 const ok =
 
   await bcrypt.compare(
@@ -124,6 +138,9 @@ const ok =
 console.log({
 
   username,
+
+  passwordReceived:
+    password,
 
   compareResult:
     ok
