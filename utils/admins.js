@@ -4,7 +4,7 @@ const path = require("path");
 const adminsFile =
   path.join(
     __dirname,
-    "../admins.json"
+    "admins.json"
   );
 
 console.log(
