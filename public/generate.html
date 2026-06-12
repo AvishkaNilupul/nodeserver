@@ -1,449 +1,213 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
   <meta charset="UTF-8" />
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  />
-
-  <title>Generate Redeem Code</title>
-
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Generate Redeem Code · Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
-
-    /* =========================
-       Base
-    ========================= */
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-
-      font-family:
-        'Segoe UI',
-        Tahoma,
-        sans-serif;
-
-      background:
-        radial-gradient(circle at top,
-        #0b1220,
-        #020617);
-
-      color: #e2e8f0;
-
-      min-height: 100vh;
-
-      display: flex;
-      justify-content: center;
-      align-items: center;
-
-      padding: 20px;
-    }
-
-    /* =========================
-       Container
-    ========================= */
-
-    .container {
-
-      width: 100%;
-      max-width: 520px;
-
-      background:
-        rgba(30, 41, 59, 0.72);
-
-      backdrop-filter: blur(12px);
-
-      border-radius: 20px;
-
-      padding: 32px;
-
-      border:
-        1px solid rgba(255,255,255,0.06);
-
-      box-shadow:
-        0 0 30px rgba(239, 68, 68, 0.10),
-        inset 0 1px 0 rgba(255,255,255,0.03);
-    }
-
-    /* =========================
-       Heading
-    ========================= */
-
-    h2 {
-
-      font-size: 28px;
-      font-weight: 700;
-
-      margin-bottom: 26px;
-
-      letter-spacing: 0.4px;
-    }
-
-    /* =========================
-       Inputs
-    ========================= */
-
-    .input-group {
-
-      display: flex;
-      flex-direction: column;
-
-      gap: 18px;
-    }
-
-    input {
-
-      width: 100%;
-
-      padding: 16px;
-
-      border-radius: 14px;
-
-      border:
-        1px solid rgba(255,255,255,0.06);
-
-      background:
-        rgba(2, 6, 23, 0.82);
-
-      color: #f8fafc;
-
-      font-size: 15px;
-
-      outline: none;
-
-      transition: 0.2s ease;
-    }
-
-    input:focus {
-
-      border-color:
-        rgba(239, 68, 68, 0.45);
-
-      box-shadow:
-        0 0 12px rgba(239, 68, 68, 0.18);
-    }
-
-    input::placeholder {
-      color: #64748b;
-    }
-
-    /* =========================
-       Button
-    ========================= */
-
-    button {
-
-      margin-top: 6px;
-
-      width: 100%;
-
-      padding: 16px;
-
-      border: none;
-
-      border-radius: 14px;
-
-      background:
-        linear-gradient(
-          135deg,
-          #ef4444,
-          #dc2626
-        );
-
-      color: white;
-
-      font-size: 15px;
-      font-weight: 600;
-
-      cursor: pointer;
-
-      transition: 0.2s ease;
-    }
-
-    button:hover {
-
-      transform: translateY(-1px);
-
-      box-shadow:
-        0 0 18px rgba(239, 68, 68, 0.28);
-    }
-
-    button:disabled {
-
-      opacity: 0.7;
-
-      cursor: not-allowed;
-
-      transform: none;
-    }
-
-    /* =========================
-       Result
-    ========================= */
-
-    #result {
-      margin-top: 22px;
-    }
-
-    .generated-code {
-
-      background:
-        rgba(2, 6, 23, 0.82);
-
-      border:
-        1px solid rgba(239, 68, 68, 0.18);
-
-      border-radius: 16px;
-
-      padding: 20px;
-
-      text-align: center;
-
-      color: #f87171;
-
-      font-size: 24px;
-      font-weight: 700;
-
-      letter-spacing: 3px;
-
-      word-break: break-word;
-
-      box-shadow:
-        inset 0 1px 0 rgba(255,255,255,0.03);
-    }
-
-    .success-message {
-
-      margin-top: 12px;
-
-      text-align: center;
-
-      color: #4ade80;
-
-      font-size: 14px;
-    }
-
-    .error {
-
-      text-align: center;
-
-      color: #f87171;
-
-      font-size: 14px;
-
-      margin-top: 10px;
-    }
-
-    /* =========================
-       Mobile
-    ========================= */
-
-    @media (max-width: 480px) {
-
-      body {
-
-        padding: 16px;
-
-        align-items: flex-start;
-      }
-
-      .container {
-
-        padding: 22px;
-      }
-
-      h2 {
-
-        font-size: 22px;
-
-        margin-bottom: 20px;
-      }
-
-      input {
-
-        padding: 14px;
-
-        font-size: 14px;
-      }
-
-      button {
-
-        padding: 14px;
-
-        font-size: 14px;
-      }
-
-      .generated-code {
-
-        font-size: 17px;
-
-        letter-spacing: 2px;
-
-        padding: 16px;
-      }
-
-    }
-
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root { --accent: #4f46e5; --accent2: #6366f1; --ink: #0f172a; --muted: #6b7280; --line: #eef1f5; }
+    body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: #f6f7fb; color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+
+    .nav { width: 236px; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+    .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+    .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+    .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+    .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+    .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+    .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: #475569; text-decoration: none; font-size: 14px; font-weight: 500; }
+    .nav .links a:hover { background: #f4f6fb; }
+    .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+    .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+    .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+    .nav .me .who { line-height: 1.2; min-width: 0; }
+    .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+    .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+    .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: #fff; color: #9aa2b1; display: grid; place-items: center; cursor: pointer; }
+    .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .topbar { display: flex; align-items: center; padding: 18px 26px; border-bottom: 1px solid var(--line); background: #fff; }
+    .topbar h1 { font-size: 19px; font-weight: 800; }
+    .topbar .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+    .wrap { flex: 1; overflow-y: auto; display: flex; justify-content: center; align-items: flex-start; padding: 40px 26px; }
+
+    .card { width: 100%; max-width: 480px; background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 30px; box-shadow: 0 12px 40px rgba(16,24,40,0.06); }
+    .card h2 { font-size: 20px; font-weight: 800; margin-bottom: 4px; }
+    .card .lead { font-size: 13px; color: var(--muted); margin-bottom: 22px; }
+    label { font-size: 12.5px; font-weight: 600; color: #475569; display: block; margin: 0 0 6px 2px; }
+    .field { margin-bottom: 15px; }
+    input { width: 100%; padding: 13px 15px; border-radius: 12px; border: 1.5px solid #e7eaf0; background: #f8fafc; outline: none; font-family: inherit; font-size: 14px; color: var(--ink); }
+    input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+    #btn { width: 100%; margin-top: 6px; padding: 14px; border: none; border-radius: 12px; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-family: inherit; font-size: 15px; font-weight: 700; cursor: pointer; box-shadow: 0 10px 22px rgba(79,70,229,0.32); }
+    #btn:disabled { opacity: 0.7; cursor: not-allowed; }
+
+    #result { margin-top: 22px; }
+    .generated-code { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 14px; padding: 18px 20px; }
+    .generated-code .code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 22px; font-weight: 800; letter-spacing: 2px; color: var(--accent); word-break: break-all; }
+    .generated-code .copy-code { flex-shrink: 0; border: 1px solid #ddd6fe; background: #fff; color: var(--accent); border-radius: 10px; padding: 9px 11px; cursor: pointer; display: grid; place-items: center; }
+    .success-message { margin-top: 10px; color: #059669; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    .error { margin-top: 12px; color: #dc2626; font-size: 13.5px; font-weight: 500; }
+
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 12px 20px; border-radius: 12px; font-size: 13.5px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.25s ease; z-index: 99; box-shadow: 0 12px 30px rgba(15,23,42,0.3); }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   </style>
-
 </head>
-
 <body>
-
-  <div class="container">
-
-    <h2>Generate Redeem Code</h2>
-
-    <div class="input-group">
-
-      <input
-        id="account"
-        placeholder="Enter account / username"
-      >
-
-      <input
-        id="password"
-        placeholder="Enter password"
-      >
-
-      <input
-        id="key"
-        placeholder="Enter admin key"
-      >
-
-      <button
-        onclick="generateCode()"
-        id="btn"
-      >
-        Generate Code
-      </button>
-
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
     </div>
+    <nav class="links">
+      <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+      <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+      <a class="active" href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
+      <a href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
+      <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+    </nav>
+    <div class="me">
+      <span class="av" id="meAvatar">--</span>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+      <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+    </div>
+  </aside>
 
-    <div id="result"></div>
+  <div class="main">
+    <div class="topbar">
+      <div><h1>Generate code</h1><div class="sub">Create a one-time redeem code for an account</div></div>
+    </div>
+    <div class="wrap">
+      <div class="card">
+        <h2>Generate Redeem Code</h2>
+        <p class="lead">Enter the account credentials and your admin key to mint a redeem code.</p>
 
+        <div class="field"><label>Account / username</label><input id="account" placeholder="Enter account / username" /></div>
+        <div class="field"><label>Password</label><input id="password" placeholder="Enter password" /></div>
+        <div class="field"><label>Admin key</label><input id="key" type="password" placeholder="Enter admin key" /></div>
+
+        <button id="btn" onclick="generateCode()">Generate Code</button>
+
+        <div id="result"></div>
+      </div>
+    </div>
   </div>
 
+  <div class="toast" id="toast"></div>
+
   <script>
+    let toastTimer;
+    function toast(msg) {
+      const t = document.getElementById("toast");
+      t.innerText = msg;
+      t.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      toast("Code copied to clipboard");
+    }
 
     async function generateCode() {
-
-      const account =
-        document.getElementById("account")
-        .value
-        .trim();
-
-      const password =
-        document.getElementById("password")
-        .value
-        .trim();
-
-      const key =
-        document.getElementById("key")
-        .value
-        .trim();
-
-      const result =
-        document.getElementById("result");
-
-      const btn =
-        document.getElementById("btn");
-
-      // Reset UI
+      const account = document.getElementById("account").value.trim();
+      const password = document.getElementById("password").value.trim();
+      const key = document.getElementById("key").value.trim();
+      const result = document.getElementById("result");
+      const btn = document.getElementById("btn");
 
       result.innerHTML = "";
 
-      // Validation
-
       if (!account || !password || !key) {
-
-        result.innerHTML = `
-          <div class="error">
-            All fields are required
-          </div>
-        `;
-
+        result.innerHTML = '<div class="error">All fields are required</div>';
         return;
       }
 
-      // Loading state
-
       btn.disabled = true;
-
       btn.innerText = "Generating...";
 
       try {
-
-        const res = await fetch(
-          "/generate",
-          {
-            method: "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json"
-            },
-
-            body: JSON.stringify({
-              account,
-              password,
-              key
-            })
-          }
-        );
+        const res = await fetch("/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account, password, key }),
+        });
 
         const data = await res.json();
 
-        // Success
-
         if (data.success) {
-
-          result.innerHTML = `
-
-            <div class="generated-code">
-              ${data.code}
-            </div>
-
-            <div class="success-message">
-              Redeem code generated successfully
-            </div>
-
-          `;
-
+          result.innerHTML =
+            '<div class="generated-code"><span class="code" id="codeValue"></span>' +
+            '<button class="copy-code" id="copyCode" title="Copy code">' +
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>' +
+            "</button></div>" +
+            '<div class="success-message">' +
+            '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"></path></svg>' +
+            "Redeem code generated successfully</div>";
+          document.getElementById("codeValue").innerText = data.code;
+          document.getElementById("copyCode").onclick = () =>
+            copyText(data.code);
+          copyText(data.code);
         } else {
-
-          result.innerHTML = `
-            <div class="error">
-              ${data.message || "Failed to generate code"}
-            </div>
-          `;
+          result.innerHTML =
+            '<div class="error">' +
+            (data.message || "Failed to generate code") +
+            "</div>";
         }
-
       } catch (err) {
-
-        result.innerHTML = `
-          <div class="error">
-            Server error
-          </div>
-        `;
+        result.innerHTML = '<div class="error">Server error</div>';
       }
 
-      // Reset button
-
       btn.disabled = false;
-
       btn.innerText = "Generate Code";
     }
 
-  </script>
+    document.getElementById("key").addEventListener("keypress", (e) => {
+      if (e.key === "Enter") generateCode();
+    });
 
+    document.getElementById("logoutBtn").addEventListener("click", async () => {
+      try {
+        await fetch("/admin-logout", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+      } catch (e) {
+        /* ignore */
+      }
+      window.location.href = "/admin-login.html";
+    });
+
+    (async () => {
+      try {
+        const r = await fetch("/whoami");
+        if (r.ok) {
+          const data = await r.json();
+          const admin = data && data.admin ? data.admin : {};
+          const name = admin.username || "Admin";
+          document.getElementById("meName").innerText = name;
+          document.getElementById("meRole").innerText =
+            "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
+          document.getElementById("meAvatar").innerText = name
+            .slice(0, 2)
+            .toUpperCase();
+        }
+      } catch (e) {
+        /* non-fatal */
+      }
+    })();
+  </script>
 </body>
 </html>

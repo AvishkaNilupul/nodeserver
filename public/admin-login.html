@@ -1,346 +1,130 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
-  <meta charset="UTF-8">
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  >
-
-  <title>Admin Login</title>
-
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Login · RedeemHub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root { --accent: #4f46e5; --accent2: #6366f1; --ink: #0f172a; --muted: #6b7280; }
     body {
-
-      font-family:
-        'Segoe UI',
-        Tahoma,
-        sans-serif;
-
-      background:
-        radial-gradient(
-          circle at top,
-          #0b1220,
-          #020617
-        );
-
+      font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+      color: var(--ink);
+      min-height: 100vh;
       display: flex;
-
       justify-content: center;
       align-items: center;
-
-      min-height: 100vh;
-
       padding: 20px;
+      background:
+        radial-gradient(1200px 600px at 100% -10%, #eef2ff, transparent),
+        radial-gradient(1000px 500px at -10% 110%, #faf5ff, transparent),
+        #f6f7fb;
     }
-
     .card {
-
       width: 100%;
-      max-width: 420px;
-
-      background:
-        rgba(15,23,42,0.82);
-
-      border:
-        1px solid
-        rgba(255,255,255,0.06);
-
+      max-width: 400px;
+      background: #fff;
+      border: 1px solid #eceef3;
       border-radius: 22px;
-
-      padding: 36px;
-
-      color: white;
-
-      box-shadow:
-        0 0 30px rgba(239,68,68,0.12);
+      padding: 34px;
+      box-shadow: 0 20px 60px rgba(16, 24, 40, 0.08);
     }
-
-    h1 {
-
-      font-size: 32px;
-
-      margin-bottom: 14px;
-    }
-
-    p {
-
-      color: #94a3b8;
-
-      line-height: 1.7;
-
-      margin-bottom: 24px;
-    }
-
+    .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 24px; }
+    .brand .mark { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 8px 18px rgba(79,70,229,0.35); }
+    .brand b { font-size: 17px; font-weight: 800; line-height: 1.1; }
+    .brand b span { display: block; font-size: 11px; color: var(--muted); font-weight: 500; }
+    h1 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
+    p.lead { color: var(--muted); font-size: 13.5px; line-height: 1.6; margin-bottom: 24px; }
+    label { font-size: 12.5px; font-weight: 600; color: #475569; display: block; margin: 0 0 6px 2px; }
+    .field { margin-bottom: 15px; }
     input {
-
       width: 100%;
-
-      padding: 16px;
-
-      border: none;
-
+      padding: 14px 15px;
+      border-radius: 12px;
+      border: 1.5px solid #e7eaf0;
+      background: #f8fafc;
+      color: var(--ink);
       outline: none;
-
-      border-radius: 14px;
-
-      background: #020617;
-
-      color: white;
-
-      margin-bottom: 16px;
-
-      border:
-        1px solid
-        rgba(255,255,255,0.06);
+      font-family: inherit;
+      font-size: 14px;
     }
-
-    input:focus {
-
-      border-color:
-        rgba(239,68,68,0.55);
-
-      box-shadow:
-        0 0 14px rgba(239,68,68,0.15);
-    }
-
+    input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
     button {
-
       width: 100%;
-
-      padding: 16px;
-
+      margin-top: 6px;
+      padding: 14px;
       border: none;
-
-      border-radius: 14px;
-
-      background:
-        linear-gradient(
-          135deg,
-          #ef4444,
-          #dc2626
-        );
-
-      color: white;
-
+      border-radius: 12px;
+      background: linear-gradient(180deg, var(--accent2), var(--accent));
+      color: #fff;
+      font-family: inherit;
       font-size: 15px;
-
-      font-weight: 600;
-
+      font-weight: 700;
       cursor: pointer;
-
-      transition: 0.2s ease;
+      box-shadow: 0 10px 22px rgba(79, 70, 229, 0.32);
     }
-
-    button:hover {
-
-      transform: translateY(-1px);
-
-      box-shadow:
-        0 0 16px rgba(239,68,68,0.35);
-    }
-
-    #message {
-
-      margin-top: 14px;
-
-      text-align: center;
-
-      color: #f87171;
-
-      min-height: 20px;
-    }
-
-    @media (max-width: 480px) {
-
-      .card {
-
-        padding: 28px 22px;
-      }
-
-      h1 {
-
-        font-size: 28px;
-      }
-
-    }
-
+    button:hover { transform: translateY(-1px); }
+    #message { margin-top: 14px; text-align: center; color: #dc2626; font-size: 13.5px; min-height: 20px; }
   </style>
-
 </head>
-
 <body>
+  <div class="card">
+    <div class="brand">
+      <span class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
 
-<div class="card">
+    <h1>Welcome back</h1>
+    <p class="lead">Enter your username and password to access your seller dashboard.</p>
 
-  <h1>Admin Login</h1>
+    <div class="field">
+      <label>Username</label>
+      <input type="text" id="username" placeholder="Username" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="password" placeholder="Enter admin password" autocomplete="off" />
+    </div>
 
-<p>
-  Enter your username and password
-  to access your seller dashboard.
-</p>
-  <input
-  type="text"
-  id="username"
-  placeholder="Username"
-  autocomplete="off"
->
-  <input
-    type="password"
-    id="password"
-    placeholder="Enter admin password"
-    autocomplete="off"
-  >
+    <button onclick="login()">Access panel</button>
 
-  <button onclick="login()">
-    Access Panel
-  </button>
+    <div id="message"></div>
+  </div>
 
-  <div id="message"></div>
+  <script>
+    async function login() {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value.trim();
+      const message = document.getElementById("message");
 
-</div>
+      message.innerText = "";
 
-<script>
+      try {
+        const res = await fetch("/admin-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ username, password }),
+        });
 
-async function login(){
+        const data = await res.json();
 
-  const username =
-
-  document
-    .getElementById(
-      "username"
-    )
-    .value
-    .trim();
-
-  const password =
-
-    document
-      .getElementById(
-        "password"
-      )
-      .value
-      .trim();
-
-  const message =
-
-    document
-      .getElementById(
-        "message"
-      );
-
-  message.innerText = "";
-
-  try{
-
-    const res =
-
-      await fetch(
-
-        "/admin-login",
-
-        {
-
-          method:"POST",
-
-          headers:{
-
-            "Content-Type":
-              "application/json"
-
-          },
-
-          credentials:
-            "same-origin",
-
-body:JSON.stringify({
-
-  username,
-  password
-
-})
-
+        if (res.ok && data.success) {
+          window.location.href = "/admin.html";
+        } else {
+          message.innerText = data.message || "Invalid password";
         }
-
-      );
-
-    const data =
-      await res.json();
-
-    if(
-
-      res.ok
-
-      &&
-
-      data.success
-
-    ){
-
-      window.location.href =
-        "/admin.html";
-
-    }
-
-    else{
-
-      message.innerText =
-
-        data.message
-        ||
-        "Invalid password";
-
-    }
-
-  }
-
-  catch(err){
-
-    console.error(err);
-
-    message.innerText =
-      "Server error";
-
-  }
-
-}
-
-document
-  .getElementById(
-    "password"
-  )
-  .addEventListener(
-
-    "keypress",
-
-    (e)=>{
-
-      if(
-
-        e.key ===
-        "Enter"
-
-      ){
-
-        login();
-
+      } catch (err) {
+        console.error(err);
+        message.innerText = "Server error";
       }
-
     }
 
-  );
-
-</script>
-
+    document.getElementById("password").addEventListener("keypress", (e) => {
+      if (e.key === "Enter") login();
+    });
+  </script>
 </body>
 </html>

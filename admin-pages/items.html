@@ -11,182 +11,75 @@ Items Manager
 </title>
 
 <style>
-
-body{
-
-  background:#020617;
-
-  color:white;
-
-  font-family:'Segoe UI',sans-serif;
-
-  padding:40px;
-
-  max-width:1600px;
-
-  margin:auto;
-
-}
-
-h1{
-
-  margin-bottom:24px;
-
-}
-
-input,select{
-
-  width:100%;
-
-padding:12px 14px;
-margin-bottom:6px;
-
-  border-radius:12px;
-
-  border:none;
-
-  outline:none;
-
-  background:#1e293b;
-
-  color:white;
-
-  font-size:14px;
-
-}
-
-button{
-
-  padding:12px 18px;
-
-  border:none;
-
-  border-radius:12px;
-
-  cursor:pointer;
-
-  background:#ef4444;
-
-  color:white;
-
-  font-weight:600;
-
-}
-
-button:hover{
-
-  opacity:.92;
-
-}
-
-#itemsList{
-
-  display:grid;
-
-  gap:18px;
-
-  margin-top:22px;
-
-}
-
-.item{
-
-  background:#0f172a;
-
-  padding:20px;
-
-  border-radius:18px;
-
-  border:
-
-    1px solid
-
-    rgba(255,255,255,.08);
-
-}
-
-.item.used{
-
-  background:
-
-    rgba(127,29,29,.30);
-
-  border:
-
-    1px solid
-
-    #ef4444;
-
-}
-
-.itemHeader{
-
-  display:flex;
-
-  justify-content:space-between;
-
-  align-items:center;
-
-  margin-bottom:18px;
-
-}
-
-.status{
-
-  font-size:13px;
-
-  font-weight:700;
-
-}
-
-.available{
-
-  color:#22c55e;
-
-}
-
-.usedText{
-
-  color:#ef4444;
-
-}
-
-.row{
-
-  margin-bottom:10px;
-
-  color:#cbd5e1;
-
-}
-
-.deleteBtn{
-
-  margin-top:18px;
-
-}
-
-@media(max-width:768px){
-
-    .formGrid{
-
-  grid-template-columns:
-  1fr !important;
-
-}
-
-  body{
-
-    padding:20px;
-
-  }
-
-}
-
-</style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root { --accent: #4f46e5; --accent2: #6366f1; --ink: #0f172a; --muted: #6b7280; --line: #eef1f5; }
+    body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: #f6f7fb; color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+
+    .nav { width: 236px; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+    .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+    .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+    .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+    .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+    .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+    .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: #475569; text-decoration: none; font-size: 14px; font-weight: 500; }
+    .nav .links a:hover { background: #f4f6fb; }
+    .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+    .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+    .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+    .nav .me .who { line-height: 1.2; min-width: 0; }
+    .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+    .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+    .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: #fff; color: #9aa2b1; display: grid; place-items: center; cursor: pointer; }
+    .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+
+    .page { flex: 1; overflow-y: auto; padding: 30px 34px; min-width: 0; }
+    .page h1 { font-size: 22px; font-weight: 800; margin-bottom: 22px; }
+    input, select, textarea { width: 100%; padding: 12px 14px; margin-bottom: 6px; border-radius: 12px; border: 1.5px solid #e7eaf0; outline: none; background: #f8fafc; color: var(--ink); font-size: 14px; font-family: inherit; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+    input::placeholder, textarea::placeholder { color: #94a3b8; }
+    button { padding: 12px 18px; border: none; border-radius: 11px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 14px; }
+    button:hover { opacity: 0.95; }
+    h2 { font-weight: 800; }
+    h3 { font-weight: 700; }
+
+    /* Items page components */
+    #itemsList { display: grid; gap: 18px; margin-top: 22px; }
+    .item { background: #fff; padding: 20px; border-radius: 18px; border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
+    .item.used { background: #fef2f2; border: 1px solid #fecaca; }
+    .itemHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+    .status { font-size: 13px; font-weight: 700; }
+    .available { color: #059669; }
+    .usedText { color: #dc2626; }
+    .row { margin-bottom: 10px; color: #475569; }
+    .deleteBtn { margin-top: 18px; }
+    #statsBar .item h3 { font-size: 13px; color: var(--muted); font-weight: 600; }
+    #statsBar .item h2 { font-size: 30px; margin: 6px 0 0; }
+    #searchInput { max-width: 420px; }
+  </style>
 
 </head>
 
 <body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+      <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+      <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+      <a href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
+      <a class="active" href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
+      <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+<main class="page">
+
 
 <h1>
 
@@ -870,11 +763,11 @@ ${
 
   ?
 
-  "rgba(127,29,29,.35)"
+  "#fef2f2"
 
   :
 
-  "#1e293b"
+  "#f4f6fb"
 };
 
 ">
@@ -1153,6 +1046,29 @@ loadItems();
 
 </script>
 
+
+</main>
+<script>
+  document.getElementById("logoutBtn").addEventListener("click", async () => {
+    try {
+      await fetch("/admin-logout", { method: "POST", credentials: "same-origin" });
+    } catch (e) { /* ignore */ }
+    window.location.href = "/admin-login.html";
+  });
+  (async () => {
+    try {
+      const r = await fetch("/whoami");
+      if (r.ok) {
+        const data = await r.json();
+        const admin = data && data.admin ? data.admin : {};
+        const name = admin.username || "Admin";
+        document.getElementById("meName").innerText = name;
+        document.getElementById("meRole").innerText = "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
+        document.getElementById("meAvatar").innerText = name.slice(0, 2).toUpperCase();
+      }
+    } catch (e) { /* non-fatal */ }
+  })();
+</script>
 </body>
 
 </html>
