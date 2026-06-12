@@ -23,10 +23,20 @@ router.get(
 
   (req,res)=>{
 
+    const orders =
+
+      loadOrderIds().filter(
+
+        o =>
+
+          o.sellerId ===
+
+          req.session.admin.id
+
+      );
+
     res.json(
-
-      loadOrderIds()
-
+      orders
     );
 
   }
@@ -76,6 +86,12 @@ orders.push({
   id:
     Date.now()
     .toString(),
+
+  sellerId:
+    req.session.admin.id,
+
+  sellerName:
+    req.session.admin.username,
 
   orderId:
     orderId.trim(),

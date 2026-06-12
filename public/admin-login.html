@@ -185,11 +185,16 @@
 
   <h1>Admin Login</h1>
 
-  <p>
-    Enter the admin password
-    to access the live support panel.
-  </p>
-
+<p>
+  Enter your username and password
+  to access your seller dashboard.
+</p>
+  <input
+  type="text"
+  id="username"
+  placeholder="Username"
+  autocomplete="off"
+>
   <input
     type="password"
     id="password"
@@ -208,6 +213,15 @@
 <script>
 
 async function login(){
+
+  const username =
+
+  document
+    .getElementById(
+      "username"
+    )
+    .value
+    .trim();
 
   const password =
 
@@ -249,11 +263,12 @@ async function login(){
           credentials:
             "same-origin",
 
-          body:JSON.stringify({
+body:JSON.stringify({
 
-            password
+  username,
+  password
 
-          })
+})
 
         }
 

@@ -2,7 +2,15 @@ const express =
   require(
     "express"
   );
+const {
 
+  loadAdmins
+
+} = require(
+
+  "../utils/admins"
+
+);
 const bcrypt =
   require(
     "bcrypt"
@@ -52,46 +60,75 @@ router.post(
 
       }
 
-      if(
+const username =
 
-        !process.env
-          .ADMIN_HASH
+  req.body?.username;
 
-      ){
+if(
 
-        return res
-          .status(500)
-          .json({
+  !username
 
-            success:false,
+){
 
-            message:
-              "Server config error"
+  return res
+    .status(400)
+    .json({
 
-          });
+      success:false,
 
-      }
+      message:
+        "Username required"
 
-      const ok =
+    });
 
-        await bcrypt.compare(
+}
 
-          password,
+const admin =
 
-          process.env
-            .ADMIN_HASH
+  loadAdmins().find(
 
-        );
+    a =>
 
-      console.log({
+      a.username === username
 
-        receivedPassword:
-          password,
+  );
 
-        compareResult:
-          ok
+if(
 
-      });
+  !admin
+
+){
+
+  return res
+    .status(401)
+    .json({
+
+      success:false,
+
+      message:
+        "Invalid credentials"
+
+    });
+
+}
+
+const ok =
+
+  await bcrypt.compare(
+
+    password,
+
+    admin.password
+
+  );
+console.log({
+
+  username,
+
+  compareResult:
+    ok
+
+});
 
       if(!ok){
 
@@ -108,8 +145,15 @@ router.post(
 
       }
 
-      req.session.admin =
-        true;
+req.session.admin = {
+
+  id:
+    admin.id,
+
+  username:
+    admin.username
+
+};
 
       res.json({
 
