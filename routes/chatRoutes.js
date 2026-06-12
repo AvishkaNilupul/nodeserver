@@ -56,12 +56,19 @@ router.get(
 
   (req,res)=>{
 
-    const messages =
-      loadMessages();
+const messages =
+  loadMessages().filter(
 
-    res.json(
-      messages
-    );
+    msg =>
+
+      msg.sellerId ===
+      req.session.admin.id
+
+  );
+
+res.json(
+  messages
+);
 
   }
 
@@ -86,16 +93,21 @@ router.post(
     let messages =
       loadMessages();
 
-    messages =
-      messages.filter(
+messages =
+  messages.filter(
 
-        msg=>
+    msg => !(
 
-          msg.userId
-          !==
-          userId
+      msg.userId === userId
 
-      );
+      &&
+
+      msg.sellerId ===
+      req.session.admin.id
+
+    )
+
+  );
 
     saveMessages(
       messages
@@ -123,19 +135,30 @@ router.get(
 
   (req,res)=>{
 
-    const messages =
-      loadMessages();
+const messages =
 
-    const uniqueUsers =
+  loadMessages().filter(
 
-      [...new Set(
+    msg =>
 
-        messages.map(
-          msg=>
-            msg.userId
-        )
+      msg.sellerId ===
+      req.session.admin.id
 
-      )];
+  );
+
+const uniqueUsers =
+
+  [...new Set(
+
+    messages.map(
+
+      msg =>
+
+        msg.userId
+
+    )
+
+  )];
 
     res.json(
       uniqueUsers
@@ -170,17 +193,19 @@ router.post(
 
         if(
 
-          msg.userId
-          ===
-          userId
+  msg.userId === userId
 
-          &&
+  &&
 
-          msg.sender
-          ===
-          "user"
+  msg.sellerId ===
+  req.session.admin.id
 
-        ){
+  &&
+
+  msg.sender ===
+  "user"
+
+){
 
           msg.readByAdmin =
             true;

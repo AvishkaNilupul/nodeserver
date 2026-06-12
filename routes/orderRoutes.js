@@ -143,17 +143,23 @@ router.delete(
 
       loadOrderIds();
 
-    orders =
+orders =
 
-      orders.filter(
+  orders.filter(
 
-        o=>
+    o =>
 
-          o.id
-          !==
-          req.params.id
+      !(
 
-      );
+        o.id === req.params.id
+
+        &&
+
+        o.sellerId === req.session.admin.id
+
+      )
+
+  );
 
     saveOrderIds(
       orders

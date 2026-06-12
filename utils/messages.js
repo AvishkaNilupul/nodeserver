@@ -79,6 +79,7 @@ function saveMessages(
 function addMessage(
 
   userId,
+  sellerId,
   sender,
   message
 
@@ -87,13 +88,15 @@ function addMessage(
   const messages =
     loadMessages();
 
-  messages.push({
+messages.push({
 
-    userId,
+  userId,
 
-    sender,
+  sellerId,
 
-    message,
+  sender,
+
+  message,
 
     timestamp:
       Date.now(),

@@ -451,6 +451,15 @@ app.post("/submit-gamertag", async (req,res)=>{
           orderId
 
       );
+      console.log({
+
+  sellerId:
+    order.sellerId,
+
+  sellerName:
+    order.sellerName
+
+});
 
     if(
 

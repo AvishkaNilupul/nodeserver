@@ -165,6 +165,8 @@ if(order){
 
     userId,
 
+    order.sellerId,
+
     "admin",
 
 `📋 TWITCH DROP GUIDE
@@ -193,6 +195,8 @@ Rust:
   addMessage(
 
     userId,
+
+    order.sellerId,
 
     "admin",
 
@@ -324,16 +328,37 @@ Rust:
             now
 
           );
+const orders =
+  loadOrderIds();
 
-          addMessage(
+const order =
 
-            data.userId,
+  orders.find(
 
-            "user",
+    o =>
 
-            data.message
+      o.gamerTag ===
+      data.userId
 
-          );
+  );
+
+if(!order){
+
+  return;
+
+}
+
+addMessage(
+
+  data.userId,
+
+  order.sellerId,
+
+  "user",
+
+  data.message
+
+);
         // =========================
         // Telegram Chat Alert
         // =========================
@@ -713,15 +738,37 @@ socket.on(
               now
             );
 
-          addMessage(
+const orders =
+  loadOrderIds();
 
-            data.userId,
+const order =
 
-            "admin",
+  orders.find(
 
-            data.message
+    o =>
 
-          );
+      o.gamerTag ===
+      data.userId
+
+  );
+
+if(!order){
+
+  return;
+
+}
+
+addMessage(
+
+  data.userId,
+
+  order.sellerId,
+
+  "admin",
+
+  data.message
+
+);
 
           io.to(
             data.userId
