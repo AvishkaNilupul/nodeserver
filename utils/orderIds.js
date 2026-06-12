@@ -1,113 +1,39 @@
-const fs =
-  require("fs");
+const Order = require("../models/Order");
 
-const path =
-  require("path");
-
-const orderIdsFile =
-
-  path.join(
-
-    __dirname,
-
-    "../orderIds.json"
-
-  );
-
-if(
-
-  !fs.existsSync(
-    orderIdsFile
-  )
-
-){
-
-  fs.writeFileSync(
-
-    orderIdsFile,
-
-    "[]"
-
-  );
-
+function getOrderByOrderId(orderId) {
+  return Order.findOne({ orderId });
 }
 
-function loadOrderIds(){
-
-  try{
-
-    console.log(
-      "ORDER FILE:",
-      orderIdsFile
-    );
-
-    console.log(
-      "FILE EXISTS:",
-      fs.existsSync(
-        orderIdsFile
-      )
-    );
-
-    const raw =
-
-      fs.readFileSync(
-
-        orderIdsFile,
-
-        "utf8"
-
-      );
-
-    console.log(
-      "RAW FILE:",
-      raw
-    );
-
-    return JSON.parse(
-      raw
-    );
-
-  }
-
-  catch(err){
-
-    console.log(
-      "LOAD ERROR:",
-      err
-    );
-
-    return [];
-
-  }
-
+function getOrderByGamerTag(gamerTag) {
+  return Order.findOne({ gamerTag });
 }
-function saveOrderIds(
 
-  orderIds
+async function getOrdersBySeller(sellerId) {
+  const orders = await Order.find({ sellerId }).sort({ createdAt: -1 }).lean();
+  return orders.map(({ _id, ...rest }) => ({ id: _id.toString(), ...rest }));
+}
 
-){
+function addOrder({ sellerId, sellerName, orderId, username, password }) {
+  return Order.create({
+    sellerId,
+    sellerName,
+    orderId,
+    username,
+    password,
+    used: false,
+    gamerTag: null,
+    usedAt: null,
+  });
+}
 
-  fs.writeFileSync(
-
-    orderIdsFile,
-
-    JSON.stringify(
-
-      orderIds,
-
-      null,
-      2
-
-    )
-
-  );
-
+function deleteOrder(id, sellerId) {
+  return Order.deleteOne({ _id: id, sellerId });
 }
 
 module.exports = {
-
-  loadOrderIds,
-
-  saveOrderIds
-
+  getOrderByOrderId,
+  getOrderByGamerTag,
+  getOrdersBySeller,
+  addOrder,
+  deleteOrder,
 };

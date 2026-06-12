@@ -1,234 +1,65 @@
-const express =
-  require("express");
+const express = require("express");
 
-const router =
-  express.Router();
+const router = express.Router();
 
 const {
+  getMessagesBySeller,
+  clearChat,
+  markRead,
+  getSellerUserIds,
+} = require("../utils/messages");
 
-  loadMessages,
-  saveMessages
-
-} = require(
-  "../utils/messages"
-);
-
-function requireAdmin(
-
-  req,
-  res,
-  next
-
-){
-
-  if(
-
-    req.session?.admin
-
-  ){
-
+function requireAdmin(req, res, next) {
+  if (req.session?.admin) {
     return next();
-
   }
-
-  return res
-    .status(401)
-    .json({
-
-      success:false,
-
-      message:
-        "Unauthorized"
-
-    });
-
+  return res.status(401).json({ success: false, message: "Unauthorized" });
 }
 
-// ====================
-// GET ALL MESSAGES
-// ====================
-
-router.get(
-
-  "/messages",
-
-  requireAdmin,
-
-  (req,res)=>{
-
-const messages =
-  loadMessages().filter(
-
-    msg =>
-
-      msg.sellerId ===
-      req.session.admin.id
-
-  );
-
-res.json(
-  messages
-);
-
+// GET ALL MESSAGES (only this seller's)
+router.get("/messages", requireAdmin, async (req, res) => {
+  try {
+    const messages = await getMessagesBySeller(req.session.admin.id);
+    res.json(messages);
+  } catch (err) {
+    console.error("messages error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
-// CLEAR CHAT
-// ====================
-
-router.post(
-
-  "/clear-chat",
-
-  requireAdmin,
-
-  (req,res)=>{
-
-    const {
-      userId
-    } = req.body;
-
-    let messages =
-      loadMessages();
-
-messages =
-  messages.filter(
-
-    msg => !(
-
-      msg.userId === userId
-
-      &&
-
-      msg.sellerId ===
-      req.session.admin.id
-
-    )
-
-  );
-
-    saveMessages(
-      messages
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+// CLEAR CHAT (only this seller's conversation with the user)
+router.post("/clear-chat", requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.body;
+    await clearChat(req.session.admin.id, userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("clear-chat error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
-// GET USERS
-// ====================
-
-router.get(
-
-  "/users",
-
-  requireAdmin,
-
-  (req,res)=>{
-
-const messages =
-
-  loadMessages().filter(
-
-    msg =>
-
-      msg.sellerId ===
-      req.session.admin.id
-
-  );
-
-const uniqueUsers =
-
-  [...new Set(
-
-    messages.map(
-
-      msg =>
-
-        msg.userId
-
-    )
-
-  )];
-
-    res.json(
-      uniqueUsers
-    );
-
+// GET USERS (distinct users that have messaged this seller)
+router.get("/users", requireAdmin, async (req, res) => {
+  try {
+    const users = await getSellerUserIds(req.session.admin.id);
+    res.json(users);
+  } catch (err) {
+    console.error("users error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
 // MARK READ
-// ====================
-
-router.post(
-
-  "/mark-read",
-
-  requireAdmin,
-
-  (req,res)=>{
-
-    const {
-      userId
-    } = req.body;
-
-    const messages =
-      loadMessages();
-
-    messages.forEach(
-
-      (msg)=>{
-
-        if(
-
-  msg.userId === userId
-
-  &&
-
-  msg.sellerId ===
-  req.session.admin.id
-
-  &&
-
-  msg.sender ===
-  "user"
-
-){
-
-          msg.readByAdmin =
-            true;
-
-        }
-
-      }
-
-    );
-
-    saveMessages(
-      messages
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+router.post("/mark-read", requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.body;
+    await markRead(req.session.admin.id, userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("mark-read error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-module.exports =
-  router;
+module.exports = router;

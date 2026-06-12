@@ -1,280 +1,74 @@
-const express =
-  require(
-    "express"
-  );
-const {
+const express = require("express");
+const bcrypt = require("bcrypt");
 
-  loadAdmins
+const { loadAdmins } = require("../utils/admins");
 
-} = require(
+const router = express.Router();
 
-  "../utils/admins"
-
-);
-const bcrypt =
-  require(
-    "bcrypt"
-  );
-
-const router =
-  express.Router();
-
-router.post(
-
-  "/admin-login",
-
-  async (req,res)=>{
-
-    console.log({
-
-      headers:
-        req.headers,
-
-      body:
-        req.body
-
-    });
-
-    try{
-
-      const password =
-
-        req.body?.password;
-
-      if(
-
-        !password
-
-      ){
-
-        return res
-          .status(400)
-          .json({
-
-            success:false,
-
-            message:
-              "Password required"
-
-          });
-
-      }
-router.get(
-
-  "/whoami",
-
-  (req,res)=>{
-
-    res.json({
-
-      admin:
-        req.session.admin
-
-    });
-
+function requireAdmin(req, res, next) {
+  if (req.session?.admin) {
+    return next();
   }
-
-);
-
-router.post(
-
-  "/admin-logout",
-
-  (req,res)=>{
-
-    // logout code
-
-  }
-
-);
-const username =
-
-  req.body?.username;
-
-if(
-
-  !username
-
-){
-
-  return res
-    .status(400)
-    .json({
-
-      success:false,
-
-      message:
-        "Username required"
-
-    });
-
+  return res.status(401).json({ success: false, message: "Unauthorized" });
 }
 
-console.log(
-  "Username received:",
-  username
-);
+// LOGIN
+router.post("/admin-login", async (req, res) => {
+  try {
+    const password = req.body?.password;
+    const username = req.body?.username;
 
-console.log(
-  "All admins:",
-  loadAdmins()
-);
+    if (!password) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Password required" });
+    }
 
-const admin =
+    if (!username) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Username required" });
+    }
 
-  loadAdmins().find(
+    const admin = loadAdmins().find((a) => a.username === username);
 
-    a =>
+    if (!admin) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid credentials" });
+    }
 
-      a.username === username
+    const ok = await bcrypt.compare(password, admin.password);
 
-  );
+    if (!ok) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid credentials" });
+    }
 
-console.log(
-  "Found admin:",
-  admin
-);
+    req.session.admin = { id: admin.id, username: admin.username };
 
-if(
-
-  !admin
-
-){
-
-  return res
-    .status(401)
-    .json({
-
-      success:false,
-
-      message:
-        "Invalid credentials"
-
-    });
-
-}
-const ok =
-
-  await bcrypt.compare(
-
-    password,
-
-    admin.password
-
-  );
-console.log({
-
-  username,
-
-  passwordReceived:
-    password,
-
-  compareResult:
-    ok
-
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Admin login error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
-      if(!ok){
+// WHOAMI (requires an active admin session)
+router.get("/whoami", requireAdmin, (req, res) => {
+  res.json({ admin: req.session.admin });
+});
 
-        return res
-          .status(401)
-          .json({
-
-            success:false,
-
-            message:
-              "Invalid password"
-
-          });
-
-      }
-
-req.session.admin = {
-
-  id:
-    admin.id,
-
-  username:
-    admin.username
-
-};
-
-      res.json({
-
-        success:true
-
-      });
-
+// LOGOUT
+router.post("/admin-logout", (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      return res.status(500).json({ success: false });
     }
+    res.clearCookie("connect.sid");
+    res.json({ success: true });
+  });
+});
 
-    catch(err){
-
-      console.error(
-
-        "Admin login error:",
-
-        err
-
-      );
-
-      res.status(500)
-
-      .json({
-
-        success:false,
-
-        message:
-          "Server error"
-
-      });
-
-    }
-
-  }
-
-);
-
-router.post(
-
-  "/admin-logout",
-
-  (req,res)=>{
-
-    req.session.destroy(
-
-      (err)=>{
-
-        if(err){
-
-          return res
-            .status(500)
-            .json({
-
-              success:false
-
-            });
-
-        }
-
-        res.clearCookie(
-
-          "connect.sid"
-
-        );
-
-        res.json({
-
-          success:true
-
-        });
-
-      }
-
-    );
-
-  }
-
-);
-
-module.exports =
-  router;
+module.exports = router;

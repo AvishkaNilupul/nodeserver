@@ -1,2 +1,11 @@
 node_modules
 .env
+
+# Local JSON data (migrated into MongoDB)
+orderIds.json
+messages.json
+items.json
+inventory.json
+
+# Uploaded chat images
+public/uploads

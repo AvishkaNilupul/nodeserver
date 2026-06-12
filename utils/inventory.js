@@ -1,90 +1,35 @@
-const fs =
-  require("fs");
+const Inventory = require("../models/Inventory");
 
-const path =
-  require("path");
-
-const inventoryFile =
-
-  path.join(
-
-    __dirname,
-
-    "../inventory.json"
-
-  );
-
-if(
-
-  !fs.existsSync(
-    inventoryFile
-  )
-
-){
-
-  fs.writeFileSync(
-
-    inventoryFile,
-
-    "[]"
-
-  );
-
+async function loadInventory() {
+  const items = await Inventory.find().sort({ createdAt: -1 }).lean();
+  return items.map(({ _id, ...rest }) => ({ id: _id.toString(), ...rest }));
 }
 
-function loadInventory(){
-
-  try{
-
-    return JSON.parse(
-
-      fs.readFileSync(
-
-        inventoryFile,
-
-        "utf8"
-
-      )
-
-    );
-
-  }
-
-  catch{
-
-    return [];
-
-  }
-
+function addInventory(category, username, password) {
+  return Inventory.create({
+    category,
+    username,
+    password,
+    used: false,
+    usedAt: null,
+  });
 }
 
-function saveInventory(
-
-  inventory
-
-){
-
-  fs.writeFileSync(
-
-    inventoryFile,
-
-    JSON.stringify(
-
-      inventory,
-
-      null,
-      2
-
-    )
-
+function setUsed(id, used) {
+  return Inventory.findByIdAndUpdate(
+    id,
+    { $set: { used, usedAt: used ? new Date() : null } },
+    { new: true }
   );
+}
 
+function deleteInventory(id) {
+  return Inventory.deleteOne({ _id: id });
 }
 
 module.exports = {
-
   loadInventory,
-
-  saveInventory
-
+  addInventory,
+  setUsed,
+  deleteInventory,
 };

@@ -1,179 +1,57 @@
-const express =
-  require("express");
+const express = require("express");
 
-const router =
-  express.Router();
+const router = express.Router();
 
 const {
+  getOrdersBySeller,
+  addOrder,
+  deleteOrder,
+} = require("../utils/orderIds");
 
-  loadOrderIds,
-  saveOrderIds
-
-} = require(
-  "../utils/orderIds"
-);
-
-// ====================
-// GET ALL
-// ====================
-
-router.get(
-
-  "/orders/list",
-
-  (req,res)=>{
-
-    const orders =
-
-      loadOrderIds().filter(
-
-        o =>
-
-          o.sellerId ===
-
-          req.session.admin.id
-
-      );
-
-    res.json(
-      orders
-    );
-
+// GET ALL (scoped to the logged-in seller)
+router.get("/orders/list", async (req, res) => {
+  try {
+    const orders = await getOrdersBySeller(req.session.admin.id);
+    res.json(orders);
+  } catch (err) {
+    console.error("orders/list error:", err.message);
+    res.status(500).json({ success: false });
   }
-
-);
-
-// ====================
-// ADD ORDER
-// ====================
-
-router.post(
-
-  "/orders/add",
-
-  (req,res)=>{
-
-const {
-
-  orderId,
-  username,
-  password
-
-} = req.body;
-
-    if(
-
-      !orderId
-
-    ){
-
-      return res
-        .status(400)
-        .json({
-
-          success:false
-
-        });
-
-    }
-
-    const orders =
-
-      loadOrderIds();
-
-orders.push({
-
-  id:
-    Date.now()
-    .toString(),
-
-  sellerId:
-    req.session.admin.id,
-
-  sellerName:
-    req.session.admin.username,
-
-  orderId:
-    orderId.trim(),
-
-  username:
-    (username || "")
-    .trim(),
-
-  password:
-    (password || "")
-    .trim(),
-
-  used:false,
-
-  gamerTag:null,
-
-  usedAt:null,
-
-  createdAt:
-    Date.now()
-
 });
 
-    saveOrderIds(
-      orders
-    );
+// ADD ORDER
+router.post("/orders/add", async (req, res) => {
+  try {
+    const { orderId, username, password } = req.body;
 
-    res.json({
+    if (!orderId) {
+      return res.status(400).json({ success: false });
+    }
 
-      success:true
-
+    await addOrder({
+      sellerId: req.session.admin.id,
+      sellerName: req.session.admin.username,
+      orderId: String(orderId).trim(),
+      username: String(username || "").trim(),
+      password: String(password || "").trim(),
     });
 
+    res.json({ success: true });
+  } catch (err) {
+    console.error("orders/add error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
-// DELETE
-// ====================
-
-router.delete(
-
-  "/orders/delete/:id",
-
-  (req,res)=>{
-
-    let orders =
-
-      loadOrderIds();
-
-orders =
-
-  orders.filter(
-
-    o =>
-
-      !(
-
-        o.id === req.params.id
-
-        &&
-
-        o.sellerId === req.session.admin.id
-
-      )
-
-  );
-
-    saveOrderIds(
-      orders
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+// DELETE (only the seller's own order)
+router.delete("/orders/delete/:id", async (req, res) => {
+  try {
+    await deleteOrder(req.params.id, req.session.admin.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("orders/delete error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-module.exports =
-  router;
+module.exports = router;

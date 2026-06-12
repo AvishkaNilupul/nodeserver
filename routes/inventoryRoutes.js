@@ -1,256 +1,73 @@
-const express =
-  require("express");
+const express = require("express");
 
-const router =
-  express.Router();
+const router = express.Router();
 
 const {
-
   loadInventory,
-  saveInventory
+  addInventory,
+  setUsed,
+  deleteInventory,
+} = require("../utils/inventory");
 
-} = require(
-  "../utils/inventory"
-);
-
-// ====================
 // GET ALL
-// ====================
-
-router.get(
-
-  "/inventory/list",
-
-  (req,res)=>{
-
-    res.json(
-
-      loadInventory()
-
-    );
-
+router.get("/inventory/list", async (req, res) => {
+  try {
+    res.json(await loadInventory());
+  } catch (err) {
+    console.error("inventory/list error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
 // ADD ACCOUNT
-// ====================
-
-router.post(
-
-  "/inventory/add",
-
-  (req,res)=>{
-
-    const {
-
-      category,
-      username,
-      password
-
-    } = req.body;
-
-    const inventory =
-
-      loadInventory();
-
-    inventory.push({
-
-      id:
-
-        Date.now()
-        .toString(),
-
-      category,
-
-      username,
-
-      password,
-
-      used:false,
-
-      usedAt:null,
-
-      createdAt:
-        Date.now()
-
-    });
-
-    saveInventory(
-      inventory
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+router.post("/inventory/add", async (req, res) => {
+  try {
+    const { category, username, password } = req.body;
+    await addInventory(category, username, password);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("inventory/add error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
 // MARK USED
-// ====================
-
-router.post(
-
-  "/inventory/mark-used/:id",
-
-  (req,res)=>{
-
-    const inventory =
-      loadInventory();
-
-    const item =
-
-      inventory.find(
-
-        i=>
-
-          i.id
-          ===
-          req.params.id
-
-      );
-
-    if(
-
-      !item
-
-    ){
-
-      return res
-        .status(404)
-        .json({
-
-          success:false
-
-        });
-
+router.post("/inventory/mark-used/:id", async (req, res) => {
+  try {
+    const item = await setUsed(req.params.id, true);
+    if (!item) {
+      return res.status(404).json({ success: false });
     }
-
-    item.used =
-      true;
-
-    item.usedAt =
-      Date.now();
-
-    saveInventory(
-      inventory
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+    res.json({ success: true });
+  } catch (err) {
+    console.error("inventory/mark-used error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
 // MARK UNUSED
-// ====================
-
-router.post(
-
-  "/inventory/mark-unused/:id",
-
-  (req,res)=>{
-
-    const inventory =
-      loadInventory();
-
-    const item =
-
-      inventory.find(
-
-        i=>
-
-          i.id
-          ===
-          req.params.id
-
-      );
-
-    if(
-
-      !item
-
-    ){
-
-      return res
-        .status(404)
-        .json({
-
-          success:false
-
-        });
-
+router.post("/inventory/mark-unused/:id", async (req, res) => {
+  try {
+    const item = await setUsed(req.params.id, false);
+    if (!item) {
+      return res.status(404).json({ success: false });
     }
-
-    item.used =
-      false;
-
-    item.usedAt =
-      null;
-
-    saveInventory(
-      inventory
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+    res.json({ success: true });
+  } catch (err) {
+    console.error("inventory/mark-unused error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-// ====================
 // DELETE ACCOUNT
-// ====================
-
-router.delete(
-
-  "/inventory/delete/:id",
-
-  (req,res)=>{
-
-    let inventory =
-      loadInventory();
-
-    inventory =
-
-      inventory.filter(
-
-        item=>
-
-          item.id
-          !==
-          req.params.id
-
-      );
-
-    saveInventory(
-      inventory
-    );
-
-    res.json({
-
-      success:true
-
-    });
-
+router.delete("/inventory/delete/:id", async (req, res) => {
+  try {
+    await deleteInventory(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("inventory/delete error:", err.message);
+    res.status(500).json({ success: false });
   }
+});
 
-);
-
-module.exports =
-  router;
+module.exports = router;

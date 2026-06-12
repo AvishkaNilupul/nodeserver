@@ -1,209 +1,46 @@
-const fs =
-  require("fs");
+const Item = require("../models/Item");
 
-const path =
-  require("path");
-
-const itemsFile =
-
-  path.join(
-
-    __dirname,
-
-    "../items.json"
-
-  );
-
-if(
-
-  !fs.existsSync(
-    itemsFile
-  )
-
-){
-
-  fs.writeFileSync(
-
-    itemsFile,
-
-    "[]"
-
-  );
-
+async function loadItems() {
+  const items = await Item.find().sort({ createdAt: -1 }).lean();
+  return items.map(({ _id, ...rest }) => ({ id: _id.toString(), ...rest }));
 }
 
-function loadItems(){
-
-  try{
-
-    return JSON.parse(
-
-      fs.readFileSync(
-
-        itemsFile,
-
-        "utf8"
-
-      )
-
-    ).map(
-
-      item=>({
-
-        used:false,
-
-        usedAt:null,
-
-        ...item
-
-      })
-
-    );
-
-  }
-
-  catch{
-
-    return [];
-
-  }
-
+function addItem(category, username, password, notes = "", value = 0) {
+  return Item.create({
+    category,
+    username,
+    password,
+    notes,
+    value: Number(value) || 0,
+    used: false,
+    usedAt: null,
+  });
 }
 
-function saveItems(
-
-  items
-
-){
-
-  fs.writeFileSync(
-
-    itemsFile,
-
-    JSON.stringify(
-
-      items,
-
-      null,
-
-      2
-
-    )
-
-  );
-
+function deleteItem(id) {
+  return Item.deleteOne({ _id: id });
 }
 
-function addItem(
-
-  category,
-
-  username,
-
-  password,
-
-  notes="",
-
-  value=0
-
-){
-
-  const items =
-    loadItems();
-
-items.push({
-
-  id:
-
-    Date.now()
-    .toString(),
-
-  category,
-
-  username,
-
-  password,
-
-  notes,
-
-  value:
-  Number(value)
-  || 0,
-
-  used:false,
-
-  usedAt:null,
-
-  createdAt:
-    Date.now()
-
-});
-
-  saveItems(
-    items
-  );
-
+// Atomically claims the next unused item in a category so two concurrent
+// requests can never hand out the same account.
+function getNextItem(category) {
+  return Item.findOneAndUpdate(
+    {
+      category: { $regex: `^${escapeRegex(category)}$`, $options: "i" },
+      used: false,
+    },
+    { $set: { used: true, usedAt: new Date() } },
+    { new: true, sort: { createdAt: 1 } }
+  ).lean();
 }
-function getNextItem(
 
-  category
-
-){
-
-  const items =
-    loadItems();
-
-  const item =
-
-    items.find(
-
-      i=>
-
-        i.category
-          .toLowerCase()
-
-        ===
-
-        category
-          .toLowerCase()
-
-        &&
-
-        !i.used
-
-    );
-
-  if(
-
-    !item
-
-  ){
-
-    return null;
-
-  }
-
-  item.used =
-    true;
-
-  item.usedAt =
-    Date.now();
-
-  saveItems(
-    items
-  );
-
-  return item;
-
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
 module.exports = {
-
   loadItems,
-
-  saveItems,
-
   addItem,
-
-  getNextItem
-
+  deleteItem,
+  getNextItem,
 };

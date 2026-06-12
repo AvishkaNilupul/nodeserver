@@ -1,125 +1,62 @@
-const fs = require("fs");
-const path = require("path");
+const Message = require("../models/Message");
 
-const messagesFile =
-  path.join(
-    __dirname,
-    "../messages.json"
-  );
-
-// create file
-
-if (
-  !fs.existsSync(
-    messagesFile
-  )
-) {
-
-  fs.writeFileSync(
-    messagesFile,
-    "[]"
-  );
-
+function getMessagesBySeller(sellerId) {
+  return Message.find({ sellerId }).sort({ createdAt: 1 }).lean();
 }
 
-// =========================
-// Load
-// =========================
-
-function loadMessages() {
-
-  try {
-
-    const data =
-      fs.readFileSync(
-        messagesFile,
-        "utf8"
-      );
-
-    return JSON.parse(
-      data
-    );
-
-  }
-
-  catch {
-
-    return [];
-
-  }
-
+function getMessagesByUser(sellerId, userId) {
+  return Message.find({ sellerId, userId }).sort({ createdAt: 1 }).lean();
 }
 
-// =========================
-// Save
-// =========================
-
-function saveMessages(
-  messages
-) {
-
-  fs.writeFileSync(
-
-    messagesFile,
-
-    JSON.stringify(
-      messages,
-      null,
-      2
-    )
-
-  );
-
-}
-
-// =========================
-// Add
-// =========================
-
-function addMessage(
-
-  userId,
-  sellerId,
-  sender,
-  message
-
-) {
-
-  const messages =
-    loadMessages();
-
-messages.push({
-
-  userId,
-
-  sellerId,
-
-  sender,
-
-  message,
-
-    timestamp:
-      Date.now(),
-
-    readByAdmin:
-      sender === "admin",
-
-    seen:
-      false
-
+function userHasWelcome(sellerId, userId) {
+  return Message.exists({
+    sellerId,
+    userId,
+    sender: "admin",
+    message: { $regex: "TWITCH DROP GUIDE" },
   });
-
-  saveMessages(
-    messages
-  );
-
 }
+
+function addMessage(userId, sellerId, sender, message) {
+  return Message.create({
+    userId,
+    sellerId,
+    sender,
+    message,
+    readByAdmin: sender === "admin",
+    seen: false,
+  });
+}
+
+function clearChat(sellerId, userId) {
+  return Message.deleteMany({ sellerId, userId });
+}
+
+function markRead(sellerId, userId) {
+  return Message.updateMany(
+    { sellerId, userId, sender: "user" },
+    { $set: { readByAdmin: true } }
+  );
+}
+
+function markSeen(sellerId, userId) {
+  return Message.updateMany(
+    { sellerId, userId, sender: "admin" },
+    { $set: { seen: true } }
+  );
+}
+
+function getSellerUserIds(sellerId) {
+  return Message.distinct("userId", { sellerId });
+}
+
 module.exports = {
-
-  loadMessages,
-
-  saveMessages,
-
-  addMessage
-
+  getMessagesBySeller,
+  getMessagesByUser,
+  userHasWelcome,
+  addMessage,
+  clearChat,
+  markRead,
+  markSeen,
+  getSellerUserIds,
 };

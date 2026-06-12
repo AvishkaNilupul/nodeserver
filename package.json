@@ -2,9 +2,13 @@
   "name": "redeemer",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate": "node scripts/migrate.js",
+    "format": "prettier --write .",
+    "lint": "eslint ."
   },
   "keywords": [],
   "author": "",
@@ -22,5 +26,10 @@
     "multer": "^2.1.1",
     "socket.io": "^4.8.3",
     "validator": "^13.15.35"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "prettier": "^3.8.4"
   }
 }

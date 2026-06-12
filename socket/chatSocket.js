@@ -1,177 +1,76 @@
-const joinedUsers =
-  new Set();
+const validator = require("validator");
+
+const { getOrderByGamerTag } = require("../utils/orderIds");
 const {
-  loadOrderIds
-} = require(
-  "../utils/orderIds"
-);
-const cooldowns =
-  new Map();
-const validator =
-  require(
-    "validator"
-  );
+  addMessage,
+  userHasWelcome,
+  getMessagesByUser,
+  markSeen,
+} = require("../utils/messages");
+const { sendTelegram } = require("../utils/telegram");
 
-require('dotenv').config();
-const axios =
-  require('axios');
+const cooldowns = new Map();
 
-const {
-
-  loadMessages,
-  saveMessages,
-  addMessage
-
-} = require(
-  "../utils/messages"
-);
-
-function chatSocket(
-  io
-) {
-
-  io.on(
-
-    "connection",
-
-    (socket)=>{
-
-      console.log(
-        "✅ Connected:",
-        socket.id
-      );
-
-      // =========================
-      // Join User
-      // =========================
-
-      socket.on(
-
-        "join-user",
-
-        (userId)=>{
-
-          if(
-
-            typeof userId
-            !==
-            "string"
-
-          ){
-
-            return;
-
-          }
-
-          userId =
-
-            validator.escape(
-
-              userId
-                .trim()
-                .slice(0,50)
-
-            );
-
-          if(!userId){
-
-            return;
-
-          }
-
-          socket.join(
-            userId
-          );
-
-          console.log(
-            "👤 Joined:",
-            userId
-          );
-
-          // tell admin immediately
-
-if(
-
-  !joinedUsers.has(
-    userId
-  )
-
-){
-
-  joinedUsers.add(
-    userId
-  );
-
+function cleanUserId(value) {
+  if (typeof value !== "string") return null;
+  const userId = validator.escape(value.trim().slice(0, 50));
+  return userId || null;
 }
 
+function chatSocket(io) {
+  io.on("connection", (socket) => {
+    const session = socket.request.session;
+    const admin = session?.admin || null;
 
-          let messages =
-            loadMessages();
+    socket.data.isAdmin = !!admin;
 
-          // welcome check
+    // Admins join a room scoped to their own sellerId so realtime events
+    // never leak across sellers.
+    if (admin) {
+      socket.data.sellerId = admin.id;
+      socket.join(`seller:${admin.id}`);
+    }
 
-const hasWelcome =
+    // =========================
+    // Join User (buyer)
+    // =========================
+    socket.on("join-user", async (payload) => {
+      try {
+        const rawUserId =
+          typeof payload === "string" ? payload : payload?.userId;
+        const token =
+          typeof payload === "object" && payload ? payload.token : null;
 
-  messages.some(
+        const userId = cleanUserId(rawUserId);
+        if (!userId) return;
 
-    msg=>
+        const order = await getOrderByGamerTag(userId);
+        if (!order) return;
 
-      msg.userId===userId
+        // Authenticate the buyer. If the order already has a chatToken, the
+        // client must present a matching one. Legacy orders created before
+        // tokens existed bind the first token presented.
+        if (order.chatToken) {
+          if (token !== order.chatToken) return;
+        } else if (typeof token === "string" && token) {
+          order.chatToken = token;
+          await order.save();
+        }
 
-      &&
+        socket.data.userId = userId;
+        socket.data.sellerId = order.sellerId;
+        socket.join(userId);
 
-      msg.message.includes(
-        "📋 TWITCH DROP GUIDE"
-      )
+        const hasWelcome = await userHasWelcome(order.sellerId, userId);
 
-  );
+        if (!hasWelcome && order.used && order.username && order.password) {
+          await addMessage(
+            userId,
+            order.sellerId,
+            "admin",
+            `📋TWITCH DROP GUIDE
 
-          // create welcome once
-
-if(!hasWelcome){
-
-
-
-  const orders =
-    loadOrderIds();
-
-  const order =
-
-    orders.find(
-
-      o =>
-
-        o.gamerTag === userId
-
-        &&
-
-        o.used
-
-        &&
-
-        o.username
-
-        &&
-
-        o.password
-
-    );
-
-
-
-if(order){
-
-  addMessage(
-
-    userId,
-
-    order.sellerId,
-
-    "admin",
-
-`📋 TWITCH DROP GUIDE
-
-🔑 Login
+🔑Login
 
 User: ${order.username}
 Pass: ${order.password}
@@ -189,658 +88,156 @@ Scroll down to the "Received" section.
 Rust:
 • Activate Drops
 • Check for missing drops`
-
-  );
-
-  addMessage(
-
-    userId,
-
-    order.sellerId,
-
-    "admin",
-
-    "If you have any issue please text here. Admin will help you."
-
-  );
-
-}
-
-  messages =
-    loadMessages();
-
-}
-
-          // user history
-
-          const userMessages =
-
-            messages.filter(
-
-              msg=>
-
-                msg.userId
-                ===
-                userId
-
-            );
-
-          socket.emit(
-
-            "chat-history",
-
-            userMessages
-
           );
 
+          await addMessage(
+            userId,
+            order.sellerId,
+            "admin",
+            "If you have any issue please text here. Admin will help you."
+          );
         }
 
-      );
-
-      // =========================
-      // User Message
-      // =========================
-
-      socket.on(
-
-        "user-message",
-
-        async (data)=>{
-
-          if(
-
-            !data
-
-            ||
-
-            typeof data.userId
-            !==
-            "string"
-
-            ||
-
-            typeof data.message
-            !==
-            "string"
-
-          ){
-
-            return;
-
-          }
-
-          data.userId =
-
-            validator.escape(
-
-              data.userId
-                .trim()
-                .slice(0,50)
-
-            );
-
-          data.message =
-
-            String(
-              data.message
-            )
-              .trim()
-              .slice(0,1000);
-
-          if(!data.message){
-
-            return;
-
-          }
-          const key =
-
-            `${socket.id}`;
-
-
-          const now =
-            Date.now();
-
-          const last =
-
-            cooldowns.get(
-              key
-            );
-
-          if(
-
-            last
-
-            &&
-
-            now - last
-            < 1000
-
-          ){
-
-            return;
-
-          }
-
-          cooldowns.set(
-
-            key,
-
-            now
-
-          );
-const orders =
-  loadOrderIds();
-
-const order =
-
-  orders.find(
-
-    o =>
-
-      o.gamerTag ===
-      data.userId
-
-  );
-
-if(!order){
-
-  return;
-
-}
-
-addMessage(
-
-  data.userId,
-
-  order.sellerId,
-
-  "user",
-
-  data.message
-
-);
-        // =========================
-        // Telegram Chat Alert
-        // =========================
-
-          try{
-
-              const chatIds =
-
-                process.env
-                  .TG_CHAT_IDS
-
-                  ?
-
-                  process.env
-                    .TG_CHAT_IDS
-                    .split(",")
-
-                  :
-
-                  [];
-
-            for(const chatId of chatIds){
-
-              await axios.post(
-
-                `https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`,
-
-                {
-
-                  chat_id:
-                    chatId.trim(),
-
-text:
-`💬 NEW CHAT MESSAGE
-
-👤 User:
-${data.userId}
-
-📝 Message:
-${data.message}
+        const userMessages = await getMessagesByUser(order.sellerId, userId);
+        socket.emit("chat-history", userMessages);
+      } catch (err) {
+        console.error("join-user error:", err.message);
+      }
+    });
+
+    // =========================
+    // User Message
+    // =========================
+    socket.on("user-message", async (data) => {
+      try {
+        const userId = socket.data.userId;
+        const sellerId = socket.data.sellerId;
+
+        // Only an authenticated (joined) buyer can post.
+        if (!userId || !sellerId || socket.data.isAdmin) return;
+        if (!data || typeof data.message !== "string") return;
+
+        const message = String(data.message).trim().slice(0, 1000);
+        if (!message) return;
+
+        const now = Date.now();
+        const last = cooldowns.get(socket.id);
+        if (last && now - last < 1000) return;
+        cooldowns.set(socket.id, now);
+
+        await addMessage(userId, sellerId, "user", message);
+
+        await sendTelegram(
+          `💬NEW CHAT MESSAGE
+
+👤User:
+${userId}
+
+📝Message:
+${message}
 
 Time:
 ${new Date().toISOString()}`
-
-                }
-
-              );
-
-            }
-
-          }
-
-          catch(err){
-
-            console.error(
-
-              "Telegram chat error:",
-
-              err.response?.data ||
-
-              err.message
-
-            );
-
-          }
-
-          
-
-          io.emit(
-
-            "new-message",
-
-            {
-
-              userId:
-                data.userId,
-
-              sender:
-                "user",
-
-              message:
-                data.message
-
-            }
-
-          );
-
-        }
-
-      );
-
-      // =========================
-// Typing Indicator
-// =========================
-
-socket.on(
-
-  "admin-typing",
-
-  (userId)=>{
-
-    if(
-
-      typeof userId
-      !==
-      "string"
-
-    ){
-
-      return;
-
-    }
-
-    io.to(
-
-      userId
-
-    ).emit(
-
-      "support-typing"
-
-    );
-
-  }
-
-);
-
-socket.on(
-
-  "admin-stop-typing",
-
-  (userId)=>{
-
-    if(
-
-      typeof userId
-      !==
-      "string"
-
-    ){
-
-      return;
-
-    }
-
-    io.to(
-
-      userId
-
-    ).emit(
-
-      "support-stop-typing"
-
-    );
-
-  }
-
-);
-
-// =========================
-// User Typing
-// =========================
-
-socket.on(
-
-  "user-typing",
-
-  (userId)=>{
-
-    if(
-
-      typeof userId
-      !==
-      "string"
-
-    ){
-
-      return;
-
-    }
-
-    io.emit(
-
-      "user-typing",
-
-      userId
-
-    );
-
-  }
-
-);
-
-socket.on(
-
-  "user-stop-typing",
-
-  (userId)=>{
-
-    if(
-
-      typeof userId
-      !==
-      "string"
-
-    ){
-
-      return;
-
-    }
-
-    io.emit(
-
-      "user-stop-typing",
-
-      userId
-
-    );
-
-  }
-
-);
-
-// =========================
-// Message Seen
-// =========================
-
-socket.on(
-
-  "message-seen",
-
-  (userId)=>{
-
-    if(
-
-      typeof userId
-      !==
-      "string"
-
-    ){
-
-      return;
-
-    }
-
-    const messages =
-      loadMessages();
-
-    let changed =
-      false;
-
-    messages.forEach(
-
-      (msg)=>{
-
-        if(
-
-          msg.userId===userId
-
-          &&
-
-          msg.sender==="admin"
-
-        ){
-
-          msg.seen =
-            true;
-
-          changed =
-            true;
-
-        }
-
+        );
+
+        // Notify only this seller's admins and the buyer's own room.
+        io.to(`seller:${sellerId}`).emit("new-message", {
+          userId,
+          sender: "user",
+          message,
+        });
+      } catch (err) {
+        console.error("user-message error:", err.message);
       }
+    });
 
-    );
+    // =========================
+    // Admin Message
+    // =========================
+    socket.on("admin-message", async (data) => {
+      try {
+        if (!socket.data.isAdmin) return;
+        const sellerId = socket.data.sellerId;
+        if (!data || typeof data.userId !== "string") return;
+        if (typeof data.message !== "string") return;
 
-    if(changed){
+        const userId = cleanUserId(data.userId);
+        const message = String(data.message).trim().slice(0, 1000);
+        if (!userId || !message) return;
 
-      saveMessages(
-        messages
-      );
+        // The admin may only message buyers that belong to them.
+        const order = await getOrderByGamerTag(userId);
+        if (!order || order.sellerId !== sellerId) return;
 
-    }
+        const key = `admin-${socket.id}`;
+        const now = Date.now();
+        const last = cooldowns.get(key);
+        if (last && now - last < 300) return;
+        cooldowns.set(key, now);
 
-    io.emit(
+        await addMessage(userId, sellerId, "admin", message);
 
-      "message-seen",
+        io.to(userId).emit("admin-reply", { message });
+        io.to(`seller:${sellerId}`).emit("new-message", {
+          userId,
+          sender: "admin",
+          message,
+        });
+      } catch (err) {
+        console.error("admin-message error:", err.message);
+      }
+    });
 
-      userId
+    // =========================
+    // Typing Indicators
+    // =========================
+    socket.on("admin-typing", (userId) => {
+      if (!socket.data.isAdmin) return;
+      const id = cleanUserId(userId);
+      if (id) io.to(id).emit("support-typing");
+    });
 
-    );
+    socket.on("admin-stop-typing", (userId) => {
+      if (!socket.data.isAdmin) return;
+      const id = cleanUserId(userId);
+      if (id) io.to(id).emit("support-stop-typing");
+    });
 
-  }
+    socket.on("user-typing", () => {
+      const { userId, sellerId } = socket.data;
+      if (!userId || !sellerId || socket.data.isAdmin) return;
+      io.to(`seller:${sellerId}`).emit("user-typing", userId);
+    });
 
-);
-      // =========================
-      // Admin Message
-      // =========================
+    socket.on("user-stop-typing", () => {
+      const { userId, sellerId } = socket.data;
+      if (!userId || !sellerId || socket.data.isAdmin) return;
+      io.to(`seller:${sellerId}`).emit("user-stop-typing", userId);
+    });
 
-      socket.on(
+    // =========================
+    // Message Seen (buyer viewed admin messages)
+    // =========================
+    socket.on("message-seen", async () => {
+      try {
+        const { userId, sellerId } = socket.data;
+        if (!userId || !sellerId || socket.data.isAdmin) return;
 
-        "admin-message",
+        await markSeen(sellerId, userId);
+        io.to(`seller:${sellerId}`).emit("message-seen", userId);
+      } catch (err) {
+        console.error("message-seen error:", err.message);
+      }
+    });
 
-        (data)=>{
-
-          if(
-
-            !data
-
-            ||
-
-            typeof data.userId
-            !==
-            "string"
-
-            ||
-
-            typeof data.message
-            !==
-            "string"
-
-          ){
-
-            return;
-
-          }
-
-          data.userId =
-
-            validator.escape(
-
-              data.userId
-                .trim()
-                .slice(0,50)
-
-            );
-
-          data.message =
-
-            String(
-
-              data.message
-            )
-            .trim()
-            .slice(0,1000);
-            const key =
-
-              `admin-${socket.id}`;
-
-            const now =
-              Date.now();
-
-            const last =
-
-              cooldowns.get(
-                key
-              );
-
-            if(
-
-              last
-
-              &&
-
-              now - last
-              < 300
-
-            ){
-
-              return;
-
-            }
-
-            cooldowns.set(
-              key,
-              now
-            );
-
-const orders =
-  loadOrderIds();
-
-const order =
-
-  orders.find(
-
-    o =>
-
-      o.gamerTag ===
-      data.userId
-
-  );
-
-if(!order){
-
-  return;
-
+    // =========================
+    // Disconnect
+    // =========================
+    socket.on("disconnect", () => {
+      cooldowns.delete(socket.id);
+      cooldowns.delete(`admin-${socket.id}`);
+    });
+  });
 }
 
-addMessage(
-
-  data.userId,
-
-  order.sellerId,
-
-  "admin",
-
-  data.message
-
-);
-
-          io.to(
-            data.userId
-          )
-
-          .emit(
-
-            "admin-reply",
-
-            {
-
-              message:
-                data.message
-
-            }
-
-          );
-
-          io.emit(
-
-            "new-message",
-
-            {
-
-              userId:
-                data.userId,
-
-              sender:
-                "admin",
-
-              message:
-                data.message
-
-            }
-
-          );
-
-        }
-
-      );
-
-      // =========================
-      // Disconnect
-      // =========================
-      socket.on(
-
-        "disconnect",
-
-        ()=>{
-
-          cooldowns.delete(
-            socket.id
-          );
-
-          cooldowns.delete(
-            `admin-${socket.id}`
-          );
-
-          console.log(
-            "❌ Disconnected:",
-            socket.id
-          );
-
-        }
-
-      );
-          }
-
-  );
-
-}
-
-
-module.exports =
-  chatSocket;
+module.exports = chatSocket;
