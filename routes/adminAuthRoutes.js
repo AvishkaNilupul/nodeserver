@@ -59,7 +59,34 @@ router.post(
           });
 
       }
+router.get(
 
+  "/whoami",
+
+  (req,res)=>{
+
+    res.json({
+
+      admin:
+        req.session.admin
+
+    });
+
+  }
+
+);
+
+router.post(
+
+  "/admin-logout",
+
+  (req,res)=>{
+
+    // logout code
+
+  }
+
+);
 const username =
 
   req.body?.username;
