@@ -1,223 +1,245 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Twitch Drops Inventory</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<title>Twitch Drops Inventory Checker</title>
 <style>
-  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;}
-  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;color-scheme:dark;}
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
-
-  /* ---- shared admin shell ---- */
-  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
-  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
-  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
-  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
-  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
-  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
-  .nav .links a:hover { background: var(--surface-2); }
-  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
-  html[data-theme="dark"] .nav .links a.active { background: rgba(79,70,229,0.18); }
-  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
-  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
-  .nav .me .who { line-height: 1.2; min-width: 0; }
-  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 80px; }
-  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
-  .nav .me .logout { width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
-  .nav .me .logout.themebtn { margin-left: auto; }
-  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
-  html[data-theme="dark"] .nav .me .logout:hover { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.4); }
-
-  .page { flex: 1; overflow-y: auto; min-width: 0; }
-
-  /* ---- Twitch tool (scoped to .tw; colors map onto theme vars) ---- */
-  .tw {
-    --panel: var(--surface);
-    --panel-2: var(--surface-2);
-    --border: var(--line);
-    --text: var(--ink);
-    --tmuted: var(--muted);
+  :root {
+    --bg: #0e0e10;
+    --panel: #18181b;
+    --panel-2: #1f1f23;
+    --border: #2a2a2e;
+    --text: #efeff1;
+    --muted: #adadb8;
     --accent: #9147ff;
     --accent-2: #772ce8;
     --green: #00b173;
     --yellow: #f5b942;
     --red: #ec4f4f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Inter", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif;
     line-height: 1.4;
   }
-  .tw .twhead { background: linear-gradient(135deg, var(--accent-2), var(--accent)); padding: 22px 24px; color: #fff; }
-  .tw .twhead h1 { margin: 0; font-size: 20px; }
-  .tw .twhead p { margin: 4px 0 0; opacity: .9; font-size: 13px; }
-  .tw .container { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
-
-  .tw .controls { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
-  .tw .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
-  .tw .field { flex: 1 1 320px; display: flex; flex-direction: column; gap: 6px; }
-  .tw label { font-size: 12px; color: var(--tmuted); font-weight: 600; }
-  .tw input[type="text"], .tw input[type="password"] {
-    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
-    padding: 10px 12px; font-size: 14px; width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  header {
+    background: linear-gradient(135deg, var(--accent-2), var(--accent));
+    padding: 22px 24px;
   }
-  .tw input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px rgba(145,71,255,0.15); }
-  .tw button { background: var(--accent); border: none; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; font-family: inherit; }
-  .tw button:hover { background: var(--accent-2); }
-  .tw button:disabled { opacity: .5; cursor: default; }
-  .tw .btn-secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
-  .tw .btn-secondary:hover { background: var(--border); }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; opacity: .85; font-size: 13px; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
 
-  .tw details.advanced { margin-top: 12px; }
-  .tw details.advanced summary { cursor: pointer; color: var(--tmuted); font-size: 12px; }
-  .tw .hint { font-size: 12px; color: var(--tmuted); margin-top: 8px; }
-  .tw .hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
-
-  .tw #status { margin: 14px 0; font-size: 14px; min-height: 20px; }
-  .tw .status-error { color: var(--red); }
-  .tw .status-ok { color: var(--green); }
-
-  .tw .summary-bar { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
-  .tw .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; min-width: 120px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
-  .tw .stat .num { font-size: 22px; font-weight: 700; }
-  .tw .stat .lbl { font-size: 12px; color: var(--tmuted); }
-
-  .tw .filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .tw .filters button { background: var(--panel-2); border: 1px solid var(--border); color: var(--tmuted); font-weight: 500; padding: 6px 14px; font-size: 13px; }
-  .tw .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-
-  .tw .campaign { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 18px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
-  .tw .campaign-head { display: flex; align-items: center; gap: 14px; padding: 14px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border); }
-  .tw .campaign-head img.boxart { width: 46px; height: 62px; border-radius: 6px; object-fit: cover; flex: 0 0 auto; background: #000; }
-  .tw .campaign-head .meta { flex: 1; min-width: 0; }
-  .tw .campaign-head .game { font-size: 13px; color: var(--accent); font-weight: 600; }
-  .tw .campaign-head .cname { font-size: 15px; font-weight: 700; }
-  .tw .campaign-head .sub { font-size: 12px; color: var(--tmuted); margin-top: 2px; }
-
-  .tw .drops { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; padding: 16px; }
-  .tw .drop { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; gap: 12px; }
-  .tw .drop img.benefit { width: 54px; height: 54px; border-radius: 8px; object-fit: cover; flex: 0 0 auto; background: #000; }
-  .tw .drop .info { flex: 1; min-width: 0; }
-  .tw .drop .dname { font-size: 13px; font-weight: 600; margin-bottom: 6px; word-break: break-word; }
-  .tw .badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; letter-spacing: .04em; margin-left: 6px; vertical-align: middle; }
-  .tw .badge.claimable { background: var(--yellow); color: #000; }
-  .tw .badge.claimed { background: var(--green); color: #fff; }
-  .tw .badge.progress { background: var(--border); color: var(--text); }
-
-  .tw .pbar { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; margin: 6px 0 4px; }
-  .tw .pbar > span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
-  .tw .pbar > span.full { background: var(--green); }
-  .tw .pmeta { font-size: 11px; color: var(--tmuted); }
-
-  .tw .claimed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
-  .tw .claimed-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; position: relative; text-align: left; }
-  .tw .claimed-card img.reward { width: 84px; height: 84px; object-fit: contain; display: block; margin: 0 auto 10px; }
-  .tw .claimed-card .noimg { width: 84px; height: 84px; margin: 0 auto 10px; background: var(--panel-2); border-radius: 8px; }
-  .tw .claimed-card .count { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.6); color: #fff; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 6px; }
-  .tw .claimed-card .ago { font-size: 11px; color: var(--tmuted); margin-bottom: 2px; }
-  .tw .claimed-card .cn { font-size: 13px; font-weight: 700; line-height: 1.25; word-break: break-word; }
-  .tw .claimed-card .cg { font-size: 11px; color: var(--accent); margin-top: 3px; }
-  .tw .connect-btn { display: inline-block; margin-top: 10px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 6px; text-decoration: none; }
-  .tw .connect-btn:hover { background: var(--accent-2); }
-  .tw .connected { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--green); }
-  .tw .connected.none { color: var(--tmuted); }
-  .tw .conn-chip { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; text-decoration: none; margin-top: 4px; }
-  .tw .conn-chip.ok { background: rgba(0,177,115,.15); color: var(--green); }
-  .tw .conn-chip.connect { background: var(--accent); color: #fff; }
-  .tw .conn-chip.connect:hover { background: var(--accent-2); }
-
-  .tw .empty { text-align: center; color: var(--tmuted); padding: 50px 20px; }
-  .tw a.link { color: var(--accent); }
-  .tw .twfoot { text-align:center; color: var(--tmuted); font-size: 12px; padding: 24px; }
-
-  @media (max-width: 720px) {
-    body { overflow: auto; }
-    .nav { display: none; }
+  .controls {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 20px;
   }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .field { flex: 1 1 320px; display: flex; flex-direction: column; gap: 6px; }
+  label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  input[type="text"], input[type="password"] {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    width: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover { background: var(--accent-2); }
+  button:disabled { opacity: .5; cursor: default; }
+  .btn-secondary { background: var(--panel-2); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: #2a2a30; }
+
+  details.advanced { margin-top: 12px; }
+  details.advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+
+  #status { margin: 14px 0; font-size: 14px; min-height: 20px; }
+  .status-error { color: var(--red); }
+  .status-ok { color: var(--green); }
+
+  .summary-bar {
+    display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 18px;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 16px; min-width: 120px;
+  }
+  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat .lbl { font-size: 12px; color: var(--muted); }
+
+  .filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .filters button {
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--muted); font-weight: 500; padding: 6px 14px; font-size: 13px;
+  }
+  .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .campaign {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 18px;
+    overflow: hidden;
+  }
+  .campaign-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 16px; background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .campaign-head img.boxart {
+    width: 46px; height: 62px; border-radius: 6px; object-fit: cover; flex: 0 0 auto;
+    background: #000;
+  }
+  .campaign-head .meta { flex: 1; min-width: 0; }
+  .campaign-head .game { font-size: 13px; color: var(--accent); font-weight: 600; }
+  .campaign-head .cname { font-size: 15px; font-weight: 700; }
+  .campaign-head .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .drops { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; padding: 16px; }
+  .drop {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex; gap: 12px;
+  }
+  .drop img.benefit {
+    width: 54px; height: 54px; border-radius: 8px; object-fit: cover; flex: 0 0 auto;
+    background: #000;
+  }
+  .drop .info { flex: 1; min-width: 0; }
+  .drop .dname { font-size: 13px; font-weight: 600; margin-bottom: 6px; word-break: break-word; }
+  .badge {
+    display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 999px; letter-spacing: .04em; margin-left: 6px; vertical-align: middle;
+  }
+  .badge.claimable { background: var(--yellow); color: #000; }
+  .badge.claimed { background: var(--green); color: #000; }
+  .badge.progress { background: #3a3a40; color: var(--text); }
+
+  .pbar { height: 8px; background: #000; border-radius: 999px; overflow: hidden; margin: 6px 0 4px; }
+  .pbar > span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .pbar > span.full { background: var(--green); }
+  .pmeta { font-size: 11px; color: var(--muted); }
+
+  .claimed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+  .claimed-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; position: relative; text-align: left;
+  }
+  .claimed-card img.reward { width: 84px; height: 84px; object-fit: contain; display: block; margin: 0 auto 10px; }
+  .claimed-card .noimg { width: 84px; height: 84px; margin: 0 auto 10px; background: var(--panel-2); border-radius: 8px; }
+  .claimed-card .count {
+    position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.6); color: #fff;
+    font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 6px;
+  }
+  .claimed-card .ago { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .claimed-card .cn { font-size: 13px; font-weight: 700; line-height: 1.25; word-break: break-word; }
+  .claimed-card .cg { font-size: 11px; color: var(--accent); margin-top: 3px; }
+  .connect-btn {
+    display: inline-block; margin-top: 10px; background: var(--accent); color: #fff;
+    font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 6px; text-decoration: none;
+  }
+  .connect-btn:hover { background: var(--accent-2); }
+  .connected { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--green); }
+  .connected.none { color: var(--muted); }
+  .conn-chip {
+    display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px;
+    border-radius: 999px; text-decoration: none; margin-top: 4px;
+  }
+  .conn-chip.ok { background: rgba(0,177,115,.15); color: var(--green); }
+  .conn-chip.connect { background: var(--accent); color: #fff; }
+  .conn-chip.connect:hover { background: var(--accent-2); }
+
+  .game-section { margin-bottom: 28px; }
+  .game-header {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid var(--accent);
+  }
+  .game-header h2 { font-size: 18px; margin: 0; }
+  .game-header .gcount { font-size: 12px; color: var(--muted); font-weight: 600; }
+
+  .empty { text-align: center; color: var(--muted); padding: 50px 20px; }
+  a.link { color: var(--accent); }
+  footer { text-align:center; color: var(--muted); font-size: 12px; padding: 24px; }
 </style>
 </head>
 <body>
-<aside class="nav">
-  <div class="brand">
-    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
-    <b>RedeemHub<span>Admin console</span></b>
-  </div>
-  <nav class="links">
-    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
-    <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
-    <a href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
-    <a href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
-    <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
-    <a class="active" href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
-    <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
-  </nav>
-  <div class="me">
-    <span class="av" id="meAvatar">--</span>
-    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
-    <button class="logout themebtn" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
-    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
-  </div>
-</aside>
+<header>
+  <h1>Twitch Drops Inventory Checker</h1>
+  <p>Paste your Twitch auth token to see your in-progress drops, progress, and what's claimable.</p>
+</header>
 
-<main class="page">
-  <div class="tw">
-    <div class="twhead">
-      <h1>Twitch Drops Inventory Checker</h1>
-      <p>Paste a Twitch auth token to see in-progress drops, progress, and what's claimable.</p>
+<div class="container">
+  <div class="controls">
+    <div class="row">
+      <div class="field">
+        <label for="token">Twitch OAuth token (your bot's <code>ClientSecret</code>, or the twitch.tv <code>auth-token</code> cookie)</label>
+        <input id="token" type="password" placeholder="e.g. 1a2b3c4d5e6f..." autocomplete="off" spellcheck="false" />
+      </div>
+      <button id="fetchBtn">Check Inventory</button>
+      <button id="toggleTok" class="btn-secondary" type="button" title="Show/hide token">Show</button>
     </div>
 
-    <div class="container">
-      <div class="controls">
-        <div class="row">
-          <div class="field">
-            <label for="token">Twitch OAuth token (the bot's <code>ClientSecret</code>, or the twitch.tv <code>auth-token</code> cookie)</label>
-            <input id="token" type="password" placeholder="e.g. 1a2b3c4d5e6f..." autocomplete="off" spellcheck="false" />
-          </div>
-          <button id="fetchBtn">Check Inventory</button>
-          <button id="toggleTok" class="btn-secondary" type="button" title="Show/hide token">Show</button>
-        </div>
-
-        <details class="advanced">
-          <summary>Advanced settings</summary>
-          <div class="row" style="margin-top:10px;">
-            <div class="field">
-              <label for="clientId">Client-ID (must match the app that created your token)</label>
-              <input id="clientId" type="text" value="kd1unb4b3q4t58fwlpcbzcbnm76a8fp" spellcheck="false" />
-            </div>
-          </div>
-          <div class="hint">
-            Defaults to the Android-app client-id <code>kd1unb4b3q4t58fwlpcbzcbnm76a8fp</code> — the one TwitchDropsBot uses, so it matches the <code>ClientSecret</code> token from the bot's <code>settings.json</code>.
-            If instead you copied the <code>auth-token</code> cookie from twitch.tv in a browser, change this to the web client-id <code>kimne78kx3ncx6brgo4mv6wki5h1ko</code>.
-          </div>
-          <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text);cursor:pointer;">
-            <input type="checkbox" id="remember" /> Remember token in this browser (localStorage)
-          </label>
-        </details>
-
-        <div class="hint" style="margin-top:12px;">
-          Where to find your token: it's the <code>ClientSecret</code> value inside the bot's <code>settings.json</code> (the bot uses it directly as the Twitch auth token). Keep the Android client-id default in that case.
-          Alternatively, open <a class="link" href="https://www.twitch.tv" target="_blank" rel="noopener">twitch.tv</a> logged in → DevTools (F12) → Application → Cookies → copy <code>auth-token</code> (then switch to the web client-id in Advanced).
-          Your token stays in your browser and is sent only to Twitch's API.
+    <details class="advanced">
+      <summary>Advanced settings</summary>
+      <div class="row" style="margin-top:10px;">
+        <div class="field">
+          <label for="clientId">Client-ID (must match the app that created your token)</label>
+          <input id="clientId" type="text" value="kd1unb4b3q4t58fwlpcbzcbnm76a8fp" spellcheck="false" />
         </div>
       </div>
-
-      <div id="status"></div>
-      <div id="summary" class="summary-bar" style="display:none;"></div>
-      <div id="filters" class="filters" style="display:none;">
-        <button data-filter="all" class="active">All</button>
-        <button data-filter="claimable">Claimable</button>
-        <button data-filter="inprogress">In progress</button>
-        <button data-filter="claimed">Claimed rewards</button>
+      <div class="hint">
+        Defaults to the Android-app client-id <code>kd1unb4b3q4t58fwlpcbzcbnm76a8fp</code> — the one TwitchDropsBot uses, so it matches the <code>ClientSecret</code> token from your bot's <code>settings.json</code>.
+        If instead you copied the <code>auth-token</code> cookie from twitch.tv in a browser, change this to the web client-id <code>kimne78kx3ncx6brgo4mv6wki5h1ko</code>.
       </div>
-      <div id="results"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text);cursor:pointer;">
+        <input type="checkbox" id="remember" /> Remember token in this browser (localStorage)
+      </label>
+    </details>
 
-      <div class="twfoot">Runs entirely in your browser. No data is sent anywhere except Twitch's GraphQL API.</div>
+    <div class="hint" style="margin-top:12px;">
+      Where to find your token: it's the <code>ClientSecret</code> value inside your bot's <code>settings.json</code> (the bot uses it directly as the Twitch auth token). Keep the Android client-id default in that case.
+      Alternatively, open <a class="link" href="https://www.twitch.tv" target="_blank" rel="noopener">twitch.tv</a> logged in → DevTools (F12) → Application → Cookies → copy <code>auth-token</code> (then switch to the web client-id in Advanced).
+      Your token stays in your browser and is sent only to Twitch's API.
     </div>
   </div>
-</main>
+
+  <div id="status"></div>
+  <div id="summary" class="summary-bar" style="display:none;"></div>
+  <div id="filters" class="filters" style="display:none;">
+    <button data-filter="all" class="active">All</button>
+    <button data-filter="claimable">Claimable</button>
+    <button data-filter="inprogress">In progress</button>
+    <button data-filter="claimed">Claimed rewards</button>
+  </div>
+  <div id="results"></div>
+</div>
+
+<footer>Runs entirely in your browser. No data is sent anywhere except Twitch's GraphQL API.</footer>
 
 <script>
 const GQL_URL = "https://gql.twitch.tv/gql";
@@ -225,7 +247,7 @@ const DEFAULT_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
 const INVENTORY_HASH = "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b";
 
 const INVENTORY_QUERY = `
-query Inventory($fetchRewardCampaigns: Boolean = false) {
+query Inventory {
   currentUser {
     id
     inventory {
@@ -266,6 +288,7 @@ query Inventory($fetchRewardCampaigns: Boolean = false) {
         isConnected
         requiredAccountLink
         game { id displayName name }
+        benefit { id name game { id displayName name } }
       }
     }
   }
@@ -286,21 +309,6 @@ window.addEventListener("DOMContentLoaded", () => {
   if (saved) { $("token").value = saved; $("remember").checked = true; }
   const savedCid = localStorage.getItem("tdi_clientid");
   if (savedCid) $("clientId").value = savedCid;
-
-  // Prefill from the Bots page ("Check drops"). Token is passed via the URL
-  // hash (#token=...&login=...) so it is never sent to the server.
-  if (window.location.hash && window.location.hash.length > 1) {
-    const p = new URLSearchParams(window.location.hash.slice(1));
-    const tok = p.get("token");
-    const login = p.get("login");
-    if (tok) {
-      $("token").value = tok;
-      setStatus("Loaded the ClientSecret for " + (login || "the selected bot account") + " — checking drops…", "");
-      // remove the token from the address bar / history right away
-      history.replaceState(null, "", window.location.pathname);
-      checkInventory();
-    }
-  }
 });
 
 $("toggleTok").addEventListener("click", () => {
@@ -350,6 +358,7 @@ async function gqlRequest(token, clientId, body) {
   return Array.isArray(parsed) ? parsed[0] : parsed;
 }
 
+
 async function checkInventory() {
   const token = cleanToken($("token").value);
   const clientId = $("clientId").value.trim() || DEFAULT_CLIENT_ID;
@@ -369,19 +378,19 @@ async function checkInventory() {
   filtersEl.style.display = "none";
 
   try {
-    // Primary: the exact persisted query the bot uses.
+    // Full query (includes benefit.game, which carries the game even for rewards
+    // from expired campaigns). Falls back to the bot's persisted query if needed.
     let data = await gqlRequest(token, clientId, [{
       operationName: "Inventory",
-      variables: { fetchRewardCampaigns: true },
-      extensions: { persistedQuery: { sha256Hash: INVENTORY_HASH, version: 1 } }
+      query: INVENTORY_QUERY,
+      variables: {}
     }]);
 
-    // Fallback: if Twitch rotated the hash, send the full query text instead.
-    if (data?.errors?.some(e => /PersistedQueryNotFound/i.test(e.message || ""))) {
+    if (data?.errors?.length) {
       data = await gqlRequest(token, clientId, [{
         operationName: "Inventory",
-        query: INVENTORY_QUERY,
-        variables: { fetchRewardCampaigns: true }
+        variables: { fetchRewardCampaigns: true },
+        extensions: { persistedQuery: { sha256Hash: INVENTORY_HASH, version: 1 } }
       }]);
     }
 
@@ -404,7 +413,7 @@ async function checkInventory() {
   } catch (err) {
     let m = err.message || String(err);
     if (m === "Failed to fetch") {
-      m = "Network/CORS error: the browser couldn't reach Twitch's API from this page. Try opening this while logged in to twitch.tv.";
+      m = "Network/CORS error: the browser couldn't reach Twitch's API from this page. Try opening this file while logged in to twitch.tv, or run it from a local web server.";
     }
     setStatus("Error: " + m, "error");
   } finally {
@@ -442,11 +451,14 @@ function renderSummary(campaigns, claimed) {
 
 function buildClaimed(inv) {
   const out = [];
-  (inv.gameEventDrops || []).forEach(g => out.push({
-    name: g.name, img: g.imageURL || "", awardedAt: g.lastAwardedAt || null,
-    count: g.totalCount || 1, game: g.game ? (g.game.displayName || g.game.name) : "",
-    link: g.requiredAccountLink || "", connected: !!g.isConnected
-  }));
+  (inv.gameEventDrops || []).forEach(g => {
+    const bg = (g.benefit && g.benefit.game) || g.game || null;
+    out.push({
+      id: g.id || "", name: g.name, img: g.imageURL || "", awardedAt: g.lastAwardedAt || null,
+      count: g.totalCount || 1, game: bg ? (bg.displayName || bg.name) : "",
+      link: g.requiredAccountLink || "", connected: !!g.isConnected
+    });
+  });
   (inv.dropCampaignsInProgress || []).forEach(c => (c.timeBasedDrops || []).forEach(d => {
     if (d.self && d.self.isClaimed) {
       const edge = (d.benefitEdges && d.benefitEdges[0]) || {};
@@ -476,29 +488,45 @@ function timeAgo(s) {
   return "just now";
 }
 
+function groupByGame(items, key) {
+  const map = new Map();
+  items.forEach(it => {
+    const k = key(it) || "Other";
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(it);
+  });
+  return [...map.entries()];
+}
+
+function claimedCardHTML(it) {
+  const img = (it.img || "").replace("{width}", "84").replace("{height}", "84");
+  return `
+    <div class="claimed-card">
+      ${it.count > 1 ? `<span class="count">${it.count}</span>` : ""}
+      ${img ? `<img class="reward" src="${escapeAttr(img)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="noimg"></div>`}
+      <div class="cinfo">
+        ${it.awardedAt ? `<div class="ago">${timeAgo(it.awardedAt)}</div>` : ""}
+        <div class="cn">${escapeHtml(it.name || "Reward")}</div>
+        ${it.link && !it.connected
+          ? `<a class="connect-btn" href="${escapeAttr(it.link)}" target="_blank" rel="noopener">Connect</a>`
+          : it.link
+            ? `<div class="connected">\u2713 Connected</div>`
+            : `<div class="connected none">\u2713 Claimed</div>`}
+      </div>
+    </div>`;
+}
+
 function renderClaimed(items) {
   if (!items.length) {
     resultsEl.innerHTML = `<div class="empty">No claimed rewards found in your inventory.<br>Twitch only returns recently awarded drops here.</div>`;
     return;
   }
-  resultsEl.innerHTML = `<div class="claimed-grid">` + items.map(it => {
-    const img = (it.img || "").replace("{width}", "84").replace("{height}", "84");
-    return `
-      <div class="claimed-card">
-        ${it.count > 1 ? `<span class="count">${it.count}</span>` : ""}
-        ${img ? `<img class="reward" src="${escapeAttr(img)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="noimg"></div>`}
-        <div class="cinfo">
-          ${it.awardedAt ? `<div class="ago">${timeAgo(it.awardedAt)}</div>` : ""}
-          <div class="cn">${escapeHtml(it.name || "Reward")}</div>
-          ${it.game ? `<div class="cg">${escapeHtml(it.game)}</div>` : ""}
-          ${it.link && !it.connected
-            ? `<a class="connect-btn" href="${escapeAttr(it.link)}" target="_blank" rel="noopener">Connect</a>`
-            : it.link
-              ? `<div class="connected">\u2713 Connected</div>`
-              : `<div class="connected none">\u2713 Claimed</div>`}
-        </div>
-      </div>`;
-  }).join("") + `</div>`;
+  const groups = groupByGame(items, it => it.game || "Other rewards");
+  resultsEl.innerHTML = groups.map(([gname, its]) => `
+    <div class="game-section">
+      <div class="game-header"><h2>${escapeHtml(gname)}</h2><span class="gcount">${its.length} reward${its.length > 1 ? "s" : ""}</span></div>
+      <div class="claimed-grid">${its.map(claimedCardHTML).join("")}</div>
+    </div>`).join("");
 }
 
 function fmtDate(s) {
@@ -522,7 +550,18 @@ function render(campaigns) {
     return;
   }
 
-  resultsEl.innerHTML = list.map(c => {
+  const groups = groupByGame(list, c => (c.game && (c.game.displayName || c.game.name)) || "Other");
+  resultsEl.innerHTML = groups.map(([gname, cs]) => {
+    const dropCount = cs.reduce((n, c) => n + (c.timeBasedDrops || []).length, 0);
+    return `
+      <div class="game-section">
+        <div class="game-header"><h2>${escapeHtml(gname)}</h2><span class="gcount">${cs.length} campaign${cs.length > 1 ? "s" : ""} · ${dropCount} drop${dropCount > 1 ? "s" : ""}</span></div>
+        ${cs.map(campaignCardHTML).join("")}
+      </div>`;
+  }).join("");
+}
+
+function campaignCardHTML(c) {
     const game = c.game || {};
     const box = (game.boxArtURL || "").replace("{width}", "138").replace("{height}", "190");
     const drops = (c.timeBasedDrops || []).map(d => {
@@ -560,7 +599,6 @@ function render(campaigns) {
         <div class="campaign-head">
           ${box ? `<img class="boxart" src="${box}" alt="" loading="lazy" onerror="this.style.display='none'">` : ""}
           <div class="meta">
-            <div class="game">${escapeHtml(game.displayName || game.name || "Game")}</div>
             <div class="cname">${escapeHtml(c.name || "Campaign")}</div>
             <div class="sub">${dates ? dates + " · " : ""}${(c.timeBasedDrops||[]).length} drop(s)${c.detailsURL ? ` · <a class="link" href="${escapeAttr(c.detailsURL)}" target="_blank" rel="noopener">details</a>` : ""}</div>
             ${chip}
@@ -568,32 +606,12 @@ function render(campaigns) {
         </div>
         <div class="drops">${drops || '<div class="pmeta">No time-based drops.</div>'}</div>
       </div>`;
-  }).join("");
 }
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 }
 function escapeAttr(s) { return escapeHtml(s); }
-
-// ---- admin shell: identity + logout + auth guard ----
-document.getElementById("logoutBtn").addEventListener("click", async () => {
-  try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
-  window.location.href = "/admin-login.html";
-});
-(async () => {
-  try {
-    const r = await fetch("/whoami", { credentials: "same-origin" });
-    if (!r.ok) { window.location.href = "/admin-login.html"; return; }
-    const data = await r.json();
-    const admin = data && data.admin ? data.admin : {};
-    const name = admin.username || "Admin";
-    document.getElementById("meName").innerText = name;
-    document.getElementById("meRole").innerText = "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
-    document.getElementById("meAvatar").innerText = name.slice(0, 2).toUpperCase();
-  } catch (e) { window.location.href = "/admin-login.html"; }
-})();
 </script>
-<script src="/theme.js"></script>
 </body>
 </html>
