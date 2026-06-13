@@ -11,16 +11,17 @@ const { requireSuperadmin } = require("../middleware/auth");
 
 const router = express.Router();
 
-// Every admin-management endpoint is superadmin-only.
-router.use(requireSuperadmin);
+// Every admin-management endpoint is superadmin-only. The guard is applied
+// per-route (not via router.use) because this router is mounted at "/", so a
+// router-level guard would intercept unrelated requests and redirect them.
 
 // LIST admins (never returns password hashes).
-router.get("/admins", (req, res) => {
+router.get("/admins", requireSuperadmin, (req, res) => {
   res.json({ success: true, admins: loadAdmins().map(sanitizeAdmin) });
 });
 
 // CREATE a new admin.
-router.post("/admins", async (req, res) => {
+router.post("/admins", requireSuperadmin, async (req, res) => {
   try {
     const { username, password, role } = req.body || {};
     const admin = await addAdmin({ username, password, role });
@@ -31,7 +32,7 @@ router.post("/admins", async (req, res) => {
 });
 
 // UPDATE an admin (username / password / role). Empty password = unchanged.
-router.put("/admins/:id", async (req, res) => {
+router.put("/admins/:id", requireSuperadmin, async (req, res) => {
   try {
     const { username, password, role } = req.body || {};
     const admin = await updateAdmin(req.params.id, {
@@ -47,7 +48,7 @@ router.put("/admins/:id", async (req, res) => {
 });
 
 // DELETE an admin.
-router.delete("/admins/:id", async (req, res) => {
+router.delete("/admins/:id", requireSuperadmin, async (req, res) => {
   // Guard against a superadmin deleting their own account mid-session.
   if (req.session.admin.id === req.params.id) {
     return res

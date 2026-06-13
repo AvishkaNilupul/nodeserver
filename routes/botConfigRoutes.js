@@ -19,8 +19,9 @@ const FILE_RE = /^config(_\d{1,3})?\.json$/;
 // Set TWITCHBOT_ALLOW_RESTART=0 to disable the docker restart endpoint.
 const ALLOW_RESTART = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
 
-// Bot configuration is a superadmin-only capability.
-router.use(requireSuperadmin);
+// Bot configuration is a superadmin-only capability. The guard is applied
+// per-route (not via router.use) because this router is mounted at "/", so a
+// router-level guard would intercept unrelated requests and redirect them.
 
 // config.json -> twitchbot ; config_02.json -> twitchbotx2 ; config_06.json -> twitchbotx6
 function containerForFile(file) {
@@ -69,7 +70,7 @@ function summarize(file, data) {
 }
 
 // LIST all config files with a parsed summary.
-router.get("/bot-configs", async (req, res) => {
+router.get("/bot-configs", requireSuperadmin, async (req, res) => {
   try {
     let files;
     try {
@@ -108,7 +109,7 @@ router.get("/bot-configs", async (req, res) => {
 });
 
 // READ one full config (parsed JSON object).
-router.get("/bot-configs/file/:file", async (req, res) => {
+router.get("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
   const full = resolveConfigPath(req.params.file);
   if (!full) {
     return res.status(400).json({ success: false, message: "Invalid file" });
@@ -137,7 +138,7 @@ router.get("/bot-configs/file/:file", async (req, res) => {
 
 // WRITE one config (full replace). Keeps a .bak of the previous version and
 // writes atomically via a temp file + rename.
-router.put("/bot-configs/file/:file", async (req, res) => {
+router.put("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
   const full = resolveConfigPath(req.params.file);
   if (!full) {
     return res.status(400).json({ success: false, message: "Invalid file" });
@@ -179,7 +180,7 @@ router.put("/bot-configs/file/:file", async (req, res) => {
 });
 
 // Docker container statuses (best effort; empty map if docker unavailable).
-router.get("/bot-configs/status", (req, res) => {
+router.get("/bot-configs/status", requireSuperadmin, (req, res) => {
   execFile(
     "docker",
     ["ps", "-a", "--format", "{{.Names}}\t{{.State}}\t{{.Status}}"],
@@ -203,7 +204,7 @@ router.get("/bot-configs/status", (req, res) => {
 });
 
 // RESTART the docker container backing a config file.
-router.post("/bot-configs/restart/:file", (req, res) => {
+router.post("/bot-configs/restart/:file", requireSuperadmin, (req, res) => {
   if (!ALLOW_RESTART) {
     return res
       .status(403)
