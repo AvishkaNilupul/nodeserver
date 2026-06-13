@@ -4,6 +4,8 @@ const fsp = require("fs/promises");
 const path = require("path");
 const { execFile } = require("child_process");
 
+const { requireSuperadmin } = require("../middleware/auth");
+
 const router = express.Router();
 
 // Directory that holds the TwitchDropsBot config files + docker-compose.yml.
@@ -17,14 +19,8 @@ const FILE_RE = /^config(_\d{1,3})?\.json$/;
 // Set TWITCHBOT_ALLOW_RESTART=0 to disable the docker restart endpoint.
 const ALLOW_RESTART = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
 
-// All routes in this module require an authenticated admin session.
-function requireAdmin(req, res, next) {
-  if (req.session?.admin) {
-    return next();
-  }
-  return res.status(401).json({ success: false, message: "Unauthorized" });
-}
-router.use(requireAdmin);
+// Bot configuration is a superadmin-only capability.
+router.use(requireSuperadmin);
 
 // config.json -> twitchbot ; config_02.json -> twitchbotx2 ; config_06.json -> twitchbotx6
 function containerForFile(file) {
@@ -202,7 +198,7 @@ router.get("/bot-configs/status", (req, res) => {
           states[name] = { state, status };
         });
       res.json({ success: true, available: true, states });
-    }
+    },
   );
 });
 
@@ -240,7 +236,7 @@ router.post("/bot-configs/restart/:file", (req, res) => {
         });
       }
       res.json({ success: true, container, output: stdout.trim() });
-    }
+    },
   );
 });
 

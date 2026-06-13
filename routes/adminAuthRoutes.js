@@ -46,7 +46,11 @@ router.post("/admin-login", async (req, res) => {
         .json({ success: false, message: "Invalid credentials" });
     }
 
-    req.session.admin = { id: admin.id, username: admin.username };
+    req.session.admin = {
+      id: admin.id,
+      username: admin.username,
+      role: admin.role === "superadmin" ? "superadmin" : "admin",
+    };
 
     res.json({ success: true });
   } catch (err) {
