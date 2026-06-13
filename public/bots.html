@@ -80,13 +80,20 @@
   /* Bot cards */
   .bot { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 18px; overflow:hidden; }
   .bot > header { display:flex; align-items:center; gap:12px; padding: 15px 18px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .bot.collapsed > header { border-bottom:none; }
+  .bot .hleft { display:flex; align-items:center; gap:10px; cursor:pointer; flex-wrap:wrap; min-width:0; flex:1 1 auto; }
+  .bot .bcaret { color: var(--muted); transition: transform .15s; flex:none; }
+  .bot.collapsed .bcaret { transform: rotate(-90deg); }
   .bot .ttl { font-size: 16px; font-weight: 800; }
   .bot .file { color: var(--muted); font-size:12.5px; font-family: ui-monospace, monospace; }
+  .bot .hgames { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
+  .bot .hgames .glabel { color: var(--muted); font-size:11.5px; font-weight:600; margin-right:2px; }
   .bot header .right { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .dot { width:8px; height:8px; border-radius:50%; background: var(--muted); display:inline-block; margin-right:6px; }
   .dot.running { background: var(--green); }
   .dot.stopped { background: var(--red); }
   .body { padding: 8px 18px 18px; }
+  .bot.collapsed .body { display:none; }
 
   .acct { border:1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
   .acct .arow { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
@@ -175,6 +182,19 @@
   const $ = (id) => document.getElementById(id);
   let CONFIGS = {};   // file -> { container, data, ok, error }
   let STATES = {};    // container -> { state, status }
+
+  // Per-bot collapsed state, remembered in localStorage. Bots with many
+  // accounts collapse by default so the page stays compact.
+  const COLLAPSE_DEFAULT_OVER = 4;
+  function collapseStore() { try { return JSON.parse(localStorage.getItem("botsCollapsed") || "{}") || {}; } catch (e) { return {}; } }
+  function isCollapsed(file, count) { const s = collapseStore(); return file in s ? !!s[file] : (count || 0) > COLLAPSE_DEFAULT_OVER; }
+  window.toggleBot = function (file, el) {
+    const sec = el ? el.closest(".bot") : null;
+    if (!sec) return;
+    const willCollapse = !sec.classList.contains("collapsed");
+    sec.classList.toggle("collapsed", willCollapse);
+    const s = collapseStore(); s[file] = willCollapse; try { localStorage.setItem("botsCollapsed", JSON.stringify(s)); } catch (e) {}
+  };
 
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
   function toast(msg, err) { const t = $("toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : ""); clearTimeout(t._t); t._t = setTimeout(() => { t.className = "toast"; }, 2200); }
@@ -309,9 +329,19 @@
         settingRow("Launch on startup", file, "root", "LaunchOnStartup", "bool", d.LaunchOnStartup) +
       '</div></div>';
 
-    return '<section class="bot">' +
+    const favGames = Array.isArray(d.FavouriteGames) ? d.FavouriteGames.filter(Boolean) : [];
+    const gamesHtml = favGames.length
+      ? '<div class="hgames"><span class="glabel">Farming</span>' + favGames.map((g) => '<span class="gtag">' + esc(g) + "</span>").join("") + "</div>"
+      : "";
+    const collapsed = isCollapsed(file, users.length);
+    const caret = '<svg class="bcaret" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"></path></svg>';
+
+    return '<section class="bot' + (collapsed ? " collapsed" : "") + '">' +
       '<header>' +
-        '<div><div class="ttl">' + esc(c.container || file) + '</div><div class="file">' + esc(file) + '</div></div>' +
+        '<div class="hleft" onclick="toggleBot(\'' + esc(file) + '\',this)">' + caret +
+          '<div><div class="ttl">' + esc(c.container || file) + '</div><div class="file">' + esc(file) + '</div></div>' +
+          gamesHtml +
+        '</div>' +
         '<div class="right">' +
           '<span class="chip"><span class="dot ' + dotCls + '"></span>' + statusTxt + '</span>' +
           '<span class="chip">' + users.length + ' account' + (users.length === 1 ? "" : "s") + '</span>' +
