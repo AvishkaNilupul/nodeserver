@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bots</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .themebtn{cursor:pointer;}
+
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+
+  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 20px 0 14px; }
+  .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
+  .search input { width:100%; padding: 11px 13px 11px 38px; border-radius: 11px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline:none; font-family:inherit; }
+  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color: var(--muted); }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; }
+  .stat b { font-size: 18px; display:block; }
+  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  button { padding: 9px 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 13.5px; }
+  button:hover { opacity: 0.94; }
+  button:disabled { opacity:.5; cursor: default; }
+  .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
+  .btn-ghost:hover { background: var(--surface-2); opacity:1; }
+  .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
+  .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
+  .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
+
+  /* All-accounts table */
+  .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 20px; overflow:hidden; }
+  .panel .ph { display:flex; align-items:center; gap:10px; padding: 14px 18px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .panel .ph b { font-size: 15px; }
+  .panel .ph .count { color: var(--muted); font-size: 12.5px; }
+  .panel .ph .caret { margin-left:auto; color: var(--muted); transition: transform .15s; }
+  .panel.collapsed .ph .caret { transform: rotate(-90deg); }
+  .panel.collapsed .pb { display:none; }
+  table { width:100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align:left; padding: 10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  td.games { white-space: normal; }
+
+  .chip { display:inline-flex; align-items:center; gap:5px; padding: 3px 9px; border-radius: 999px; font-size:11.5px; font-weight:600; background: var(--surface-2); color: var(--muted); }
+  .chip.on { background:#ecfdf5; color: var(--green); }
+  .chip.off { background:#fef2f2; color: var(--red); }
+  .gtag { display:inline-block; padding: 2px 8px; border-radius:999px; background: var(--surface-2); color: var(--muted); font-size:11.5px; margin:1px; }
+
+  /* Bot cards */
+  .bot { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 18px; overflow:hidden; }
+  .bot > header { display:flex; align-items:center; gap:12px; padding: 15px 18px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .bot .ttl { font-size: 16px; font-weight: 800; }
+  .bot .file { color: var(--muted); font-size:12.5px; font-family: ui-monospace, monospace; }
+  .bot header .right { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .dot { width:8px; height:8px; border-radius:50%; background: var(--muted); display:inline-block; margin-right:6px; }
+  .dot.running { background: var(--green); }
+  .dot.stopped { background: var(--red); }
+  .body { padding: 8px 18px 18px; }
+
+  .acct { border:1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+  .acct .arow { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .fld { display:flex; flex-direction:column; gap:4px; }
+  .fld label { font-size: 11px; color: var(--muted); font-weight:600; }
+  .fld input { padding: 8px 10px; border-radius: 9px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13px; outline:none; font-family:inherit; }
+  .fld input:focus { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px rgba(79,70,229,0.12); }
+  .fld.grow { flex:1; min-width: 160px; }
+  .secret-wrap { display:flex; gap:6px; }
+  .secret-wrap input { flex:1; font-family: ui-monospace, monospace; }
+  .switch { display:inline-flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; user-select:none; }
+  .switch input { display:none; }
+  .switch .track { width:38px; height:22px; border-radius:999px; background: var(--line); position:relative; transition: background .15s; }
+  .switch .track::after { content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; transition: left .15s; box-shadow:0 1px 2px rgba(0,0,0,.2); }
+  .switch input:checked + .track { background: var(--green); }
+  .switch input:checked + .track::after { left:18px; }
+  .acct .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+
+  .settings { margin-top:16px; border-top:1px dashed var(--line); padding-top:14px; }
+  .settings h4 { font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:10px; }
+  .sgrid { display:grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px); background:#0f172a; color:#fff; padding: 11px 18px; border-radius: 11px; font-size: 13.5px; opacity:0; pointer-events:none; transition: all .2s; z-index:120; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+  .toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
+  .toast.err { background:#b91c1c; }
+  .empty { padding: 40px; text-align:center; color: var(--muted); }
+  .banner { background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:12px 16px; border-radius:12px; font-size:13.5px; margin-bottom:16px; }
+  html[data-theme="dark"] .banner{background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.3);color:#fbbf24;}
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+    <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+    <a href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
+    <a href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
+    <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+    <a href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
+    <a class="active" href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout themebtn" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Bots</h1>
+      <div class="sub">TwitchDropsBot configs in <code id="dirLabel">/root/twitchbot</code> — view, edit accounts &amp; settings, and check drops.</div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+      <input id="search" type="text" placeholder="Search accounts by login, id, file or game…" />
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div id="banner"></div>
+
+  <div class="panel" id="allPanel">
+    <div class="ph" id="allHead"><b>All accounts</b> <span class="count" id="allCount"></span><svg class="caret" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"></path></svg></div>
+    <div class="pb"><div style="overflow-x:auto;"><table id="allTable"><thead><tr><th>Login</th><th>Twitch ID</th><th>Bot</th><th>Status</th><th>Fav games</th><th></th></tr></thead><tbody id="allBody"></tbody></table></div></div>
+  </div>
+
+  <div id="bots"><div class="empty">Loading configs…</div></div>
+</main>
+
+<div class="toast" id="toast"></div>
+<script src="/theme.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let CONFIGS = {};   // file -> { container, data, ok, error }
+  let STATES = {};    // container -> { state, status }
+
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+  function toast(msg, err) { const t = $("toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : ""); clearTimeout(t._t); t._t = setTimeout(() => { t.className = "toast"; }, 2200); }
+  function randHex(n) { let s = ""; const h = "0123456789abcdef"; for (let i = 0; i < n; i++) s += h[Math.floor(Math.random() * 16)]; return s; }
+
+  async function api(url, opts) {
+    const r = await fetch(url, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts));
+    if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
+    let j = {}; try { j = await r.json(); } catch (e) {}
+    if (!r.ok || j.success === false) throw new Error(j.message || ("HTTP " + r.status));
+    return j;
+  }
+
+  async function load() {
+    $("bots").innerHTML = '<div class="empty">Loading configs…</div>';
+    let list;
+    try { list = await api("/bot-configs"); }
+    catch (e) { $("bots").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
+    $("dirLabel").textContent = list.dir || "/root/twitchbot";
+    // fetch docker statuses (best effort)
+    try { const s = await api("/bot-configs/status"); STATES = s.states || {}; } catch (e) { STATES = {}; }
+
+    CONFIGS = {};
+    const files = list.configs.map((c) => c.file);
+    // load full data for files that parsed OK
+    await Promise.all(list.configs.map(async (c) => {
+      if (!c.ok) { CONFIGS[c.file] = { container: c.container, ok: false, error: c.error }; return; }
+      try { const full = await api("/bot-configs/file/" + encodeURIComponent(c.file)); CONFIGS[c.file] = { container: full.container, data: full.data, ok: true }; }
+      catch (e) { CONFIGS[c.file] = { container: c.container, ok: false, error: e.message }; }
+    }));
+    renderAll(files);
+  }
+
+  function accountsOf(file) { const d = CONFIGS[file] && CONFIGS[file].data; const ts = d && d.TwitchSettings; return (ts && Array.isArray(ts.TwitchUsers)) ? ts.TwitchUsers : []; }
+
+  function renderStats(files) {
+    let bots = 0, accts = 0, enabled = 0, running = 0;
+    files.forEach((f) => {
+      const c = CONFIGS[f]; if (!c) return; bots++;
+      if (c.ok) { const u = accountsOf(f); accts += u.length; enabled += u.filter((x) => x && x.Enabled).length; }
+      const st = STATES[c.container]; if (st && /^running/i.test(st.state || "")) running++;
+    });
+    $("stats").innerHTML =
+      '<div class="stat"><b>' + bots + '</b><span>Bots</span></div>' +
+      '<div class="stat"><b>' + accts + '</b><span>Accounts</span></div>' +
+      '<div class="stat"><b>' + enabled + '</b><span>Enabled</span></div>' +
+      '<div class="stat"><b>' + running + '</b><span>Running</span></div>';
+  }
+
+  function renderAllTable(files) {
+    const q = $("search").value.trim().toLowerCase();
+    const rows = [];
+    files.forEach((f) => {
+      const c = CONFIGS[f]; if (!c || !c.ok) return;
+      accountsOf(f).forEach((u, i) => {
+        const games = (Array.isArray(u.FavouriteGames) && u.FavouriteGames.length ? u.FavouriteGames : (CONFIGS[f].data.FavouriteGames || []));
+        const hay = [u.Login, u.Id, f, c.container, (games || []).join(" ")].join(" ").toLowerCase();
+        if (q && hay.indexOf(q) === -1) return;
+        rows.push(
+          "<tr>" +
+          "<td><b>" + esc(u.Login || "—") + "</b></td>" +
+          "<td>" + esc(u.Id || "—") + "</td>" +
+          "<td>" + esc(c.container || f) + "</td>" +
+          "<td>" + (u.Enabled ? '<span class="chip on">Enabled</span>' : '<span class="chip off">Disabled</span>') + "</td>" +
+          '<td class="games">' + ((games || []).map((g) => '<span class="gtag">' + esc(g) + "</span>").join("") || '<span style="color:var(--muted)">—</span>') + "</td>" +
+          '<td><button class="btn-ghost btn-sm" onclick="checkDrops(\'' + esc(f) + "'," + i + ')">Check drops</button></td>' +
+          "</tr>"
+        );
+      });
+    });
+    $("allBody").innerHTML = rows.join("") || '<tr><td colspan="6" style="color:var(--muted)">No matching accounts.</td></tr>';
+    $("allCount").textContent = rows.length + " shown";
+  }
+
+  function settingRow(label, file, kind, key, type, val) {
+    const id = "s_" + file.replace(/\W/g, "") + "_" + kind + "_" + key;
+    if (type === "bool") {
+      return '<label class="switch" style="margin:2px 0;"><input type="checkbox" data-file="' + esc(file) + '" data-kind="' + kind + '" data-key="' + key + '" data-type="bool"' + (val ? " checked" : "") + '><span class="track"></span> ' + esc(label) + "</label>";
+    }
+    const t = (type === "num") ? "number" : "text";
+    return '<div class="fld"><label>' + esc(label) + '</label><input id="' + id + '" type="' + t + '" data-file="' + esc(file) + '" data-kind="' + kind + '" data-key="' + key + '" data-type="' + type + '" value="' + esc(type === "csv" ? (Array.isArray(val) ? val.join(", ") : "") : (val == null ? "" : val)) + '"></div>';
+  }
+
+  function renderBot(file) {
+    const c = CONFIGS[file];
+    if (!c) return "";
+    if (!c.ok) {
+      return '<section class="bot"><header><div><div class="ttl">' + esc(c.container || file) + '</div><div class="file">' + esc(file) + '</div></div></header><div class="body"><div class="banner">Could not parse this file: ' + esc(c.error || "invalid JSON") + "</div></div></section>";
+    }
+    const d = c.data;
+    const ts = d.TwitchSettings || (d.TwitchSettings = {});
+    const users = Array.isArray(ts.TwitchUsers) ? ts.TwitchUsers : (ts.TwitchUsers = []);
+    const st = STATES[c.container];
+    const running = st && /^running/i.test(st.state || "");
+    const dotCls = !st ? "" : (running ? "running" : "stopped");
+    const statusTxt = st ? esc(st.status || st.state) : "status unknown";
+
+    let acctsHtml = users.map((u, i) => {
+      const games = Array.isArray(u.FavouriteGames) ? u.FavouriteGames.join(", ") : "";
+      return '<div class="acct">' +
+        '<div class="arow">' +
+          '<div class="fld grow"><label>Login</label><input data-file="' + esc(file) + '" data-kind="acct" data-idx="' + i + '" data-key="Login" data-type="str" value="' + esc(u.Login) + '"></div>' +
+          '<div class="fld"><label>Twitch ID</label><input data-file="' + esc(file) + '" data-kind="acct" data-idx="' + i + '" data-key="Id" data-type="str" value="' + esc(u.Id) + '"></div>' +
+          '<label class="switch"><input type="checkbox" data-file="' + esc(file) + '" data-kind="acct" data-idx="' + i + '" data-key="Enabled" data-type="bool"' + (u.Enabled ? " checked" : "") + '><span class="track"></span> Enabled</label>' +
+        '</div>' +
+        '<div class="arow" style="margin-top:10px;">' +
+          '<div class="fld grow"><label>ClientSecret (auth token)</label><div class="secret-wrap"><input type="password" data-file="' + esc(file) + '" data-kind="acct" data-idx="' + i + '" data-key="ClientSecret" data-type="str" value="' + esc(u.ClientSecret) + '"><button class="btn-ghost btn-sm" type="button" onclick="toggleSecret(this)">Show</button><button class="btn-ghost btn-sm" type="button" onclick="copySecret(this)">Copy</button></div></div>' +
+          '<div class="fld grow"><label>Favourite games (comma separated, optional)</label><input data-file="' + esc(file) + '" data-kind="acct" data-idx="' + i + '" data-key="FavouriteGames" data-type="csv" value="' + esc(games) + '"></div>' +
+        '</div>' +
+        '<div class="actions">' +
+          '<button class="btn-ghost btn-sm" onclick="checkDrops(\'' + esc(file) + "'," + i + ')">Check drops</button>' +
+          '<button class="btn-danger btn-sm" onclick="removeAccount(\'' + esc(file) + "'," + i + ')">Remove account</button>' +
+          (u.UniqueId ? '<span style="align-self:center;color:var(--muted);font-size:11.5px;">UniqueId ' + esc(u.UniqueId) + "</span>" : "") +
+        '</div>' +
+      '</div>';
+    }).join("");
+
+    const settings =
+      '<div class="settings"><h4>Twitch settings</h4><div class="sgrid">' +
+        settingRow("Only favourite games", file, "ts", "OnlyFavouriteGames", "bool", ts.OnlyFavouriteGames) +
+        settingRow("Only connected accounts", file, "ts", "OnlyConnectedAccounts", "bool", ts.OnlyConnectedAccounts) +
+        settingRow("Force try with tags", file, "ts", "ForceTryWithTags", "bool", ts.ForceTryWithTags) +
+        settingRow("Minimize in tray", file, "ts", "MinimizeInTray", "bool", ts.MinimizeInTray) +
+      '</div></div>' +
+      '<div class="settings"><h4>General</h4><div class="sgrid">' +
+        settingRow("Favourite games (comma separated)", file, "root", "FavouriteGames", "csv", d.FavouriteGames) +
+        settingRow("Waiting seconds", file, "root", "WaitingSeconds", "num", d.WaitingSeconds) +
+        settingRow("Attempts to watch", file, "root", "AttemptToWatch", "num", d.AttemptToWatch) +
+        settingRow("Log level", file, "root", "LogLevel", "num", d.LogLevel) +
+        settingRow("Webhook URL", file, "root", "WebhookURL", "str", d.WebhookURL) +
+        settingRow("Watch browser headless", file, "root", "WatchBrowserHeadless", "bool", d.WatchBrowserHeadless) +
+        settingRow("Launch on startup", file, "root", "LaunchOnStartup", "bool", d.LaunchOnStartup) +
+      '</div></div>';
+
+    return '<section class="bot">' +
+      '<header>' +
+        '<div><div class="ttl">' + esc(c.container || file) + '</div><div class="file">' + esc(file) + '</div></div>' +
+        '<div class="right">' +
+          '<span class="chip"><span class="dot ' + dotCls + '"></span>' + statusTxt + '</span>' +
+          '<span class="chip">' + users.length + ' account' + (users.length === 1 ? "" : "s") + '</span>' +
+          '<button class="btn-ghost btn-sm" onclick="addAccount(\'' + esc(file) + '\')">+ Account</button>' +
+          '<button class="btn-ghost btn-sm" onclick="restartBot(\'' + esc(file) + '\',this)">Restart</button>' +
+          '<button class="btn-sm" onclick="saveBot(\'' + esc(file) + '\',this)">Save</button>' +
+        '</div>' +
+      '</header>' +
+      '<div class="body">' + (acctsHtml || '<div style="color:var(--muted);padding:10px 0;">No accounts in this config. Use “+ Account”.</div>') + settings + '</div>' +
+    '</section>';
+  }
+
+  function renderAll(files) {
+    renderStats(files);
+    renderAllTable(files);
+    $("bots").innerHTML = files.map(renderBot).join("") || '<div class="empty">No config files found in this directory.</div>';
+  }
+
+  // Delegated edit handler — mutates the in-memory config object.
+  function onEdit(e) {
+    const el = e.target.closest("[data-file][data-key]");
+    if (!el) return;
+    const file = el.getAttribute("data-file");
+    const c = CONFIGS[file]; if (!c || !c.ok) return;
+    const kind = el.getAttribute("data-kind");
+    const key = el.getAttribute("data-key");
+    const type = el.getAttribute("data-type");
+    let val;
+    if (type === "bool") val = el.checked;
+    else if (type === "num") { val = el.value === "" ? 0 : Number(el.value); if (Number.isNaN(val)) val = 0; }
+    else if (type === "csv") val = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+    else val = el.value;
+
+    if (kind === "acct") {
+      const idx = parseInt(el.getAttribute("data-idx"), 10);
+      const u = c.data.TwitchSettings.TwitchUsers[idx]; if (!u) return;
+      u[key] = val;
+    } else if (kind === "ts") {
+      c.data.TwitchSettings = c.data.TwitchSettings || {};
+      c.data.TwitchSettings[key] = val;
+    } else if (kind === "root") {
+      c.data[key] = val;
+    }
+    if (kind === "acct" && (key === "Enabled" || key === "Login" || key === "Id" || key === "FavouriteGames")) {
+      renderStats(Object.keys(CONFIGS));
+      renderAllTable(Object.keys(CONFIGS));
+    }
+  }
+
+  window.toggleSecret = function (btn) { const inp = btn.parentElement.querySelector("input"); if (inp.type === "password") { inp.type = "text"; btn.textContent = "Hide"; } else { inp.type = "password"; btn.textContent = "Show"; } };
+  window.copySecret = function (btn) { const inp = btn.parentElement.querySelector("input"); navigator.clipboard.writeText(inp.value).then(() => toast("ClientSecret copied")).catch(() => toast("Copy failed", true)); };
+
+  window.checkDrops = function (file, idx) {
+    const u = accountsOf(file)[idx]; if (!u) return;
+    const tok = u.ClientSecret || "";
+    if (!tok) { toast("This account has no ClientSecret", true); return; }
+    const url = "/twitch-inventory.html#token=" + encodeURIComponent(tok) + "&login=" + encodeURIComponent(u.Login || "");
+    window.open(url, "_blank");
+  };
+
+  window.addAccount = function (file) {
+    const c = CONFIGS[file]; if (!c || !c.ok) return;
+    c.data.TwitchSettings = c.data.TwitchSettings || {};
+    if (!Array.isArray(c.data.TwitchSettings.TwitchUsers)) c.data.TwitchSettings.TwitchUsers = [];
+    c.data.TwitchSettings.TwitchUsers.push({ ClientSecret: "", UniqueId: randHex(32), Login: "", Id: "", Enabled: true, FavouriteGames: [] });
+    renderAll(Object.keys(CONFIGS));
+    toast("Account added — fill it in and Save");
+  };
+
+  window.removeAccount = function (file, idx) {
+    const c = CONFIGS[file]; if (!c || !c.ok) return;
+    const u = c.data.TwitchSettings.TwitchUsers[idx];
+    if (!confirm("Remove account " + (u && u.Login ? u.Login : "#" + (idx + 1)) + " from " + file + "? (Saved only when you click Save)")) return;
+    c.data.TwitchSettings.TwitchUsers.splice(idx, 1);
+    renderAll(Object.keys(CONFIGS));
+  };
+
+  window.saveBot = async function (file, btn) {
+    const c = CONFIGS[file]; if (!c || !c.ok) return;
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "Saving…";
+    try {
+      await api("/bot-configs/file/" + encodeURIComponent(file), { method: "PUT", body: JSON.stringify({ data: c.data }) });
+      toast("Saved " + file + " (a .bak backup was kept)");
+    } catch (e) { toast("Save failed: " + e.message, true); }
+    finally { btn.disabled = false; btn.textContent = old; }
+  };
+
+  window.restartBot = async function (file, btn) {
+    const c = CONFIGS[file]; if (!c) return;
+    if (!confirm("Restart container " + (c.container || "?") + "? This bounces the bot.")) return;
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "Restarting…";
+    try {
+      const r = await api("/bot-configs/restart/" + encodeURIComponent(file), { method: "POST" });
+      toast("Restarted " + r.container);
+      setTimeout(load, 1500);
+    } catch (e) { toast("Restart failed: " + e.message, true); }
+    finally { btn.disabled = false; btn.textContent = old; }
+  };
+
+  // events
+  $("bots").addEventListener("input", onEdit);
+  $("bots").addEventListener("change", onEdit);
+  $("search").addEventListener("input", () => renderAllTable(Object.keys(CONFIGS)));
+  $("refreshBtn").addEventListener("click", load);
+  $("allHead").addEventListener("click", () => $("allPanel").classList.toggle("collapsed"));
+
+  $("logoutBtn").addEventListener("click", async () => {
+    try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+    window.location.href = "/admin-login.html";
+  });
+  (async () => {
+    try {
+      const r = await fetch("/whoami", { credentials: "same-origin" });
+      if (!r.ok) { window.location.href = "/admin-login.html"; return; }
+      const data = await r.json();
+      const admin = (data && data.admin) || {};
+      const name = admin.username || "Admin";
+      $("meName").innerText = name;
+      $("meRole").innerText = "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
+      $("meAvatar").innerText = name.slice(0, 2).toUpperCase();
+    } catch (e) { window.location.href = "/admin-login.html"; return; }
+    load();
+  })();
+</script>
+</body>
+</html>

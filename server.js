@@ -18,6 +18,7 @@ const chatRoutes = require("./routes/chatRoutes");
 const itemRoutes = require("./routes/itemRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
+const botConfigRoutes = require("./routes/botConfigRoutes");
 const chatSocket = require("./socket/chatSocket");
 const { getOrderByOrderId } = require("./utils/orderIds");
 const { sendTelegram } = require("./utils/telegram");
@@ -212,6 +213,7 @@ app.use(chatRoutes);
 app.use(requireAdmin, itemRoutes);
 app.use(requireAdmin, inventoryRoutes);
 app.use(requireAdmin, orderRoutes);
+app.use(botConfigRoutes);
 
 // =========================
 // Socket.IO
