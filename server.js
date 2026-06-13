@@ -12,7 +12,9 @@ const { Server } = require("socket.io");
 require("dotenv").config();
 
 const config = require("./config/config");
+const { requireAdmin, requireSuperadmin } = require("./middleware/auth");
 const adminAuthRoutes = require("./routes/adminAuthRoutes");
+const adminManageRoutes = require("./routes/adminManageRoutes");
 const redeemRoutes = require("./routes/redeemRoutes");
 const chatRoutes = require("./routes/chatRoutes");
 const itemRoutes = require("./routes/itemRoutes");
@@ -52,16 +54,6 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 // Share the session with Socket.IO so admin sockets are authenticated.
 io.engine.use(sessionMiddleware);
-
-function requireAdmin(req, res, next) {
-  if (req.session?.admin) {
-    return next();
-  }
-  if (req.accepts("html")) {
-    return res.redirect("/admin-login.html");
-  }
-  return res.status(401).json({ success: false, message: "Unauthorized" });
-}
 
 // =========================
 // Image upload (image types only)
@@ -154,7 +146,7 @@ IP:
 ${ip}
 
 Time:
-${new Date().toISOString()}`
+${new Date().toISOString()}`,
     );
 
     order.used = true;
@@ -176,6 +168,7 @@ ${new Date().toISOString()}`
 // Admin auth routes
 // =========================
 app.use(adminAuthRoutes);
+app.use(adminManageRoutes);
 
 // =========================
 // Admin-only pages
@@ -194,6 +187,21 @@ app.get("/items", requireAdmin, (req, res) => {
 
 app.get("/inventory", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "admin-pages", "inventory.html"));
+});
+
+// =========================
+// Superadmin-only pages
+// =========================
+app.get("/superadmin.html", requireSuperadmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "superadmin.html"));
+});
+
+app.get("/twitch-inventory.html", requireSuperadmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "twitch-inventory.html"));
+});
+
+app.get("/bots.html", requireSuperadmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
 app.use(express.static(path.join(__dirname, "public")));
