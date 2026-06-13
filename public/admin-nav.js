@@ -4,6 +4,16 @@
 (function () {
   var SUPERADMIN_LINKS = ["twitch-inventory.html", "bots.html"];
 
+  function marketplaceLinkMarkup() {
+    return (
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"><path d="M3 3h18l-2 5H5L3 3z"></path>' +
+      '<path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"></path>' +
+      '<path d="M9 13h6"></path></svg> Marketplace'
+    );
+  }
+
   function adminsLinkMarkup() {
     return (
       '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
@@ -31,6 +41,17 @@
       }
     });
 
+    // Marketplace is available to every admin (normal + superadmin).
+    if (!links.querySelector('a[href="/marketplace.html"]')) {
+      var mlink = document.createElement("a");
+      mlink.href = "/marketplace.html";
+      mlink.innerHTML = marketplaceLinkMarkup();
+      if (window.location.pathname === "/marketplace.html") {
+        mlink.className = "active";
+      }
+      links.appendChild(mlink);
+    }
+
     if (isSuper && !links.querySelector('a[href="/superadmin.html"]')) {
       var link = document.createElement("a");
       link.href = "/superadmin.html";
@@ -44,7 +65,8 @@
     var roleEl = document.getElementById("meRole");
     if (roleEl) {
       var label = isSuper ? "Super Admin" : "Seller";
-      roleEl.innerText = label + (admin && admin.id ? " \u00b7 " + admin.id : "");
+      roleEl.innerText =
+        label + (admin && admin.id ? " \u00b7 " + admin.id : "");
     }
   }
 

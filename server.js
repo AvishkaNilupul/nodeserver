@@ -8,6 +8,7 @@ const helmet = require("helmet");
 const multer = require("multer");
 const validator = require("validator");
 const { Server } = require("socket.io");
+const { createProxyMiddleware } = require("http-proxy-middleware");
 
 require("dotenv").config();
 
@@ -203,6 +204,27 @@ app.get("/twitch-inventory.html", requireSuperadmin, (req, res) => {
 app.get("/bots.html", requireSuperadmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
+
+// =========================
+// Marketplace tab (all admins)
+// =========================
+// The marketplace runs as a local FastAPI sidecar (default 127.0.0.1:8001),
+// reached only through this authenticated reverse proxy — it is never exposed
+// publicly on its own port. The wrapper page keeps the admin sidebar and embeds
+// the app in an iframe pointed at the proxied "/marketplace/" path.
+const MARKETPLACE_TARGET =
+  process.env.MARKETPLACE_URL || "http://127.0.0.1:8001";
+const marketplaceProxy = createProxyMiddleware({
+  target: MARKETPLACE_TARGET,
+  changeOrigin: true,
+  pathRewrite: { "^/marketplace": "" },
+  ws: false,
+});
+
+app.get("/marketplace.html", requireAdmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "marketplace.html"));
+});
+app.use("/marketplace", requireAdmin, marketplaceProxy);
 
 app.use(express.static(path.join(__dirname, "public")));
 

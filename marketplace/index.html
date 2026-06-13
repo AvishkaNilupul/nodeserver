@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Game Marketplace</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f232c;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #97a0b0;
+    --accent: #5b8cff;
+    --green: #4cd07d;
+    --radius: 12px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  .header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(15, 17, 21, 0.92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 22px;
+  }
+
+  .header-top {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .brand {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+  .brand span { color: var(--accent); }
+
+  .badge {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+  }
+
+  /* searchable game selector */
+  .game-picker { position: relative; flex: 1; min-width: 240px; max-width: 420px; }
+  .game-picker input {
+    width: 100%;
+    padding: 11px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+  }
+  .game-picker input:focus { border-color: var(--accent); }
+  .dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    display: none;
+  }
+  .dropdown.open { display: block; }
+  .dropdown-item {
+    padding: 11px 14px;
+    cursor: pointer;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .dropdown-item:last-child { border-bottom: none; }
+  .dropdown-item:hover, .dropdown-item.active { background: var(--panel-2); }
+  .dropdown-empty { padding: 14px; color: var(--muted); font-size: 14px; }
+
+  .categories {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+  }
+  .chip {
+    padding: 8px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+    transition: all 0.15s ease;
+  }
+  .chip:hover { color: var(--text); }
+  .chip.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+    align-items: center;
+  }
+  .toolbar input {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    outline: none;
+  }
+  .toolbar input:focus { border-color: var(--accent); }
+  button.tool {
+    padding: 10px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button.tool:hover { border-color: var(--accent); }
+
+  .meta { margin-top: 10px; color: var(--muted); font-size: 13px; }
+
+  .content { padding: 22px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.12s ease;
+  }
+  .card:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .card .desc {
+    font-size: 14px;
+    line-height: 1.4;
+    max-height: 4.2em;
+    overflow: hidden;
+  }
+  .card .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+  }
+  .card .seller { color: var(--accent); }
+  .card .sub { color: var(--muted); }
+  .card .price {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 18px;
+  }
+
+  .state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--muted);
+    font-size: 16px;
+  }
+  .loader { text-align: center; padding: 24px; color: var(--muted); }
+
+  /* item detail modal */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(3px);
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    z-index: 100;
+    padding: 40px 16px;
+    overflow-y: auto;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 720px;
+    padding: 24px;
+  }
+  .modal-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+  }
+  .modal-head h2 { margin: 0; font-size: 20px; line-height: 1.3; }
+  .modal-close {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    width: 34px;
+    height: 34px;
+    cursor: pointer;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .modal .seller-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 16px 0;
+  }
+  .modal .avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--panel-2) center/cover;
+  }
+  .modal .price {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 26px;
+    margin: 8px 0 4px;
+  }
+  .modal .block-label {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 18px 0 6px;
+  }
+  .modal .desc-text {
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .params {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--border);
+  }
+  .params li {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+  .params li .k { color: var(--muted); }
+  .params li .v { text-align: right; }
+  .modal .loading { color: var(--muted); padding: 24px 0; }
+
+  /* resale mode */
+  .toggle {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .toggle.on {
+    background: linear-gradient(90deg, #2f7d4f, #4cd07d);
+    border-color: #4cd07d;
+    color: #06210f;
+  }
+
+  .resale-bar {
+    display: none;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    margin-top: 14px;
+    padding: 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .resale-bar.show { display: flex; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .field input, .field select {
+    padding: 9px 11px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+  }
+  .field input:focus, .field select:focus { border-color: var(--green); }
+  .field input.num { width: 110px; }
+
+  .stats-strip {
+    display: none;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 0 22px;
+  }
+  .stats-strip.show { display: flex; }
+  .stat {
+    flex: 1;
+    min-width: 120px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .v { font-size: 20px; font-weight: 700; margin-top: 3px; }
+  .pill { font-size: 11px; padding: 2px 9px; border-radius: 999px; font-weight: 700; text-transform: capitalize; }
+  .pill.high { background: rgba(76,208,125,0.18); color: var(--green); }
+  .pill.medium { background: rgba(91,140,255,0.18); color: var(--accent); }
+  .pill.low { background: rgba(151,160,176,0.18); color: var(--muted); }
+
+  .section-title {
+    margin: 4px 22px 10px;
+    font-size: 14px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .markets {
+    display: none;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 0 22px 16px;
+  }
+  .markets.show { display: flex; }
+  .market {
+    flex: 1;
+    min-width: 200px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .market h4 { margin: 0 0 8px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+  .market .tag { font-size: 10px; padding: 2px 8px; border-radius: 999px; }
+  .market .tag.live { background: rgba(76,208,125,0.18); color: var(--green); }
+  .market .tag.manual { background: rgba(151,160,176,0.18); color: var(--muted); }
+  .market .big { font-size: 22px; font-weight: 700; color: var(--green); }
+  .market .small { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .market a { color: var(--accent); font-size: 12px; }
+  .market .use {
+    margin-top: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+  }
+  .market .use:hover { border-color: var(--green); }
+  .market input.manual-in {
+    width: 100%; margin-top: 6px; padding: 7px 9px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text); outline: none;
+  }
+
+  .recs { margin: 0 22px 18px; display: none; }
+  .recs.show { display: block; }
+  .recs-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; }
+  .rec-card {
+    min-width: 230px;
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border: 1px solid #2f7d4f;
+    border-radius: var(--radius);
+    padding: 14px;
+    cursor: pointer;
+  }
+  .rec-card .d { font-size: 13px; line-height: 1.35; max-height: 3.9em; overflow: hidden; }
+  .rec-card .p { color: var(--green); font-weight: 700; font-size: 18px; margin-top: 8px; }
+  .rec-card .m { font-size: 12px; color: var(--muted); }
+
+  /* resale badges on offer cards */
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .b {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .b.profitable { background: rgba(76,208,125,0.16); color: var(--green); border-color: transparent; }
+  .b.underpriced { background: rgba(91,140,255,0.16); color: var(--accent); border-color: transparent; }
+  .b.high-margin { background: rgba(255,196,0,0.16); color: #ffc400; border-color: transparent; }
+  .b.thin { background: rgba(151,160,176,0.12); color: var(--muted); border-color: transparent; }
+  .card.flip { border-color: #2f7d4f; }
+  .profit-row { display: flex; justify-content: space-between; font-size: 13px; }
+  .profit-row .pos { color: var(--green); font-weight: 700; }
+  .profit-row .neg { color: #ff7a7a; font-weight: 700; }
+
+  /* "good to sell" verdict banner */
+  .verdict {
+    display: none;
+    margin: 0 22px 14px;
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .verdict.show { display: block; }
+  .verdict .v-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .verdict .v-call { font-size: 18px; font-weight: 800; }
+  .verdict .v-demand { font-size: 11px; padding: 3px 10px; border-radius: 999px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+  .verdict.good { border-color: #2f7d4f; background: linear-gradient(180deg, rgba(76,208,125,0.08), var(--panel)); }
+  .verdict.good .v-call { color: var(--green); }
+  .verdict.ok { border-color: #5b6f3a; }
+  .verdict.ok .v-call { color: #ffc400; }
+  .verdict.bad { border-color: #6f3a3a; }
+  .verdict.bad .v-call { color: #ff7a7a; }
+  .verdict .v-demand.good { background: rgba(76,208,125,0.18); color: var(--green); }
+  .verdict .v-demand.ok { background: rgba(255,196,0,0.16); color: #ffc400; }
+  .verdict .v-demand.bad { background: rgba(255,122,122,0.16); color: #ff7a7a; }
+  .verdict ul { margin: 9px 0 0; padding-left: 18px; }
+  .verdict li { font-size: 13px; color: var(--muted); line-height: 1.55; }
+
+  /* trending / "what's hot" board */
+  .trending {
+    display: none;
+    margin: 0 22px 16px;
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .trending.show { display: block; }
+  .trending .t-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .trending .t-head .title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+  .trending .t-head .sub { font-size: 11px; color: var(--muted); }
+  .trend-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+  .trend-card {
+    min-width: 165px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 12px;
+    cursor: pointer;
+  }
+  .trend-card:hover { border-color: var(--green); }
+  .trend-card .rank { font-size: 11px; color: var(--muted); }
+  .trend-card .g { font-size: 14px; font-weight: 700; margin: 2px 0 6px; }
+  .trend-card .sold { color: var(--green); font-weight: 700; font-size: 15px; }
+  .trend-card .px { font-size: 12px; color: var(--muted); margin-top: 3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-top">
+    <div class="brand" id="brand">Game <span>Marketplace</span></div>
+    <div class="game-picker">
+      <input id="gameSearch" placeholder="Search a game (e.g. Rust, Warframe, Rocket League)..." autocomplete="off" />
+      <div id="gameDropdown" class="dropdown"></div>
+    </div>
+    <div class="badge" id="markupBadge">markup +0.00</div>
+    <div class="badge" id="gameCount">loading games…</div>
+  </div>
+
+  <div class="categories" id="categories"></div>
+
+  <div class="toolbar">
+    <input id="offerSearch" placeholder="Filter offers by description or seller…" oninput="applyFilters()" />
+    <button class="tool" onclick="sortBy('asc')">Price ↑</button>
+    <button class="tool" onclick="sortBy('desc')">Price ↓</button>
+    <button class="tool" id="sortFlip" onclick="sortBy('flip')" style="display:none;">Best to sell ★</button>
+    <button class="tool" onclick="refreshOffers()">Refresh</button>
+    <button class="toggle" id="resaleToggle" onclick="toggleResale()">💰 Resale mode</button>
+  </div>
+
+  <div class="resale-bar" id="resaleBar">
+    <div class="field">
+      <label>Resell on</label>
+      <select id="marketSel" onchange="onMarketChange()">
+        <option value="g2g">G2G (10% fee)</option>
+        <option value="ebay">eBay (13% fee)</option>
+        <option value="eldorado">Eldorado (10% fee)</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Fee %</label>
+      <input class="num" id="feeInput" type="number" min="0" step="0.5" value="10" oninput="recomputeResale()" />
+    </div>
+    <div class="field">
+      <label>Sell price (USD)</label>
+      <input class="num" id="sellInput" type="number" min="0" step="0.5" placeholder="auto" oninput="recomputeResale()" />
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button class="tool" onclick="lookupMarkets(true)">↻ Refresh live prices</button>
+    </div>
+    <div class="field" style="flex:1;justify-content:flex-end;">
+      <label>&nbsp;</label>
+      <span class="meta" id="resaleHint">Sell price blank → uses source median as fair-value baseline.</span>
+    </div>
+  </div>
+
+  <div class="meta" id="meta"></div>
+</div>
+
+<div class="content">
+  <div class="trending" id="trending">
+    <div class="t-head">
+      <span class="title">🔥 Hot right now</span>
+      <span class="sub">popular games ranked by units actually sold on the live market — click to jump in</span>
+    </div>
+    <div class="trend-row" id="trendRow"></div>
+  </div>
+
+  <div class="stats-strip" id="statsStrip"></div>
+
+  <div class="verdict" id="verdict"></div>
+
+  <div class="section-title markets-title" id="marketsTitle" style="display:none;">Live market comparison</div>
+  <div class="markets" id="markets"></div>
+
+  <div class="recs" id="recs">
+    <div class="section-title" style="margin-left:0;">★ Top picks to flip</div>
+    <div class="recs-row" id="recsRow"></div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <div class="state" id="emptyState">Pick a game above to see live offers.</div>
+  <div class="loader" id="loader" style="display:none;">Loading more…</div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modalTitle">Item</h2>
+      <button class="modal-close" onclick="closeDetail()">×</button>
+    </div>
+    <div class="price" id="modalPrice"></div>
+    <div class="seller-row">
+      <div class="avatar" id="modalAvatar"></div>
+      <span class="seller" id="modalSeller"></span>
+    </div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+// When embedded in the admin panel this page is served under a path prefix
+// (e.g. /marketplace/), so derive the API base from the current location so the
+// same file works both standalone and proxied behind Node.
+const API_BASE = window.location.pathname.replace(/\/[^/]*$/, "").replace(/\/+$/, "");
+let games = [];
+let activeGame = null;
+let activeCategory = null;
+
+let allOffers = [];
+let filteredOffers = [];
+let currentPage = 1;
+let totalOffers = 0;
+let loading = false;
+let sortDir = null;
+
+let resaleMode = false;
+let lastStats = null;
+let marketData = null;
+let trendingLoaded = false;
+const FEE_PRESET = { g2g: 10, ebay: 13, eldorado: 10, custom: 0 };
+const MIN_PROFIT_USD = 0.5;
+
+const $ = (id) => document.getElementById(id);
+
+function toggleResale() {
+  resaleMode = !resaleMode;
+  $("resaleToggle").classList.toggle("on", resaleMode);
+  $("resaleBar").classList.toggle("show", resaleMode);
+  $("statsStrip").classList.toggle("show", resaleMode && !!lastStats);
+  $("sortFlip").style.display = resaleMode ? "inline-block" : "none";
+  $("recs").classList.toggle("show", resaleMode);
+  $("markets").classList.toggle("show", resaleMode);
+  $("marketsTitle").style.display = resaleMode ? "block" : "none";
+  $("trending").classList.toggle("show", resaleMode);
+  if (resaleMode) {
+    loadTrending();
+    recomputeResale();
+    if (activeGame) lookupMarkets(false);
+  } else {
+    $("verdict").classList.remove("show");
+  }
+}
+
+// Best per-flip profit currently on the page (used to colour the verdict).
+function bestProfitUsd() {
+  let best = null;
+  allOffers.forEach((o) => {
+    if (o.resale && Number.isFinite(o.resale.profitUsd)) {
+      if (best === null || o.resale.profitUsd > best) best = o.resale.profitUsd;
+    }
+  });
+  return best;
+}
+
+async function loadTrending() {
+  if (trendingLoaded) return;
+  trendingLoaded = true;
+  $("trendRow").innerHTML = `<div class="meta">Loading what's selling…</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/trending?limit=12`);
+    const data = await res.json();
+    renderTrending(data.games || []);
+  } catch (err) {
+    trendingLoaded = false;
+    $("trendRow").innerHTML = `<div class="meta">Couldn't load trending right now.</div>`;
+  }
+}
+
+function renderTrending(rows) {
+  if (!rows.length) {
+    $("trendRow").innerHTML = `<div class="meta">No live trend data right now.</div>`;
+    return;
+  }
+  $("trendRow").innerHTML = rows
+    .map((r, i) => {
+      const unit = r.unit && r.unit !== "item" ? ` / ${escapeHtml(r.unit)}` : "";
+      return `<div class="trend-card" data-game="${encodeURIComponent(r.game)}">
+        <div class="rank">#${i + 1}</div>
+        <div class="g">${escapeHtml(r.game)}</div>
+        <div class="sold">${Number(r.sold).toLocaleString()} sold</div>
+        <div class="px">from $${r.lowest}${unit}</div>
+      </div>`;
+    })
+    .join("");
+  $("trendRow").querySelectorAll(".trend-card").forEach((el) => {
+    el.onclick = () => jumpToGame(decodeURIComponent(el.dataset.game));
+  });
+}
+
+// Jump to a trending game in the local catalog (best-effort name match).
+function jumpToGame(name) {
+  const lower = name.toLowerCase();
+  let match = games.find((g) => g.name.toLowerCase() === lower);
+  if (!match) match = games.find((g) => g.name.toLowerCase().includes(lower) || lower.includes(g.name.toLowerCase()));
+  if (match) {
+    selectGame(match.name);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } else {
+    $("gameSearch").value = name;
+    renderDropdown(name);
+    $("gameDropdown").classList.add("open");
+  }
+}
+
+function onMarketChange() {
+  const m = $("marketSel").value;
+  $("feeInput").value = FEE_PRESET[m] ?? 0;
+  recomputeResale();
+}
+
+// Recompute each offer's flip economics client-side (instant, no refetch). Uses
+// the USD cost + median the server already returned, mirroring resale.py.
+function computeResaleFor(o) {
+  const cost = Number(o.costUsd) || 0;
+  const median = (lastStats && Number(lastStats.medianUsd)) || 0;
+  const sell = parseFloat($("sellInput").value) || 0;
+  const fee = parseFloat($("feeInput").value) || 0;
+  const baseline = sell > 0 ? sell : median;
+  if (cost <= 0 || baseline <= 0) {
+    o.resale = null;
+    return;
+  }
+  const net = baseline * (1 - fee / 100);
+  const profit = +(net - cost).toFixed(2);
+  const margin = +((profit / cost) * 100).toFixed(1);
+  const discount = median > 0 ? +(((median - cost) / median) * 100).toFixed(1) : 0;
+  const badges = [];
+  if (discount >= 20) badges.push("underpriced");
+  if (margin >= 35) badges.push("high-margin");
+  badges.push(profit > 0 ? "profitable" : "thin");
+  o.resale = {
+    costUsd: cost,
+    sellUsd: +baseline.toFixed(2),
+    profitUsd: profit,
+    marginPct: margin,
+    discountPct: discount,
+    score: profit,
+    badges,
+    recommend: profit >= MIN_PROFIT_USD && margin >= 15,
+    baseline: sell > 0 ? "sell-price" : "median",
+  };
+}
+
+let _verdictTimer = null;
+function recomputeResale() {
+  if (!resaleMode) return;
+  allOffers.forEach(computeResaleFor);
+  renderStats();
+  renderRecs();
+  applyFilters();
+  // Refresh the "good to sell" verdict so its best-flip line tracks the new
+  // sell price/fee. Debounced; the market lookup is cached server-side so this
+  // is cheap and does not re-hit G2G on every keystroke.
+  if (marketData && activeGame) {
+    clearTimeout(_verdictTimer);
+    _verdictTimer = setTimeout(() => lookupMarkets(false), 350);
+  }
+}
+
+function renderStats() {
+  const s = lastStats;
+  const strip = $("statsStrip");
+  if (!resaleMode || !s || !s.priced) {
+    strip.classList.remove("show");
+    return;
+  }
+  strip.classList.add("show");
+  const cur = s.currency || "";
+  strip.innerHTML = `
+    <div class="stat"><div class="k">Offers priced</div><div class="v">${s.priced}</div></div>
+    <div class="stat"><div class="k">Lowest buy</div><div class="v">${s.lowest} ${cur}</div></div>
+    <div class="stat"><div class="k">Median buy</div><div class="v">${s.median} ${cur}</div><div class="m">≈ $${s.medianUsd}</div></div>
+    <div class="stat"><div class="k">Average buy</div><div class="v">${s.average} ${cur}</div></div>
+    <div class="stat"><div class="k">Liquidity</div><div class="v"><span class="pill ${s.liquidity}">${s.liquidity}</span></div></div>`;
+}
+
+function renderRecs() {
+  const recs = $("recs");
+  if (!resaleMode) {
+    recs.classList.remove("show");
+    return;
+  }
+  recs.classList.add("show");
+  const picks = allOffers
+    .filter((o) => o.resale && o.resale.recommend)
+    .sort((a, b) => b.resale.score - a.resale.score)
+    .slice(0, 12);
+  if (!picks.length) {
+    $("recsRow").innerHTML =
+      `<div class="meta">No clear flips at this sell price/fee. Lower the fee, raise the sell price, or check live market prices.</div>`;
+    return;
+  }
+  $("recsRow").innerHTML = picks
+    .map((o) => {
+      const r = o.resale;
+      return `<div class="rec-card" data-id="${encodeURIComponent(o.id || "")}">
+        <div class="d">${escapeHtml(o.description) || "—"}</div>
+        <div class="p">+$${r.profitUsd}</div>
+        <div class="m">${r.marginPct}% margin · buy ${o.originalPrice} ${lastStats.currency || ""}</div>
+      </div>`;
+    })
+    .join("");
+  $("recsRow").querySelectorAll(".rec-card").forEach((el) => {
+    el.onclick = () => {
+      const o = allOffers.find((x) => String(x.id || "") === decodeURIComponent(el.dataset.id));
+      if (o) openDetail(o);
+    };
+  });
+}
+
+async function lookupMarkets(refresh) {
+  if (!activeGame) return;
+  $("markets").innerHTML = `<div class="market"><div class="small">Looking up live prices…</div></div>`;
+  try {
+    const cat = activeCategory ? activeCategory.name : "";
+    const s = lastStats || {};
+    const best = bestProfitUsd();
+    const params = new URLSearchParams({
+      game: activeGame.name,
+      category: cat,
+      medianUsd: String(s.medianUsd || 0),
+      liquidity: String(s.liquidity || ""),
+      supply: String(s.priced || 0),
+      bestProfitUsd: String(best === null ? -1 : best),
+    });
+    if (refresh) params.set("refresh", "true");
+    const res = await fetch(`${API_BASE}/api/markets?${params.toString()}`);
+    marketData = await res.json();
+    renderMarkets();
+    renderVerdict();
+  } catch (err) {
+    $("markets").innerHTML = `<div class="market"><div class="small">Market lookup failed: ${escapeHtml(err.message)}</div></div>`;
+  }
+}
+
+function renderVerdict() {
+  const el = $("verdict");
+  const v = marketData && marketData.verdict;
+  if (!resaleMode || !v) {
+    el.classList.remove("show");
+    return;
+  }
+  el.className = `verdict show ${v.tone || "ok"}`;
+  const demandTag = v.hasLive
+    ? `<span class="v-demand ${v.tone || "ok"}">${escapeHtml(v.demand)} demand</span>`
+    : "";
+  el.innerHTML = `
+    <div class="v-head">
+      <span class="v-call">${escapeHtml(v.verdict)}</span>
+      ${demandTag}
+    </div>
+    <ul>${(v.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>`;
+}
+
+function renderMarkets() {
+  if (!marketData) return;
+  $("markets").innerHTML = (marketData.markets || [])
+    .map((m) => {
+      if (m.ok) {
+        return `<div class="market">
+          <h4>${escapeHtml(m.source)} <span class="tag live">LIVE</span></h4>
+          <div class="big">$${m.lowest}</div>
+          <div class="small">median $${m.median} · ${m.count} offers${m.totalSales ? ` · ${m.totalSales} sold` : ""}${m.unit && m.unit !== "item" ? ` · per ${escapeHtml(m.unit)}` : ""}</div>
+          <button class="use" onclick="useSellPrice(${m.lowest})">Use $${m.lowest} as sell price</button>
+          <div><a href="${m.url}" target="_blank" rel="noopener">open ${escapeHtml(m.source)} ↗</a></div>
+        </div>`;
+      }
+      return `<div class="market">
+        <h4>${escapeHtml(m.source)} <span class="tag manual">MANUAL</span></h4>
+        <div class="small">${escapeHtml(m.reason || "no live data")}</div>
+        <input class="manual-in" type="number" step="0.5" placeholder="price you see ($)" onchange="useSellPrice(this.value)" />
+        ${m.url ? `<div style="margin-top:6px;"><a href="${m.url}" target="_blank" rel="noopener">search ${escapeHtml(m.source)} ↗</a></div>` : ""}
+      </div>`;
+    })
+    .join("");
+}
+
+function useSellPrice(v) {
+  const n = parseFloat(v);
+  if (!n || n <= 0) return;
+  $("sellInput").value = n;
+  recomputeResale();
+}
+
+async function loadGames() {
+  const res = await fetch(`${API_BASE}/api/games`);
+  const data = await res.json();
+  games = data.games;
+  if (data.siteName) {
+    $("brand").innerHTML = escapeHtml(data.siteName);
+    document.title = data.siteName;
+  }
+  $("markupBadge").innerText = `markup +${Number(data.markup).toFixed(2)}`;
+  $("gameCount").innerText = `${data.count} games`;
+  renderDropdown("");
+}
+
+function renderDropdown(query) {
+  const dd = $("gameDropdown");
+  const q = query.trim().toLowerCase();
+  const matches = (q ? games.filter((g) => g.name.toLowerCase().includes(q)) : games).slice(0, 60);
+
+  if (!matches.length) {
+    dd.innerHTML = `<div class="dropdown-empty">No games match “${query}”.</div>`;
+    return;
+  }
+  dd.innerHTML = matches
+    .map((g) => `<div class="dropdown-item" data-name="${encodeURIComponent(g.name)}">${g.name}</div>`)
+    .join("");
+
+  dd.querySelectorAll(".dropdown-item").forEach((el) => {
+    el.onclick = () => selectGame(decodeURIComponent(el.dataset.name));
+  });
+}
+
+function selectGame(name) {
+  activeGame = games.find((g) => g.name === name);
+  if (!activeGame) return;
+  $("gameSearch").value = activeGame.name;
+  $("gameDropdown").classList.remove("open");
+  renderCategories();
+  if (activeGame.categories.length) selectCategory(activeGame.categories[0]);
+}
+
+function renderCategories() {
+  const wrap = $("categories");
+  wrap.innerHTML = activeGame.categories
+    .map((c, i) => `<div class="chip" data-i="${i}">${c.name}</div>`)
+    .join("");
+  wrap.querySelectorAll(".chip").forEach((el) => {
+    el.onclick = () => selectCategory(activeGame.categories[Number(el.dataset.i)]);
+  });
+}
+
+function selectCategory(category) {
+  activeCategory = category;
+  document.querySelectorAll("#categories .chip").forEach((el) => {
+    el.classList.toggle("active", activeGame.categories[Number(el.dataset.i)] === category);
+  });
+  resetOffers();
+  loadPage(1);
+}
+
+function resetOffers() {
+  allOffers = [];
+  filteredOffers = [];
+  currentPage = 1;
+  totalOffers = 0;
+  sortDir = null;
+  $("grid").innerHTML = "";
+  $("emptyState").style.display = "none";
+}
+
+async function loadPage(page, refresh = false) {
+  if (loading || !activeCategory) return;
+  loading = true;
+  $("loader").style.display = "block";
+  $("loader").innerText = "Loading…";
+
+  try {
+    const url = `${API_BASE}/api/offers?url=${encodeURIComponent(activeCategory.url)}&page=${page}&limit=50${refresh ? "&refresh=true" : ""}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    const data = await res.json();
+
+    totalOffers = data.count;
+    if (data.stats) lastStats = data.stats;
+    allOffers.push(...data.offers);
+    if (resaleMode) {
+      allOffers.forEach(computeResaleFor);
+      renderStats();
+      renderRecs();
+      // Fetch the live market comparison + verdict only after the first page's
+      // stats have landed, so the verdict reflects THIS category's supply.
+      if (page === 1) lookupMarkets(false);
+    }
+    applyFilters();
+
+    $("meta").innerText = `${activeGame.name} › ${data.title} — ${totalOffers} offers`;
+    $("loader").style.display = allOffers.length >= totalOffers ? "none" : "block";
+    if (allOffers.length >= totalOffers) $("loader").innerText = "All offers loaded";
+  } catch (err) {
+    $("loader").style.display = "block";
+    $("loader").innerText = `Failed to load: ${err.message}`;
+  } finally {
+    loading = false;
+  }
+}
+
+function applyFilters() {
+  const q = $("offerSearch").value.toLowerCase();
+  filteredOffers = allOffers.filter(
+    (o) =>
+      o.description.toLowerCase().includes(q) ||
+      o.seller.toLowerCase().includes(q)
+  );
+  if (sortDir === "flip") {
+    filteredOffers.sort((a, b) => {
+      const sa = a.resale ? a.resale.score : -Infinity;
+      const sb = b.resale ? b.resale.score : -Infinity;
+      return sb - sa;
+    });
+  } else if (sortDir) {
+    filteredOffers.sort((a, b) =>
+      sortDir === "asc" ? a.priceValue - b.priceValue : b.priceValue - a.priceValue
+    );
+  }
+  render();
+}
+
+function sortBy(dir) {
+  sortDir = dir;
+  applyFilters();
+}
+
+function render() {
+  if (!filteredOffers.length) {
+    $("grid").innerHTML = "";
+    if (allOffers.length) {
+      $("emptyState").style.display = "block";
+      $("emptyState").innerText = "No offers match your filter.";
+    }
+    return;
+  }
+  $("emptyState").style.display = "none";
+  $("grid").innerHTML = filteredOffers
+    .map((o, i) => {
+      const sub = [o.server, o.amount].filter(Boolean).join(" · ");
+      const r = resaleMode ? o.resale : null;
+      const flip = r && r.recommend ? " flip" : "";
+      let resaleHtml = "";
+      if (r) {
+        const badges = r.badges
+          .map((b) => `<span class="b ${b}">${b.replace("-", " ")}</span>`)
+          .join("");
+        const cls = r.profitUsd > 0 ? "pos" : "neg";
+        resaleHtml = `
+          <div class="badges">${badges}</div>
+          <div class="profit-row">
+            <span class="sub">profit @ $${r.sellUsd} sell</span>
+            <span class="${cls}">${r.profitUsd > 0 ? "+" : ""}$${r.profitUsd} · ${r.marginPct}%</span>
+          </div>`;
+      }
+      return `
+        <div class="card${flip}" data-i="${i}">
+          <div class="desc">${escapeHtml(o.description) || "—"}</div>
+          <div class="row">
+            <span class="seller">${escapeHtml(o.seller)}</span>
+            <span class="sub">${escapeHtml(sub)}</span>
+          </div>
+          <div class="row">
+            <span class="price">${escapeHtml(o.price)}</span>
+            <span class="sub">orig ${o.originalPrice}</span>
+          </div>
+          ${resaleHtml}
+        </div>`;
+    })
+    .join("");
+
+  $("grid").querySelectorAll(".card").forEach((el) => {
+    el.onclick = () => openDetail(filteredOffers[Number(el.dataset.i)]);
+  });
+}
+
+async function openDetail(offer) {
+  const overlay = $("overlay");
+  overlay.classList.add("open");
+  $("modalTitle").innerText = offer.description || "Item";
+  $("modalPrice").innerText = offer.price;
+  $("modalSeller").innerText = offer.seller;
+  $("modalAvatar").style.backgroundImage = "";
+  $("modalBody").innerHTML = `<div class="loading">Loading item details…</div>`;
+
+  if (!offer.id) {
+    $("modalBody").innerHTML = `<div class="loading">No further details available for this item.</div>`;
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/offer/${offer.id}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    const d = await res.json();
+
+    if (d.title) $("modalTitle").innerText = d.title;
+    if (d.seller) $("modalSeller").innerText = d.seller;
+    if (d.sellerAvatar) $("modalAvatar").style.backgroundImage = `url(${d.sellerAvatar})`;
+
+    const blocks = [];
+    const longDesc = d.detailedDescription || d.shortDescription;
+    if (longDesc) {
+      blocks.push(`<div class="block-label">Description</div><div class="desc-text">${escapeHtml(longDesc)}</div>`);
+    }
+    if (d.params && d.params.length) {
+      const rows = d.params
+        .map((p) => `<li><span class="k">${escapeHtml(p.label)}</span><span class="v">${escapeHtml(p.value)}</span></li>`)
+        .join("");
+      blocks.push(`<div class="block-label">Details</div><ul class="params">${rows}</ul>`);
+    }
+    $("modalBody").innerHTML = blocks.join("") || `<div class="loading">No extra details provided.</div>`;
+  } catch (err) {
+    $("modalBody").innerHTML = `<div class="loading">Couldn't load details: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function closeDetail() {
+  $("overlay").classList.remove("open");
+}
+
+function escapeHtml(str) {
+  return String(str || "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+}
+
+async function refreshOffers() {
+  if (!activeCategory) return;
+  resetOffers();
+  await loadPage(1, true);
+}
+
+// search interactions
+$("gameSearch").addEventListener("input", (e) => {
+  $("gameDropdown").classList.add("open");
+  renderDropdown(e.target.value);
+});
+$("gameSearch").addEventListener("focus", () => {
+  $("gameDropdown").classList.add("open");
+  renderDropdown($("gameSearch").value);
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".game-picker")) $("gameDropdown").classList.remove("open");
+});
+
+// modal close interactions
+$("overlay").addEventListener("click", (e) => {
+  if (e.target === $("overlay")) closeDetail();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeDetail();
+});
+
+// infinite scroll
+window.addEventListener("scroll", () => {
+  if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 600) {
+    if (!loading && allOffers.length < totalOffers) {
+      currentPage++;
+      loadPage(currentPage);
+    }
+  }
+});
+
+loadGames();
+</script>
+</body>
+</html>
