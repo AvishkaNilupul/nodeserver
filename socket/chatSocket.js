@@ -31,6 +31,14 @@ function chatSocket(io) {
       socket.join(`seller:${admin.id}`);
     }
 
+    // Lets the admin page confirm its socket is still authenticated after a
+    // reconnect. If the session was lost (e.g. server restart on the old
+    // in-memory store) the page can prompt a re-login instead of silently
+    // failing to send.
+    socket.on("admin-check", () => {
+      socket.emit("admin-auth", { isAdmin: !!socket.data.isAdmin });
+    });
+
     // =========================
     // Join User (buyer)
     // =========================
@@ -158,7 +166,10 @@ ${new Date().toISOString()}`
     // =========================
     socket.on("admin-message", async (data) => {
       try {
-        if (!socket.data.isAdmin) return;
+        if (!socket.data.isAdmin) {
+          socket.emit("admin-auth", { isAdmin: false });
+          return;
+        }
         const sellerId = socket.data.sellerId;
         if (!data || typeof data.userId !== "string") return;
         if (typeof data.message !== "string") return;

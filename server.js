@@ -4,6 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const session = require("express-session");
+const MongoStore = require("connect-mongo").default;
 const helmet = require("helmet");
 const multer = require("multer");
 const validator = require("validator");
@@ -44,6 +45,14 @@ const sessionMiddleware = session({
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  // Persist sessions in MongoDB so admins stay logged in across server
+  // restarts (the default in-memory store is wiped on every restart, which
+  // silently de-authenticates open admin sockets).
+  store: MongoStore.create({
+    mongoUrl: config.MONGO_URI,
+    collectionName: "sessions",
+    ttl: 60 * 60 * 12,
+  }),
   cookie: {
     httpOnly: true,
     secure: "auto",

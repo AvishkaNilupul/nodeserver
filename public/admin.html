@@ -231,6 +231,21 @@
 
 const socket = io();
 
+// Whenever the socket (re)connects, confirm we're still an authenticated
+// admin. If the session was lost server-side, prompt a re-login instead of
+// silently failing to send messages.
+let sessionExpiredHandled = false;
+socket.on("connect", () => {
+  socket.emit("admin-check");
+});
+socket.on("admin-auth", (info) => {
+  if (info && info.isAdmin) return;
+  if (sessionExpiredHandled) return;
+  sessionExpiredHandled = true;
+  alert("Your admin session expired. Please log in again.");
+  window.location.href = "/admin-login.html";
+});
+
 const usersDiv =
   document.getElementById(
     "users"
