@@ -409,23 +409,17 @@ function toggleManualFields(){
 }
 async function loadUsers() {
 
-  const usersRes =
-    await fetch("/users");
+  const convosRes =
+    await fetch("/conversations");
 
-  const users =
-    await usersRes.json();
-
-  const messagesRes =
-    await fetch("/messages");
-
-  const messages =
-    await messagesRes.json();
+  const convos =
+    await convosRes.json();
 
   usersDiv.innerHTML = "";
 
-  users.reverse();
+  convos.forEach((convo) => {
 
-  users.forEach((userId) => {
+    const userId = convo.userId;
 
     const div =
       document.createElement("div");
@@ -447,22 +441,7 @@ async function loadUsers() {
     // =========================
 
     const unreadCount =
-
-      messages.filter(
-
-        (msg) =>
-
-          msg.userId === userId
-
-          &&
-
-          msg.sender === "user"
-
-          &&
-
-          !msg.readByAdmin
-
-      ).length;
+      convo.unread || 0;
 
     if (unreadCount > 0) {
 
@@ -481,12 +460,10 @@ async function loadUsers() {
 
     wrapper.className = "user-content";
 
-    const userMsgs = messages.filter((m) => m.userId === userId);
-    const last = userMsgs[userMsgs.length - 1];
-    const lastText = last
-      ? last.message.startsWith("[IMAGE]")
+    const lastText = convo.lastMessage
+      ? convo.lastMessage.startsWith("[IMAGE]")
         ? "📷 Image"
-        : (last.sender === "admin" ? "You: " : "") + last.message
+        : (convo.lastSender === "admin" ? "You: " : "") + convo.lastMessage
       : "No messages yet";
 
     const avatar = document.createElement("div");
@@ -601,19 +578,15 @@ async function loadMessages(
 ) {
 
   const res =
-    await fetch("/messages");
+    await fetch(
+      "/messages/" +
+        encodeURIComponent(userId)
+    );
 
-  const messages =
+  const filtered =
     await res.json();
 
   messagesDiv.innerHTML = "";
-
-  const filtered =
-    messages.filter(
-      (msg) =>
-        msg.userId ===
-        userId
-    );
 
   filtered.forEach((msg) => {
 

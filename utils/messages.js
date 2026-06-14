@@ -56,6 +56,47 @@ function conversationExists(sellerId, userId) {
   return Message.exists({ sellerId, userId });
 }
 
+// One row per buyer for the inbox list: last message + unread count, newest
+// first. Computed in the DB so the admin page no longer downloads the entire
+// message history just to render the conversation list.
+async function getSellerConversations(sellerId) {
+  const rows = await Message.aggregate([
+    { $match: { sellerId } },
+    { $sort: { createdAt: 1 } },
+    {
+      $group: {
+        _id: "$userId",
+        lastMessage: { $last: "$message" },
+        lastSender: { $last: "$sender" },
+        updatedAt: { $last: "$createdAt" },
+        unread: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$sender", "user"] },
+                  { $eq: ["$readByAdmin", false] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+    { $sort: { updatedAt: -1 } },
+  ]);
+
+  return rows.map((r) => ({
+    userId: r._id,
+    lastMessage: r.lastMessage,
+    lastSender: r.lastSender,
+    unread: r.unread,
+    updatedAt: r.updatedAt,
+  }));
+}
+
 module.exports = {
   getMessagesBySeller,
   getMessagesByUser,
@@ -66,4 +107,5 @@ module.exports = {
   markSeen,
   getSellerUserIds,
   conversationExists,
+  getSellerConversations,
 };

@@ -4,9 +4,11 @@ const router = express.Router();
 
 const {
   getMessagesBySeller,
+  getMessagesByUser,
   clearChat,
   markRead,
   getSellerUserIds,
+  getSellerConversations,
 } = require("../utils/messages");
 
 function requireAdmin(req, res, next) {
@@ -23,6 +25,31 @@ router.get("/messages", requireAdmin, async (req, res) => {
     res.json(messages);
   } catch (err) {
     console.error("messages error:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
+
+// GET MESSAGES FOR ONE BUYER (so the chat view doesn't pull the full history)
+router.get("/messages/:userId", requireAdmin, async (req, res) => {
+  try {
+    const messages = await getMessagesByUser(
+      req.session.admin.id,
+      req.params.userId
+    );
+    res.json(messages);
+  } catch (err) {
+    console.error("messages/:userId error:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
+
+// CONVERSATION LIST (one row per buyer: last message + unread count)
+router.get("/conversations", requireAdmin, async (req, res) => {
+  try {
+    const conversations = await getSellerConversations(req.session.admin.id);
+    res.json(conversations);
+  } catch (err) {
+    console.error("conversations error:", err.message);
     res.status(500).json({ success: false });
   }
 });
