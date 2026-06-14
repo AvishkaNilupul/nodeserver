@@ -23,6 +23,8 @@ const itemRoutes = require("./routes/itemRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
+const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const dropScanner = require("./utils/dropScanner");
 const chatSocket = require("./socket/chatSocket");
 const { getOrderByOrderId, authorizeBuyer } = require("./utils/orderIds");
 const { sendTelegram } = require("./utils/telegram");
@@ -264,6 +266,10 @@ app.get("/bots.html", requireSuperadmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
+app.get("/drops-archive.html", requireSuperadmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
+});
+
 // =========================
 // Marketplace tab (all admins)
 // =========================
@@ -303,6 +309,7 @@ app.use(requireAdmin, itemRoutes);
 app.use(requireAdmin, inventoryRoutes);
 app.use(requireAdmin, orderRoutes);
 app.use(botConfigRoutes);
+app.use(dropArchiveRoutes);
 
 // =========================
 // Socket.IO
@@ -326,6 +333,9 @@ mongoose
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
     });
+    // Begin the background drop-archive scanner (gentle, one account at a
+    // time). Safe no-op until accounts are synced from the bot configs.
+    dropScanner.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

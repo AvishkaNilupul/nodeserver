@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Drops Archive</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .themebtn{cursor:pointer;}
+
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+
+  button { padding: 9px 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 13.5px; }
+  button:hover { opacity: 0.94; }
+  button:disabled { opacity:.5; cursor: default; }
+  .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
+  .btn-ghost:hover { background: var(--surface-2); opacity:1; }
+  .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
+
+  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 18px 0 14px; }
+  .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
+  .search input { width:100%; padding: 11px 13px 11px 38px; border-radius: 11px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline:none; font-family:inherit; }
+  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color: var(--muted); }
+  select { padding: 10px 12px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 13.5px; font-family:inherit; outline:none; }
+
+  /* Progress panel */
+  .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 18px; overflow:hidden; }
+  .panel .ph { display:flex; align-items:center; gap:10px; padding: 14px 18px; border-bottom:1px solid var(--line); }
+  .panel .ph b { font-size: 15px; }
+  .panel .pb { padding: 16px 18px; }
+  .bar { height: 12px; border-radius: 999px; background: var(--surface-2); overflow:hidden; border:1px solid var(--line); }
+  .bar > i { display:block; height:100%; background: linear-gradient(90deg,var(--accent2),var(--accent)); width:0%; transition: width .4s ease; }
+  .pstats { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+  .stat { background: var(--surface-2); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; min-width: 84px; }
+  .stat b { font-size: 18px; display:block; }
+  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+  .stat.green b{color:var(--green);} .stat.red b{color:var(--red);} .stat.warn b{color:var(--yellow);}
+  .pctl { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:14px; padding-top:14px; border-top:1px dashed var(--line); }
+  .scanning { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
+  .pulse { width:9px; height:9px; border-radius:50%; background: var(--green); box-shadow:0 0 0 0 rgba(16,185,129,.5); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(16,185,129,.5);} 70%{box-shadow:0 0 0 8px rgba(16,185,129,0);} 100%{box-shadow:0 0 0 0 rgba(16,185,129,0);} }
+
+  .switch { display:inline-flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; user-select:none; }
+  .switch input { display:none; }
+  .switch .track { width:38px; height:22px; border-radius:999px; background: var(--line); position:relative; transition: background .15s; }
+  .switch .track::after { content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; transition: left .15s; box-shadow:0 1px 2px rgba(0,0,0,.2); }
+  .switch input:checked + .track { background: var(--green); }
+  .switch input:checked + .track::after { left:18px; }
+
+  /* Accounts table */
+  table { width:100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align:left; padding: 10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  tbody tr:hover { background: var(--surface-2); }
+  .mono { font-family: ui-monospace, monospace; font-size:12.5px; }
+  .chip { display:inline-flex; align-items:center; gap:5px; padding: 3px 9px; border-radius: 999px; font-size:11.5px; font-weight:600; background: var(--surface-2); color: var(--muted); }
+  .chip.on { background:#ecfdf5; color: var(--green); }
+  .chip.off { background:#fef2f2; color: var(--red); }
+  .chip.warn { background:#fffbeb; color: var(--yellow); }
+  .linkish { color: var(--accent); cursor:pointer; font-weight:600; }
+  .linkish:hover { text-decoration: underline; }
+  .pw { display:inline-flex; align-items:center; gap:6px; }
+  .pw .val { font-family: ui-monospace, monospace; font-size:12.5px; }
+
+  .empty { text-align:center; color: var(--muted); padding: 40px 16px; font-size: 14px; }
+  #banner { margin-bottom: 12px; }
+  .note { padding:10px 14px; border-radius:10px; font-size:13px; }
+  .note.ok { background:#ecfdf5; color:var(--green); }
+  .note.err { background:#fef2f2; color:var(--red); }
+
+  /* Modal */
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:48px 16px; overflow-y:auto; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:720px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
+  .modal > header { display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal > header b { font-size:16px; }
+  .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
+  .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
+  .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
+  .mbody textarea, .mbody input[type="text"], .mbody input:not([type]) { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody textarea { min-height:180px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
+  .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
+  .grid3 { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+  .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
+
+  /* Drops grid */
+  .game-section { margin-top: 18px; }
+  .game-header { display:flex; align-items:baseline; gap:10px; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:12px; }
+  .game-header h3 { font-size:15px; font-weight:800; }
+  .game-header .gc { font-size:12px; color:var(--muted); }
+  .drops-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap:12px; }
+  .dcard { background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px; text-align:left; position:relative; }
+  .dcard img { width:64px; height:64px; object-fit:contain; display:block; margin:0 auto 8px; }
+  .dcard .noimg { width:64px; height:64px; margin:0 auto 8px; background:var(--surface); border-radius:8px; }
+  .dcard .cnt { position:absolute; top:8px; right:8px; background:rgba(0,0,0,.6); color:#fff; font-size:11px; font-weight:700; padding:1px 7px; border-radius:6px; }
+  .dcard .nm { font-size:12.5px; font-weight:700; line-height:1.25; word-break:break-word; }
+  .dcard .meta { font-size:10.5px; color:var(--muted); margin-top:4px; }
+  .badge { display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; padding:2px 7px; border-radius:999px; margin-top:6px; }
+  .badge.claimed { background:#ecfdf5; color:var(--green); }
+  .badge.connect { background:#fffbeb; color:var(--yellow); }
+  .badge.connected { background:#eef2ff; color:var(--accent); }
+
+  @media (max-width:768px){ th.hide-sm, td.hide-sm { display:none; } }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+    <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+    <a href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
+    <a href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
+    <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+    <a href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
+    <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
+    <a class="active" href="/drops-archive.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path></svg> Drops archive</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout themebtn" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Drops Archive</h1>
+      <div class="sub">Permanent log of every account's claimed drops — kept beyond Twitch's 6-month window, scanned gradually every day.</div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn-ghost btn-sm" id="syncBtn">Sync from bots</button>
+      <button class="btn-sm" id="credBtn">Import credentials</button>
+      <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
+    </div>
+  </div>
+
+  <div id="banner" style="margin-top:14px;"></div>
+
+  <!-- Progress -->
+  <div class="panel">
+    <div class="ph"><b>Scan progress</b><span class="scanning" id="scanState" style="margin-left:auto;"></span></div>
+    <div class="pb">
+      <div class="bar"><i id="bar"></i></div>
+      <div class="pstats" id="pstats"></div>
+      <div class="pctl">
+        <label class="switch"><input type="checkbox" id="schedToggle"><span class="track"></span></label>
+        <span id="schedLabel" style="font-size:13px;">Scanner</span>
+        <span style="font-size:13px;color:var(--muted);">Delay between scans:</span>
+        <select id="rate">
+          <option value="8000">8s (fast)</option>
+          <option value="20000">20s (default)</option>
+          <option value="60000">1m (gentle)</option>
+          <option value="180000">3m (very gentle)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Accounts -->
+  <div class="toolbar">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+      <input id="search" type="text" placeholder="Search by login, username or config…" />
+    </div>
+    <select id="statusFilter">
+      <option value="">All statuses</option>
+      <option value="ok">Scanned OK</option>
+      <option value="pending">Not scanned yet</option>
+      <option value="token_invalid">Token invalid</option>
+      <option value="error">Error</option>
+    </select>
+  </div>
+
+  <div class="panel">
+    <div class="pb" style="padding:0;">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th>Login</th>
+            <th>Email</th>
+            <th>Password</th>
+            <th class="hide-sm">Bot</th>
+            <th>Drops</th>
+            <th class="hide-sm">Last scan</th>
+            <th>Status</th>
+            <th></th>
+          </tr></thead>
+          <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Account detail modal -->
+<div class="modal-bg" id="detailBg">
+  <div class="modal" style="max-width:760px;">
+    <header><b id="dTitle">Account</b><button class="x" id="dClose">&times;</button></header>
+    <div class="mbody" id="dBody"></div>
+  </div>
+</div>
+
+<!-- Import credentials modal -->
+<div class="modal-bg" id="credBg">
+  <div class="modal">
+    <header><b>Import credentials</b><button class="x" id="credClose">&times;</button></header>
+    <div class="mbody">
+      <div>
+        <label class="lbl">Accounts JSON</label>
+        <textarea id="credInput" placeholder='[
+  { "username": "Marol1yr08p", "password": "CrkNc1OlcGTz", "email": "..." },
+  { "username": "Marolqig5x7", "password": "OTZMgTp9wlp7", "email": "..." }
+]'></textarea>
+        <div class="hint" style="margin-top:6px;">Paste a list of <code>{ username, password, email }</code> objects (with or without surrounding <code>[ ]</code> and trailing commas). They're matched to accounts by <b>username = Twitch login</b>. Passwords are stored encrypted. Unmatched usernames are reported back.</div>
+      </div>
+      <div id="credResult"></div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="credCancel">Cancel</button>
+      <button id="credSubmit">Import &amp; match</button>
+    </footer>
+  </div>
+</div>
+
+<script src="/theme.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let accounts = [];
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function attr(s){ return esc(s); }
+
+async function api(url, opts){
+  const r = await fetch(url, Object.assign({ credentials:"same-origin", headers:{ "Content-Type":"application/json" } }, opts||{}));
+  let data = null;
+  try { data = await r.json(); } catch { data = null; }
+  if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
+  if (!r.ok || (data && data.success === false)) {
+    throw new Error((data && data.message) || ("HTTP " + r.status));
+  }
+  return data;
+}
+
+function banner(msg, cls){
+  $("banner").innerHTML = msg ? '<div class="note ' + (cls||"ok") + '">' + esc(msg) + '</div>' : "";
+  if (msg) setTimeout(()=>{ if($("banner").textContent===msg) $("banner").innerHTML=""; }, 6000);
+}
+
+function timeAgo(s){
+  if (!s) return "never";
+  const d = new Date(s); if (isNaN(d)) return "—";
+  let sec = Math.floor((Date.now()-d.getTime())/1000); if (sec<0) sec=0;
+  const u=[["d",86400],["h",3600],["m",60]];
+  for (const [n,v] of u){ const x=Math.floor(sec/v); if (x>=1) return x+n+" ago"; }
+  return "just now";
+}
+
+function statusChip(s){
+  if (s==="ok") return '<span class="chip on">OK</span>';
+  if (s==="token_invalid") return '<span class="chip off">Token invalid</span>';
+  if (s==="error") return '<span class="chip off">Error</span>';
+  return '<span class="chip">Pending</span>';
+}
+
+// -------- Progress --------
+function fmtPerAcct(ms){
+  const h = Math.round(ms/3600000);
+  if (h >= 1) return h + "h";
+  return Math.round(ms/60000) + "m";
+}
+
+async function loadProgress(){
+  let p;
+  try { p = (await api("/drops-archive/progress")).progress; } catch { return; }
+  const c = p.counts;
+  const pct = c.total ? Math.round((c.scannedWindow / c.total) * 100) : 0;
+  $("bar").style.width = pct + "%";
+  $("pstats").innerHTML =
+    '<div class="stat"><b>' + c.total + '</b><span>Accounts</span></div>' +
+    '<div class="stat green"><b>' + c.scannedWindow + '</b><span>Scanned (' + fmtPerAcct(p.perAccountMs) + ')</span></div>' +
+    '<div class="stat"><b>' + c.due + '</b><span>Queued</span></div>' +
+    '<div class="stat green"><b>' + c.totalDrops + '</b><span>Logged drops</span></div>' +
+    '<div class="stat warn"><b>' + c.tokenInvalid + '</b><span>Bad token</span></div>' +
+    '<div class="stat red"><b>' + c.error + '</b><span>Errors</span></div>';
+  $("scanState").innerHTML = p.scanning
+    ? '<span class="pulse"></span> Scanning ' + esc(p.currentLogin||"") + "…"
+    : (p.enabled ? "Idle — waiting for next due account" : "Scanner paused");
+  // Reflect scheduler state without clobbering a user mid-toggle.
+  if (document.activeElement !== $("schedToggle")) $("schedToggle").checked = p.enabled;
+  $("schedLabel").textContent = p.enabled ? "Scanner on" : "Scanner paused";
+  if (document.activeElement !== $("rate")) $("rate").value = String(p.intervalMs);
+}
+
+// -------- Accounts --------
+async function loadAccounts(){
+  const search = encodeURIComponent($("search").value.trim());
+  const status = encodeURIComponent($("statusFilter").value);
+  let data;
+  try { data = await api("/drops-archive/accounts?search=" + search + "&status=" + status); }
+  catch (e) { $("rows").innerHTML = '<tr><td colspan="8" class="empty">' + esc(e.message) + "</td></tr>"; return; }
+  accounts = data.accounts || [];
+  if (!accounts.length){
+    $("rows").innerHTML = '<tr><td colspan="8" class="empty">No accounts yet. Click <b>Sync from bots</b> to import them from your bot configs.</td></tr>';
+    return;
+  }
+  $("rows").innerHTML = accounts.map(rowHTML).join("");
+}
+
+function rowHTML(a){
+  const pw = a.hasPassword
+    ? '<span class="pw"><span class="val" data-pw="' + attr(a.id) + '">••••••••</span> <span class="linkish" data-reveal="' + attr(a.id) + '">show</span></span>'
+    : '<span class="chip warn">no password</span>';
+  return '<tr>' +
+    '<td><span class="linkish" data-view="' + attr(a.id) + '">' + esc(a.login || "(no login)") + "</span></td>" +
+    "<td>" + (a.credEmail ? esc(a.credEmail) : '<span style="color:var(--muted)">—</span>') + "</td>" +
+    "<td>" + pw + "</td>" +
+    '<td class="hide-sm mono">' + esc(a.container || a.configFile || "—") + "</td>" +
+    "<td><b>" + (a.dropCount||0) + "</b></td>" +
+    '<td class="hide-sm">' + esc(timeAgo(a.lastScanAt)) + "</td>" +
+    "<td>" + statusChip(a.lastScanStatus) + "</td>" +
+    '<td style="text-align:right;"><button class="btn-ghost btn-sm" data-scan="' + attr(a.id) + '">Scan now</button> ' +
+      '<button class="btn-ghost btn-sm" data-view="' + attr(a.id) + '">View</button></td>' +
+  "</tr>";
+}
+
+async function revealPassword(id, el){
+  try {
+    const d = await api("/drops-archive/accounts/" + encodeURIComponent(id) + "/password");
+    const span = document.querySelector('[data-pw="' + id + '"]');
+    if (span) span.textContent = d.password || "(empty)";
+    el.textContent = "hide";
+    el.dataset.reveal = "";
+    el.dataset.hide = id;
+  } catch (e) { banner(e.message, "err"); }
+}
+
+async function scanNow(id, btn){
+  const old = btn.textContent; btn.disabled = true; btn.textContent = "Scanning…";
+  try {
+    const d = await api("/drops-archive/accounts/" + encodeURIComponent(id) + "/scan", { method:"POST" });
+    if (d.result && d.result.ok) banner("Scanned: " + (d.result.newDrops||0) + " new drop(s), " + (d.result.total||0) + " total.", "ok");
+    else banner("Scan failed: " + ((d.result && d.result.error) || "unknown"), "err");
+    await loadAccounts(); await loadProgress();
+  } catch (e) { banner(e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+// -------- Detail modal --------
+function badge(state){
+  if (state==="connect") return '<span class="badge connect">Connect</span>';
+  if (state==="connected") return '<span class="badge connected">Connected</span>';
+  return '<span class="badge claimed">Claimed</span>';
+}
+
+async function openDetail(id){
+  const a = accounts.find((x)=>x.id===id);
+  $("dTitle").textContent = a ? (a.login || "Account") : "Account";
+  $("dBody").innerHTML = '<div class="empty">Loading…</div>';
+  $("detailBg").classList.add("show");
+  let d;
+  try { d = await api("/drops-archive/accounts/" + encodeURIComponent(id)); }
+  catch (e) { $("dBody").innerHTML = '<div class="note err">' + esc(e.message) + "</div>"; return; }
+  const acc = d.account;
+  let html =
+    '<div class="grid3">' +
+      '<div><label class="lbl">Username</label><input id="eUser" type="text" value="' + attr(acc.credUsername || acc.login || "") + '"></div>' +
+      '<div><label class="lbl">Password</label><input id="ePass" type="text" placeholder="' + (acc.hasPassword ? "•••••• (unchanged)" : "not set") + '"></div>' +
+      '<div><label class="lbl">Email</label><input id="eMail" type="text" value="' + attr(acc.credEmail || "") + '"></div>' +
+    "</div>" +
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+      '<button class="btn-sm" id="saveCred" data-id="' + attr(acc.id) + '">Save credentials</button>' +
+      '<button class="btn-ghost btn-sm" id="scanDetail" data-id="' + attr(acc.id) + '">Scan now</button>' +
+      '<span style="font-size:12.5px;color:var(--muted);">' + d.totalDrops + ' logged drop(s) · last scan ' + esc(timeAgo(acc.lastScanAt)) + " · " + statusChip(acc.lastScanStatus) + "</span>" +
+    "</div>";
+  if (acc.lastScanError) html += '<div class="note err">' + esc(acc.lastScanError) + "</div>";
+  if (!d.games.length){
+    html += '<div class="empty">No drops logged yet. Use “Scan now”.</div>';
+  } else {
+    for (const g of d.games){
+      html += '<div class="game-section"><div class="game-header"><h3>' + esc(g.game) + '</h3><span class="gc">' + g.items.length + " reward" + (g.items.length>1?"s":"") + "</span></div><div class=\"drops-grid\">";
+      for (const it of g.items){
+        const img = (it.imageURL||"").replace("{width}","64").replace("{height}","64");
+        html += '<div class="dcard">' +
+          (it.count>1 ? '<span class="cnt">' + it.count + "</span>" : "") +
+          (img ? '<img src="' + attr(img) + '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">' : '<div class="noimg"></div>') +
+          '<div class="nm">' + esc(it.name||"Reward") + "</div>" +
+          '<div class="meta">' + (it.awardedAt ? "awarded " + esc(timeAgo(it.awardedAt)) : "logged " + esc(timeAgo(it.firstSeenAt))) + "</div>" +
+          badge(it.state) +
+        "</div>";
+      }
+      html += "</div></div>";
+    }
+  }
+  $("dBody").innerHTML = html;
+}
+
+async function saveCred(id, btn){
+  const old = btn.textContent; btn.disabled = true; btn.textContent = "Saving…";
+  const body = { username: $("eUser").value, email: $("eMail").value };
+  const pass = $("ePass").value;
+  if (pass) body.password = pass;
+  try {
+    await api("/drops-archive/accounts/" + encodeURIComponent(id), { method:"PUT", body: JSON.stringify(body) });
+    banner("Credentials saved.", "ok");
+    await loadAccounts();
+    openDetail(id);
+  } catch (e) { banner(e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+// -------- Events --------
+$("rows").addEventListener("click", (e)=>{
+  const v = e.target.closest("[data-view]"); if (v) return openDetail(v.dataset.view);
+  const s = e.target.closest("[data-scan]"); if (s) return scanNow(s.dataset.scan, s);
+  const r = e.target.closest("[data-reveal]");
+  if (r){
+    if (r.dataset.hide){ // currently shown -> hide
+      const span = document.querySelector('[data-pw="' + r.dataset.hide + '"]');
+      if (span) span.textContent = "••••••••";
+      r.textContent = "show"; r.dataset.reveal = r.dataset.hide; r.dataset.hide = "";
+    } else { revealPassword(r.dataset.reveal, r); }
+  }
+});
+
+$("dBody").addEventListener("click", (e)=>{
+  const sv = e.target.closest("#saveCred"); if (sv) return saveCred(sv.dataset.id, sv);
+  const sc = e.target.closest("#scanDetail"); if (sc) return scanNow(sc.dataset.id, sc);
+});
+
+$("dClose").addEventListener("click", ()=> $("detailBg").classList.remove("show"));
+$("detailBg").addEventListener("click", (e)=>{ if (e.target===$("detailBg")) $("detailBg").classList.remove("show"); });
+
+$("credBtn").addEventListener("click", ()=>{ $("credResult").innerHTML=""; $("credBg").classList.add("show"); });
+$("credClose").addEventListener("click", ()=> $("credBg").classList.remove("show"));
+$("credCancel").addEventListener("click", ()=> $("credBg").classList.remove("show"));
+$("credBg").addEventListener("click", (e)=>{ if (e.target===$("credBg")) $("credBg").classList.remove("show"); });
+
+$("credSubmit").addEventListener("click", async (e)=>{
+  const btn = e.currentTarget; const old = btn.textContent; btn.disabled = true; btn.textContent = "Importing…";
+  try {
+    const d = await api("/drops-archive/credentials", { method:"POST", body: JSON.stringify({ accounts: $("credInput").value }) });
+    let msg = "Matched " + d.matched + " account(s).";
+    if (d.unmatchedCount) msg += " " + d.unmatchedCount + " unmatched.";
+    $("credResult").innerHTML = '<div class="note ' + (d.matched ? "ok" : "err") + '">' + esc(msg) +
+      (d.unmatched && d.unmatched.length ? '<div style="margin-top:6px;font-size:12px;">Unmatched: ' + esc(d.unmatched.slice(0,40).join(", ")) + (d.unmatched.length>40?" …":"") + "</div>" : "") + "</div>";
+    await loadAccounts();
+  } catch (err) { $("credResult").innerHTML = '<div class="note err">' + esc(err.message) + "</div>"; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
+
+$("syncBtn").addEventListener("click", async (e)=>{
+  const btn = e.currentTarget; const old = btn.textContent; btn.disabled = true; btn.textContent = "Syncing…";
+  try {
+    const d = await api("/drops-archive/sync", { method:"POST" });
+    banner("Synced " + d.accountsFound + " account(s) from " + d.filesRead + " config file(s): " + d.inserted + " new, " + d.updated + " updated.", "ok");
+    await loadAccounts(); await loadProgress();
+  } catch (err) { banner(err.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
+
+$("refreshBtn").addEventListener("click", ()=>{ loadAccounts(); loadProgress(); });
+$("schedToggle").addEventListener("change", async (e)=>{
+  try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ enabled: e.target.checked }) }); loadProgress(); }
+  catch (err) { banner(err.message, "err"); }
+});
+$("rate").addEventListener("change", async (e)=>{
+  try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ intervalMs: Number(e.target.value) }) }); loadProgress(); }
+  catch (err) { banner(err.message, "err"); }
+});
+
+let searchTimer = null;
+$("search").addEventListener("input", ()=>{ clearTimeout(searchTimer); searchTimer = setTimeout(loadAccounts, 300); });
+$("statusFilter").addEventListener("change", loadAccounts);
+
+$("logoutBtn").addEventListener("click", async ()=>{
+  try { await fetch("/admin-logout", { method:"POST", credentials:"same-origin" }); } catch {}
+  window.location.href = "/admin-login.html";
+});
+
+loadAccounts();
+loadProgress();
+setInterval(loadProgress, 4000);
+</script>
+<script src="/admin-nav.js"></script>
+</body>
+</html>

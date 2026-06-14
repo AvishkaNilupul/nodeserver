@@ -1,0 +1,226 @@
+// Background, rate-limit-safe scanner for the Drops Archive.
+//
+// Design goals:
+//  - Never burst Twitch's API. We scan ONE account per tick with a delay (plus
+//    jitter) between ticks, so hundreds of accounts are spread across the day
+//    instead of fired all at once (which risks an IP block).
+//  - Each account is re-scanned roughly once per `perAccountMs` (default 24h).
+//    On each scan we upsert drops: new ones are inserted, known ones refresh
+//    their lastSeenAt/state. Nothing is ever deleted, so the archive outlives
+//    Twitch's ~6-month inventory window.
+//  - Expose live progress for a global progress bar in the UI.
+const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
+const { fetchInventory } = require("./twitchInventory");
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const state = {
+  enabled: process.env.DROP_SCAN_DISABLED !== "1",
+  // Delay between consecutive account scans.
+  intervalMs: Number(process.env.DROP_SCAN_INTERVAL_MS) || 20000,
+  // Re-scan an account at most once per this window.
+  perAccountMs: Number(process.env.DROP_SCAN_PER_ACCOUNT_MS) || DAY_MS,
+  scanning: false,
+  currentLogin: null,
+  lastTickAt: null,
+  lastError: "",
+  startedAt: Date.now(),
+  // Session counters (since process start).
+  sessionScanned: 0,
+  sessionNewDrops: 0,
+  sessionErrors: 0,
+};
+
+let timer = null;
+let started = false;
+
+function jitter(ms) {
+  // +/- 30% so the cadence isn't perfectly periodic.
+  const f = 0.7 + Math.random() * 0.6;
+  return Math.round(ms * f);
+}
+
+function maskedLogin(acc) {
+  return acc.login || (acc.clientSecret ? acc.clientSecret.slice(0, 6) : "");
+}
+
+// Pick the single most-stale account that is due for a scan.
+async function nextDueAccount() {
+  const cutoff = new Date(Date.now() - state.perAccountMs);
+  return BotAccount.findOne({
+    $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
+  })
+    .sort({ lastScanAt: 1 }) // nulls sort first
+    .exec();
+}
+
+// Scan a single account doc: fetch inventory, upsert its drops, update status.
+async function scanAccount(acc) {
+  const now = new Date();
+  try {
+    const { twitchId, login, drops } = await fetchInventory(acc.clientSecret);
+    let newDrops = 0;
+    for (const d of drops) {
+      const r = await DropLog.updateOne(
+        { account: acc._id, benefitId: d.benefitId },
+        {
+          $set: {
+            login: login || acc.login || "",
+            dropId: d.dropId,
+            name: d.name,
+            imageURL: d.imageURL,
+            game: d.game,
+            gameId: d.gameId,
+            count: d.count,
+            awardedAt: d.awardedAt,
+            connected: d.connected,
+            requiredAccountLink: d.requiredAccountLink,
+            state: d.state,
+            source: d.source,
+            lastSeenAt: now,
+          },
+          $setOnInsert: { firstSeenAt: now },
+        },
+        { upsert: true },
+      );
+      if (r.upsertedCount) newDrops++;
+    }
+    if (twitchId) acc.twitchId = twitchId;
+    if (login && !acc.login) acc.login = login;
+    acc.dropCount = await DropLog.countDocuments({ account: acc._id });
+    acc.lastScanAt = now;
+    acc.lastScanStatus = "ok";
+    acc.lastScanError = "";
+    await acc.save();
+    state.sessionNewDrops += newDrops;
+    return { ok: true, newDrops, total: acc.dropCount };
+  } catch (e) {
+    acc.lastScanAt = now;
+    acc.lastScanStatus = e.code === "token_invalid" ? "token_invalid" : "error";
+    acc.lastScanError = (e.message || String(e)).slice(0, 300);
+    await acc.save();
+    state.sessionErrors++;
+    state.lastError = acc.lastScanError;
+    return { ok: false, error: acc.lastScanError };
+  }
+}
+
+// Force-scan one account immediately (used by the "Scan now" button). Runs
+// outside the pacing loop but still serialised via the scanning flag.
+async function scanAccountNow(id) {
+  const acc = await BotAccount.findById(id);
+  if (!acc) return { ok: false, error: "Account not found" };
+  state.scanning = true;
+  state.currentLogin = maskedLogin(acc);
+  try {
+    const res = await scanAccount(acc);
+    state.sessionScanned++;
+    return res;
+  } finally {
+    state.scanning = false;
+    state.currentLogin = null;
+  }
+}
+
+async function tick() {
+  if (!state.enabled) {
+    schedule(state.intervalMs);
+    return;
+  }
+  state.lastTickAt = new Date();
+  try {
+    const acc = await nextDueAccount();
+    if (!acc) {
+      // Nothing due — idle a bit before checking again.
+      schedule(Math.max(state.intervalMs, 60000));
+      return;
+    }
+    state.scanning = true;
+    state.currentLogin = maskedLogin(acc);
+    await scanAccount(acc);
+    state.sessionScanned++;
+  } catch (e) {
+    state.lastError = e.message || String(e);
+  } finally {
+    state.scanning = false;
+    state.currentLogin = null;
+  }
+  schedule(jitter(state.intervalMs));
+}
+
+function schedule(ms) {
+  clearTimeout(timer);
+  timer = setTimeout(tick, ms);
+}
+
+function start() {
+  if (started) return;
+  started = true;
+  // Small startup delay so it doesn't compete with boot.
+  schedule(5000);
+}
+
+// Live snapshot for the UI progress bar.
+async function getProgress() {
+  const now = Date.now();
+  const cutoff = new Date(now - state.perAccountMs);
+  const [total, scannedWindow, due, ok, tokenInvalid, errored, totalDrops] =
+    await Promise.all([
+      BotAccount.countDocuments({}),
+      BotAccount.countDocuments({ lastScanAt: { $gt: cutoff } }),
+      BotAccount.countDocuments({
+        $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
+      }),
+      BotAccount.countDocuments({ lastScanStatus: "ok" }),
+      BotAccount.countDocuments({ lastScanStatus: "token_invalid" }),
+      BotAccount.countDocuments({ lastScanStatus: "error" }),
+      DropLog.countDocuments({}),
+    ]);
+  return {
+    enabled: state.enabled,
+    scanning: state.scanning,
+    currentLogin: state.currentLogin,
+    intervalMs: state.intervalMs,
+    perAccountMs: state.perAccountMs,
+    lastTickAt: state.lastTickAt,
+    lastError: state.lastError,
+    counts: {
+      total,
+      scannedWindow,
+      due,
+      ok,
+      tokenInvalid,
+      error: errored,
+      totalDrops,
+    },
+    session: {
+      scanned: state.sessionScanned,
+      newDrops: state.sessionNewDrops,
+      errors: state.sessionErrors,
+      startedAt: state.startedAt,
+    },
+  };
+}
+
+function setEnabled(v) {
+  state.enabled = !!v;
+  if (state.enabled) schedule(1000);
+  return state.enabled;
+}
+
+function setIntervalMs(ms) {
+  const n = Number(ms);
+  if (Number.isFinite(n) && n >= 2000 && n <= 3600000) {
+    state.intervalMs = Math.round(n);
+  }
+  return state.intervalMs;
+}
+
+module.exports = {
+  start,
+  getProgress,
+  scanAccountNow,
+  setEnabled,
+  setIntervalMs,
+};
