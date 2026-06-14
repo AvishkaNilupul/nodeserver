@@ -132,9 +132,9 @@
   .modal > header .x:hover { background:var(--surface-2); opacity:1; }
   .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
   .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
-  .mbody select, .mbody textarea { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody select, .mbody textarea, .mbody input[type="text"], .mbody input:not([type]) { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
   .mbody textarea { min-height:150px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
-  .mbody select:focus, .mbody textarea:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .mbody select:focus, .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
   .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
   .mbody .slotpill { display:inline-block; font-family:ui-monospace,monospace; font-size:12.5px; background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:3px 8px; color:var(--ink); }
   .chkrow { display:flex; align-items:center; gap:9px; font-size:13.5px; cursor:pointer; user-select:none; }
@@ -500,9 +500,13 @@
             '<select id="mTemplate">' + (opts || '<option value="">(no existing config)</option>') + '</select>' +
             '<div class="hint" style="margin-top:6px;">Copies that bot\u2019s games/options only \u2014 <b>not</b> its accounts. The new bot starts with just the accounts you paste below.</div>' +
           '</div>' +
-          '<div><label class="lbl">Accounts (one per line)</label>' +
-            '<textarea id="mAccounts" placeholder="auth_token_one&#10;login2:auth_token_two&#10;login3 auth_token_three"></textarea>' +
-            '<div class="hint" style="margin-top:6px;">One account per line. Either just the <b>auth token</b>, or <b>login:token</b>. Separators <code>:</code> <code>,</code> or spaces all work. Leave empty to create an empty bot.</div>' +
+          '<div><label class="lbl">Accounts</label>' +
+            '<textarea id="mAccounts" placeholder="One per line:&#10;auth_token_one&#10;login2:auth_token_two&#10;&#10;…or paste JSON account objects copied from a config."></textarea>' +
+            '<div class="hint" style="margin-top:6px;">One per line (just the <b>auth token</b>, or <b>login:token</b>) — <b>or</b> paste full JSON account objects (with or without <code>[ ]</code> / trailing commas). Leave empty to create an empty bot.</div>' +
+          '</div>' +
+          '<div><label class="lbl">Favourite games (optional)</label>' +
+            '<input id="mGames" placeholder="e.g. Rust, Valorant, Dota 2">' +
+            '<div class="hint" style="margin-top:6px;">Comma-separated. Applied to every account added — except accounts whose JSON already lists their own games.</div>' +
           '</div>' +
           '<label class="chkrow"><input type="checkbox" id="mStart" checked> Start the bot immediately</label>' +
         '</div>' +
@@ -517,12 +521,13 @@
   window.submitCreate = async function (btn) {
     const template = $("mTemplate") ? $("mTemplate").value : "";
     const accounts = $("mAccounts") ? $("mAccounts").value : "";
+    const favouriteGames = $("mGames") ? $("mGames").value : "";
     const startRunning = $("mStart") ? $("mStart").checked : true;
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Creating…";
     try {
       const r = await api("/bot-configs/create", {
         method: "POST",
-        body: JSON.stringify({ template, accounts, startRunning }),
+        body: JSON.stringify({ template, accounts, favouriteGames, startRunning }),
       });
       closeModal();
       if (r.warning) toast(r.warning, true);
@@ -541,9 +546,13 @@
         '<header><b>Mass add accounts</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
         '<div class="mbody">' +
           '<div class="hint">Appending to <span class="slotpill">' + esc(c.container || file) + '</span> (' + esc(file) + ').</div>' +
-          '<div><label class="lbl">Accounts (one per line)</label>' +
-            '<textarea id="bAccounts" placeholder="auth_token_one&#10;login2:auth_token_two"></textarea>' +
-            '<div class="hint" style="margin-top:6px;">One per line: just the <b>auth token</b> or <b>login:token</b>. They\u2019re appended to the existing accounts.</div>' +
+          '<div><label class="lbl">Accounts</label>' +
+            '<textarea id="bAccounts" placeholder="One per line:&#10;auth_token_one&#10;login2:auth_token_two&#10;&#10;…or paste JSON account objects copied from a config."></textarea>' +
+            '<div class="hint" style="margin-top:6px;">One per line (<b>auth token</b> or <b>login:token</b>) — <b>or</b> paste full JSON account objects (with or without <code>[ ]</code> / trailing commas). Appended to the existing accounts.</div>' +
+          '</div>' +
+          '<div><label class="lbl">Favourite games (optional)</label>' +
+            '<input id="bGames" placeholder="e.g. Rust, Valorant, Dota 2">' +
+            '<div class="hint" style="margin-top:6px;">Comma-separated. Applied to every account added — except accounts whose JSON already lists their own games.</div>' +
           '</div>' +
           '<label class="chkrow"><input type="checkbox" id="bRestart" checked> Restart the container after adding (so the bot picks them up)</label>' +
         '</div>' +
@@ -557,13 +566,14 @@
 
   window.submitBulk = async function (file, btn) {
     const accounts = $("bAccounts") ? $("bAccounts").value : "";
+    const favouriteGames = $("bGames") ? $("bGames").value : "";
     const restart = $("bRestart") ? $("bRestart").checked : false;
     if (!accounts.trim()) { toast("Paste at least one account", true); return; }
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Adding…";
     try {
       const r = await api("/bot-configs/file/" + encodeURIComponent(file) + "/accounts", {
         method: "POST",
-        body: JSON.stringify({ accounts, restart }),
+        body: JSON.stringify({ accounts, favouriteGames, restart }),
       });
       closeModal();
       toast("Added " + r.added + " account" + (r.added === 1 ? "" : "s") + " (now " + r.total + ")" + (r.restarted ? " — restarted" : ""));
