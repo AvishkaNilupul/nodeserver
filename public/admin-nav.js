@@ -2,7 +2,11 @@
 // just hides links the current admin isn't allowed to use and surfaces the
 // superadmin-only "Admins" link.
 (function () {
-  var SUPERADMIN_LINKS = ["twitch-inventory.html", "bots.html"];
+  var SUPERADMIN_LINKS = [
+    "twitch-inventory.html",
+    "bots.html",
+    "drops-archive.html",
+  ];
 
   function marketplaceLinkMarkup() {
     return (
@@ -11,6 +15,16 @@
       'stroke-linejoin="round"><path d="M3 3h18l-2 5H5L3 3z"></path>' +
       '<path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"></path>' +
       '<path d="M9 13h6"></path></svg> Marketplace'
+    );
+  }
+
+  function dropsArchiveLinkMarkup() {
+    return (
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"><path d="M21 8v13H3V8"></path>' +
+      '<path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path></svg> ' +
+      "Drops archive"
     );
   }
 
@@ -50,6 +64,27 @@
         mlink.className = "active";
       }
       links.appendChild(mlink);
+    }
+
+    // Drops archive (superadmin only). Inserted next to the Bots/Twitch links
+    // when present so related tools stay grouped, otherwise appended.
+    if (isSuper && !links.querySelector('a[href="/drops-archive.html"]')) {
+      var dlink = document.createElement("a");
+      dlink.href = "/drops-archive.html";
+      dlink.innerHTML = dropsArchiveLinkMarkup();
+      if (window.location.pathname === "/drops-archive.html") {
+        dlink.className = "active";
+      }
+      var anchor =
+        links.querySelector('a[href="/bots.html"]') ||
+        links.querySelector('a[href="/twitch-inventory.html"]');
+      if (anchor && anchor.nextSibling) {
+        links.insertBefore(dlink, anchor.nextSibling);
+      } else if (anchor) {
+        links.appendChild(dlink);
+      } else {
+        links.appendChild(dlink);
+      }
     }
 
     if (isSuper && !links.querySelector('a[href="/superadmin.html"]')) {
