@@ -2,11 +2,24 @@ const express = require("express");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
+const crypto = require("crypto");
 const { execFile } = require("child_process");
 
 const { requireSuperadmin } = require("../middleware/auth");
 
 const router = express.Router();
+
+// Default image used when a new bot can't inherit one from an existing service.
+const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
+// Possible compose filenames inside BOT_DIR (first match wins).
+const COMPOSE_NAMES = [
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "compose.yml",
+  "compose.yaml",
+];
+// Hard cap on accounts accepted in one paste, as a sanity/DoS guard.
+const MAX_BULK_ACCOUNTS = 2000;
 
 // Directory that holds the TwitchDropsBot config files + docker-compose.yml.
 // Defaults to the production path; override with TWITCHBOT_DIR for local testing.
@@ -46,6 +59,153 @@ function resolveConfigPath(file) {
     return null;
   }
   return full;
+}
+
+// Parse pasted account text into TwitchDropsBot TwitchUsers entries. Each
+// non-empty line is one account. Accepted forms (separator is ":", "," or
+// whitespace):
+//   <token>            -> ClientSecret only
+//   <login> <token>    -> Login + ClientSecret
+function parseAccounts(text) {
+  if (typeof text !== "string") return [];
+  const out = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(/[\s:,]+/).filter(Boolean);
+    let login = "";
+    let token = "";
+    if (parts.length === 1) {
+      token = parts[0];
+    } else {
+      login = parts[0];
+      token = parts[1];
+    }
+    if (!token) continue;
+    out.push({
+      ClientSecret: token,
+      UniqueId: crypto.randomBytes(16).toString("hex"),
+      Login: login,
+      Id: "",
+      Enabled: true,
+      FavouriteGames: [],
+    });
+    if (out.length >= MAX_BULK_ACCOUNTS) break;
+  }
+  return out;
+}
+
+// Given the list of files in BOT_DIR, work out the next free bot slot.
+// config.json -> index 1 (twitchbot); config_0N.json -> index N (twitchbotxN).
+function findNextSlot(files) {
+  let max = 0;
+  for (const f of files) {
+    if (f === "config.json") {
+      if (max < 1) max = 1;
+      continue;
+    }
+    const m = f.match(/^config_0*(\d+)\.json$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+  }
+  const index = max + 1;
+  return {
+    index,
+    file: "config_" + String(index).padStart(2, "0") + ".json",
+    container: "twitchbotx" + index,
+  };
+}
+
+// Choose a template config to clone when the caller didn't specify one. Prefer
+// the base config.json, otherwise the first config file available.
+function pickDefaultTemplate(files) {
+  if (files.includes("config.json")) return "config.json";
+  const cfgs = files.filter((f) => FILE_RE.test(f)).sort();
+  return cfgs[0] || null;
+}
+
+// Locate the docker compose file inside BOT_DIR (first candidate that exists).
+function findComposePath() {
+  for (const name of COMPOSE_NAMES) {
+    const p = path.join(BOT_DIR, name);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+// Add a new service (mirroring the existing twitchbotxN ones) to the compose
+// file. Uses js-yaml to parse + re-emit so hand-written indentation can't be
+// corrupted. Backs up the original to .bak and writes atomically.
+function addServiceToCompose(composePath, container, file) {
+  const yaml = require("js-yaml");
+  const raw = fs.readFileSync(composePath, "utf8");
+  const doc = yaml.load(raw) || {};
+  if (!doc.services || typeof doc.services !== "object") doc.services = {};
+  if (doc.services[container]) return { exists: true };
+
+  let image = DEFAULT_IMAGE;
+  for (const key of Object.keys(doc.services)) {
+    const svc = doc.services[key];
+    if (svc && typeof svc.image === "string" && svc.image) {
+      image = svc.image;
+      break;
+    }
+  }
+
+  doc.services[container] = {
+    image,
+    container_name: container,
+    restart: "always",
+    volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
+  };
+
+  fs.writeFileSync(composePath + ".bak", raw, "utf8");
+  const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });
+  const tmp = composePath + ".tmp-" + process.pid;
+  fs.writeFileSync(tmp, text, "utf8");
+  fs.renameSync(tmp, composePath);
+  return { exists: false, image };
+}
+
+// Remove a service from the compose file (used when deleting a bot).
+function removeServiceFromCompose(composePath, container) {
+  const yaml = require("js-yaml");
+  const raw = fs.readFileSync(composePath, "utf8");
+  const doc = yaml.load(raw) || {};
+  if (!doc.services || !doc.services[container]) return false;
+  delete doc.services[container];
+  fs.writeFileSync(composePath + ".bak", raw, "utf8");
+  const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });
+  const tmp = composePath + ".tmp-" + process.pid;
+  fs.writeFileSync(tmp, text, "utf8");
+  fs.renameSync(tmp, composePath);
+  return true;
+}
+
+// Detect whether to use `docker compose` (v2 plugin) or `docker-compose` (v1).
+// Cached after the first probe.
+let _composeCmd = null;
+function detectComposeCmd(cb) {
+  if (_composeCmd) return cb(_composeCmd);
+  execFile("docker", ["compose", "version"], { timeout: 8000 }, (err) => {
+    _composeCmd = err ? { cmd: "docker-compose", pre: [] } : { cmd: "docker", pre: ["compose"] };
+    cb(_composeCmd);
+  });
+}
+
+// Write a config object to disk atomically, keeping a .bak of any prior file.
+async function writeConfigAtomic(full, data) {
+  try {
+    const cur = await fsp.readFile(full, "utf8");
+    await fsp.writeFile(full + ".bak", cur, "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  const tmp = full + ".tmp-" + process.pid;
+  await fsp.writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
+  await fsp.rename(tmp, full);
 }
 
 function summarize(file, data) {
@@ -239,6 +399,317 @@ router.post("/bot-configs/restart/:file", requireSuperadmin, (req, res) => {
       res.json({ success: true, container, output: stdout.trim() });
     },
   );
+});
+
+// CREATE a brand-new bot: pick the next slot, clone a template's settings
+// (without its accounts), seed any pasted accounts, register a compose service,
+// and (by default) start the container.
+router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const startRunning = body.startRunning !== false; // default true
+
+    if (!ALLOW_RESTART && startRunning) {
+      return res.status(403).json({
+        success: false,
+        message: "Starting containers is disabled on this server",
+      });
+    }
+
+    try {
+      require("js-yaml");
+    } catch {
+      return res.status(500).json({
+        success: false,
+        message:
+          "js-yaml is not installed. Run `npm install` in the nodeserver directory and restart.",
+      });
+    }
+
+    const composePath = findComposePath();
+    if (!composePath) {
+      return res.status(500).json({
+        success: false,
+        message: "No docker compose file found in " + BOT_DIR,
+      });
+    }
+
+    let files;
+    try {
+      files = await fsp.readdir(BOT_DIR);
+    } catch (e) {
+      return res.status(500).json({
+        success: false,
+        message: "Config directory not found: " + BOT_DIR + " (" + e.code + ")",
+      });
+    }
+
+    const slot = findNextSlot(files);
+    const newPath = path.join(BOT_DIR, slot.file);
+    if (fs.existsSync(newPath)) {
+      return res.status(409).json({
+        success: false,
+        message: "Target config already exists: " + slot.file,
+      });
+    }
+
+    // Resolve the template to clone settings from.
+    const templateName = body.template || pickDefaultTemplate(files);
+    if (!templateName) {
+      return res.status(400).json({
+        success: false,
+        message: "No template config available to clone from",
+      });
+    }
+    const tplPath = resolveConfigPath(templateName);
+    if (!tplPath) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid template" });
+    }
+    let data;
+    try {
+      data = JSON.parse(await fsp.readFile(tplPath, "utf8"));
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        return res
+          .status(404)
+          .json({ success: false, message: "Template not found" });
+      }
+      return res
+        .status(422)
+        .json({ success: false, message: "Template is not valid JSON" });
+    }
+
+    // A new bot never inherits the template's accounts — it starts with only
+    // the accounts pasted in (if any).
+    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+      data.TwitchSettings = {};
+    }
+    const accounts = parseAccounts(body.accounts);
+    data.TwitchSettings.TwitchUsers = accounts;
+    if (data.KickSettings && typeof data.KickSettings === "object") {
+      data.KickSettings.KickUsers = [];
+    }
+
+    await writeConfigAtomic(newPath, data);
+
+    try {
+      addServiceToCompose(composePath, slot.container, slot.file);
+    } catch (e) {
+      // Roll back the config file so a failed compose edit doesn't leave an
+      // orphan config behind.
+      try {
+        await fsp.unlink(newPath);
+      } catch {
+        /* ignore */
+      }
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update compose file: " + e.message,
+      });
+    }
+
+    const base = {
+      success: true,
+      file: slot.file,
+      container: slot.container,
+      accountCount: accounts.length,
+    };
+
+    if (!startRunning) {
+      return res.json(Object.assign({ started: false }, base));
+    }
+
+    detectComposeCmd((c) => {
+      const args = [...c.pre, "up", "-d", slot.container];
+      execFile(
+        c.cmd,
+        args,
+        { cwd: BOT_DIR, timeout: 120000 },
+        (err, stdout, stderr) => {
+          if (err) {
+            // Config + compose were written; only the start failed. Report 207
+            // so the UI can show a partial-success warning.
+            return res.status(207).json(
+              Object.assign(
+                {
+                  started: false,
+                  warning:
+                    "Bot created, but starting the container failed: " +
+                    (stderr || err.message || "").trim(),
+                },
+                base,
+              ),
+            );
+          }
+          res.json(Object.assign({ started: true, output: (stdout || "").trim() }, base));
+        },
+      );
+    });
+  } catch (err) {
+    console.error("bot create error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// BULK-APPEND accounts to an existing config (mass feed). Optionally restart
+// the container afterwards so the bot picks them up.
+router.post(
+  "/bot-configs/file/:file/accounts",
+  requireSuperadmin,
+  async (req, res) => {
+    const full = resolveConfigPath(req.params.file);
+    if (!full) {
+      return res.status(400).json({ success: false, message: "Invalid file" });
+    }
+    const accounts = parseAccounts(req.body && req.body.accounts);
+    if (!accounts.length) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No valid accounts found in input" });
+    }
+    const wantRestart = !!(req.body && req.body.restart);
+    try {
+      let data;
+      try {
+        data = JSON.parse(await fsp.readFile(full, "utf8"));
+      } catch (e) {
+        if (e.code === "ENOENT") {
+          return res
+            .status(404)
+            .json({ success: false, message: "Not found" });
+        }
+        if (e instanceof SyntaxError) {
+          return res
+            .status(422)
+            .json({ success: false, message: "File is not valid JSON" });
+        }
+        throw e;
+      }
+      if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+        data.TwitchSettings = {};
+      }
+      if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
+        data.TwitchSettings.TwitchUsers = [];
+      }
+      data.TwitchSettings.TwitchUsers.push(...accounts);
+      const total = data.TwitchSettings.TwitchUsers.length;
+
+      await writeConfigAtomic(full, data);
+
+      const container = containerForFile(req.params.file);
+      if (!wantRestart || !ALLOW_RESTART || !container) {
+        return res.json({
+          success: true,
+          added: accounts.length,
+          total,
+          restarted: false,
+        });
+      }
+      execFile("docker", ["restart", container], { timeout: 60000 }, (err) => {
+        res.json({
+          success: true,
+          added: accounts.length,
+          total,
+          restarted: !err,
+        });
+      });
+    } catch (e) {
+      console.error("bulk accounts error:", e.message);
+      res
+        .status(500)
+        .json({ success: false, message: "Write failed: " + (e.code || e.message) });
+    }
+  },
+);
+
+// START / STOP the container backing a config file.
+function dockerSimpleAction(action, file, res) {
+  if (!ALLOW_RESTART) {
+    return res
+      .status(403)
+      .json({ success: false, message: "Container control disabled on this server" });
+  }
+  if (!FILE_RE.test(file)) {
+    return res.status(400).json({ success: false, message: "Invalid file" });
+  }
+  const container = containerForFile(file);
+  if (!container) {
+    return res
+      .status(400)
+      .json({ success: false, message: "No container mapped to this file" });
+  }
+  execFile(
+    "docker",
+    [action, container],
+    { timeout: 60000 },
+    (err, stdout, stderr) => {
+      if (err) {
+        return res.status(500).json({
+          success: false,
+          message: (stderr || err.message || action + " failed").trim(),
+        });
+      }
+      res.json({ success: true, container, output: (stdout || "").trim() });
+    },
+  );
+}
+
+router.post("/bot-configs/start/:file", requireSuperadmin, (req, res) => {
+  dockerSimpleAction("start", req.params.file, res);
+});
+
+router.post("/bot-configs/stop/:file", requireSuperadmin, (req, res) => {
+  dockerSimpleAction("stop", req.params.file, res);
+});
+
+// DELETE a bot: force-remove its container, drop the compose service, and
+// archive (not destroy) its config file so it can be recovered if needed.
+// The base config.json / twitchbot is protected from deletion.
+router.delete("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
+  const file = req.params.file;
+  if (!FILE_RE.test(file)) {
+    return res.status(400).json({ success: false, message: "Invalid file" });
+  }
+  if (file === "config.json") {
+    return res
+      .status(400)
+      .json({ success: false, message: "The base bot cannot be deleted here" });
+  }
+  const full = resolveConfigPath(file);
+  const container = containerForFile(file);
+  if (!full || !container) {
+    return res.status(400).json({ success: false, message: "Invalid file" });
+  }
+  if (!fs.existsSync(full)) {
+    return res.status(404).json({ success: false, message: "Config not found" });
+  }
+  try {
+    // Remove the compose service first (best effort if a compose file exists).
+    const composePath = findComposePath();
+    if (composePath) {
+      try {
+        removeServiceFromCompose(composePath, container);
+      } catch (e) {
+        return res.status(500).json({
+          success: false,
+          message: "Failed to update compose file: " + e.message,
+        });
+      }
+    }
+    // Archive the config rather than deleting outright.
+    const archive = full + ".deleted-" + Date.now();
+    await fsp.rename(full, archive);
+
+    // Force-remove the container (ignore "no such container").
+    execFile("docker", ["rm", "-f", container], { timeout: 60000 }, () => {
+      res.json({ success: true, container, archived: path.basename(archive) });
+    });
+  } catch (e) {
+    console.error("bot delete error:", e.message);
+    res.status(500).json({ success: false, message: "Delete failed: " + (e.code || e.message) });
+  }
 });
 
 module.exports = router;
