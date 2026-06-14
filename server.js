@@ -26,7 +26,11 @@ const botConfigRoutes = require("./routes/botConfigRoutes");
 const chatSocket = require("./socket/chatSocket");
 const { getOrderByOrderId, authorizeBuyer } = require("./utils/orderIds");
 const { sendTelegram } = require("./utils/telegram");
-const { submitLimiter, uploadLimiter } = require("./utils/rateLimit");
+const {
+  globalLimiter,
+  submitLimiter,
+  uploadLimiter,
+} = require("./utils/rateLimit");
 
 const app = express();
 const server = http.createServer(app);
@@ -37,6 +41,11 @@ app.disable("x-powered-by");
 // IPs and `secure` cookie detection are based on the real edge, not on a
 // header any client can spoof.
 app.set("trust proxy", 1);
+
+// Site-wide rate limit: a blanket per-IP ceiling across every route, in front
+// of the stricter per-endpoint limiters. Skips Socket.IO so live chat isn't
+// throttled.
+app.use(globalLimiter);
 
 // =========================
 // Core middleware (must come before any route)
