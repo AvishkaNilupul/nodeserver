@@ -57,6 +57,9 @@ app.use(
         defaultSrc: ["'self'"],
         // Inline scripts/styles are used throughout the static pages.
         scriptSrc: ["'self'", "'unsafe-inline'"],
+        // Pages wire up buttons with inline on* handlers (onclick=...), which
+        // helmet otherwise blocks via its default `script-src-attr 'none'`.
+        scriptSrcAttr: ["'unsafe-inline'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         // Chat messages may embed externally hosted images.
         imgSrc: ["'self'", "data:", "https:"],
