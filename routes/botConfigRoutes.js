@@ -61,13 +61,94 @@ function resolveConfigPath(file) {
   return full;
 }
 
-// Parse pasted account text into TwitchDropsBot TwitchUsers entries. Each
-// non-empty line is one account. Accepted forms (separator is ":", "," or
-// whitespace):
-//   <token>            -> ClientSecret only
-//   <login> <token>    -> Login + ClientSecret
-function parseAccounts(text) {
+// Normalize a comma-separated string (or array) of game names into a clean
+// string array.
+function parseGamesList(v) {
+  if (Array.isArray(v)) {
+    return v.map((g) => String(g).trim()).filter(Boolean);
+  }
+  if (typeof v === "string") {
+    return v
+      .split(",")
+      .map((g) => g.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+// Coerce a single parsed JSON account object into a valid TwitchUsers entry.
+// Preserves caller-supplied fields and fills in sensible defaults. Returns
+// null when there's no usable auth token.
+function normalizeAccount(o, defaultGames) {
+  if (!o || typeof o !== "object") return null;
+  const token =
+    typeof o.ClientSecret === "string" ? o.ClientSecret.trim() : "";
+  if (!token) return null;
+  let fav = Array.isArray(o.FavouriteGames)
+    ? o.FavouriteGames.map((g) => String(g).trim()).filter(Boolean)
+    : [];
+  if (!fav.length && Array.isArray(defaultGames)) fav = defaultGames.slice();
+  return {
+    ClientSecret: token,
+    UniqueId:
+      typeof o.UniqueId === "string" && o.UniqueId
+        ? o.UniqueId
+        : crypto.randomBytes(16).toString("hex"),
+    Login: typeof o.Login === "string" ? o.Login : "",
+    Id: o.Id == null ? "" : String(o.Id),
+    Enabled: o.Enabled === false ? false : true,
+    FavouriteGames: fav,
+  };
+}
+
+// Try to interpret the pasted text as JSON account objects. Handles three
+// shapes: a proper array `[ {...}, {...} ]`, a single object `{...}`, and a
+// loose comma-separated sequence of objects (what you get when copying lines
+// straight out of a config's TwitchUsers array, trailing comma and all).
+function tryParseJsonAccounts(s) {
+  const attempts = [s, "[" + s.replace(/,\s*$/, "") + "]"];
+  for (const a of attempts) {
+    try {
+      const v = JSON.parse(a);
+      if (Array.isArray(v)) return v;
+      if (v && typeof v === "object") return [v];
+    } catch {
+      /* try next shape */
+    }
+  }
+  return null;
+}
+
+// Parse pasted account text into TwitchDropsBot TwitchUsers entries.
+// Two input styles are accepted:
+//   1. JSON: an array, a single object, or a loose `{...},{...},` sequence of
+//      account objects (fields like ClientSecret/Login/Id/Enabled preserved).
+//   2. Plain lines: one account per line (separator ":", "," or whitespace):
+//        <token>            -> ClientSecret only
+//        <login> <token>    -> Login + ClientSecret
+// `defaultGames` (array) is applied as FavouriteGames to any account that
+// doesn't already specify its own.
+function parseAccounts(text, defaultGames) {
   if (typeof text !== "string") return [];
+  const games = Array.isArray(defaultGames) ? defaultGames : [];
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  // JSON path: only attempt when there's an object/array in the input.
+  if (trimmed.includes("{") || trimmed.startsWith("[")) {
+    const parsed = tryParseJsonAccounts(trimmed);
+    if (parsed) {
+      const out = [];
+      for (const o of parsed) {
+        const acct = normalizeAccount(o, games);
+        if (acct) out.push(acct);
+        if (out.length >= MAX_BULK_ACCOUNTS) break;
+      }
+      return out;
+    }
+    // Fall through to line parsing if it wasn't valid JSON after all.
+  }
+
   const out = [];
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -88,7 +169,7 @@ function parseAccounts(text) {
       Login: login,
       Id: "",
       Enabled: true,
-      FavouriteGames: [],
+      FavouriteGames: games.slice(),
     });
     if (out.length >= MAX_BULK_ACCOUNTS) break;
   }
@@ -486,7 +567,8 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
     if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
       data.TwitchSettings = {};
     }
-    const accounts = parseAccounts(body.accounts);
+    const defaultGames = parseGamesList(body.favouriteGames);
+    const accounts = parseAccounts(body.accounts, defaultGames);
     data.TwitchSettings.TwitchUsers = accounts;
     if (data.KickSettings && typeof data.KickSettings === "object") {
       data.KickSettings.KickUsers = [];
@@ -563,7 +645,11 @@ router.post(
     if (!full) {
       return res.status(400).json({ success: false, message: "Invalid file" });
     }
-    const accounts = parseAccounts(req.body && req.body.accounts);
+    const defaultGames = parseGamesList(req.body && req.body.favouriteGames);
+    const accounts = parseAccounts(
+      req.body && req.body.accounts,
+      defaultGames,
+    );
     if (!accounts.length) {
       return res
         .status(400)
