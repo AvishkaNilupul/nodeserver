@@ -1,10 +1,12 @@
 const js = require("@eslint/js");
 
 module.exports = [
+  // Global ignores must live in their own config object (with no other keys)
+  // to apply repo-wide in flat config.
+  { ignores: ["node_modules/**", "public/**", "admin-pages/**"] },
   js.configs.recommended,
   {
     files: ["**/*.js"],
-    ignores: ["node_modules/**", "public/**", "admin-pages/**"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "commonjs",
@@ -16,6 +18,7 @@ module.exports = [
         __dirname: "readonly",
         setTimeout: "readonly",
         clearTimeout: "readonly",
+        Buffer: "readonly",
       },
     },
     rules: {

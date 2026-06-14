@@ -532,6 +532,10 @@ async function loadUsers() {
       chatHeader.innerText =
         `Chat with ${userId}`;
 
+      // Clear the pane immediately so the previously open chat doesn't linger
+      // on screen while the new conversation is being fetched.
+      messagesDiv.innerHTML = "";
+
       // Mark Read
 
       await fetch(
@@ -585,6 +589,12 @@ async function loadMessages(
 
   const filtered =
     await res.json();
+
+  // A newer chat may have been opened while this request was in flight; if so,
+  // discard these now-stale results instead of overwriting the open chat.
+  if (userId !== selectedUser) {
+    return;
+  }
 
   messagesDiv.innerHTML = "";
 

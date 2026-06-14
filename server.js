@@ -24,20 +24,43 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const chatSocket = require("./socket/chatSocket");
-const { getOrderByOrderId } = require("./utils/orderIds");
+const { getOrderByOrderId, authorizeBuyer } = require("./utils/orderIds");
 const { sendTelegram } = require("./utils/telegram");
+const { submitLimiter, uploadLimiter } = require("./utils/rateLimit");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e5 });
 
 app.disable("x-powered-by");
-app.set("trust proxy", true);
+// Trust a single proxy hop (the reverse proxy in front of the app) so client
+// IPs and `secure` cookie detection are based on the real edge, not on a
+// header any client can spoof.
+app.set("trust proxy", 1);
 
 // =========================
 // Core middleware (must come before any route)
 // =========================
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        // Inline scripts/styles are used throughout the static pages.
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        // Chat messages may embed externally hosted images.
+        imgSrc: ["'self'", "data:", "https:"],
+        // Socket.IO uses same-origin HTTP(S) and WebSocket connections.
+        connectSrc: ["'self'", "ws:", "wss:"],
+        frameSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        frameAncestors: ["'self'"],
+      },
+    },
+  }),
+);
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 
@@ -83,40 +106,55 @@ const upload = multer({
   },
 });
 
-app.post("/upload-image", upload.single("image"), (req, res) => {
-  if (!req.file) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Image file required" });
+// Only an authenticated admin, or a buyer who presents a valid gamertag +
+// chat token, may upload. Buyers send these via headers (available before the
+// multipart body is parsed) so we can reject before writing any file. This
+// stops the endpoint from being open, unauthenticated file hosting.
+async function requireUploader(req, res, next) {
+  if (req.session?.admin) {
+    return next();
   }
-  res.json({ success: true, url: `/uploads/${req.file.filename}` });
-});
+  const gamerTag = req.get("x-gamer-tag");
+  const token = req.get("x-chat-token");
+  try {
+    const order = await authorizeBuyer(gamerTag, token);
+    if (order) {
+      return next();
+    }
+  } catch (err) {
+    console.error("upload auth error:", err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+  return res.status(401).json({ success: false, message: "Unauthorized" });
+}
+
+app.post(
+  "/upload-image",
+  uploadLimiter,
+  requireUploader,
+  upload.single("image"),
+  (req, res) => {
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Image file required" });
+    }
+    res.json({ success: true, url: `/uploads/${req.file.filename}` });
+  },
+);
 
 // =========================
 // Submit Gamer Tag (buyer redeem -> Telegram alert)
 // =========================
-let globalEntries = [];
-const MAX_USERS = 5;
-const WINDOW_MS = 10 * 60 * 1000;
-
-app.post("/submit-gamertag", async (req, res) => {
+// Throttling is per-IP (see submitLimiter). The previous global counter
+// rate-limited every buyer with a single shared bucket and counted invalid
+// requests, so a handful of junk submissions could lock out all real buyers.
+app.post("/submit-gamertag", submitLimiter, async (req, res) => {
   try {
     let { gamerTag, orderId } = req.body;
 
     gamerTag = validator.escape(String(gamerTag || "")).trim();
     orderId = String(orderId || "").trim();
-
-    // Global limit (intentionally left unchanged)
-    const now = Date.now();
-    globalEntries = globalEntries.filter((time) => now - time < WINDOW_MS);
-
-    if (globalEntries.length >= MAX_USERS) {
-      return res.status(429).json({
-        success: false,
-        message: "Server busy. Please try again later.",
-      });
-    }
-    globalEntries.push(now);
 
     if (!gamerTag || !orderId) {
       return res
