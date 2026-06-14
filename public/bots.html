@@ -121,6 +121,25 @@
   .empty { padding: 40px; text-align:center; color: var(--muted); }
   .banner { background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:12px 16px; border-radius:12px; font-size:13.5px; margin-bottom:16px; }
   html[data-theme="dark"] .banner{background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.3);color:#fbbf24;}
+
+  /* Modal (add bot / mass-add accounts) */
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:56px 16px; overflow-y:auto; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:560px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
+  .modal > header { display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal > header b { font-size:16px; }
+  .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
+  .modal > header .x:hover { background:var(--surface-2); opacity:1; }
+  .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
+  .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
+  .mbody select, .mbody textarea { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody textarea { min-height:150px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
+  .mbody select:focus, .mbody textarea:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
+  .mbody .slotpill { display:inline-block; font-family:ui-monospace,monospace; font-size:12.5px; background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:3px 8px; color:var(--ink); }
+  .chkrow { display:flex; align-items:center; gap:9px; font-size:13.5px; cursor:pointer; user-select:none; }
+  .chkrow input { width:16px; height:16px; accent-color:var(--accent); }
+  .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
 </style>
 </head>
 
@@ -154,6 +173,7 @@
       <div class="sub">TwitchDropsBot configs in <code id="dirLabel">/root/twitchbot</code> — view, edit accounts &amp; settings, and check drops.</div>
     </div>
     <div style="margin-left:auto;display:flex;gap:8px;">
+      <button class="btn-sm" id="addBotBtn">+ Add bot</button>
       <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
     </div>
   </div>
@@ -176,6 +196,7 @@
   <div id="bots"><div class="empty">Loading configs…</div></div>
 </main>
 
+<div class="modal-bg" id="modalBg"></div>
 <div class="toast" id="toast"></div>
 <script src="/theme.js"></script>
 <script>
@@ -346,8 +367,13 @@
           '<span class="chip"><span class="dot ' + dotCls + '"></span>' + statusTxt + '</span>' +
           '<span class="chip">' + users.length + ' account' + (users.length === 1 ? "" : "s") + '</span>' +
           '<button class="btn-ghost btn-sm" onclick="addAccount(\'' + esc(file) + '\')">+ Account</button>' +
+          '<button class="btn-ghost btn-sm" onclick="openBulkModal(\'' + esc(file) + '\')">Mass add</button>' +
+          (running
+            ? '<button class="btn-ghost btn-sm" onclick="botPower(\'' + esc(file) + "','stop',this)\">Stop</button>"
+            : '<button class="btn-ghost btn-sm" onclick="botPower(\'' + esc(file) + "','start',this)\">Start</button>") +
           '<button class="btn-ghost btn-sm" onclick="restartBot(\'' + esc(file) + '\',this)">Restart</button>' +
           '<button class="btn-sm" onclick="saveBot(\'' + esc(file) + '\',this)">Save</button>' +
+          (file === "config.json" ? "" : '<button class="btn-danger btn-sm" onclick="deleteBot(\'' + esc(file) + '\',this)">Delete</button>') +
         '</div>' +
       '</header>' +
       '<div class="body">' + (acctsHtml || '<div style="color:var(--muted);padding:10px 0;">No accounts in this config. Use “+ Account”.</div>') + settings + '</div>' +
@@ -441,7 +467,142 @@
     finally { btn.disabled = false; btn.textContent = old; }
   };
 
+  // ---- Modal helpers ----
+  function closeModal() { $("modalBg").classList.remove("show"); $("modalBg").innerHTML = ""; }
+  $("modalBg").addEventListener("click", (e) => { if (e.target === $("modalBg")) closeModal(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+  // Compute the next free bot slot client-side (server is authoritative; this
+  // is just for the modal preview). config.json -> 1; config_0N.json -> N.
+  function nextSlot() {
+    let max = 0;
+    Object.keys(CONFIGS).forEach((f) => {
+      if (f === "config.json") { if (max < 1) max = 1; return; }
+      const m = f.match(/^config_0*(\d+)\.json$/);
+      if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+    });
+    const i = max + 1;
+    return { file: "config_" + String(i).padStart(2, "0") + ".json", container: "twitchbotx" + i };
+  }
+
+  window.openCreateModal = function () {
+    const slot = nextSlot();
+    const opts = Object.keys(CONFIGS)
+      .filter((f) => CONFIGS[f] && CONFIGS[f].ok)
+      .map((f) => '<option value="' + esc(f) + '"' + (f === "config.json" ? " selected" : "") + ">" + esc((CONFIGS[f].container || f)) + " (" + esc(f) + ")</option>")
+      .join("");
+    $("modalBg").innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true">' +
+        '<header><b>Create new bot</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
+        '<div class="mbody">' +
+          '<div class="hint">A new bot will be created at <span class="slotpill">' + esc(slot.file) + '</span> → container <span class="slotpill">' + esc(slot.container) + '</span>, added to docker-compose, and started.</div>' +
+          '<div><label class="lbl">Copy settings from</label>' +
+            '<select id="mTemplate">' + (opts || '<option value="">(no existing config)</option>') + '</select>' +
+            '<div class="hint" style="margin-top:6px;">Copies that bot\u2019s games/options only \u2014 <b>not</b> its accounts. The new bot starts with just the accounts you paste below.</div>' +
+          '</div>' +
+          '<div><label class="lbl">Accounts (one per line)</label>' +
+            '<textarea id="mAccounts" placeholder="auth_token_one&#10;login2:auth_token_two&#10;login3 auth_token_three"></textarea>' +
+            '<div class="hint" style="margin-top:6px;">One account per line. Either just the <b>auth token</b>, or <b>login:token</b>. Separators <code>:</code> <code>,</code> or spaces all work. Leave empty to create an empty bot.</div>' +
+          '</div>' +
+          '<label class="chkrow"><input type="checkbox" id="mStart" checked> Start the bot immediately</label>' +
+        '</div>' +
+        '<footer>' +
+          '<button class="btn-ghost" type="button" onclick="closeModal()">Cancel</button>' +
+          '<button type="button" id="mCreateBtn" onclick="submitCreate(this)">Create bot</button>' +
+        '</footer>' +
+      '</div>';
+    $("modalBg").classList.add("show");
+  };
+
+  window.submitCreate = async function (btn) {
+    const template = $("mTemplate") ? $("mTemplate").value : "";
+    const accounts = $("mAccounts") ? $("mAccounts").value : "";
+    const startRunning = $("mStart") ? $("mStart").checked : true;
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "Creating…";
+    try {
+      const r = await api("/bot-configs/create", {
+        method: "POST",
+        body: JSON.stringify({ template, accounts, startRunning }),
+      });
+      closeModal();
+      if (r.warning) toast(r.warning, true);
+      else toast("Created " + r.container + " with " + r.accountCount + " account" + (r.accountCount === 1 ? "" : "s") + (r.started ? " — running" : ""));
+      setTimeout(load, 1200);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = old;
+      toast("Create failed: " + e.message, true);
+    }
+  };
+
+  window.openBulkModal = function (file) {
+    const c = CONFIGS[file]; if (!c) return;
+    $("modalBg").innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true">' +
+        '<header><b>Mass add accounts</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
+        '<div class="mbody">' +
+          '<div class="hint">Appending to <span class="slotpill">' + esc(c.container || file) + '</span> (' + esc(file) + ').</div>' +
+          '<div><label class="lbl">Accounts (one per line)</label>' +
+            '<textarea id="bAccounts" placeholder="auth_token_one&#10;login2:auth_token_two"></textarea>' +
+            '<div class="hint" style="margin-top:6px;">One per line: just the <b>auth token</b> or <b>login:token</b>. They\u2019re appended to the existing accounts.</div>' +
+          '</div>' +
+          '<label class="chkrow"><input type="checkbox" id="bRestart" checked> Restart the container after adding (so the bot picks them up)</label>' +
+        '</div>' +
+        '<footer>' +
+          '<button class="btn-ghost" type="button" onclick="closeModal()">Cancel</button>' +
+          '<button type="button" id="bAddBtn" onclick="submitBulk(\'' + esc(file) + '\',this)">Add accounts</button>' +
+        '</footer>' +
+      '</div>';
+    $("modalBg").classList.add("show");
+  };
+
+  window.submitBulk = async function (file, btn) {
+    const accounts = $("bAccounts") ? $("bAccounts").value : "";
+    const restart = $("bRestart") ? $("bRestart").checked : false;
+    if (!accounts.trim()) { toast("Paste at least one account", true); return; }
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "Adding…";
+    try {
+      const r = await api("/bot-configs/file/" + encodeURIComponent(file) + "/accounts", {
+        method: "POST",
+        body: JSON.stringify({ accounts, restart }),
+      });
+      closeModal();
+      toast("Added " + r.added + " account" + (r.added === 1 ? "" : "s") + " (now " + r.total + ")" + (r.restarted ? " — restarted" : ""));
+      setTimeout(load, restart ? 1500 : 300);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = old;
+      toast("Add failed: " + e.message, true);
+    }
+  };
+
+  window.botPower = async function (file, action, btn) {
+    const c = CONFIGS[file]; if (!c) return;
+    btn.disabled = true; const old = btn.textContent; btn.textContent = action === "stop" ? "Stopping…" : "Starting…";
+    try {
+      const r = await api("/bot-configs/" + action + "/" + encodeURIComponent(file), { method: "POST" });
+      toast((action === "stop" ? "Stopped " : "Started ") + r.container);
+      setTimeout(load, 1500);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = old;
+      toast(action + " failed: " + e.message, true);
+    }
+  };
+
+  window.deleteBot = async function (file, btn) {
+    const c = CONFIGS[file]; if (!c) return;
+    if (!confirm("Delete bot " + (c.container || file) + "?\n\nThis stops and removes its container and the docker-compose service. The config file is archived (kept as a .deleted backup), not destroyed.")) return;
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "Deleting…";
+    try {
+      const r = await api("/bot-configs/file/" + encodeURIComponent(file), { method: "DELETE" });
+      toast("Deleted " + r.container + " (config archived as " + r.archived + ")");
+      setTimeout(load, 1200);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = old;
+      toast("Delete failed: " + e.message, true);
+    }
+  };
+
   // events
+  $("addBotBtn").addEventListener("click", openCreateModal);
   $("bots").addEventListener("input", onEdit);
   $("bots").addEventListener("change", onEdit);
   $("search").addEventListener("input", () => renderAllTable(Object.keys(CONFIGS)));
