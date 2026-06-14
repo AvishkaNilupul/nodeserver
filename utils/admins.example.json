@@ -1,0 +1,8 @@
+[
+  {
+    "id": "admin1",
+    "username": "changeme",
+    "password": "$2b$10$REPLACE_WITH_A_BCRYPT_HASH_OF_YOUR_PASSWORD",
+    "role": "superadmin"
+  }
+]

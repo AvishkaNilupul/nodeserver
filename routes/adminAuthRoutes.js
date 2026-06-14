@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 
 const { loadAdmins } = require("../utils/admins");
+const { loginLimiter } = require("../utils/rateLimit");
 
 const router = express.Router();
 
@@ -13,7 +14,7 @@ function requireAdmin(req, res, next) {
 }
 
 // LOGIN
-router.post("/admin-login", async (req, res) => {
+router.post("/admin-login", loginLimiter, async (req, res) => {
   try {
     const password = req.body?.password;
     const username = req.body?.username;

@@ -467,6 +467,10 @@
 
         const res = await fetch("/upload-image", {
           method: "POST",
+          headers: {
+            "x-gamer-tag": gamerTag,
+            "x-chat-token": chatToken || "",
+          },
           body: formData,
         });
 

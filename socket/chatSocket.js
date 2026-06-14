@@ -56,14 +56,15 @@ function chatSocket(io) {
         const order = await getOrderByGamerTag(userId);
         if (!order) return;
 
-        // Buyer auth. A client that presents a token must match the one bound
-        // to the order; the first token seen is bound. Clients that present no
-        // token (older buyer pages) are still allowed in, identified by their
-        // gamertag, so the chat works without any frontend changes.
-        if (token && order.chatToken && token !== order.chatToken) {
-          return;
-        }
-        if (token && !order.chatToken) {
+        // Buyer auth. Once a token is bound to the order it is required and
+        // must match — a gamertag alone is no longer enough to read or post as
+        // that buyer. Until a token is bound the first one presented is bound
+        // (first-come), so the normal buyer flow keeps working.
+        if (order.chatToken) {
+          if (token !== order.chatToken) {
+            return;
+          }
+        } else if (token) {
           order.chatToken = token;
           await order.save();
         }
@@ -183,9 +184,10 @@ ${new Date().toISOString()}`
         // belongs to the seller if there is a live order tagged with this
         // sellerId, OR an existing conversation under this sellerId (so
         // replies to older chats keep working even after the order is gone).
-        const order = await getOrderByGamerTag(userId);
-        const ownsOrder = order && order.sellerId === sellerId;
-        if (!ownsOrder && !(await conversationExists(sellerId, userId))) {
+        // The order lookup is scoped to the seller so a gamertag reused across
+        // sellers can't resolve to another seller's order.
+        const order = await getOrderByGamerTag(userId, sellerId);
+        if (!order && !(await conversationExists(sellerId, userId))) {
           return;
         }
 
