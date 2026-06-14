@@ -1,10 +1,12 @@
+const crypto = require("crypto");
+
 function generateRedeemCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
   function part(length) {
     let result = "";
     for (let i = 0; i < length; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
+      result += chars.charAt(crypto.randomInt(chars.length));
     }
     return result;
   }
