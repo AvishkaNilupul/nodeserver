@@ -25,11 +25,14 @@ function chatSocket(io) {
 
     socket.data.isAdmin = !!admin;
 
-    // Admins join a room scoped to their own sellerId so realtime events
-    // never leak across sellers.
+    // All authenticated admins share one support inbox: they see every
+    // buyer conversation, regardless of which admin created the order. So
+    // every admin joins a single shared `admins` room that buyer/admin chat
+    // events are delivered to. (Buyers never join this room, so they still
+    // can't see each other's messages.)
     if (admin) {
       socket.data.sellerId = admin.id;
-      socket.join(`seller:${admin.id}`);
+      socket.join("admins");
     }
 
     // Lets the admin page confirm its socket is still authenticated after a
@@ -152,8 +155,8 @@ Time:
 ${new Date().toISOString()}`
         );
 
-        // Notify only this seller's admins and the buyer's own room.
-        io.to(`seller:${sellerId}`).emit("new-message", {
+        // Notify every admin (shared inbox) so whoever is online sees it.
+        io.to("admins").emit("new-message", {
           userId,
           sender: "user",
           message,
@@ -200,7 +203,8 @@ ${new Date().toISOString()}`
         await addMessage(userId, sellerId, "admin", message);
 
         io.to(userId).emit("admin-reply", { message });
-        io.to(`seller:${sellerId}`).emit("new-message", {
+        // Echo to every admin's panel so other logged-in admins see the reply.
+        io.to("admins").emit("new-message", {
           userId,
           sender: "admin",
           message,
@@ -228,13 +232,13 @@ ${new Date().toISOString()}`
     socket.on("user-typing", () => {
       const { userId, sellerId } = socket.data;
       if (!userId || !sellerId || socket.data.isAdmin) return;
-      io.to(`seller:${sellerId}`).emit("user-typing", userId);
+      io.to("admins").emit("user-typing", userId);
     });
 
     socket.on("user-stop-typing", () => {
       const { userId, sellerId } = socket.data;
       if (!userId || !sellerId || socket.data.isAdmin) return;
-      io.to(`seller:${sellerId}`).emit("user-stop-typing", userId);
+      io.to("admins").emit("user-stop-typing", userId);
     });
 
     // =========================
@@ -246,7 +250,7 @@ ${new Date().toISOString()}`
         if (!userId || !sellerId || socket.data.isAdmin) return;
 
         await markSeen(sellerId, userId);
-        io.to(`seller:${sellerId}`).emit("message-seen", userId);
+        io.to("admins").emit("message-seen", userId);
       } catch (err) {
         console.error("message-seen error:", err.message);
       }
