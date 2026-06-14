@@ -451,8 +451,13 @@ function renderSummary(campaigns, claimed) {
 
 function buildClaimed(inv) {
   const out = [];
+  // Track benefit/drop ids already represented by awarded inventory so the
+  // in-progress pass below doesn't list the same reward twice.
+  const seen = new Set();
   (inv.gameEventDrops || []).forEach(g => {
     const bg = (g.benefit && g.benefit.game) || g.game || null;
+    const benefitId = (g.benefit && g.benefit.id) || g.id || "";
+    if (benefitId) seen.add(benefitId);
     out.push({
       id: g.id || "", name: g.name, img: g.imageURL || "", awardedAt: g.lastAwardedAt || null,
       count: g.totalCount || 1, game: bg ? (bg.displayName || bg.name) : "",
@@ -463,10 +468,17 @@ function buildClaimed(inv) {
     if (d.self && d.self.isClaimed) {
       const edge = (d.benefitEdges && d.benefitEdges[0]) || {};
       const b = edge.benefit || {};
+      // Skip if this reward is already shown via gameEventDrops (awarded
+      // inventory), otherwise it would appear twice with conflicting states.
+      if (b.id && seen.has(b.id)) return;
+      // A drop being claimed on Twitch doesn't mean it reached the game
+      // account — that needs the campaign's account link. Reflect the real
+      // connection state instead of assuming it's fully delivered.
       out.push({
-        name: d.name || b.name, img: b.imageAssetURL || "", awardedAt: null,
+        name: b.name || d.name, img: b.imageAssetURL || "", awardedAt: null,
         count: edge.entitlementLimit || 1, game: c.game ? (c.game.displayName || c.game.name) : "",
-        link: "", connected: true
+        link: c.accountLinkURL || "",
+        connected: !!(c.self && c.self.isAccountConnected)
       });
     }
   }));
