@@ -64,7 +64,7 @@ app.use(
         // Chat messages may embed externally hosted images.
         imgSrc: ["'self'", "data:", "https:"],
         // Socket.IO uses same-origin HTTP(S) and WebSocket connections.
-        connectSrc: ["'self'", "ws:", "wss:"],
+        connectSrc: ["'self'", "ws:", "wss:", "https://gql.twitch.tv"],
         frameSrc: ["'self'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
