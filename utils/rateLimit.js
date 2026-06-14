@@ -3,17 +3,30 @@ const rateLimit = require("express-rate-limit");
 // Shared rate limiters. Each one is keyed by client IP (Express resolves this
 // from the configured `trust proxy` setting). Responses are JSON so API
 // clients get a consistent shape.
-function jsonLimiter({ windowMs, limit, message }) {
+function jsonLimiter({ windowMs, limit, message, skip }) {
   return rateLimit({
     windowMs,
     limit,
     standardHeaders: true,
     legacyHeaders: false,
+    skip,
     handler: (req, res) => {
       res.status(429).json({ success: false, message });
     },
   });
 }
+
+// Site-wide safety net: caps total requests per IP across every route. The
+// ceiling is high on purpose so a normal page load (HTML + assets + a few API
+// calls) never trips it; it only catches a single IP flooding the server.
+// Socket.IO is skipped because its polling transport makes many background
+// requests and would otherwise get throttled, breaking live chat.
+const globalLimiter = jsonLimiter({
+  windowMs: 15 * 60 * 1000,
+  limit: 1000,
+  message: "Too many requests. Please slow down and try again later.",
+  skip: (req) => req.path.startsWith("/socket.io"),
+});
 
 // Admin login: slow brute-force of passwords.
 const loginLimiter = jsonLimiter({
@@ -51,6 +64,7 @@ const uploadLimiter = jsonLimiter({
 });
 
 module.exports = {
+  globalLimiter,
   loginLimiter,
   validateLimiter,
   generateLimiter,
