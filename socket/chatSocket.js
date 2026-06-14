@@ -6,6 +6,7 @@ const {
   userHasWelcome,
   getMessagesByUser,
   markSeen,
+  conversationExists,
 } = require("../utils/messages");
 const { sendTelegram } = require("../utils/telegram");
 
@@ -178,9 +179,15 @@ ${new Date().toISOString()}`
         const message = String(data.message).trim().slice(0, 1000);
         if (!userId || !message) return;
 
-        // The admin may only message buyers that belong to them.
+        // The admin may only message buyers that belong to them. A buyer
+        // belongs to the seller if there is a live order tagged with this
+        // sellerId, OR an existing conversation under this sellerId (so
+        // replies to older chats keep working even after the order is gone).
         const order = await getOrderByGamerTag(userId);
-        if (!order || order.sellerId !== sellerId) return;
+        const ownsOrder = order && order.sellerId === sellerId;
+        if (!ownsOrder && !(await conversationExists(sellerId, userId))) {
+          return;
+        }
 
         const key = `admin-${socket.id}`;
         const now = Date.now();

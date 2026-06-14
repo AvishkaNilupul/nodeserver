@@ -50,6 +50,12 @@ function getSellerUserIds(sellerId) {
   return Message.distinct("userId", { sellerId });
 }
 
+// True when an admin already has a conversation with this buyer, so replies to
+// existing threads work even if the original order has since been removed.
+function conversationExists(sellerId, userId) {
+  return Message.exists({ sellerId, userId });
+}
+
 module.exports = {
   getMessagesBySeller,
   getMessagesByUser,
@@ -59,4 +65,5 @@ module.exports = {
   markRead,
   markSeen,
   getSellerUserIds,
+  conversationExists,
 };
