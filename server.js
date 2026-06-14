@@ -233,6 +233,14 @@ app.use(adminManageRoutes);
 app.get("/orders", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "admin-pages", "orders.html"));
 });
+app.get("/whoami", (req, res) => {
+  res.json({
+    reqIp: req.ip,
+    xff: req.headers["x-forwarded-for"] || null,
+    xRealIp: req.headers["x-real-ip"] || null,
+    cfIp: req.headers["cf-connecting-ip"] || null,
+  });
+});
 
 app.get("/admin.html", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin.html"));
