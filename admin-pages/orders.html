@@ -93,6 +93,23 @@
 
     .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 12px 20px; border-radius: 12px; font-size: 13.5px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.25s ease; z-index: 99; box-shadow: 0 12px 30px rgba(15,23,42,0.3); }
     .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* Mobile */
+    @media (max-width: 768px) {
+      .topbar { padding: 14px 16px; }
+      .topbar h1 { font-size: 17px; }
+      .topbar .sub { font-size: 11.5px; }
+      .topbar .btn.primary { padding: 10px 13px; }
+      .scroll { padding: 16px 14px; }
+      .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 16px; }
+      .stat { padding: 13px 14px; }
+      .stat .val { font-size: 22px; }
+      .toolbar { flex-direction: column; align-items: stretch; gap: 10px; }
+      .filter { justify-content: space-between; }
+      .filter span { flex: 1; text-align: center; }
+      .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 16px; }
+      .table-wrap table { border: none; border-radius: 0; min-width: 640px; }
+    }
   </style>
 </head>
 <body>
@@ -141,10 +158,12 @@
         </div>
       </div>
 
-      <table>
-        <thead><tr><th>Order ID</th><th>Username</th><th>Password</th><th>Status</th><th>Buyer</th><th></th></tr></thead>
-        <tbody id="ordersBody"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Order ID</th><th>Username</th><th>Password</th><th>Status</th><th>Buyer</th><th></th></tr></thead>
+          <tbody id="ordersBody"></tbody>
+        </table>
+      </div>
       <div class="empty" id="emptyState" style="display:none">No orders match your filter yet.</div>
     </div>
   </div>

@@ -70,7 +70,71 @@
     }
   }
 
+  // Mobile navigation: on small screens the left sidebar becomes an
+  // off-canvas drawer opened from a top bar with a hamburger button. Injected
+  // here so every admin page that loads this script gets it for free.
+  function setupMobileNav() {
+    var nav = document.querySelector(".nav");
+    if (!nav || document.querySelector(".mobile-topbar")) {
+      return;
+    }
+
+    var css =
+      ".mobile-topbar{display:none;}" +
+      ".nav-backdrop{display:none;}" +
+      "@media (max-width:768px){" +
+      "body{padding-top:54px;}" +
+      ".mobile-topbar{display:flex;align-items:center;gap:12px;position:fixed;" +
+      "top:0;left:0;right:0;height:54px;z-index:160;background:var(--surface);" +
+      "border-bottom:1px solid var(--line);padding:0 14px;}" +
+      ".mobile-topbar b{font-size:15px;font-weight:700;color:var(--ink);}" +
+      ".mobile-topbar .hamburger{width:40px;height:40px;border-radius:10px;" +
+      "border:1px solid var(--line);background:var(--surface);color:var(--ink);" +
+      "display:grid;place-items:center;cursor:pointer;flex-shrink:0;}" +
+      ".nav{position:fixed;top:0;left:0;bottom:0;z-index:200;width:264px;" +
+      "transform:translateX(-100%);transition:transform .25s ease;" +
+      "box-shadow:0 0 50px rgba(15,23,42,.3);}" +
+      ".nav.open{transform:translateX(0);}" +
+      ".nav-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);" +
+      "z-index:180;}" +
+      ".nav-backdrop.show{display:block;}" +
+      "}";
+    var style = document.createElement("style");
+    style.textContent = css;
+    document.head.appendChild(style);
+
+    var bar = document.createElement("div");
+    bar.className = "mobile-topbar";
+    bar.innerHTML =
+      '<button class="hamburger" type="button" aria-label="Menu">' +
+      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+      '<path d="M3 6h18M3 12h18M3 18h18"></path></svg></button>' +
+      "<b>RedeemHub</b>";
+
+    var backdrop = document.createElement("div");
+    backdrop.className = "nav-backdrop";
+
+    document.body.insertBefore(bar, document.body.firstChild);
+    document.body.appendChild(backdrop);
+
+    function open() {
+      nav.classList.add("open");
+      backdrop.classList.add("show");
+    }
+    function close() {
+      nav.classList.remove("open");
+      backdrop.classList.remove("show");
+    }
+    bar.querySelector(".hamburger").addEventListener("click", open);
+    backdrop.addEventListener("click", close);
+    nav.querySelectorAll(".links a").forEach(function (a) {
+      a.addEventListener("click", close);
+    });
+  }
+
   function run() {
+    setupMobileNav();
     fetch("/whoami", { credentials: "same-origin" })
       .then(function (r) {
         if (!r.ok) {
