@@ -59,6 +59,12 @@
   html[data-theme="dark"] .badge.super { background: rgba(99,102,241,0.18); }
   html[data-theme="dark"] .badge.admin { background: rgba(16,185,129,0.16); color: #34d399; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .badge.on { background: #ecfdf5; color: #059669; }
+  .badge.off { background: #f1f5f9; color: #64748b; }
+  html[data-theme="dark"] .badge.on { background: rgba(16,185,129,0.16); color: #34d399; }
+  html[data-theme="dark"] .badge.off { background: rgba(148,163,184,0.16); color: #94a3b8; }
+  .switch { display: flex; align-items: center; gap: 12px; }
+  .switch input { width: 18px; height: 18px; flex: none; }
   .msg { font-size: 13.5px; min-height: 20px; margin-bottom: 12px; }
   .msg.err { color: #dc2626; }
   .msg.ok { color: #059669; }
@@ -126,13 +132,23 @@
   </div>
 
   <div class="card">
+    <h2>Two-factor authentication</h2>
+    <div class="switch">
+      <input type="checkbox" id="require2fa" />
+      <label for="require2fa" style="margin:0;text-transform:none;font-size:13.5px;color:var(--ink);">
+        Require 2FA for every admin — admins without it set up are sent to the security page and can't use the panel until they enable it.
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Existing admins</h2>
     <table>
       <thead>
-        <tr><th>Username</th><th>Role</th><th>ID</th><th style="text-align:right;">Actions</th></tr>
+        <tr><th>Username</th><th>Role</th><th>2FA</th><th>ID</th><th style="text-align:right;">Actions</th></tr>
       </thead>
       <tbody id="adminRows">
-        <tr><td colspan="4" style="color:var(--muted);">Loading…</td></tr>
+        <tr><td colspan="5" style="color:var(--muted);">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -206,14 +222,14 @@
       renderAdmins(data.admins || []);
     } catch (e) {
       $("adminRows").innerHTML =
-        '<tr><td colspan="4" style="color:#dc2626;">' + esc(e.message) + "</td></tr>";
+        '<tr><td colspan="5" style="color:#dc2626;">' + esc(e.message) + "</td></tr>";
     }
   }
 
   function renderAdmins(admins) {
     if (!admins.length) {
       $("adminRows").innerHTML =
-        '<tr><td colspan="4" style="color:var(--muted);">No admins yet.</td></tr>';
+        '<tr><td colspan="5" style="color:var(--muted);">No admins yet.</td></tr>';
       return;
     }
     $("adminRows").innerHTML = admins
@@ -226,13 +242,21 @@
         const delBtn = isMe
           ? ""
           : '<button class="btn danger sm" data-del="' + esc(a.id) + '" data-name="' + esc(a.username) + '">Delete</button>';
+        const tfaBadge = a.totpEnabled
+          ? '<span class="badge on">On</span>'
+          : '<span class="badge off">Off</span>';
+        const resetBtn = a.totpEnabled
+          ? '<button class="btn ghost sm" data-reset2fa="' + esc(a.id) + '" data-name="' + esc(a.username) + '">Reset 2FA</button>'
+          : "";
         return (
           "<tr>" +
           "<td><b>" + esc(a.username) + "</b>" + (isMe ? ' <span style="color:var(--muted);font-weight:500;">(you)</span>' : "") + "</td>" +
           "<td>" + roleBadge + "</td>" +
+          "<td>" + tfaBadge + "</td>" +
           '<td style="color:var(--muted);font-size:12.5px;">' + esc(a.id) + "</td>" +
           '<td><div class="actions">' +
           '<button class="btn ghost sm" data-edit=\'' + esc(JSON.stringify(a)) + "'>Edit</button>" +
+          resetBtn +
           delBtn +
           "</div></td>" +
           "</tr>"
@@ -294,6 +318,20 @@
       try { openEdit(JSON.parse(editBtn.getAttribute("data-edit"))); } catch (err) { /* ignore */ }
       return;
     }
+    const resetBtn = e.target.closest("[data-reset2fa]");
+    if (resetBtn) {
+      const id = resetBtn.getAttribute("data-reset2fa");
+      const name = resetBtn.getAttribute("data-name");
+      if (!confirm("Reset (turn off) 2FA for '" + name + "'? They'll log in with just their password until they set it up again.")) return;
+      try {
+        await api("POST", "/admins/" + encodeURIComponent(id) + "/2fa-reset");
+        showMsg("2FA reset for '" + name + "'.", "ok");
+        loadAdmins();
+      } catch (err) {
+        showMsg(err.message, "err");
+      }
+      return;
+    }
     const delBtn = e.target.closest("[data-del]");
     if (delBtn) {
       const id = delBtn.getAttribute("data-del");
@@ -306,6 +344,24 @@
       } catch (err) {
         showMsg(err.message, "err");
       }
+    }
+  });
+
+  async function loadRequire2fa() {
+    try {
+      const data = await api("GET", "/admin/2fa/status");
+      $("require2fa").checked = !!data.require2fa;
+    } catch (e) { /* ignore */ }
+  }
+
+  $("require2fa").addEventListener("change", async (e) => {
+    const value = e.target.checked;
+    try {
+      await api("POST", "/admin/2fa/require", { value });
+      showMsg(value ? "2FA is now required for all admins." : "2FA requirement turned off.", "ok");
+    } catch (err) {
+      e.target.checked = !value;
+      showMsg(err.message, "err");
     }
   });
 
@@ -328,6 +384,7 @@
       return;
     }
     loadAdmins();
+    loadRequire2fa();
   })();
 </script>
 <script src="/theme.js"></script>
