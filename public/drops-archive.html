@@ -112,7 +112,17 @@
 
   /* Item grid (By item) */
   .igrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:12px; }
-  .icard { background: var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px; cursor:pointer; display:flex; gap:12px; align-items:flex-start; transition: border-color .12s, box-shadow .12s; }
+  .icard { position:relative; background: var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px; cursor:pointer; display:flex; gap:12px; align-items:flex-start; transition: border-color .12s, box-shadow .12s; }
+  .icard .addset { position:absolute; top:8px; right:8px; padding:3px 8px; font-size:11.5px; border-radius:8px; background:var(--surface-2); color:var(--accent); border:1px solid var(--line); font-weight:700; }
+  .icard .addset:hover { background:var(--accent); color:#fff; }
+  .setcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; cursor:pointer; transition:border-color .12s, box-shadow .12s; }
+  .setcard:hover { border-color:var(--accent); box-shadow:0 4px 14px rgba(79,70,229,.12); }
+  .setcard .sn { font-size:15px; font-weight:800; }
+  .setcard .thumbs { display:flex; gap:4px; margin:10px 0; flex-wrap:wrap; }
+  .setcard .thumbs img { width:34px; height:34px; object-fit:contain; background:var(--surface-2); border-radius:7px; padding:2px; }
+  .pickrow { display:flex; align-items:center; gap:10px; padding:9px 11px; border:1px solid var(--line); border-radius:10px; margin-bottom:7px; cursor:pointer; }
+  .pickrow:hover { background:var(--surface-2); border-color:var(--accent); }
+  .pickrow b { font-size:13.5px; } .pickrow span { font-size:11.5px; color:var(--muted); margin-left:auto; }
   .icard:hover { border-color: var(--accent); box-shadow:0 4px 14px rgba(79,70,229,.12); }
   .icard img { width:56px; height:56px; object-fit:contain; flex:none; background:var(--surface-2); border-radius:10px; padding:4px; }
   .icard .noimg { width:56px; height:56px; flex:none; background:var(--surface-2); border-radius:10px; }
@@ -226,6 +236,7 @@
   <!-- Tabs -->
   <div class="tabs">
     <button class="tab active" data-tab="items">By item</button>
+    <button class="tab" data-tab="sets">Sets / bundles</button>
     <button class="tab" data-tab="games">By game</button>
     <button class="tab" data-tab="accounts">Accounts</button>
   </div>
@@ -241,6 +252,15 @@
       <span class="sub" id="itemCount"></span>
     </div>
     <div id="items"><div class="empty">Loading…</div></div>
+  </section>
+
+  <!-- Sets / bundles -->
+  <section class="view" id="view-sets">
+    <div class="toolbar">
+      <div class="sub">Group items you sell together as one order. For each set you'll see which accounts can deliver the whole bundle.</div>
+      <button class="btn-sm" id="newSetBtn" style="margin-left:auto;">+ New set</button>
+    </div>
+    <div id="sets"><div class="empty">Loading…</div></div>
   </section>
 
   <!-- By game -->
@@ -292,6 +312,43 @@
   <div class="modal">
     <header><img id="iImg" alt="" style="display:none;"><b id="iTitle">Item</b><button class="x" id="iClose">&times;</button></header>
     <div class="mbody" id="iBody"></div>
+  </div>
+</div>
+
+<!-- Set detail / fulfillment modal -->
+<div class="modal-bg" id="setBg">
+  <div class="modal" style="max-width:820px;">
+    <header><b id="sTitle">Set</b><button class="x" id="sClose">&times;</button></header>
+    <div class="mbody" id="sBody"></div>
+  </div>
+</div>
+
+<!-- Create / edit set form -->
+<div class="modal-bg" id="setFormBg">
+  <div class="modal" style="max-width:480px;">
+    <header><b id="sfTitle">New set</b><button class="x" id="sfClose">&times;</button></header>
+    <div class="mbody">
+      <div><label class="lbl">Set name</label><input id="sfName" type="text" placeholder="e.g. Rust starter bundle"></div>
+      <div><label class="lbl">Note (optional)</label><input id="sfNote" type="text" placeholder="e.g. sold as one eBay listing"></div>
+      <div id="sfResult"></div>
+    </div>
+    <footer><button class="btn-ghost" id="sfCancel">Cancel</button><button id="sfSave">Save</button></footer>
+  </div>
+</div>
+
+<!-- Add-to-set picker -->
+<div class="modal-bg" id="pickBg">
+  <div class="modal" style="max-width:440px;">
+    <header><b>Add to set</b><button class="x" id="pickClose">&times;</button></header>
+    <div class="mbody">
+      <div class="hint" id="pickItemLbl"></div>
+      <div id="pickList"></div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input id="pickNew" type="text" placeholder="…or new set name" style="flex:1;">
+        <button class="btn-sm" id="pickCreate">Create &amp; add</button>
+      </div>
+      <div id="pickResult"></div>
+    </div>
   </div>
 </div>
 
@@ -381,6 +438,7 @@ function switchTab(t){
   document.querySelectorAll(".view").forEach((v)=>v.classList.remove("active"));
   $("view-" + t).classList.add("active");
   if (t==="items") loadItems();
+  else if (t==="sets") loadSets();
   else if (t==="games") loadGames();
   else loadAccounts();
 }
@@ -442,6 +500,7 @@ async function loadItems(){
   try { data = await api("/drops-archive/by-item?search=" + search + "&game=" + game); }
   catch (e) { $("items").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
   const items = data.items || [];
+  lastItems = items;
   $("itemCount").textContent = items.length ? items.length + " distinct item(s)" : "";
   if (!items.length){ $("items").innerHTML = '<div class="empty">No items logged yet. Go to <b>Accounts</b> → Sync from bots, then let it scan.</div>'; return; }
   $("items").innerHTML = '<div class="igrid">' + items.map(itemCard).join("") + "</div>";
@@ -453,16 +512,22 @@ function itemCard(it){
   if (it.connect) sb.push('<span class="chip warn">' + it.connect + " connect</span>");
   if (it.connected) sb.push('<span class="chip">' + it.connected + " connected</span>");
   return '<div class="icard" data-item="' + attr(it.itemKey) + '">' +
+    '<button class="addset" data-addset="' + attr(it.itemKey) + '" title="Add to a set">+ set</button>' +
     imgTag(it.image) +
     '<div style="min-width:0;flex:1;">' +
-      '<div class="nm">' + esc(it.name||"Reward") + "</div>" +
+      '<div class="nm" style="padding-right:42px;">' + esc(it.name||"Reward") + "</div>" +
       '<div class="gm">' + esc(it.game||"Other rewards") + "</div>" +
       '<div class="big"><b>' + it.totalCount + '</b><span>held · ' + it.accounts + " account" + (it.accounts>1?"s":"") + "</span></div>" +
       '<div class="sb">' + sb.join("") + "</div>" +
     "</div></div>";
 }
 
-$("items").addEventListener("click", (e)=>{ const c = e.target.closest("[data-item]"); if (c) openItem(c.dataset.item); });
+let lastItems = [];
+$("items").addEventListener("click", (e)=>{
+  const add = e.target.closest("[data-addset]");
+  if (add){ e.stopPropagation(); const it = lastItems.find((x)=>x.itemKey===add.dataset.addset); openPicker(it || { itemKey: add.dataset.addset }); return; }
+  const c = e.target.closest("[data-item]"); if (c) openItem(c.dataset.item);
+});
 let itemSearchTimer=null;
 $("itemSearch").addEventListener("input", ()=>{ clearTimeout(itemSearchTimer); itemSearchTimer=setTimeout(loadItems,300); });
 $("itemGame").addEventListener("change", loadItems);
@@ -652,6 +717,153 @@ $("dBody").addEventListener("click", (e)=>{
 });
 $("dClose").addEventListener("click", ()=> $("detailBg").classList.remove("show"));
 $("detailBg").addEventListener("click", (e)=>{ if (e.target===$("detailBg")) $("detailBg").classList.remove("show"); });
+
+// -------- Sets / bundles --------
+let allSets = [];
+async function loadSets(){
+  let data;
+  try { data = await api("/drops-archive/sets"); }
+  catch (e) { $("sets").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
+  allSets = data.sets || [];
+  if (!allSets.length){ $("sets").innerHTML = '<div class="empty">No sets yet. Click <b>+ New set</b>, or use the <b>+ set</b> button on any item in the By-item tab.</div>'; return; }
+  $("sets").innerHTML = '<div class="igrid">' + allSets.map(setCard).join("") + "</div>";
+}
+function setCard(s){
+  const thumbs = (s.items||[]).slice(0,6).map((i)=> i.image ? '<img src="' + attr(String(i.image).replace("{width}","34").replace("{height}","34")) + '" onerror="this.style.display=\'none\'">' : "").join("");
+  return '<div class="setcard" data-set="' + attr(s.id) + '">' +
+    '<div class="sn">' + esc(s.name) + "</div>" +
+    (s.note ? '<div class="gm" style="color:var(--muted);font-size:12px;margin-top:2px;">' + esc(s.note) + "</div>" : "") +
+    '<div class="thumbs">' + thumbs + "</div>" +
+    '<div class="gm" style="color:var(--muted);font-size:12.5px;">' + s.itemCount + " item" + (s.itemCount!==1?"s":"") + "</div>" +
+  "</div>";
+}
+$("sets").addEventListener("click", (e)=>{ const c = e.target.closest("[data-set]"); if (c) openSet(c.dataset.set); });
+
+$("newSetBtn").addEventListener("click", ()=>{ setFormMode = { mode:"create" }; $("sfTitle").textContent="New set"; $("sfName").value=""; $("sfNote").value=""; $("sfResult").innerHTML=""; $("setFormBg").classList.add("show"); $("sfName").focus(); });
+let setFormMode = { mode:"create" };
+$("sfClose").addEventListener("click", ()=> $("setFormBg").classList.remove("show"));
+$("sfCancel").addEventListener("click", ()=> $("setFormBg").classList.remove("show"));
+$("setFormBg").addEventListener("click", (e)=>{ if (e.target===$("setFormBg")) $("setFormBg").classList.remove("show"); });
+$("sfSave").addEventListener("click", async (e)=>{
+  const btn=e.currentTarget; const old=btn.textContent; btn.disabled=true; btn.textContent="Saving…";
+  const name=$("sfName").value.trim(), note=$("sfNote").value.trim();
+  if (!name){ $("sfResult").innerHTML='<div class="note err">Name required</div>'; btn.disabled=false; btn.textContent=old; return; }
+  try {
+    if (setFormMode.mode==="create") await api("/drops-archive/sets", { method:"POST", body: JSON.stringify({ name, note }) });
+    else await api("/drops-archive/sets/" + encodeURIComponent(setFormMode.id), { method:"PUT", body: JSON.stringify({ name, note }) });
+    $("setFormBg").classList.remove("show"); loadSets();
+    if (setFormMode.mode!=="create" && $("setBg").classList.contains("show")) openSet(setFormMode.id);
+  } catch (err){ $("sfResult").innerHTML='<div class="note err">' + esc(err.message) + "</div>"; }
+  finally { btn.disabled=false; btn.textContent=old; }
+});
+
+let currentSet = null, currentFulfil = null;
+async function openSet(id){
+  $("sTitle").textContent="Loading…"; $("sBody").innerHTML='<div class="empty">Loading…</div>'; $("setBg").classList.add("show");
+  let d;
+  try { d = await api("/drops-archive/sets/" + encodeURIComponent(id) + "/fulfillment"); }
+  catch (e){ $("sBody").innerHTML='<div class="note err">' + esc(e.message) + "</div>"; return; }
+  currentSet = d.set; currentFulfil = d;
+  $("sTitle").innerHTML = esc(d.set.name) + (d.set.note ? ' <span style="color:var(--muted);font-weight:500;font-size:13px;">' + esc(d.set.note) + "</span>" : "");
+  const full = d.accounts.filter((a)=>a.complete);
+  let html =
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+      '<div class="stat accent"><b>' + d.fullAccounts + '</b><span>Accounts with full set</span></div>' +
+      '<div class="stat green"><b>' + d.bundlesAvailable + '</b><span>Full bundles available</span></div>' +
+      '<div class="stat"><b>' + (d.items||[]).length + '</b><span>Items in set</span></div>' +
+      '<button class="btn-ghost btn-sm" id="setEdit" style="margin-left:auto;">Rename</button>' +
+      '<button class="btn-ghost btn-sm" id="setDelete">Delete set</button>' +
+    "</div>";
+
+  // Items in the set
+  html += '<div><label class="lbl">Items in this set</label>';
+  if (!(d.items||[]).length) html += '<div class="hint">No items yet. Add items from the By-item tab with the “+ set” button.</div>';
+  else {
+    html += '<div class="igrid">' + d.items.map((it)=>
+      '<div class="icard" style="cursor:default;">' +
+        '<button class="addset" data-rmitem="' + attr(it.itemKey) + '" title="Remove from set" style="color:var(--red);">&times; remove</button>' +
+        imgTag(it.image) +
+        '<div style="min-width:0;flex:1;">' +
+          '<div class="nm" style="padding-right:60px;">' + esc(it.name||"Reward") + "</div>" +
+          '<div class="gm">' + esc(it.game||"") + "</div>" +
+          '<div class="big"><b>' + (it.totalCount||0) + '</b><span>held · ' + (it.accounts||0) + " acct" + ((it.accounts||0)!==1?"s":"") + "</span></div>" +
+        "</div></div>").join("") + "</div>";
+  }
+  html += "</div>";
+
+  // Accounts that can fulfill
+  html += '<div><label class="lbl">Delivery — accounts ranked by how much of the set they hold</label>';
+  if (!d.accounts.length) html += '<div class="hint">No account holds any item in this set yet.</div>';
+  else {
+    html += '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
+      (full.length ? '<button class="btn-ghost btn-sm" id="copyFull">Copy full-set logins (' + full.length + ")</button>" : "") +
+      "</div>";
+    html += '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Has</th><th>Full bundles</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
+      d.accounts.map((a)=>
+        "<tr>" +
+          '<td><span class="linkish" data-acc="' + attr(a.accountId) + '">' + esc(a.login||"(no login)") + "</span></td>" +
+          "<td>" + (a.complete ? '<span class="chip on">' + a.have + "/" + a.total + " full</span>" : '<span class="chip warn">' + a.have + "/" + a.total + "</span>") + "</td>" +
+          "<td>" + (a.complete ? "<b>" + a.minCount + "</b>" : "—") + "</td>" +
+          '<td class="hide-sm mono">' + esc(a.container||a.configFile||"—") + "</td>" +
+          '<td class="hide-sm">' + (a.hasPassword ? '<span class="chip on">saved</span>' : '<span class="chip warn">none</span>') + "</td>" +
+        "</tr>").join("") +
+      "</tbody></table></div>";
+  }
+  html += "</div>";
+  $("sBody").innerHTML = html;
+}
+
+$("sBody").addEventListener("click", async (e)=>{
+  const acc = e.target.closest("[data-acc]");
+  if (acc){ $("setBg").classList.remove("show"); switchTab("accounts"); setTimeout(()=>openDetail(acc.dataset.acc), 50); return; }
+  if (e.target.id==="copyFull" && currentFulfil){
+    const txt = currentFulfil.accounts.filter((a)=>a.complete).map((a)=>a.login).filter(Boolean).join("\n");
+    navigator.clipboard.writeText(txt).then(()=>banner("Copied full-set logins.","ok")).catch(()=>banner("Copy failed","err"));
+    return;
+  }
+  if (e.target.id==="setEdit" && currentSet){ setFormMode={ mode:"edit", id:currentSet.id }; $("sfTitle").textContent="Rename set"; $("sfName").value=currentSet.name; $("sfNote").value=currentSet.note||""; $("sfResult").innerHTML=""; $("setFormBg").classList.add("show"); return; }
+  if (e.target.id==="setDelete" && currentSet){
+    if (!confirm("Delete set “" + currentSet.name + "”? This doesn't touch your drops.")) return;
+    try { await api("/drops-archive/sets/" + encodeURIComponent(currentSet.id), { method:"DELETE" }); $("setBg").classList.remove("show"); loadSets(); banner("Set deleted.","ok"); } catch(err){ banner(err.message,"err"); }
+    return;
+  }
+  const rm = e.target.closest("[data-rmitem]");
+  if (rm && currentSet){
+    try { await api("/drops-archive/sets/" + encodeURIComponent(currentSet.id), { method:"PUT", body: JSON.stringify({ removeItemKeys:[rm.dataset.rmitem] }) }); openSet(currentSet.id); } catch(err){ banner(err.message,"err"); }
+  }
+});
+$("sClose").addEventListener("click", ()=> $("setBg").classList.remove("show"));
+$("setBg").addEventListener("click", (e)=>{ if (e.target===$("setBg")) $("setBg").classList.remove("show"); });
+
+// Add-to-set picker
+let pickItemKey = null;
+async function openPicker(it){
+  pickItemKey = it.itemKey;
+  $("pickItemLbl").innerHTML = "Add <b>" + esc(it.name||it.itemKey) + "</b>" + (it.game ? " (" + esc(it.game) + ")" : "") + " to:";
+  $("pickNew").value=""; $("pickResult").innerHTML="";
+  $("pickList").innerHTML = '<div class="hint">Loading sets…</div>';
+  $("pickBg").classList.add("show");
+  try {
+    const sets = (await api("/drops-archive/sets")).sets || [];
+    $("pickList").innerHTML = sets.length
+      ? sets.map((s)=>'<div class="pickrow" data-pickset="' + attr(s.id) + '"><b>' + esc(s.name) + "</b><span>" + s.itemCount + " item" + (s.itemCount!==1?"s":"") + "</span></div>").join("")
+      : '<div class="hint">No sets yet — create one below.</div>';
+  } catch(e){ $("pickList").innerHTML='<div class="note err">' + esc(e.message) + "</div>"; }
+}
+$("pickList").addEventListener("click", async (e)=>{
+  const row = e.target.closest("[data-pickset]"); if (!row) return;
+  try { await api("/drops-archive/sets/" + encodeURIComponent(row.dataset.pickset), { method:"PUT", body: JSON.stringify({ addItemKeys:[pickItemKey] }) }); $("pickBg").classList.remove("show"); banner("Added to set.","ok"); }
+  catch(err){ $("pickResult").innerHTML='<div class="note err">' + esc(err.message) + "</div>"; }
+});
+$("pickCreate").addEventListener("click", async (e)=>{
+  const name=$("pickNew").value.trim(); if (!name){ $("pickResult").innerHTML='<div class="note err">Enter a name</div>'; return; }
+  const btn=e.currentTarget; btn.disabled=true;
+  try { await api("/drops-archive/sets", { method:"POST", body: JSON.stringify({ name, itemKeys:[pickItemKey] }) }); $("pickBg").classList.remove("show"); banner("Created set “" + name + "” and added item.","ok"); }
+  catch(err){ $("pickResult").innerHTML='<div class="note err">' + esc(err.message) + "</div>"; }
+  finally { btn.disabled=false; }
+});
+$("pickClose").addEventListener("click", ()=> $("pickBg").classList.remove("show"));
+$("pickBg").addEventListener("click", (e)=>{ if (e.target===$("pickBg")) $("pickBg").classList.remove("show"); });
 
 // -------- Credentials + sync --------
 $("credBtn").addEventListener("click", ()=>{ $("credResult").innerHTML=""; $("credBg").classList.add("show"); });
