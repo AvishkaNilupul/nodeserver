@@ -36,4 +36,29 @@ function requireSuperadmin(req, res, next) {
   return next();
 }
 
-module.exports = { requireAdmin, requireSuperadmin };
+// When the site requires 2FA for everyone, block a logged-in admin who hasn't
+// enrolled from using protected features — sending browsers to the security
+// page and API calls a clear "enroll_2fa" error. Applied only to feature
+// routers, never to the 2FA setup endpoints themselves (or enrolment would be
+// impossible). Falls back to allowing access if the settings file can't load.
+function enforce2fa(req, res, next) {
+  let required = false;
+  try {
+    required = require("../utils/settings").getRequire2fa();
+  } catch {
+    required = false;
+  }
+  if (!required) return next();
+  const admin = req.session?.admin;
+  if (!admin || admin.tfa) return next();
+  if (wantsHtml(req)) {
+    return res.redirect("/security.html");
+  }
+  return res.status(403).json({
+    success: false,
+    code: "enroll_2fa",
+    message: "Two-factor authentication setup is required",
+  });
+}
+
+module.exports = { requireAdmin, requireSuperadmin, enforce2fa };
