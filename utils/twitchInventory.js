@@ -70,6 +70,16 @@ async function gqlRequest(token, clientId, body) {
   return { status: res.status, parsed };
 }
 
+// Normalised grouping key so the same reward on different accounts collapses
+// together in aggregate views (case/space-insensitive name + game).
+function itemKeyFor(name, game) {
+  return (
+    String(name || "").trim().toLowerCase() +
+    "|" +
+    String(game || "").trim().toLowerCase()
+  );
+}
+
 // Same label rule as the inventory page: a reward that needs an account link
 // but isn't connected is "connect"; linked is "connected"; otherwise "claimed".
 function stateFor(link, connected) {
@@ -95,6 +105,11 @@ function buildDrops(inv) {
       imageURL: g.imageURL || "",
       game: bg ? bg.displayName || bg.name : "",
       gameId: bg ? bg.id || "" : "",
+      campaign: "",
+      itemKey: itemKeyFor(
+        g.name || (g.benefit && g.benefit.name),
+        bg ? bg.displayName || bg.name : "",
+      ),
       count: g.totalCount || 1,
       awardedAt: g.lastAwardedAt || null,
       connected,
@@ -119,6 +134,11 @@ function buildDrops(inv) {
         imageURL: b.imageAssetURL || "",
         game: bg ? bg.displayName || bg.name : "",
         gameId: bg ? bg.id || "" : "",
+        campaign: c.name || "",
+        itemKey: itemKeyFor(
+          b.name || d.name,
+          bg ? bg.displayName || bg.name : "",
+        ),
         count: edge.entitlementLimit || 1,
         awardedAt: null,
         connected,

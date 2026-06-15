@@ -12,6 +12,7 @@
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const { fetchInventory } = require("./twitchInventory");
+const { cacheImage } = require("./imageCache");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -62,26 +63,30 @@ async function scanAccount(acc) {
     const { twitchId, login, drops } = await fetchInventory(acc.clientSecret);
     let newDrops = 0;
     for (const d of drops) {
+      // Cache the image locally (deduped on disk; a no-op once downloaded) so
+      // the archive doesn't depend on Twitch's CDN long-term.
+      const imageLocal = d.imageURL ? await cacheImage(d.imageURL) : "";
+      const set = {
+        login: login || acc.login || "",
+        dropId: d.dropId,
+        name: d.name,
+        imageURL: d.imageURL,
+        game: d.game,
+        gameId: d.gameId,
+        campaign: d.campaign || "",
+        itemKey: d.itemKey || "",
+        count: d.count,
+        awardedAt: d.awardedAt,
+        connected: d.connected,
+        requiredAccountLink: d.requiredAccountLink,
+        state: d.state,
+        source: d.source,
+        lastSeenAt: now,
+      };
+      if (imageLocal) set.imageLocal = imageLocal;
       const r = await DropLog.updateOne(
         { account: acc._id, benefitId: d.benefitId },
-        {
-          $set: {
-            login: login || acc.login || "",
-            dropId: d.dropId,
-            name: d.name,
-            imageURL: d.imageURL,
-            game: d.game,
-            gameId: d.gameId,
-            count: d.count,
-            awardedAt: d.awardedAt,
-            connected: d.connected,
-            requiredAccountLink: d.requiredAccountLink,
-            state: d.state,
-            source: d.source,
-            lastSeenAt: now,
-          },
-          $setOnInsert: { firstSeenAt: now },
-        },
+        { $set: set, $setOnInsert: { firstSeenAt: now } },
         { upsert: true },
       );
       if (r.upsertedCount) newDrops++;
