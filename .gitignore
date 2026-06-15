@@ -12,3 +12,6 @@ inventory.json
 
 # Uploaded chat images
 public/uploads
+
+# Cached Twitch drop reward images (downloaded at runtime)
+public/drop-images

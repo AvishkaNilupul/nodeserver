@@ -22,8 +22,15 @@ const dropLogSchema = new mongoose.Schema(
 
     name: { type: String, default: "" },
     imageURL: { type: String, default: "" },
+    // Locally cached copy of imageURL (e.g. /drop-images/<hash>.png) so the
+    // picture survives even if Twitch removes the CDN asset.
+    imageLocal: { type: String, default: "" },
     game: { type: String, default: "", index: true },
     gameId: { type: String, default: "" },
+    // Campaign / "drop set" name when Twitch provides one (in-progress drops).
+    campaign: { type: String, default: "", index: true },
+    // Normalised key used to group the same reward across accounts (name+game).
+    itemKey: { type: String, default: "", index: true },
     count: { type: Number, default: 1 },
 
     awardedAt: { type: Date, default: null },

@@ -101,9 +101,11 @@ router.get(
         if (!byGame.has(g)) byGame.set(g, []);
         byGame.get(g).push({
           benefitId: d.benefitId,
+          itemKey: d.itemKey,
           name: d.name,
-          imageURL: d.imageURL,
+          image: d.imageLocal || d.imageURL,
           game: d.game,
+          campaign: d.campaign,
           count: d.count,
           awardedAt: d.awardedAt,
           state: d.state,
@@ -332,5 +334,204 @@ router.post("/drops-archive/scheduler", requireSuperadmin, (req, res) => {
   if (body.intervalMs != null) scanner.setIntervalMs(body.intervalMs);
   res.json({ success: true });
 });
+
+// ------------------------------------------------------------------
+// Aggregated / cross-account views (for building sell orders)
+// ------------------------------------------------------------------
+function searchRegex(s) {
+  return new RegExp(String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+}
+
+// High-level totals for the dashboard header.
+router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
+  try {
+    const [accounts, totalDrops, totalItemsHeld, games, items] =
+      await Promise.all([
+        BotAccount.countDocuments({}),
+        DropLog.countDocuments({}),
+        DropLog.aggregate([
+          { $group: { _id: null, n: { $sum: "$count" } } },
+        ]),
+        DropLog.distinct("game"),
+        DropLog.distinct("itemKey"),
+      ]);
+    res.json({
+      success: true,
+      overview: {
+        accounts,
+        totalDrops,
+        totalItemsHeld: (totalItemsHeld[0] && totalItemsHeld[0].n) || 0,
+        games: games.filter(Boolean).length,
+        items: items.filter(Boolean).length,
+      },
+    });
+  } catch (err) {
+    console.error("drops-archive overview error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// One row per game: how many rewards, distinct items, accounts, total held.
+router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
+  try {
+    const rows = await DropLog.aggregate([
+      {
+        $group: {
+          _id: "$game",
+          drops: { $sum: 1 },
+          totalCount: { $sum: "$count" },
+          accounts: { $addToSet: "$account" },
+          items: { $addToSet: "$itemKey" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          game: "$_id",
+          drops: 1,
+          totalCount: 1,
+          accounts: { $size: "$accounts" },
+          items: { $size: "$items" },
+        },
+      },
+      { $sort: { totalCount: -1 } },
+    ]);
+    res.json({ success: true, games: rows });
+  } catch (err) {
+    console.error("drops-archive by-game error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// One row per distinct item (reward), collapsed across all accounts. This is
+// the inventory view for selling: name, game, image, total held, # accounts.
+router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
+  try {
+    const match = {};
+    const game = String(req.query.game || "").trim();
+    if (game) match.game = game === "Other rewards" ? "" : game;
+    const search = String(req.query.search || "").trim();
+    if (search) match.name = searchRegex(search);
+
+    const rows = await DropLog.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: "$itemKey",
+          name: { $first: "$name" },
+          game: { $first: "$game" },
+          imageLocal: { $max: "$imageLocal" },
+          imageURL: { $first: "$imageURL" },
+          campaign: { $first: "$campaign" },
+          totalCount: { $sum: "$count" },
+          accounts: { $addToSet: "$account" },
+          claimed: {
+            $sum: { $cond: [{ $eq: ["$state", "claimed"] }, 1, 0] },
+          },
+          connect: {
+            $sum: { $cond: [{ $eq: ["$state", "connect"] }, 1, 0] },
+          },
+          connected: {
+            $sum: { $cond: [{ $eq: ["$state", "connected"] }, 1, 0] },
+          },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          itemKey: "$_id",
+          name: 1,
+          game: 1,
+          // Prefer the locally cached image; fall back to the live URL. Note
+          // imageLocal defaults to "" (not null), so test its length.
+          image: {
+            $cond: [
+              { $gt: [{ $strLenCP: { $ifNull: ["$imageLocal", ""] } }, 0] },
+              "$imageLocal",
+              "$imageURL",
+            ],
+          },
+          imageURL: 1,
+          campaign: 1,
+          totalCount: 1,
+          accounts: { $size: "$accounts" },
+          claimed: 1,
+          connect: 1,
+          connected: 1,
+        },
+      },
+      { $sort: { accounts: -1, totalCount: -1 } },
+      { $limit: 2000 },
+    ]);
+    res.json({ success: true, items: rows });
+  } catch (err) {
+    console.error("drops-archive by-item error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Which accounts hold a given item (by itemKey) — the delivery picker.
+router.get(
+  "/drops-archive/item-accounts",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const itemKey = String(req.query.itemKey || "").trim();
+      if (!itemKey) {
+        return res
+          .status(400)
+          .json({ success: false, message: "itemKey required" });
+      }
+      const rows = await DropLog.aggregate([
+        { $match: { itemKey } },
+        {
+          $lookup: {
+            from: "botaccounts",
+            localField: "account",
+            foreignField: "_id",
+            as: "acc",
+          },
+        },
+        { $unwind: { path: "$acc", preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            accountId: "$account",
+            login: { $ifNull: ["$acc.login", "$login"] },
+            container: "$acc.container",
+            configFile: "$acc.configFile",
+            hasPassword: "$acc.hasPassword",
+            count: 1,
+            state: 1,
+            connected: 1,
+            requiredAccountLink: 1,
+            awardedAt: 1,
+            firstSeenAt: 1,
+            lastSeenAt: 1,
+          },
+        },
+        { $sort: { state: 1, login: 1 } },
+      ]);
+      const first = await DropLog.findOne({ itemKey })
+        .select("name game imageLocal imageURL campaign")
+        .lean();
+      res.json({
+        success: true,
+        item: first
+          ? {
+              name: first.name,
+              game: first.game,
+              campaign: first.campaign,
+              image: first.imageLocal || first.imageURL,
+            }
+          : {},
+        accounts: rows,
+      });
+    } catch (err) {
+      console.error("drops-archive item-accounts error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 module.exports = router;

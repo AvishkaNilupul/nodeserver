@@ -14,6 +14,7 @@
   html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
   html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
   html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .tab.active{background:rgba(99,102,241,0.18);}
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
   .themebtn{cursor:pointer;}
@@ -47,14 +48,14 @@
   .btn-ghost:hover { background: var(--surface-2); opacity:1; }
   .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
 
-  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 18px 0 14px; }
+  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 16px 0 14px; }
   .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
   .search input { width:100%; padding: 11px 13px 11px 38px; border-radius: 11px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline:none; font-family:inherit; }
   .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
   .search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color: var(--muted); }
   select { padding: 10px 12px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 13.5px; font-family:inherit; outline:none; }
 
-  /* Progress panel */
+  /* Panels / progress */
   .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 18px; overflow:hidden; }
   .panel .ph { display:flex; align-items:center; gap:10px; padding: 14px 18px; border-bottom:1px solid var(--line); }
   .panel .ph b { font-size: 15px; }
@@ -65,7 +66,7 @@
   .stat { background: var(--surface-2); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; min-width: 84px; }
   .stat b { font-size: 18px; display:block; }
   .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
-  .stat.green b{color:var(--green);} .stat.red b{color:var(--red);} .stat.warn b{color:var(--yellow);}
+  .stat.green b{color:var(--green);} .stat.red b{color:var(--red);} .stat.warn b{color:var(--yellow);} .stat.accent b{color:var(--accent);}
   .pctl { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:14px; padding-top:14px; border-top:1px dashed var(--line); }
   .scanning { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
   .pulse { width:9px; height:9px; border-radius:50%; background: var(--green); box-shadow:0 0 0 0 rgba(16,185,129,.5); animation: pulse 1.4s infinite; }
@@ -78,12 +79,21 @@
   .switch input:checked + .track { background: var(--green); }
   .switch input:checked + .track::after { left:18px; }
 
-  /* Accounts table */
+  /* Tabs */
+  .tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin: 6px 0 4px; }
+  .tab { padding:10px 16px; border:none; background:none; color:var(--muted); font-weight:600; font-size:14px; border-radius:10px 10px 0 0; cursor:pointer; }
+  .tab:hover { background: var(--surface-2); opacity:1; }
+  .tab.active { background:#eef2ff; color:var(--accent); }
+  .view { display:none; }
+  .view.active { display:block; }
+
+  /* Tables */
   table { width:100%; border-collapse: collapse; font-size: 13.5px; }
   th, td { text-align:left; padding: 10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
   tr:last-child td { border-bottom:none; }
   tbody tr:hover { background: var(--surface-2); }
+  tr.clickable { cursor:pointer; }
   .mono { font-family: ui-monospace, monospace; font-size:12.5px; }
   .chip { display:inline-flex; align-items:center; gap:5px; padding: 3px 9px; border-radius: 999px; font-size:11.5px; font-weight:600; background: var(--surface-2); color: var(--muted); }
   .chip.on { background:#ecfdf5; color: var(--green); }
@@ -100,11 +110,25 @@
   .note.ok { background:#ecfdf5; color:var(--green); }
   .note.err { background:#fef2f2; color:var(--red); }
 
+  /* Item grid (By item) */
+  .igrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:12px; }
+  .icard { background: var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px; cursor:pointer; display:flex; gap:12px; align-items:flex-start; transition: border-color .12s, box-shadow .12s; }
+  .icard:hover { border-color: var(--accent); box-shadow:0 4px 14px rgba(79,70,229,.12); }
+  .icard img { width:56px; height:56px; object-fit:contain; flex:none; background:var(--surface-2); border-radius:10px; padding:4px; }
+  .icard .noimg { width:56px; height:56px; flex:none; background:var(--surface-2); border-radius:10px; }
+  .icard .nm { font-size:13.5px; font-weight:700; line-height:1.25; word-break:break-word; }
+  .icard .gm { font-size:11.5px; color:var(--muted); margin-top:2px; }
+  .icard .big { margin-top:8px; display:flex; align-items:baseline; gap:6px; }
+  .icard .big b { font-size:20px; color:var(--accent); }
+  .icard .big span { font-size:11.5px; color:var(--muted); }
+  .icard .sb { margin-top:6px; display:flex; gap:5px; flex-wrap:wrap; }
+
   /* Modal */
   .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:48px 16px; overflow-y:auto; }
   .modal-bg.show { display:flex; }
-  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:720px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
-  .modal > header { display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:760px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
+  .modal > header { display:flex; align-items:center; gap:12px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal > header img { width:40px; height:40px; object-fit:contain; background:var(--surface-2); border-radius:8px; padding:3px; }
   .modal > header b { font-size:16px; }
   .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
   .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
@@ -116,7 +140,7 @@
   .grid3 { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
   .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
 
-  /* Drops grid */
+  /* Drops grid (account detail) */
   .game-section { margin-top: 18px; }
   .game-header { display:flex; align-items:baseline; gap:10px; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:12px; }
   .game-header h3 { font-size:15px; font-weight:800; }
@@ -165,7 +189,7 @@
   <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
     <div>
       <h1>Drops Archive</h1>
-      <div class="sub">Permanent log of every account's claimed drops — kept beyond Twitch's 6-month window, scanned gradually every day.</div>
+      <div class="sub">Permanent, self-contained log of every account's drops — browse by item, game or account to plan sell orders.</div>
     </div>
     <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn-ghost btn-sm" id="syncBtn">Sync from bots</button>
@@ -176,8 +200,11 @@
 
   <div id="banner" style="margin-top:14px;"></div>
 
+  <!-- Overview -->
+  <div class="pstats" id="overview" style="margin:14px 0 4px;"></div>
+
   <!-- Progress -->
-  <div class="panel">
+  <div class="panel" style="margin-top:14px;">
     <div class="ph"><b>Scan progress</b><span class="scanning" id="scanState" style="margin-left:auto;"></span></div>
     <div class="pb">
       <div class="bar"><i id="bar"></i></div>
@@ -196,48 +223,81 @@
     </div>
   </div>
 
-  <!-- Accounts -->
-  <div class="toolbar">
-    <div class="search">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
-      <input id="search" type="text" placeholder="Search by login, username or config…" />
-    </div>
-    <select id="statusFilter">
-      <option value="">All statuses</option>
-      <option value="ok">Scanned OK</option>
-      <option value="pending">Not scanned yet</option>
-      <option value="token_invalid">Token invalid</option>
-      <option value="error">Error</option>
-    </select>
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="items">By item</button>
+    <button class="tab" data-tab="games">By game</button>
+    <button class="tab" data-tab="accounts">Accounts</button>
   </div>
 
-  <div class="panel">
-    <div class="pb" style="padding:0;">
-      <div style="overflow-x:auto;">
-        <table>
-          <thead><tr>
-            <th>Login</th>
-            <th>Email</th>
-            <th>Password</th>
-            <th class="hide-sm">Bot</th>
-            <th>Drops</th>
-            <th class="hide-sm">Last scan</th>
-            <th>Status</th>
-            <th></th>
-          </tr></thead>
-          <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
-        </table>
+  <!-- By item -->
+  <section class="view active" id="view-items">
+    <div class="toolbar">
+      <div class="search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+        <input id="itemSearch" type="text" placeholder="Search items by name…" />
+      </div>
+      <select id="itemGame"><option value="">All games</option></select>
+      <span class="sub" id="itemCount"></span>
+    </div>
+    <div id="items"><div class="empty">Loading…</div></div>
+  </section>
+
+  <!-- By game -->
+  <section class="view" id="view-games">
+    <div class="panel" style="margin-top:14px;">
+      <div class="pb" style="padding:0;">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Game</th><th>Items held</th><th>Distinct items</th><th>Accounts</th><th class="hide-sm">Total drops</th></tr></thead>
+            <tbody id="gameRows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
-  </div>
+  </section>
+
+  <!-- Accounts -->
+  <section class="view" id="view-accounts">
+    <div class="toolbar">
+      <div class="search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+        <input id="search" type="text" placeholder="Search by login, username or config…" />
+      </div>
+      <select id="statusFilter">
+        <option value="">All statuses</option>
+        <option value="ok">Scanned OK</option>
+        <option value="pending">Not scanned yet</option>
+        <option value="token_invalid">Token invalid</option>
+        <option value="error">Error</option>
+      </select>
+    </div>
+    <div class="panel">
+      <div class="pb" style="padding:0;">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr>
+              <th>Login</th><th>Email</th><th>Password</th><th class="hide-sm">Bot</th><th>Drops</th><th class="hide-sm">Last scan</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
 </main>
+
+<!-- Item -> accounts modal -->
+<div class="modal-bg" id="itemBg">
+  <div class="modal">
+    <header><img id="iImg" alt="" style="display:none;"><b id="iTitle">Item</b><button class="x" id="iClose">&times;</button></header>
+    <div class="mbody" id="iBody"></div>
+  </div>
+</div>
 
 <!-- Account detail modal -->
 <div class="modal-bg" id="detailBg">
-  <div class="modal" style="max-width:760px;">
-    <header><b id="dTitle">Account</b><button class="x" id="dClose">&times;</button></header>
-    <div class="mbody" id="dBody"></div>
-  </div>
+  <div class="modal"><header><b id="dTitle">Account</b><button class="x" id="dClose">&times;</button></header><div class="mbody" id="dBody"></div></div>
 </div>
 
 <!-- Import credentials modal -->
@@ -248,10 +308,9 @@
       <div>
         <label class="lbl">Accounts JSON</label>
         <textarea id="credInput" placeholder='[
-  { "username": "Marol1yr08p", "password": "CrkNc1OlcGTz", "email": "..." },
-  { "username": "Marolqig5x7", "password": "OTZMgTp9wlp7", "email": "..." }
+  { "username": "Marol1yr08p", "password": "CrkNc1OlcGTz", "email": "..." }
 ]'></textarea>
-        <div class="hint" style="margin-top:6px;">Paste a list of <code>{ username, password, email }</code> objects (with or without surrounding <code>[ ]</code> and trailing commas). They're matched to accounts by <b>username = Twitch login</b>. Passwords are stored encrypted. Unmatched usernames are reported back.</div>
+        <div class="hint" style="margin-top:6px;">Paste a list of <code>{ username, password, email }</code> objects (with or without surrounding <code>[ ]</code> and trailing commas). Matched to accounts by <b>username = Twitch login</b>. Passwords stored encrypted. Unmatched usernames are reported.</div>
       </div>
       <div id="credResult"></div>
     </div>
@@ -275,9 +334,7 @@ async function api(url, opts){
   let data = null;
   try { data = await r.json(); } catch { data = null; }
   if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
-  if (!r.ok || (data && data.success === false)) {
-    throw new Error((data && data.message) || ("HTTP " + r.status));
-  }
+  if (!r.ok || (data && data.success === false)) throw new Error((data && data.message) || ("HTTP " + r.status));
   return data;
 }
 
@@ -290,8 +347,7 @@ function timeAgo(s){
   if (!s) return "never";
   const d = new Date(s); if (isNaN(d)) return "—";
   let sec = Math.floor((Date.now()-d.getTime())/1000); if (sec<0) sec=0;
-  const u=[["d",86400],["h",3600],["m",60]];
-  for (const [n,v] of u){ const x=Math.floor(sec/v); if (x>=1) return x+n+" ago"; }
+  for (const [n,v] of [["d",86400],["h",3600],["m",60]]){ const x=Math.floor(sec/v); if (x>=1) return x+n+" ago"; }
   return "just now";
 }
 
@@ -301,17 +357,52 @@ function statusChip(s){
   if (s==="error") return '<span class="chip off">Error</span>';
   return '<span class="chip">Pending</span>';
 }
+function badge(state){
+  if (state==="connect") return '<span class="badge connect">Connect</span>';
+  if (state==="connected") return '<span class="badge connected">Connected</span>';
+  return '<span class="badge claimed">Claimed</span>';
+}
+function stateChipInline(state){
+  if (state==="connect") return '<span class="chip warn">Connect</span>';
+  if (state==="connected") return '<span class="chip">Connected</span>';
+  return '<span class="chip on">Claimed</span>';
+}
+function imgTag(url, cls){
+  if (!url) return '<div class="noimg"></div>';
+  const u = String(url).replace("{width}","64").replace("{height}","64");
+  return '<img class="' + (cls||"") + '" src="' + attr(u) + '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">';
+}
 
-// -------- Progress --------
-function fmtPerAcct(ms){
-  const h = Math.round(ms/3600000);
-  if (h >= 1) return h + "h";
-  return Math.round(ms/60000) + "m";
+// -------- Tabs --------
+let activeTab = "items";
+function switchTab(t){
+  activeTab = t;
+  document.querySelectorAll(".tab").forEach((b)=>b.classList.toggle("active", b.dataset.tab===t));
+  document.querySelectorAll(".view").forEach((v)=>v.classList.remove("active"));
+  $("view-" + t).classList.add("active");
+  if (t==="items") loadItems();
+  else if (t==="games") loadGames();
+  else loadAccounts();
+}
+document.querySelectorAll(".tab").forEach((b)=> b.addEventListener("click", ()=>switchTab(b.dataset.tab)));
+
+// -------- Overview + progress --------
+function fmtPerAcct(ms){ const h=Math.round(ms/3600000); return h>=1 ? h+"h" : Math.round(ms/60000)+"m"; }
+
+async function loadOverview(){
+  try {
+    const o = (await api("/drops-archive/overview")).overview;
+    $("overview").innerHTML =
+      '<div class="stat accent"><b>' + o.totalItemsHeld + '</b><span>Items held</span></div>' +
+      '<div class="stat"><b>' + o.items + '</b><span>Distinct items</span></div>' +
+      '<div class="stat"><b>' + o.games + '</b><span>Games</span></div>' +
+      '<div class="stat"><b>' + o.accounts + '</b><span>Accounts</span></div>' +
+      '<div class="stat"><b>' + o.totalDrops + '</b><span>Log entries</span></div>';
+  } catch {}
 }
 
 async function loadProgress(){
-  let p;
-  try { p = (await api("/drops-archive/progress")).progress; } catch { return; }
+  let p; try { p = (await api("/drops-archive/progress")).progress; } catch { return; }
   const c = p.counts;
   const pct = c.total ? Math.round((c.scannedWindow / c.total) * 100) : 0;
   $("bar").style.width = pct + "%";
@@ -319,17 +410,132 @@ async function loadProgress(){
     '<div class="stat"><b>' + c.total + '</b><span>Accounts</span></div>' +
     '<div class="stat green"><b>' + c.scannedWindow + '</b><span>Scanned (' + fmtPerAcct(p.perAccountMs) + ')</span></div>' +
     '<div class="stat"><b>' + c.due + '</b><span>Queued</span></div>' +
-    '<div class="stat green"><b>' + c.totalDrops + '</b><span>Logged drops</span></div>' +
     '<div class="stat warn"><b>' + c.tokenInvalid + '</b><span>Bad token</span></div>' +
     '<div class="stat red"><b>' + c.error + '</b><span>Errors</span></div>';
   $("scanState").innerHTML = p.scanning
     ? '<span class="pulse"></span> Scanning ' + esc(p.currentLogin||"") + "…"
     : (p.enabled ? "Idle — waiting for next due account" : "Scanner paused");
-  // Reflect scheduler state without clobbering a user mid-toggle.
   if (document.activeElement !== $("schedToggle")) $("schedToggle").checked = p.enabled;
   $("schedLabel").textContent = p.enabled ? "Scanner on" : "Scanner paused";
   if (document.activeElement !== $("rate")) $("rate").value = String(p.intervalMs);
 }
+
+// -------- By item --------
+let gamesLoadedForFilter = false;
+async function ensureGameFilter(){
+  if (gamesLoadedForFilter) return;
+  try {
+    const g = (await api("/drops-archive/by-game")).games;
+    const cur = $("itemGame").value;
+    $("itemGame").innerHTML = '<option value="">All games</option>' +
+      g.map((x)=>'<option value="' + attr(x.game||"Other rewards") + '">' + esc(x.game||"Other rewards") + " (" + x.items + ")</option>").join("");
+    $("itemGame").value = cur;
+    gamesLoadedForFilter = true;
+  } catch {}
+}
+
+async function loadItems(){
+  ensureGameFilter();
+  const search = encodeURIComponent($("itemSearch").value.trim());
+  const game = encodeURIComponent($("itemGame").value);
+  let data;
+  try { data = await api("/drops-archive/by-item?search=" + search + "&game=" + game); }
+  catch (e) { $("items").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
+  const items = data.items || [];
+  $("itemCount").textContent = items.length ? items.length + " distinct item(s)" : "";
+  if (!items.length){ $("items").innerHTML = '<div class="empty">No items logged yet. Go to <b>Accounts</b> → Sync from bots, then let it scan.</div>'; return; }
+  $("items").innerHTML = '<div class="igrid">' + items.map(itemCard).join("") + "</div>";
+}
+
+function itemCard(it){
+  const sb = [];
+  if (it.claimed) sb.push('<span class="chip on">' + it.claimed + " claimed</span>");
+  if (it.connect) sb.push('<span class="chip warn">' + it.connect + " connect</span>");
+  if (it.connected) sb.push('<span class="chip">' + it.connected + " connected</span>");
+  return '<div class="icard" data-item="' + attr(it.itemKey) + '">' +
+    imgTag(it.image) +
+    '<div style="min-width:0;flex:1;">' +
+      '<div class="nm">' + esc(it.name||"Reward") + "</div>" +
+      '<div class="gm">' + esc(it.game||"Other rewards") + "</div>" +
+      '<div class="big"><b>' + it.totalCount + '</b><span>held · ' + it.accounts + " account" + (it.accounts>1?"s":"") + "</span></div>" +
+      '<div class="sb">' + sb.join("") + "</div>" +
+    "</div></div>";
+}
+
+$("items").addEventListener("click", (e)=>{ const c = e.target.closest("[data-item]"); if (c) openItem(c.dataset.item); });
+let itemSearchTimer=null;
+$("itemSearch").addEventListener("input", ()=>{ clearTimeout(itemSearchTimer); itemSearchTimer=setTimeout(loadItems,300); });
+$("itemGame").addEventListener("change", loadItems);
+
+// -------- Item -> accounts modal --------
+let currentItemAccounts = [];
+async function openItem(itemKey){
+  $("iTitle").textContent = "Loading…"; $("iImg").style.display="none";
+  $("iBody").innerHTML = '<div class="empty">Loading…</div>';
+  $("itemBg").classList.add("show");
+  let d;
+  try { d = await api("/drops-archive/item-accounts?itemKey=" + encodeURIComponent(itemKey)); }
+  catch (e) { $("iBody").innerHTML = '<div class="note err">' + esc(e.message) + "</div>"; return; }
+  currentItemAccounts = d.accounts || [];
+  const it = d.item || {};
+  $("iTitle").innerHTML = esc(it.name||"Item") + ' <span style="color:var(--muted);font-weight:500;font-size:13px;">' + esc(it.game||"") + "</span>";
+  if (it.image){ const u=String(it.image).replace("{width}","64").replace("{height}","64"); $("iImg").src=u; $("iImg").style.display="block"; }
+  const total = currentItemAccounts.reduce((s,a)=>s+(a.count||0),0);
+  let html =
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+      '<div class="stat accent"><b>' + total + '</b><span>Total held</span></div>' +
+      '<div class="stat"><b>' + currentItemAccounts.length + '</b><span>Accounts</span></div>' +
+      (it.campaign ? '<span class="chip">Set: ' + esc(it.campaign) + "</span>" : "") +
+      '<button class="btn-ghost btn-sm" id="copyLogins" style="margin-left:auto;">Copy logins</button>' +
+    "</div>" +
+    '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Held</th><th>State</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
+    currentItemAccounts.map((a)=>
+      "<tr>" +
+        '<td><span class="linkish" data-acc="' + attr(a.accountId) + '">' + esc(a.login||"(no login)") + "</span></td>" +
+        "<td><b>" + (a.count||1) + "</b></td>" +
+        "<td>" + stateChipInline(a.state) + "</td>" +
+        '<td class="hide-sm mono">' + esc(a.container||a.configFile||"—") + "</td>" +
+        '<td class="hide-sm">' + (a.hasPassword ? '<span class="chip on">saved</span>' : '<span class="chip warn">none</span>') + "</td>" +
+      "</tr>").join("") +
+    "</tbody></table></div>";
+  $("iBody").innerHTML = html;
+}
+
+$("iBody").addEventListener("click", (e)=>{
+  const c = e.target.closest("[data-acc]");
+  if (c){ $("itemBg").classList.remove("show"); switchTab("accounts"); setTimeout(()=>openDetail(c.dataset.acc), 50); return; }
+  if (e.target.id === "copyLogins"){
+    const txt = currentItemAccounts.map((a)=>a.login).filter(Boolean).join("\n");
+    navigator.clipboard.writeText(txt).then(()=>banner("Copied " + currentItemAccounts.length + " login(s).","ok")).catch(()=>banner("Copy failed","err"));
+  }
+});
+$("iClose").addEventListener("click", ()=> $("itemBg").classList.remove("show"));
+$("itemBg").addEventListener("click", (e)=>{ if (e.target===$("itemBg")) $("itemBg").classList.remove("show"); });
+
+// -------- By game --------
+async function loadGames(){
+  let data;
+  try { data = await api("/drops-archive/by-game"); }
+  catch (e) { $("gameRows").innerHTML = '<tr><td colspan="5" class="empty">' + esc(e.message) + "</td></tr>"; return; }
+  const games = data.games || [];
+  if (!games.length){ $("gameRows").innerHTML = '<tr><td colspan="5" class="empty">No drops logged yet.</td></tr>'; return; }
+  $("gameRows").innerHTML = games.map((g)=>
+    '<tr class="clickable" data-game="' + attr(g.game||"Other rewards") + '">' +
+      "<td><b>" + esc(g.game||"Other rewards") + "</b></td>" +
+      "<td>" + g.totalCount + "</td>" +
+      "<td>" + g.items + "</td>" +
+      "<td>" + g.accounts + "</td>" +
+      '<td class="hide-sm">' + g.drops + "</td>" +
+    "</tr>").join("");
+}
+$("gameRows").addEventListener("click", (e)=>{
+  const tr = e.target.closest("[data-game]");
+  if (!tr) return;
+  gamesLoadedForFilter = false;
+  switchTab("items");
+  ensureGameFilter().then(()=>{ $("itemGame").value = tr.dataset.game; loadItems(); });
+  $("itemGame").value = tr.dataset.game;
+});
 
 // -------- Accounts --------
 async function loadAccounts(){
@@ -339,10 +545,7 @@ async function loadAccounts(){
   try { data = await api("/drops-archive/accounts?search=" + search + "&status=" + status); }
   catch (e) { $("rows").innerHTML = '<tr><td colspan="8" class="empty">' + esc(e.message) + "</td></tr>"; return; }
   accounts = data.accounts || [];
-  if (!accounts.length){
-    $("rows").innerHTML = '<tr><td colspan="8" class="empty">No accounts yet. Click <b>Sync from bots</b> to import them from your bot configs.</td></tr>';
-    return;
-  }
+  if (!accounts.length){ $("rows").innerHTML = '<tr><td colspan="8" class="empty">No accounts yet. Click <b>Sync from bots</b> to import them from your bot configs.</td></tr>'; return; }
   $("rows").innerHTML = accounts.map(rowHTML).join("");
 }
 
@@ -350,7 +553,7 @@ function rowHTML(a){
   const pw = a.hasPassword
     ? '<span class="pw"><span class="val" data-pw="' + attr(a.id) + '">••••••••</span> <span class="linkish" data-reveal="' + attr(a.id) + '">show</span></span>'
     : '<span class="chip warn">no password</span>';
-  return '<tr>' +
+  return "<tr>" +
     '<td><span class="linkish" data-view="' + attr(a.id) + '">' + esc(a.login || "(no login)") + "</span></td>" +
     "<td>" + (a.credEmail ? esc(a.credEmail) : '<span style="color:var(--muted)">—</span>') + "</td>" +
     "<td>" + pw + "</td>" +
@@ -368,9 +571,7 @@ async function revealPassword(id, el){
     const d = await api("/drops-archive/accounts/" + encodeURIComponent(id) + "/password");
     const span = document.querySelector('[data-pw="' + id + '"]');
     if (span) span.textContent = d.password || "(empty)";
-    el.textContent = "hide";
-    el.dataset.reveal = "";
-    el.dataset.hide = id;
+    el.textContent = "hide"; el.dataset.reveal = ""; el.dataset.hide = id;
   } catch (e) { banner(e.message, "err"); }
 }
 
@@ -380,16 +581,9 @@ async function scanNow(id, btn){
     const d = await api("/drops-archive/accounts/" + encodeURIComponent(id) + "/scan", { method:"POST" });
     if (d.result && d.result.ok) banner("Scanned: " + (d.result.newDrops||0) + " new drop(s), " + (d.result.total||0) + " total.", "ok");
     else banner("Scan failed: " + ((d.result && d.result.error) || "unknown"), "err");
-    await loadAccounts(); await loadProgress();
+    await loadAccounts(); await loadProgress(); await loadOverview();
   } catch (e) { banner(e.message, "err"); }
   finally { btn.disabled = false; btn.textContent = old; }
-}
-
-// -------- Detail modal --------
-function badge(state){
-  if (state==="connect") return '<span class="badge connect">Connect</span>';
-  if (state==="connected") return '<span class="badge connected">Connected</span>';
-  return '<span class="badge claimed">Claimed</span>';
 }
 
 async function openDetail(id){
@@ -413,16 +607,14 @@ async function openDetail(id){
       '<span style="font-size:12.5px;color:var(--muted);">' + d.totalDrops + ' logged drop(s) · last scan ' + esc(timeAgo(acc.lastScanAt)) + " · " + statusChip(acc.lastScanStatus) + "</span>" +
     "</div>";
   if (acc.lastScanError) html += '<div class="note err">' + esc(acc.lastScanError) + "</div>";
-  if (!d.games.length){
-    html += '<div class="empty">No drops logged yet. Use “Scan now”.</div>';
-  } else {
+  if (!d.games.length){ html += '<div class="empty">No drops logged yet. Use “Scan now”.</div>'; }
+  else {
     for (const g of d.games){
-      html += '<div class="game-section"><div class="game-header"><h3>' + esc(g.game) + '</h3><span class="gc">' + g.items.length + " reward" + (g.items.length>1?"s":"") + "</span></div><div class=\"drops-grid\">";
+      html += '<div class="game-section"><div class="game-header"><h3>' + esc(g.game) + '</h3><span class="gc">' + g.items.length + " reward" + (g.items.length>1?"s":"") + '</span></div><div class="drops-grid">';
       for (const it of g.items){
-        const img = (it.imageURL||"").replace("{width}","64").replace("{height}","64");
         html += '<div class="dcard">' +
           (it.count>1 ? '<span class="cnt">' + it.count + "</span>" : "") +
-          (img ? '<img src="' + attr(img) + '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">' : '<div class="noimg"></div>') +
+          imgTag(it.image) +
           '<div class="nm">' + esc(it.name||"Reward") + "</div>" +
           '<div class="meta">' + (it.awardedAt ? "awarded " + esc(timeAgo(it.awardedAt)) : "logged " + esc(timeAgo(it.firstSeenAt))) + "</div>" +
           badge(it.state) +
@@ -437,53 +629,43 @@ async function openDetail(id){
 async function saveCred(id, btn){
   const old = btn.textContent; btn.disabled = true; btn.textContent = "Saving…";
   const body = { username: $("eUser").value, email: $("eMail").value };
-  const pass = $("ePass").value;
-  if (pass) body.password = pass;
+  const pass = $("ePass").value; if (pass) body.password = pass;
   try {
     await api("/drops-archive/accounts/" + encodeURIComponent(id), { method:"PUT", body: JSON.stringify(body) });
-    banner("Credentials saved.", "ok");
-    await loadAccounts();
-    openDetail(id);
+    banner("Credentials saved.", "ok"); await loadAccounts(); openDetail(id);
   } catch (e) { banner(e.message, "err"); }
   finally { btn.disabled = false; btn.textContent = old; }
 }
 
-// -------- Events --------
 $("rows").addEventListener("click", (e)=>{
   const v = e.target.closest("[data-view]"); if (v) return openDetail(v.dataset.view);
   const s = e.target.closest("[data-scan]"); if (s) return scanNow(s.dataset.scan, s);
   const r = e.target.closest("[data-reveal]");
   if (r){
-    if (r.dataset.hide){ // currently shown -> hide
-      const span = document.querySelector('[data-pw="' + r.dataset.hide + '"]');
-      if (span) span.textContent = "••••••••";
-      r.textContent = "show"; r.dataset.reveal = r.dataset.hide; r.dataset.hide = "";
-    } else { revealPassword(r.dataset.reveal, r); }
+    if (r.dataset.hide){ const span = document.querySelector('[data-pw="' + r.dataset.hide + '"]'); if (span) span.textContent="••••••••"; r.textContent="show"; r.dataset.reveal=r.dataset.hide; r.dataset.hide=""; }
+    else revealPassword(r.dataset.reveal, r);
   }
 });
-
 $("dBody").addEventListener("click", (e)=>{
   const sv = e.target.closest("#saveCred"); if (sv) return saveCred(sv.dataset.id, sv);
   const sc = e.target.closest("#scanDetail"); if (sc) return scanNow(sc.dataset.id, sc);
 });
-
 $("dClose").addEventListener("click", ()=> $("detailBg").classList.remove("show"));
 $("detailBg").addEventListener("click", (e)=>{ if (e.target===$("detailBg")) $("detailBg").classList.remove("show"); });
 
+// -------- Credentials + sync --------
 $("credBtn").addEventListener("click", ()=>{ $("credResult").innerHTML=""; $("credBg").classList.add("show"); });
 $("credClose").addEventListener("click", ()=> $("credBg").classList.remove("show"));
 $("credCancel").addEventListener("click", ()=> $("credBg").classList.remove("show"));
 $("credBg").addEventListener("click", (e)=>{ if (e.target===$("credBg")) $("credBg").classList.remove("show"); });
-
 $("credSubmit").addEventListener("click", async (e)=>{
   const btn = e.currentTarget; const old = btn.textContent; btn.disabled = true; btn.textContent = "Importing…";
   try {
     const d = await api("/drops-archive/credentials", { method:"POST", body: JSON.stringify({ accounts: $("credInput").value }) });
-    let msg = "Matched " + d.matched + " account(s).";
-    if (d.unmatchedCount) msg += " " + d.unmatchedCount + " unmatched.";
+    let msg = "Matched " + d.matched + " account(s)."; if (d.unmatchedCount) msg += " " + d.unmatchedCount + " unmatched.";
     $("credResult").innerHTML = '<div class="note ' + (d.matched ? "ok" : "err") + '">' + esc(msg) +
       (d.unmatched && d.unmatched.length ? '<div style="margin-top:6px;font-size:12px;">Unmatched: ' + esc(d.unmatched.slice(0,40).join(", ")) + (d.unmatched.length>40?" …":"") + "</div>" : "") + "</div>";
-    await loadAccounts();
+    if (activeTab==="accounts") loadAccounts();
   } catch (err) { $("credResult").innerHTML = '<div class="note err">' + esc(err.message) + "</div>"; }
   finally { btn.disabled = false; btn.textContent = old; }
 });
@@ -493,32 +675,24 @@ $("syncBtn").addEventListener("click", async (e)=>{
   try {
     const d = await api("/drops-archive/sync", { method:"POST" });
     banner("Synced " + d.accountsFound + " account(s) from " + d.filesRead + " config file(s): " + d.inserted + " new, " + d.updated + " updated.", "ok");
-    await loadAccounts(); await loadProgress();
+    loadOverview(); loadProgress(); if (activeTab==="accounts") loadAccounts();
   } catch (err) { banner(err.message, "err"); }
   finally { btn.disabled = false; btn.textContent = old; }
 });
 
-$("refreshBtn").addEventListener("click", ()=>{ loadAccounts(); loadProgress(); });
-$("schedToggle").addEventListener("change", async (e)=>{
-  try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ enabled: e.target.checked }) }); loadProgress(); }
-  catch (err) { banner(err.message, "err"); }
-});
-$("rate").addEventListener("change", async (e)=>{
-  try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ intervalMs: Number(e.target.value) }) }); loadProgress(); }
-  catch (err) { banner(err.message, "err"); }
-});
+$("refreshBtn").addEventListener("click", ()=>{ loadOverview(); loadProgress(); gamesLoadedForFilter=false; switchTab(activeTab); });
+$("schedToggle").addEventListener("change", async (e)=>{ try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ enabled: e.target.checked }) }); loadProgress(); } catch (err) { banner(err.message,"err"); } });
+$("rate").addEventListener("change", async (e)=>{ try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ intervalMs: Number(e.target.value) }) }); loadProgress(); } catch (err) { banner(err.message,"err"); } });
 
-let searchTimer = null;
-$("search").addEventListener("input", ()=>{ clearTimeout(searchTimer); searchTimer = setTimeout(loadAccounts, 300); });
+let searchTimer=null;
+$("search").addEventListener("input", ()=>{ clearTimeout(searchTimer); searchTimer=setTimeout(loadAccounts,300); });
 $("statusFilter").addEventListener("change", loadAccounts);
 
-$("logoutBtn").addEventListener("click", async ()=>{
-  try { await fetch("/admin-logout", { method:"POST", credentials:"same-origin" }); } catch {}
-  window.location.href = "/admin-login.html";
-});
+$("logoutBtn").addEventListener("click", async ()=>{ try { await fetch("/admin-logout", { method:"POST", credentials:"same-origin" }); } catch {} window.location.href = "/admin-login.html"; });
 
-loadAccounts();
+loadOverview();
 loadProgress();
+loadItems();
 setInterval(loadProgress, 4000);
 </script>
 <script src="/admin-nav.js"></script>
