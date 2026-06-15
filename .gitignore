@@ -4,6 +4,9 @@ node_modules
 # Admin credentials (bcrypt hashes) — never commit
 admins.json
 
+# Site settings written at runtime (e.g. require-2FA flag)
+utils/settings.json
+
 # Local JSON data (migrated into MongoDB)
 orderIds.json
 messages.json

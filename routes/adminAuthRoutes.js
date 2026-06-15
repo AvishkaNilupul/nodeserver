@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 
 const { loadAdmins } = require("../utils/admins");
+const settings = require("../utils/settings");
 const { loginLimiter } = require("../utils/rateLimit");
 
 const router = express.Router();
@@ -47,11 +48,30 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
         .json({ success: false, message: "Invalid credentials" });
     }
 
+    // If this admin has 2FA on, don't create the real session yet — stash a
+    // short-lived pending state and make them pass the code step (/admin-2fa).
+    if (admin.totpEnabled) {
+      req.session.pending2fa = {
+        id: admin.id,
+        username: admin.username,
+        role: admin.role === "superadmin" ? "superadmin" : "admin",
+        at: Date.now(),
+      };
+      return res.json({ success: true, twofa: true });
+    }
+
     req.session.admin = {
       id: admin.id,
       username: admin.username,
       role: admin.role === "superadmin" ? "superadmin" : "admin",
+      tfa: false,
     };
+
+    // When 2FA is mandatory site-wide but this admin hasn't set it up, let them
+    // in only to enrol — the UI sends them to the security page.
+    if (settings.getRequire2fa()) {
+      return res.json({ success: true, mustEnroll: true });
+    }
 
     res.json({ success: true });
   } catch (err) {
