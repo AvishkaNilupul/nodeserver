@@ -85,19 +85,31 @@
       <b>RedeemHub<span>Admin console</span></b>
     </div>
 
-    <h1>Welcome back</h1>
-    <p class="lead">Enter your username and password to access your seller dashboard.</p>
+    <div id="step1">
+      <h1>Welcome back</h1>
+      <p class="lead">Enter your username and password to access your seller dashboard.</p>
 
-    <div class="field">
-      <label>Username</label>
-      <input type="text" id="username" placeholder="Username" autocomplete="off" />
-    </div>
-    <div class="field">
-      <label>Password</label>
-      <input type="password" id="password" placeholder="Enter admin password" autocomplete="off" />
+      <div class="field">
+        <label>Username</label>
+        <input type="text" id="username" placeholder="Username" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" id="password" placeholder="Enter admin password" autocomplete="off" />
+      </div>
+
+      <button onclick="login()">Access panel</button>
     </div>
 
-    <button onclick="login()">Access panel</button>
+    <div id="step2" style="display:none;">
+      <h1>Two-factor</h1>
+      <p class="lead">Enter the 6-digit code from your authenticator app. Lost your phone? Enter one of your backup codes instead.</p>
+      <div class="field">
+        <label>Authentication code</label>
+        <input type="text" id="code" placeholder="123456" autocomplete="one-time-code" inputmode="numeric" />
+      </div>
+      <button onclick="verify2fa()">Verify</button>
+    </div>
 
     <div id="message"></div>
   </div>
@@ -121,7 +133,15 @@
         const data = await res.json();
 
         if (res.ok && data.success) {
-          window.location.href = "/admin.html";
+          if (data.twofa) {
+            document.getElementById("step1").style.display = "none";
+            document.getElementById("step2").style.display = "block";
+            document.getElementById("code").focus();
+          } else if (data.mustEnroll) {
+            window.location.href = "/security.html";
+          } else {
+            window.location.href = "/admin.html";
+          }
         } else {
           message.innerText = data.message || "Invalid password";
         }
@@ -131,8 +151,34 @@
       }
     }
 
+    async function verify2fa() {
+      const token = document.getElementById("code").value.trim();
+      const message = document.getElementById("message");
+      message.innerText = "";
+      try {
+        const res = await fetch("/admin-2fa", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ token }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          window.location.href = "/admin.html";
+        } else {
+          message.innerText = data.message || "Incorrect code";
+        }
+      } catch (err) {
+        console.error(err);
+        message.innerText = "Server error";
+      }
+    }
+
     document.getElementById("password").addEventListener("keypress", (e) => {
       if (e.key === "Enter") login();
+    });
+    document.getElementById("code").addEventListener("keypress", (e) => {
+      if (e.key === "Enter") verify2fa();
     });
   </script>
 <script src="/theme.js"></script>

@@ -34,9 +34,17 @@ async function saveAdmins(admins) {
   await fsp.rename(tmp, adminsFile);
 }
 
-// Public-safe view of an admin (never expose the password hash).
+// Public-safe view of an admin (never expose the password hash or 2FA secret).
 function sanitizeAdmin(admin) {
-  return { id: admin.id, username: admin.username, role: admin.role };
+  return {
+    id: admin.id,
+    username: admin.username,
+    role: admin.role,
+    totpEnabled: !!admin.totpEnabled,
+    backupCodesRemaining: Array.isArray(admin.backupCodes)
+      ? admin.backupCodes.length
+      : 0,
+  };
 }
 
 function findByUsername(admins, username) {
@@ -125,6 +133,56 @@ async function deleteAdmin(id) {
   return sanitizeAdmin(admin);
 }
 
+// --- Two-factor (TOTP) helpers ---------------------------------------------
+
+function getAdminById(id) {
+  return loadAdmins().find((a) => a.id === id) || null;
+}
+
+// Store an encrypted secret as "pending" (enrolment started, not yet confirmed).
+async function setTotpPending(id, encSecret) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  admin.totpPending = encSecret;
+  await saveAdmins(admins);
+}
+
+// Confirm enrolment: promote the pending secret to active and store backup codes.
+async function enableTotp(id, encSecret, backupHashes) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  admin.totpSecret = encSecret;
+  admin.totpEnabled = true;
+  admin.backupCodes = Array.isArray(backupHashes) ? backupHashes : [];
+  delete admin.totpPending;
+  await saveAdmins(admins);
+  return sanitizeAdmin(admin);
+}
+
+// Turn off 2FA and wipe all related material.
+async function disableTotp(id) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  admin.totpEnabled = false;
+  delete admin.totpSecret;
+  delete admin.totpPending;
+  delete admin.backupCodes;
+  await saveAdmins(admins);
+  return sanitizeAdmin(admin);
+}
+
+// Consume (remove) a used backup code by index.
+async function consumeBackupCode(id, index) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin || !Array.isArray(admin.backupCodes)) return;
+  admin.backupCodes.splice(index, 1);
+  await saveAdmins(admins);
+}
+
 module.exports = {
   ROLES,
   loadAdmins,
@@ -133,4 +191,9 @@ module.exports = {
   addAdmin,
   updateAdmin,
   deleteAdmin,
+  getAdminById,
+  setTotpPending,
+  enableTotp,
+  disableTotp,
+  consumeBackupCode,
 };

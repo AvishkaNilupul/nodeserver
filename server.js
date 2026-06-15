@@ -14,7 +14,11 @@ const { createProxyMiddleware } = require("http-proxy-middleware");
 require("dotenv").config();
 
 const config = require("./config/config");
-const { requireAdmin, requireSuperadmin } = require("./middleware/auth");
+const {
+  requireAdmin,
+  requireSuperadmin,
+  enforce2fa,
+} = require("./middleware/auth");
 const adminAuthRoutes = require("./routes/adminAuthRoutes");
 const adminManageRoutes = require("./routes/adminManageRoutes");
 const redeemRoutes = require("./routes/redeemRoutes");
@@ -24,6 +28,7 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const dropScanner = require("./utils/dropScanner");
 const chatSocket = require("./socket/chatSocket");
 const { getOrderByOrderId, authorizeBuyer } = require("./utils/orderIds");
@@ -230,43 +235,52 @@ ${new Date().toISOString()}`,
 // Admin auth routes
 // =========================
 app.use(adminAuthRoutes);
-app.use(adminManageRoutes);
+// 2FA setup + login second step. Mounted before the enforcement guard so an
+// admin who hasn't enrolled yet can still reach these to set it up.
+app.use(twoFactorRoutes);
+app.use(enforce2fa, adminManageRoutes);
 
 // =========================
 // Admin-only pages
 // =========================
-app.get("/orders", requireAdmin, (req, res) => {
+app.get("/orders", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "admin-pages", "orders.html"));
 });
 
-app.get("/admin.html", requireAdmin, (req, res) => {
+app.get("/admin.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin.html"));
 });
 
-app.get("/items", requireAdmin, (req, res) => {
+// Security / 2FA self-service page (any admin; not behind enforce2fa so a
+// not-yet-enrolled admin can actually reach it to set up).
+app.get("/security.html", requireAdmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "security.html"));
+});
+
+app.get("/items", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "admin-pages", "items.html"));
 });
 
-app.get("/inventory", requireAdmin, (req, res) => {
+app.get("/inventory", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "admin-pages", "inventory.html"));
 });
 
 // =========================
 // Superadmin-only pages
 // =========================
-app.get("/superadmin.html", requireSuperadmin, (req, res) => {
+app.get("/superadmin.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "superadmin.html"));
 });
 
-app.get("/twitch-inventory.html", requireSuperadmin, (req, res) => {
+app.get("/twitch-inventory.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "twitch-inventory.html"));
 });
 
-app.get("/bots.html", requireSuperadmin, (req, res) => {
+app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
-app.get("/drops-archive.html", requireSuperadmin, (req, res) => {
+app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
 });
 
@@ -286,10 +300,10 @@ const marketplaceProxy = createProxyMiddleware({
   ws: false,
 });
 
-app.get("/marketplace.html", requireAdmin, (req, res) => {
+app.get("/marketplace.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "marketplace.html"));
 });
-app.use("/marketplace", requireAdmin, marketplaceProxy);
+app.use("/marketplace", requireAdmin, enforce2fa, marketplaceProxy);
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -305,11 +319,11 @@ app.get("/", (req, res) => {
 // =========================
 app.use(redeemRoutes);
 app.use(chatRoutes);
-app.use(requireAdmin, itemRoutes);
-app.use(requireAdmin, inventoryRoutes);
-app.use(requireAdmin, orderRoutes);
-app.use(botConfigRoutes);
-app.use(dropArchiveRoutes);
+app.use(requireAdmin, enforce2fa, itemRoutes);
+app.use(requireAdmin, enforce2fa, inventoryRoutes);
+app.use(requireAdmin, enforce2fa, orderRoutes);
+app.use(enforce2fa, botConfigRoutes);
+app.use(enforce2fa, dropArchiveRoutes);
 
 // =========================
 // Socket.IO
