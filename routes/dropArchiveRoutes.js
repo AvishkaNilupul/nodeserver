@@ -5,6 +5,7 @@ const path = require("path");
 const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const DropSet = require("../models/DropSet");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
 
@@ -342,6 +343,22 @@ function searchRegex(s) {
   return new RegExp(String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
+// Aggregation expression for the grouping key: stored itemKey when present,
+// else a computed name|game (handles rows logged before itemKey existed).
+const itemKeyExpr = {
+  $cond: [
+    { $gt: [{ $strLenCP: { $ifNull: ["$itemKey", ""] } }, 0] },
+    "$itemKey",
+    {
+      $concat: [
+        { $toLower: { $trim: { input: { $ifNull: ["$name", ""] } } } },
+        "|",
+        { $toLower: { $trim: { input: { $ifNull: ["$game", ""] } } } },
+      ],
+    },
+  ],
+};
+
 // High-level totals for the dashboard header.
 router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
   try {
@@ -353,7 +370,11 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
           { $group: { _id: null, n: { $sum: "$count" } } },
         ]),
         DropLog.distinct("game"),
-        DropLog.distinct("itemKey"),
+        DropLog.aggregate([
+          { $addFields: { _k: itemKeyExpr } },
+          { $group: { _id: "$_k" } },
+          { $count: "n" },
+        ]),
       ]);
     res.json({
       success: true,
@@ -362,7 +383,7 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         totalDrops,
         totalItemsHeld: (totalItemsHeld[0] && totalItemsHeld[0].n) || 0,
         games: games.filter(Boolean).length,
-        items: items.filter(Boolean).length,
+        items: (items[0] && items[0].n) || 0,
       },
     });
   } catch (err) {
@@ -375,13 +396,14 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
 router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
   try {
     const rows = await DropLog.aggregate([
+      { $addFields: { _k: itemKeyExpr } },
       {
         $group: {
           _id: "$game",
           drops: { $sum: 1 },
           totalCount: { $sum: "$count" },
           accounts: { $addToSet: "$account" },
-          items: { $addToSet: "$itemKey" },
+          items: { $addToSet: "$_k" },
         },
       },
       {
@@ -415,9 +437,12 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
 
     const rows = await DropLog.aggregate([
       { $match: match },
+      // Fall back to a computed name|game key for any row whose itemKey
+      // wasn't backfilled yet, so items never merge into one bucket.
+      { $addFields: { _k: itemKeyExpr } },
       {
         $group: {
-          _id: "$itemKey",
+          _id: "$_k",
           name: { $first: "$name" },
           game: { $first: "$game" },
           imageLocal: { $max: "$imageLocal" },
@@ -483,7 +508,8 @@ router.get(
           .json({ success: false, message: "itemKey required" });
       }
       const rows = await DropLog.aggregate([
-        { $match: { itemKey } },
+        { $addFields: { _k: itemKeyExpr } },
+        { $match: { _k: itemKey } },
         {
           $lookup: {
             from: "botaccounts",
@@ -501,6 +527,11 @@ router.get(
             container: "$acc.container",
             configFile: "$acc.configFile",
             hasPassword: "$acc.hasPassword",
+            name: 1,
+            game: 1,
+            campaign: 1,
+            imageLocal: 1,
+            imageURL: 1,
             count: 1,
             state: 1,
             connected: 1,
@@ -512,9 +543,7 @@ router.get(
         },
         { $sort: { state: 1, login: 1 } },
       ]);
-      const first = await DropLog.findOne({ itemKey })
-        .select("name game imageLocal imageURL campaign")
-        .lean();
+      const first = rows[0];
       res.json({
         success: true,
         item: first
@@ -529,6 +558,262 @@ router.get(
       });
     } catch (err) {
       console.error("drops-archive item-accounts error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
+// Sets / bundles — group items sold together as one order
+// ------------------------------------------------------------------
+
+// Resolve display metadata (name/game/image) for a list of itemKeys from the
+// logged drops, so a set always shows accurate names/images.
+async function resolveItemsMeta(keys) {
+  const uniq = [...new Set(keys.map((k) => String(k || "").trim()).filter(Boolean))];
+  if (!uniq.length) return [];
+  const rows = await DropLog.aggregate([
+    { $addFields: { _k: itemKeyExpr } },
+    { $match: { _k: { $in: uniq } } },
+    {
+      $group: {
+        _id: "$_k",
+        name: { $first: "$name" },
+        game: { $first: "$game" },
+        imageLocal: { $max: "$imageLocal" },
+        imageURL: { $first: "$imageURL" },
+      },
+    },
+  ]);
+  const byKey = new Map(rows.map((r) => [r._id, r]));
+  return uniq.map((k) => {
+    const m = byKey.get(k) || {};
+    return {
+      itemKey: k,
+      name: m.name || k.split("|")[0] || "Reward",
+      game: m.game || (k.split("|")[1] || ""),
+      image: m.imageLocal || m.imageURL || "",
+    };
+  });
+}
+
+function publicSet(s) {
+  return {
+    id: String(s._id),
+    name: s.name,
+    note: s.note || "",
+    items: s.items || [],
+    itemCount: (s.items || []).length,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+  };
+}
+
+// List all sets (lightweight).
+router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
+  try {
+    const sets = await DropSet.find({}).sort({ updatedAt: -1 }).lean();
+    res.json({
+      success: true,
+      sets: sets.map((s) => ({
+        id: String(s._id),
+        name: s.name,
+        note: s.note || "",
+        items: s.items || [],
+        itemCount: (s.items || []).length,
+        updatedAt: s.updatedAt,
+      })),
+    });
+  } catch (err) {
+    console.error("drops-archive sets list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Create a set.
+router.post("/drops-archive/sets", requireSuperadmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const name = String(body.name || "").trim();
+    if (!name) {
+      return res.status(400).json({ success: false, message: "Name required" });
+    }
+    const keys = Array.isArray(body.itemKeys) ? body.itemKeys : [];
+    const items = await resolveItemsMeta(keys);
+    const set = await DropSet.create({
+      name,
+      note: String(body.note || "").trim(),
+      items,
+    });
+    res.json({ success: true, set: publicSet(set) });
+  } catch (err) {
+    console.error("drops-archive set create error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Update a set: rename, note, replace/add/remove items.
+router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
+  try {
+    const set = await DropSet.findById(req.params.id);
+    if (!set) {
+      return res.status(404).json({ success: false, message: "Not found" });
+    }
+    const body = req.body || {};
+    if (typeof body.name === "string" && body.name.trim()) {
+      set.name = body.name.trim();
+    }
+    if (typeof body.note === "string") set.note = body.note.trim();
+
+    let keys = set.items.map((i) => i.itemKey);
+    if (Array.isArray(body.itemKeys)) keys = body.itemKeys;
+    if (Array.isArray(body.addItemKeys)) keys = keys.concat(body.addItemKeys);
+    if (Array.isArray(body.removeItemKeys)) {
+      const rm = new Set(body.removeItemKeys);
+      keys = keys.filter((k) => !rm.has(k));
+    }
+    set.items = await resolveItemsMeta(keys);
+    await set.save();
+    res.json({ success: true, set: publicSet(set) });
+  } catch (err) {
+    console.error("drops-archive set update error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Delete a set.
+router.delete("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
+  try {
+    await DropSet.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("drops-archive set delete error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Fulfillment: which accounts can deliver the whole bundle, plus per-item stock.
+router.get(
+  "/drops-archive/sets/:id/fulfillment",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const set = await DropSet.findById(req.params.id).lean();
+      if (!set) {
+        return res.status(404).json({ success: false, message: "Not found" });
+      }
+      const keys = (set.items || []).map((i) => i.itemKey);
+      if (!keys.length) {
+        return res.json({
+          success: true,
+          set: { id: String(set._id), name: set.name, note: set.note || "" },
+          items: set.items || [],
+          accounts: [],
+          fullAccounts: 0,
+          bundlesAvailable: 0,
+        });
+      }
+
+      // Per account: which of the set's items they hold and the count of each.
+      const rows = await DropLog.aggregate([
+        { $addFields: { _k: itemKeyExpr } },
+        { $match: { _k: { $in: keys } } },
+        {
+          $group: {
+            _id: { account: "$account", k: "$_k" },
+            count: { $sum: "$count" },
+            state: { $first: "$state" },
+          },
+        },
+        {
+          $group: {
+            _id: "$_id.account",
+            items: {
+              $push: { itemKey: "$_id.k", count: "$count", state: "$state" },
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: "botaccounts",
+            localField: "_id",
+            foreignField: "_id",
+            as: "acc",
+          },
+        },
+        { $unwind: { path: "$acc", preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            accountId: "$_id",
+            login: "$acc.login",
+            container: "$acc.container",
+            configFile: "$acc.configFile",
+            hasPassword: "$acc.hasPassword",
+            items: 1,
+          },
+        },
+      ]);
+
+      const total = keys.length;
+      const accounts = rows
+        .map((r) => {
+          const have = r.items.length;
+          const complete = have === total;
+          const minCount = complete
+            ? Math.min(...r.items.map((i) => i.count || 0))
+            : 0;
+          return {
+            accountId: r.accountId,
+            login: r.login || "",
+            container: r.container || "",
+            configFile: r.configFile || "",
+            hasPassword: !!r.hasPassword,
+            have,
+            total,
+            complete,
+            minCount,
+            haveKeys: r.items.map((i) => i.itemKey),
+          };
+        })
+        .sort((a, b) => b.have - a.have || b.minCount - a.minCount);
+
+      // Per-item stock across all accounts.
+      const perItem = await DropLog.aggregate([
+        { $addFields: { _k: itemKeyExpr } },
+        { $match: { _k: { $in: keys } } },
+        {
+          $group: {
+            _id: "$_k",
+            totalCount: { $sum: "$count" },
+            accounts: { $addToSet: "$account" },
+          },
+        },
+      ]);
+      const stockByKey = new Map(
+        perItem.map((p) => [p._id, { totalCount: p.totalCount, accounts: p.accounts.length }]),
+      );
+      const items = (set.items || []).map((it) => {
+        const s = stockByKey.get(it.itemKey) || { totalCount: 0, accounts: 0 };
+        return { ...it, totalCount: s.totalCount, accounts: s.accounts };
+      });
+
+      const fullAccounts = accounts.filter((a) => a.complete);
+      const bundlesAvailable = fullAccounts.reduce(
+        (sum, a) => sum + a.minCount,
+        0,
+      );
+
+      res.json({
+        success: true,
+        set: { id: String(set._id), name: set.name, note: set.note || "" },
+        items,
+        accounts,
+        fullAccounts: fullAccounts.length,
+        bundlesAvailable,
+      });
+    } catch (err) {
+      console.error("drops-archive fulfillment error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },

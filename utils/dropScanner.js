@@ -159,9 +159,42 @@ function schedule(ms) {
   timer = setTimeout(tick, ms);
 }
 
+// One-time backfill: older rows were logged before itemKey/imageLocal existed.
+// Compute itemKey (name|game, lowercased+trimmed) for any drop missing it so
+// the aggregate views group correctly instead of merging into one item.
+async function backfillItemKeys() {
+  try {
+    // Use the native driver so the aggregation-pipeline update is accepted.
+    const r = await DropLog.collection.updateMany(
+      { $or: [{ itemKey: "" }, { itemKey: { $exists: false } }] },
+      [
+        {
+          $set: {
+            itemKey: {
+              $concat: [
+                { $toLower: { $trim: { input: { $ifNull: ["$name", ""] } } } },
+                "|",
+                { $toLower: { $trim: { input: { $ifNull: ["$game", ""] } } } },
+              ],
+            },
+          },
+        },
+      ],
+    );
+    if (r.modifiedCount) {
+      console.log("dropScanner: backfilled itemKey on", r.modifiedCount, "drops");
+    }
+    return r.modifiedCount || 0;
+  } catch (e) {
+    console.error("dropScanner backfill error:", e.message);
+    return 0;
+  }
+}
+
 function start() {
   if (started) return;
   started = true;
+  backfillItemKeys();
   // Small startup delay so it doesn't compete with boot.
   schedule(5000);
 }
@@ -228,4 +261,5 @@ module.exports = {
   scanAccountNow,
   setEnabled,
   setIntervalMs,
+  backfillItemKeys,
 };
