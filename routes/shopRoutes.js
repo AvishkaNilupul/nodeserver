@@ -20,14 +20,15 @@ function isSuper(req) {
   return req.session?.admin?.role === "superadmin";
 }
 
-// Accounts that hold EVERY item in the set and have not been sold yet. Each
-// such account is one sellable unit (the buyer receives the whole account).
-// Sorted so the account that can deliver the most copies comes first.
-async function availableAccountsForSet(set) {
-  const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
+// Group DropLog by account for a set of item keys, returning every account that
+// holds ALL of `keys` together with the per-item copy counts. This stays inside
+// DropLog (driven by the itemKey index) and does NOT join botaccounts — the
+// sellable/sold/password filtering is done in a second, _id-indexed query so we
+// avoid the expensive per-row $lookup + $strLenCP scan the old pipeline did.
+async function holdingsForKeys(keys) {
   if (!keys.length) return [];
   const total = keys.length;
-  const rows = await DropLog.aggregate([
+  return DropLog.aggregate([
     { $match: { itemKey: { $in: keys } } },
     {
       $group: {
@@ -44,40 +45,145 @@ async function availableAccountsForSet(set) {
       },
     },
     { $match: { have: total } },
-    {
-      $lookup: {
-        from: "botaccounts",
-        localField: "_id",
-        foreignField: "_id",
-        as: "acc",
-      },
-    },
-    { $unwind: "$acc" },
-    // Only sell accounts that actually have a stored password — accounts
-    // without one can't be delivered, so they're excluded from stock.
-    {
-      $match: {
-        "acc.soldAt": null,
-        $expr: {
-          $gt: [{ $strLenCP: { $ifNull: ["$acc.credPassword", ""] } }, 0],
-        },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        accountId: "$_id",
-        login: "$acc.login",
-        hasPassword: "$acc.hasPassword",
-        lastScanStatus: "$acc.lastScanStatus",
-        minCount: 1,
-        items: 1,
-      },
-    },
-    // Prefer accounts with healthy tokens and more spare copies of the bundle.
-    { $sort: { minCount: -1, login: 1 } },
   ]);
-  return rows;
+}
+
+// Of a list of candidate account ids, return the subset that is still sellable
+// (not sold AND has a stored password). One indexed query on _id.
+async function sellableAccountMap(ids) {
+  if (!ids.length) return new Map();
+  const accs = await BotAccount.find(
+    { _id: { $in: ids }, soldAt: null },
+    { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1 },
+  ).lean();
+  const map = new Map();
+  for (const a of accs) {
+    // Accounts without a stored password can't be delivered, so they're
+    // excluded from the sellable pool.
+    if (a.credPassword && String(a.credPassword).length > 0) {
+      map.set(String(a._id), a);
+    }
+  }
+  return map;
+}
+
+// Accounts that hold EVERY item in the set and have not been sold yet. Each
+// such account is one sellable unit (the buyer receives the whole account).
+// Sorted so the account that can deliver the most copies comes first.
+async function availableAccountsForSet(set) {
+  const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
+  if (!keys.length) return [];
+  const rows = await holdingsForKeys(keys);
+  if (!rows.length) return [];
+  const accMap = await sellableAccountMap(rows.map((r) => r._id));
+  const out = [];
+  for (const r of rows) {
+    const acc = accMap.get(String(r._id));
+    if (!acc) continue;
+    out.push({
+      accountId: r._id,
+      login: acc.login,
+      hasPassword: acc.hasPassword,
+      lastScanStatus: acc.lastScanStatus,
+      minCount: r.minCount,
+      items: r.items,
+    });
+  }
+  // Prefer accounts with more spare copies of the bundle, then by login.
+  out.sort(
+    (a, b) =>
+      b.minCount - a.minCount ||
+      String(a.login || "").localeCompare(String(b.login || "")),
+  );
+  return out;
+}
+
+// Compute stock + delivery preview for MANY sets in a single DropLog
+// aggregation + a single botaccounts query, instead of one aggregation per set
+// (the old N+1 that made the Shop page slow). Returns a Map<setId, {stock,
+// topItems}> where topItems are the per-item copy counts of the account that
+// would be delivered next.
+async function stockForSets(sets) {
+  const result = new Map();
+  // Union of every key across all listed sets -> one indexed aggregation.
+  const allKeys = [
+    ...new Set(
+      sets.flatMap((s) => (s.items || []).map((i) => i.itemKey).filter(Boolean)),
+    ),
+  ];
+  if (!allKeys.length) {
+    for (const s of sets) result.set(String(s._id), { stock: 0, topItems: [] });
+    return result;
+  }
+  // account -> [{k,count}] across the union of keys (accounts holding ANY key).
+  const rows = await DropLog.aggregate([
+    { $match: { itemKey: { $in: allKeys } } },
+    {
+      $group: {
+        _id: { account: "$account", k: "$itemKey" },
+        count: { $sum: "$count" },
+      },
+    },
+    {
+      $group: {
+        _id: "$_id.account",
+        items: { $push: { k: "$_id.k", count: "$count" } },
+      },
+    },
+  ]);
+  const accMap = await sellableAccountMap(rows.map((r) => r._id));
+  // Keep only sellable accounts; build id -> Map(key->count).
+  const holdings = [];
+  for (const r of rows) {
+    if (!accMap.has(String(r._id))) continue;
+    const m = new Map();
+    for (const it of r.items) m.set(it.k, it.count || 0);
+    holdings.push(m);
+  }
+  // For each set, count sellable accounts that hold all its keys and remember
+  // the one with the most spare copies for the ×N preview.
+  for (const set of sets) {
+    const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
+    if (!keys.length) {
+      result.set(String(set._id), { stock: 0, topItems: [] });
+      continue;
+    }
+    let stock = 0;
+    let bestMin = -1;
+    let bestMap = null;
+    for (const m of holdings) {
+      let ok = true;
+      let min = Infinity;
+      for (const k of keys) {
+        const c = m.get(k);
+        if (!c) {
+          ok = false;
+          break;
+        }
+        if (c < min) min = c;
+      }
+      if (!ok) continue;
+      stock += 1;
+      if (min > bestMin) {
+        bestMin = min;
+        bestMap = m;
+      }
+    }
+    const topItems = bestMap
+      ? keys.map((k) => ({ k, count: bestMap.get(k) || 0 }))
+      : [];
+    result.set(String(set._id), { stock, topItems });
+  }
+  return result;
+}
+
+// Short-lived cache for the listings payload. Browsing the Shop is read-heavy
+// and stock only changes on buy/refund (or a scan), so a few seconds of
+// staleness is fine — and the buy path re-validates stock atomically anyway.
+let listingsCache = { at: 0, data: null };
+const LISTINGS_TTL_MS = 15000;
+function invalidateListingsCache() {
+  listingsCache = { at: 0, data: null };
 }
 
 // Per-item copy counts for the account that would be delivered next (the top
@@ -86,6 +192,13 @@ async function availableAccountsForSet(set) {
 function countsFromRow(row) {
   const map = new Map();
   for (const it of (row && row.items) || []) map.set(it.k, it.count || 0);
+  return map;
+}
+
+// Same as countsFromRow but for the {k,count}[] shape returned by stockForSets.
+function countsFromItems(items) {
+  const map = new Map();
+  for (const it of items || []) map.set(it.k, it.count || 0);
   return map;
 }
 
@@ -149,17 +262,20 @@ router.get("/shop/me", requireAdmin, (req, res) => {
 // ------------------------------------------------------------------
 router.get("/shop/listings", requireAdmin, async (req, res) => {
   try {
+    if (listingsCache.data && Date.now() - listingsCache.at < LISTINGS_TTL_MS) {
+      return res.json({ success: true, listings: listingsCache.data });
+    }
     const sets = await DropSet.find({ listed: true, price: { $gt: 0 } })
       .sort({ updatedAt: -1 })
       .lean();
-    // Compute each bundle's stock in parallel rather than sequentially so the
-    // Shop page loads in one round-trip's worth of time, not N.
-    const listings = await Promise.all(
-      sets.map(async (set) => {
-        const accounts = await availableAccountsForSet(set);
-        return listingView(set, accounts.length, countsFromRow(accounts[0]));
-      }),
-    );
+    // One DropLog aggregation + one botaccounts query for ALL bundles, instead
+    // of an aggregation per bundle.
+    const stockMap = await stockForSets(sets);
+    const listings = sets.map((set) => {
+      const s = stockMap.get(String(set._id)) || { stock: 0, topItems: [] };
+      return listingView(set, s.stock, countsFromItems(s.topItems));
+    });
+    listingsCache = { at: Date.now(), data: listings };
     res.json({ success: true, listings });
   } catch (err) {
     console.error("shop listings error:", err.message);
@@ -310,6 +426,8 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
       { _id: account._id },
       { $set: { soldPurchaseId: String(purchase._id) } },
     );
+    // Stock changed: drop the cached listings so the next load is accurate.
+    invalidateListingsCache();
 
     // Audit the spend (best-effort; never blocks the sale).
     BalanceLog.create({
@@ -414,6 +532,8 @@ router.post(
       p.refundedAt = new Date();
       p.refundedBy = req.session.admin.id;
       await p.save();
+      // The account is back in the pool: invalidate the cached listings.
+      invalidateListingsCache();
 
       BalanceLog.create({
         adminId: p.buyerAdminId,
