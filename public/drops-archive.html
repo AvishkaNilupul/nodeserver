@@ -1,912 +1,3046 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-
-<head>
-<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Drops Archive</title>
-<style>
-  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
-  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
-  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
-  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
-  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
-  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
-  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
-  html[data-theme="dark"] .tab.active{background:rgba(99,102,241,0.18);}
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
-  .themebtn{cursor:pointer;}
-
-  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
-  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
-  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
-  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
-  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
-  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
-  .nav .links a:hover { background: var(--surface-2); }
-  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
-  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
-  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
-  .nav .me .who { line-height: 1.2; min-width: 0; }
-  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
-  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
-  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
-  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
-  .nav .me .logout + .logout { margin-left: 8px; }
-
-  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
-  .page h1 { font-size: 22px; font-weight: 800; }
-  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
-
-  button { padding: 9px 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 13.5px; }
-  button:hover { opacity: 0.94; }
-  button:disabled { opacity:.5; cursor: default; }
-  .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
-  .btn-ghost:hover { background: var(--surface-2); opacity:1; }
-  .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
-
-  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 16px 0 14px; }
-  .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
-  .search input { width:100%; padding: 11px 13px 11px 38px; border-radius: 11px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline:none; font-family:inherit; }
-  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
-  .search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color: var(--muted); }
-  select { padding: 10px 12px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 13.5px; font-family:inherit; outline:none; }
-
-  /* Panels / progress */
-  .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 18px; overflow:hidden; }
-  .panel .ph { display:flex; align-items:center; gap:10px; padding: 14px 18px; border-bottom:1px solid var(--line); }
-  .panel .ph b { font-size: 15px; }
-  .panel .pb { padding: 16px 18px; }
-  .bar { height: 12px; border-radius: 999px; background: var(--surface-2); overflow:hidden; border:1px solid var(--line); }
-  .bar > i { display:block; height:100%; background: linear-gradient(90deg,var(--accent2),var(--accent)); width:0%; transition: width .4s ease; }
-  .pstats { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
-  .stat { background: var(--surface-2); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; min-width: 84px; }
-  .stat b { font-size: 18px; display:block; }
-  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
-  .stat.green b{color:var(--green);} .stat.red b{color:var(--red);} .stat.warn b{color:var(--yellow);} .stat.accent b{color:var(--accent);}
-  .pctl { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:14px; padding-top:14px; border-top:1px dashed var(--line); }
-  .scanning { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
-  .pulse { width:9px; height:9px; border-radius:50%; background: var(--green); box-shadow:0 0 0 0 rgba(16,185,129,.5); animation: pulse 1.4s infinite; }
-  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(16,185,129,.5);} 70%{box-shadow:0 0 0 8px rgba(16,185,129,0);} 100%{box-shadow:0 0 0 0 rgba(16,185,129,0);} }
-
-  .switch { display:inline-flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; user-select:none; }
-  .switch input { display:none; }
-  .switch .track { width:38px; height:22px; border-radius:999px; background: var(--line); position:relative; transition: background .15s; }
-  .switch .track::after { content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; transition: left .15s; box-shadow:0 1px 2px rgba(0,0,0,.2); }
-  .switch input:checked + .track { background: var(--green); }
-  .switch input:checked + .track::after { left:18px; }
-
-  /* Tabs */
-  .tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin: 6px 0 4px; }
-  .tab { padding:10px 16px; border:none; background:none; color:var(--muted); font-weight:600; font-size:14px; border-radius:10px 10px 0 0; cursor:pointer; }
-  .tab:hover { background: var(--surface-2); opacity:1; }
-  .tab.active { background:#eef2ff; color:var(--accent); }
-  .view { display:none; }
-  .view.active { display:block; }
-
-  /* Tables */
-  table { width:100%; border-collapse: collapse; font-size: 13.5px; }
-  th, td { text-align:left; padding: 10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
-  th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
-  tr:last-child td { border-bottom:none; }
-  tbody tr:hover { background: var(--surface-2); }
-  tr.clickable { cursor:pointer; }
-  .mono { font-family: ui-monospace, monospace; font-size:12.5px; }
-  .chip { display:inline-flex; align-items:center; gap:5px; padding: 3px 9px; border-radius: 999px; font-size:11.5px; font-weight:600; background: var(--surface-2); color: var(--muted); }
-  .chip.on { background:#ecfdf5; color: var(--green); }
-  .chip.off { background:#fef2f2; color: var(--red); }
-  .chip.warn { background:#fffbeb; color: var(--yellow); }
-  .linkish { color: var(--accent); cursor:pointer; font-weight:600; }
-  .linkish:hover { text-decoration: underline; }
-  .pw { display:inline-flex; align-items:center; gap:6px; }
-  .pw .val { font-family: ui-monospace, monospace; font-size:12.5px; }
-
-  .empty { text-align:center; color: var(--muted); padding: 40px 16px; font-size: 14px; }
-  #banner { margin-bottom: 12px; }
-  .note { padding:10px 14px; border-radius:10px; font-size:13px; }
-  .note.ok { background:#ecfdf5; color:var(--green); }
-  .note.err { background:#fef2f2; color:var(--red); }
-
-  /* Item grid (By item) */
-  .igrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:12px; }
-  .icard { position:relative; background: var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px; cursor:pointer; display:flex; gap:12px; align-items:flex-start; transition: border-color .12s, box-shadow .12s; }
-  .icard .addset { position:absolute; top:8px; right:8px; padding:3px 8px; font-size:11.5px; border-radius:8px; background:var(--surface-2); color:var(--accent); border:1px solid var(--line); font-weight:700; }
-  .icard .addset:hover { background:var(--accent); color:#fff; }
-  .setcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; cursor:pointer; transition:border-color .12s, box-shadow .12s; }
-  .setcard:hover { border-color:var(--accent); box-shadow:0 4px 14px rgba(79,70,229,.12); }
-  .setcard .sn { font-size:15px; font-weight:800; }
-  .setcard .thumbs { display:flex; gap:4px; margin:10px 0; flex-wrap:wrap; }
-  .setcard .thumbs img { width:34px; height:34px; object-fit:contain; background:var(--surface-2); border-radius:7px; padding:2px; }
-  .pickrow { display:flex; align-items:center; gap:10px; padding:9px 11px; border:1px solid var(--line); border-radius:10px; margin-bottom:7px; cursor:pointer; }
-  .pickrow:hover { background:var(--surface-2); border-color:var(--accent); }
-  .pickrow b { font-size:13.5px; } .pickrow span { font-size:11.5px; color:var(--muted); margin-left:auto; }
-  .icard:hover { border-color: var(--accent); box-shadow:0 4px 14px rgba(79,70,229,.12); }
-  .icard img { width:56px; height:56px; object-fit:contain; flex:none; background:var(--surface-2); border-radius:10px; padding:4px; }
-  .icard .noimg { width:56px; height:56px; flex:none; background:var(--surface-2); border-radius:10px; }
-  .icard .nm { font-size:13.5px; font-weight:700; line-height:1.25; word-break:break-word; }
-  .icard .gm { font-size:11.5px; color:var(--muted); margin-top:2px; }
-  .icard .big { margin-top:8px; display:flex; align-items:baseline; gap:6px; }
-  .icard .big b { font-size:20px; color:var(--accent); }
-  .icard .big span { font-size:11.5px; color:var(--muted); }
-  .icard .sb { margin-top:6px; display:flex; gap:5px; flex-wrap:wrap; }
-
-  /* Modal */
-  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:48px 16px; overflow-y:auto; }
-  .modal-bg.show { display:flex; }
-  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:760px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
-  .modal > header { display:flex; align-items:center; gap:12px; padding:16px 20px; border-bottom:1px solid var(--line); }
-  .modal > header img { width:40px; height:40px; object-fit:contain; background:var(--surface-2); border-radius:8px; padding:3px; }
-  .modal > header b { font-size:16px; }
-  .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
-  .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
-  .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
-  .mbody textarea, .mbody input[type="text"], .mbody input:not([type]) { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
-  .mbody textarea { min-height:180px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
-  .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
-  .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
-  .grid3 { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
-  .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
-
-  /* Drops grid (account detail) */
-  .game-section { margin-top: 18px; }
-  .game-header { display:flex; align-items:baseline; gap:10px; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:12px; }
-  .game-header h3 { font-size:15px; font-weight:800; }
-  .game-header .gc { font-size:12px; color:var(--muted); }
-  .drops-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap:12px; }
-  .dcard { background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px; text-align:left; position:relative; }
-  .dcard img { width:64px; height:64px; object-fit:contain; display:block; margin:0 auto 8px; }
-  .dcard .noimg { width:64px; height:64px; margin:0 auto 8px; background:var(--surface); border-radius:8px; }
-  .dcard .cnt { position:absolute; top:8px; right:8px; background:rgba(0,0,0,.6); color:#fff; font-size:11px; font-weight:700; padding:1px 7px; border-radius:6px; }
-  .dcard .nm { font-size:12.5px; font-weight:700; line-height:1.25; word-break:break-word; }
-  .dcard .meta { font-size:10.5px; color:var(--muted); margin-top:4px; }
-  .badge { display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; padding:2px 7px; border-radius:999px; margin-top:6px; }
-  .badge.claimed { background:#ecfdf5; color:var(--green); }
-  .badge.connect { background:#fffbeb; color:var(--yellow); }
-  .badge.connected { background:#eef2ff; color:var(--accent); }
-
-  @media (max-width:768px){ th.hide-sm, td.hide-sm { display:none; } }
-</style>
-</head>
-
-<body>
-<aside class="nav">
-  <div class="brand">
-    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
-    <b>RedeemHub<span>Admin console</span></b>
-  </div>
-  <nav class="links">
-    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
-    <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
-    <a href="/generate.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 7l10 5 10-5"></path></svg> Generate code</a>
-    <a href="/items"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"></path></svg> Items</a>
-    <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
-    <a href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
-    <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
-    <a class="active" href="/drops-archive.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path></svg> Drops archive</a>
-  </nav>
-  <div class="me">
-    <span class="av" id="meAvatar">--</span>
-    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
-    <button class="logout themebtn" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
-    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
-  </div>
-</aside>
-
-<main class="page">
-  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
-    <div>
-      <h1>Drops Archive</h1>
-      <div class="sub">Permanent, self-contained log of every account's drops — browse by item, game or account to plan sell orders.</div>
-    </div>
-    <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn-ghost btn-sm" id="syncBtn">Sync from bots</button>
-      <button class="btn-sm" id="credBtn">Import credentials</button>
-      <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
-    </div>
-  </div>
-
-  <div id="banner" style="margin-top:14px;"></div>
-
-  <!-- Overview -->
-  <div class="pstats" id="overview" style="margin:14px 0 4px;"></div>
-
-  <!-- Progress -->
-  <div class="panel" style="margin-top:14px;">
-    <div class="ph"><b>Scan progress</b><span class="scanning" id="scanState" style="margin-left:auto;"></span></div>
-    <div class="pb">
-      <div class="bar"><i id="bar"></i></div>
-      <div class="pstats" id="pstats"></div>
-      <div class="pctl">
-        <label class="switch"><input type="checkbox" id="schedToggle"><span class="track"></span></label>
-        <span id="schedLabel" style="font-size:13px;">Scanner</span>
-        <span style="font-size:13px;color:var(--muted);">Delay between scans:</span>
-        <select id="rate">
-          <option value="8000">8s (fast)</option>
-          <option value="20000">20s (default)</option>
-          <option value="60000">1m (gentle)</option>
-          <option value="180000">3m (very gentle)</option>
-        </select>
-      </div>
-    </div>
-  </div>
-
-  <!-- Tabs -->
-  <div class="tabs">
-    <button class="tab active" data-tab="items">By item</button>
-    <button class="tab" data-tab="sets">Sets / bundles</button>
-    <button class="tab" data-tab="games">By game</button>
-    <button class="tab" data-tab="accounts">Accounts</button>
-  </div>
-
-  <!-- By item -->
-  <section class="view active" id="view-items">
-    <div class="toolbar">
-      <div class="search">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
-        <input id="itemSearch" type="text" placeholder="Search items by name…" />
-      </div>
-      <select id="itemGame"><option value="">All games</option></select>
-      <span class="sub" id="itemCount"></span>
-    </div>
-    <div id="items"><div class="empty">Loading…</div></div>
-  </section>
-
-  <!-- Sets / bundles -->
-  <section class="view" id="view-sets">
-    <div class="toolbar">
-      <div class="sub">Group items you sell together as one order. For each set you'll see which accounts can deliver the whole bundle.</div>
-      <button class="btn-sm" id="newSetBtn" style="margin-left:auto;">+ New set</button>
-    </div>
-    <div id="sets"><div class="empty">Loading…</div></div>
-  </section>
-
-  <!-- By game -->
-  <section class="view" id="view-games">
-    <div class="panel" style="margin-top:14px;">
-      <div class="pb" style="padding:0;">
-        <div style="overflow-x:auto;">
-          <table>
-            <thead><tr><th>Game</th><th>Items held</th><th>Distinct items</th><th>Accounts</th><th class="hide-sm">Total drops</th></tr></thead>
-            <tbody id="gameRows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Accounts -->
-  <section class="view" id="view-accounts">
-    <div class="toolbar">
-      <div class="search">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
-        <input id="search" type="text" placeholder="Search by login, username or config…" />
-      </div>
-      <select id="statusFilter">
-        <option value="">All statuses</option>
-        <option value="ok">Scanned OK</option>
-        <option value="pending">Not scanned yet</option>
-        <option value="token_invalid">Token invalid</option>
-        <option value="error">Error</option>
-      </select>
-    </div>
-    <div class="panel">
-      <div class="pb" style="padding:0;">
-        <div style="overflow-x:auto;">
-          <table>
-            <thead><tr>
-              <th>Login</th><th>Email</th><th>Password</th><th class="hide-sm">Bot</th><th>Drops</th><th class="hide-sm">Last scan</th><th>Status</th><th></th>
-            </tr></thead>
-            <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </section>
-</main>
-
-<!-- Item -> accounts modal -->
-<div class="modal-bg" id="itemBg">
-  <div class="modal">
-    <header><img id="iImg" alt="" style="display:none;"><b id="iTitle">Item</b><button class="x" id="iClose">&times;</button></header>
-    <div class="mbody" id="iBody"></div>
-  </div>
-</div>
-
-<!-- Set detail / fulfillment modal -->
-<div class="modal-bg" id="setBg">
-  <div class="modal" style="max-width:820px;">
-    <header><b id="sTitle">Set</b><button class="x" id="sClose">&times;</button></header>
-    <div class="mbody" id="sBody"></div>
-  </div>
-</div>
-
-<!-- Create / edit set form -->
-<div class="modal-bg" id="setFormBg">
-  <div class="modal" style="max-width:480px;">
-    <header><b id="sfTitle">New set</b><button class="x" id="sfClose">&times;</button></header>
-    <div class="mbody">
-      <div><label class="lbl">Set name</label><input id="sfName" type="text" placeholder="e.g. Rust starter bundle"></div>
-      <div><label class="lbl">Note (optional)</label><input id="sfNote" type="text" placeholder="e.g. sold as one eBay listing"></div>
-      <div id="sfResult"></div>
-    </div>
-    <footer><button class="btn-ghost" id="sfCancel">Cancel</button><button id="sfSave">Save</button></footer>
-  </div>
-</div>
-
-<!-- Add-to-set picker -->
-<div class="modal-bg" id="pickBg">
-  <div class="modal" style="max-width:440px;">
-    <header><b>Add to set</b><button class="x" id="pickClose">&times;</button></header>
-    <div class="mbody">
-      <div class="hint" id="pickItemLbl"></div>
-      <div id="pickList"></div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <input id="pickNew" type="text" placeholder="…or new set name" style="flex:1;">
-        <button class="btn-sm" id="pickCreate">Create &amp; add</button>
-      </div>
-      <div id="pickResult"></div>
-    </div>
-  </div>
-</div>
-
-<!-- Account detail modal -->
-<div class="modal-bg" id="detailBg">
-  <div class="modal"><header><b id="dTitle">Account</b><button class="x" id="dClose">&times;</button></header><div class="mbody" id="dBody"></div></div>
-</div>
-
-<!-- Import credentials modal -->
-<div class="modal-bg" id="credBg">
-  <div class="modal">
-    <header><b>Import credentials</b><button class="x" id="credClose">&times;</button></header>
-    <div class="mbody">
-      <div>
-        <label class="lbl">Accounts JSON</label>
-        <textarea id="credInput" placeholder='[
-  { "username": "Marol1yr08p", "password": "CrkNc1OlcGTz", "email": "..." }
-]'></textarea>
-        <div class="hint" style="margin-top:6px;">Paste a list of <code>{ username, password, email }</code> objects (with or without surrounding <code>[ ]</code> and trailing commas). Matched to accounts by <b>username = Twitch login</b>. Passwords stored encrypted. Unmatched usernames are reported.</div>
-      </div>
-      <div id="credResult"></div>
-    </div>
-    <footer>
-      <button class="btn-ghost" id="credCancel">Cancel</button>
-      <button id="credSubmit">Import &amp; match</button>
-    </footer>
-  </div>
-</div>
-
-<script src="/theme.js"></script>
-<script>
-const $ = (id) => document.getElementById(id);
-let accounts = [];
-
-function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-function attr(s){ return esc(s); }
-
-async function api(url, opts){
-  const r = await fetch(url, Object.assign({ credentials:"same-origin", headers:{ "Content-Type":"application/json" } }, opts||{}));
-  let data = null;
-  try { data = await r.json(); } catch { data = null; }
-  if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
-  if (!r.ok || (data && data.success === false)) throw new Error((data && data.message) || ("HTTP " + r.status));
-  return data;
-}
-
-function banner(msg, cls){
-  $("banner").innerHTML = msg ? '<div class="note ' + (cls||"ok") + '">' + esc(msg) + '</div>' : "";
-  if (msg) setTimeout(()=>{ if($("banner").textContent===msg) $("banner").innerHTML=""; }, 6000);
-}
-
-function timeAgo(s){
-  if (!s) return "never";
-  const d = new Date(s); if (isNaN(d)) return "—";
-  let sec = Math.floor((Date.now()-d.getTime())/1000); if (sec<0) sec=0;
-  for (const [n,v] of [["d",86400],["h",3600],["m",60]]){ const x=Math.floor(sec/v); if (x>=1) return x+n+" ago"; }
-  return "just now";
-}
-
-function statusChip(s){
-  if (s==="ok") return '<span class="chip on">OK</span>';
-  if (s==="token_invalid") return '<span class="chip off">Token invalid</span>';
-  if (s==="error") return '<span class="chip off">Error</span>';
-  return '<span class="chip">Pending</span>';
-}
-function badge(state){
-  if (state==="connect") return '<span class="badge connect">Connect</span>';
-  if (state==="connected") return '<span class="badge connected">Connected</span>';
-  return '<span class="badge claimed">Claimed</span>';
-}
-function stateChipInline(state){
-  if (state==="connect") return '<span class="chip warn">Connect</span>';
-  if (state==="connected") return '<span class="chip">Connected</span>';
-  return '<span class="chip on">Claimed</span>';
-}
-function imgTag(url, cls){
-  if (!url) return '<div class="noimg"></div>';
-  const u = String(url).replace("{width}","64").replace("{height}","64");
-  return '<img class="' + (cls||"") + '" src="' + attr(u) + '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">';
-}
-
-// -------- Tabs --------
-let activeTab = "items";
-function switchTab(t){
-  activeTab = t;
-  document.querySelectorAll(".tab").forEach((b)=>b.classList.toggle("active", b.dataset.tab===t));
-  document.querySelectorAll(".view").forEach((v)=>v.classList.remove("active"));
-  $("view-" + t).classList.add("active");
-  if (t==="items") loadItems();
-  else if (t==="sets") loadSets();
-  else if (t==="games") loadGames();
-  else loadAccounts();
-}
-document.querySelectorAll(".tab").forEach((b)=> b.addEventListener("click", ()=>switchTab(b.dataset.tab)));
-
-// -------- Overview + progress --------
-function fmtPerAcct(ms){ const h=Math.round(ms/3600000); return h>=1 ? h+"h" : Math.round(ms/60000)+"m"; }
-
-async function loadOverview(){
-  try {
-    const o = (await api("/drops-archive/overview")).overview;
-    $("overview").innerHTML =
-      '<div class="stat accent"><b>' + o.totalItemsHeld + '</b><span>Items held</span></div>' +
-      '<div class="stat"><b>' + o.items + '</b><span>Distinct items</span></div>' +
-      '<div class="stat"><b>' + o.games + '</b><span>Games</span></div>' +
-      '<div class="stat"><b>' + o.accounts + '</b><span>Accounts</span></div>' +
-      '<div class="stat"><b>' + o.totalDrops + '</b><span>Log entries</span></div>';
-  } catch {}
-}
-
-async function loadProgress(){
-  let p; try { p = (await api("/drops-archive/progress")).progress; } catch { return; }
-  const c = p.counts;
-  const pct = c.total ? Math.round((c.scannedWindow / c.total) * 100) : 0;
-  $("bar").style.width = pct + "%";
-  $("pstats").innerHTML =
-    '<div class="stat"><b>' + c.total + '</b><span>Accounts</span></div>' +
-    '<div class="stat green"><b>' + c.scannedWindow + '</b><span>Scanned (' + fmtPerAcct(p.perAccountMs) + ')</span></div>' +
-    '<div class="stat"><b>' + c.due + '</b><span>Queued</span></div>' +
-    '<div class="stat warn"><b>' + c.tokenInvalid + '</b><span>Bad token</span></div>' +
-    '<div class="stat red"><b>' + c.error + '</b><span>Errors</span></div>';
-  $("scanState").innerHTML = p.scanning
-    ? '<span class="pulse"></span> Scanning ' + esc(p.currentLogin||"") + "…"
-    : (p.enabled ? "Idle — waiting for next due account" : "Scanner paused");
-  if (document.activeElement !== $("schedToggle")) $("schedToggle").checked = p.enabled;
-  $("schedLabel").textContent = p.enabled ? "Scanner on" : "Scanner paused";
-  if (document.activeElement !== $("rate")) $("rate").value = String(p.intervalMs);
-}
-
-// -------- By item --------
-let gamesLoadedForFilter = false;
-async function ensureGameFilter(){
-  if (gamesLoadedForFilter) return;
-  try {
-    const g = (await api("/drops-archive/by-game")).games;
-    const cur = $("itemGame").value;
-    $("itemGame").innerHTML = '<option value="">All games</option>' +
-      g.map((x)=>'<option value="' + attr(x.game||"Other rewards") + '">' + esc(x.game||"Other rewards") + " (" + x.items + ")</option>").join("");
-    $("itemGame").value = cur;
-    gamesLoadedForFilter = true;
-  } catch {}
-}
-
-async function loadItems(){
-  ensureGameFilter();
-  const search = encodeURIComponent($("itemSearch").value.trim());
-  const game = encodeURIComponent($("itemGame").value);
-  let data;
-  try { data = await api("/drops-archive/by-item?search=" + search + "&game=" + game); }
-  catch (e) { $("items").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
-  const items = data.items || [];
-  lastItems = items;
-  $("itemCount").textContent = items.length ? items.length + " distinct item(s)" : "";
-  if (!items.length){ $("items").innerHTML = '<div class="empty">No items logged yet. Go to <b>Accounts</b> → Sync from bots, then let it scan.</div>'; return; }
-  $("items").innerHTML = '<div class="igrid">' + items.map(itemCard).join("") + "</div>";
-}
-
-function itemCard(it){
-  const sb = [];
-  if (it.claimed) sb.push('<span class="chip on">' + it.claimed + " claimed</span>");
-  if (it.connect) sb.push('<span class="chip warn">' + it.connect + " connect</span>");
-  if (it.connected) sb.push('<span class="chip">' + it.connected + " connected</span>");
-  return '<div class="icard" data-item="' + attr(it.itemKey) + '">' +
-    '<button class="addset" data-addset="' + attr(it.itemKey) + '" title="Add to a set">+ set</button>' +
-    imgTag(it.image) +
-    '<div style="min-width:0;flex:1;">' +
-      '<div class="nm" style="padding-right:42px;">' + esc(it.name||"Reward") + "</div>" +
-      '<div class="gm">' + esc(it.game||"Other rewards") + "</div>" +
-      '<div class="big"><b>' + it.totalCount + '</b><span>held · ' + it.accounts + " account" + (it.accounts>1?"s":"") + "</span></div>" +
-      '<div class="sb">' + sb.join("") + "</div>" +
-    "</div></div>";
-}
-
-let lastItems = [];
-$("items").addEventListener("click", (e)=>{
-  const add = e.target.closest("[data-addset]");
-  if (add){ e.stopPropagation(); const it = lastItems.find((x)=>x.itemKey===add.dataset.addset); openPicker(it || { itemKey: add.dataset.addset }); return; }
-  const c = e.target.closest("[data-item]"); if (c) openItem(c.dataset.item);
-});
-let itemSearchTimer=null;
-$("itemSearch").addEventListener("input", ()=>{ clearTimeout(itemSearchTimer); itemSearchTimer=setTimeout(loadItems,300); });
-$("itemGame").addEventListener("change", loadItems);
-
-// -------- Item -> accounts modal --------
-let currentItemAccounts = [];
-async function openItem(itemKey){
-  $("iTitle").textContent = "Loading…"; $("iImg").style.display="none";
-  $("iBody").innerHTML = '<div class="empty">Loading…</div>';
-  $("itemBg").classList.add("show");
-  let d;
-  try { d = await api("/drops-archive/item-accounts?itemKey=" + encodeURIComponent(itemKey)); }
-  catch (e) { $("iBody").innerHTML = '<div class="note err">' + esc(e.message) + "</div>"; return; }
-  currentItemAccounts = d.accounts || [];
-  const it = d.item || {};
-  $("iTitle").innerHTML = esc(it.name||"Item") + ' <span style="color:var(--muted);font-weight:500;font-size:13px;">' + esc(it.game||"") + "</span>";
-  if (it.image){ const u=String(it.image).replace("{width}","64").replace("{height}","64"); $("iImg").src=u; $("iImg").style.display="block"; }
-  const total = currentItemAccounts.reduce((s,a)=>s+(a.count||0),0);
-  let html =
-    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
-      '<div class="stat accent"><b>' + total + '</b><span>Total held</span></div>' +
-      '<div class="stat"><b>' + currentItemAccounts.length + '</b><span>Accounts</span></div>' +
-      (it.campaign ? '<span class="chip">Set: ' + esc(it.campaign) + "</span>" : "") +
-      '<button class="btn-ghost btn-sm" id="copyLogins" style="margin-left:auto;">Copy logins</button>' +
-    "</div>" +
-    '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Held</th><th>State</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
-    currentItemAccounts.map((a)=>
-      "<tr>" +
-        '<td><span class="linkish" data-acc="' + attr(a.accountId) + '">' + esc(a.login||"(no login)") + "</span></td>" +
-        "<td><b>" + (a.count||1) + "</b></td>" +
-        "<td>" + stateChipInline(a.state) + "</td>" +
-        '<td class="hide-sm mono">' + esc(a.container||a.configFile||"—") + "</td>" +
-        '<td class="hide-sm">' + (a.hasPassword ? '<span class="chip on">saved</span>' : '<span class="chip warn">none</span>') + "</td>" +
-      "</tr>").join("") +
-    "</tbody></table></div>";
-  $("iBody").innerHTML = html;
-}
-
-$("iBody").addEventListener("click", (e)=>{
-  const c = e.target.closest("[data-acc]");
-  if (c){ $("itemBg").classList.remove("show"); switchTab("accounts"); setTimeout(()=>openDetail(c.dataset.acc), 50); return; }
-  if (e.target.id === "copyLogins"){
-    const txt = currentItemAccounts.map((a)=>a.login).filter(Boolean).join("\n");
-    navigator.clipboard.writeText(txt).then(()=>banner("Copied " + currentItemAccounts.length + " login(s).","ok")).catch(()=>banner("Copy failed","err"));
-  }
-});
-$("iClose").addEventListener("click", ()=> $("itemBg").classList.remove("show"));
-$("itemBg").addEventListener("click", (e)=>{ if (e.target===$("itemBg")) $("itemBg").classList.remove("show"); });
-
-// -------- By game --------
-async function loadGames(){
-  let data;
-  try { data = await api("/drops-archive/by-game"); }
-  catch (e) { $("gameRows").innerHTML = '<tr><td colspan="5" class="empty">' + esc(e.message) + "</td></tr>"; return; }
-  const games = data.games || [];
-  if (!games.length){ $("gameRows").innerHTML = '<tr><td colspan="5" class="empty">No drops logged yet.</td></tr>'; return; }
-  $("gameRows").innerHTML = games.map((g)=>
-    '<tr class="clickable" data-game="' + attr(g.game||"Other rewards") + '">' +
-      "<td><b>" + esc(g.game||"Other rewards") + "</b></td>" +
-      "<td>" + g.totalCount + "</td>" +
-      "<td>" + g.items + "</td>" +
-      "<td>" + g.accounts + "</td>" +
-      '<td class="hide-sm">' + g.drops + "</td>" +
-    "</tr>").join("");
-}
-$("gameRows").addEventListener("click", (e)=>{
-  const tr = e.target.closest("[data-game]");
-  if (!tr) return;
-  gamesLoadedForFilter = false;
-  switchTab("items");
-  ensureGameFilter().then(()=>{ $("itemGame").value = tr.dataset.game; loadItems(); });
-  $("itemGame").value = tr.dataset.game;
-});
-
-// -------- Accounts --------
-async function loadAccounts(){
-  const search = encodeURIComponent($("search").value.trim());
-  const status = encodeURIComponent($("statusFilter").value);
-  let data;
-  try { data = await api("/drops-archive/accounts?search=" + search + "&status=" + status); }
-  catch (e) { $("rows").innerHTML = '<tr><td colspan="8" class="empty">' + esc(e.message) + "</td></tr>"; return; }
-  accounts = data.accounts || [];
-  if (!accounts.length){ $("rows").innerHTML = '<tr><td colspan="8" class="empty">No accounts yet. Click <b>Sync from bots</b> to import them from your bot configs.</td></tr>'; return; }
-  $("rows").innerHTML = accounts.map(rowHTML).join("");
-}
-
-function rowHTML(a){
-  const pw = a.hasPassword
-    ? '<span class="pw"><span class="val" data-pw="' + attr(a.id) + '">••••••••</span> <span class="linkish" data-reveal="' + attr(a.id) + '">show</span></span>'
-    : '<span class="chip warn">no password</span>';
-  return "<tr>" +
-    '<td><span class="linkish" data-view="' + attr(a.id) + '">' + esc(a.login || "(no login)") + "</span></td>" +
-    "<td>" + (a.credEmail ? esc(a.credEmail) : '<span style="color:var(--muted)">—</span>') + "</td>" +
-    "<td>" + pw + "</td>" +
-    '<td class="hide-sm mono">' + esc(a.container || a.configFile || "—") + "</td>" +
-    "<td><b>" + (a.dropCount||0) + "</b></td>" +
-    '<td class="hide-sm">' + esc(timeAgo(a.lastScanAt)) + "</td>" +
-    "<td>" + statusChip(a.lastScanStatus) + "</td>" +
-    '<td style="text-align:right;"><button class="btn-ghost btn-sm" data-scan="' + attr(a.id) + '">Scan now</button> ' +
-      '<button class="btn-ghost btn-sm" data-view="' + attr(a.id) + '">View</button></td>' +
-  "</tr>";
-}
-
-async function revealPassword(id, el){
-  try {
-    const d = await api("/drops-archive/accounts/" + encodeURIComponent(id) + "/password");
-    const span = document.querySelector('[data-pw="' + id + '"]');
-    if (span) span.textContent = d.password || "(empty)";
-    el.textContent = "hide"; el.dataset.reveal = ""; el.dataset.hide = id;
-  } catch (e) { banner(e.message, "err"); }
-}
-
-async function scanNow(id, btn){
-  const old = btn.textContent; btn.disabled = true; btn.textContent = "Scanning…";
-  try {
-    const d = await api("/drops-archive/accounts/" + encodeURIComponent(id) + "/scan", { method:"POST" });
-    if (d.result && d.result.ok) banner("Scanned: " + (d.result.newDrops||0) + " new drop(s), " + (d.result.total||0) + " total.", "ok");
-    else banner("Scan failed: " + ((d.result && d.result.error) || "unknown"), "err");
-    await loadAccounts(); await loadProgress(); await loadOverview();
-  } catch (e) { banner(e.message, "err"); }
-  finally { btn.disabled = false; btn.textContent = old; }
-}
-
-async function openDetail(id){
-  const a = accounts.find((x)=>x.id===id);
-  $("dTitle").textContent = a ? (a.login || "Account") : "Account";
-  $("dBody").innerHTML = '<div class="empty">Loading…</div>';
-  $("detailBg").classList.add("show");
-  let d;
-  try { d = await api("/drops-archive/accounts/" + encodeURIComponent(id)); }
-  catch (e) { $("dBody").innerHTML = '<div class="note err">' + esc(e.message) + "</div>"; return; }
-  const acc = d.account;
-  let html =
-    '<div class="grid3">' +
-      '<div><label class="lbl">Username</label><input id="eUser" type="text" value="' + attr(acc.credUsername || acc.login || "") + '"></div>' +
-      '<div><label class="lbl">Password</label><input id="ePass" type="text" placeholder="' + (acc.hasPassword ? "•••••• (unchanged)" : "not set") + '"></div>' +
-      '<div><label class="lbl">Email</label><input id="eMail" type="text" value="' + attr(acc.credEmail || "") + '"></div>' +
-    "</div>" +
-    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
-      '<button class="btn-sm" id="saveCred" data-id="' + attr(acc.id) + '">Save credentials</button>' +
-      '<button class="btn-ghost btn-sm" id="scanDetail" data-id="' + attr(acc.id) + '">Scan now</button>' +
-      '<span style="font-size:12.5px;color:var(--muted);">' + d.totalDrops + ' logged drop(s) · last scan ' + esc(timeAgo(acc.lastScanAt)) + " · " + statusChip(acc.lastScanStatus) + "</span>" +
-    "</div>";
-  if (acc.lastScanError) html += '<div class="note err">' + esc(acc.lastScanError) + "</div>";
-  if (!d.games.length){ html += '<div class="empty">No drops logged yet. Use “Scan now”.</div>'; }
-  else {
-    for (const g of d.games){
-      html += '<div class="game-section"><div class="game-header"><h3>' + esc(g.game) + '</h3><span class="gc">' + g.items.length + " reward" + (g.items.length>1?"s":"") + '</span></div><div class="drops-grid">';
-      for (const it of g.items){
-        html += '<div class="dcard">' +
-          (it.count>1 ? '<span class="cnt">' + it.count + "</span>" : "") +
-          imgTag(it.image) +
-          '<div class="nm">' + esc(it.name||"Reward") + "</div>" +
-          '<div class="meta">' + (it.awardedAt ? "awarded " + esc(timeAgo(it.awardedAt)) : "logged " + esc(timeAgo(it.firstSeenAt))) + "</div>" +
-          badge(it.state) +
-        "</div>";
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drops Archive</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --accent2: #6366f1;
+        --green: #059669;
+        --red: #dc2626;
+        --yellow: #b45309;
       }
-      html += "</div></div>";
-    }
-  }
-  $("dBody").innerHTML = html;
-}
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        --yellow: #fbbf24;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      html[data-theme="dark"] .nav .me .logout:hover {
+        background: rgba(239, 68, 68, 0.12);
+        border-color: rgba(239, 68, 68, 0.4);
+      }
+      html[data-theme="dark"] .chip.on {
+        background: rgba(52, 211, 153, 0.14);
+      }
+      html[data-theme="dark"] .chip.off {
+        background: rgba(248, 113, 113, 0.14);
+      }
+      html[data-theme="dark"] .chip.warn {
+        background: rgba(251, 191, 36, 0.14);
+      }
+      html[data-theme="dark"] .tab.active {
+        background: rgba(99, 102, 241, 0.18);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        height: 100vh;
+        display: flex;
+        overflow: hidden;
+      }
+      .themebtn {
+        cursor: pointer;
+      }
 
-async function saveCred(id, btn){
-  const old = btn.textContent; btn.disabled = true; btn.textContent = "Saving…";
-  const body = { username: $("eUser").value, email: $("eMail").value };
-  const pass = $("ePass").value; if (pass) body.password = pass;
-  try {
-    await api("/drops-archive/accounts/" + encodeURIComponent(id), { method:"PUT", body: JSON.stringify(body) });
-    banner("Credentials saved.", "ok"); await loadAccounts(); openDetail(id);
-  } catch (e) { banner(e.message, "err"); }
-  finally { btn.disabled = false; btn.textContent = old; }
-}
+      .nav {
+        width: 236px;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        box-shadow: 0 6px 14px rgba(79, 70, 229, 0.32);
+      }
+      .nav .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: #eef2ff;
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .nav .me {
+        border-top: 1px solid var(--line);
+        padding: 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .nav .me .av {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #34d399, #10b981);
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-weight: 700;
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+      .nav .me .who {
+        line-height: 1.2;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13.5px;
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 110px;
+      }
+      .nav .me .who span {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .nav .me .logout {
+        margin-left: auto;
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+      .nav .me .logout:hover {
+        color: #ef4444;
+        border-color: #fecaca;
+        background: #fef2f2;
+      }
+      .nav .me .logout + .logout {
+        margin-left: 8px;
+      }
 
-$("rows").addEventListener("click", (e)=>{
-  const v = e.target.closest("[data-view]"); if (v) return openDetail(v.dataset.view);
-  const s = e.target.closest("[data-scan]"); if (s) return scanNow(s.dataset.scan, s);
-  const r = e.target.closest("[data-reveal]");
-  if (r){
-    if (r.dataset.hide){ const span = document.querySelector('[data-pw="' + r.dataset.hide + '"]'); if (span) span.textContent="••••••••"; r.textContent="show"; r.dataset.reveal=r.dataset.hide; r.dataset.hide=""; }
-    else revealPassword(r.dataset.reveal, r);
-  }
-});
-$("dBody").addEventListener("click", (e)=>{
-  const sv = e.target.closest("#saveCred"); if (sv) return saveCred(sv.dataset.id, sv);
-  const sc = e.target.closest("#scanDetail"); if (sc) return scanNow(sc.dataset.id, sc);
-});
-$("dClose").addEventListener("click", ()=> $("detailBg").classList.remove("show"));
-$("detailBg").addEventListener("click", (e)=>{ if (e.target===$("detailBg")) $("detailBg").classList.remove("show"); });
+      .page {
+        flex: 1;
+        overflow-y: auto;
+        padding: 26px 30px;
+        min-width: 0;
+      }
+      .page h1 {
+        font-size: 22px;
+        font-weight: 800;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin-top: 4px;
+      }
 
-// -------- Sets / bundles --------
-let allSets = [];
-async function loadSets(){
-  let data;
-  try { data = await api("/drops-archive/sets"); }
-  catch (e) { $("sets").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
-  allSets = data.sets || [];
-  if (!allSets.length){ $("sets").innerHTML = '<div class="empty">No sets yet. Click <b>+ New set</b>, or use the <b>+ set</b> button on any item in the By-item tab.</div>'; return; }
-  $("sets").innerHTML = '<div class="igrid">' + allSets.map(setCard).join("") + "</div>";
-}
-function setCard(s){
-  const thumbs = (s.items||[]).slice(0,6).map((i)=> i.image ? '<img src="' + attr(String(i.image).replace("{width}","34").replace("{height}","34")) + '" onerror="this.style.display=\'none\'">' : "").join("");
-  return '<div class="setcard" data-set="' + attr(s.id) + '">' +
-    '<div class="sn">' + esc(s.name) + "</div>" +
-    (s.note ? '<div class="gm" style="color:var(--muted);font-size:12px;margin-top:2px;">' + esc(s.note) + "</div>" : "") +
-    '<div class="thumbs">' + thumbs + "</div>" +
-    '<div class="gm" style="color:var(--muted);font-size:12.5px;">' + s.itemCount + " item" + (s.itemCount!==1?"s":"") + "</div>" +
-  "</div>";
-}
-$("sets").addEventListener("click", (e)=>{ const c = e.target.closest("[data-set]"); if (c) openSet(c.dataset.set); });
+      button {
+        padding: 9px 14px;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        background: linear-gradient(180deg, var(--accent2), var(--accent));
+        color: #fff;
+        font-weight: 600;
+        font-family: inherit;
+        font-size: 13.5px;
+      }
+      button:hover {
+        opacity: 0.94;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .btn-ghost {
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+      .btn-ghost:hover {
+        background: var(--surface-2);
+        opacity: 1;
+      }
+      .btn-sm {
+        padding: 6px 10px;
+        font-size: 12.5px;
+        border-radius: 9px;
+      }
 
-$("newSetBtn").addEventListener("click", ()=>{ setFormMode = { mode:"create" }; $("sfTitle").textContent="New set"; $("sfName").value=""; $("sfNote").value=""; $("sfResult").innerHTML=""; $("setFormBg").classList.add("show"); $("sfName").focus(); });
-let setFormMode = { mode:"create" };
-$("sfClose").addEventListener("click", ()=> $("setFormBg").classList.remove("show"));
-$("sfCancel").addEventListener("click", ()=> $("setFormBg").classList.remove("show"));
-$("setFormBg").addEventListener("click", (e)=>{ if (e.target===$("setFormBg")) $("setFormBg").classList.remove("show"); });
-$("sfSave").addEventListener("click", async (e)=>{
-  const btn=e.currentTarget; const old=btn.textContent; btn.disabled=true; btn.textContent="Saving…";
-  const name=$("sfName").value.trim(), note=$("sfNote").value.trim();
-  if (!name){ $("sfResult").innerHTML='<div class="note err">Name required</div>'; btn.disabled=false; btn.textContent=old; return; }
-  try {
-    if (setFormMode.mode==="create") await api("/drops-archive/sets", { method:"POST", body: JSON.stringify({ name, note }) });
-    else await api("/drops-archive/sets/" + encodeURIComponent(setFormMode.id), { method:"PUT", body: JSON.stringify({ name, note }) });
-    $("setFormBg").classList.remove("show"); loadSets();
-    if (setFormMode.mode!=="create" && $("setBg").classList.contains("show")) openSet(setFormMode.id);
-  } catch (err){ $("sfResult").innerHTML='<div class="note err">' + esc(err.message) + "</div>"; }
-  finally { btn.disabled=false; btn.textContent=old; }
-});
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 16px 0 14px;
+      }
+      .search {
+        flex: 1;
+        min-width: 220px;
+        max-width: 420px;
+        position: relative;
+      }
+      .search input {
+        width: 100%;
+        padding: 11px 13px 11px 38px;
+        border-radius: 11px;
+        border: 1.5px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 14px;
+        outline: none;
+        font-family: inherit;
+      }
+      .search input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+      }
+      .search svg {
+        position: absolute;
+        left: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--muted);
+      }
+      select {
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1.5px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-family: inherit;
+        outline: none;
+      }
 
-let currentSet = null, currentFulfil = null;
-async function openSet(id){
-  $("sTitle").textContent="Loading…"; $("sBody").innerHTML='<div class="empty">Loading…</div>'; $("setBg").classList.add("show");
-  let d;
-  try { d = await api("/drops-archive/sets/" + encodeURIComponent(id) + "/fulfillment"); }
-  catch (e){ $("sBody").innerHTML='<div class="note err">' + esc(e.message) + "</div>"; return; }
-  currentSet = d.set; currentFulfil = d;
-  $("sTitle").innerHTML = esc(d.set.name) + (d.set.note ? ' <span style="color:var(--muted);font-weight:500;font-size:13px;">' + esc(d.set.note) + "</span>" : "");
-  const full = d.accounts.filter((a)=>a.complete);
-  let html =
-    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
-      '<div class="stat accent"><b>' + d.fullAccounts + '</b><span>Accounts with full set</span></div>' +
-      '<div class="stat green"><b>' + d.bundlesAvailable + '</b><span>Full bundles available</span></div>' +
-      '<div class="stat"><b>' + (d.items||[]).length + '</b><span>Items in set</span></div>' +
-      '<button class="btn-ghost btn-sm" id="setEdit" style="margin-left:auto;">Rename</button>' +
-      '<button class="btn-ghost btn-sm" id="setDelete">Delete set</button>' +
-    "</div>";
+      /* Panels / progress */
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        margin-bottom: 18px;
+        overflow: hidden;
+      }
+      .panel .ph {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      .panel .ph b {
+        font-size: 15px;
+      }
+      .panel .pb {
+        padding: 16px 18px;
+      }
+      .bar {
+        height: 12px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        width: 0%;
+        transition: width 0.4s ease;
+      }
+      .pstats {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+      .stat {
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 8px 14px;
+        min-width: 84px;
+      }
+      .stat b {
+        font-size: 18px;
+        display: block;
+      }
+      .stat span {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .stat.green b {
+        color: var(--green);
+      }
+      .stat.red b {
+        color: var(--red);
+      }
+      .stat.warn b {
+        color: var(--yellow);
+      }
+      .stat.accent b {
+        color: var(--accent);
+      }
+      .pctl {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px dashed var(--line);
+      }
+      .scanning {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+      .pulse {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+        animation: pulse 1.4s infinite;
+      }
+      @keyframes pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+        }
+        70% {
+          box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+        }
+      }
 
-  // Items in the set
-  html += '<div><label class="lbl">Items in this set</label>';
-  if (!(d.items||[]).length) html += '<div class="hint">No items yet. Add items from the By-item tab with the “+ set” button.</div>';
-  else {
-    html += '<div class="igrid">' + d.items.map((it)=>
-      '<div class="icard" style="cursor:default;">' +
-        '<button class="addset" data-rmitem="' + attr(it.itemKey) + '" title="Remove from set" style="color:var(--red);">&times; remove</button>' +
-        imgTag(it.image) +
-        '<div style="min-width:0;flex:1;">' +
-          '<div class="nm" style="padding-right:60px;">' + esc(it.name||"Reward") + "</div>" +
-          '<div class="gm">' + esc(it.game||"") + "</div>" +
-          '<div class="big"><b>' + (it.totalCount||0) + '</b><span>held · ' + (it.accounts||0) + " acct" + ((it.accounts||0)!==1?"s":"") + "</span></div>" +
-        "</div></div>").join("") + "</div>";
-  }
-  html += "</div>";
+      .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .switch input {
+        display: none;
+      }
+      .switch .track {
+        width: 38px;
+        height: 22px;
+        border-radius: 999px;
+        background: var(--line);
+        position: relative;
+        transition: background 0.15s;
+      }
+      .switch .track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #fff;
+        transition: left 0.15s;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+      }
+      .switch input:checked + .track {
+        background: var(--green);
+      }
+      .switch input:checked + .track::after {
+        left: 18px;
+      }
 
-  // Accounts that can fulfill
-  html += '<div><label class="lbl">Delivery — accounts ranked by how much of the set they hold</label>';
-  if (!d.accounts.length) html += '<div class="hint">No account holds any item in this set yet.</div>';
-  else {
-    html += '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
-      (full.length ? '<button class="btn-ghost btn-sm" id="copyFull">Copy full-set logins (' + full.length + ")</button>" : "") +
-      "</div>";
-    html += '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Has</th><th>Full bundles</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
-      d.accounts.map((a)=>
-        "<tr>" +
-          '<td><span class="linkish" data-acc="' + attr(a.accountId) + '">' + esc(a.login||"(no login)") + "</span></td>" +
-          "<td>" + (a.complete ? '<span class="chip on">' + a.have + "/" + a.total + " full</span>" : '<span class="chip warn">' + a.have + "/" + a.total + "</span>") + "</td>" +
-          "<td>" + (a.complete ? "<b>" + a.minCount + "</b>" : "—") + "</td>" +
-          '<td class="hide-sm mono">' + esc(a.container||a.configFile||"—") + "</td>" +
-          '<td class="hide-sm">' + (a.hasPassword ? '<span class="chip on">saved</span>' : '<span class="chip warn">none</span>') + "</td>" +
-        "</tr>").join("") +
-      "</tbody></table></div>";
-  }
-  html += "</div>";
-  $("sBody").innerHTML = html;
-}
+      /* Tabs */
+      .tabs {
+        display: flex;
+        gap: 6px;
+        border-bottom: 1px solid var(--line);
+        margin: 6px 0 4px;
+      }
+      .tab {
+        padding: 10px 16px;
+        border: none;
+        background: none;
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 14px;
+        border-radius: 10px 10px 0 0;
+        cursor: pointer;
+      }
+      .tab:hover {
+        background: var(--surface-2);
+        opacity: 1;
+      }
+      .tab.active {
+        background: #eef2ff;
+        color: var(--accent);
+      }
+      .view {
+        display: none;
+      }
+      .view.active {
+        display: block;
+      }
 
-$("sBody").addEventListener("click", async (e)=>{
-  const acc = e.target.closest("[data-acc]");
-  if (acc){ $("setBg").classList.remove("show"); switchTab("accounts"); setTimeout(()=>openDetail(acc.dataset.acc), 50); return; }
-  if (e.target.id==="copyFull" && currentFulfil){
-    const txt = currentFulfil.accounts.filter((a)=>a.complete).map((a)=>a.login).filter(Boolean).join("\n");
-    navigator.clipboard.writeText(txt).then(()=>banner("Copied full-set logins.","ok")).catch(()=>banner("Copy failed","err"));
-    return;
-  }
-  if (e.target.id==="setEdit" && currentSet){ setFormMode={ mode:"edit", id:currentSet.id }; $("sfTitle").textContent="Rename set"; $("sfName").value=currentSet.name; $("sfNote").value=currentSet.note||""; $("sfResult").innerHTML=""; $("setFormBg").classList.add("show"); return; }
-  if (e.target.id==="setDelete" && currentSet){
-    if (!confirm("Delete set “" + currentSet.name + "”? This doesn't touch your drops.")) return;
-    try { await api("/drops-archive/sets/" + encodeURIComponent(currentSet.id), { method:"DELETE" }); $("setBg").classList.remove("show"); loadSets(); banner("Set deleted.","ok"); } catch(err){ banner(err.message,"err"); }
-    return;
-  }
-  const rm = e.target.closest("[data-rmitem]");
-  if (rm && currentSet){
-    try { await api("/drops-archive/sets/" + encodeURIComponent(currentSet.id), { method:"PUT", body: JSON.stringify({ removeItemKeys:[rm.dataset.rmitem] }) }); openSet(currentSet.id); } catch(err){ banner(err.message,"err"); }
-  }
-});
-$("sClose").addEventListener("click", ()=> $("setBg").classList.remove("show"));
-$("setBg").addEventListener("click", (e)=>{ if (e.target===$("setBg")) $("setBg").classList.remove("show"); });
+      /* Tables */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      tbody tr:hover {
+        background: var(--surface-2);
+      }
+      tr.clickable {
+        cursor: pointer;
+      }
+      .mono {
+        font-family: ui-monospace, monospace;
+        font-size: 12.5px;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 9px;
+        border-radius: 999px;
+        font-size: 11.5px;
+        font-weight: 600;
+        background: var(--surface-2);
+        color: var(--muted);
+      }
+      .chip.on {
+        background: #ecfdf5;
+        color: var(--green);
+      }
+      .chip.off {
+        background: #fef2f2;
+        color: var(--red);
+      }
+      .chip.warn {
+        background: #fffbeb;
+        color: var(--yellow);
+      }
+      .linkish {
+        color: var(--accent);
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .linkish:hover {
+        text-decoration: underline;
+      }
+      .pw {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .pw .val {
+        font-family: ui-monospace, monospace;
+        font-size: 12.5px;
+      }
 
-// Add-to-set picker
-let pickItemKey = null;
-async function openPicker(it){
-  pickItemKey = it.itemKey;
-  $("pickItemLbl").innerHTML = "Add <b>" + esc(it.name||it.itemKey) + "</b>" + (it.game ? " (" + esc(it.game) + ")" : "") + " to:";
-  $("pickNew").value=""; $("pickResult").innerHTML="";
-  $("pickList").innerHTML = '<div class="hint">Loading sets…</div>';
-  $("pickBg").classList.add("show");
-  try {
-    const sets = (await api("/drops-archive/sets")).sets || [];
-    $("pickList").innerHTML = sets.length
-      ? sets.map((s)=>'<div class="pickrow" data-pickset="' + attr(s.id) + '"><b>' + esc(s.name) + "</b><span>" + s.itemCount + " item" + (s.itemCount!==1?"s":"") + "</span></div>").join("")
-      : '<div class="hint">No sets yet — create one below.</div>';
-  } catch(e){ $("pickList").innerHTML='<div class="note err">' + esc(e.message) + "</div>"; }
-}
-$("pickList").addEventListener("click", async (e)=>{
-  const row = e.target.closest("[data-pickset]"); if (!row) return;
-  try { await api("/drops-archive/sets/" + encodeURIComponent(row.dataset.pickset), { method:"PUT", body: JSON.stringify({ addItemKeys:[pickItemKey] }) }); $("pickBg").classList.remove("show"); banner("Added to set.","ok"); }
-  catch(err){ $("pickResult").innerHTML='<div class="note err">' + esc(err.message) + "</div>"; }
-});
-$("pickCreate").addEventListener("click", async (e)=>{
-  const name=$("pickNew").value.trim(); if (!name){ $("pickResult").innerHTML='<div class="note err">Enter a name</div>'; return; }
-  const btn=e.currentTarget; btn.disabled=true;
-  try { await api("/drops-archive/sets", { method:"POST", body: JSON.stringify({ name, itemKeys:[pickItemKey] }) }); $("pickBg").classList.remove("show"); banner("Created set “" + name + "” and added item.","ok"); }
-  catch(err){ $("pickResult").innerHTML='<div class="note err">' + esc(err.message) + "</div>"; }
-  finally { btn.disabled=false; }
-});
-$("pickClose").addEventListener("click", ()=> $("pickBg").classList.remove("show"));
-$("pickBg").addEventListener("click", (e)=>{ if (e.target===$("pickBg")) $("pickBg").classList.remove("show"); });
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 40px 16px;
+        font-size: 14px;
+      }
+      #banner {
+        margin-bottom: 12px;
+      }
+      .note {
+        padding: 10px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+      }
+      .note.ok {
+        background: #ecfdf5;
+        color: var(--green);
+      }
+      .note.err {
+        background: #fef2f2;
+        color: var(--red);
+      }
 
-// -------- Credentials + sync --------
-$("credBtn").addEventListener("click", ()=>{ $("credResult").innerHTML=""; $("credBg").classList.add("show"); });
-$("credClose").addEventListener("click", ()=> $("credBg").classList.remove("show"));
-$("credCancel").addEventListener("click", ()=> $("credBg").classList.remove("show"));
-$("credBg").addEventListener("click", (e)=>{ if (e.target===$("credBg")) $("credBg").classList.remove("show"); });
-$("credSubmit").addEventListener("click", async (e)=>{
-  const btn = e.currentTarget; const old = btn.textContent; btn.disabled = true; btn.textContent = "Importing…";
-  try {
-    const d = await api("/drops-archive/credentials", { method:"POST", body: JSON.stringify({ accounts: $("credInput").value }) });
-    let msg = "Matched " + d.matched + " account(s)."; if (d.unmatchedCount) msg += " " + d.unmatchedCount + " unmatched.";
-    $("credResult").innerHTML = '<div class="note ' + (d.matched ? "ok" : "err") + '">' + esc(msg) +
-      (d.unmatched && d.unmatched.length ? '<div style="margin-top:6px;font-size:12px;">Unmatched: ' + esc(d.unmatched.slice(0,40).join(", ")) + (d.unmatched.length>40?" …":"") + "</div>" : "") + "</div>";
-    if (activeTab==="accounts") loadAccounts();
-  } catch (err) { $("credResult").innerHTML = '<div class="note err">' + esc(err.message) + "</div>"; }
-  finally { btn.disabled = false; btn.textContent = old; }
-});
+      /* Item grid (By item) */
+      .igrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 12px;
+      }
+      .icard {
+        position: relative;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        cursor: pointer;
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        transition:
+          border-color 0.12s,
+          box-shadow 0.12s;
+      }
+      .icard .addset {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        padding: 3px 8px;
+        font-size: 11.5px;
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--accent);
+        border: 1px solid var(--line);
+        font-weight: 700;
+      }
+      .icard .addset:hover {
+        background: var(--accent);
+        color: #fff;
+      }
+      .setcard {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 16px;
+        cursor: pointer;
+        transition:
+          border-color 0.12s,
+          box-shadow 0.12s;
+      }
+      .setcard:hover {
+        border-color: var(--accent);
+        box-shadow: 0 4px 14px rgba(79, 70, 229, 0.12);
+      }
+      .setcard .sn {
+        font-size: 15px;
+        font-weight: 800;
+      }
+      .setcard .thumbs {
+        display: flex;
+        gap: 4px;
+        margin: 10px 0;
+        flex-wrap: wrap;
+      }
+      .setcard .thumbs img {
+        width: 34px;
+        height: 34px;
+        object-fit: contain;
+        background: var(--surface-2);
+        border-radius: 7px;
+        padding: 2px;
+      }
+      .pickrow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        margin-bottom: 7px;
+        cursor: pointer;
+      }
+      .pickrow:hover {
+        background: var(--surface-2);
+        border-color: var(--accent);
+      }
+      .pickrow b {
+        font-size: 13.5px;
+      }
+      .pickrow span {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-left: auto;
+      }
+      .icard:hover {
+        border-color: var(--accent);
+        box-shadow: 0 4px 14px rgba(79, 70, 229, 0.12);
+      }
+      .icard img {
+        width: 56px;
+        height: 56px;
+        object-fit: contain;
+        flex: none;
+        background: var(--surface-2);
+        border-radius: 10px;
+        padding: 4px;
+      }
+      .icard .noimg {
+        width: 56px;
+        height: 56px;
+        flex: none;
+        background: var(--surface-2);
+        border-radius: 10px;
+      }
+      .icard .nm {
+        font-size: 13.5px;
+        font-weight: 700;
+        line-height: 1.25;
+        word-break: break-word;
+      }
+      .icard .gm {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .icard .big {
+        margin-top: 8px;
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+      }
+      .icard .big b {
+        font-size: 20px;
+        color: var(--accent);
+      }
+      .icard .big span {
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .icard .sb {
+        margin-top: 6px;
+        display: flex;
+        gap: 5px;
+        flex-wrap: wrap;
+      }
+      .icard .selbox {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        width: 18px;
+        height: 18px;
+        z-index: 3;
+        cursor: pointer;
+        accent-color: var(--accent);
+        border-radius: 4px;
+        box-shadow: 0 0 0 3px var(--surface);
+        background: var(--surface);
+      }
+      .icard.sel {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.3);
+      }
 
-$("syncBtn").addEventListener("click", async (e)=>{
-  const btn = e.currentTarget; const old = btn.textContent; btn.disabled = true; btn.textContent = "Syncing…";
-  try {
-    const d = await api("/drops-archive/sync", { method:"POST" });
-    banner("Synced " + d.accountsFound + " account(s) from " + d.filesRead + " config file(s): " + d.inserted + " new, " + d.updated + " updated.", "ok");
-    loadOverview(); loadProgress(); if (activeTab==="accounts") loadAccounts();
-  } catch (err) { banner(err.message, "err"); }
-  finally { btn.disabled = false; btn.textContent = old; }
-});
+      /* Selection action bar */
+      .selbar {
+        display: none;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 12px;
+        padding: 9px 14px;
+        background: #eef2ff;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        font-size: 13.5px;
+        flex-wrap: wrap;
+      }
+      html[data-theme="dark"] .selbar {
+        background: rgba(99, 102, 241, 0.16);
+      }
+      .selbar b {
+        font-size: 15px;
+      }
 
-$("refreshBtn").addEventListener("click", ()=>{ loadOverview(); loadProgress(); gamesLoadedForFilter=false; switchTab(activeTab); });
-$("schedToggle").addEventListener("change", async (e)=>{ try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ enabled: e.target.checked }) }); loadProgress(); } catch (err) { banner(err.message,"err"); } });
-$("rate").addEventListener("change", async (e)=>{ try { await api("/drops-archive/scheduler", { method:"POST", body: JSON.stringify({ intervalMs: Number(e.target.value) }) }); loadProgress(); } catch (err) { banner(err.message,"err"); } });
+      /* Searchable combo (game filter) */
+      .combo {
+        position: relative;
+        min-width: 210px;
+      }
+      .combo > input {
+        width: 100%;
+        padding: 10px 30px 10px 12px;
+        border-radius: 10px;
+        border: 1.5px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-family: inherit;
+        outline: none;
+      }
+      .combo > input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+      }
+      .combo-clear {
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1;
+        display: none;
+      }
+      .combo-clear:hover {
+        background: var(--surface-2);
+        color: var(--ink);
+        opacity: 1;
+      }
+      .combo.has-value .combo-clear {
+        display: block;
+      }
+      .combo-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        z-index: 60;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+        max-height: 300px;
+        overflow-y: auto;
+        display: none;
+        padding: 5px;
+      }
+      .combo-menu.show {
+        display: block;
+      }
+      .combo-opt {
+        padding: 8px 10px;
+        border-radius: 8px;
+        font-size: 13px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--ink);
+      }
+      .combo-opt:hover,
+      .combo-opt.active {
+        background: var(--surface-2);
+      }
+      .combo-opt.sel {
+        color: var(--accent);
+        font-weight: 700;
+      }
+      .combo-opt .c {
+        margin-left: auto;
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .combo-empty {
+        padding: 10px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
 
-let searchTimer=null;
-$("search").addEventListener("input", ()=>{ clearTimeout(searchTimer); searchTimer=setTimeout(loadAccounts,300); });
-$("statusFilter").addEventListener("change", loadAccounts);
+      /* Modal */
+      .modal-bg {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        z-index: 130;
+        padding: 48px 16px;
+        overflow-y: auto;
+      }
+      .modal-bg.show {
+        display: flex;
+      }
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        width: 100%;
+        max-width: 760px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+      }
+      .modal > header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .modal > header img {
+        width: 40px;
+        height: 40px;
+        object-fit: contain;
+        background: var(--surface-2);
+        border-radius: 8px;
+        padding: 3px;
+      }
+      .modal > header b {
+        font-size: 16px;
+      }
+      .modal > header .x {
+        margin-left: auto;
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        padding: 0;
+      }
+      .mbody {
+        padding: 18px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .mbody label.lbl {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 600;
+        display: block;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      .mbody textarea,
+      .mbody input[type="text"],
+      .mbody input:not([type]) {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-family: inherit;
+        outline: none;
+      }
+      .mbody textarea {
+        min-height: 180px;
+        resize: vertical;
+        font-family: ui-monospace, monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+      }
+      .mbody textarea:focus,
+      .mbody input:focus {
+        border-color: var(--accent);
+        background: var(--surface);
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+      }
+      .mbody .hint {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+      .grid3 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }
+      .modal > footer {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        padding: 14px 20px;
+        border-top: 1px solid var(--line);
+      }
 
-$("logoutBtn").addEventListener("click", async ()=>{ try { await fetch("/admin-logout", { method:"POST", credentials:"same-origin" }); } catch {} window.location.href = "/admin-login.html"; });
+      /* Drops grid (account detail) */
+      .game-section {
+        margin-top: 18px;
+      }
+      .game-header {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 8px;
+        margin-bottom: 12px;
+      }
+      .game-header h3 {
+        font-size: 15px;
+        font-weight: 800;
+      }
+      .game-header .gc {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .drops-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 12px;
+      }
+      .dcard {
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px;
+        text-align: left;
+        position: relative;
+      }
+      .dcard img {
+        width: 64px;
+        height: 64px;
+        object-fit: contain;
+        display: block;
+        margin: 0 auto 8px;
+      }
+      .dcard .noimg {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto 8px;
+        background: var(--surface);
+        border-radius: 8px;
+      }
+      .dcard .cnt {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 1px 7px;
+        border-radius: 6px;
+      }
+      .dcard .nm {
+        font-size: 12.5px;
+        font-weight: 700;
+        line-height: 1.25;
+        word-break: break-word;
+      }
+      .dcard .meta {
+        font-size: 10.5px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 2px 7px;
+        border-radius: 999px;
+        margin-top: 6px;
+      }
+      .badge.claimed {
+        background: #ecfdf5;
+        color: var(--green);
+      }
+      .badge.connect {
+        background: #fffbeb;
+        color: var(--yellow);
+      }
+      .badge.connected {
+        background: #eef2ff;
+        color: var(--accent);
+      }
 
-loadOverview();
-loadProgress();
-loadItems();
-setInterval(loadProgress, 4000);
-</script>
-<script src="/admin-nav.js"></script>
-</body>
+      @media (max-width: 768px) {
+        th.hide-sm,
+        td.hide-sm {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/generate.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M12 2v20M2 7l10 5 10-5"></path>
+          </svg>
+          Generate code</a
+        >
+        <a href="/items"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"
+            ></path>
+          </svg>
+          Items</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+        <a href="/twitch-inventory.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+            <path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path>
+          </svg>
+          Twitch drops</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>
+          </svg>
+          Bots</a
+        >
+        <a class="active" href="/drops-archive.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 8v13H3V8"></path>
+            <path d="M1 3h22v5H1z"></path>
+            <path d="M10 12h4"></path>
+          </svg>
+          Drops archive</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="logout themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+            ></path></svg
+          ><svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+        <button class="logout" id="logoutBtn" title="Log out">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="page">
+      <div
+        style="
+          display: flex;
+          align-items: flex-start;
+          gap: 14px;
+          flex-wrap: wrap;
+        "
+      >
+        <div>
+          <h1>Drops Archive</h1>
+          <div class="sub">
+            Permanent, self-contained log of every account's drops — browse by
+            item, game or account to plan sell orders.
+          </div>
+        </div>
+        <div
+          style="margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap"
+        >
+          <button class="btn-ghost btn-sm" id="syncBtn">Sync from bots</button>
+          <button class="btn-sm" id="credBtn">Import credentials</button>
+          <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
+        </div>
+      </div>
+
+      <div id="banner" style="margin-top: 14px"></div>
+
+      <!-- Overview -->
+      <div class="pstats" id="overview" style="margin: 14px 0 4px"></div>
+
+      <!-- Progress -->
+      <div class="panel" style="margin-top: 14px">
+        <div class="ph">
+          <b>Scan progress</b
+          ><span
+            class="scanning"
+            id="scanState"
+            style="margin-left: auto"
+          ></span>
+        </div>
+        <div class="pb">
+          <div class="bar"><i id="bar"></i></div>
+          <div class="pstats" id="pstats"></div>
+          <div class="pctl">
+            <label class="switch"
+              ><input type="checkbox" id="schedToggle" /><span
+                class="track"
+              ></span
+            ></label>
+            <span id="schedLabel" style="font-size: 13px">Scanner</span>
+            <span style="font-size: 13px; color: var(--muted)"
+              >Delay between scans:</span
+            >
+            <select id="rate">
+              <option value="8000">8s (fast)</option>
+              <option value="20000">20s (default)</option>
+              <option value="60000">1m (gentle)</option>
+              <option value="180000">3m (very gentle)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab active" data-tab="items">By item</button>
+        <button class="tab" data-tab="sets">Sets / bundles</button>
+        <button class="tab" data-tab="games">By game</button>
+        <button class="tab" data-tab="accounts">Accounts</button>
+      </div>
+
+      <!-- By item -->
+      <section class="view active" id="view-items">
+        <div class="toolbar">
+          <div class="search">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            >
+              <circle cx="11" cy="11" r="7"></circle>
+              <path d="m21 21-4.3-4.3"></path>
+            </svg>
+            <input
+              id="itemSearch"
+              type="text"
+              placeholder="Search items by name…"
+            />
+          </div>
+          <div class="combo" id="gameCombo">
+            <input
+              id="gameInput"
+              type="text"
+              placeholder="All games"
+              autocomplete="off"
+            />
+            <button
+              class="combo-clear"
+              id="gameClear"
+              type="button"
+              title="Clear"
+            >
+              &times;
+            </button>
+            <div class="combo-menu" id="gameMenu"></div>
+          </div>
+          <span class="sub" id="itemCount"></span>
+          <button
+            class="btn-ghost btn-sm"
+            id="selectAllBtn"
+            style="margin-left: auto"
+          >
+            Select all shown
+          </button>
+        </div>
+        <div id="selbar" class="selbar"></div>
+        <div id="items"><div class="empty">Loading…</div></div>
+      </section>
+
+      <!-- Sets / bundles -->
+      <section class="view" id="view-sets">
+        <div class="toolbar">
+          <div class="sub">
+            Group items you sell together as one order. For each set you'll see
+            which accounts can deliver the whole bundle.
+          </div>
+          <button class="btn-sm" id="newSetBtn" style="margin-left: auto">
+            + New set
+          </button>
+        </div>
+        <div id="sets"><div class="empty">Loading…</div></div>
+      </section>
+
+      <!-- By game -->
+      <section class="view" id="view-games">
+        <div class="panel" style="margin-top: 14px">
+          <div class="pb" style="padding: 0">
+            <div style="overflow-x: auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Game</th>
+                    <th>Items held</th>
+                    <th>Distinct items</th>
+                    <th>Accounts</th>
+                    <th class="hide-sm">Total drops</th>
+                  </tr>
+                </thead>
+                <tbody id="gameRows">
+                  <tr>
+                    <td colspan="5" class="empty">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Accounts -->
+      <section class="view" id="view-accounts">
+        <div class="toolbar">
+          <div class="search">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            >
+              <circle cx="11" cy="11" r="7"></circle>
+              <path d="m21 21-4.3-4.3"></path>
+            </svg>
+            <input
+              id="search"
+              type="text"
+              placeholder="Search by login, username or config…"
+            />
+          </div>
+          <select id="statusFilter">
+            <option value="">All statuses</option>
+            <option value="ok">Scanned OK</option>
+            <option value="pending">Not scanned yet</option>
+            <option value="token_invalid">Token invalid</option>
+            <option value="error">Error</option>
+          </select>
+        </div>
+        <div class="panel">
+          <div class="pb" style="padding: 0">
+            <div style="overflow-x: auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Login</th>
+                    <th>Email</th>
+                    <th>Password</th>
+                    <th class="hide-sm">Bot</th>
+                    <th>Drops</th>
+                    <th class="hide-sm">Last scan</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="rows">
+                  <tr>
+                    <td colspan="8" class="empty">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Item -> accounts modal -->
+    <div class="modal-bg" id="itemBg">
+      <div class="modal">
+        <header>
+          <img id="iImg" alt="" style="display: none" /><b id="iTitle">Item</b
+          ><button class="x" id="iClose">&times;</button>
+        </header>
+        <div class="mbody" id="iBody"></div>
+      </div>
+    </div>
+
+    <!-- Set detail / fulfillment modal -->
+    <div class="modal-bg" id="setBg">
+      <div class="modal" style="max-width: 820px">
+        <header>
+          <b id="sTitle">Set</b><button class="x" id="sClose">&times;</button>
+        </header>
+        <div class="mbody" id="sBody"></div>
+      </div>
+    </div>
+
+    <!-- Create / edit set form -->
+    <div class="modal-bg" id="setFormBg">
+      <div class="modal" style="max-width: 480px">
+        <header>
+          <b id="sfTitle">New set</b
+          ><button class="x" id="sfClose">&times;</button>
+        </header>
+        <div class="mbody">
+          <div>
+            <label class="lbl">Set name</label
+            ><input
+              id="sfName"
+              type="text"
+              placeholder="e.g. Rust starter bundle"
+            />
+          </div>
+          <div>
+            <label class="lbl">Note (optional)</label
+            ><input
+              id="sfNote"
+              type="text"
+              placeholder="e.g. sold as one eBay listing"
+            />
+          </div>
+          <div id="sfResult"></div>
+        </div>
+        <footer>
+          <button class="btn-ghost" id="sfCancel">Cancel</button
+          ><button id="sfSave">Save</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Add-to-set picker -->
+    <div class="modal-bg" id="pickBg">
+      <div class="modal" style="max-width: 440px">
+        <header>
+          <b>Add to set</b><button class="x" id="pickClose">&times;</button>
+        </header>
+        <div class="mbody">
+          <div class="hint" id="pickItemLbl"></div>
+          <div id="pickList"></div>
+          <div style="display: flex; gap: 8px; align-items: center">
+            <input
+              id="pickNew"
+              type="text"
+              placeholder="…or new set name"
+              style="flex: 1"
+            />
+            <button class="btn-sm" id="pickCreate">Create &amp; add</button>
+          </div>
+          <div id="pickResult"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Account detail modal -->
+    <div class="modal-bg" id="detailBg">
+      <div class="modal">
+        <header>
+          <b id="dTitle">Account</b
+          ><button class="x" id="dClose">&times;</button>
+        </header>
+        <div class="mbody" id="dBody"></div>
+      </div>
+    </div>
+
+    <!-- Import credentials modal -->
+    <div class="modal-bg" id="credBg">
+      <div class="modal">
+        <header>
+          <b>Import credentials</b
+          ><button class="x" id="credClose">&times;</button>
+        </header>
+        <div class="mbody">
+          <div>
+            <label class="lbl">Accounts JSON</label>
+            <textarea
+              id="credInput"
+              placeholder='[
+  { "username": "Marol1yr08p", "password": "CrkNc1OlcGTz", "email": "..." }
+]'
+            ></textarea>
+            <div class="hint" style="margin-top: 6px">
+              Paste a list of <code>{ username, password, email }</code> objects
+              (with or without surrounding <code>[ ]</code> and trailing
+              commas). Matched to accounts by <b>username = Twitch login</b>.
+              Passwords stored encrypted. Unmatched usernames are reported.
+            </div>
+          </div>
+          <div id="credResult"></div>
+        </div>
+        <footer>
+          <button class="btn-ghost" id="credCancel">Cancel</button>
+          <button id="credSubmit">Import &amp; match</button>
+        </footer>
+      </div>
+    </div>
+
+    <script src="/theme.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let accounts = [];
+
+      function esc(s) {
+        return String(s == null ? "" : s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      }
+      function attr(s) {
+        return esc(s);
+      }
+
+      async function api(url, opts) {
+        const r = await fetch(
+          url,
+          Object.assign(
+            {
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+            },
+            opts || {},
+          ),
+        );
+        let data = null;
+        try {
+          data = await r.json();
+        } catch {
+          data = null;
+        }
+        if (r.status === 401) {
+          window.location.href = "/admin-login.html";
+          throw new Error("unauth");
+        }
+        if (!r.ok || (data && data.success === false))
+          throw new Error((data && data.message) || "HTTP " + r.status);
+        return data;
+      }
+
+      function banner(msg, cls) {
+        $("banner").innerHTML = msg
+          ? '<div class="note ' + (cls || "ok") + '">' + esc(msg) + "</div>"
+          : "";
+        if (msg)
+          setTimeout(() => {
+            if ($("banner").textContent === msg) $("banner").innerHTML = "";
+          }, 6000);
+      }
+
+      function timeAgo(s) {
+        if (!s) return "never";
+        const d = new Date(s);
+        if (isNaN(d)) return "—";
+        let sec = Math.floor((Date.now() - d.getTime()) / 1000);
+        if (sec < 0) sec = 0;
+        for (const [n, v] of [
+          ["d", 86400],
+          ["h", 3600],
+          ["m", 60],
+        ]) {
+          const x = Math.floor(sec / v);
+          if (x >= 1) return x + n + " ago";
+        }
+        return "just now";
+      }
+
+      function statusChip(s) {
+        if (s === "ok") return '<span class="chip on">OK</span>';
+        if (s === "token_invalid")
+          return '<span class="chip off">Token invalid</span>';
+        if (s === "error") return '<span class="chip off">Error</span>';
+        return '<span class="chip">Pending</span>';
+      }
+      function badge(state) {
+        if (state === "connect")
+          return '<span class="badge connect">Connect</span>';
+        if (state === "connected")
+          return '<span class="badge connected">Connected</span>';
+        return '<span class="badge claimed">Claimed</span>';
+      }
+      function stateChipInline(state) {
+        if (state === "connect")
+          return '<span class="chip warn">Connect</span>';
+        if (state === "connected") return '<span class="chip">Connected</span>';
+        return '<span class="chip on">Claimed</span>';
+      }
+      function imgTag(url, cls) {
+        if (!url) return '<div class="noimg"></div>';
+        const u = String(url)
+          .replace("{width}", "64")
+          .replace("{height}", "64");
+        return (
+          '<img class="' +
+          (cls || "") +
+          '" src="' +
+          attr(u) +
+          '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">'
+        );
+      }
+
+      // -------- Tabs --------
+      let activeTab = "items";
+      function switchTab(t) {
+        activeTab = t;
+        document
+          .querySelectorAll(".tab")
+          .forEach((b) => b.classList.toggle("active", b.dataset.tab === t));
+        document
+          .querySelectorAll(".view")
+          .forEach((v) => v.classList.remove("active"));
+        $("view-" + t).classList.add("active");
+        if (t === "items") loadItems();
+        else if (t === "sets") loadSets();
+        else if (t === "games") loadGames();
+        else loadAccounts();
+      }
+      document
+        .querySelectorAll(".tab")
+        .forEach((b) =>
+          b.addEventListener("click", () => switchTab(b.dataset.tab)),
+        );
+
+      // -------- Overview + progress --------
+      function fmtPerAcct(ms) {
+        const h = Math.round(ms / 3600000);
+        return h >= 1 ? h + "h" : Math.round(ms / 60000) + "m";
+      }
+
+      async function loadOverview() {
+        try {
+          const o = (await api("/drops-archive/overview")).overview;
+          $("overview").innerHTML =
+            '<div class="stat accent"><b>' +
+            o.totalItemsHeld +
+            "</b><span>Items held</span></div>" +
+            '<div class="stat"><b>' +
+            o.items +
+            "</b><span>Distinct items</span></div>" +
+            '<div class="stat"><b>' +
+            o.games +
+            "</b><span>Games</span></div>" +
+            '<div class="stat"><b>' +
+            o.accounts +
+            "</b><span>Accounts</span></div>" +
+            '<div class="stat"><b>' +
+            o.totalDrops +
+            "</b><span>Log entries</span></div>";
+        } catch {}
+      }
+
+      async function loadProgress() {
+        let p;
+        try {
+          p = (await api("/drops-archive/progress")).progress;
+        } catch {
+          return;
+        }
+        const c = p.counts;
+        const pct = c.total ? Math.round((c.scannedWindow / c.total) * 100) : 0;
+        $("bar").style.width = pct + "%";
+        $("pstats").innerHTML =
+          '<div class="stat"><b>' +
+          c.total +
+          "</b><span>Accounts</span></div>" +
+          '<div class="stat green"><b>' +
+          c.scannedWindow +
+          "</b><span>Scanned (" +
+          fmtPerAcct(p.perAccountMs) +
+          ")</span></div>" +
+          '<div class="stat"><b>' +
+          c.due +
+          "</b><span>Queued</span></div>" +
+          '<div class="stat warn"><b>' +
+          c.tokenInvalid +
+          "</b><span>Bad token</span></div>" +
+          '<div class="stat red"><b>' +
+          c.error +
+          "</b><span>Errors</span></div>";
+        $("scanState").innerHTML = p.scanning
+          ? '<span class="pulse"></span> Scanning ' +
+            esc(p.currentLogin || "") +
+            "…"
+          : p.enabled
+            ? "Idle — waiting for next due account"
+            : "Scanner paused";
+        if (document.activeElement !== $("schedToggle"))
+          $("schedToggle").checked = p.enabled;
+        $("schedLabel").textContent = p.enabled
+          ? "Scanner on"
+          : "Scanner paused";
+        if (document.activeElement !== $("rate"))
+          $("rate").value = String(p.intervalMs);
+      }
+
+      // -------- By item --------
+      let gamesLoadedForFilter = false;
+      let gameOptions = []; // [{ value, name, count }]
+      let currentGameFilter = "";
+      async function ensureGameFilter() {
+        if (gamesLoadedForFilter) return;
+        try {
+          const g = (await api("/drops-archive/by-game")).games || [];
+          gameOptions = [{ value: "", name: "All games", count: null }].concat(
+            g.map((x) => ({
+              value: x.game || "Other rewards",
+              name: x.game || "Other rewards",
+              count: x.items,
+            })),
+          );
+          renderGameMenu();
+          gamesLoadedForFilter = true;
+        } catch {}
+      }
+      function gameDisplay(value) {
+        if (!value) return "";
+        const o = gameOptions.find((x) => x.value === value);
+        return o ? o.name : value;
+      }
+      function setGameFilter(value) {
+        currentGameFilter = value || "";
+        $("gameInput").value = gameDisplay(currentGameFilter);
+        $("gameCombo").classList.toggle("has-value", !!currentGameFilter);
+        closeGameMenu();
+      }
+      function renderGameMenu(filterText) {
+        const q = String(filterText == null ? "" : filterText)
+          .trim()
+          .toLowerCase();
+        const opts = gameOptions.filter(
+          (o) => !q || o.name.toLowerCase().includes(q),
+        );
+        const menu = $("gameMenu");
+        if (!opts.length) {
+          menu.innerHTML = '<div class="combo-empty">No games match.</div>';
+          return;
+        }
+        menu.innerHTML = opts
+          .map(
+            (o) =>
+              '<div class="combo-opt' +
+              (o.value === currentGameFilter ? " sel" : "") +
+              '" data-gval="' +
+              attr(o.value) +
+              '">' +
+              "<span>" +
+              esc(o.name) +
+              "</span>" +
+              (o.count != null
+                ? '<span class="c">' + o.count + "</span>"
+                : "") +
+              "</div>",
+          )
+          .join("");
+      }
+      function openGameMenu() {
+        const typed =
+          $("gameInput").value === gameDisplay(currentGameFilter)
+            ? ""
+            : $("gameInput").value;
+        renderGameMenu(typed);
+        $("gameMenu").classList.add("show");
+      }
+      function closeGameMenu() {
+        $("gameMenu").classList.remove("show");
+      }
+
+      async function loadItems() {
+        ensureGameFilter();
+        const search = encodeURIComponent($("itemSearch").value.trim());
+        const game = encodeURIComponent(currentGameFilter);
+        let data;
+        try {
+          data = await api(
+            "/drops-archive/by-item?search=" + search + "&game=" + game,
+          );
+        } catch (e) {
+          lastItems = [];
+          $("items").innerHTML =
+            '<div class="empty">' + esc(e.message) + "</div>";
+          $("itemCount").textContent = "";
+          updateSelBar();
+          return;
+        }
+        lastItems = data.items || [];
+        $("itemCount").textContent = lastItems.length
+          ? lastItems.length + " distinct item(s)"
+          : "";
+        renderItemsGrid();
+      }
+
+      function renderItemsGrid() {
+        if (!lastItems.length) {
+          $("items").innerHTML =
+            '<div class="empty">No items logged yet. Go to <b>Accounts</b> → Sync from bots, then let it scan.</div>';
+          updateSelBar();
+          return;
+        }
+        $("items").innerHTML =
+          '<div class="igrid">' + lastItems.map(itemCard).join("") + "</div>";
+        updateSelBar();
+      }
+
+      function itemCard(it) {
+        const sb = [];
+        if (it.claimed)
+          sb.push('<span class="chip on">' + it.claimed + " claimed</span>");
+        if (it.connect)
+          sb.push('<span class="chip warn">' + it.connect + " connect</span>");
+        if (it.connected)
+          sb.push('<span class="chip">' + it.connected + " connected</span>");
+        const sel = selectedItems.has(it.itemKey);
+        return (
+          '<div class="icard' +
+          (sel ? " sel" : "") +
+          '" data-item="' +
+          attr(it.itemKey) +
+          '">' +
+          '<input type="checkbox" class="selbox" data-select="' +
+          attr(it.itemKey) +
+          '"' +
+          (sel ? " checked" : "") +
+          ' title="Select item">' +
+          '<button class="addset" data-addset="' +
+          attr(it.itemKey) +
+          '" title="Add to a set">+ set</button>' +
+          imgTag(it.image) +
+          '<div style="min-width:0;flex:1;">' +
+          '<div class="nm" style="padding-right:42px;">' +
+          esc(it.name || "Reward") +
+          "</div>" +
+          '<div class="gm">' +
+          esc(it.game || "Other rewards") +
+          "</div>" +
+          '<div class="big"><b>' +
+          it.totalCount +
+          "</b><span>held · " +
+          it.accounts +
+          " account" +
+          (it.accounts > 1 ? "s" : "") +
+          "</span></div>" +
+          '<div class="sb">' +
+          sb.join("") +
+          "</div>" +
+          "</div></div>"
+        );
+      }
+
+      let lastItems = [];
+      let selectedItems = new Set();
+      function singleItemLabel(it) {
+        return (
+          "<b>" +
+          esc(it.name || it.itemKey) +
+          "</b>" +
+          (it.game ? " (" + esc(it.game) + ")" : "")
+        );
+      }
+      $("items").addEventListener("click", (e) => {
+        const cb = e.target.closest("[data-select]");
+        if (cb) {
+          e.stopPropagation();
+          if (cb.checked) selectedItems.add(cb.dataset.select);
+          else selectedItems.delete(cb.dataset.select);
+          const card = cb.closest(".icard");
+          if (card) card.classList.toggle("sel", cb.checked);
+          updateSelBar();
+          return;
+        }
+        const add = e.target.closest("[data-addset]");
+        if (add) {
+          e.stopPropagation();
+          const it = lastItems.find(
+            (x) => x.itemKey === add.dataset.addset,
+          ) || { itemKey: add.dataset.addset };
+          openPicker([it.itemKey], singleItemLabel(it), false);
+          return;
+        }
+        const c = e.target.closest("[data-item]");
+        if (c) openItem(c.dataset.item);
+      });
+
+      function updateSelBar() {
+        const n = selectedItems.size;
+        const bar = $("selbar");
+        if (!n) {
+          bar.style.display = "none";
+          bar.innerHTML = "";
+          return;
+        }
+        bar.style.display = "flex";
+        bar.innerHTML =
+          "<b>" +
+          n +
+          "</b>&nbsp;item(s) selected" +
+          '<button class="btn-sm" id="selAddBtn">Add to set</button>' +
+          '<button class="btn-ghost btn-sm" id="selClearBtn">Clear</button>';
+      }
+      function clearSelection() {
+        selectedItems.clear();
+        renderItemsGrid();
+      }
+      $("selbar").addEventListener("click", (e) => {
+        if (e.target.id === "selAddBtn") {
+          if (!selectedItems.size) return;
+          openPicker(
+            [...selectedItems],
+            "<b>" + selectedItems.size + "</b> selected item(s)",
+            true,
+          );
+        } else if (e.target.id === "selClearBtn") {
+          clearSelection();
+        }
+      });
+      $("selectAllBtn").addEventListener("click", () => {
+        if (!lastItems.length) return;
+        // Toggle: if every shown item is already selected, clear them; else select all shown.
+        const allSelected = lastItems.every((it) =>
+          selectedItems.has(it.itemKey),
+        );
+        if (allSelected)
+          lastItems.forEach((it) => selectedItems.delete(it.itemKey));
+        else lastItems.forEach((it) => selectedItems.add(it.itemKey));
+        renderItemsGrid();
+      });
+
+      let itemSearchTimer = null;
+      $("itemSearch").addEventListener("input", () => {
+        clearTimeout(itemSearchTimer);
+        itemSearchTimer = setTimeout(loadItems, 300);
+      });
+
+      // Searchable game combo
+      $("gameInput").addEventListener("focus", openGameMenu);
+      $("gameInput").addEventListener("input", () => {
+        renderGameMenu($("gameInput").value);
+        $("gameMenu").classList.add("show");
+      });
+      $("gameInput").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const first = $("gameMenu").querySelector(".combo-opt");
+          if (first) {
+            setGameFilter(first.dataset.gval);
+            loadItems();
+          }
+        } else if (e.key === "Escape") {
+          setGameFilter(currentGameFilter);
+        }
+      });
+      $("gameMenu").addEventListener("mousedown", (e) => {
+        const o = e.target.closest("[data-gval]");
+        if (!o) return;
+        e.preventDefault();
+        setGameFilter(o.dataset.gval);
+        loadItems();
+      });
+      $("gameClear").addEventListener("click", () => {
+        setGameFilter("");
+        loadItems();
+        $("gameInput").focus();
+      });
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest("#gameCombo")) {
+          $("gameInput").value = gameDisplay(currentGameFilter);
+          closeGameMenu();
+        }
+      });
+
+      // -------- Item -> accounts modal --------
+      let currentItemAccounts = [];
+      async function openItem(itemKey) {
+        $("iTitle").textContent = "Loading…";
+        $("iImg").style.display = "none";
+        $("iBody").innerHTML = '<div class="empty">Loading…</div>';
+        $("itemBg").classList.add("show");
+        let d;
+        try {
+          d = await api(
+            "/drops-archive/item-accounts?itemKey=" +
+              encodeURIComponent(itemKey),
+          );
+        } catch (e) {
+          $("iBody").innerHTML =
+            '<div class="note err">' + esc(e.message) + "</div>";
+          return;
+        }
+        currentItemAccounts = d.accounts || [];
+        const it = d.item || {};
+        $("iTitle").innerHTML =
+          esc(it.name || "Item") +
+          ' <span style="color:var(--muted);font-weight:500;font-size:13px;">' +
+          esc(it.game || "") +
+          "</span>";
+        if (it.image) {
+          const u = String(it.image)
+            .replace("{width}", "64")
+            .replace("{height}", "64");
+          $("iImg").src = u;
+          $("iImg").style.display = "block";
+        }
+        const total = currentItemAccounts.reduce(
+          (s, a) => s + (a.count || 0),
+          0,
+        );
+        let html =
+          '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+          '<div class="stat accent"><b>' +
+          total +
+          "</b><span>Total held</span></div>" +
+          '<div class="stat"><b>' +
+          currentItemAccounts.length +
+          "</b><span>Accounts</span></div>" +
+          (it.campaign
+            ? '<span class="chip">Set: ' + esc(it.campaign) + "</span>"
+            : "") +
+          '<button class="btn-ghost btn-sm" id="copyLogins" style="margin-left:auto;">Copy logins</button>' +
+          "</div>" +
+          '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Held</th><th>State</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
+          currentItemAccounts
+            .map(
+              (a) =>
+                "<tr>" +
+                '<td><span class="linkish" data-acc="' +
+                attr(a.accountId) +
+                '">' +
+                esc(a.login || "(no login)") +
+                "</span></td>" +
+                "<td><b>" +
+                (a.count || 1) +
+                "</b></td>" +
+                "<td>" +
+                stateChipInline(a.state) +
+                "</td>" +
+                '<td class="hide-sm mono">' +
+                esc(a.container || a.configFile || "—") +
+                "</td>" +
+                '<td class="hide-sm">' +
+                (a.hasPassword
+                  ? '<span class="chip on">saved</span>'
+                  : '<span class="chip warn">none</span>') +
+                "</td>" +
+                "</tr>",
+            )
+            .join("") +
+          "</tbody></table></div>";
+        $("iBody").innerHTML = html;
+      }
+
+      $("iBody").addEventListener("click", (e) => {
+        const c = e.target.closest("[data-acc]");
+        if (c) {
+          $("itemBg").classList.remove("show");
+          switchTab("accounts");
+          setTimeout(() => openDetail(c.dataset.acc), 50);
+          return;
+        }
+        if (e.target.id === "copyLogins") {
+          const txt = currentItemAccounts
+            .map((a) => a.login)
+            .filter(Boolean)
+            .join("\n");
+          navigator.clipboard
+            .writeText(txt)
+            .then(() =>
+              banner(
+                "Copied " + currentItemAccounts.length + " login(s).",
+                "ok",
+              ),
+            )
+            .catch(() => banner("Copy failed", "err"));
+        }
+      });
+      $("iClose").addEventListener("click", () =>
+        $("itemBg").classList.remove("show"),
+      );
+      $("itemBg").addEventListener("click", (e) => {
+        if (e.target === $("itemBg")) $("itemBg").classList.remove("show");
+      });
+
+      // -------- By game --------
+      async function loadGames() {
+        let data;
+        try {
+          data = await api("/drops-archive/by-game");
+        } catch (e) {
+          $("gameRows").innerHTML =
+            '<tr><td colspan="5" class="empty">' +
+            esc(e.message) +
+            "</td></tr>";
+          return;
+        }
+        const games = data.games || [];
+        if (!games.length) {
+          $("gameRows").innerHTML =
+            '<tr><td colspan="5" class="empty">No drops logged yet.</td></tr>';
+          return;
+        }
+        $("gameRows").innerHTML = games
+          .map(
+            (g) =>
+              '<tr class="clickable" data-game="' +
+              attr(g.game || "Other rewards") +
+              '">' +
+              "<td><b>" +
+              esc(g.game || "Other rewards") +
+              "</b></td>" +
+              "<td>" +
+              g.totalCount +
+              "</td>" +
+              "<td>" +
+              g.items +
+              "</td>" +
+              "<td>" +
+              g.accounts +
+              "</td>" +
+              '<td class="hide-sm">' +
+              g.drops +
+              "</td>" +
+              "</tr>",
+          )
+          .join("");
+      }
+      $("gameRows").addEventListener("click", (e) => {
+        const tr = e.target.closest("[data-game]");
+        if (!tr) return;
+        gamesLoadedForFilter = false;
+        switchTab("items");
+        ensureGameFilter().then(() => {
+          setGameFilter(tr.dataset.game);
+          loadItems();
+        });
+      });
+
+      // -------- Accounts --------
+      async function loadAccounts() {
+        const search = encodeURIComponent($("search").value.trim());
+        const status = encodeURIComponent($("statusFilter").value);
+        let data;
+        try {
+          data = await api(
+            "/drops-archive/accounts?search=" + search + "&status=" + status,
+          );
+        } catch (e) {
+          $("rows").innerHTML =
+            '<tr><td colspan="8" class="empty">' +
+            esc(e.message) +
+            "</td></tr>";
+          return;
+        }
+        accounts = data.accounts || [];
+        if (!accounts.length) {
+          $("rows").innerHTML =
+            '<tr><td colspan="8" class="empty">No accounts yet. Click <b>Sync from bots</b> to import them from your bot configs.</td></tr>';
+          return;
+        }
+        $("rows").innerHTML = accounts.map(rowHTML).join("");
+      }
+
+      function rowHTML(a) {
+        const pw = a.hasPassword
+          ? '<span class="pw"><span class="val" data-pw="' +
+            attr(a.id) +
+            '">••••••••</span> <span class="linkish" data-reveal="' +
+            attr(a.id) +
+            '">show</span></span>'
+          : '<span class="chip warn">no password</span>';
+        return (
+          "<tr>" +
+          '<td><span class="linkish" data-view="' +
+          attr(a.id) +
+          '">' +
+          esc(a.login || "(no login)") +
+          "</span></td>" +
+          "<td>" +
+          (a.credEmail
+            ? esc(a.credEmail)
+            : '<span style="color:var(--muted)">—</span>') +
+          "</td>" +
+          "<td>" +
+          pw +
+          "</td>" +
+          '<td class="hide-sm mono">' +
+          esc(a.container || a.configFile || "—") +
+          "</td>" +
+          "<td><b>" +
+          (a.dropCount || 0) +
+          "</b></td>" +
+          '<td class="hide-sm">' +
+          esc(timeAgo(a.lastScanAt)) +
+          "</td>" +
+          "<td>" +
+          statusChip(a.lastScanStatus) +
+          "</td>" +
+          '<td style="text-align:right;"><button class="btn-ghost btn-sm" data-scan="' +
+          attr(a.id) +
+          '">Scan now</button> ' +
+          '<button class="btn-ghost btn-sm" data-view="' +
+          attr(a.id) +
+          '">View</button></td>' +
+          "</tr>"
+        );
+      }
+
+      async function revealPassword(id, el) {
+        try {
+          const d = await api(
+            "/drops-archive/accounts/" + encodeURIComponent(id) + "/password",
+          );
+          const span = document.querySelector('[data-pw="' + id + '"]');
+          if (span) span.textContent = d.password || "(empty)";
+          el.textContent = "hide";
+          el.dataset.reveal = "";
+          el.dataset.hide = id;
+        } catch (e) {
+          banner(e.message, "err");
+        }
+      }
+
+      async function scanNow(id, btn) {
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Scanning…";
+        try {
+          const d = await api(
+            "/drops-archive/accounts/" + encodeURIComponent(id) + "/scan",
+            { method: "POST" },
+          );
+          if (d.result && d.result.ok)
+            banner(
+              "Scanned: " +
+                (d.result.newDrops || 0) +
+                " new drop(s), " +
+                (d.result.total || 0) +
+                " total.",
+              "ok",
+            );
+          else
+            banner(
+              "Scan failed: " + ((d.result && d.result.error) || "unknown"),
+              "err",
+            );
+          await loadAccounts();
+          await loadProgress();
+          await loadOverview();
+        } catch (e) {
+          banner(e.message, "err");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      }
+
+      async function openDetail(id) {
+        const a = accounts.find((x) => x.id === id);
+        $("dTitle").textContent = a ? a.login || "Account" : "Account";
+        $("dBody").innerHTML = '<div class="empty">Loading…</div>';
+        $("detailBg").classList.add("show");
+        let d;
+        try {
+          d = await api("/drops-archive/accounts/" + encodeURIComponent(id));
+        } catch (e) {
+          $("dBody").innerHTML =
+            '<div class="note err">' + esc(e.message) + "</div>";
+          return;
+        }
+        const acc = d.account;
+        let html =
+          '<div class="grid3">' +
+          '<div><label class="lbl">Username</label><input id="eUser" type="text" value="' +
+          attr(acc.credUsername || acc.login || "") +
+          '"></div>' +
+          '<div><label class="lbl">Password</label><input id="ePass" type="text" placeholder="' +
+          (acc.hasPassword ? "•••••• (unchanged)" : "not set") +
+          '"></div>' +
+          '<div><label class="lbl">Email</label><input id="eMail" type="text" value="' +
+          attr(acc.credEmail || "") +
+          '"></div>' +
+          "</div>" +
+          '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+          '<button class="btn-sm" id="saveCred" data-id="' +
+          attr(acc.id) +
+          '">Save credentials</button>' +
+          '<button class="btn-ghost btn-sm" id="scanDetail" data-id="' +
+          attr(acc.id) +
+          '">Scan now</button>' +
+          '<span style="font-size:12.5px;color:var(--muted);">' +
+          d.totalDrops +
+          " logged drop(s) · last scan " +
+          esc(timeAgo(acc.lastScanAt)) +
+          " · " +
+          statusChip(acc.lastScanStatus) +
+          "</span>" +
+          "</div>";
+        if (acc.lastScanError)
+          html += '<div class="note err">' + esc(acc.lastScanError) + "</div>";
+        if (!d.games.length) {
+          html +=
+            '<div class="empty">No drops logged yet. Use “Scan now”.</div>';
+        } else {
+          for (const g of d.games) {
+            html +=
+              '<div class="game-section"><div class="game-header"><h3>' +
+              esc(g.game) +
+              '</h3><span class="gc">' +
+              g.items.length +
+              " reward" +
+              (g.items.length > 1 ? "s" : "") +
+              '</span></div><div class="drops-grid">';
+            for (const it of g.items) {
+              html +=
+                '<div class="dcard">' +
+                (it.count > 1
+                  ? '<span class="cnt">' + it.count + "</span>"
+                  : "") +
+                imgTag(it.image) +
+                '<div class="nm">' +
+                esc(it.name || "Reward") +
+                "</div>" +
+                '<div class="meta">' +
+                (it.awardedAt
+                  ? "awarded " + esc(timeAgo(it.awardedAt))
+                  : "logged " + esc(timeAgo(it.firstSeenAt))) +
+                "</div>" +
+                badge(it.state) +
+                "</div>";
+            }
+            html += "</div></div>";
+          }
+        }
+        $("dBody").innerHTML = html;
+      }
+
+      async function saveCred(id, btn) {
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        const body = { username: $("eUser").value, email: $("eMail").value };
+        const pass = $("ePass").value;
+        if (pass) body.password = pass;
+        try {
+          await api("/drops-archive/accounts/" + encodeURIComponent(id), {
+            method: "PUT",
+            body: JSON.stringify(body),
+          });
+          banner("Credentials saved.", "ok");
+          await loadAccounts();
+          openDetail(id);
+        } catch (e) {
+          banner(e.message, "err");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      }
+
+      $("rows").addEventListener("click", (e) => {
+        const v = e.target.closest("[data-view]");
+        if (v) return openDetail(v.dataset.view);
+        const s = e.target.closest("[data-scan]");
+        if (s) return scanNow(s.dataset.scan, s);
+        const r = e.target.closest("[data-reveal]");
+        if (r) {
+          if (r.dataset.hide) {
+            const span = document.querySelector(
+              '[data-pw="' + r.dataset.hide + '"]',
+            );
+            if (span) span.textContent = "••••••••";
+            r.textContent = "show";
+            r.dataset.reveal = r.dataset.hide;
+            r.dataset.hide = "";
+          } else revealPassword(r.dataset.reveal, r);
+        }
+      });
+      $("dBody").addEventListener("click", (e) => {
+        const sv = e.target.closest("#saveCred");
+        if (sv) return saveCred(sv.dataset.id, sv);
+        const sc = e.target.closest("#scanDetail");
+        if (sc) return scanNow(sc.dataset.id, sc);
+      });
+      $("dClose").addEventListener("click", () =>
+        $("detailBg").classList.remove("show"),
+      );
+      $("detailBg").addEventListener("click", (e) => {
+        if (e.target === $("detailBg")) $("detailBg").classList.remove("show");
+      });
+
+      // -------- Sets / bundles --------
+      let allSets = [];
+      async function loadSets() {
+        let data;
+        try {
+          data = await api("/drops-archive/sets");
+        } catch (e) {
+          $("sets").innerHTML =
+            '<div class="empty">' + esc(e.message) + "</div>";
+          return;
+        }
+        allSets = data.sets || [];
+        if (!allSets.length) {
+          $("sets").innerHTML =
+            '<div class="empty">No sets yet. Click <b>+ New set</b>, or use the <b>+ set</b> button on any item in the By-item tab.</div>';
+          return;
+        }
+        $("sets").innerHTML =
+          '<div class="igrid">' + allSets.map(setCard).join("") + "</div>";
+      }
+      function setCard(s) {
+        const thumbs = (s.items || [])
+          .slice(0, 6)
+          .map((i) =>
+            i.image
+              ? '<img src="' +
+                attr(
+                  String(i.image)
+                    .replace("{width}", "34")
+                    .replace("{height}", "34"),
+                ) +
+                '" onerror="this.style.display=\'none\'">'
+              : "",
+          )
+          .join("");
+        return (
+          '<div class="setcard" data-set="' +
+          attr(s.id) +
+          '">' +
+          '<div class="sn">' +
+          esc(s.name) +
+          "</div>" +
+          (s.note
+            ? '<div class="gm" style="color:var(--muted);font-size:12px;margin-top:2px;">' +
+              esc(s.note) +
+              "</div>"
+            : "") +
+          '<div class="thumbs">' +
+          thumbs +
+          "</div>" +
+          '<div class="gm" style="color:var(--muted);font-size:12.5px;">' +
+          s.itemCount +
+          " item" +
+          (s.itemCount !== 1 ? "s" : "") +
+          "</div>" +
+          "</div>"
+        );
+      }
+      $("sets").addEventListener("click", (e) => {
+        const c = e.target.closest("[data-set]");
+        if (c) openSet(c.dataset.set);
+      });
+
+      $("newSetBtn").addEventListener("click", () => {
+        setFormMode = { mode: "create" };
+        $("sfTitle").textContent = "New set";
+        $("sfName").value = "";
+        $("sfNote").value = "";
+        $("sfResult").innerHTML = "";
+        $("setFormBg").classList.add("show");
+        $("sfName").focus();
+      });
+      let setFormMode = { mode: "create" };
+      $("sfClose").addEventListener("click", () =>
+        $("setFormBg").classList.remove("show"),
+      );
+      $("sfCancel").addEventListener("click", () =>
+        $("setFormBg").classList.remove("show"),
+      );
+      $("setFormBg").addEventListener("click", (e) => {
+        if (e.target === $("setFormBg"))
+          $("setFormBg").classList.remove("show");
+      });
+      $("sfSave").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        const name = $("sfName").value.trim(),
+          note = $("sfNote").value.trim();
+        if (!name) {
+          $("sfResult").innerHTML = '<div class="note err">Name required</div>';
+          btn.disabled = false;
+          btn.textContent = old;
+          return;
+        }
+        try {
+          if (setFormMode.mode === "create")
+            await api("/drops-archive/sets", {
+              method: "POST",
+              body: JSON.stringify({ name, note }),
+            });
+          else
+            await api(
+              "/drops-archive/sets/" + encodeURIComponent(setFormMode.id),
+              { method: "PUT", body: JSON.stringify({ name, note }) },
+            );
+          $("setFormBg").classList.remove("show");
+          loadSets();
+          if (
+            setFormMode.mode !== "create" &&
+            $("setBg").classList.contains("show")
+          )
+            openSet(setFormMode.id);
+        } catch (err) {
+          $("sfResult").innerHTML =
+            '<div class="note err">' + esc(err.message) + "</div>";
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
+
+      let currentSet = null,
+        currentFulfil = null;
+      async function openSet(id) {
+        $("sTitle").textContent = "Loading…";
+        $("sBody").innerHTML = '<div class="empty">Loading…</div>';
+        $("setBg").classList.add("show");
+        let d;
+        try {
+          d = await api(
+            "/drops-archive/sets/" + encodeURIComponent(id) + "/fulfillment",
+          );
+        } catch (e) {
+          $("sBody").innerHTML =
+            '<div class="note err">' + esc(e.message) + "</div>";
+          return;
+        }
+        currentSet = d.set;
+        currentFulfil = d;
+        $("sTitle").innerHTML =
+          esc(d.set.name) +
+          (d.set.note
+            ? ' <span style="color:var(--muted);font-weight:500;font-size:13px;">' +
+              esc(d.set.note) +
+              "</span>"
+            : "");
+        const full = d.accounts.filter((a) => a.complete);
+        let html =
+          '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
+          '<div class="stat accent"><b>' +
+          d.fullAccounts +
+          "</b><span>Accounts with full set</span></div>" +
+          '<div class="stat green"><b>' +
+          d.bundlesAvailable +
+          "</b><span>Full bundles available</span></div>" +
+          '<div class="stat"><b>' +
+          (d.items || []).length +
+          "</b><span>Items in set</span></div>" +
+          '<button class="btn-ghost btn-sm" id="setEdit" style="margin-left:auto;">Rename</button>' +
+          '<button class="btn-ghost btn-sm" id="setDelete">Delete set</button>' +
+          "</div>";
+
+        // Items in the set
+        html += '<div><label class="lbl">Items in this set</label>';
+        if (!(d.items || []).length)
+          html +=
+            '<div class="hint">No items yet. Add items from the By-item tab with the “+ set” button.</div>';
+        else {
+          html +=
+            '<div class="igrid">' +
+            d.items
+              .map(
+                (it) =>
+                  '<div class="icard" style="cursor:default;">' +
+                  '<button class="addset" data-rmitem="' +
+                  attr(it.itemKey) +
+                  '" title="Remove from set" style="color:var(--red);">&times; remove</button>' +
+                  imgTag(it.image) +
+                  '<div style="min-width:0;flex:1;">' +
+                  '<div class="nm" style="padding-right:60px;">' +
+                  esc(it.name || "Reward") +
+                  "</div>" +
+                  '<div class="gm">' +
+                  esc(it.game || "") +
+                  "</div>" +
+                  '<div class="big"><b>' +
+                  (it.totalCount || 0) +
+                  "</b><span>held · " +
+                  (it.accounts || 0) +
+                  " acct" +
+                  ((it.accounts || 0) !== 1 ? "s" : "") +
+                  "</span></div>" +
+                  "</div></div>",
+              )
+              .join("") +
+            "</div>";
+        }
+        html += "</div>";
+
+        // Accounts that can fulfill
+        html +=
+          '<div><label class="lbl">Delivery — accounts ranked by how much of the set they hold</label>';
+        if (!d.accounts.length)
+          html +=
+            '<div class="hint">No account holds any item in this set yet.</div>';
+        else {
+          html +=
+            '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
+            (full.length
+              ? '<button class="btn-ghost btn-sm" id="copyFull">Copy full-set logins (' +
+                full.length +
+                ")</button>"
+              : "") +
+            "</div>";
+          html +=
+            '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Has</th><th>Full bundles</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
+            d.accounts
+              .map(
+                (a) =>
+                  "<tr>" +
+                  '<td><span class="linkish" data-acc="' +
+                  attr(a.accountId) +
+                  '">' +
+                  esc(a.login || "(no login)") +
+                  "</span></td>" +
+                  "<td>" +
+                  (a.complete
+                    ? '<span class="chip on">' +
+                      a.have +
+                      "/" +
+                      a.total +
+                      " full</span>"
+                    : '<span class="chip warn">' +
+                      a.have +
+                      "/" +
+                      a.total +
+                      "</span>") +
+                  "</td>" +
+                  "<td>" +
+                  (a.complete ? "<b>" + a.minCount + "</b>" : "—") +
+                  "</td>" +
+                  '<td class="hide-sm mono">' +
+                  esc(a.container || a.configFile || "—") +
+                  "</td>" +
+                  '<td class="hide-sm">' +
+                  (a.hasPassword
+                    ? '<span class="chip on">saved</span>'
+                    : '<span class="chip warn">none</span>') +
+                  "</td>" +
+                  "</tr>",
+              )
+              .join("") +
+            "</tbody></table></div>";
+        }
+        html += "</div>";
+        $("sBody").innerHTML = html;
+      }
+
+      $("sBody").addEventListener("click", async (e) => {
+        const acc = e.target.closest("[data-acc]");
+        if (acc) {
+          $("setBg").classList.remove("show");
+          switchTab("accounts");
+          setTimeout(() => openDetail(acc.dataset.acc), 50);
+          return;
+        }
+        if (e.target.id === "copyFull" && currentFulfil) {
+          const txt = currentFulfil.accounts
+            .filter((a) => a.complete)
+            .map((a) => a.login)
+            .filter(Boolean)
+            .join("\n");
+          navigator.clipboard
+            .writeText(txt)
+            .then(() => banner("Copied full-set logins.", "ok"))
+            .catch(() => banner("Copy failed", "err"));
+          return;
+        }
+        if (e.target.id === "setEdit" && currentSet) {
+          setFormMode = { mode: "edit", id: currentSet.id };
+          $("sfTitle").textContent = "Rename set";
+          $("sfName").value = currentSet.name;
+          $("sfNote").value = currentSet.note || "";
+          $("sfResult").innerHTML = "";
+          $("setFormBg").classList.add("show");
+          return;
+        }
+        if (e.target.id === "setDelete" && currentSet) {
+          if (
+            !confirm(
+              "Delete set “" +
+                currentSet.name +
+                "”? This doesn't touch your drops.",
+            )
+          )
+            return;
+          try {
+            await api(
+              "/drops-archive/sets/" + encodeURIComponent(currentSet.id),
+              { method: "DELETE" },
+            );
+            $("setBg").classList.remove("show");
+            loadSets();
+            banner("Set deleted.", "ok");
+          } catch (err) {
+            banner(err.message, "err");
+          }
+          return;
+        }
+        const rm = e.target.closest("[data-rmitem]");
+        if (rm && currentSet) {
+          try {
+            await api(
+              "/drops-archive/sets/" + encodeURIComponent(currentSet.id),
+              {
+                method: "PUT",
+                body: JSON.stringify({ removeItemKeys: [rm.dataset.rmitem] }),
+              },
+            );
+            openSet(currentSet.id);
+          } catch (err) {
+            banner(err.message, "err");
+          }
+        }
+      });
+      $("sClose").addEventListener("click", () =>
+        $("setBg").classList.remove("show"),
+      );
+      $("setBg").addEventListener("click", (e) => {
+        if (e.target === $("setBg")) $("setBg").classList.remove("show");
+      });
+
+      // Add-to-set picker (supports one or many items at once)
+      let pickKeys = [];
+      let pickFromSelection = false;
+      async function openPicker(keys, labelHtml, fromSelection) {
+        pickKeys = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
+        pickFromSelection = !!fromSelection;
+        $("pickItemLbl").innerHTML = "Add " + labelHtml + " to:";
+        $("pickNew").value = "";
+        $("pickResult").innerHTML = "";
+        $("pickList").innerHTML = '<div class="hint">Loading sets…</div>';
+        $("pickBg").classList.add("show");
+        try {
+          const sets = (await api("/drops-archive/sets")).sets || [];
+          $("pickList").innerHTML = sets.length
+            ? sets
+                .map(
+                  (s) =>
+                    '<div class="pickrow" data-pickset="' +
+                    attr(s.id) +
+                    '"><b>' +
+                    esc(s.name) +
+                    "</b><span>" +
+                    s.itemCount +
+                    " item" +
+                    (s.itemCount !== 1 ? "s" : "") +
+                    "</span></div>",
+                )
+                .join("")
+            : '<div class="hint">No sets yet — create one below.</div>';
+        } catch (e) {
+          $("pickList").innerHTML =
+            '<div class="note err">' + esc(e.message) + "</div>";
+        }
+      }
+      function afterPickSuccess(msg) {
+        $("pickBg").classList.remove("show");
+        banner(msg, "ok");
+        if (pickFromSelection) clearSelection();
+      }
+      $("pickList").addEventListener("click", async (e) => {
+        const row = e.target.closest("[data-pickset]");
+        if (!row) return;
+        if (!pickKeys.length) return;
+        try {
+          await api(
+            "/drops-archive/sets/" + encodeURIComponent(row.dataset.pickset),
+            { method: "PUT", body: JSON.stringify({ addItemKeys: pickKeys }) },
+          );
+          afterPickSuccess("Added " + pickKeys.length + " item(s) to set.");
+        } catch (err) {
+          $("pickResult").innerHTML =
+            '<div class="note err">' + esc(err.message) + "</div>";
+        }
+      });
+      $("pickCreate").addEventListener("click", async (e) => {
+        const name = $("pickNew").value.trim();
+        if (!name) {
+          $("pickResult").innerHTML =
+            '<div class="note err">Enter a name</div>';
+          return;
+        }
+        if (!pickKeys.length) {
+          $("pickResult").innerHTML =
+            '<div class="note err">No items to add</div>';
+          return;
+        }
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try {
+          await api("/drops-archive/sets", {
+            method: "POST",
+            body: JSON.stringify({ name, itemKeys: pickKeys }),
+          });
+          afterPickSuccess(
+            "Created set “" + name + "” with " + pickKeys.length + " item(s).",
+          );
+        } catch (err) {
+          $("pickResult").innerHTML =
+            '<div class="note err">' + esc(err.message) + "</div>";
+        } finally {
+          btn.disabled = false;
+        }
+      });
+      $("pickClose").addEventListener("click", () =>
+        $("pickBg").classList.remove("show"),
+      );
+      $("pickBg").addEventListener("click", (e) => {
+        if (e.target === $("pickBg")) $("pickBg").classList.remove("show");
+      });
+
+      // -------- Credentials + sync --------
+      $("credBtn").addEventListener("click", () => {
+        $("credResult").innerHTML = "";
+        $("credBg").classList.add("show");
+      });
+      $("credClose").addEventListener("click", () =>
+        $("credBg").classList.remove("show"),
+      );
+      $("credCancel").addEventListener("click", () =>
+        $("credBg").classList.remove("show"),
+      );
+      $("credBg").addEventListener("click", (e) => {
+        if (e.target === $("credBg")) $("credBg").classList.remove("show");
+      });
+      $("credSubmit").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Importing…";
+        try {
+          const d = await api("/drops-archive/credentials", {
+            method: "POST",
+            body: JSON.stringify({ accounts: $("credInput").value }),
+          });
+          let msg = "Matched " + d.matched + " account(s).";
+          if (d.unmatchedCount) msg += " " + d.unmatchedCount + " unmatched.";
+          $("credResult").innerHTML =
+            '<div class="note ' +
+            (d.matched ? "ok" : "err") +
+            '">' +
+            esc(msg) +
+            (d.unmatched && d.unmatched.length
+              ? '<div style="margin-top:6px;font-size:12px;">Unmatched: ' +
+                esc(d.unmatched.slice(0, 40).join(", ")) +
+                (d.unmatched.length > 40 ? " …" : "") +
+                "</div>"
+              : "") +
+            "</div>";
+          if (activeTab === "accounts") loadAccounts();
+        } catch (err) {
+          $("credResult").innerHTML =
+            '<div class="note err">' + esc(err.message) + "</div>";
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
+
+      $("syncBtn").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Syncing…";
+        try {
+          const d = await api("/drops-archive/sync", { method: "POST" });
+          banner(
+            "Synced " +
+              d.accountsFound +
+              " account(s) from " +
+              d.filesRead +
+              " config file(s): " +
+              d.inserted +
+              " new, " +
+              d.updated +
+              " updated.",
+            "ok",
+          );
+          loadOverview();
+          loadProgress();
+          if (activeTab === "accounts") loadAccounts();
+        } catch (err) {
+          banner(err.message, "err");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
+
+      $("refreshBtn").addEventListener("click", () => {
+        loadOverview();
+        loadProgress();
+        gamesLoadedForFilter = false;
+        switchTab(activeTab);
+      });
+      $("schedToggle").addEventListener("change", async (e) => {
+        try {
+          await api("/drops-archive/scheduler", {
+            method: "POST",
+            body: JSON.stringify({ enabled: e.target.checked }),
+          });
+          loadProgress();
+        } catch (err) {
+          banner(err.message, "err");
+        }
+      });
+      $("rate").addEventListener("change", async (e) => {
+        try {
+          await api("/drops-archive/scheduler", {
+            method: "POST",
+            body: JSON.stringify({ intervalMs: Number(e.target.value) }),
+          });
+          loadProgress();
+        } catch (err) {
+          banner(err.message, "err");
+        }
+      });
+
+      let searchTimer = null;
+      $("search").addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(loadAccounts, 300);
+      });
+      $("statusFilter").addEventListener("change", loadAccounts);
+
+      $("logoutBtn").addEventListener("click", async () => {
+        try {
+          await fetch("/admin-logout", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+        } catch {}
+        window.location.href = "/admin-login.html";
+      });
+
+      loadOverview();
+      loadProgress();
+      loadItems();
+      setInterval(loadProgress, 4000);
+    </script>
+    <script src="/admin-nav.js"></script>
+  </body>
 </html>
