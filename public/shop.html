@@ -1,0 +1,1143 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shop</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --accent2: #6366f1;
+        --green: #059669;
+        --red: #dc2626;
+        --yellow: #b45309;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        --yellow: #fbbf24;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      html[data-theme="dark"] .tab.active {
+        background: rgba(99, 102, 241, 0.18);
+      }
+      html[data-theme="dark"] .bal {
+        background: rgba(99, 102, 241, 0.16);
+      }
+      html[data-theme="dark"] .chip.on {
+        background: rgba(52, 211, 153, 0.14);
+      }
+      html[data-theme="dark"] .chip.off {
+        background: rgba(248, 113, 113, 0.14);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        height: 100vh;
+        display: flex;
+        overflow: hidden;
+      }
+      .themebtn {
+        cursor: pointer;
+      }
+
+      /* Sidebar (shared look with other admin pages) */
+      .nav {
+        width: 236px;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        box-shadow: 0 6px 14px rgba(79, 70, 229, 0.32);
+      }
+      .nav .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: #eef2ff;
+        color: var(--accent);
+      }
+      .nav .me {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 16px;
+        border-top: 1px solid var(--line);
+      }
+      .nav .me .av {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #10b981, #059669);
+        color: #fff;
+        display: grid;
+        place-items: center;
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .nav .me .who {
+        flex: 1;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13px;
+        display: block;
+      }
+      .nav .me .who span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .nav .me .logout {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+      .nav .me .logout:hover {
+        color: var(--red);
+        border-color: var(--red);
+      }
+
+      /* Page */
+      .page {
+        flex: 1;
+        overflow-y: auto;
+        padding: 26px 30px 60px;
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 800;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin-top: 3px;
+      }
+      .bal {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: #eef2ff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 9px 14px;
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+      .bal b {
+        font-size: 17px;
+      }
+      .bal svg {
+        color: var(--accent);
+      }
+
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin: 18px 0 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .tab {
+        padding: 9px 14px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        border-radius: 9px 9px 0 0;
+      }
+      .tab.active {
+        background: #eef2ff;
+        color: var(--accent);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .card .imgs {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .card .imgs img,
+      .card .imgs .ph {
+        width: 44px;
+        height: 44px;
+        border-radius: 9px;
+        object-fit: cover;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        display: grid;
+        place-items: center;
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .card .nm {
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .card .meta {
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+      .card .foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: auto;
+      }
+      .price {
+        font-size: 19px;
+        font-weight: 800;
+      }
+      .stock {
+        font-size: 12px;
+        font-weight: 600;
+        padding: 3px 9px;
+        border-radius: 999px;
+        background: rgba(5, 150, 105, 0.12);
+        color: var(--green);
+      }
+      .stock.zero {
+        background: rgba(220, 38, 38, 0.12);
+        color: var(--red);
+      }
+
+      .btn-sm,
+      .btn-ghost {
+        font-size: 13px;
+        font-weight: 600;
+        padding: 9px 14px;
+        border-radius: 10px;
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+      .btn-sm {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      .btn-sm:hover {
+        background: var(--accent2);
+      }
+      .btn-sm:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn-ghost {
+        background: var(--surface);
+        color: var(--ink);
+        border-color: var(--line);
+      }
+      .btn-ghost:hover {
+        background: var(--surface-2);
+      }
+
+      .empty {
+        color: var(--muted);
+        font-size: 14px;
+        padding: 40px 0;
+        text-align: center;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 11px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      /* Modal */
+      .modal-bg {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.5);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+        padding: 20px;
+      }
+      .modal-bg.show {
+        display: flex;
+      }
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        width: 100%;
+        max-width: 560px;
+        max-height: 88vh;
+        overflow-y: auto;
+        padding: 20px 22px;
+      }
+      .modal h3 {
+        font-size: 18px;
+      }
+      .mh {
+        display: flex;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      .mh button {
+        margin-left: auto;
+        background: transparent;
+        border: 0;
+        font-size: 22px;
+        color: var(--muted);
+        cursor: pointer;
+        line-height: 1;
+      }
+      .itrow {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .itrow img,
+      .itrow .ph {
+        width: 40px;
+        height: 40px;
+        border-radius: 9px;
+        object-fit: cover;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+      }
+      .itrow .nm {
+        font-weight: 600;
+        font-size: 13.5px;
+      }
+      .itrow .gm {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .cred {
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 12px 14px;
+        margin-top: 6px;
+      }
+      .cred .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 7px 0;
+      }
+      .cred .row label {
+        width: 88px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .cred .row code {
+        flex: 1;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 13px;
+        word-break: break-all;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 9px;
+      }
+      .cred .copy {
+        font-size: 11.5px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+      }
+      .note {
+        font-size: 12.5px;
+        color: var(--muted);
+        margin-top: 10px;
+      }
+      .banner {
+        margin: 14px 0;
+        padding: 11px 14px;
+        border-radius: 11px;
+        font-size: 13.5px;
+        display: none;
+      }
+      .banner.show {
+        display: block;
+      }
+      .banner.ok {
+        background: rgba(5, 150, 105, 0.12);
+        color: var(--green);
+      }
+      .banner.err {
+        background: rgba(220, 38, 38, 0.12);
+        color: var(--red);
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path></svg
+          >Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path></svg
+          >Orders</a
+        >
+        <a href="/generate.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M12 2v20M2 7l10 5 10-5"></path></svg
+          >Generate code</a
+        >
+        <a href="/items"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"
+            ></path></svg
+          >Items</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg
+          >Inventory</a
+        >
+        <a href="/twitch-inventory.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+            <path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg
+          >Twitch drops</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path
+              d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"
+            ></path></svg
+          >Bots</a
+        >
+        <a href="/drops-archive.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 8v13H3V8"></path>
+            <path d="M1 3h22v5H1z"></path>
+            <path d="M10 12h4"></path></svg
+          >Drops archive</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="logout themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+            ></path></svg
+          ><svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+        <button class="logout" id="logoutBtn" title="Log out">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="page">
+      <div
+        style="
+          display: flex;
+          align-items: flex-start;
+          gap: 14px;
+          flex-wrap: wrap;
+        "
+      >
+        <div>
+          <h1>Shop</h1>
+          <div class="sub">
+            Buy a ready-made account bundle with your balance — you'll instantly
+            get the login for an account that holds the whole bundle.
+          </div>
+        </div>
+        <div style="margin-left: auto">
+          <span class="bal"
+            ><svg
+              width="17"
+              height="17"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="9"></circle>
+              <path
+                d="M14.5 9.5a2.5 2 0 0 0-2.5-1.5c-1.7 0-2.5.9-2.5 2s.8 1.7 2.5 2 2.5.9 2.5 2-.8 2-2.5 2a2.5 2 0 0 1-2.5-1.5M12 6.5v11"
+              ></path>
+            </svg>
+            Balance: <b id="balance">—</b></span
+          >
+        </div>
+      </div>
+
+      <div id="banner" class="banner"></div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="browse">Browse</button>
+        <button class="tab" data-tab="purchases">My purchases</button>
+      </div>
+
+      <section id="view-browse">
+        <div id="listings" class="grid"></div>
+      </section>
+
+      <section id="view-purchases" style="display: none">
+        <div id="purchases"></div>
+      </section>
+    </main>
+
+    <!-- Examine / buy modal -->
+    <div class="modal-bg" id="modalBg">
+      <div class="modal" id="modal"></div>
+    </div>
+
+    <script src="/theme.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) =>
+        String(s == null ? "" : s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      const attr = (s) => esc(s).replace(/"/g, "&quot;");
+      function fmt(n) {
+        const v = Number(n) || 0;
+        return v % 1 === 0 ? String(v) : v.toFixed(2);
+      }
+      function isSuper() {
+        return ME.role === "superadmin";
+      }
+
+      async function api(url, opts) {
+        const r = await fetch(url, {
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          ...(opts || {}),
+        });
+        let d = {};
+        try {
+          d = await r.json();
+        } catch (e) {}
+        if (!r.ok || d.success === false) {
+          throw new Error(d.message || "HTTP " + r.status);
+        }
+        return d;
+      }
+
+      function banner(msg, kind) {
+        const b = $("banner");
+        b.textContent = msg;
+        b.className = "banner show " + (kind || "ok");
+        clearTimeout(banner._t);
+        banner._t = setTimeout(() => b.classList.remove("show"), 4500);
+      }
+
+      let ME = { role: "admin", balance: 0, username: "" };
+
+      function imgsMarkup(items) {
+        const shown = (items || []).slice(0, 6);
+        const more = (items || []).length - shown.length;
+        let html = shown
+          .map((i) =>
+            i.image
+              ? '<img src="' + attr(i.image) + '" alt="" />'
+              : '<span class="ph">' + esc((i.name || "?")[0]) + "</span>",
+          )
+          .join("");
+        if (more > 0) html += '<span class="ph">+' + more + "</span>";
+        return html;
+      }
+
+      // -------- Browse --------
+      async function loadListings() {
+        const box = $("listings");
+        box.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+          const data = await api("/shop/listings");
+          const list = data.listings || [];
+          if (!list.length) {
+            box.innerHTML =
+              '<div class="empty">No bundles are listed for sale yet.' +
+              (isSuper()
+                ? " Go to <b>Drops archive → Sets / bundles</b> to price and list one."
+                : " Check back soon.") +
+              "</div>";
+            return;
+          }
+          box.innerHTML = list.map(listingCard).join("");
+        } catch (e) {
+          box.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+        }
+      }
+
+      function listingCard(l) {
+        const inStock = l.stock > 0;
+        return (
+          '<div class="card">' +
+          '<div class="imgs">' +
+          imgsMarkup(l.items) +
+          "</div>" +
+          '<div class="nm">' +
+          esc(l.name) +
+          "</div>" +
+          '<div class="meta">' +
+          l.itemCount +
+          " item" +
+          (l.itemCount === 1 ? "" : "s") +
+          (l.note ? " · " + esc(l.note) : "") +
+          "</div>" +
+          '<div class="foot">' +
+          '<span class="price">' +
+          fmt(l.price) +
+          "</span>" +
+          '<span class="stock' +
+          (inStock ? "" : " zero") +
+          '">' +
+          (inStock ? l.stock + " in stock" : "Out of stock") +
+          "</span>" +
+          "</div>" +
+          '<button class="btn-ghost" data-view="' +
+          attr(l.id) +
+          '">View bundle</button>' +
+          "</div>"
+        );
+      }
+
+      $("listings").addEventListener("click", (e) => {
+        const v = e.target.closest("[data-view]");
+        if (v) openListing(v.dataset.view);
+      });
+
+      // -------- Examine + buy --------
+      async function openListing(id) {
+        openModal('<div class="empty">Loading…</div>');
+        try {
+          const data = await api("/shop/listings/" + encodeURIComponent(id));
+          renderListingModal(data.listing);
+        } catch (e) {
+          openModal(
+            modalHead("Bundle") +
+              '<div class="empty">' +
+              esc(e.message) +
+              "</div>",
+          );
+        }
+      }
+
+      function renderListingModal(l) {
+        const inStock = l.stock > 0;
+        const canAfford = ME.balance >= l.price;
+        const items = (l.items || [])
+          .map(
+            (i) =>
+              '<div class="itrow">' +
+              (i.image
+                ? '<img src="' + attr(i.image) + '" alt="" />'
+                : '<span class="ph"></span>') +
+              '<div><div class="nm">' +
+              esc(i.name || "Reward") +
+              '</div><div class="gm">' +
+              esc(i.game || "") +
+              "</div></div></div>",
+          )
+          .join("");
+        let action;
+        if (!inStock) {
+          action = '<button class="btn-sm" disabled>Out of stock</button>';
+        } else if (!canAfford) {
+          action =
+            '<button class="btn-sm" disabled>Not enough balance</button>';
+        } else {
+          action =
+            '<button class="btn-sm" id="buyBtn" data-buy="' +
+            attr(l.id) +
+            '">Buy for ' +
+            fmt(l.price) +
+            "</button>";
+        }
+        openModal(
+          modalHead(esc(l.name)) +
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">' +
+            '<span class="price">' +
+            fmt(l.price) +
+            "</span>" +
+            '<span class="stock' +
+            (inStock ? "" : " zero") +
+            '">' +
+            (inStock ? l.stock + " in stock" : "Out of stock") +
+            "</span></div>" +
+            (l.note ? '<div class="note">' + esc(l.note) + "</div>" : "") +
+            '<div style="margin:12px 0 4px;font-weight:700;font-size:13px;">' +
+            l.itemCount +
+            " item" +
+            (l.itemCount === 1 ? "" : "s") +
+            " in this bundle</div>" +
+            items +
+            '<div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;">' +
+            '<button class="btn-ghost" data-close>Close</button>' +
+            action +
+            "</div>" +
+            '<div class="note">On purchase you receive the login for one of our accounts that holds the entire bundle. The account is then retired from the shop.</div>',
+        );
+        const buy = $("buyBtn");
+        if (buy) buy.addEventListener("click", () => doBuy(l));
+      }
+
+      async function doBuy(l) {
+        const buy = $("buyBtn");
+        if (buy) {
+          buy.disabled = true;
+          buy.textContent = "Processing…";
+        }
+        try {
+          const data = await api(
+            "/shop/listings/" + encodeURIComponent(l.id) + "/buy",
+            { method: "POST", body: "{}" },
+          );
+          ME.balance = data.balance;
+          renderBalance();
+          renderPurchaseResult(data.purchase);
+          banner("Purchased " + l.name + ".", "ok");
+        } catch (e) {
+          banner(e.message, "err");
+          if (buy) {
+            buy.disabled = false;
+            buy.textContent = "Buy for " + fmt(l.price);
+          }
+        }
+      }
+
+      function credBlock(c) {
+        if (!c) return "";
+        const row = (label, val) =>
+          '<div class="row"><label>' +
+          label +
+          "</label><code>" +
+          esc(val || "—") +
+          '</code><button class="copy" data-copy="' +
+          attr(val || "") +
+          '">Copy</button></div>';
+        return (
+          '<div class="cred">' +
+          row("Login", c.login) +
+          (c.username && c.username !== c.login
+            ? row("Username", c.username)
+            : "") +
+          row("Password", c.password) +
+          (c.email ? row("Email", c.email) : "") +
+          "</div>"
+        );
+      }
+
+      function renderPurchaseResult(p) {
+        openModal(
+          modalHead("Purchase complete") +
+            '<div class="note" style="margin-top:0;">You bought <b>' +
+            esc(p.setName) +
+            "</b> for " +
+            fmt(p.price) +
+            ". Here is the delivered account:</div>" +
+            credBlock(p.credentials) +
+            '<div class="note">Account login: <b>' +
+            esc(p.accountLogin) +
+            "</b>. You can re-open these details any time under <b>My purchases</b>.</div>" +
+            '<div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;">' +
+            '<button class="btn-sm" data-close>Done</button></div>',
+        );
+        // Refresh listings/purchases in the background.
+        loadListings();
+      }
+
+      // -------- My purchases --------
+      async function loadPurchases() {
+        const box = $("purchases");
+        box.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+          const data = await api("/shop/purchases");
+          const list = data.purchases || [];
+          if (!list.length) {
+            box.innerHTML =
+              '<div class="empty">You haven\'t bought anything yet.</div>';
+            return;
+          }
+          box.innerHTML =
+            "<table><thead><tr><th>When</th><th>Bundle</th><th>Items</th><th>Price</th><th>Account</th><th></th></tr></thead><tbody>" +
+            list
+              .map(
+                (p) =>
+                  "<tr><td>" +
+                  esc(new Date(p.createdAt).toLocaleString()) +
+                  "</td><td>" +
+                  esc(p.setName) +
+                  "</td><td>" +
+                  (p.items || []).length +
+                  "</td><td>" +
+                  fmt(p.price) +
+                  "</td><td>" +
+                  esc(p.accountLogin || "—") +
+                  '</td><td><button class="btn-ghost" data-reveal="' +
+                  attr(p.id) +
+                  '">Reveal login</button></td></tr>',
+              )
+              .join("") +
+            "</tbody></table>";
+        } catch (e) {
+          box.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+        }
+      }
+
+      $("purchases").addEventListener("click", (e) => {
+        const r = e.target.closest("[data-reveal]");
+        if (r) revealPurchase(r.dataset.reveal);
+      });
+
+      async function revealPurchase(id) {
+        openModal('<div class="empty">Loading…</div>');
+        try {
+          const data = await api("/shop/purchases/" + encodeURIComponent(id));
+          const p = data.purchase;
+          openModal(
+            modalHead(esc(p.setName)) +
+              '<div class="note" style="margin-top:0;">Bought ' +
+              esc(new Date(p.createdAt).toLocaleString()) +
+              " for " +
+              fmt(p.price) +
+              ".</div>" +
+              credBlock(p.credentials) +
+              '<div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;">' +
+              '<button class="btn-sm" data-close>Close</button></div>',
+          );
+        } catch (e) {
+          openModal(
+            modalHead("Purchase") +
+              '<div class="empty">' +
+              esc(e.message) +
+              "</div>",
+          );
+        }
+      }
+
+      // -------- Modal plumbing --------
+      function modalHead(title) {
+        return (
+          '<div class="mh"><h3>' +
+          title +
+          '</h3><button data-close title="Close">&times;</button></div>'
+        );
+      }
+      function openModal(html) {
+        $("modal").innerHTML = html;
+        $("modalBg").classList.add("show");
+      }
+      function closeModal() {
+        $("modalBg").classList.remove("show");
+      }
+      $("modalBg").addEventListener("click", (e) => {
+        if (e.target === $("modalBg") || e.target.closest("[data-close]")) {
+          closeModal();
+        }
+        const cp = e.target.closest("[data-copy]");
+        if (cp) {
+          navigator.clipboard &&
+            navigator.clipboard.writeText(cp.dataset.copy || "");
+          cp.textContent = "Copied";
+          setTimeout(() => (cp.textContent = "Copy"), 1200);
+        }
+      });
+
+      // -------- Tabs --------
+      document.querySelectorAll(".tab").forEach((t) => {
+        t.addEventListener("click", () => {
+          document
+            .querySelectorAll(".tab")
+            .forEach((x) => x.classList.remove("active"));
+          t.classList.add("active");
+          const tab = t.dataset.tab;
+          $("view-browse").style.display = tab === "browse" ? "" : "none";
+          $("view-purchases").style.display = tab === "purchases" ? "" : "none";
+          if (tab === "purchases") loadPurchases();
+          else loadListings();
+        });
+      });
+
+      function renderBalance() {
+        $("balance").textContent = fmt(ME.balance);
+      }
+
+      $("logoutBtn").addEventListener("click", async () => {
+        try {
+          await fetch("/admin-logout", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+        } catch {}
+        window.location.href = "/admin-login.html";
+      });
+
+      async function init() {
+        try {
+          const me = await api("/shop/me");
+          ME = { role: me.role, balance: me.balance, username: me.username };
+          $("meName").textContent = me.username || "Admin";
+          renderBalance();
+        } catch (e) {}
+        loadListings();
+      }
+      init();
+    </script>
+    <script src="/admin-nav.js"></script>
+  </body>
+</html>

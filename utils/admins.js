@@ -59,6 +59,7 @@ function sanitizeAdmin(admin) {
       : 0,
     telegramUsername: admin.telegramUsername || "",
     telegramLinked: !!admin.telegramChatId,
+    balance: Number(admin.balance) || 0,
   };
 }
 
@@ -281,6 +282,51 @@ function getTelegramChatId(id) {
   return admin && admin.telegramChatId ? String(admin.telegramChatId) : null;
 }
 
+// --- Wallet / balance -------------------------------------------------------
+//
+// Each admin has a spendable balance (in whatever currency unit the operator
+// uses) held in admins.json. Superadmins top it up; the shop debits it on a
+// purchase. Balances are plain numbers and never go negative.
+
+function getBalance(id) {
+  const admin = loadAdmins().find((a) => a.id === id);
+  return admin ? Number(admin.balance) || 0 : 0;
+}
+
+// Apply a signed delta to an admin's balance atomically (load → mutate →
+// save). Rejects a debit that would overdraw unless allowNegative is set.
+// Returns the new balance.
+async function adjustBalance(id, delta, { allowNegative = false } = {}) {
+  const amount = Number(delta);
+  if (!Number.isFinite(amount)) throw new Error("Invalid amount");
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  const current = Number(admin.balance) || 0;
+  const next = current + amount;
+  if (next < 0 && !allowNegative) {
+    throw new Error("Insufficient balance");
+  }
+  admin.balance = Math.round(next * 100) / 100;
+  await saveAdmins(admins);
+  return admin.balance;
+}
+
+// Set an admin's balance to an exact value (superadmin override). Returns the
+// public view of the updated admin.
+async function setBalance(id, value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error("Invalid balance");
+  }
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  admin.balance = Math.round(amount * 100) / 100;
+  await saveAdmins(admins);
+  return sanitizeAdmin(admin);
+}
+
 module.exports = {
   ROLES,
   loadAdmins,
@@ -300,4 +346,7 @@ module.exports = {
   linkTelegramByCode,
   unlinkTelegram,
   getTelegramChatId,
+  getBalance,
+  adjustBalance,
+  setBalance,
 };

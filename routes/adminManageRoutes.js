@@ -6,6 +6,9 @@ const {
   addAdmin,
   updateAdmin,
   deleteAdmin,
+  adjustBalance,
+  setBalance,
+  getAdminById,
 } = require("../utils/admins");
 const { requireSuperadmin } = require("../middleware/auth");
 
@@ -41,6 +44,44 @@ router.put("/admins/:id", requireSuperadmin, async (req, res) => {
       role,
     });
     res.json({ success: true, admin });
+  } catch (err) {
+    const status = err.message === "Admin not found" ? 404 : 400;
+    res.status(status).json({ success: false, message: err.message });
+  }
+});
+
+// TOP UP / SET an admin's wallet balance (superadmin only). Pass either
+// `amount` (a signed delta to add, e.g. 50 to credit or -10 to deduct) or
+// `set` (an absolute new balance). Returns the updated admin.
+router.post("/admins/:id/balance", requireSuperadmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!getAdminById(req.params.id)) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Admin not found" });
+    }
+    if (body.set !== undefined) {
+      const admin = await setBalance(req.params.id, body.set);
+      return res.json({ success: true, admin });
+    }
+    if (body.amount !== undefined) {
+      const amount = Number(body.amount);
+      if (!Number.isFinite(amount)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid amount" });
+      }
+      // Superadmin adjustments may push a balance negative (e.g. a correction).
+      await adjustBalance(req.params.id, amount, { allowNegative: true });
+      return res.json({
+        success: true,
+        admin: sanitizeAdmin(getAdminById(req.params.id)),
+      });
+    }
+    res
+      .status(400)
+      .json({ success: false, message: "Provide `amount` or `set`" });
   } catch (err) {
     const status = err.message === "Admin not found" ? 404 : 400;
     res.status(status).json({ success: false, message: err.message });

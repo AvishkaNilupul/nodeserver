@@ -19,6 +19,10 @@ const dropSetSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     note: { type: String, default: "" },
     items: { type: [dropSetItemSchema], default: [] },
+    // Shop listing: superadmin sets a flat price and flips `listed` to make
+    // the bundle buyable by regular admins from the Shop tab.
+    price: { type: Number, default: 0, min: 0 },
+    listed: { type: Boolean, default: false, index: true },
   },
   { timestamps: true },
 );

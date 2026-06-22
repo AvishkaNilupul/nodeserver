@@ -166,8 +166,10 @@ router.put(
           .json({ success: false, message: "Account not found" });
       }
       const body = req.body || {};
-      if (typeof body.username === "string") acc.credUsername = body.username.trim();
-      if (typeof body.email === "string") acc.credEmail = encrypt(body.email.trim());
+      if (typeof body.username === "string")
+        acc.credUsername = body.username.trim();
+      if (typeof body.email === "string")
+        acc.credEmail = encrypt(body.email.trim());
       if (typeof body.password === "string") {
         acc.credPassword = encrypt(body.password);
         acc.hasPassword = !!body.password;
@@ -224,7 +226,8 @@ router.post("/drops-archive/sync", requireSuperadmin, async (req, res) => {
       const users =
         (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
       for (const u of users) {
-        const token = typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
+        const token =
+          typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
         if (!token) continue;
         found++;
         const r = await BotAccount.updateOne(
@@ -305,7 +308,8 @@ router.post(
           continue;
         }
         acc.credUsername = username;
-        if (item.email != null) acc.credEmail = encrypt(String(item.email).trim());
+        if (item.email != null)
+          acc.credEmail = encrypt(String(item.email).trim());
         if (item.password != null) {
           acc.credPassword = encrypt(String(item.password));
           acc.hasPassword = !!String(item.password);
@@ -366,9 +370,7 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
       await Promise.all([
         BotAccount.countDocuments({}),
         DropLog.countDocuments({}),
-        DropLog.aggregate([
-          { $group: { _id: null, n: { $sum: "$count" } } },
-        ]),
+        DropLog.aggregate([{ $group: { _id: null, n: { $sum: "$count" } } }]),
         DropLog.distinct("game"),
         DropLog.aggregate([
           { $addFields: { _k: itemKeyExpr } },
@@ -570,7 +572,9 @@ router.get(
 // Resolve display metadata (name/game/image) for a list of itemKeys from the
 // logged drops, so a set always shows accurate names/images.
 async function resolveItemsMeta(keys) {
-  const uniq = [...new Set(keys.map((k) => String(k || "").trim()).filter(Boolean))];
+  const uniq = [
+    ...new Set(keys.map((k) => String(k || "").trim()).filter(Boolean)),
+  ];
   if (!uniq.length) return [];
   const rows = await DropLog.aggregate([
     { $addFields: { _k: itemKeyExpr } },
@@ -591,7 +595,7 @@ async function resolveItemsMeta(keys) {
     return {
       itemKey: k,
       name: m.name || k.split("|")[0] || "Reward",
-      game: m.game || (k.split("|")[1] || ""),
+      game: m.game || k.split("|")[1] || "",
       image: m.imageLocal || m.imageURL || "",
     };
   });
@@ -604,6 +608,8 @@ function publicSet(s) {
     note: s.note || "",
     items: s.items || [],
     itemCount: (s.items || []).length,
+    price: Number(s.price) || 0,
+    listed: !!s.listed,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -621,6 +627,8 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
         note: s.note || "",
         items: s.items || [],
         itemCount: (s.items || []).length,
+        price: Number(s.price) || 0,
+        listed: !!s.listed,
         updatedAt: s.updatedAt,
       })),
     });
@@ -665,6 +673,20 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
     }
     if (typeof body.note === "string") set.note = body.note.trim();
 
+    // Shop listing controls (superadmin only — this whole route is guarded by
+    // requireSuperadmin). Price is a flat amount; listed toggles visibility in
+    // the Shop tab for regular admins.
+    if (body.price !== undefined) {
+      const price = Number(body.price);
+      if (!Number.isFinite(price) || price < 0) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid price" });
+      }
+      set.price = Math.round(price * 100) / 100;
+    }
+    if (body.listed !== undefined) set.listed = !!body.listed;
+
     let keys = set.items.map((i) => i.itemKey);
     if (Array.isArray(body.itemKeys)) keys = body.itemKeys;
     if (Array.isArray(body.addItemKeys)) keys = keys.concat(body.addItemKeys);
@@ -682,15 +704,19 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
 });
 
 // Delete a set.
-router.delete("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
-  try {
-    await DropSet.findByIdAndDelete(req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    console.error("drops-archive set delete error:", err.message);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-});
+router.delete(
+  "/drops-archive/sets/:id",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      await DropSet.findByIdAndDelete(req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("drops-archive set delete error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 // Fulfillment: which accounts can deliver the whole bundle, plus per-item stock.
 router.get(
@@ -706,7 +732,13 @@ router.get(
       if (!keys.length) {
         return res.json({
           success: true,
-          set: { id: String(set._id), name: set.name, note: set.note || "" },
+          set: {
+            id: String(set._id),
+            name: set.name,
+            note: set.note || "",
+            price: Number(set.price) || 0,
+            listed: !!set.listed,
+          },
           items: set.items || [],
           accounts: [],
           fullAccounts: 0,
@@ -791,7 +823,10 @@ router.get(
         },
       ]);
       const stockByKey = new Map(
-        perItem.map((p) => [p._id, { totalCount: p.totalCount, accounts: p.accounts.length }]),
+        perItem.map((p) => [
+          p._id,
+          { totalCount: p.totalCount, accounts: p.accounts.length },
+        ]),
       );
       const items = (set.items || []).map((it) => {
         const s = stockByKey.get(it.itemKey) || { totalCount: 0, accounts: 0 };
@@ -806,7 +841,13 @@ router.get(
 
       res.json({
         success: true,
-        set: { id: String(set._id), name: set.name, note: set.note || "" },
+        set: {
+          id: String(set._id),
+          name: set.name,
+          note: set.note || "",
+          price: Number(set.price) || 0,
+          listed: !!set.listed,
+        },
         items,
         accounts,
         fullAccounts: fullAccounts.length,

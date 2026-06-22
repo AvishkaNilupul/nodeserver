@@ -23,6 +23,15 @@ const botAccountSchema = new mongoose.Schema(
     credEmail: { type: String, default: "" },
     hasPassword: { type: Boolean, default: false },
 
+    // Shop sale bookkeeping. When an account is delivered to a buyer via the
+    // Shop it is retired from the sellable pool by stamping soldAt; the
+    // remaining fields record who got it and as part of which bundle.
+    soldAt: { type: Date, default: null, index: true },
+    soldToAdminId: { type: String, default: "" },
+    soldToUsername: { type: String, default: "" },
+    soldSetId: { type: String, default: "" },
+    soldPurchaseId: { type: String, default: "" },
+
     // Scan bookkeeping.
     lastScanAt: { type: Date, default: null },
     lastScanStatus: {

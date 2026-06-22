@@ -1614,6 +1614,10 @@
       function attr(s) {
         return esc(s);
       }
+      function fmt(n) {
+        const v = Number(n) || 0;
+        return v % 1 === 0 ? String(v) : v.toFixed(2);
+      }
 
       async function api(url, opts) {
         const r = await fetch(
@@ -2543,6 +2547,14 @@
           " item" +
           (s.itemCount !== 1 ? "s" : "") +
           "</div>" +
+          '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
+          (s.price
+            ? '<span class="chip">Price: ' + esc(fmt(s.price)) + "</span>"
+            : "") +
+          (s.listed
+            ? '<span class="chip on">In shop</span>'
+            : '<span class="chip off">Not listed</span>') +
+          "</div>" +
           "</div>"
         );
       }
@@ -2650,6 +2662,24 @@
           "</b><span>Items in set</span></div>" +
           '<button class="btn-ghost btn-sm" id="setEdit" style="margin-left:auto;">Rename</button>' +
           '<button class="btn-ghost btn-sm" id="setDelete">Delete set</button>' +
+          "</div>";
+
+        // Shop listing controls — price the bundle and list it for admins.
+        html +=
+          '<div style="border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:4px;">' +
+          '<label class="lbl">Shop listing</label>' +
+          '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
+          '<div><div class="gm" style="font-size:12px;color:var(--muted);">Price</div>' +
+          '<input type="number" id="setPrice" min="0" step="0.01" value="' +
+          attr(d.set.price || 0) +
+          '" style="width:130px;" /></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;">' +
+          '<input type="checkbox" id="setListed"' +
+          (d.set.listed ? " checked" : "") +
+          " /> List in shop (visible to all admins)</label>" +
+          '<button class="btn-sm" id="setListSave" style="margin-left:auto;">Save listing</button>' +
+          "</div>" +
+          '<div class="hint" style="margin-top:8px;">Listed bundles need a price above 0 and at least one account that holds the whole set to be buyable.</div>' +
           "</div>";
 
         // Items in the set
@@ -2766,6 +2796,32 @@
             .writeText(txt)
             .then(() => banner("Copied full-set logins.", "ok"))
             .catch(() => banner("Copy failed", "err"));
+          return;
+        }
+        if (e.target.id === "setListSave" && currentSet) {
+          const btn = e.target;
+          const old = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = "Saving…";
+          try {
+            await api(
+              "/drops-archive/sets/" + encodeURIComponent(currentSet.id),
+              {
+                method: "PUT",
+                body: JSON.stringify({
+                  price: Number($("setPrice").value) || 0,
+                  listed: $("setListed").checked,
+                }),
+              },
+            );
+            banner("Shop listing saved.", "ok");
+            loadSets();
+            openSet(currentSet.id);
+          } catch (err) {
+            banner(err.message, "err");
+            btn.disabled = false;
+            btn.textContent = old;
+          }
           return;
         }
         if (e.target.id === "setEdit" && currentSet) {

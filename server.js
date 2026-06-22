@@ -28,6 +28,7 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const shopRoutes = require("./routes/shopRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
@@ -318,6 +319,16 @@ app.get("/marketplace.html", requireAdmin, enforce2fa, (req, res) => {
 });
 app.use("/marketplace", requireAdmin, enforce2fa, marketplaceProxy);
 
+// =========================
+// Shop (in-app bundle store, all admins)
+// =========================
+// A second, fully in-app marketplace: superadmins price and list bundles
+// (DropSets); regular admins browse them and buy with their balance, getting a
+// matching account in return. Separate from the FastAPI Marketplace above.
+app.get("/shop.html", requireAdmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "shop.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -337,6 +348,7 @@ app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
 app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
+app.use(enforce2fa, shopRoutes);
 
 // =========================
 // Socket.IO
