@@ -47,6 +47,34 @@ async function saveAdmins(admins) {
   await fsp.rename(tmp, adminsFile);
 }
 
+// Serialise every read-modify-write of admins.json. Without this, two
+// overlapping writers (e.g. a purchase debit and a superadmin top-up) both load
+// the same snapshot and the last save clobbers the other's change — silently
+// losing a balance update. All mutating helpers run their load → mutate → save
+// inside this single in-process queue so writes never interleave.
+let writeChain = Promise.resolve();
+function withLock(fn) {
+  const run = writeChain.then(fn, fn);
+  // Keep the chain alive regardless of whether this task resolved or threw.
+  writeChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+// Run `fn(admins)` against a freshly-loaded list and persist the result, all
+// under the write lock. `fn` may mutate the array and return any value to pass
+// back to the caller; it can throw to abort without saving.
+function mutate(fn) {
+  return withLock(async () => {
+    const admins = loadAdmins();
+    const result = await fn(admins);
+    await saveAdmins(admins);
+    return result;
+  });
+}
+
 // Public-safe view of an admin (never expose the password hash or 2FA secret).
 function sanitizeAdmin(admin) {
   return {
@@ -80,73 +108,72 @@ async function addAdmin({ username, password, role }) {
     throw new Error("Password must be at least 6 characters");
   }
 
-  const admins = loadAdmins();
-  if (findByUsername(admins, username)) {
-    throw new Error("An admin with that username already exists");
-  }
-
-  const admin = {
-    id: "admin_" + crypto.randomBytes(6).toString("hex"),
-    username,
-    password: await bcrypt.hash(password, BCRYPT_ROUNDS),
-    role: normalizeRole(role),
-  };
-
-  admins.push(admin);
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  return mutate((admins) => {
+    if (findByUsername(admins, username)) {
+      throw new Error("An admin with that username already exists");
+    }
+    const admin = {
+      id: "admin_" + crypto.randomBytes(6).toString("hex"),
+      username,
+      password: hash,
+      role: normalizeRole(role),
+    };
+    admins.push(admin);
+    return sanitizeAdmin(admin);
+  });
 }
 
 async function updateAdmin(id, { username, password, role }) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) {
-    throw new Error("Admin not found");
-  }
-
-  if (username !== undefined) {
-    username = String(username).trim();
-    if (!username) {
-      throw new Error("Username cannot be empty");
-    }
-    const clash = findByUsername(admins, username);
-    if (clash && clash.id !== id) {
-      throw new Error("An admin with that username already exists");
-    }
-    admin.username = username;
-  }
-
+  // Hash outside the lock (bcrypt is slow) so we don't hold up other writers.
+  let newHash = null;
   if (password !== undefined && password !== "") {
     if (String(password).length < 6) {
       throw new Error("Password must be at least 6 characters");
     }
-    admin.password = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
+    newHash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
   }
-
-  if (role !== undefined) {
-    admin.role = normalizeRole(role);
-  }
-
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  const nextUsername =
+    username !== undefined ? String(username).trim() : undefined;
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) {
+      throw new Error("Admin not found");
+    }
+    if (nextUsername !== undefined) {
+      if (!nextUsername) {
+        throw new Error("Username cannot be empty");
+      }
+      const clash = findByUsername(admins, nextUsername);
+      if (clash && clash.id !== id) {
+        throw new Error("An admin with that username already exists");
+      }
+      admin.username = nextUsername;
+    }
+    if (newHash) admin.password = newHash;
+    if (role !== undefined) admin.role = normalizeRole(role);
+    return sanitizeAdmin(admin);
+  });
 }
 
 async function deleteAdmin(id) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) {
-    throw new Error("Admin not found");
-  }
-  const remaining = admins.filter((a) => a.id !== id);
-  // Never allow deleting the last superadmin (would lock everyone out).
-  if (
-    admin.role === "superadmin" &&
-    !remaining.some((a) => a.role === "superadmin")
-  ) {
-    throw new Error("Cannot delete the only superadmin");
-  }
-  await saveAdmins(remaining);
-  return sanitizeAdmin(admin);
+  return withLock(async () => {
+    const admins = loadAdmins();
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) {
+      throw new Error("Admin not found");
+    }
+    const remaining = admins.filter((a) => a.id !== id);
+    // Never allow deleting the last superadmin (would lock everyone out).
+    if (
+      admin.role === "superadmin" &&
+      !remaining.some((a) => a.role === "superadmin")
+    ) {
+      throw new Error("Cannot delete the only superadmin");
+    }
+    await saveAdmins(remaining);
+    return sanitizeAdmin(admin);
+  });
 }
 
 // --- Two-factor (TOTP) helpers ---------------------------------------------
@@ -157,46 +184,46 @@ function getAdminById(id) {
 
 // Store an encrypted secret as "pending" (enrolment started, not yet confirmed).
 async function setTotpPending(id, encSecret) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  admin.totpPending = encSecret;
-  await saveAdmins(admins);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    admin.totpPending = encSecret;
+  });
 }
 
 // Confirm enrolment: promote the pending secret to active and store backup codes.
 async function enableTotp(id, encSecret, backupHashes) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  admin.totpSecret = encSecret;
-  admin.totpEnabled = true;
-  admin.backupCodes = Array.isArray(backupHashes) ? backupHashes : [];
-  delete admin.totpPending;
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    admin.totpSecret = encSecret;
+    admin.totpEnabled = true;
+    admin.backupCodes = Array.isArray(backupHashes) ? backupHashes : [];
+    delete admin.totpPending;
+    return sanitizeAdmin(admin);
+  });
 }
 
 // Turn off 2FA and wipe all related material.
 async function disableTotp(id) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  admin.totpEnabled = false;
-  delete admin.totpSecret;
-  delete admin.totpPending;
-  delete admin.backupCodes;
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    admin.totpEnabled = false;
+    delete admin.totpSecret;
+    delete admin.totpPending;
+    delete admin.backupCodes;
+    return sanitizeAdmin(admin);
+  });
 }
 
 // Consume (remove) a used backup code by index.
 async function consumeBackupCode(id, index) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin || !Array.isArray(admin.backupCodes)) return;
-  admin.backupCodes.splice(index, 1);
-  await saveAdmins(admins);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin || !Array.isArray(admin.backupCodes)) return;
+    admin.backupCodes.splice(index, 1);
+  });
 }
 
 // --- Telegram linking -------------------------------------------------------
@@ -211,25 +238,25 @@ async function consumeBackupCode(id, index) {
 // Save the @username the admin typed in. Purely for display/identification —
 // the chat_id captured at confirm time is what actually receives messages.
 async function setTelegramUsername(id, username) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  admin.telegramUsername = normalizeTelegramUsername(username);
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    admin.telegramUsername = normalizeTelegramUsername(username);
+    return sanitizeAdmin(admin);
+  });
 }
 
 // Begin linking: generate a fresh code bound to this admin and return it. The
 // admin then confirms it inside Telegram so we can capture their chat_id.
 async function startTelegramLink(id) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  const code = crypto.randomBytes(4).toString("hex").toUpperCase();
-  admin.telegramLinkCode = code;
-  admin.telegramLinkExpires = Date.now() + TELEGRAM_LINK_TTL_MS;
-  await saveAdmins(admins);
-  return code;
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    const code = crypto.randomBytes(4).toString("hex").toUpperCase();
+    admin.telegramLinkCode = code;
+    admin.telegramLinkExpires = Date.now() + TELEGRAM_LINK_TTL_MS;
+    return code;
+  });
 }
 
 // Confirm a link from an incoming Telegram message. Finds the admin whose
@@ -242,37 +269,36 @@ async function linkTelegramByCode(code, chatId, fromUsername) {
     .toUpperCase();
   if (!wanted || chatId === undefined || chatId === null) return null;
 
-  const admins = loadAdmins();
-  const admin = admins.find(
-    (a) =>
-      a.telegramLinkCode &&
-      a.telegramLinkCode.toUpperCase() === wanted &&
-      typeof a.telegramLinkExpires === "number" &&
-      a.telegramLinkExpires > Date.now(),
-  );
-  if (!admin) return null;
-
-  admin.telegramChatId = String(chatId);
-  if (fromUsername && !admin.telegramUsername) {
-    admin.telegramUsername = normalizeTelegramUsername(fromUsername);
-  }
-  delete admin.telegramLinkCode;
-  delete admin.telegramLinkExpires;
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  return mutate((admins) => {
+    const admin = admins.find(
+      (a) =>
+        a.telegramLinkCode &&
+        a.telegramLinkCode.toUpperCase() === wanted &&
+        typeof a.telegramLinkExpires === "number" &&
+        a.telegramLinkExpires > Date.now(),
+    );
+    if (!admin) return null;
+    admin.telegramChatId = String(chatId);
+    if (fromUsername && !admin.telegramUsername) {
+      admin.telegramUsername = normalizeTelegramUsername(fromUsername);
+    }
+    delete admin.telegramLinkCode;
+    delete admin.telegramLinkExpires;
+    return sanitizeAdmin(admin);
+  });
 }
 
 // Remove the linked chat (and any pending code) so the admin stops receiving
 // notifications until they link again.
 async function unlinkTelegram(id) {
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  delete admin.telegramChatId;
-  delete admin.telegramLinkCode;
-  delete admin.telegramLinkExpires;
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    delete admin.telegramChatId;
+    delete admin.telegramLinkCode;
+    delete admin.telegramLinkExpires;
+    return sanitizeAdmin(admin);
+  });
 }
 
 // The linked chat_id for a seller, or null. Used when fanning out a
@@ -299,17 +325,17 @@ function getBalance(id) {
 async function adjustBalance(id, delta, { allowNegative = false } = {}) {
   const amount = Number(delta);
   if (!Number.isFinite(amount)) throw new Error("Invalid amount");
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  const current = Number(admin.balance) || 0;
-  const next = current + amount;
-  if (next < 0 && !allowNegative) {
-    throw new Error("Insufficient balance");
-  }
-  admin.balance = Math.round(next * 100) / 100;
-  await saveAdmins(admins);
-  return admin.balance;
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    const current = Number(admin.balance) || 0;
+    const next = current + amount;
+    if (next < 0 && !allowNegative) {
+      throw new Error("Insufficient balance");
+    }
+    admin.balance = Math.round(next * 100) / 100;
+    return admin.balance;
+  });
 }
 
 // Set an admin's balance to an exact value (superadmin override). Returns the
@@ -319,12 +345,12 @@ async function setBalance(id, value) {
   if (!Number.isFinite(amount) || amount < 0) {
     throw new Error("Invalid balance");
   }
-  const admins = loadAdmins();
-  const admin = admins.find((a) => a.id === id);
-  if (!admin) throw new Error("Admin not found");
-  admin.balance = Math.round(amount * 100) / 100;
-  await saveAdmins(admins);
-  return sanitizeAdmin(admin);
+  return mutate((admins) => {
+    const admin = admins.find((a) => a.id === id);
+    if (!admin) throw new Error("Admin not found");
+    admin.balance = Math.round(amount * 100) / 100;
+    return sanitizeAdmin(admin);
+  });
 }
 
 module.exports = {

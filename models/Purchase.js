@@ -39,6 +39,12 @@ const purchaseSchema = new mongoose.Schema(
 
     // Balance snapshot right after the debit (for the receipt).
     balanceAfter: { type: Number, default: 0 },
+
+    // Refund bookkeeping. A superadmin can reverse a sale: the account is
+    // returned to the sellable pool and the buyer is refunded. Refunded
+    // purchases stay on record (with these stamps) rather than being deleted.
+    refundedAt: { type: Date, default: null, index: true },
+    refundedBy: { type: String, default: "" },
   },
   { timestamps: true },
 );

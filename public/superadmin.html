@@ -699,6 +699,31 @@
           </tbody>
         </table>
       </div>
+
+      <div class="card">
+        <h2>Balance ledger</h2>
+        <div class="sub" style="margin: -6px 0 12px">
+          Audit trail of every wallet change — top-ups, purchases and refunds.
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Admin</th>
+              <th>Type</th>
+              <th style="text-align: right">Amount</th>
+              <th style="text-align: right">Balance after</th>
+              <th>By</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody id="ledgerRows">
+            <tr>
+              <td colspan="7" style="color: var(--muted)">Loading…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </main>
 
     <!-- Edit modal -->
@@ -830,10 +855,22 @@
         }
       }
 
-      async function loadBuyers() {
+      let buyerPage = 1;
+      let buyerHasMore = false;
+      let buyerRows = [];
+      async function loadBuyers(reset) {
+        if (reset !== false) {
+          buyerPage = 1;
+          buyerRows = [];
+        }
         try {
-          const data = await api("GET", "/shop/purchases?all=1");
-          renderBuyers(data.purchases || []);
+          const data = await api(
+            "GET",
+            "/shop/purchases?all=1&page=" + buyerPage + "&limit=50",
+          );
+          buyerRows = buyerRows.concat(data.purchases || []);
+          buyerHasMore = !!data.hasMore;
+          renderBuyers();
         } catch (e) {
           $("buyerRows").innerHTML =
             '<tr><td colspan="7" style="color:#dc2626;">' +
@@ -842,18 +879,27 @@
         }
       }
 
-      function renderBuyers(purchases) {
-        if (!purchases.length) {
+      function renderBuyers() {
+        if (!buyerRows.length) {
           $("buyerRows").innerHTML =
             '<tr><td colspan="7" style="color:var(--muted);">No purchases yet.</td></tr>';
           return;
         }
-        $("buyerRows").innerHTML = purchases
+        const body = buyerRows
           .map((p) => {
             const when = p.createdAt
               ? new Date(p.createdAt).toLocaleString()
               : "—";
             const items = (p.items || []).length;
+            const refunded = !!p.refundedAt;
+            const actions = refunded
+              ? '<span style="color:var(--muted);font-size:12px;">Refunded</span>'
+              : '<button class="btn ghost sm" data-reveal="' +
+                esc(p.id) +
+                '">Reveal login</button> ' +
+                '<button class="btn ghost sm" data-refund="' +
+                esc(p.id) +
+                '">Refund</button>';
             return (
               "<tr>" +
               '<td style="color:var(--muted);font-size:12.5px;">' +
@@ -864,6 +910,9 @@
               "</b></td>" +
               "<td>" +
               esc(p.setName || "—") +
+              (refunded
+                ? ' <span style="color:#dc2626;font-size:11px;">(refunded)</span>'
+                : "") +
               "</td>" +
               "<td>" +
               items +
@@ -874,13 +923,18 @@
               '<td class="mono">' +
               esc(p.accountLogin || "—") +
               "</td>" +
-              '<td style="text-align:right;"><button class="btn ghost sm" data-reveal="' +
-              esc(p.id) +
-              '">Reveal login</button></td>' +
+              '<td style="text-align:right;white-space:nowrap;">' +
+              actions +
+              "</td>" +
               "</tr>"
             );
           })
           .join("");
+        const more = buyerHasMore
+          ? '<tr><td colspan="7" style="text-align:center;">' +
+            '<button class="btn ghost sm" id="buyerMore">Load more</button></td></tr>'
+          : "";
+        $("buyerRows").innerHTML = body + more;
       }
 
       function renderAdmins(admins) {
@@ -1036,6 +1090,7 @@
               "ok",
             );
             loadAdmins();
+            loadLedger();
           } catch (err) {
             showMsg(err.message, "err");
           }
@@ -1099,6 +1154,37 @@
       });
 
       $("buyerRows").addEventListener("click", async (e) => {
+        if (e.target.id === "buyerMore") {
+          buyerPage++;
+          return loadBuyers(false);
+        }
+        const refundBtn = e.target.closest("[data-refund]");
+        if (refundBtn) {
+          const rid = refundBtn.getAttribute("data-refund");
+          if (
+            !confirm(
+              "Refund this purchase? The account is returned to the shop pool and the buyer is credited back.",
+            )
+          )
+            return;
+          refundBtn.disabled = true;
+          refundBtn.textContent = "…";
+          try {
+            await api(
+              "POST",
+              "/shop/purchases/" + encodeURIComponent(rid) + "/refund",
+            );
+            showMsg("Purchase refunded.", "ok");
+            loadBuyers();
+            loadAdmins();
+            loadLedger();
+          } catch (err) {
+            showMsg(err.message, "err");
+            refundBtn.disabled = false;
+            refundBtn.textContent = "Refund";
+          }
+          return;
+        }
         const btn = e.target.closest("[data-reveal]");
         if (!btn) return;
         const id = btn.getAttribute("data-reveal");
@@ -1129,6 +1215,63 @@
           btn.textContent = old;
         }
       });
+
+      async function loadLedger() {
+        try {
+          const data = await api("GET", "/admins/ledger");
+          const rows = data.ledger || [];
+          if (!rows.length) {
+            $("ledgerRows").innerHTML =
+              '<tr><td colspan="7" style="color:var(--muted);">No balance changes yet.</td></tr>';
+            return;
+          }
+          $("ledgerRows").innerHTML = rows
+            .map((r) => {
+              const when = r.createdAt
+                ? new Date(r.createdAt).toLocaleString()
+                : "—";
+              const pos = Number(r.delta) >= 0;
+              const amt =
+                '<span style="color:' +
+                (pos ? "#059669" : "#dc2626") +
+                ';font-weight:700;">' +
+                (pos ? "+" : "") +
+                fmt(r.delta) +
+                "</span>";
+              return (
+                "<tr>" +
+                '<td style="color:var(--muted);font-size:12.5px;">' +
+                esc(when) +
+                "</td>" +
+                "<td><b>" +
+                esc(r.username || r.adminId || "—") +
+                "</b></td>" +
+                "<td>" +
+                esc(r.kind || "—") +
+                "</td>" +
+                '<td style="text-align:right;">' +
+                amt +
+                "</td>" +
+                '<td style="text-align:right;">' +
+                fmt(r.balanceAfter) +
+                "</td>" +
+                "<td>" +
+                esc(r.byUsername || "—") +
+                "</td>" +
+                '<td style="color:var(--muted);">' +
+                esc(r.note || "") +
+                "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
+        } catch (e) {
+          $("ledgerRows").innerHTML =
+            '<tr><td colspan="7" style="color:#dc2626;">' +
+            esc(e.message) +
+            "</td></tr>";
+        }
+      }
 
       async function loadRequire2fa() {
         try {
@@ -1184,6 +1327,7 @@
         loadAdmins();
         loadRequire2fa();
         loadBuyers();
+        loadLedger();
       })();
     </script>
     <script src="/theme.js"></script>

@@ -290,33 +290,46 @@ router.post(
           .status(400)
           .json({ success: false, message: "Expected an array of accounts" });
       }
+      // Build a single in-memory index of login/credUsername → account id so
+      // matching is one DB read + one bulk write, instead of a regex findOne +
+      // save per imported row (which was N round-trips and used no index).
+      const accounts = await BotAccount.find(
+        {},
+        { login: 1, credUsername: 1 },
+      ).lean();
+      const byKey = new Map();
+      for (const a of accounts) {
+        for (const k of [a.login, a.credUsername]) {
+          const key = String(k || "")
+            .trim()
+            .toLowerCase();
+          if (key && !byKey.has(key)) byKey.set(key, a._id);
+        }
+      }
+
       let matched = 0;
       const unmatched = [];
+      const ops = [];
       for (const item of list) {
         if (!item || typeof item !== "object") continue;
         const username = String(item.username || "").trim();
         if (!username) continue;
-        const re = new RegExp(
-          "^" + username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
-          "i",
-        );
-        const acc = await BotAccount.findOne({
-          $or: [{ login: re }, { credUsername: re }],
-        });
-        if (!acc) {
+        const id = byKey.get(username.toLowerCase());
+        if (!id) {
           unmatched.push(username);
           continue;
         }
-        acc.credUsername = username;
+        const set = { credUsername: username };
         if (item.email != null)
-          acc.credEmail = encrypt(String(item.email).trim());
+          set.credEmail = encrypt(String(item.email).trim());
         if (item.password != null) {
-          acc.credPassword = encrypt(String(item.password));
-          acc.hasPassword = !!String(item.password);
+          set.credPassword = encrypt(String(item.password));
+          set.hasPassword = !!String(item.password);
         }
-        await acc.save();
+        ops.push({ updateOne: { filter: { _id: id }, update: { $set: set } } });
         matched++;
       }
+      if (ops.length) await BotAccount.bulkWrite(ops, { ordered: false });
       res.json({
         success: true,
         matched,
@@ -510,8 +523,9 @@ router.get(
           .json({ success: false, message: "itemKey required" });
       }
       const rows = await DropLog.aggregate([
-        { $addFields: { _k: itemKeyExpr } },
-        { $match: { _k: itemKey } },
+        // Match the indexed itemKey directly so this uses the index instead of
+        // scanning every drop (legacy rows are backfilled on startup).
+        { $match: { itemKey } },
         {
           $lookup: {
             from: "botaccounts",
@@ -577,11 +591,10 @@ async function resolveItemsMeta(keys) {
   ];
   if (!uniq.length) return [];
   const rows = await DropLog.aggregate([
-    { $addFields: { _k: itemKeyExpr } },
-    { $match: { _k: { $in: uniq } } },
+    { $match: { itemKey: { $in: uniq } } },
     {
       $group: {
-        _id: "$_k",
+        _id: "$itemKey",
         name: { $first: "$name" },
         game: { $first: "$game" },
         imageLocal: { $max: "$imageLocal" },
@@ -748,11 +761,10 @@ router.get(
 
       // Per account: which of the set's items they hold and the count of each.
       const rows = await DropLog.aggregate([
-        { $addFields: { _k: itemKeyExpr } },
-        { $match: { _k: { $in: keys } } },
+        { $match: { itemKey: { $in: keys } } },
         {
           $group: {
-            _id: { account: "$account", k: "$_k" },
+            _id: { account: "$account", k: "$itemKey" },
             count: { $sum: "$count" },
             state: { $first: "$state" },
           },
@@ -816,11 +828,10 @@ router.get(
 
       // Per-item stock across all accounts.
       const perItem = await DropLog.aggregate([
-        { $addFields: { _k: itemKeyExpr } },
-        { $match: { _k: { $in: keys } } },
+        { $match: { itemKey: { $in: keys } } },
         {
           $group: {
-            _id: "$_k",
+            _id: "$itemKey",
             totalCount: { $sum: "$count" },
             accounts: { $addToSet: "$account" },
           },

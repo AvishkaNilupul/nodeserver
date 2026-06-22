@@ -1,31 +1,20 @@
 const express = require("express");
 
-const { requireAdmin } = require("../middleware/auth");
+const { requireAdmin, requireSuperadmin } = require("../middleware/auth");
 const DropSet = require("../models/DropSet");
 const DropLog = require("../models/DropLog");
 const BotAccount = require("../models/BotAccount");
 const Purchase = require("../models/Purchase");
 const { decrypt } = require("../utils/secretBox");
 const { getBalance, adjustBalance } = require("../utils/admins");
+const BalanceLog = require("../models/BalanceLog");
 
 const router = express.Router();
 
-// Grouping key for a drop: stored itemKey when present, else a computed
-// name|game. Kept identical to the expression used by the drops archive so a
-// bundle's items resolve to exactly the same buckets here.
-const itemKeyExpr = {
-  $cond: [
-    { $gt: [{ $strLenCP: { $ifNull: ["$itemKey", ""] } }, 0] },
-    "$itemKey",
-    {
-      $concat: [
-        { $toLower: { $trim: { input: { $ifNull: ["$name", ""] } } } },
-        "|",
-        { $toLower: { $trim: { input: { $ifNull: ["$game", ""] } } } },
-      ],
-    },
-  ],
-};
+// Bundle items are keyed by the stored, indexed `itemKey` (a normalised
+// name|game that the scanner and the startup backfill always populate). We
+// match on it directly so these aggregations use the itemKey index instead of
+// scanning the whole DropLog collection on every shop request.
 
 function isSuper(req) {
   return req.session?.admin?.role === "superadmin";
@@ -39,11 +28,10 @@ async function availableAccountsForSet(set) {
   if (!keys.length) return [];
   const total = keys.length;
   const rows = await DropLog.aggregate([
-    { $addFields: { _k: itemKeyExpr } },
-    { $match: { _k: { $in: keys } } },
+    { $match: { itemKey: { $in: keys } } },
     {
       $group: {
-        _id: { account: "$account", k: "$_k" },
+        _id: { account: "$account", k: "$itemKey" },
         count: { $sum: "$count" },
       },
     },
@@ -129,7 +117,9 @@ function purchaseView(p, { withCreds = false, account = null } = {}) {
     items: p.items || [],
     accountLogin: p.accountLogin,
     buyerUsername: p.buyerUsername,
+    buyerAdminId: p.buyerAdminId,
     createdAt: p.createdAt,
+    refundedAt: p.refundedAt || null,
   };
   if (withCreds && account) {
     base.credentials = {
@@ -162,13 +152,14 @@ router.get("/shop/listings", requireAdmin, async (req, res) => {
     const sets = await DropSet.find({ listed: true, price: { $gt: 0 } })
       .sort({ updatedAt: -1 })
       .lean();
-    const listings = [];
-    for (const set of sets) {
-      const accounts = await availableAccountsForSet(set);
-      listings.push(
-        listingView(set, accounts.length, countsFromRow(accounts[0])),
-      );
-    }
+    // Compute each bundle's stock in parallel rather than sequentially so the
+    // Shop page loads in one round-trip's worth of time, not N.
+    const listings = await Promise.all(
+      sets.map(async (set) => {
+        const accounts = await availableAccountsForSet(set);
+        return listingView(set, accounts.length, countsFromRow(accounts[0]));
+      }),
+    );
     res.json({ success: true, listings });
   } catch (err) {
     console.error("shop listings error:", err.message);
@@ -320,6 +311,20 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
       { $set: { soldPurchaseId: String(purchase._id) } },
     );
 
+    // Audit the spend (best-effort; never blocks the sale).
+    BalanceLog.create({
+      adminId: buyerId,
+      username: buyerUsername,
+      kind: "purchase",
+      delta: -price,
+      balanceAfter,
+      note: set.name,
+      byAdminId: buyerId,
+      byUsername: buyerUsername,
+      purchaseId: String(purchase._id),
+      setId: String(set._id),
+    }).catch((e) => console.error("balance log error:", e.message));
+
     res.json({
       success: true,
       balance: balanceAfter,
@@ -338,16 +343,98 @@ router.get("/shop/purchases", requireAdmin, async (req, res) => {
   try {
     const all = isSuper(req) && String(req.query.all || "") === "1";
     const q = all ? {} : { buyerAdminId: req.session.admin.id };
-    const purchases = await Purchase.find(q).sort({ createdAt: -1 }).lean();
+    // Pagination so the history doesn't grow into an unbounded payload.
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const [purchases, total] = await Promise.all([
+      Purchase.find(q)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Purchase.countDocuments(q),
+    ]);
     res.json({
       success: true,
       purchases: purchases.map((p) => purchaseView(p)),
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
     });
   } catch (err) {
     console.error("shop purchases error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// ------------------------------------------------------------------
+// Refund / unsell (superadmin only): return the delivered account to the
+// sellable pool and credit the buyer back. The purchase stays on record,
+// stamped as refunded.
+// ------------------------------------------------------------------
+router.post(
+  "/shop/purchases/:id/refund",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const p = await Purchase.findById(req.params.id);
+      if (!p) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Purchase not found" });
+      }
+      if (p.refundedAt) {
+        return res
+          .status(409)
+          .json({ success: false, message: "Already refunded" });
+      }
+      // Release the account back to the pool.
+      await BotAccount.updateOne(
+        { _id: p.account },
+        {
+          $set: {
+            soldAt: null,
+            soldToAdminId: "",
+            soldToUsername: "",
+            soldSetId: "",
+            soldPurchaseId: "",
+          },
+        },
+      );
+      // Credit the buyer back (allowNegative is irrelevant for a credit).
+      let balanceAfter = null;
+      try {
+        balanceAfter = await adjustBalance(p.buyerAdminId, p.price, {
+          allowNegative: true,
+        });
+      } catch (e) {
+        console.error("refund credit error:", e.message);
+      }
+      p.refundedAt = new Date();
+      p.refundedBy = req.session.admin.id;
+      await p.save();
+
+      BalanceLog.create({
+        adminId: p.buyerAdminId,
+        username: p.buyerUsername,
+        kind: "refund",
+        delta: p.price,
+        balanceAfter: balanceAfter == null ? 0 : balanceAfter,
+        note: "Refund: " + p.setName,
+        byAdminId: req.session.admin.id,
+        byUsername: req.session.admin.username,
+        purchaseId: String(p._id),
+        setId: p.setId,
+      }).catch((e) => console.error("balance log error:", e.message));
+
+      res.json({ success: true, balanceAfter });
+    } catch (err) {
+      console.error("shop refund error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 // One purchase WITH the delivered account's credentials. Only the buyer (or a
 // superadmin) may reveal them.

@@ -15,11 +15,22 @@ let cachedKey = null;
 
 function getKey() {
   if (cachedKey) return cachedKey;
-  const secret =
-    process.env.CRED_SECRET || process.env.SESSION_SECRET || "";
+  const secret = process.env.CRED_SECRET || process.env.SESSION_SECRET || "";
   if (!secret) {
     throw new Error(
       "CRED_SECRET (or SESSION_SECRET) must be set to store credentials securely",
+    );
+  }
+  // The credential key is derived from this secret. If it changes, every value
+  // encrypted with the old one becomes undecryptable. Falling back to
+  // SESSION_SECRET ties stored passwords to the session secret — so rotating
+  // SESSION_SECRET would silently destroy them. Warn once so operators set a
+  // dedicated, stable CRED_SECRET instead.
+  if (!process.env.CRED_SECRET) {
+    console.warn(
+      "[secretBox] CRED_SECRET is not set; deriving the credential key from " +
+        "SESSION_SECRET. Set a dedicated CRED_SECRET before rotating " +
+        "SESSION_SECRET, or stored account passwords/emails will be lost.",
     );
   }
   // Fixed salt: the secret itself is the entropy; we just need a deterministic

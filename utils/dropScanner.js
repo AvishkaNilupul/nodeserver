@@ -114,6 +114,11 @@ async function scanAccount(acc) {
 // Force-scan one account immediately (used by the "Scan now" button). Runs
 // outside the pacing loop but still serialised via the scanning flag.
 async function scanAccountNow(id) {
+  // Don't overlap with an in-flight scan (background tick or another manual
+  // scan) — concurrent scans of the same account would race on its doc.
+  if (state.scanning) {
+    return { ok: false, error: "A scan is already in progress" };
+  }
   const acc = await BotAccount.findById(id);
   if (!acc) return { ok: false, error: "Account not found" };
   state.scanning = true;
@@ -134,6 +139,11 @@ async function tick() {
     return;
   }
   state.lastTickAt = new Date();
+  // A manual "Scan now" may be running; skip this tick rather than overlap.
+  if (state.scanning) {
+    schedule(jitter(state.intervalMs));
+    return;
+  }
   try {
     const acc = await nextDueAccount();
     if (!acc) {
@@ -182,7 +192,11 @@ async function backfillItemKeys() {
       ],
     );
     if (r.modifiedCount) {
-      console.log("dropScanner: backfilled itemKey on", r.modifiedCount, "drops");
+      console.log(
+        "dropScanner: backfilled itemKey on",
+        r.modifiedCount,
+        "drops",
+      );
     }
     return r.modifiedCount || 0;
   } catch (e) {

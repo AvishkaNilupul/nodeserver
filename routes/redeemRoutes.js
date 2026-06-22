@@ -7,6 +7,7 @@ const Code = require("../models/Code");
 const config = require("../config/config");
 const generateRedeemCode = require("../utils/codeGenerator");
 const { validateLimiter, generateLimiter } = require("../utils/rateLimit");
+const { encrypt, decrypt } = require("../utils/secretBox");
 
 // Constant-time comparison so the admin key can't be recovered via timing.
 function safeEqual(a, b) {
@@ -37,16 +38,21 @@ router.post("/validate", validateLimiter, async (req, res) => {
         .json({ success: false, message: "Device token is required" });
     }
 
-    const found = await Code.findOne({ code });
+    // Atomically claim the code for this device: bind deviceToken only if it
+    // isn't set yet. This closes the race where two simultaneous first-redeems
+    // could each bind their own token via a read-then-write.
+    let found = await Code.findOneAndUpdate(
+      { code, deviceToken: null },
+      { $set: { deviceToken, redeemedAt: new Date() } },
+      { new: true },
+    );
+    if (!found) {
+      // Either the code doesn't exist or it's already locked to a device.
+      found = await Code.findOne({ code });
+    }
 
     if (!found) {
       return res.json({ success: false, message: "Invalid code" });
-    }
-
-    if (!found.deviceToken) {
-      found.deviceToken = deviceToken;
-      found.redeemedAt = new Date();
-      await found.save();
     }
 
     if (found.deviceToken !== deviceToken) {
@@ -66,10 +72,12 @@ router.post("/validate", validateLimiter, async (req, res) => {
       }
     }
 
+    // Stored encrypted at rest; decrypt for delivery. Legacy plaintext rows are
+    // returned unchanged (decrypt passes through non-encrypted values).
     return res.json({
       success: true,
-      account: found.account,
-      password: found.password,
+      account: decrypt(found.account),
+      password: decrypt(found.password),
     });
   } catch (err) {
     console.error(err);
@@ -95,7 +103,11 @@ router.post("/generate", generateLimiter, async (req, res) => {
       exists = await Code.findOne({ code });
     }
 
-    const newCode = new Code({ code, account, password });
+    const newCode = new Code({
+      code,
+      account: encrypt(String(account || "")),
+      password: encrypt(String(password || "")),
+    });
     await newCode.save();
 
     return res.json({ success: true, code });

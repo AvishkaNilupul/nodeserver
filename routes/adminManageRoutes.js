@@ -8,11 +8,23 @@ const {
   deleteAdmin,
   adjustBalance,
   setBalance,
+  getBalance,
   getAdminById,
 } = require("../utils/admins");
 const { requireSuperadmin } = require("../middleware/auth");
+const BalanceLog = require("../models/BalanceLog");
 
 const router = express.Router();
+
+// Record a balance change in the audit ledger. Never throws — a logging
+// failure must not block the actual top-up.
+async function logBalance(entry) {
+  try {
+    await BalanceLog.create(entry);
+  } catch (e) {
+    console.error("balance log error:", e.message);
+  }
+}
 
 // Every admin-management endpoint is superadmin-only. The guard is applied
 // per-route (not via router.use) because this router is mounted at "/", so a
@@ -61,8 +73,20 @@ router.post("/admins/:id/balance", requireSuperadmin, async (req, res) => {
         .status(404)
         .json({ success: false, message: "Admin not found" });
     }
+    const target = getAdminById(req.params.id);
+    const before = getBalance(req.params.id);
     if (body.set !== undefined) {
       const admin = await setBalance(req.params.id, body.set);
+      await logBalance({
+        adminId: req.params.id,
+        username: target.username,
+        kind: "set",
+        delta: Math.round((admin.balance - before) * 100) / 100,
+        balanceAfter: admin.balance,
+        note: String(body.note || ""),
+        byAdminId: req.session.admin.id,
+        byUsername: req.session.admin.username,
+      });
       return res.json({ success: true, admin });
     }
     if (body.amount !== undefined) {
@@ -73,7 +97,19 @@ router.post("/admins/:id/balance", requireSuperadmin, async (req, res) => {
           .json({ success: false, message: "Invalid amount" });
       }
       // Superadmin adjustments may push a balance negative (e.g. a correction).
-      await adjustBalance(req.params.id, amount, { allowNegative: true });
+      const after = await adjustBalance(req.params.id, amount, {
+        allowNegative: true,
+      });
+      await logBalance({
+        adminId: req.params.id,
+        username: target.username,
+        kind: "topup",
+        delta: amount,
+        balanceAfter: after,
+        note: String(body.note || ""),
+        byAdminId: req.session.admin.id,
+        byUsername: req.session.admin.username,
+      });
       return res.json({
         success: true,
         admin: sanitizeAdmin(getAdminById(req.params.id)),
@@ -85,6 +121,22 @@ router.post("/admins/:id/balance", requireSuperadmin, async (req, res) => {
   } catch (err) {
     const status = err.message === "Admin not found" ? 404 : 400;
     res.status(status).json({ success: false, message: err.message });
+  }
+});
+
+// Balance ledger (audit trail). Superadmin sees all top-ups/spends; a regular
+// admin sees only their own. Newest first, capped for the UI.
+router.get("/admins/ledger", requireSuperadmin, async (req, res) => {
+  try {
+    const q = req.query.adminId ? { adminId: String(req.query.adminId) } : {};
+    const rows = await BalanceLog.find(q)
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+    res.json({ success: true, ledger: rows });
+  } catch (err) {
+    console.error("balance ledger error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 

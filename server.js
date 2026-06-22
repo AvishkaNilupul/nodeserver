@@ -204,7 +204,17 @@ app.post("/submit-gamertag", submitLimiter, async (req, res) => {
       req.socket.remoteAddress ||
       "Unknown";
 
-    await sendTelegramToSeller(
+    order.used = true;
+    order.gamerTag = gamerTag;
+    order.usedAt = new Date();
+    // Per-buyer secret returned to the client; required to authenticate
+    // the chat socket so a gamertag alone can't impersonate the buyer.
+    order.chatToken = crypto.randomBytes(24).toString("hex");
+    await order.save();
+
+    // Notify out-of-band so the buyer's response isn't delayed by the
+    // Telegram API round-trip (errors are handled inside the sender).
+    sendTelegramToSeller(
       order.sellerId,
       `🎮NEW GAMER TAG
 
@@ -218,15 +228,7 @@ ${ip}
 
 Time:
 ${new Date().toISOString()}`,
-    );
-
-    order.used = true;
-    order.gamerTag = gamerTag;
-    order.usedAt = new Date();
-    // Per-buyer secret returned to the client; required to authenticate
-    // the chat socket so a gamertag alone can't impersonate the buyer.
-    order.chatToken = crypto.randomBytes(24).toString("hex");
-    await order.save();
+    ).catch((e) => console.error("telegram notify error:", e.message));
 
     res.json({ success: true, token: order.chatToken });
   } catch (err) {

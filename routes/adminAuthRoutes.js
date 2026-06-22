@@ -7,6 +7,19 @@ const { loginLimiter } = require("../utils/rateLimit");
 
 const router = express.Router();
 
+// A precomputed bcrypt hash compared against when the username is unknown, so
+// a missing account takes the same time as a wrong password (no enumeration).
+const DUMMY_HASH =
+  "$2b$10$CwTycUXWue0Thq9StjUM0uJ8Diq1oV7l0nF1iJ9Z6Kx4z3qK4kHe";
+
+// Promisified session regeneration to prevent session fixation: a new session
+// id is issued on successful authentication.
+function regenerateSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 function requireAdmin(req, res, next) {
   if (req.session?.admin) {
     return next();
@@ -32,21 +45,25 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
         .json({ success: false, message: "Username required" });
     }
 
-    const admin = loadAdmins().find((a) => a.username === username);
+    const admin = loadAdmins().find(
+      (a) => a.username.toLowerCase() === String(username).toLowerCase(),
+    );
 
-    if (!admin) {
+    // Always run a bcrypt comparison so the response time doesn't reveal
+    // whether the username exists.
+    const ok = await bcrypt.compare(
+      password,
+      admin ? admin.password : DUMMY_HASH,
+    );
+
+    if (!admin || !ok) {
       return res
         .status(401)
         .json({ success: false, message: "Invalid credentials" });
     }
 
-    const ok = await bcrypt.compare(password, admin.password);
-
-    if (!ok) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid credentials" });
-    }
+    // Issue a fresh session id now that the password is verified.
+    await regenerateSession(req);
 
     // If this admin has 2FA on, don't create the real session yet — stash a
     // short-lived pending state and make them pass the code step (/admin-2fa).

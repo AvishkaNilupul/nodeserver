@@ -32,8 +32,9 @@ const botAccountSchema = new mongoose.Schema(
     soldSetId: { type: String, default: "" },
     soldPurchaseId: { type: String, default: "" },
 
-    // Scan bookkeeping.
-    lastScanAt: { type: Date, default: null },
+    // Scan bookkeeping. Indexed because the scanner picks the oldest-scanned
+    // account each tick and the progress view sorts/filters on it.
+    lastScanAt: { type: Date, default: null, index: true },
     lastScanStatus: {
       type: String,
       enum: ["pending", "ok", "token_invalid", "error"],

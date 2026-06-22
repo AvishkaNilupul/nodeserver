@@ -19,6 +19,15 @@ function cleanUserId(value) {
 }
 
 function chatSocket(io) {
+  // Deliver an event only to the admins who should see this seller's chat: the
+  // seller's own sessions (room `seller:<id>`) and every superadmin (room
+  // `supers`). Socket.IO de-duplicates a socket that is in both rooms.
+  function emitToSeller(sellerId, event, payload) {
+    io.to("seller:" + sellerId)
+      .to("supers")
+      .emit(event, payload);
+  }
+
   io.on("connection", (socket) => {
     const session = socket.request.session;
     const admin = session?.admin || null;
@@ -26,14 +35,14 @@ function chatSocket(io) {
     socket.data.isAdmin = !!admin;
     socket.data.isSuper = admin?.role === "superadmin";
 
-    // All authenticated admins share one support inbox: they see every
-    // buyer conversation, regardless of which admin created the order. So
-    // every admin joins a single shared `admins` room that buyer/admin chat
-    // events are delivered to. (Buyers never join this room, so they still
-    // can't see each other's messages.)
+    // Real-time chat events are scoped per seller so a normal admin only
+    // receives messages for buyers that belong to them. Each admin joins their
+    // own `seller:<id>` room; superadmins additionally join `supers` so they
+    // still see every seller's chat. (Buyers never join these rooms.)
     if (admin) {
       socket.data.sellerId = admin.id;
-      socket.join("admins");
+      socket.join("seller:" + admin.id);
+      if (socket.data.isSuper) socket.join("supers");
     }
 
     // Lets the admin page confirm its socket is still authenticated after a
@@ -103,14 +112,14 @@ Scroll down to the "Received" section.
 
 Rust:
 • Activate Drops
-• Check for missing drops`
+• Check for missing drops`,
           );
 
           await addMessage(
             userId,
             order.sellerId,
             "admin",
-            "If you have any issue please text here. Admin will help you."
+            "If you have any issue please text here. Admin will help you.",
           );
         }
 
@@ -143,7 +152,8 @@ Rust:
 
         await addMessage(userId, sellerId, "user", message);
 
-        await sendTelegramToSeller(
+        // Fire-and-forget so the message broadcast isn't delayed by Telegram.
+        sendTelegramToSeller(
           sellerId,
           `💬NEW CHAT MESSAGE
 
@@ -154,11 +164,11 @@ ${userId}
 ${message}
 
 Time:
-${new Date().toISOString()}`
-        );
+${new Date().toISOString()}`,
+        ).catch((e) => console.error("telegram notify error:", e.message));
 
-        // Notify every admin (shared inbox) so whoever is online sees it.
-        io.to("admins").emit("new-message", {
+        // Notify only this seller's admins (and superadmins).
+        emitToSeller(sellerId, "new-message", {
           userId,
           sellerId,
           sender: "user",
@@ -215,8 +225,9 @@ ${new Date().toISOString()}`
         await addMessage(userId, sellerId, "admin", message);
 
         io.to(userId).emit("admin-reply", { message });
-        // Echo to every admin's panel so other logged-in admins see the reply.
-        io.to("admins").emit("new-message", {
+        // Echo to this seller's admins (and superadmins) so other open panels
+        // see the reply.
+        emitToSeller(sellerId, "new-message", {
           userId,
           sellerId,
           sender: "admin",
@@ -245,13 +256,13 @@ ${new Date().toISOString()}`
     socket.on("user-typing", () => {
       const { userId, sellerId } = socket.data;
       if (!userId || !sellerId || socket.data.isAdmin) return;
-      io.to("admins").emit("user-typing", userId);
+      emitToSeller(sellerId, "user-typing", userId);
     });
 
     socket.on("user-stop-typing", () => {
       const { userId, sellerId } = socket.data;
       if (!userId || !sellerId || socket.data.isAdmin) return;
-      io.to("admins").emit("user-stop-typing", userId);
+      emitToSeller(sellerId, "user-stop-typing", userId);
     });
 
     // =========================
@@ -263,7 +274,7 @@ ${new Date().toISOString()}`
         if (!userId || !sellerId || socket.data.isAdmin) return;
 
         await markSeen(sellerId, userId);
-        io.to("admins").emit("message-seen", userId);
+        emitToSeller(sellerId, "message-seen", userId);
       } catch (err) {
         console.error("message-seen error:", err.message);
       }
