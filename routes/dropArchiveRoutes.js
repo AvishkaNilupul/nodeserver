@@ -781,7 +781,10 @@ router.get(
             login: "$acc.login",
             container: "$acc.container",
             configFile: "$acc.configFile",
-            hasPassword: "$acc.hasPassword",
+            soldAt: "$acc.soldAt",
+            hasPassword: {
+              $gt: [{ $strLenCP: { $ifNull: ["$acc.credPassword", ""] } }, 0],
+            },
             items: 1,
           },
         },
@@ -801,6 +804,7 @@ router.get(
             container: r.container || "",
             configFile: r.configFile || "",
             hasPassword: !!r.hasPassword,
+            sold: !!r.soldAt,
             have,
             total,
             complete,
@@ -834,10 +838,13 @@ router.get(
       });
 
       const fullAccounts = accounts.filter((a) => a.complete);
-      const bundlesAvailable = fullAccounts.reduce(
-        (sum, a) => sum + a.minCount,
-        0,
-      );
+      // One deliverable bundle per account that holds the whole set and is
+      // actually sellable (has a stored password and hasn't been sold). This
+      // matches the Shop's "in stock" exactly — a buyer receives the whole
+      // account, so duplicate copies on one account are not counted twice.
+      const bundlesAvailable = fullAccounts.filter(
+        (a) => a.hasPassword && !a.sold,
+      ).length;
 
       res.json({
         success: true,
