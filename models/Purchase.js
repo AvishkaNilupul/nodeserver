@@ -12,6 +12,8 @@ const purchaseItemSchema = new mongoose.Schema(
     name: { type: String, default: "" },
     game: { type: String, default: "" },
     image: { type: String, default: "" },
+    // How many copies of this item the delivered account actually holds.
+    count: { type: Number, default: 1 },
   },
   { _id: false },
 );

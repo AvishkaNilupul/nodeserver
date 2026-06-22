@@ -52,6 +52,7 @@ async function availableAccountsForSet(set) {
         _id: "$_id.account",
         have: { $sum: 1 },
         minCount: { $min: "$count" },
+        items: { $push: { k: "$_id.k", count: "$count" } },
       },
     },
     { $match: { have: total } },
@@ -82,6 +83,7 @@ async function availableAccountsForSet(set) {
         hasPassword: "$acc.hasPassword",
         lastScanStatus: "$acc.lastScanStatus",
         minCount: 1,
+        items: 1,
       },
     },
     // Prefer accounts with healthy tokens and more spare copies of the bundle.
@@ -90,7 +92,16 @@ async function availableAccountsForSet(set) {
   return rows;
 }
 
-function listingView(set, stock) {
+// Per-item copy counts for the account that would be delivered next (the top
+// candidate). Lets the shop preview how many copies of each item the buyer
+// will actually receive.
+function countsFromRow(row) {
+  const map = new Map();
+  for (const it of (row && row.items) || []) map.set(it.k, it.count || 0);
+  return map;
+}
+
+function listingView(set, stock, countsByKey = null) {
   const items = set.items || [];
   return {
     id: String(set._id),
@@ -103,6 +114,7 @@ function listingView(set, stock) {
       name: i.name,
       game: i.game,
       image: i.image,
+      count: countsByKey ? countsByKey.get(i.itemKey) || 0 : null,
     })),
     stock,
   };
@@ -153,7 +165,9 @@ router.get("/shop/listings", requireAdmin, async (req, res) => {
     const listings = [];
     for (const set of sets) {
       const accounts = await availableAccountsForSet(set);
-      listings.push(listingView(set, accounts.length));
+      listings.push(
+        listingView(set, accounts.length, countsFromRow(accounts[0])),
+      );
     }
     res.json({ success: true, listings });
   } catch (err) {
@@ -172,7 +186,10 @@ router.get("/shop/listings/:id", requireAdmin, async (req, res) => {
         .json({ success: false, message: "Listing not found" });
     }
     const accounts = await availableAccountsForSet(set);
-    res.json({ success: true, listing: listingView(set, accounts.length) });
+    res.json({
+      success: true,
+      listing: listingView(set, accounts.length, countsFromRow(accounts[0])),
+    });
   } catch (err) {
     console.error("shop listing detail error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -210,6 +227,7 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
     // be handed the same account.
     const candidates = await availableAccountsForSet(set);
     let account = null;
+    let claimedCounts = null;
     for (const c of candidates) {
       const claimed = await BotAccount.findOneAndUpdate(
         { _id: c.accountId, soldAt: null },
@@ -225,6 +243,7 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
       );
       if (claimed) {
         account = claimed;
+        claimedCounts = countsFromRow(c);
         break;
       }
     }
@@ -269,6 +288,7 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
           name: i.name,
           game: i.game,
           image: i.image,
+          count: (claimedCounts && claimedCounts.get(i.itemKey)) || 1,
         })),
         buyerAdminId: buyerId,
         buyerUsername,

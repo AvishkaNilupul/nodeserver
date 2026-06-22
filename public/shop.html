@@ -415,6 +415,16 @@
         font-size: 12px;
         color: var(--muted);
       }
+      .itrow .qty {
+        margin-left: auto;
+        flex: none;
+        font-size: 12.5px;
+        font-weight: 700;
+        color: var(--accent2);
+        background: rgba(99, 102, 241, 0.12);
+        border-radius: 999px;
+        padding: 3px 9px;
+      }
       .cred {
         background: var(--surface-2);
         border: 1px solid var(--line);
@@ -877,23 +887,31 @@
         }
       }
 
-      function renderListingModal(l) {
-        const inStock = l.stock > 0;
-        const canAfford = ME.balance >= l.price;
-        const items = (l.items || [])
+      function itemRows(list) {
+        return (list || [])
           .map(
             (i) =>
               '<div class="itrow">' +
               (i.image
                 ? '<img src="' + attr(i.image) + '" alt="" />'
                 : '<span class="ph"></span>') +
-              '<div><div class="nm">' +
+              '<div style="flex:1;min-width:0;"><div class="nm">' +
               esc(i.name || "Reward") +
               '</div><div class="gm">' +
               esc(i.game || "") +
-              "</div></div></div>",
+              "</div></div>" +
+              (Number(i.count) > 1
+                ? '<span class="qty">×' + Number(i.count) + "</span>"
+                : "") +
+              "</div>",
           )
           .join("");
+      }
+
+      function renderListingModal(l) {
+        const inStock = l.stock > 0;
+        const canAfford = ME.balance >= l.price;
+        const items = itemRows(l.items);
         let action;
         if (!inStock) {
           action = '<button class="btn-sm" disabled>Out of stock</button>';
@@ -994,6 +1012,10 @@
             '<div class="note">Account login: <b>' +
             esc(p.accountLogin) +
             "</b>. You can re-open these details any time under <b>My purchases</b>.</div>" +
+            ((p.items || []).length
+              ? '<div style="margin:12px 0 4px;font-weight:700;font-size:13px;">What you received</div>' +
+                itemRows(p.items)
+              : "") +
             '<div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;">' +
             '<button class="btn-sm" data-close>Done</button></div>',
         );
@@ -1057,6 +1079,10 @@
               fmt(p.price) +
               ".</div>" +
               credBlock(p.credentials) +
+              ((p.items || []).length
+                ? '<div style="margin:12px 0 4px;font-weight:700;font-size:13px;">What you received</div>' +
+                  itemRows(p.items)
+                : "") +
               '<div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;">' +
               '<button class="btn-sm" data-close>Close</button></div>',
           );
