@@ -9,8 +9,21 @@ const adminsFile = path.join(__dirname, "admins.json");
 const ROLES = ["admin", "superadmin"];
 const BCRYPT_ROUNDS = 10;
 
+// How long a generated Telegram link code stays valid before it must be
+// regenerated (the admin has to open the bot and confirm within this window).
+const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
+
 function normalizeRole(role) {
   return role === "superadmin" ? "superadmin" : "admin";
+}
+
+// Telegram usernames are case-insensitive and may be entered with a leading
+// "@" or a full t.me link; normalise to the bare lowercase handle.
+function normalizeTelegramUsername(username) {
+  let u = String(username || "").trim();
+  u = u.replace(/^https?:\/\/t\.me\//i, "");
+  u = u.replace(/^@/, "");
+  return u.toLowerCase();
 }
 
 function loadAdmins() {
@@ -44,6 +57,8 @@ function sanitizeAdmin(admin) {
     backupCodesRemaining: Array.isArray(admin.backupCodes)
       ? admin.backupCodes.length
       : 0,
+    telegramUsername: admin.telegramUsername || "",
+    telegramLinked: !!admin.telegramChatId,
   };
 }
 
@@ -183,6 +198,89 @@ async function consumeBackupCode(id, index) {
   await saveAdmins(admins);
 }
 
+// --- Telegram linking -------------------------------------------------------
+//
+// Each admin can link a personal Telegram chat so notifications for the orders
+// they created are delivered to them. A bot can't message a user by @username
+// (the Bot API only sends to a numeric chat_id, and the user must have messaged
+// the bot first), so linking is a two-step "confirm in Telegram" flow: we
+// generate a short code, the admin sends it to the bot (via a deep link or
+// /link <code>), and the bot listener captures their chat_id.
+
+// Save the @username the admin typed in. Purely for display/identification —
+// the chat_id captured at confirm time is what actually receives messages.
+async function setTelegramUsername(id, username) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  admin.telegramUsername = normalizeTelegramUsername(username);
+  await saveAdmins(admins);
+  return sanitizeAdmin(admin);
+}
+
+// Begin linking: generate a fresh code bound to this admin and return it. The
+// admin then confirms it inside Telegram so we can capture their chat_id.
+async function startTelegramLink(id) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  const code = crypto.randomBytes(4).toString("hex").toUpperCase();
+  admin.telegramLinkCode = code;
+  admin.telegramLinkExpires = Date.now() + TELEGRAM_LINK_TTL_MS;
+  await saveAdmins(admins);
+  return code;
+}
+
+// Confirm a link from an incoming Telegram message. Finds the admin whose
+// pending code matches (case-insensitively, and not expired), stores their
+// chat_id, and clears the pending code. Returns the linked admin or null when
+// no valid pending code matches.
+async function linkTelegramByCode(code, chatId, fromUsername) {
+  const wanted = String(code || "")
+    .trim()
+    .toUpperCase();
+  if (!wanted || chatId === undefined || chatId === null) return null;
+
+  const admins = loadAdmins();
+  const admin = admins.find(
+    (a) =>
+      a.telegramLinkCode &&
+      a.telegramLinkCode.toUpperCase() === wanted &&
+      typeof a.telegramLinkExpires === "number" &&
+      a.telegramLinkExpires > Date.now(),
+  );
+  if (!admin) return null;
+
+  admin.telegramChatId = String(chatId);
+  if (fromUsername && !admin.telegramUsername) {
+    admin.telegramUsername = normalizeTelegramUsername(fromUsername);
+  }
+  delete admin.telegramLinkCode;
+  delete admin.telegramLinkExpires;
+  await saveAdmins(admins);
+  return sanitizeAdmin(admin);
+}
+
+// Remove the linked chat (and any pending code) so the admin stops receiving
+// notifications until they link again.
+async function unlinkTelegram(id) {
+  const admins = loadAdmins();
+  const admin = admins.find((a) => a.id === id);
+  if (!admin) throw new Error("Admin not found");
+  delete admin.telegramChatId;
+  delete admin.telegramLinkCode;
+  delete admin.telegramLinkExpires;
+  await saveAdmins(admins);
+  return sanitizeAdmin(admin);
+}
+
+// The linked chat_id for a seller, or null. Used when fanning out a
+// notification to the admin who created an order.
+function getTelegramChatId(id) {
+  const admin = loadAdmins().find((a) => a.id === id);
+  return admin && admin.telegramChatId ? String(admin.telegramChatId) : null;
+}
+
 module.exports = {
   ROLES,
   loadAdmins,
@@ -196,4 +294,10 @@ module.exports = {
   enableTotp,
   disableTotp,
   consumeBackupCode,
+  normalizeTelegramUsername,
+  setTelegramUsername,
+  startTelegramLink,
+  linkTelegramByCode,
+  unlinkTelegram,
+  getTelegramChatId,
 };

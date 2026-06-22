@@ -29,10 +29,12 @@ const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
+const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
+const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
 const { getOrderByOrderId, authorizeBuyer } = require("./utils/orderIds");
-const { sendTelegram } = require("./utils/telegram");
+const { sendTelegramToSeller } = require("./utils/telegram");
 const {
   globalLimiter,
   submitLimiter,
@@ -201,7 +203,8 @@ app.post("/submit-gamertag", submitLimiter, async (req, res) => {
       req.socket.remoteAddress ||
       "Unknown";
 
-    await sendTelegram(
+    await sendTelegramToSeller(
+      order.sellerId,
       `🎮NEW GAMER TAG
 
 Tag: ${gamerTag}
@@ -238,6 +241,10 @@ app.use(adminAuthRoutes);
 // 2FA setup + login second step. Mounted before the enforcement guard so an
 // admin who hasn't enrolled yet can still reach these to set it up.
 app.use(twoFactorRoutes);
+// Per-admin self-service settings (e.g. linking a personal Telegram chat).
+// Each route guards with requireAdmin; kept out of the 2FA enforcement gate so
+// it stays reachable like the security page.
+app.use(settingsRoutes);
 app.use(enforce2fa, adminManageRoutes);
 
 // =========================
@@ -255,6 +262,12 @@ app.get("/admin.html", requireAdmin, enforce2fa, (req, res) => {
 // not-yet-enrolled admin can actually reach it to set up).
 app.get("/security.html", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "security.html"));
+});
+
+// Settings (any admin; not behind enforce2fa so it stays reachable like the
+// security page). Hosts the per-admin "My Telegram" linking panel.
+app.get("/settings.html", requireAdmin, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "settings.html"));
 });
 
 app.get("/items", requireAdmin, enforce2fa, (req, res) => {
@@ -350,6 +363,9 @@ mongoose
     // Begin the background drop-archive scanner (gentle, one account at a
     // time). Safe no-op until accounts are synced from the bot configs.
     dropScanner.start();
+    // Listen for admins confirming a Telegram link from inside the app's bot.
+    // No-op when TG_TOKEN is unset.
+    telegramBot.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

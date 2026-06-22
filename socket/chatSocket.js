@@ -8,7 +8,7 @@ const {
   markSeen,
   conversationExists,
 } = require("../utils/messages");
-const { sendTelegram } = require("../utils/telegram");
+const { sendTelegramToSeller } = require("../utils/telegram");
 
 const cooldowns = new Map();
 
@@ -143,7 +143,8 @@ Rust:
 
         await addMessage(userId, sellerId, "user", message);
 
-        await sendTelegram(
+        await sendTelegramToSeller(
+          sellerId,
           `💬NEW CHAT MESSAGE
 
 👤User:

@@ -1,0 +1,844 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Settings · RedeemHub</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --accent2: #6366f1;
+        --green: #059669;
+        --red: #ef4444;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        height: 100vh;
+        display: flex;
+        overflow: hidden;
+      }
+
+      .nav {
+        width: 236px;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        box-shadow: 0 6px 14px rgba(79, 70, 229, 0.32);
+      }
+      .nav .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        overflow-y: auto;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: #eef2ff;
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .nav .me {
+        border-top: 1px solid var(--line);
+        padding: 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .nav .me .av {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #34d399, #10b981);
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-weight: 700;
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+      .nav .me .who {
+        line-height: 1.2;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13.5px;
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 110px;
+      }
+      .nav .me .who span {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .nav .me .logout {
+        margin-left: auto;
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+      .nav .me .logout + .logout {
+        margin-left: 8px;
+      }
+      .nav .me .logout:hover {
+        color: #ef4444;
+        border-color: #fecaca;
+        background: #fef2f2;
+      }
+
+      .page {
+        flex: 1;
+        overflow-y: auto;
+        padding: 28px 32px;
+        min-width: 0;
+      }
+      .page h1 {
+        font-size: 22px;
+        font-weight: 800;
+      }
+      .page .sub {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin-top: 4px;
+        margin-bottom: 22px;
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 22px;
+        margin-bottom: 22px;
+        max-width: 560px;
+      }
+      .card h2 {
+        font-size: 15px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .card p.hint {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+        margin-bottom: 16px;
+      }
+      label {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--muted);
+        display: block;
+        margin: 0 0 6px 2px;
+      }
+      .field {
+        margin-bottom: 14px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
+        flex-wrap: wrap;
+      }
+      .row .field {
+        flex: 1;
+        min-width: 200px;
+        margin-bottom: 0;
+      }
+      input {
+        width: 100%;
+        padding: 12px 13px;
+        border-radius: 11px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        outline: none;
+        font-family: inherit;
+        font-size: 14px;
+      }
+      input:focus {
+        border-color: var(--accent);
+        background: var(--surface);
+        box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+      }
+      .btn {
+        padding: 11px 18px;
+        border: none;
+        border-radius: 11px;
+        background: linear-gradient(180deg, var(--accent2), var(--accent));
+        color: #fff;
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .btn:hover {
+        transform: translateY(-1px);
+      }
+      .btn.ghost {
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        box-shadow: none;
+      }
+      .btn.danger {
+        background: #fff;
+        color: #ef4444;
+        border: 1px solid #fecaca;
+        box-shadow: none;
+      }
+      html[data-theme="dark"] .btn.danger {
+        background: transparent;
+        border-color: rgba(239, 68, 68, 0.4);
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 11.5px;
+        font-weight: 700;
+      }
+      .badge.on {
+        background: #ecfdf5;
+        color: #059669;
+      }
+      .badge.off {
+        background: #f1f5f9;
+        color: #64748b;
+      }
+      html[data-theme="dark"] .badge.on {
+        background: rgba(16, 185, 129, 0.16);
+        color: #34d399;
+      }
+      html[data-theme="dark"] .badge.off {
+        background: rgba(148, 163, 184, 0.16);
+        color: #94a3b8;
+      }
+
+      .msg {
+        font-size: 13.5px;
+        min-height: 20px;
+        margin-bottom: 12px;
+      }
+      .msg.err {
+        color: #dc2626;
+      }
+      .msg.ok {
+        color: #059669;
+      }
+
+      .warn {
+        background: #fff7ed;
+        border: 1px solid #fed7aa;
+        color: #9a3412;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 13px;
+        line-height: 1.6;
+        margin-bottom: 14px;
+      }
+      html[data-theme="dark"] .warn {
+        background: rgba(234, 88, 12, 0.12);
+        border-color: rgba(234, 88, 12, 0.4);
+        color: #fdba74;
+      }
+      .codebox {
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 18px;
+        letter-spacing: 2px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        text-align: center;
+        margin-bottom: 14px;
+      }
+      .steps {
+        font-size: 13px;
+        line-height: 1.7;
+        color: var(--muted);
+        margin: 0 0 16px 18px;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/generate.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M12 2v20M2 7l10 5 10-5"></path>
+          </svg>
+          Generate code</a
+        >
+        <a href="/items"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="m7.5 4.27 9 5.15M21 8l-9 5-9-5 9-5 9 5zM3 8v8l9 5 9-5V8"
+            ></path>
+          </svg>
+          Items</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+        <a href="/twitch-inventory.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+            <path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path>
+          </svg>
+          Twitch drops</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>
+          </svg>
+          Bots</a
+        >
+        <a href="/superadmin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path
+              d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+            ></path>
+          </svg>
+          Admins</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Admin</span>
+        </div>
+        <button
+          class="logout themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+            ></path></svg
+          ><svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+        <button class="logout" id="logoutBtn" title="Log out">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="page">
+      <h1>Settings</h1>
+      <div class="sub">Manage your personal notification preferences.</div>
+
+      <div id="msg" class="msg"></div>
+
+      <!-- Telegram linking -->
+      <div class="card">
+        <h2>
+          My Telegram <span id="tgBadge" class="badge off">Not linked</span>
+        </h2>
+        <p class="hint">
+          Link your Telegram so you receive a notification whenever a buyer
+          redeems or messages on <b>an order you created</b>. Super admins
+          always receive every notification. A bot can't message you by username
+          alone, so after entering your handle you'll confirm once inside
+          Telegram — that's what connects your chat.
+        </p>
+
+        <div class="row" style="margin-bottom: 16px">
+          <div class="field">
+            <label>Your Telegram username (optional)</label>
+            <input
+              id="tgUsername"
+              placeholder="@yourhandle"
+              autocomplete="off"
+            />
+          </div>
+          <button class="btn ghost" id="saveUsernameBtn" type="button">
+            Save
+          </button>
+        </div>
+
+        <!-- Not linked: show connect -->
+        <div id="connectBlock">
+          <button class="btn" id="connectBtn" type="button">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M21.5 4.5 2.5 12.5l6 2 2 6 3.5-4.5"></path>
+              <path d="m8.5 14.5 11-10"></path>
+            </svg>
+            Connect Telegram
+          </button>
+        </div>
+
+        <!-- Linking in progress: instructions -->
+        <div id="linkBlock" class="hidden">
+          <div class="warn">
+            <b>Almost there.</b> Open the bot in Telegram and press <b>Start</b>
+            (or send the code below). This page will update automatically once
+            it's connected. The code expires in 15 minutes.
+          </div>
+          <div class="codebox" id="linkCode">--------</div>
+          <ol class="steps">
+            <li>Tap <b>Open Telegram &amp; link</b> below.</li>
+            <li>In the chat with the bot, press <b>Start</b>.</li>
+            <li>
+              If nothing happens, send: <code id="manualCmd">/link CODE</code>
+            </li>
+          </ol>
+          <div class="actions">
+            <a class="btn" id="openTgBtn" target="_blank" rel="noopener"
+              >Open Telegram &amp; link</a
+            >
+            <button class="btn ghost" id="checkBtn" type="button">
+              I've done it
+            </button>
+            <button class="btn ghost" id="cancelLinkBtn" type="button">
+              Cancel
+            </button>
+          </div>
+        </div>
+
+        <!-- Linked: show unlink -->
+        <div id="linkedBlock" class="hidden">
+          <p class="hint" id="linkedHint" style="margin-bottom: 12px"></p>
+          <button class="btn danger" id="unlinkBtn" type="button">
+            Unlink Telegram
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let pollTimer = null;
+
+      function showMsg(text, kind) {
+        const el = $("msg");
+        el.textContent = text || "";
+        el.className = "msg" + (kind ? " " + kind : "");
+        if (text) {
+          clearTimeout(showMsg._t);
+          showMsg._t = setTimeout(() => {
+            el.textContent = "";
+            el.className = "msg";
+          }, 5000);
+        }
+      }
+
+      async function api(method, url, body) {
+        const opts = { method, credentials: "same-origin", headers: {} };
+        if (body !== undefined) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
+        }
+        const res = await fetch(url, opts);
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (e) {
+          /* ignore */
+        }
+        if (!res.ok || data.success === false) {
+          throw new Error((data && data.message) || "Request failed");
+        }
+        return data;
+      }
+
+      function stopPolling() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      function render(status) {
+        if (status.username && !$("tgUsername").value) {
+          $("tgUsername").value = "@" + status.username;
+        }
+        if (status.linked) {
+          stopPolling();
+          $("tgBadge").className = "badge on";
+          $("tgBadge").textContent = "Linked";
+          $("connectBlock").classList.add("hidden");
+          $("linkBlock").classList.add("hidden");
+          $("linkedBlock").classList.remove("hidden");
+          $("linkedHint").textContent =
+            "Your Telegram is connected" +
+            (status.username ? " (@" + status.username + ")" : "") +
+            ". You'll receive notifications for your own orders here.";
+        } else {
+          $("tgBadge").className = "badge off";
+          $("tgBadge").textContent = "Not linked";
+          $("linkedBlock").classList.add("hidden");
+          if (!$("linkBlock").classList.contains("hidden")) {
+            // mid-linking; keep instructions visible
+          } else {
+            $("connectBlock").classList.remove("hidden");
+          }
+        }
+      }
+
+      async function loadStatus() {
+        try {
+          const s = await api("GET", "/me/telegram");
+          render(s);
+          return s;
+        } catch (e) {
+          showMsg(e.message, "err");
+          return null;
+        }
+      }
+
+      $("saveUsernameBtn").addEventListener("click", async () => {
+        try {
+          await api("POST", "/me/telegram/username", {
+            username: $("tgUsername").value,
+          });
+          showMsg("Username saved.", "ok");
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
+
+      $("connectBtn").addEventListener("click", async () => {
+        try {
+          // Save whatever username they typed first (best effort).
+          if ($("tgUsername").value.trim()) {
+            try {
+              await api("POST", "/me/telegram/username", {
+                username: $("tgUsername").value,
+              });
+            } catch (e) {}
+          }
+          const d = await api("POST", "/me/telegram/link");
+          $("linkCode").textContent = d.code;
+          $("manualCmd").textContent = "/link " + d.code;
+          if (d.deepLink) {
+            $("openTgBtn").href = d.deepLink;
+            $("openTgBtn").classList.remove("hidden");
+          } else {
+            $("openTgBtn").classList.add("hidden");
+          }
+          $("connectBlock").classList.add("hidden");
+          $("linkedBlock").classList.add("hidden");
+          $("linkBlock").classList.remove("hidden");
+          if (!d.botUsername) {
+            showMsg(
+              "Bot not configured yet — send /link " +
+                d.code +
+                " to your bot once TG_TOKEN is set.",
+              "err",
+            );
+          }
+          // Poll for completion.
+          stopPolling();
+          pollTimer = setInterval(loadStatus, 3000);
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
+
+      $("checkBtn").addEventListener("click", () => loadStatus());
+
+      $("cancelLinkBtn").addEventListener("click", () => {
+        stopPolling();
+        $("linkBlock").classList.add("hidden");
+        $("connectBlock").classList.remove("hidden");
+      });
+
+      $("unlinkBtn").addEventListener("click", async () => {
+        try {
+          await api("POST", "/me/telegram/unlink");
+          showMsg("Telegram unlinked.", "ok");
+          loadStatus();
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
+
+      $("logoutBtn").addEventListener("click", async () => {
+        try {
+          await fetch("/admin-logout", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+        } catch (e) {}
+        window.location.href = "/admin-login.html";
+      });
+
+      (async () => {
+        try {
+          const r = await fetch("/whoami", { credentials: "same-origin" });
+          if (!r.ok) {
+            window.location.href = "/admin-login.html";
+            return;
+          }
+          const data = await r.json();
+          const me = (data && data.admin) || {};
+          const name = me.username || "Admin";
+          $("meName").innerText = name;
+          $("meAvatar").innerText = name.slice(0, 2).toUpperCase();
+        } catch (e) {
+          window.location.href = "/admin-login.html";
+          return;
+        }
+        loadStatus();
+      })();
+    </script>
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+  </body>
+</html>
