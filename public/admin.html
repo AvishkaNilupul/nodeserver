@@ -271,6 +271,10 @@ const input =
   );
 let typingTimer;
 let selectedUser = null;
+// For a superadmin the inbox spans every seller, so the open chat is keyed by
+// seller id + buyer id. Stays null for a normal admin (server uses their own).
+let selectedSeller = null;
+let isSuper = false;
 let lastAdminBubble =
   null;
 
@@ -427,7 +431,8 @@ async function loadUsers() {
     div.className = "user";
 
     if (
-      userId === selectedUser
+      userId === selectedUser &&
+      (!isSuper || convo.sellerId === selectedSeller)
     ) {
 
       div.classList.add(
@@ -527,10 +532,15 @@ async function loadUsers() {
       selectedUser =
         userId;
 
+      selectedSeller =
+        convo.sellerId || null;
+
       document.body.classList.add("chat-open");
 
       chatHeader.innerText =
-        `Chat with ${userId}`;
+        isSuper && selectedSeller
+          ? `Chat with ${userId} · seller ${selectedSeller}`
+          : `Chat with ${userId}`;
 
       // Clear the pane immediately so the previously open chat doesn't linger
       // on screen while the new conversation is being fetched.
@@ -539,12 +549,12 @@ async function loadUsers() {
       // Start loading the feed right away. Marking the thread read is a
       // background side effect, so don't make the chat wait on its round-trip
       // (that doubled the perceived switch latency).
-      loadMessages(userId);
+      loadMessages(userId, selectedSeller);
 
       fetch("/mark-read", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
+        body: JSON.stringify({ userId, sellerId: selectedSeller }),
       })
         .then(() => loadUsers())
         .catch(() => {});
@@ -565,13 +575,21 @@ loadUsers();
 // =========================
 
 async function loadMessages(
-  userId
+  userId,
+  sellerId
 ) {
+
+  // Superadmin chats carry a seller id so the right seller+buyer thread loads.
+  const qs =
+    sellerId
+      ? "?sellerId=" + encodeURIComponent(sellerId)
+      : "";
 
   const res =
     await fetch(
       "/messages/" +
-        encodeURIComponent(userId)
+        encodeURIComponent(userId) +
+        qs
     );
 
   const filtered =
@@ -887,11 +905,17 @@ socket.on(
       selectedUser =
         data.userId;
 
+      selectedSeller =
+        data.sellerId || null;
+
       chatHeader.innerText =
-        `Chat with ${data.userId}`;
+        isSuper && selectedSeller
+          ? `Chat with ${data.userId} · seller ${selectedSeller}`
+          : `Chat with ${data.userId}`;
 
       loadMessages(
-        data.userId
+        data.userId,
+        selectedSeller
       );
 
     }
@@ -904,6 +928,11 @@ socket.on(
 
       data.userId !==
       selectedUser
+
+      ||
+
+      (isSuper &&
+        data.sellerId !== selectedSeller)
 
     ) return;
 
@@ -1194,6 +1223,9 @@ Rust:
       userId:
         selectedUser,
 
+      sellerId:
+        selectedSeller,
+
       message
 
     }
@@ -1244,6 +1276,9 @@ function sendReply() {
 
       userId:
         selectedUser,
+
+      sellerId:
+        selectedSeller,
 
       message
 
@@ -1349,6 +1384,9 @@ document
 
               userId:
                 selectedUser,
+
+              sellerId:
+                selectedSeller,
 
               message:
 
@@ -1498,7 +1536,10 @@ async function clearChat(){
       body:JSON.stringify({
 
         userId:
-          selectedUser
+          selectedUser,
+
+        sellerId:
+          selectedSeller
 
       })
 
@@ -1509,6 +1550,7 @@ async function clearChat(){
   messagesDiv.innerHTML="";
 
   selectedUser=null;
+  selectedSeller=null;
 
   document.body.classList.remove("chat-open");
 
@@ -1573,9 +1615,16 @@ loadGuideCategories();
         const data = await r.json();
         const admin = data && data.admin ? data.admin : {};
         const name = admin.username || "Admin";
+        isSuper = admin.role === "superadmin";
         document.getElementById("meName").innerText = name;
         document.getElementById("meRole").innerText =
-          "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
+          (isSuper ? "Superadmin" : "Seller") +
+          (admin.id ? " \u00b7 " + admin.id : "");
+        // Superadmin sees every seller's chats, so refresh the list now that
+        // we know the role (the first load ran before whoami resolved).
+        if (isSuper && typeof loadUsers === "function") {
+          loadUsers();
+        }
         document.getElementById("meAvatar").innerText = name
           .slice(0, 2)
           .toUpperCase();

@@ -24,6 +24,7 @@ function chatSocket(io) {
     const admin = session?.admin || null;
 
     socket.data.isAdmin = !!admin;
+    socket.data.isSuper = admin?.role === "superadmin";
 
     // All authenticated admins share one support inbox: they see every
     // buyer conversation, regardless of which admin created the order. So
@@ -158,6 +159,7 @@ ${new Date().toISOString()}`
         // Notify every admin (shared inbox) so whoever is online sees it.
         io.to("admins").emit("new-message", {
           userId,
+          sellerId,
           sender: "user",
           message,
         });
@@ -175,7 +177,16 @@ ${new Date().toISOString()}`
           socket.emit("admin-auth", { isAdmin: false });
           return;
         }
-        const sellerId = socket.data.sellerId;
+        // A superadmin may reply into any seller's conversation by naming the
+        // target seller; a normal admin is always pinned to their own seller.
+        let sellerId = socket.data.sellerId;
+        if (
+          socket.data.isSuper &&
+          typeof data?.sellerId === "string" &&
+          data.sellerId
+        ) {
+          sellerId = data.sellerId;
+        }
         if (!data || typeof data.userId !== "string") return;
         if (typeof data.message !== "string") return;
 
@@ -206,6 +217,7 @@ ${new Date().toISOString()}`
         // Echo to every admin's panel so other logged-in admins see the reply.
         io.to("admins").emit("new-message", {
           userId,
+          sellerId,
           sender: "admin",
           message,
         });

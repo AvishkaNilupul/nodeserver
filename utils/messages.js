@@ -97,6 +97,47 @@ async function getSellerConversations(sellerId) {
   }));
 }
 
+// Superadmin inbox: every conversation across ALL sellers, one row per
+// seller+buyer pair (the same gamertag can exist under two sellers, so the
+// seller id is part of the key and is returned so the UI can scope replies).
+async function getAllConversations() {
+  const rows = await Message.aggregate([
+    { $sort: { createdAt: 1 } },
+    {
+      $group: {
+        _id: { sellerId: "$sellerId", userId: "$userId" },
+        lastMessage: { $last: "$message" },
+        lastSender: { $last: "$sender" },
+        updatedAt: { $last: "$createdAt" },
+        unread: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$sender", "user"] },
+                  { $eq: ["$readByAdmin", false] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+    { $sort: { updatedAt: -1 } },
+  ]);
+
+  return rows.map((r) => ({
+    userId: r._id.userId,
+    sellerId: r._id.sellerId,
+    lastMessage: r.lastMessage,
+    lastSender: r.lastSender,
+    unread: r.unread,
+    updatedAt: r.updatedAt,
+  }));
+}
+
 module.exports = {
   getMessagesBySeller,
   getMessagesByUser,
@@ -108,4 +149,5 @@ module.exports = {
   getSellerUserIds,
   conversationExists,
   getSellerConversations,
+  getAllConversations,
 };
