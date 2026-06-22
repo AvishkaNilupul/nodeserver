@@ -64,7 +64,16 @@ async function availableAccountsForSet(set) {
       },
     },
     { $unwind: "$acc" },
-    { $match: { "acc.soldAt": null } },
+    // Only sell accounts that actually have a stored password — accounts
+    // without one can't be delivered, so they're excluded from stock.
+    {
+      $match: {
+        "acc.soldAt": null,
+        $expr: {
+          $gt: [{ $strLenCP: { $ifNull: ["$acc.credPassword", ""] } }, 0],
+        },
+      },
+    },
     {
       $project: {
         _id: 0,

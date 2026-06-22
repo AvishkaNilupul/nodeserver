@@ -674,6 +674,31 @@
           </tbody>
         </table>
       </div>
+
+      <div class="card">
+        <h2>Buyer history</h2>
+        <div class="sub" style="margin: -6px 0 12px">
+          Every bundle bought from the Shop, across all admins.
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Buyer</th>
+              <th>Bundle</th>
+              <th>Items</th>
+              <th>Price</th>
+              <th>Account</th>
+              <th style="text-align: right">Login</th>
+            </tr>
+          </thead>
+          <tbody id="buyerRows">
+            <tr>
+              <td colspan="7" style="color: var(--muted)">Loading…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </main>
 
     <!-- Edit modal -->
@@ -711,6 +736,29 @@
             Cancel
           </button>
           <button class="btn" type="button" id="editSave">Save changes</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reveal credentials modal -->
+    <div class="modal-bg" id="revealModal">
+      <div class="modal">
+        <h3 id="revealTitle">Account</h3>
+        <div class="sub" id="revealMeta" style="margin: -6px 0 12px"></div>
+        <div class="field">
+          <label>Login</label>
+          <input id="revealLogin" readonly />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input id="revealPassword" readonly />
+        </div>
+        <div class="field">
+          <label>Email</label>
+          <input id="revealEmail" readonly />
+        </div>
+        <div class="actions">
+          <button class="btn" type="button" id="revealClose">Close</button>
         </div>
       </div>
     </div>
@@ -780,6 +828,59 @@
             esc(e.message) +
             "</td></tr>";
         }
+      }
+
+      async function loadBuyers() {
+        try {
+          const data = await api("GET", "/shop/purchases?all=1");
+          renderBuyers(data.purchases || []);
+        } catch (e) {
+          $("buyerRows").innerHTML =
+            '<tr><td colspan="7" style="color:#dc2626;">' +
+            esc(e.message) +
+            "</td></tr>";
+        }
+      }
+
+      function renderBuyers(purchases) {
+        if (!purchases.length) {
+          $("buyerRows").innerHTML =
+            '<tr><td colspan="7" style="color:var(--muted);">No purchases yet.</td></tr>';
+          return;
+        }
+        $("buyerRows").innerHTML = purchases
+          .map((p) => {
+            const when = p.createdAt
+              ? new Date(p.createdAt).toLocaleString()
+              : "—";
+            const items = (p.items || []).length;
+            return (
+              "<tr>" +
+              '<td style="color:var(--muted);font-size:12.5px;">' +
+              esc(when) +
+              "</td>" +
+              "<td><b>" +
+              esc(p.buyerUsername || "—") +
+              "</b></td>" +
+              "<td>" +
+              esc(p.setName || "—") +
+              "</td>" +
+              "<td>" +
+              items +
+              "</td>" +
+              "<td>" +
+              fmt(p.price) +
+              "</td>" +
+              '<td class="mono">' +
+              esc(p.accountLogin || "—") +
+              "</td>" +
+              '<td style="text-align:right;"><button class="btn ghost sm" data-reveal="' +
+              esc(p.id) +
+              '">Reveal login</button></td>' +
+              "</tr>"
+            );
+          })
+          .join("");
       }
 
       function renderAdmins(admins) {
@@ -989,6 +1090,46 @@
         }
       });
 
+      function closeReveal() {
+        $("revealModal").classList.remove("show");
+      }
+      $("revealClose").addEventListener("click", closeReveal);
+      $("revealModal").addEventListener("click", (e) => {
+        if (e.target === $("revealModal")) closeReveal();
+      });
+
+      $("buyerRows").addEventListener("click", async (e) => {
+        const btn = e.target.closest("[data-reveal]");
+        if (!btn) return;
+        const id = btn.getAttribute("data-reveal");
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "…";
+        try {
+          const d = await api(
+            "GET",
+            "/shop/purchases/" + encodeURIComponent(id),
+          );
+          const p = d.purchase || {};
+          const c = p.credentials || {};
+          $("revealTitle").textContent = p.setName || "Account";
+          $("revealMeta").textContent =
+            "Bought by " +
+            (p.buyerUsername || "—") +
+            " · " +
+            (p.createdAt ? new Date(p.createdAt).toLocaleString() : "—");
+          $("revealLogin").value = c.login || p.accountLogin || "";
+          $("revealPassword").value = c.password || "";
+          $("revealEmail").value = c.email || "";
+          $("revealModal").classList.add("show");
+        } catch (err) {
+          showMsg(err.message, "err");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
+
       async function loadRequire2fa() {
         try {
           const data = await api("GET", "/admin/2fa/status");
@@ -1042,6 +1183,7 @@
         }
         loadAdmins();
         loadRequire2fa();
+        loadBuyers();
       })();
     </script>
     <script src="/theme.js"></script>
