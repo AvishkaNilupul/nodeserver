@@ -6,6 +6,7 @@
     "twitch-inventory.html",
     "bots.html",
     "drops-archive.html",
+    "listings.html",
   ];
 
   function marketplaceLinkMarkup() {
@@ -35,6 +36,15 @@
       'stroke-linejoin="round"><path d="M21 8v13H3V8"></path>' +
       '<path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path></svg> ' +
       "Drops archive"
+    );
+  }
+
+  function listingsLinkMarkup() {
+    return (
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"><path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 ' +
+      '4 1.5-7.5L2 9h7z"></path></svg> Listings'
     );
   }
 
@@ -154,6 +164,22 @@
         links.appendChild(dlink);
       } else {
         links.appendChild(dlink);
+      }
+    }
+
+    // Listings manager (superadmin only) — grouped right after Drops archive.
+    if (isSuper && !links.querySelector('a[href="/listings.html"]')) {
+      var llink = document.createElement("a");
+      llink.href = "/listings.html";
+      llink.innerHTML = listingsLinkMarkup();
+      if (window.location.pathname === "/listings.html") {
+        llink.className = "active";
+      }
+      var dropsAnchor = links.querySelector('a[href="/drops-archive.html"]');
+      if (dropsAnchor && dropsAnchor.nextSibling) {
+        links.insertBefore(llink, dropsAnchor.nextSibling);
+      } else {
+        links.appendChild(llink);
       }
     }
 

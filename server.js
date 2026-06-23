@@ -273,10 +273,6 @@ app.get("/settings.html", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "settings.html"));
 });
 
-app.get("/items", requireAdmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "admin-pages", "items.html"));
-});
-
 app.get("/inventory", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "admin-pages", "inventory.html"));
 });
@@ -298,6 +294,11 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
 
 app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
+});
+
+// Shop listings manager (superadmin only) — build/publish manual listings.
+app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "listings.html"));
 });
 
 // =========================

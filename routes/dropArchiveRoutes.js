@@ -661,11 +661,24 @@ router.post("/drops-archive/sets", requireSuperadmin, async (req, res) => {
     }
     const keys = Array.isArray(body.itemKeys) ? body.itemKeys : [];
     const items = await resolveItemsMeta(keys);
-    const set = await DropSet.create({
+    const doc = {
       name,
       note: String(body.note || "").trim(),
       items,
-    });
+    };
+    // Optional shop-listing fields so a listing can be created and published in
+    // one call (superadmin Listings page). Same validation as the update route.
+    if (body.price !== undefined) {
+      const price = Number(body.price);
+      if (!Number.isFinite(price) || price < 0) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid price" });
+      }
+      doc.price = Math.round(price * 100) / 100;
+    }
+    if (body.listed !== undefined) doc.listed = !!body.listed;
+    const set = await DropSet.create(doc);
     res.json({ success: true, set: publicSet(set) });
   } catch (err) {
     console.error("drops-archive set create error:", err.message);
