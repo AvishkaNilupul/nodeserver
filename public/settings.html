@@ -343,6 +343,55 @@
         text-align: center;
         margin-bottom: 14px;
       }
+      .qrwrap {
+        display: flex;
+        gap: 18px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .qrbox {
+        width: 196px;
+        height: 196px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 8px;
+        flex: none;
+      }
+      .qrbox svg {
+        width: 100%;
+        height: 100%;
+      }
+      .keybox {
+        flex: 1;
+        min-width: 200px;
+      }
+      .manualkey {
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 14px;
+        letter-spacing: 1px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        word-break: break-all;
+      }
+      .codes {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin: 14px 0;
+      }
+      .codes span {
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 14px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 10px;
+        text-align: center;
+      }
       .steps {
         font-size: 13px;
         line-height: 1.7;
@@ -542,9 +591,83 @@
 
     <main class="page">
       <h1>Settings</h1>
-      <div class="sub">Manage your personal notification preferences.</div>
+      <div class="sub">
+        Manage your account security and personal notification preferences.
+      </div>
 
       <div id="msg" class="msg"></div>
+      <div id="enrollNotice" class="warn hidden">
+        Your administrator requires two-factor authentication. Please set it up
+        below to continue using the panel.
+      </div>
+
+      <!-- Two-factor authentication -->
+      <div class="card">
+        <h2>
+          Two-factor authentication
+          <span id="tfaBadge" class="badge off">Off</span>
+        </h2>
+        <p class="hint" id="tfaHint">Loading…</p>
+        <div id="onActions" class="hidden">
+          <div class="field" style="max-width: 220px">
+            <label>Enter a current code to turn it off</label>
+            <input
+              id="disableCode"
+              placeholder="123456 or backup code"
+              inputmode="numeric"
+              autocomplete="off"
+            />
+          </div>
+          <button class="btn danger" id="disableBtn" type="button">
+            Disable 2FA
+          </button>
+        </div>
+        <div id="offActions" class="hidden">
+          <button class="btn" id="enableBtn" type="button">Enable 2FA</button>
+        </div>
+
+        <!-- Enrolment flow -->
+        <div class="hidden" id="setupCard" style="margin-top: 18px">
+          <h2 style="margin-bottom: 8px">Set up your authenticator</h2>
+          <p class="hint">
+            1. Open Google Authenticator (or Authy / 1Password). 2. Scan this QR
+            code, or type the key manually. 3. Enter the 6-digit code it shows
+            to confirm.
+          </p>
+          <div class="qrwrap">
+            <div class="qrbox" id="qrbox"></div>
+            <div class="keybox">
+              <label>Manual key</label>
+              <div class="manualkey" id="manualKey">—</div>
+            </div>
+          </div>
+          <div class="field" style="max-width: 220px">
+            <label>6-digit code from the app</label>
+            <input
+              id="enableCode"
+              placeholder="123456"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+            />
+          </div>
+          <button class="btn" id="confirmBtn" type="button">
+            Confirm &amp; turn on
+          </button>
+        </div>
+
+        <!-- Backup codes shown once after enabling -->
+        <div class="hidden" id="backupCard" style="margin-top: 18px">
+          <h2 style="margin-bottom: 8px">Save your backup codes</h2>
+          <div class="warn">
+            These are shown <b>once</b>. Each code works a single time if you
+            ever lose your phone. Store them somewhere safe.
+          </div>
+          <div class="codes" id="backupCodes"></div>
+          <button class="btn ghost" id="copyCodesBtn" type="button">
+            Copy codes
+          </button>
+        </div>
+      </div>
 
       <!-- Telegram linking -->
       <div class="card">
@@ -666,6 +789,96 @@
         }
         return data;
       }
+
+      // ---- Two-factor authentication ----
+      let currentBackup = [];
+
+      async function load2faStatus() {
+        try {
+          const s = await api("GET", "/admin/2fa/status");
+          if (s.require2fa && !s.enabled) {
+            $("enrollNotice").classList.remove("hidden");
+          } else {
+            $("enrollNotice").classList.add("hidden");
+          }
+          if (s.enabled) {
+            $("tfaBadge").className = "badge on";
+            $("tfaBadge").textContent = "On";
+            $("tfaHint").textContent =
+              "Two-factor is on. You'll be asked for a code each time you log in. Backup codes remaining: " +
+              (s.backupCodesRemaining || 0) +
+              ".";
+            $("onActions").classList.remove("hidden");
+            $("offActions").classList.add("hidden");
+          } else {
+            $("tfaBadge").className = "badge off";
+            $("tfaBadge").textContent = "Off";
+            $("tfaHint").textContent =
+              "Two-factor is off. Turn it on to require an authenticator code at login.";
+            $("offActions").classList.remove("hidden");
+            $("onActions").classList.add("hidden");
+          }
+        } catch (e) {
+          $("tfaHint").textContent = e.message;
+        }
+      }
+
+      $("enableBtn").addEventListener("click", async () => {
+        try {
+          const d = await api("POST", "/admin/2fa/setup");
+          $("qrbox").innerHTML = d.qr || "";
+          $("manualKey").textContent = d.secret || "—";
+          $("setupCard").classList.remove("hidden");
+          $("backupCard").classList.add("hidden");
+          $("enableCode").value = "";
+          $("enableCode").focus();
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
+
+      $("confirmBtn").addEventListener("click", async () => {
+        const token = $("enableCode").value.trim();
+        try {
+          const d = await api("POST", "/admin/2fa/enable", { token });
+          currentBackup = d.backupCodes || [];
+          $("backupCodes").innerHTML = currentBackup
+            .map((c) => "<span>" + c + "</span>")
+            .join("");
+          $("setupCard").classList.add("hidden");
+          $("backupCard").classList.remove("hidden");
+          showMsg("Two-factor is now on.", "ok");
+          load2faStatus();
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
+
+      $("copyCodesBtn").addEventListener("click", () => {
+        const text = currentBackup.join("\n");
+        navigator.clipboard.writeText(text).then(
+          () => showMsg("Backup codes copied.", "ok"),
+          () => showMsg("Copy failed — select them manually.", "err"),
+        );
+      });
+
+      $("disableBtn").addEventListener("click", async () => {
+        const token = $("disableCode").value.trim();
+        if (!token) {
+          showMsg("Enter a current code to disable.", "err");
+          return;
+        }
+        try {
+          await api("POST", "/admin/2fa/disable", { token });
+          $("disableCode").value = "";
+          $("setupCard").classList.add("hidden");
+          $("backupCard").classList.add("hidden");
+          showMsg("Two-factor turned off.", "ok");
+          load2faStatus();
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
 
       function stopPolling() {
         if (pollTimer) {
@@ -805,6 +1018,7 @@
           window.location.href = "/admin-login.html";
           return;
         }
+        load2faStatus();
         loadStatus();
       })();
     </script>

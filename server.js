@@ -261,14 +261,15 @@ app.get("/admin.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin.html"));
 });
 
-// Security / 2FA self-service page (any admin; not behind enforce2fa so a
-// not-yet-enrolled admin can actually reach it to set up).
-app.get("/security.html", requireAdmin, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "security.html"));
+// Legacy security page: 2FA now lives inside Settings, so redirect any old
+// bookmarks / links there.
+app.get("/security.html", (req, res) => {
+  res.redirect("/settings.html");
 });
 
-// Settings (any admin; not behind enforce2fa so it stays reachable like the
-// security page). Hosts the per-admin "My Telegram" linking panel.
+// Settings (any admin; not behind enforce2fa so a not-yet-enrolled admin can
+// reach it to set up 2FA). Hosts both the 2FA panel and the per-admin "My
+// Telegram" linking panel.
 app.get("/settings.html", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "settings.html"));
 });

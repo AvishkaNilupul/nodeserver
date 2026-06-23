@@ -352,6 +352,27 @@
       .pickbar input {
         flex: 1;
       }
+      .pickbar select {
+        flex: 0 0 auto;
+        max-width: 210px;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 14px;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .qty {
+        flex-shrink: 0;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--accent);
+        background: rgba(99, 102, 241, 0.1);
+        border-radius: 999px;
+        padding: 1px 7px;
+      }
       .pick {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -768,6 +789,9 @@
         <section class="card">
           <h2>Pick items from scanned drops</h2>
           <div class="pickbar">
+            <select id="fGame" title="Filter items by game">
+              <option value="">All games</option>
+            </select>
             <input
               type="text"
               id="pickSearch"
@@ -856,13 +880,95 @@
       }
 
       // ---- state ----
-      var selected = []; // [{itemKey,name,game,image}]
+      var selected = []; // [{itemKey,name,game,image,qty}]
       var catalog = []; // by-item rows
       var editId = null;
+      // Track whether the seller has hand-edited the title / description so the
+      // auto-generated text never clobbers their own wording.
+      var titleEdited = false;
+      var noteEdited = false;
+
+      // ---- auto title / description helpers ----
+      // qty = copies of a drop a holding account typically has, so a "pack"
+      // that grants 3 items counts as 3 items, not 1.
+      function totalItemCount() {
+        return selected.reduce(function (n, s) {
+          return n + (Number(s.qty) || 1);
+        }, 0);
+      }
+      function uniqueGames() {
+        var games = [];
+        selected.forEach(function (s) {
+          var g = s.game || "Other rewards";
+          if (games.indexOf(g) === -1) games.push(g);
+        });
+        return games;
+      }
+      function buildAutoTitle() {
+        if (!selected.length) return "";
+        var games = uniqueGames();
+        var total = totalItemCount();
+        var label = games.length === 1 ? games[0] : games.length + " games";
+        var names = selected.map(function (s) {
+          return s.name;
+        });
+        var head = names.slice(0, 2).join(", ");
+        var more = names.length > 2 ? " +" + (names.length - 2) + " more" : "";
+        return (
+          label +
+          " bundle — " +
+          head +
+          more +
+          " (" +
+          total +
+          " item" +
+          (total === 1 ? "" : "s") +
+          ")"
+        );
+      }
+      function buildAutoDescription() {
+        if (!selected.length) return "";
+        var games = uniqueGames();
+        var total = totalItemCount();
+        var lines = [];
+        lines.push(
+          "This account includes " +
+            total +
+            " item" +
+            (total === 1 ? "" : "s") +
+            (games.length === 1 ? " from " + games[0] : "") +
+            ":",
+        );
+        selected.forEach(function (s) {
+          var q = Number(s.qty) || 1;
+          lines.push(
+            "\u2022 " +
+              (q > 1 ? q + "\u00d7 " : "") +
+              s.name +
+              (s.game ? " (" + s.game + ")" : ""),
+          );
+        });
+        lines.push("");
+        lines.push(
+          "Buyer receives one in-stock account holding every item listed above.",
+        );
+        return lines.join("\n");
+      }
+      function refreshAuto() {
+        if (!titleEdited) $("fName").value = buildAutoTitle();
+        if (!noteEdited) $("fNote").value = buildAutoDescription();
+      }
+      $("fName").addEventListener("input", function () {
+        titleEdited = true;
+      });
+      $("fNote").addEventListener("input", function () {
+        noteEdited = true;
+      });
 
       // ---- selected items ----
       function renderSelected() {
-        $("selCount").innerText = selected.length;
+        var total = totalItemCount();
+        $("selCount").innerText = total;
         var box = $("selList");
         if (!selected.length) {
           box.innerHTML =
@@ -870,6 +976,7 @@
         } else {
           box.innerHTML = selected
             .map(function (it) {
+              var q = Number(it.qty) || 1;
               return (
                 '<div class="row">' +
                 imgTag(it.image) +
@@ -880,6 +987,7 @@
                 '<div class="gm">' +
                 esc(it.game || "Other rewards") +
                 "</div></div>" +
+                (q > 1 ? '<span class="qty">' + q + "\u00d7</span>" : "") +
                 '<button class="x" data-rm="' +
                 attr(it.itemKey) +
                 '" title="Remove">&times;</button>' +
@@ -888,6 +996,7 @@
             })
             .join("");
         }
+        refreshAuto();
         // reflect selection state in the picker
         document.querySelectorAll(".pick .it").forEach(function (el) {
           var on = selected.some(function (s) {
@@ -903,6 +1012,7 @@
           name: row.name,
           game: row.game,
           image: row.image,
+          qty: Number(row.qty) || 1,
         });
         renderSelected();
       }
@@ -939,7 +1049,13 @@
               (it.accounts || 0) +
               " acct" +
               (it.accounts === 1 ? "" : "s") +
+              ((Number(it.qty) || 1) > 1
+                ? " · " + it.qty + "\u00d7 per acct"
+                : "") +
               "</div></div>" +
+              ((Number(it.qty) || 1) > 1
+                ? '<span class="qty">' + it.qty + "\u00d7</span>"
+                : "") +
               '<div class="tick">&#10003;</div>' +
               "</div>"
             );
@@ -959,10 +1075,20 @@
 
       var searchTimer = null;
       function loadCatalog(search) {
-        var qs = search ? "?search=" + encodeURIComponent(search) : "";
+        var params = [];
+        var g = $("fGame") ? $("fGame").value : "";
+        if (g) params.push("game=" + encodeURIComponent(g));
+        if (search) params.push("search=" + encodeURIComponent(search));
+        var qs = params.length ? "?" + params.join("&") : "";
         return api("/drops-archive/by-item" + qs)
           .then(function (j) {
-            catalog = j.items || [];
+            catalog = (j.items || []).map(function (it) {
+              var acc = Number(it.accounts) || 0;
+              var tot = Number(it.totalCount) || 0;
+              it.qty =
+                acc > 0 ? Math.max(1, Math.round(tot / acc)) : Math.max(1, tot);
+              return it;
+            });
             renderPicker(catalog);
           })
           .catch(function (e) {
@@ -970,6 +1096,30 @@
               '<div class="empty">' + esc(e.message) + "</div>";
           });
       }
+      function loadGames() {
+        return api("/drops-archive/by-game")
+          .then(function (j) {
+            var games = (j.games || [])
+              .map(function (g) {
+                return g.game || "Other rewards";
+              })
+              .filter(Boolean);
+            var sel = $("fGame");
+            sel.innerHTML =
+              '<option value="">All games</option>' +
+              games
+                .map(function (g) {
+                  return (
+                    '<option value="' + attr(g) + '">' + esc(g) + "</option>"
+                  );
+                })
+                .join("");
+          })
+          .catch(function () {});
+      }
+      $("fGame").addEventListener("change", function () {
+        loadCatalog($("pickSearch").value.trim());
+      });
       $("pickSearch").addEventListener("input", function (e) {
         clearTimeout(searchTimer);
         var v = e.target.value.trim();
@@ -982,6 +1132,8 @@
       function resetForm() {
         editId = null;
         selected = [];
+        titleEdited = false;
+        noteEdited = false;
         $("fName").value = "";
         $("fNote").value = "";
         $("fPrice").value = "0";
@@ -1063,12 +1215,16 @@
 
       function startEdit(set) {
         editId = set.id;
+        // Editing an existing listing: keep its saved title/note as-is.
+        titleEdited = true;
+        noteEdited = true;
         selected = (set.items || []).map(function (i) {
           return {
             itemKey: i.itemKey,
             name: i.name,
             game: i.game,
             image: i.image,
+            qty: Number(i.qty) || 1,
           };
         });
         $("fName").value = set.name || "";
@@ -1241,6 +1397,7 @@
       // ---- init ----
       resetForm();
       loadMe();
+      loadGames();
       loadCatalog("");
       loadListings();
     </script>

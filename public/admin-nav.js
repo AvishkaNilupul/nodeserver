@@ -48,15 +48,6 @@
     );
   }
 
-  function securityLinkMarkup() {
-    return (
-      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-      'stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 ' +
-      '8 10z"></path></svg> Security'
-    );
-  }
-
   function settingsLinkMarkup() {
     return (
       '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
@@ -102,18 +93,11 @@
       }
     });
 
-    // Security (2FA) is available to every admin (normal + superadmin).
-    if (!links.querySelector('a[href="/security.html"]')) {
-      var slink = document.createElement("a");
-      slink.href = "/security.html";
-      slink.innerHTML = securityLinkMarkup();
-      if (window.location.pathname === "/security.html") {
-        slink.className = "active";
-      }
-      links.appendChild(slink);
+    // Settings hosts both 2FA (security) and per-admin preferences (e.g.
+    // Telegram linking) — available to every admin.
+    if (links.querySelector('a[href="/security.html"]')) {
+      links.querySelector('a[href="/security.html"]').remove();
     }
-
-    // Settings (per-admin preferences, e.g. Telegram linking) — every admin.
     if (!links.querySelector('a[href="/settings.html"]')) {
       var setlink = document.createElement("a");
       setlink.href = "/settings.html";

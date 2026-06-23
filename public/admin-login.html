@@ -1,186 +1,361 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Admin Login · RedeemHub</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <style>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Login · RedeemHub</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        color-scheme: dark;
+      }
+      .themebtn {
+        cursor: pointer;
+      }
+      .theme-fab {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 80;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+        transition: background 0.15s;
+      }
+      .theme-fab:hover {
+        background: var(--surface-2);
+      }
 
-  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;}
-  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;color-scheme:dark;}
-  .themebtn{cursor:pointer;}
-  .theme-fab{position:fixed;top:16px;right:16px;z-index:80;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 18px rgba(15,23,42,.12);transition:background .15s;}
-  .theme-fab:hover{background:var(--surface-2);}
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      :root {
+        --accent: #4f46e5;
+        --accent2: #6366f1;
+        --ink: #0f172a;
+        --muted: #6b7280;
+      }
+      body {
+        font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+        color: var(--ink);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+        background:
+          radial-gradient(1200px 600px at 100% -10%, #eef2ff, transparent),
+          radial-gradient(1000px 500px at -10% 110%, #faf5ff, transparent),
+          var(--bg);
+      }
+      .card {
+        width: 100%;
+        max-width: 400px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        padding: 34px;
+        box-shadow: 0 20px 60px rgba(16, 24, 40, 0.08);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        margin-bottom: 24px;
+      }
+      .brand .mark {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        box-shadow: 0 8px 18px rgba(79, 70, 229, 0.35);
+      }
+      .brand b {
+        font-size: 17px;
+        font-weight: 800;
+        line-height: 1.1;
+      }
+      .brand b span {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 800;
+        margin-bottom: 6px;
+      }
+      p.lead {
+        color: var(--muted);
+        font-size: 13.5px;
+        line-height: 1.6;
+        margin-bottom: 24px;
+      }
+      label {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--muted);
+        display: block;
+        margin: 0 0 6px 2px;
+      }
+      .field {
+        margin-bottom: 15px;
+      }
+      input {
+        width: 100%;
+        padding: 14px 15px;
+        border-radius: 12px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        outline: none;
+        font-family: inherit;
+        font-size: 14px;
+      }
+      input:focus {
+        border-color: var(--accent);
+        background: var(--surface);
+        box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+      }
+      button {
+        width: 100%;
+        margin-top: 6px;
+        padding: 14px;
+        border: none;
+        border-radius: 12px;
+        background: linear-gradient(180deg, var(--accent2), var(--accent));
+        color: #fff;
+        font-family: inherit;
+        font-size: 15px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 10px 22px rgba(79, 70, 229, 0.32);
+      }
+      button:hover {
+        transform: translateY(-1px);
+      }
+      #message {
+        margin-top: 14px;
+        text-align: center;
+        color: #dc2626;
+        font-size: 13.5px;
+        min-height: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <button
+      class="theme-fab"
+      data-theme-toggle
+      onclick="toggleTheme()"
+      title="Toggle dark mode"
+      aria-pressed="false"
+    >
+      <svg
+        class="t-moon"
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg
+      ><svg
+        class="t-sun"
+        style="display: none"
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <circle cx="12" cy="12" r="4"></circle>
+        <path
+          d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+        ></path>
+      </svg>
+    </button>
+    <div class="card">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
 
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    :root { --accent: #4f46e5; --accent2: #6366f1; --ink: #0f172a; --muted: #6b7280; }
-    body {
-      font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
-      color: var(--ink);
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 20px;
-      background:
-        radial-gradient(1200px 600px at 100% -10%, #eef2ff, transparent),
-        radial-gradient(1000px 500px at -10% 110%, #faf5ff, transparent),
-        var(--bg);
-    }
-    .card {
-      width: 100%;
-      max-width: 400px;
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      padding: 34px;
-      box-shadow: 0 20px 60px rgba(16, 24, 40, 0.08);
-    }
-    .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 24px; }
-    .brand .mark { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 8px 18px rgba(79,70,229,0.35); }
-    .brand b { font-size: 17px; font-weight: 800; line-height: 1.1; }
-    .brand b span { display: block; font-size: 11px; color: var(--muted); font-weight: 500; }
-    h1 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
-    p.lead { color: var(--muted); font-size: 13.5px; line-height: 1.6; margin-bottom: 24px; }
-    label { font-size: 12.5px; font-weight: 600; color: var(--muted); display: block; margin: 0 0 6px 2px; }
-    .field { margin-bottom: 15px; }
-    input {
-      width: 100%;
-      padding: 14px 15px;
-      border-radius: 12px;
-      border: 1.5px solid var(--line);
-      background: var(--surface-2);
-      color: var(--ink);
-      outline: none;
-      font-family: inherit;
-      font-size: 14px;
-    }
-    input:focus { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
-    button {
-      width: 100%;
-      margin-top: 6px;
-      padding: 14px;
-      border: none;
-      border-radius: 12px;
-      background: linear-gradient(180deg, var(--accent2), var(--accent));
-      color: #fff;
-      font-family: inherit;
-      font-size: 15px;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 10px 22px rgba(79, 70, 229, 0.32);
-    }
-    button:hover { transform: translateY(-1px); }
-    #message { margin-top: 14px; text-align: center; color: #dc2626; font-size: 13.5px; min-height: 20px; }
-  </style>
-</head>
-<body>
-<button class="theme-fab" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
-  <div class="card">
-    <div class="brand">
-      <span class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
-      <b>RedeemHub<span>Admin console</span></b>
+      <div id="step1">
+        <h1>Welcome back</h1>
+        <p class="lead">
+          Enter your username and password to access your seller dashboard.
+        </p>
+
+        <div class="field">
+          <label>Username</label>
+          <input
+            type="text"
+            id="username"
+            placeholder="Username"
+            autocomplete="off"
+          />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input
+            type="password"
+            id="password"
+            placeholder="Enter admin password"
+            autocomplete="off"
+          />
+        </div>
+
+        <button onclick="login()">Access panel</button>
+      </div>
+
+      <div id="step2" style="display: none">
+        <h1>Two-factor</h1>
+        <p class="lead">
+          Enter the 6-digit code from your authenticator app. Lost your phone?
+          Enter one of your backup codes instead.
+        </p>
+        <div class="field">
+          <label>Authentication code</label>
+          <input
+            type="text"
+            id="code"
+            placeholder="123456"
+            autocomplete="one-time-code"
+            inputmode="numeric"
+          />
+        </div>
+        <button onclick="verify2fa()">Verify</button>
+      </div>
+
+      <div id="message"></div>
     </div>
 
-    <div id="step1">
-      <h1>Welcome back</h1>
-      <p class="lead">Enter your username and password to access your seller dashboard.</p>
+    <script>
+      async function login() {
+        const username = document.getElementById("username").value.trim();
+        const password = document.getElementById("password").value.trim();
+        const message = document.getElementById("message");
 
-      <div class="field">
-        <label>Username</label>
-        <input type="text" id="username" placeholder="Username" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label>Password</label>
-        <input type="password" id="password" placeholder="Enter admin password" autocomplete="off" />
-      </div>
+        message.innerText = "";
 
-      <button onclick="login()">Access panel</button>
-    </div>
+        try {
+          const res = await fetch("/admin-login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({ username, password }),
+          });
 
-    <div id="step2" style="display:none;">
-      <h1>Two-factor</h1>
-      <p class="lead">Enter the 6-digit code from your authenticator app. Lost your phone? Enter one of your backup codes instead.</p>
-      <div class="field">
-        <label>Authentication code</label>
-        <input type="text" id="code" placeholder="123456" autocomplete="one-time-code" inputmode="numeric" />
-      </div>
-      <button onclick="verify2fa()">Verify</button>
-    </div>
+          const data = await res.json();
 
-    <div id="message"></div>
-  </div>
-
-  <script>
-    async function login() {
-      const username = document.getElementById("username").value.trim();
-      const password = document.getElementById("password").value.trim();
-      const message = document.getElementById("message");
-
-      message.innerText = "";
-
-      try {
-        const res = await fetch("/admin-login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          body: JSON.stringify({ username, password }),
-        });
-
-        const data = await res.json();
-
-        if (res.ok && data.success) {
-          if (data.twofa) {
-            document.getElementById("step1").style.display = "none";
-            document.getElementById("step2").style.display = "block";
-            document.getElementById("code").focus();
-          } else if (data.mustEnroll) {
-            window.location.href = "/security.html";
+          if (res.ok && data.success) {
+            if (data.twofa) {
+              document.getElementById("step1").style.display = "none";
+              document.getElementById("step2").style.display = "block";
+              document.getElementById("code").focus();
+            } else if (data.mustEnroll) {
+              window.location.href = "/settings.html";
+            } else {
+              window.location.href = "/admin.html";
+            }
           } else {
-            window.location.href = "/admin.html";
+            message.innerText = data.message || "Invalid password";
           }
-        } else {
-          message.innerText = data.message || "Invalid password";
+        } catch (err) {
+          console.error(err);
+          message.innerText = "Server error";
         }
-      } catch (err) {
-        console.error(err);
-        message.innerText = "Server error";
       }
-    }
 
-    async function verify2fa() {
-      const token = document.getElementById("code").value.trim();
-      const message = document.getElementById("message");
-      message.innerText = "";
-      try {
-        const res = await fetch("/admin-2fa", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          body: JSON.stringify({ token }),
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          window.location.href = "/admin.html";
-        } else {
-          message.innerText = data.message || "Incorrect code";
+      async function verify2fa() {
+        const token = document.getElementById("code").value.trim();
+        const message = document.getElementById("message");
+        message.innerText = "";
+        try {
+          const res = await fetch("/admin-2fa", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({ token }),
+          });
+          const data = await res.json();
+          if (res.ok && data.success) {
+            window.location.href = "/admin.html";
+          } else {
+            message.innerText = data.message || "Incorrect code";
+          }
+        } catch (err) {
+          console.error(err);
+          message.innerText = "Server error";
         }
-      } catch (err) {
-        console.error(err);
-        message.innerText = "Server error";
       }
-    }
 
-    document.getElementById("password").addEventListener("keypress", (e) => {
-      if (e.key === "Enter") login();
-    });
-    document.getElementById("code").addEventListener("keypress", (e) => {
-      if (e.key === "Enter") verify2fa();
-    });
-  </script>
-<script src="/theme.js"></script>
-</body>
+      document.getElementById("password").addEventListener("keypress", (e) => {
+        if (e.key === "Enter") login();
+      });
+      document.getElementById("code").addEventListener("keypress", (e) => {
+        if (e.key === "Enter") verify2fa();
+      });
+    </script>
+    <script src="/theme.js"></script>
+  </body>
 </html>

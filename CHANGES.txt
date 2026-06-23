@@ -1,0 +1,30 @@
+RedeemHub — listings + 2FA fixes
+=================================
+Extract this ZIP at the ROOT of your project (the folder that contains
+server.js, public/, middleware/ ...). It will overwrite these files in place,
+keeping the exact paths below.
+
+MODIFIED FILES (replace your copies with these):
+  public/listings.html      Game selector + auto title/description + per-pack qty counting
+  public/settings.html      2FA panel now lives here (status / enable QR / backup codes / disable)
+  public/admin-nav.js       Removed the separate "Security" sidebar tab
+  public/admin-login.html   "must enroll 2FA" now sends you to /settings.html
+  middleware/auth.js         enforce2fa redirect now points at /settings.html
+  server.js                  /security.html now redirects to /settings.html
+
+DELETE THIS FILE on your server (2FA moved into Settings, page no longer used):
+  public/security.html
+
+WHAT CHANGED (listings page)
+  - New "game" dropdown above the picker: filters scanned drops to one game.
+  - Picker/selected rows show a quantity badge (e.g. 3x) when an account holds
+    multiple copies of the same drop. A 3-item pack now counts as 3 items.
+  - Title auto-fills, e.g.: "Rocket League bundle — RLCS 2025 Very Rare Drop,
+    Tactical Nuke (White) +1 more (6 items)".
+  - Description auto-fills with the included items and their quantities.
+  - If you type your own title/description it is kept and not overwritten.
+
+NOTES
+  - No backend data model changes. The picker derives per-account quantity from
+    the existing totalCount / accounts the API already returns.
+  - Existing-listing cards still show the distinct-item count (unchanged).
