@@ -6,6 +6,8 @@ const crypto = require("crypto");
 const { execFile } = require("child_process");
 
 const { requireSuperadmin } = require("../middleware/auth");
+const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 
 const router = express.Router();
 
@@ -345,6 +347,79 @@ router.get("/bot-configs", requireSuperadmin, async (req, res) => {
     res.json({ success: true, dir: BOT_DIR, configs: out });
   } catch (err) {
     console.error("bot-configs list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// HEALTH summary per config file: account scan status counts, total drops and
+// last-drop time. Aggregated from the BotAccount/DropLog archive (the scanner's
+// data), keyed by configFile so the Bots page can show it per bot. Best effort:
+// returns an empty map on error so the page still renders.
+router.get("/bot-configs/health", requireSuperadmin, async (req, res) => {
+  try {
+    const byFile = await BotAccount.aggregate([
+      {
+        $group: {
+          _id: "$configFile",
+          accounts: { $sum: 1 },
+          ok: { $sum: { $cond: [{ $eq: ["$lastScanStatus", "ok"] }, 1, 0] } },
+          error: {
+            $sum: { $cond: [{ $eq: ["$lastScanStatus", "error"] }, 1, 0] },
+          },
+          tokenInvalid: {
+            $sum: {
+              $cond: [{ $eq: ["$lastScanStatus", "token_invalid"] }, 1, 0],
+            },
+          },
+          pending: {
+            $sum: { $cond: [{ $eq: ["$lastScanStatus", "pending"] }, 1, 0] },
+          },
+          drops: { $sum: "$dropCount" },
+          lastScanAt: { $max: "$lastScanAt" },
+        },
+      },
+    ]);
+
+    // Most recent drop time per account, then rolled up to the config file.
+    const lastDropByAccount = await DropLog.aggregate([
+      {
+        $group: {
+          _id: "$account",
+          lastDropAt: { $max: { $ifNull: ["$awardedAt", "$firstSeenAt"] } },
+        },
+      },
+    ]);
+    const accIdToFile = {};
+    const accs = await BotAccount.find({}, { configFile: 1 }).lean();
+    accs.forEach((a) => {
+      accIdToFile[String(a._id)] = a.configFile || "";
+    });
+    const lastDropByFile = {};
+    lastDropByAccount.forEach((r) => {
+      const f = accIdToFile[String(r._id)];
+      if (!f || !r.lastDropAt) return;
+      const t = new Date(r.lastDropAt).getTime();
+      if (!lastDropByFile[f] || t > lastDropByFile[f]) lastDropByFile[f] = t;
+    });
+
+    const health = {};
+    byFile.forEach((r) => {
+      const f = r._id || "";
+      if (!f) return;
+      health[f] = {
+        accounts: r.accounts,
+        ok: r.ok,
+        error: r.error,
+        tokenInvalid: r.tokenInvalid,
+        pending: r.pending,
+        drops: r.drops || 0,
+        lastScanAt: r.lastScanAt || null,
+        lastDropAt: lastDropByFile[f] ? new Date(lastDropByFile[f]) : null,
+      };
+    });
+    res.json({ success: true, health });
+  } catch (err) {
+    console.error("bot-configs health error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });

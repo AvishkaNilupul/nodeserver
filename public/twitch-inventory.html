@@ -309,6 +309,29 @@ window.addEventListener("DOMContentLoaded", () => {
   if (saved) { $("token").value = saved; $("remember").checked = true; }
   const savedCid = localStorage.getItem("tdi_clientid");
   if (savedCid) $("clientId").value = savedCid;
+
+  // When opened from the Bots page "Check drops" button, the account's token
+  // (and login) are passed in the URL hash: #token=...&login=... . Pick it up,
+  // load the inventory automatically, then strip the hash so the token isn't
+  // left sitting in the address bar / history.
+  const hash = (location.hash || "").replace(/^#/, "");
+  if (hash) {
+    const params = new URLSearchParams(hash);
+    const hToken = params.get("token");
+    const hLogin = params.get("login");
+    if (hToken) {
+      $("token").value = hToken;
+      // A bot ClientSecret always pairs with the Android client-id, so force the
+      // default here (overriding any remembered web client-id) to avoid a mismatch.
+      $("clientId").value = DEFAULT_CLIENT_ID;
+      if (hLogin) {
+        const sub = document.querySelector("header p");
+        if (sub) sub.textContent = "Checking drops for " + hLogin;
+      }
+      history.replaceState(null, "", location.pathname + location.search);
+      checkInventory();
+    }
+  }
 });
 
 $("toggleTok").addEventListener("click", () => {

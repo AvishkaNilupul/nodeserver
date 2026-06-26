@@ -201,6 +201,7 @@
   const $ = (id) => document.getElementById(id);
   let CONFIGS = {};   // file -> { container, data, ok, error }
   let STATES = {};    // container -> { state, status }
+  let HEALTH = {};    // file -> { accounts, ok, error, tokenInvalid, drops, lastScanAt, lastDropAt }
 
   // Per-bot collapsed state, remembered in localStorage. Bots with many
   // accounts collapse by default so the page stays compact.
@@ -216,6 +217,16 @@
   };
 
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+  function fmtNum(n) { return Number(n || 0).toLocaleString(); }
+  function timeAgoShort(v) {
+    if (!v) return "";
+    const t = new Date(v).getTime(); if (isNaN(t)) return "";
+    let s = Math.floor((Date.now() - t) / 1000); if (s < 0) s = 0;
+    if (s < 60) return s + "s ago";
+    const m = Math.floor(s / 60); if (m < 60) return m + "m ago";
+    const h = Math.floor(m / 60); if (h < 24) return h + "h ago";
+    const d = Math.floor(h / 24); return d + "d ago";
+  }
   function toast(msg, err) { const t = $("toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : ""); clearTimeout(t._t); t._t = setTimeout(() => { t.className = "toast"; }, 2200); }
   function randHex(n) { let s = ""; const h = "0123456789abcdef"; for (let i = 0; i < n; i++) s += h[Math.floor(Math.random() * 16)]; return s; }
 
@@ -235,6 +246,8 @@
     $("dirLabel").textContent = list.dir || "/root/twitchbot";
     // fetch docker statuses (best effort)
     try { const s = await api("/bot-configs/status"); STATES = s.states || {}; } catch (e) { STATES = {}; }
+    // fetch per-bot health from the drops archive (best effort)
+    try { const h = await api("/bot-configs/health"); HEALTH = h.health || {}; } catch (e) { HEALTH = {}; }
 
     CONFIGS = {};
     const files = list.configs.map((c) => c.file);
@@ -250,17 +263,21 @@
   function accountsOf(file) { const d = CONFIGS[file] && CONFIGS[file].data; const ts = d && d.TwitchSettings; return (ts && Array.isArray(ts.TwitchUsers)) ? ts.TwitchUsers : []; }
 
   function renderStats(files) {
-    let bots = 0, accts = 0, enabled = 0, running = 0;
+    let bots = 0, accts = 0, enabled = 0, running = 0, drops = 0, unhealthy = 0;
     files.forEach((f) => {
       const c = CONFIGS[f]; if (!c) return; bots++;
       if (c.ok) { const u = accountsOf(f); accts += u.length; enabled += u.filter((x) => x && x.Enabled).length; }
       const st = STATES[c.container]; if (st && /^running/i.test(st.state || "")) running++;
+      const h = HEALTH[f]; if (h) { drops += (h.drops || 0); unhealthy += (h.error || 0) + (h.tokenInvalid || 0); }
     });
+    const unhClass = unhealthy > 0 ? ' style="color:var(--red)"' : "";
     $("stats").innerHTML =
       '<div class="stat"><b>' + bots + '</b><span>Bots</span></div>' +
       '<div class="stat"><b>' + accts + '</b><span>Accounts</span></div>' +
       '<div class="stat"><b>' + enabled + '</b><span>Enabled</span></div>' +
-      '<div class="stat"><b>' + running + '</b><span>Running</span></div>';
+      '<div class="stat"><b>' + running + '</b><span>Running</span></div>' +
+      '<div class="stat"><b>' + fmtNum(drops) + '</b><span>Drops archived</span></div>' +
+      '<div class="stat"><b' + unhClass + '>' + fmtNum(unhealthy) + '</b><span>Unhealthy accounts</span></div>';
   }
 
   function renderAllTable(files) {
@@ -348,6 +365,24 @@
         settingRow("Launch on startup", file, "root", "LaunchOnStartup", "bool", d.LaunchOnStartup) +
       '</div></div>';
 
+    // Health summary chips from the drops archive (scanner data), keyed by file.
+    const h = HEALTH[file];
+    let healthHtml = "";
+    if (h) {
+      const problems = (h.error || 0) + (h.tokenInvalid || 0);
+      const cls = problems > 0 ? "off" : (h.ok > 0 ? "on" : "");
+      const parts = [];
+      if (h.ok) parts.push(h.ok + " ok");
+      if (h.error) parts.push(h.error + " err");
+      if (h.tokenInvalid) parts.push(h.tokenInvalid + " bad token");
+      const healthTxt = parts.length ? parts.join(" \u00b7 ") : "not scanned yet";
+      healthHtml += '<span class="chip ' + cls + '" title="Account scan health (from Drops Archive)">' + esc(healthTxt) + '</span>';
+      const last = h.lastDropAt || h.lastScanAt;
+      const lastLbl = h.lastDropAt ? "last drop " : (h.lastScanAt ? "last scan " : "");
+      const dropsTxt = fmtNum(h.drops) + " drop" + (h.drops === 1 ? "" : "s") + (last ? " \u00b7 " + lastLbl + timeAgoShort(last) : "");
+      healthHtml += '<span class="chip" title="Total drops archived for this bot\u2019s accounts">' + esc(dropsTxt) + '</span>';
+    }
+
     const favGames = Array.isArray(d.FavouriteGames) ? d.FavouriteGames.filter(Boolean) : [];
     const gamesHtml = favGames.length
       ? '<div class="hgames"><span class="glabel">Farming</span>' + favGames.map((g) => '<span class="gtag">' + esc(g) + "</span>").join("") + "</div>"
@@ -364,6 +399,7 @@
         '<div class="right">' +
           '<span class="chip"><span class="dot ' + dotCls + '"></span>' + statusTxt + '</span>' +
           '<span class="chip">' + users.length + ' account' + (users.length === 1 ? "" : "s") + '</span>' +
+          healthHtml +
           '<button class="btn-ghost btn-sm" onclick="addAccount(\'' + esc(file) + '\')">+ Account</button>' +
           '<button class="btn-ghost btn-sm" onclick="openBulkModal(\'' + esc(file) + '\')">Mass add</button>' +
           (running
