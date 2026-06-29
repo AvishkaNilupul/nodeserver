@@ -34,7 +34,11 @@ const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
 const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
-const { getOrderByOrderId, authorizeBuyer } = require("./utils/orderIds");
+const {
+  getOrderByOrderId,
+  authorizeBuyerByOrder,
+  buildChatId,
+} = require("./utils/orderIds");
 const { sendTelegramToSeller } = require("./utils/telegram");
 const {
   globalLimiter,
@@ -136,10 +140,10 @@ async function requireUploader(req, res, next) {
   if (req.session?.admin) {
     return next();
   }
-  const gamerTag = req.get("x-gamer-tag");
+  const orderId = req.get("x-order-id");
   const token = req.get("x-chat-token");
   try {
-    const order = await authorizeBuyer(gamerTag, token);
+    const order = await authorizeBuyerByOrder(orderId, token);
     if (order) {
       return next();
     }
@@ -192,10 +196,22 @@ app.post("/submit-gamertag", submitLimiter, async (req, res) => {
         .json({ success: false, message: "Invalid Order ID" });
     }
 
+    // Already claimed: only the original buyer (same gamertag) may resume their
+    // chat. Anyone else presenting this order id is rejected, so a used order
+    // id is never available to a different person.
     if (order.used) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Order ID already used" });
+      if (order.gamerTag !== gamerTag) {
+        return res.status(400).json({
+          success: false,
+          message: "This order ID is already in use",
+        });
+      }
+      // Backfill the chat id for orders claimed before this field existed.
+      if (!order.chatId) {
+        order.chatId = buildChatId(order.gamerTag, order.orderId);
+        await order.save();
+      }
+      return res.json({ success: true, token: order.chatToken, resumed: true });
     }
 
     const ip =
@@ -207,6 +223,9 @@ app.post("/submit-gamertag", submitLimiter, async (req, res) => {
     order.used = true;
     order.gamerTag = gamerTag;
     order.usedAt = new Date();
+    // Stable per-order chat identity so a reused gamertag never overlaps a
+    // previous order's chat.
+    order.chatId = buildChatId(gamerTag, orderId);
     // Per-buyer secret returned to the client; required to authenticate
     // the chat socket so a gamertag alone can't impersonate the buyer.
     order.chatToken = crypto.randomBytes(24).toString("hex");

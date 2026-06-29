@@ -239,12 +239,29 @@
   </div>
 
   <script>
-    // Auto login: if we already have a gamer tag + order ID, skip straight to chat.
+    // A saved buyer session lasts 12h. After that the buyer is sent back here
+    // to re-enter their gamer tag + order ID (re-entering the same details
+    // resumes the same chat; a new order ID opens a fresh one).
+    const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+
+    function clearSession() {
+      localStorage.removeItem("gamerTag");
+      localStorage.removeItem("orderId");
+      localStorage.removeItem("chatToken");
+      localStorage.removeItem("loginTime");
+    }
+
+    // Auto login: if we have a recent (<12h) gamer tag + order ID, skip
+    // straight to chat. Otherwise clear the stale session.
     const existingTag = localStorage.getItem("gamerTag");
     const existingOrderId = localStorage.getItem("orderId");
+    const loginTime = Number(localStorage.getItem("loginTime") || 0);
+    const fresh = loginTime && Date.now() - loginTime < SESSION_MAX_AGE_MS;
 
-    if (existingTag && existingOrderId) {
+    if (existingTag && existingOrderId && fresh) {
       window.location.href = "/result.html";
+    } else if (existingTag || existingOrderId) {
+      clearSession();
     }
 
     async function submitTag() {
@@ -280,6 +297,7 @@
 
         localStorage.setItem("gamerTag", gamerTag);
         localStorage.setItem("orderId", orderId);
+        localStorage.setItem("loginTime", String(Date.now()));
 
         if (data.token) {
           localStorage.setItem("chatToken", data.token);

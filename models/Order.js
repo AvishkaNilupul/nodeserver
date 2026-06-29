@@ -9,6 +9,10 @@ const orderSchema = new mongoose.Schema(
     password: { type: String, default: "" },
     used: { type: Boolean, default: false },
     gamerTag: { type: String, default: null, index: true },
+    // Stable per-order chat identity ("<gamerTag> #<orderId>"). Unique per
+    // order so a buyer who reuses a gamertag across orders gets a separate
+    // chat instead of overlapping the previous one.
+    chatId: { type: String, default: null, index: true },
     usedAt: { type: Date, default: null },
     // Per-buyer secret used to authenticate the chat socket so a gamertag
     // alone is not enough to read/send another buyer's messages.

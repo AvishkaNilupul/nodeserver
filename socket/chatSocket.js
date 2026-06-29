@@ -1,6 +1,8 @@
-const validator = require("validator");
-
-const { getOrderByGamerTag } = require("../utils/orderIds");
+const {
+  getOrderByOrderId,
+  getOrderByChatId,
+  buildChatId,
+} = require("../utils/orderIds");
 const {
   addMessage,
   userHasWelcome,
@@ -12,10 +14,13 @@ const { sendTelegramToSeller } = require("../utils/telegram");
 
 const cooldowns = new Map();
 
-function cleanUserId(value) {
+// A chat id ("<gamerTag> #<orderId>") is already sanitized when the order is
+// claimed, so it is only length-guarded here — re-escaping would corrupt the
+// already-escaped value and break room/message matching.
+function cleanChatId(value) {
   if (typeof value !== "string") return null;
-  const userId = validator.escape(value.trim().slice(0, 50));
-  return userId || null;
+  const id = value.trim().slice(0, 120);
+  return id || null;
 }
 
 function chatSocket(io) {
@@ -58,27 +63,41 @@ function chatSocket(io) {
     // =========================
     socket.on("join-user", async (payload) => {
       try {
-        const rawUserId =
-          typeof payload === "string" ? payload : payload?.userId;
+        // The buyer is identified by their order id (unique per purchase), so a
+        // reused gamertag never resolves to the wrong order or shares a chat.
+        const rawOrderId =
+          typeof payload === "string" ? payload : payload?.orderId;
         const token =
           typeof payload === "object" && payload ? payload.token : null;
 
-        const userId = cleanUserId(rawUserId);
-        if (!userId) return;
+        const orderId =
+          typeof rawOrderId === "string"
+            ? rawOrderId.trim().slice(0, 100)
+            : null;
+        if (!orderId) return;
 
-        const order = await getOrderByGamerTag(userId);
+        const order = await getOrderByOrderId(orderId);
         if (!order) return;
 
         // Buyer auth. Once a token is bound to the order it is required and
-        // must match — a gamertag alone is no longer enough to read or post as
-        // that buyer. Until a token is bound the first one presented is bound
-        // (first-come), so the normal buyer flow keeps working.
+        // must match — the order id alone is no longer enough to read or post
+        // as that buyer. Until a token is bound the first one presented is
+        // bound (first-come), so the normal buyer flow keeps working.
         if (order.chatToken) {
           if (token !== order.chatToken) {
             return;
           }
         } else if (token) {
           order.chatToken = token;
+          await order.save();
+        }
+
+        // Canonical chat identity for this order. Backfilled for orders that
+        // were claimed before the chatId field existed.
+        let userId = order.chatId;
+        if (!userId) {
+          userId = buildChatId(order.gamerTag || "", order.orderId);
+          order.chatId = userId;
           await order.save();
         }
 
@@ -201,17 +220,17 @@ ${new Date().toISOString()}`,
         if (!data || typeof data.userId !== "string") return;
         if (typeof data.message !== "string") return;
 
-        const userId = cleanUserId(data.userId);
+        const userId = cleanChatId(data.userId);
         const message = String(data.message).trim().slice(0, 1000);
         if (!userId || !message) return;
 
         // The admin may only message buyers that belong to them. A buyer
-        // belongs to the seller if there is a live order tagged with this
-        // sellerId, OR an existing conversation under this sellerId (so
-        // replies to older chats keep working even after the order is gone).
-        // The order lookup is scoped to the seller so a gamertag reused across
+        // belongs to the seller if there is a live order with this chat id
+        // under this sellerId, OR an existing conversation under this sellerId
+        // (so replies to older chats keep working even after the order is
+        // gone). The lookup is scoped to the seller so a chat id reused across
         // sellers can't resolve to another seller's order.
-        const order = await getOrderByGamerTag(userId, sellerId);
+        const order = await getOrderByChatId(userId, sellerId);
         if (!order && !(await conversationExists(sellerId, userId))) {
           return;
         }
@@ -243,13 +262,13 @@ ${new Date().toISOString()}`,
     // =========================
     socket.on("admin-typing", (userId) => {
       if (!socket.data.isAdmin) return;
-      const id = cleanUserId(userId);
+      const id = cleanChatId(userId);
       if (id) io.to(id).emit("support-typing");
     });
 
     socket.on("admin-stop-typing", (userId) => {
       if (!socket.data.isAdmin) return;
-      const id = cleanUserId(userId);
+      const id = cleanChatId(userId);
       if (id) io.to(id).emit("support-stop-typing");
     });
 

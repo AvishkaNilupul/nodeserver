@@ -353,10 +353,25 @@
     // =========================
     // Gamer Tag
     // =========================
-    const gamerTag = localStorage.getItem("gamerTag");
-    const chatToken = localStorage.getItem("chatToken");
+    const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
-    if (!gamerTag) {
+    const gamerTag = localStorage.getItem("gamerTag");
+    const orderId = localStorage.getItem("orderId");
+    const chatToken = localStorage.getItem("chatToken");
+    const loginTime = Number(localStorage.getItem("loginTime") || 0);
+
+    // Send the buyer back to the entry page if their details are missing or the
+    // 12h session has expired.
+    if (
+      !gamerTag ||
+      !orderId ||
+      !loginTime ||
+      Date.now() - loginTime >= SESSION_MAX_AGE_MS
+    ) {
+      localStorage.removeItem("gamerTag");
+      localStorage.removeItem("orderId");
+      localStorage.removeItem("chatToken");
+      localStorage.removeItem("loginTime");
       window.location.href = "/index.html";
     }
 
@@ -370,7 +385,7 @@
 
     socket.on("connect", () => {
       console.log("CONNECTED:", socket.id);
-      socket.emit("join-user", { userId: gamerTag, token: chatToken });
+      socket.emit("join-user", { orderId, token: chatToken });
     });
 
     socket.onAny((event, ...args) => {
@@ -468,7 +483,7 @@
         const res = await fetch("/upload-image", {
           method: "POST",
           headers: {
-            "x-gamer-tag": gamerTag,
+            "x-order-id": orderId,
             "x-chat-token": chatToken || "",
           },
           body: formData,
