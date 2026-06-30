@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Redeem your order</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
+
+  <style>
+
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;color-scheme:dark;}
+  .themebtn{cursor:pointer;}
+  .theme-fab{position:fixed;top:16px;right:16px;z-index:80;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 18px rgba(15,23,42,.12);transition:background .15s;}
+  .theme-fab:hover{background:var(--surface-2);}
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --accent: #4f46e5;
+      --accent-d: #4338ca;
+    }
+
+    body {
+      font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      color: var(--ink);
+      background:
+        radial-gradient(1000px 500px at 100% -10%, #eef2ff 0%, transparent 60%),
+        radial-gradient(900px 500px at -10% 110%, #faf5ff 0%, transparent 55%),
+        var(--bg);
+    }
+
+    .redeem-card {
+      width: 100%;
+      max-width: 430px;
+      background: var(--surface);
+      border-radius: 22px;
+      padding: 40px 36px;
+      border: 1px solid var(--line);
+      box-shadow:
+        0 24px 60px rgba(31, 41, 55, 0.1),
+        0 2px 6px rgba(31, 41, 55, 0.04);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+
+    .brand .mark {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      display: grid;
+      place-items: center;
+      box-shadow: 0 8px 18px rgba(79, 70, 229, 0.35);
+    }
+
+    .brand .name {
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.2px;
+      line-height: 1.15;
+    }
+
+    .brand .name span {
+      color: var(--muted);
+      font-weight: 500;
+      display: block;
+      font-size: 11.5px;
+    }
+
+    .redeem-header h1 {
+      font-size: 27px;
+      font-weight: 800;
+      letter-spacing: -0.6px;
+      margin-bottom: 8px;
+    }
+
+    .redeem-header p {
+      color: var(--muted);
+      font-size: 14.5px;
+      line-height: 1.6;
+      margin-bottom: 28px;
+    }
+
+    label {
+      display: block;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--muted);
+      margin: 0 0 7px 2px;
+    }
+
+    .field {
+      position: relative;
+      margin-bottom: 16px;
+    }
+
+    .field .ic {
+      position: absolute;
+      left: 14px;
+      top: 41px;
+      color: var(--muted);
+      pointer-events: none;
+    }
+
+    input {
+      width: 100%;
+      padding: 14px 14px 14px 42px;
+      border-radius: 12px;
+      outline: none;
+      background: var(--surface-2);
+      border: 1.5px solid var(--line);
+      color: var(--ink);
+      font-size: 15px;
+      font-family: inherit;
+      transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+    }
+
+    input::placeholder {
+      color: #aeb4c2;
+    }
+
+    input:focus {
+      background: var(--surface);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+    }
+
+    button {
+      width: 100%;
+      margin-top: 10px;
+      padding: 15px;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+      font-family: inherit;
+      background: linear-gradient(180deg, var(--accent), var(--accent-d));
+      box-shadow: 0 10px 22px rgba(79, 70, 229, 0.3);
+      transition: transform 0.12s, box-shadow 0.2s, opacity 0.2s;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 30px rgba(79, 70, 229, 0.42);
+    }
+
+    button:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+    }
+
+    #message {
+      min-height: 20px;
+      text-align: center;
+      font-size: 13.5px;
+      margin-top: 14px;
+    }
+
+    .error {
+      color: #dc2626;
+    }
+
+    .success {
+      color: #16a34a;
+    }
+
+    .foot {
+      margin-top: 22px;
+      text-align: center;
+      font-size: 12.5px;
+      color: var(--muted);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
+</head>
+
+<body>
+<button class="theme-fab" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+  <div class="redeem-wrapper">
+    <div class="redeem-card">
+      <div class="brand">
+        <span class="mark">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg>
+        </span>
+        <span class="name">RedeemHub<span>Order redemption</span></span>
+      </div>
+
+      <div class="redeem-header">
+        <h1>Redeem your order</h1>
+        <p>Enter your gamer tag and order ID to receive your items.</p>
+      </div>
+
+      <div class="redeem-form">
+        <div class="field">
+          <label for="gamerTag">Gamer tag</label>
+          <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h4M8 10v4"></path><circle cx="16" cy="11" r="1"></circle><circle cx="18.5" cy="13.5" r="1"></circle><rect x="2" y="6" width="20" height="12" rx="4"></rect></svg></span>
+          <input id="gamerTag" placeholder="Enter your gamer tag" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label for="orderId">Order ID</label>
+          <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"></rect><path d="M3 9h18M7 14h6"></path></svg></span>
+          <input id="orderId" placeholder="Enter your Order ID" autocomplete="off" />
+        </div>
+
+        <button onclick="submitTag()" id="btn">Continue</button>
+
+        <p id="message"></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // A saved buyer session lasts 12h. After that the buyer is sent back here
+    // to re-enter their gamer tag + order ID (re-entering the same details
+    // resumes the same chat; a new order ID opens a fresh one).
+    const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+
+    function clearSession() {
+      localStorage.removeItem("gamerTag");
+      localStorage.removeItem("orderId");
+      localStorage.removeItem("chatToken");
+      localStorage.removeItem("loginTime");
+    }
+
+    // Auto login: if we have a recent (<12h) gamer tag + order ID, skip
+    // straight to chat. Otherwise clear the stale session.
+    const existingTag = localStorage.getItem("gamerTag");
+    const existingOrderId = localStorage.getItem("orderId");
+    const loginTime = Number(localStorage.getItem("loginTime") || 0);
+    const fresh = loginTime && Date.now() - loginTime < SESSION_MAX_AGE_MS;
+
+    if (existingTag && existingOrderId && fresh) {
+      window.location.href = "/result.html";
+    } else if (existingTag || existingOrderId) {
+      clearSession();
+    }
+
+    async function submitTag() {
+      const gamerTag = document.getElementById("gamerTag").value.trim();
+      const orderId = document.getElementById("orderId").value.trim();
+      const message = document.getElementById("message");
+      const btn = document.getElementById("btn");
+
+      message.innerText = "";
+      message.className = "";
+
+      if (!gamerTag || !orderId) {
+        message.innerText = "Please enter gamer tag and order ID";
+        message.classList.add("error");
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = "Checking...";
+
+      try {
+        const response = await fetch("/submit-gamertag", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ gamerTag, orderId }),
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+          throw new Error(data.message || "Submit failed");
+        }
+
+        localStorage.setItem("gamerTag", gamerTag);
+        localStorage.setItem("orderId", orderId);
+        localStorage.setItem("loginTime", String(Date.now()));
+
+        if (data.token) {
+          localStorage.setItem("chatToken", data.token);
+        }
+
+        message.innerText = "Success";
+        message.classList.add("success");
+
+        setTimeout(() => {
+          window.location.href = "/result.html";
+        }, 500);
+      } catch (err) {
+        console.error(err);
+        message.innerText = err.message;
+        message.classList.add("error");
+      } finally {
+        btn.disabled = false;
+        btn.innerText = "Continue";
+      }
+    }
+  </script>
+<script src="/theme.js"></script>
+</body>
+</html>
