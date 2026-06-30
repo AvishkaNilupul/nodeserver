@@ -411,6 +411,90 @@ async function detectComposeCmd(host) {
   return cmd;
 }
 
+// ----------------------------------------------------------------------------
+// Logs & resource stats (host-aware)
+// ----------------------------------------------------------------------------
+
+// Run an arbitrary /bin/sh command string on a host regardless of transport.
+// Local runs go through `sh -c`, remote ones over SSH (same shell semantics),
+// so a single command string works for both.
+function runShell(host, script, { timeout = SHORT_TIMEOUT } = {}) {
+  if (host.transport === "local") {
+    return localRun("/bin/sh", ["-c", script], { timeout });
+  }
+  return sshRun(host, script, { timeout });
+}
+
+// Tail a container's docker logs. docker writes logs to stderr, so we merge
+// 2>&1. Returns the raw text (caller splits into lines).
+async function dockerLogs(host, container, { tail = 200 } = {}) {
+  const n = Math.max(1, Math.min(2000, parseInt(tail, 10) || 200));
+  const script =
+    "docker logs --tail " + n + " " + shq(container) + " 2>&1 | tail -n " + n;
+  const { stdout } = await runShell(host, script, { timeout: 25000 });
+  return stdout;
+}
+
+// One shell snippet that samples CPU (two /proc/stat reads 0.4s apart), memory
+// from /proc/meminfo, disk for the bot directory's filesystem, uptime and the
+// CPU count. Emitted as "key value" lines so parsing stays trivial and works
+// identically over SSH or locally.
+function statsScript(dir) {
+  return [
+    "S1=$(awk '/^cpu /{t=0;for(i=2;i<=NF;i++)t+=$i;print t\" \"($5+$6)}' /proc/stat)",
+    "sleep 0.4",
+    "S2=$(awk '/^cpu /{t=0;for(i=2;i<=NF;i++)t+=$i;print t\" \"($5+$6)}' /proc/stat)",
+    'echo "cpu $(awk -v a="$S1" -v b="$S2" \'BEGIN{split(a,x);split(b,y);dt=y[1]-x[1];di=y[2]-x[2];if(dt<=0){print 0}else{p=(1-di/dt)*100;if(p<0)p=0;printf "%.1f",p}}\')"',
+    "awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf \"mem_total %d\\nmem_used %d\\n\",t*1024,(t-a)*1024}' /proc/meminfo",
+    "df -P -B1 " + shq(dir) + " 2>/dev/null | awk 'NR==2{printf \"disk_total %d\\ndisk_used %d\\n\",$2,$3}'",
+    "awk '{printf \"uptime %d\\n\",$1}' /proc/uptime",
+    'echo "ncpu $(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)"',
+  ].join("; ");
+}
+
+async function hostStats(host) {
+  const { stdout } = await runShell(host, statsScript(host.dir), {
+    timeout: 15000,
+  });
+  const out = {};
+  stdout
+    .trim()
+    .split("\n")
+    .forEach((line) => {
+      const sp = line.indexOf(" ");
+      if (sp < 0) return;
+      const k = line.slice(0, sp).trim();
+      const v = Number(line.slice(sp + 1).trim());
+      if (k && !Number.isNaN(v)) out[k] = v;
+    });
+  return {
+    cpu: out.cpu ?? null,
+    ncpu: out.ncpu ?? null,
+    memTotal: out.mem_total ?? null,
+    memUsed: out.mem_used ?? null,
+    diskTotal: out.disk_total ?? null,
+    diskUsed: out.disk_used ?? null,
+    uptime: out.uptime ?? null,
+  };
+}
+
+// Per-container CPU/mem from `docker stats --no-stream`, keyed by container name.
+async function dockerStats(host) {
+  const fmt = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}";
+  const script = "docker stats --no-stream --format " + shq(fmt);
+  const { stdout } = await runShell(host, script, { timeout: 20000 });
+  const out = {};
+  stdout
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .forEach((line) => {
+      const [name, cpu, mem, memPerc] = line.split("\t");
+      if (name) out[name] = { cpu, mem, memPerc };
+    });
+  return out;
+}
+
 async function composeUp(host, container) {
   const c = await detectComposeCmd(host);
   const args = [...c.pre, "up", "-d", container];
@@ -442,5 +526,8 @@ module.exports = {
   composeWrite,
   dockerPs,
   dockerContainer,
+  dockerLogs,
+  dockerStats,
+  hostStats,
   composeUp,
 };

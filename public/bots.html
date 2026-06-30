@@ -58,6 +58,19 @@
   .hosttab { background: var(--surface); color: var(--muted); border:1px solid var(--line); padding:8px 16px; border-radius:10px; font-weight:600; font-size:13px; }
   .hosttab:hover { background: var(--surface-2); opacity:1; color: var(--ink); }
   .hosttab.active { background: linear-gradient(180deg, var(--accent2), var(--accent)); color:#fff; border-color: transparent; }
+  .hostusage { display:flex; gap:10px; flex-wrap:wrap; margin: 0 0 16px; }
+  .ustat { background: var(--surface); border:1px solid var(--line); border-radius:12px; padding:9px 14px; min-width:128px; }
+  .ustat b { font-size:16px; display:block; }
+  .ustat span { font-size:11px; color: var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .ustat .bar { height:5px; border-radius:999px; background: var(--surface-2); margin-top:7px; overflow:hidden; }
+  .ustat .bar > i { display:block; height:100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); }
+  .uoff { color: var(--muted); font-size:12.5px; padding:6px 2px; }
+  .logwrap { background:#0b0e14; color:#cdd3df; border-radius:10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.5; padding:12px 14px; height:60vh; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+  .modal.lg { max-width:900px; width:94vw; }
+  .logbar { display:flex; align-items:center; gap:12px; margin-bottom:8px; color: var(--muted); font-size:12px; flex-wrap:wrap; }
+  .logbar .live { display:inline-flex; align-items:center; gap:5px; }
+  .logbar .live i { width:8px; height:8px; border-radius:50%; background: var(--green); display:inline-block; animation: livepulse 1.4s infinite; }
+  @keyframes livepulse { 0%,100%{opacity:1} 50%{opacity:.3} }
   .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
   .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
   .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
@@ -190,6 +203,8 @@
     <div class="stats" id="stats"></div>
   </div>
 
+  <div id="hostUsage" class="hostusage" style="display:none;"></div>
+
   <div id="banner"></div>
 
   <div class="panel" id="allPanel">
@@ -208,6 +223,9 @@
   let CONFIGS = {};   // file -> { container, data, ok, error }
   let STATES = {};    // container -> { state, status }
   let HEALTH = {};    // file -> { accounts, ok, error, tokenInvalid, drops, lastScanAt, lastDropAt }
+  let CSTATS = {};    // container -> { cpu, mem, memPerc } (from docker stats)
+  let _statsTimer = null; // periodic host-usage refresh
+  let _logTimer = null;   // live-log poll while the logs modal is open
 
   // Which managed host the page is currently showing (the local server by
   // default; remote hosts such as a Raspberry Pi appear as extra tabs).
@@ -232,6 +250,17 @@
 
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
   function fmtNum(n) { return Number(n || 0).toLocaleString(); }
+  function fmtBytes(n) {
+    if (n == null || isNaN(n)) return "—";
+    const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; n = Number(n);
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
+  }
+  function fmtUptime(s) {
+    if (s == null || isNaN(s)) return "—";
+    s = Math.floor(s); const d = Math.floor(s / 86400); const h = Math.floor((s % 86400) / 3600); const m = Math.floor((s % 3600) / 60);
+    if (d > 0) return d + "d " + h + "h"; if (h > 0) return h + "h " + m + "m"; return m + "m";
+  }
   function timeAgoShort(v) {
     if (!v) return "";
     const t = new Date(v).getTime(); if (isNaN(t)) return "";
@@ -278,6 +307,7 @@
       catch (e) { CONFIGS[c.file] = { container: c.container, ok: false, error: e.message }; }
     }));
     renderAll(files);
+    loadHostStats();
   }
 
   // Load the configured hosts and render a tab per host (hidden when only the
@@ -296,8 +326,49 @@
   }
   window.switchHost = function (id) {
     if (id === CURRENT_HOST) return;
-    CURRENT_HOST = id; renderHostTabs(); load();
+    CURRENT_HOST = id; CSTATS = {}; renderHostTabs(); load();
   };
+
+  // Resource usage for the active host: CPU / memory / disk / uptime, refreshed
+  // on a timer. Also pulls per-container CPU/mem so each bot can show a chip.
+  function uBar(pct) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    return '<div class="bar"><i style="width:' + p.toFixed(0) + '%"></i></div>';
+  }
+  function renderHostUsage(r) {
+    const el = $("hostUsage");
+    if (!el) return;
+    el.style.display = "flex";
+    if (!r || r.available === false) {
+      el.innerHTML = '<div class="uoff">' + (r && r.offline ? "⚠️ Host offline — usage unavailable" : "Usage unavailable for this host") + "</div>";
+      return;
+    }
+    const s = r.stats || {};
+    const memPct = s.memTotal ? (s.memUsed / s.memTotal) * 100 : 0;
+    const diskPct = s.diskTotal ? (s.diskUsed / s.diskTotal) * 100 : 0;
+    el.innerHTML =
+      '<div class="ustat"><b>' + (s.cpu == null ? "—" : s.cpu + "%") + '</b><span>CPU' + (s.ncpu ? " · " + s.ncpu + " cores" : "") + '</span>' + uBar(s.cpu) + "</div>" +
+      '<div class="ustat"><b>' + fmtBytes(s.memUsed) + " / " + fmtBytes(s.memTotal) + '</b><span>Memory · ' + memPct.toFixed(0) + '%</span>' + uBar(memPct) + "</div>" +
+      '<div class="ustat"><b>' + fmtBytes(s.diskUsed) + " / " + fmtBytes(s.diskTotal) + '</b><span>Disk · ' + diskPct.toFixed(0) + '%</span>' + uBar(diskPct) + "</div>" +
+      '<div class="ustat"><b>' + fmtUptime(s.uptime) + '</b><span>Uptime</span></div>';
+  }
+  async function loadHostStats() {
+    const hostAtCall = CURRENT_HOST;
+    try {
+      const r = await api(hq("/bot-configs/host-stats"));
+      if (hostAtCall !== CURRENT_HOST) return; // tab changed mid-flight
+      CSTATS = r.containers || {};
+      renderHostUsage(r);
+      // refresh the per-bot container chips without a full reload
+      if (Object.keys(CONFIGS).length) renderAll(Object.keys(CONFIGS));
+    } catch (e) {
+      if (hostAtCall === CURRENT_HOST) renderHostUsage({ available: false });
+    }
+  }
+  function startStatsTimer() {
+    if (_statsTimer) clearInterval(_statsTimer);
+    _statsTimer = setInterval(loadHostStats, 7000);
+  }
 
   function accountsOf(file) { const d = CONFIGS[file] && CONFIGS[file].data; const ts = d && d.TwitchSettings; return (ts && Array.isArray(ts.TwitchUsers)) ? ts.TwitchUsers : []; }
 
@@ -438,12 +509,14 @@
         '<div class="right">' +
           '<span class="chip"><span class="dot ' + dotCls + '"></span>' + statusTxt + '</span>' +
           '<span class="chip">' + users.length + ' account' + (users.length === 1 ? "" : "s") + '</span>' +
+          (CSTATS[c.container] ? '<span class="chip" title="Container CPU · memory">' + esc(CSTATS[c.container].cpu || "") + " · " + esc(String(CSTATS[c.container].mem || "").split("/")[0].trim()) + "</span>" : "") +
           healthHtml +
           '<button class="btn-ghost btn-sm" onclick="addAccount(\'' + esc(file) + '\')">+ Account</button>' +
           '<button class="btn-ghost btn-sm" onclick="openBulkModal(\'' + esc(file) + '\')">Mass add</button>' +
           (running
             ? '<button class="btn-ghost btn-sm" onclick="botPower(\'' + esc(file) + "','stop',this)\">Stop</button>"
             : '<button class="btn-ghost btn-sm" onclick="botPower(\'' + esc(file) + "','start',this)\">Start</button>") +
+          '<button class="btn-ghost btn-sm" onclick="openLogs(\'' + esc(file) + '\')">Logs</button>' +
           '<button class="btn-ghost btn-sm" onclick="restartBot(\'' + esc(file) + '\',this)">Restart</button>' +
           '<button class="btn-sm" onclick="saveBot(\'' + esc(file) + '\',this)">Save</button>' +
           (file === "config.json" ? "" : '<button class="btn-danger btn-sm" onclick="deleteBot(\'' + esc(file) + '\',this)">Delete</button>') +
@@ -540,8 +613,50 @@
     finally { btn.disabled = false; btn.textContent = old; }
   };
 
+  // ---- Live logs ----
+  window.openLogs = function (file) {
+    const c = CONFIGS[file]; if (!c) return;
+    const cont = c.container || file;
+    $("modalBg").innerHTML =
+      '<div class="modal lg" role="dialog" aria-modal="true">' +
+        '<header><b>Logs · ' + esc(cont) + '</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
+        '<div class="mbody">' +
+          '<div class="logbar">' +
+            '<span class="live"><i></i> Live</span>' +
+            '<span>Tail <select id="logTail"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select> lines</span>' +
+            '<label class="chkrow" style="margin:0;"><input type="checkbox" id="logFollow" checked> Auto-scroll</label>' +
+            '<span id="logMeta" style="margin-left:auto;"></span>' +
+          '</div>' +
+          '<div class="logwrap" id="logWrap">Loading logs…</div>' +
+        '</div>' +
+      '</div>';
+    $("modalBg").classList.add("show");
+    const wrap = $("logWrap");
+    let lastText = null;
+    async function poll() {
+      const tail = $("logTail") ? $("logTail").value : 200;
+      try {
+        const r = await api(hq("/bot-configs/logs/" + encodeURIComponent(file) + "?tail=" + encodeURIComponent(tail)));
+        const text = (r.logs || "").replace(/\s+$/, "") || "(no log output yet)";
+        if (text !== lastText) {
+          const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 30;
+          wrap.textContent = text;
+          lastText = text;
+          const follow = $("logFollow") ? $("logFollow").checked : true;
+          if (follow || atBottom) wrap.scrollTop = wrap.scrollHeight;
+        }
+        if ($("logMeta")) $("logMeta").textContent = "updated " + new Date().toLocaleTimeString();
+      } catch (e) {
+        wrap.textContent = (/unreachable|offline/i.test(e.message) ? "⚠️ " : "") + e.message;
+      }
+    }
+    if (_logTimer) clearInterval(_logTimer);
+    poll();
+    _logTimer = setInterval(poll, 2500);
+  };
+
   // ---- Modal helpers ----
-  function closeModal() { $("modalBg").classList.remove("show"); $("modalBg").innerHTML = ""; }
+  function closeModal() { if (_logTimer) { clearInterval(_logTimer); _logTimer = null; } $("modalBg").classList.remove("show"); $("modalBg").innerHTML = ""; }
   $("modalBg").addEventListener("click", (e) => { if (e.target === $("modalBg")) closeModal(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
@@ -709,6 +824,7 @@
     } catch (e) { window.location.href = "/admin-login.html"; return; }
     await loadHosts();
     load();
+    startStatsTimer();
   })();
 </script>
 <script src="/admin-nav.js"></script>

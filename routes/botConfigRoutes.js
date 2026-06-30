@@ -516,6 +516,58 @@ router.get("/bot-configs/status", requireSuperadmin, async (req, res) => {
   }
 });
 
+// LIVE LOGS: tail the docker logs of the container backing a config file.
+// The frontend polls this for a live feed; ?tail=N controls how many lines.
+router.get("/bot-configs/logs/:file", requireSuperadmin, async (req, res) => {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  if (!validFile(req.params.file)) {
+    return res.status(400).json({ success: false, message: "Invalid file" });
+  }
+  const container = containerForFile(req.params.file);
+  if (!container) {
+    return res
+      .status(400)
+      .json({ success: false, message: "No container mapped to this file" });
+  }
+  try {
+    const logs = await hosts.dockerLogs(host, container, {
+      tail: req.query.tail,
+    });
+    res.json({ success: true, container, logs });
+  } catch (e) {
+    res.status(e.unreachable ? 502 : 500).json({
+      success: false,
+      offline: !!e.unreachable,
+      message: hostErrorMessage(host, e),
+    });
+  }
+});
+
+// HOST STATS: CPU / memory / disk / uptime for the machine this host runs on,
+// plus per-container CPU/mem. Used for the resource-usage strip on each tab.
+// Fails soft (available:false) so the page never breaks when a host is offline.
+router.get("/bot-configs/host-stats", requireSuperadmin, async (req, res) => {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  try {
+    const stats = await hosts.hostStats(host);
+    let containers = {};
+    try {
+      containers = await hosts.dockerStats(host);
+    } catch {
+      /* docker stats is best-effort */
+    }
+    res.json({ success: true, available: true, stats, containers });
+  } catch (e) {
+    res.json({
+      success: true,
+      available: false,
+      offline: !!e.unreachable,
+    });
+  }
+});
+
 // RESTART the docker container backing a config file.
 router.post(
   "/bot-configs/restart/:file",
