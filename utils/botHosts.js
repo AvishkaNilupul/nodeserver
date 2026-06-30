@@ -536,6 +536,90 @@ async function composeUp(host, container) {
   return stdout.trim();
 }
 
+// ----------------------------------------------------------------------------
+// Server-side "last known" snapshots + small metadata files.
+//
+// Remote hosts (a Raspberry Pi) can be powered off or fall off the network. So
+// the server keeps a copy of each host's config files (refreshed whenever we
+// successfully read them) plus a tiny metadata store. This is what lets the
+// "All bots" view list a host's bots while it's offline, and what lets the
+// emergency "move to server" recover a bot even when the Pi is unreachable.
+// ----------------------------------------------------------------------------
+const SNAPSHOT_DIR =
+  process.env.TWITCHBOT_SNAPSHOT_DIR ||
+  path.join(path.dirname(BOT_DIR), "twitchbot-snapshots");
+
+function snapshotPath(hostId, file) {
+  return path.join(SNAPSHOT_DIR, "hosts", String(hostId), file);
+}
+async function saveSnapshot(hostId, file, text) {
+  const p = snapshotPath(hostId, file);
+  await fsp.mkdir(path.dirname(p), { recursive: true });
+  await fsp.writeFile(p, text, "utf8");
+}
+async function readSnapshot(hostId, file) {
+  return fsp.readFile(snapshotPath(hostId, file), "utf8");
+}
+async function listSnapshot(hostId) {
+  try {
+    return await fsp.readdir(path.join(SNAPSHOT_DIR, "hosts", String(hostId)));
+  } catch (e) {
+    if (e.code === "ENOENT") return [];
+    throw e;
+  }
+}
+async function readMeta(name) {
+  try {
+    return await fsp.readFile(path.join(SNAPSHOT_DIR, name), "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+async function writeMeta(name, text) {
+  await fsp.mkdir(SNAPSHOT_DIR, { recursive: true });
+  await fsp.writeFile(path.join(SNAPSHOT_DIR, name), text, "utf8");
+}
+
+// Best-effort "what is this container farming right now", parsed from the tail
+// of its docker logs. TwitchDropsBot prints lines about the game/campaign it's
+// watching; we return the most recent recognisable one (ANSI stripped), or the
+// last log line as a fallback. Returns null when there's nothing to show.
+// eslint-disable-next-line no-control-regex
+const _ansiRe = /\u001b\[[0-9;]*[A-Za-z]/g;
+async function farmingStatus(host, container) {
+  let text;
+  try {
+    text = (await dockerLogs(host, container, { tail: 160 })) || "";
+  } catch {
+    return null;
+  }
+  const lines = text
+    .replace(_ansiRe, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) return null;
+  const patterns = [
+    /watching\s+(.+)/i,
+    /now watching\s+(.+)/i,
+    /mining\s+(.+)/i,
+    /farming\s+(.+)/i,
+    /campaign[:\s]+(.+)/i,
+    /current drop[:\s]+(.+)/i,
+    /\bdrop[:\s]+(.+)/i,
+    /streamer[:\s]+(.+)/i,
+  ];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    for (const re of patterns) {
+      const m = lines[i].match(re);
+      if (m) return { line: lines[i], detail: m[1].slice(0, 180) };
+    }
+  }
+  const last = lines[lines.length - 1];
+  return { line: last, detail: last.slice(0, 180) };
+}
+
 module.exports = {
   BOT_DIR,
   COMPOSE_NAMES,
@@ -555,4 +639,10 @@ module.exports = {
   dockerStats,
   hostStats,
   composeUp,
+  saveSnapshot,
+  readSnapshot,
+  listSnapshot,
+  readMeta,
+  writeMeta,
+  farmingStatus,
 };

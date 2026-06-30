@@ -276,6 +276,90 @@ router.get("/bot-configs/hosts", requireSuperadmin, (req, res) => {
   res.json({ success: true, hosts: hosts.listHosts() });
 });
 
+// AGGREGATE every bot across every host into one view (the "All bots" tab).
+// For reachable hosts we read live + refresh the server-side snapshot and parse
+// what each running container is farming. For an offline host we fall back to
+// the last-known snapshot so its bots still appear (so the data is never lost
+// even if the Pi is down). Always 200: per-host errors are reported inline.
+router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
+  const out = [];
+  for (const meta of hosts.listHosts()) {
+    const host = hosts.resolveHost(meta.id);
+    const entry = {
+      id: meta.id,
+      label: meta.label,
+      transport: meta.transport,
+      online: true,
+      bots: [],
+    };
+    let states = {};
+    try {
+      states = await hosts.dockerPs(host);
+    } catch (e) {
+      if (e.unreachable) entry.online = false;
+    }
+    let files = null;
+    try {
+      files = (await hosts.readdir(host)).filter((f) => FILE_RE.test(f)).sort();
+    } catch {
+      entry.online = false;
+    }
+
+    if (files) {
+      for (const file of files) {
+        try {
+          const raw = await hosts.readFile(host, file);
+          // Keep a server-side copy so an offline host (or emergency move)
+          // still has this bot's accounts/tokens.
+          hosts.saveSnapshot(meta.id, file, raw).catch(() => {});
+          const data = JSON.parse(raw);
+          const sum = summarize(file, data);
+          const st = states[sum.container];
+          const running = !!(st && /^running/i.test(st.state || ""));
+          let farming = null;
+          if (running) {
+            try {
+              farming = await hosts.farmingStatus(host, sum.container);
+            } catch {
+              /* best effort */
+            }
+          }
+          entry.bots.push({
+            ...sum,
+            source: "live",
+            state: st ? st.state : null,
+            status: st ? st.status : null,
+            running,
+            farming,
+          });
+        } catch {
+          /* skip unreadable file */
+        }
+      }
+    } else {
+      // Offline: reconstruct from the last-known snapshots.
+      const snaps = (await hosts.listSnapshot(meta.id).catch(() => []))
+        .filter((f) => FILE_RE.test(f))
+        .sort();
+      for (const file of snaps) {
+        try {
+          const data = JSON.parse(await hosts.readSnapshot(meta.id, file));
+          entry.bots.push({
+            ...summarize(file, data),
+            source: "snapshot",
+            running: false,
+            farming: null,
+          });
+        } catch {
+          /* skip */
+        }
+      }
+    }
+    out.push(entry);
+  }
+  res.json({ success: true, hosts: out });
+});
+
 // LIST all config files on a host with a parsed summary.
 router.get("/bot-configs", requireSuperadmin, async (req, res) => {
   const host = hostFromReq(req);
@@ -767,6 +851,188 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
   } catch (err) {
     console.error("bot create error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Server-side record of where bots have been moved to, so repeating a move is
+// idempotent (it re-uses the same target slot instead of piling up copies).
+// Shape: { "<toHostId>": { "<fromHostId>:<file>": "<targetFile>" } }
+async function readMoves() {
+  const t = await hosts.readMeta("moves.json").catch(() => null);
+  if (!t) return {};
+  try {
+    return JSON.parse(t) || {};
+  } catch {
+    return {};
+  }
+}
+async function recordMove(toHostId, marker, targetFile) {
+  const m = await readMoves();
+  m[toHostId] = m[toHostId] || {};
+  m[toHostId][marker] = targetFile;
+  await hosts.writeMeta("moves.json", JSON.stringify(m, null, 2)).catch(() => {});
+}
+
+// EMERGENCY MOVE / SWITCH a bot from one host to another (e.g. Raspberry Pi ->
+// server if the Pi dies). The source's accounts/tokens come from a live read
+// when reachable, otherwise from the last-known server snapshot. To guarantee
+// the same accounts never farm on two machines at once, the source container
+// is STOPPED first whenever the source host is reachable.
+router.post("/bot-configs/move", requireSuperadmin, async (req, res) => {
+  const body = req.body || {};
+  const fromHost = hosts.resolveHost(body.fromHost || "");
+  const toHost = hosts.resolveHost(
+    body.toHost === undefined ? "local" : body.toHost,
+  );
+  if (!fromHost || !toHost) return badHost(res);
+  if (fromHost.id === toHost.id) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Source and target host are the same" });
+  }
+  const file = body.file;
+  if (!validFile(file)) {
+    return res.status(400).json({ success: false, message: "Invalid file" });
+  }
+  const start = body.start !== false; // default true
+  if (!ALLOW_RESTART && start) {
+    return res.status(403).json({
+      success: false,
+      message: "Starting containers is disabled on this server",
+    });
+  }
+  try {
+    require("js-yaml");
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: "js-yaml is not installed. Run `npm install` and restart.",
+    });
+  }
+
+  // 1. Get the source config: prefer a fresh live read, fall back to snapshot.
+  let raw = null;
+  let sourceOnline = true;
+  try {
+    raw = await hosts.readFile(fromHost, file);
+    hosts.saveSnapshot(fromHost.id, file, raw).catch(() => {});
+  } catch (e) {
+    if (e.unreachable) {
+      sourceOnline = false;
+      raw = await hosts.readSnapshot(fromHost.id, file).catch(() => null);
+    } else if (e.code === "ENOENT") {
+      return res
+        .status(404)
+        .json({ success: false, message: "Config not found on source host" });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: "Could not read source config: " + (e.code || e.message),
+      });
+    }
+  }
+  if (raw == null) {
+    return res.status(404).json({
+      success: false,
+      message:
+        fromHost.label +
+        " is offline and no saved copy exists yet. Open the All bots tab while it's online at least once, then try again.",
+    });
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return res
+      .status(422)
+      .json({ success: false, message: "Source config is not valid JSON" });
+  }
+
+  // 2. Never double-farm: stop it on the source first (best effort; skipped if
+  //    the source is already offline/down).
+  const srcContainer = containerForFile(file);
+  if (sourceOnline && srcContainer) {
+    try {
+      await hosts.dockerContainer(fromHost, "stop", srcContainer);
+    } catch {
+      /* best effort — proceed with the move regardless */
+    }
+  }
+
+  // 3. Pick the target slot: re-use a previous move target if one exists
+  //    (idempotent), else allocate the next free slot on the target host.
+  let targetFiles;
+  try {
+    targetFiles = await hosts.readdir(toHost);
+  } catch (e) {
+    return res.status(e.unreachable ? 502 : 500).json({
+      success: false,
+      offline: !!e.unreachable,
+      message: hostErrorMessage(toHost, e),
+    });
+  }
+  const composeFile = await hosts.composeName(toHost);
+  if (!composeFile) {
+    return res.status(500).json({
+      success: false,
+      message: "No docker compose file found on " + toHost.label,
+    });
+  }
+  const marker = fromHost.id + ":" + file;
+  const moves = await readMoves();
+  const prev = moves[toHost.id] && moves[toHost.id][marker];
+  let slot;
+  if (prev && targetFiles.includes(prev) && containerForFile(prev)) {
+    slot = { file: prev, container: containerForFile(prev) };
+  } else {
+    slot = findNextSlot(targetFiles);
+  }
+
+  // 4. Write the config (accounts kept!) and register the compose service.
+  try {
+    await hosts.writeFileAtomic(toHost, slot.file, JSON.stringify(data, null, 2));
+    const rawc = await hosts.composeRead(toHost, composeFile);
+    const edited = addServiceToComposeText(rawc, slot.container, slot.file);
+    if (!edited.exists) {
+      await hosts.composeWrite(toHost, composeFile, edited.text);
+    }
+  } catch (e) {
+    return res.status(e.unreachable ? 502 : 500).json({
+      success: false,
+      offline: !!e.unreachable,
+      message: "Failed to write bot on target: " + hostErrorMessage(toHost, e),
+    });
+  }
+  await recordMove(toHost.id, marker, slot.file);
+
+  const base = {
+    success: true,
+    fromHost: fromHost.id,
+    toHost: toHost.id,
+    sourceOnline,
+    sourceStopped: sourceOnline && !!srcContainer,
+    file: slot.file,
+    container: slot.container,
+    accountCount: summarize(file, data).accountCount,
+  };
+  if (!start) return res.json(Object.assign({ started: false }, base));
+  try {
+    const output = await hosts.composeUp(toHost, slot.container);
+    res.json(Object.assign({ started: true, output }, base));
+  } catch (e) {
+    res.status(207).json(
+      Object.assign(
+        {
+          started: false,
+          warning:
+            "Moved, but starting it on " +
+            toHost.label +
+            " failed: " +
+            hostErrorMessage(toHost, e),
+        },
+        base,
+      ),
+    );
   }
 });
 

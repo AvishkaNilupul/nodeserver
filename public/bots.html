@@ -137,6 +137,34 @@
   .toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
   .toast.err { background:#b91c1c; }
   .empty { padding: 40px; text-align:center; color: var(--muted); }
+
+  /* All-bots aggregate view */
+  .muted { color: var(--muted); }
+  .allhost { margin-bottom:22px; }
+  .allhost-h { display:flex; align-items:center; gap:10px; margin:0 0 10px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+  .allhost-h b { font-size:15px; }
+  .hdot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .hdot.on { background:#16a34a; } .hdot.off { background:#dc2626; }
+  .hbadge { font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); text-transform:uppercase; letter-spacing:.03em; }
+  .hbadge.on { color:#16a34a; border-color:#bbf7d0; background:#f0fdf4; }
+  .hbadge.off { color:#dc2626; border-color:#fecaca; background:#fef2f2; }
+  html[data-theme="dark"] .hbadge.on{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);}
+  html[data-theme="dark"] .hbadge.off{background:rgba(220,38,38,.12);border-color:rgba(220,38,38,.35);}
+  .allbot { display:flex; align-items:flex-start; gap:14px; padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:var(--surface); margin-bottom:8px; }
+  .allbot .ab-main { flex:1; min-width:0; }
+  .ab-ttl { font-weight:600; display:flex; align-items:center; gap:8px; }
+  .ab-file { font-weight:400; font-size:11.5px; color:var(--muted); font-family:ui-monospace,monospace; }
+  .sdot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .sdot.run { background:#16a34a; } .sdot.stop { background:var(--muted); }
+  .ab-sub { font-size:12.5px; color:var(--muted); margin-top:3px; }
+  .ab-sub .ok { color:#16a34a; } .ab-sub .off { color:#dc2626; }
+  .ab-farm { font-size:12.5px; margin-top:6px; color:var(--ink); }
+  .ab-farm.muted { color:var(--muted); }
+  .ab-actions { display:flex; flex-direction:column; gap:6px; flex:none; align-items:stretch; }
+  .ab-actions .btn-sm { white-space:nowrap; }
+  .acctbl { width:100%; border-collapse:collapse; font-size:13px; }
+  .acctbl th, .acctbl td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); font-family:ui-monospace,monospace; }
+  .acctbl th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
   .banner { background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:12px 16px; border-radius:12px; font-size:13.5px; margin-bottom:16px; }
   html[data-theme="dark"] .banner{background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.3);color:#fbbf24;}
 
@@ -234,6 +262,8 @@
   // default; remote hosts such as a Raspberry Pi appear as extra tabs).
   let CURRENT_HOST = "local";
   let HOSTS = [{ id: "local", label: "Server" }];
+  const ALL_TAB = "__all__";   // synthetic tab aggregating every host
+  let _allLoading = false;     // guards overlapping All-bots refreshes
   // Append the active host to a bot-configs URL so every read/write/restart
   // targets the host whose tab is selected.
   function hq(url) { return url + (url.includes("?") ? "&" : "?") + "host=" + encodeURIComponent(CURRENT_HOST); }
@@ -336,14 +366,31 @@
     const el = $("hostTabs"); if (!el) return;
     if (HOSTS.length <= 1) { el.innerHTML = ""; el.style.display = "none"; return; }
     el.style.display = "flex";
-    el.innerHTML = HOSTS.map((h) =>
+    const tabs = HOSTS.concat([{ id: ALL_TAB, label: "All bots" }]);
+    el.innerHTML = tabs.map((h) =>
       '<button type="button" class="hosttab' + (h.id === CURRENT_HOST ? " active" : "") + '" onclick="switchHost(\'' + esc(h.id) + '\')">' + esc(h.label) + "</button>"
     ).join("");
+  }
+  // Toggle the per-host UI (search, usage strip, add-bot, all-accounts panel)
+  // off when the aggregate "All bots" view is showing, back on otherwise.
+  function setAllMode(on) {
+    ["toolbar", "hostUsage", "allPanel"].forEach((id) => {
+      const e = document.querySelector(id === "toolbar" ? ".toolbar" : "#" + id);
+      if (e) e.style.display = on ? "none" : "";
+    });
+    const add = $("addBotBtn"); if (add) add.style.display = on ? "none" : "";
   }
   window.switchHost = function (id) {
     if (id === CURRENT_HOST) return;
     CURRENT_HOST = id;
     renderHostTabs();
+    if (id === ALL_TAB) {
+      setAllMode(true);
+      $("bots").innerHTML = '<div class="empty">Loading all bots…</div>';
+      loadAllBots();
+      return;
+    }
+    setAllMode(false);
     const cached = HOST_CACHE[id];
     if (cached) {
       // Show this host's last-known data instantly, then refresh in the
@@ -407,6 +454,7 @@
     });
   }
   async function loadHostStats() {
+    if (CURRENT_HOST === ALL_TAB) return; // aggregate view refreshes itself
     const hostAtCall = CURRENT_HOST;
     const url = "/bot-configs/host-stats?host=" + encodeURIComponent(hostAtCall);
     try {
@@ -422,8 +470,126 @@
   }
   function startStatsTimer() {
     if (_statsTimer) clearInterval(_statsTimer);
-    _statsTimer = setInterval(loadHostStats, 7000);
+    _statsTimer = setInterval(function () {
+      if (CURRENT_HOST === ALL_TAB) { loadAllBots(); return; }
+      loadHostStats();
+    }, 7000);
   }
+
+  // ---- All bots (aggregate across every host) ----
+  function labelFor(id) { const h = HOSTS.find((x) => x.id === id); return h ? h.label : id; }
+
+  async function loadAllBots() {
+    if (CURRENT_HOST !== ALL_TAB || _allLoading) return;
+    _allLoading = true;
+    try {
+      const r = await api("/bot-configs/all");
+      if (CURRENT_HOST !== ALL_TAB) return; // tab changed mid-flight
+      renderAllBots((r && r.hosts) || []);
+    } catch (e) {
+      if (CURRENT_HOST === ALL_TAB) $("bots").innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + "</div>";
+    } finally { _allLoading = false; }
+  }
+
+  function renderAllBots(list) {
+    const totalBots = list.reduce((n, h) => n + h.bots.length, 0);
+    if (!totalBots) { $("bots").innerHTML = '<div class="empty">No bots found on any host.</div>'; return; }
+    const html = list.map(function (h) {
+      const head =
+        '<div class="allhost-h">' +
+          '<span class="hdot ' + (h.online ? "on" : "off") + '"></span>' +
+          '<b>' + esc(h.label) + '</b>' +
+          '<span class="hbadge ' + (h.online ? "on" : "off") + '">' + (h.online ? "online" : "offline") + '</span>' +
+          '<span class="muted">' + h.bots.length + ' bot' + (h.bots.length === 1 ? "" : "s") + '</span>' +
+        '</div>';
+      const rows = h.bots.length
+        ? h.bots.map((b) => allBotRow(h, b)).join("")
+        : '<div class="muted" style="padding:8px 2px;">No bots' + (h.online ? "" : " (host offline, no saved copy yet)") + '.</div>';
+      return '<section class="allhost">' + head + rows + "</section>";
+    }).join("");
+    $("bots").innerHTML = html;
+  }
+
+  function allBotRow(host, b) {
+    const running = b.running;
+    const statusTxt = b.source === "snapshot"
+      ? "saved copy (host offline)"
+      : (running ? "running" : (b.status || b.state || "stopped"));
+    const games = (b.favouriteGames && b.favouriteGames.length)
+      ? b.favouriteGames.join(", ")
+      : "any game";
+    let farm;
+    if (b.farming && b.farming.detail) farm = '<div class="ab-farm">▶ farming: ' + esc(b.farming.detail) + "</div>";
+    else if (running) farm = '<div class="ab-farm muted">▶ farming: (parsing…) · favourites: ' + esc(games) + "</div>";
+    else farm = '<div class="ab-farm muted">favourites: ' + esc(games) + "</div>";
+
+    // Move buttons: to every OTHER host. The emergency Pi→Server case is the
+    // primary one; this also lets you switch a moved bot back.
+    const moveBtns = HOSTS.filter((t) => t.id !== host.id).map((t) =>
+      '<button class="btn-sm btn-danger" onclick="moveBot(\'' + esc(host.id) + '\',\'' + esc(b.file) + '\',\'' + esc(t.id) + '\',\'' + esc(t.label) + '\')">⇄ Move to ' + esc(t.label) + "</button>"
+    ).join("");
+    const logsBtn = host.online
+      ? '<button class="btn-sm btn-ghost" onclick="openLogs(\'' + esc(b.file) + '\',\'' + esc(b.container || "") + '\',\'' + esc(host.id) + '\')">Logs</button>'
+      : "";
+
+    return '<div class="allbot">' +
+      '<div class="ab-main">' +
+        '<div class="ab-ttl"><span class="sdot ' + (running ? "run" : "stop") + '"></span>' + esc(b.container || b.file) +
+          ' <span class="ab-file">' + esc(b.file) + '</span></div>' +
+        '<div class="ab-sub">' + b.accountCount + ' account' + (b.accountCount === 1 ? "" : "s") +
+          ' · <span class="' + (running ? "ok" : "off") + '">' + esc(statusTxt) + "</span></div>" +
+        farm +
+      "</div>" +
+      '<div class="ab-actions">' +
+        '<button class="btn-sm btn-ghost" onclick="viewAccounts(\'' + esc(host.id) + '\',\'' + esc(b.file) + '\')">Accounts</button>' +
+        logsBtn + moveBtns +
+      "</div>" +
+    "</div>";
+  }
+
+  // Read-only accounts/passwords view (so you can confirm what's stored, incl.
+  // from the server-side saved copy of an offline host).
+  window.viewAccounts = async function (hostId, file) {
+    $("modalBg").innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true">' +
+        '<header><b>Accounts · ' + esc(file) + ' · ' + esc(labelFor(hostId)) + '</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
+        '<div class="mbody" id="accBody">Loading…</div>' +
+      "</div>";
+    $("modalBg").classList.add("show");
+    try {
+      const r = await api("/bot-configs/file/" + encodeURIComponent(file) + "?host=" + encodeURIComponent(hostId));
+      const ts = (r.data && r.data.TwitchSettings) || {};
+      const users = Array.isArray(ts.TwitchUsers) ? ts.TwitchUsers : [];
+      const rows = users.length ? users.map((u) =>
+        '<tr><td>' + esc(u.Login || "?") + '</td><td>' + esc(u.Password || "") + '</td><td>' + (u.Enabled ? "enabled" : "disabled") + "</td></tr>"
+      ).join("") : '<tr><td colspan="3" class="muted">No accounts.</td></tr>';
+      $("accBody").innerHTML =
+        '<table class="acctbl"><thead><tr><th>Login</th><th>Password</th><th>State</th></tr></thead><tbody>' + rows + "</tbody></table>";
+    } catch (e) {
+      $("accBody").innerHTML = '<div class="muted">Could not load accounts: ' + esc(e.message) + "</div>";
+    }
+  };
+
+  // Emergency move/switch: stops the bot on the source first (server-side),
+  // then starts it on the target — never farming on two machines at once.
+  window.moveBot = async function (fromHost, file, toHost, toLabel) {
+    if (!confirm(
+      "Move " + file + " from " + labelFor(fromHost) + " to " + toLabel + "?\n\n" +
+      "It will be STOPPED on " + labelFor(fromHost) + " first (if reachable), then started on " + toLabel +
+      ". The same accounts never farm on both at once."
+    )) return;
+    toast("Moving " + file + " to " + toLabel + "…");
+    try {
+      const r = await api("/bot-configs/move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromHost, toHost, file }),
+      });
+      if (r.warning) toast(r.warning, true);
+      else toast("Moved to " + toLabel + " as " + r.container + (r.sourceStopped ? " · stopped on source" : (r.sourceOnline ? "" : " · source was offline")));
+      loadAllBots();
+    } catch (e) { toast("Move failed: " + e.message, true); }
+  };
 
   function accountsOf(file) { const d = CONFIGS[file] && CONFIGS[file].data; const ts = d && d.TwitchSettings; return (ts && Array.isArray(ts.TwitchUsers)) ? ts.TwitchUsers : []; }
 
@@ -682,9 +848,13 @@
   };
 
   // ---- Live logs ----
-  window.openLogs = function (file) {
-    const c = CONFIGS[file]; if (!c) return;
-    const cont = c.container || file;
+  // Can be called from the per-host view (container/host inferred from CONFIGS
+  // + CURRENT_HOST) or from the All-bots view (explicit container + hostId).
+  window.openLogs = function (file, container, hostId) {
+    const c = CONFIGS[file];
+    const cont = container || (c && c.container) || file;
+    const host = hostId || CURRENT_HOST;
+    const lq = (u) => u + (u.includes("?") ? "&" : "?") + "host=" + encodeURIComponent(host);
     $("modalBg").innerHTML =
       '<div class="modal lg" role="dialog" aria-modal="true">' +
         '<header><b>Logs · ' + esc(cont) + '</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
@@ -704,7 +874,7 @@
     async function poll() {
       const tail = $("logTail") ? $("logTail").value : 200;
       try {
-        const r = await api(hq("/bot-configs/logs/" + encodeURIComponent(file) + "?tail=" + encodeURIComponent(tail)));
+        const r = await api(lq("/bot-configs/logs/" + encodeURIComponent(file) + "?tail=" + encodeURIComponent(tail)));
         const text = (r.logs || "").replace(/\s+$/, "") || "(no log output yet)";
         if (text !== lastText) {
           const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 30;
