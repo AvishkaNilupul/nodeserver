@@ -13,6 +13,11 @@ const botAccountSchema = new mongoose.Schema(
     // Last bot config file this account was seen in (e.g. config_02.json).
     configFile: { type: String, default: "" },
     container: { type: String, default: "" },
+    // Which managed host this account's config lives on ("local" for the
+    // server itself, or a configured remote host id such as "pi"). Defaults to
+    // local so accounts synced before multi-host support keep grouping under
+    // the server tab.
+    host: { type: String, default: "local", index: true },
     enabled: { type: Boolean, default: true },
 
     // Provided separately by the operator and matched to the account by login.

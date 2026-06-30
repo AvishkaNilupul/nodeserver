@@ -1,0 +1,16 @@
+{
+  "_comment": "Remote bot hosts managed from the Bots page, IN ADDITION to the implicit 'local' host (this server, which uses TWITCHBOT_DIR / the default /root/twitchbot). Copy this file to config/botHosts.json (gitignored) and edit. Each host runs its file + docker operations over SSH, so the server must be able to SSH to host.ssh.target non-interactively (key-based, BatchMode). You can also supply the same JSON via the BOT_HOSTS env var instead of a file.",
+  "hosts": [
+    {
+      "id": "pi",
+      "label": "Raspberry Pi",
+      "dir": "/home/avishka/twitchbot",
+      "ssh": {
+        "target": "avishka@raspberrypi",
+        "identityFile": "/root/.ssh/id_bothost",
+        "port": 22,
+        "options": []
+      }
+    }
+  ]
+}

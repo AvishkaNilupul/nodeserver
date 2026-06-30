@@ -54,6 +54,10 @@
   button:disabled { opacity:.5; cursor: default; }
   .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
   .btn-ghost:hover { background: var(--surface-2); opacity:1; }
+  .hosttabs { display:flex; gap:8px; flex-wrap:wrap; margin: 4px 0 14px; }
+  .hosttab { background: var(--surface); color: var(--muted); border:1px solid var(--line); padding:8px 16px; border-radius:10px; font-weight:600; font-size:13px; }
+  .hosttab:hover { background: var(--surface-2); opacity:1; color: var(--ink); }
+  .hosttab.active { background: linear-gradient(180deg, var(--accent2), var(--accent)); color:#fff; border-color: transparent; }
   .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
   .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
   .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
@@ -176,6 +180,8 @@
     </div>
   </div>
 
+  <div id="hostTabs" class="hosttabs" style="display:none;"></div>
+
   <div class="toolbar">
     <div class="search">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
@@ -202,6 +208,14 @@
   let CONFIGS = {};   // file -> { container, data, ok, error }
   let STATES = {};    // container -> { state, status }
   let HEALTH = {};    // file -> { accounts, ok, error, tokenInvalid, drops, lastScanAt, lastDropAt }
+
+  // Which managed host the page is currently showing (the local server by
+  // default; remote hosts such as a Raspberry Pi appear as extra tabs).
+  let CURRENT_HOST = "local";
+  let HOSTS = [{ id: "local", label: "Server" }];
+  // Append the active host to a bot-configs URL so every read/write/restart
+  // targets the host whose tab is selected.
+  function hq(url) { return url + (url.includes("?") ? "&" : "?") + "host=" + encodeURIComponent(CURRENT_HOST); }
 
   // Per-bot collapsed state, remembered in localStorage. Bots with many
   // accounts collapse by default so the page stays compact.
@@ -241,24 +255,49 @@
   async function load() {
     $("bots").innerHTML = '<div class="empty">Loading configs…</div>';
     let list;
-    try { list = await api("/bot-configs"); }
-    catch (e) { $("bots").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
+    try { list = await api(hq("/bot-configs")); }
+    catch (e) {
+      CONFIGS = {}; STATES = {}; HEALTH = {};
+      renderStats([]);
+      const offline = /unreachable|offline/i.test(e.message);
+      $("bots").innerHTML = '<div class="empty">' + (offline ? "⚠️ " : "") + esc(e.message) + "</div>";
+      return;
+    }
     $("dirLabel").textContent = list.dir || "/root/twitchbot";
     // fetch docker statuses (best effort)
-    try { const s = await api("/bot-configs/status"); STATES = s.states || {}; } catch (e) { STATES = {}; }
+    try { const s = await api(hq("/bot-configs/status")); STATES = s.states || {}; } catch (e) { STATES = {}; }
     // fetch per-bot health from the drops archive (best effort)
-    try { const h = await api("/bot-configs/health"); HEALTH = h.health || {}; } catch (e) { HEALTH = {}; }
+    try { const h = await api(hq("/bot-configs/health")); HEALTH = h.health || {}; } catch (e) { HEALTH = {}; }
 
     CONFIGS = {};
     const files = list.configs.map((c) => c.file);
     // load full data for files that parsed OK
     await Promise.all(list.configs.map(async (c) => {
       if (!c.ok) { CONFIGS[c.file] = { container: c.container, ok: false, error: c.error }; return; }
-      try { const full = await api("/bot-configs/file/" + encodeURIComponent(c.file)); CONFIGS[c.file] = { container: full.container, data: full.data, ok: true }; }
+      try { const full = await api(hq("/bot-configs/file/" + encodeURIComponent(c.file))); CONFIGS[c.file] = { container: full.container, data: full.data, ok: true }; }
       catch (e) { CONFIGS[c.file] = { container: c.container, ok: false, error: e.message }; }
     }));
     renderAll(files);
   }
+
+  // Load the configured hosts and render a tab per host (hidden when only the
+  // local server exists, so single-host setups look unchanged).
+  async function loadHosts() {
+    try { const r = await api("/bot-configs/hosts"); if (Array.isArray(r.hosts) && r.hosts.length) HOSTS = r.hosts; } catch (e) {}
+    renderHostTabs();
+  }
+  function renderHostTabs() {
+    const el = $("hostTabs"); if (!el) return;
+    if (HOSTS.length <= 1) { el.innerHTML = ""; el.style.display = "none"; return; }
+    el.style.display = "flex";
+    el.innerHTML = HOSTS.map((h) =>
+      '<button type="button" class="hosttab' + (h.id === CURRENT_HOST ? " active" : "") + '" onclick="switchHost(\'' + esc(h.id) + '\')">' + esc(h.label) + "</button>"
+    ).join("");
+  }
+  window.switchHost = function (id) {
+    if (id === CURRENT_HOST) return;
+    CURRENT_HOST = id; renderHostTabs(); load();
+  };
 
   function accountsOf(file) { const d = CONFIGS[file] && CONFIGS[file].data; const ts = d && d.TwitchSettings; return (ts && Array.isArray(ts.TwitchUsers)) ? ts.TwitchUsers : []; }
 
@@ -483,7 +522,7 @@
     const c = CONFIGS[file]; if (!c || !c.ok) return;
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Saving…";
     try {
-      await api("/bot-configs/file/" + encodeURIComponent(file), { method: "PUT", body: JSON.stringify({ data: c.data }) });
+      await api(hq("/bot-configs/file/" + encodeURIComponent(file)), { method: "PUT", body: JSON.stringify({ data: c.data }) });
       toast("Saved " + file + " (a .bak backup was kept)");
     } catch (e) { toast("Save failed: " + e.message, true); }
     finally { btn.disabled = false; btn.textContent = old; }
@@ -494,7 +533,7 @@
     if (!confirm("Restart container " + (c.container || "?") + "? This bounces the bot.")) return;
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Restarting…";
     try {
-      const r = await api("/bot-configs/restart/" + encodeURIComponent(file), { method: "POST" });
+      const r = await api(hq("/bot-configs/restart/" + encodeURIComponent(file)), { method: "POST" });
       toast("Restarted " + r.container);
       setTimeout(load, 1500);
     } catch (e) { toast("Restart failed: " + e.message, true); }
@@ -559,7 +598,7 @@
     const startRunning = $("mStart") ? $("mStart").checked : true;
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Creating…";
     try {
-      const r = await api("/bot-configs/create", {
+      const r = await api(hq("/bot-configs/create"), {
         method: "POST",
         body: JSON.stringify({ template, accounts, favouriteGames, startRunning }),
       });
@@ -605,7 +644,7 @@
     if (!accounts.trim()) { toast("Paste at least one account", true); return; }
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Adding…";
     try {
-      const r = await api("/bot-configs/file/" + encodeURIComponent(file) + "/accounts", {
+      const r = await api(hq("/bot-configs/file/" + encodeURIComponent(file) + "/accounts"), {
         method: "POST",
         body: JSON.stringify({ accounts, favouriteGames, restart }),
       });
@@ -622,7 +661,7 @@
     const c = CONFIGS[file]; if (!c) return;
     btn.disabled = true; const old = btn.textContent; btn.textContent = action === "stop" ? "Stopping…" : "Starting…";
     try {
-      const r = await api("/bot-configs/" + action + "/" + encodeURIComponent(file), { method: "POST" });
+      const r = await api(hq("/bot-configs/" + action + "/" + encodeURIComponent(file)), { method: "POST" });
       toast((action === "stop" ? "Stopped " : "Started ") + r.container);
       setTimeout(load, 1500);
     } catch (e) {
@@ -636,7 +675,7 @@
     if (!confirm("Delete bot " + (c.container || file) + "?\n\nThis stops and removes its container and the docker-compose service. The config file is archived (kept as a .deleted backup), not destroyed.")) return;
     btn.disabled = true; const old = btn.textContent; btn.textContent = "Deleting…";
     try {
-      const r = await api("/bot-configs/file/" + encodeURIComponent(file), { method: "DELETE" });
+      const r = await api(hq("/bot-configs/file/" + encodeURIComponent(file)), { method: "DELETE" });
       toast("Deleted " + r.container + " (config archived as " + r.archived + ")");
       setTimeout(load, 1200);
     } catch (e) {
@@ -668,6 +707,7 @@
       $("meRole").innerText = "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
       $("meAvatar").innerText = name.slice(0, 2).toUpperCase();
     } catch (e) { window.location.href = "/admin-login.html"; return; }
+    await loadHosts();
     load();
   })();
 </script>

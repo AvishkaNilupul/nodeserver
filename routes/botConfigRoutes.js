@@ -1,31 +1,17 @@
 const express = require("express");
-const fs = require("fs");
-const fsp = require("fs/promises");
-const path = require("path");
 const crypto = require("crypto");
-const { execFile } = require("child_process");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const hosts = require("../utils/botHosts");
 
 const router = express.Router();
 
 // Default image used when a new bot can't inherit one from an existing service.
 const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
-// Possible compose filenames inside BOT_DIR (first match wins).
-const COMPOSE_NAMES = [
-  "docker-compose.yml",
-  "docker-compose.yaml",
-  "compose.yml",
-  "compose.yaml",
-];
 // Hard cap on accounts accepted in one paste, as a sanity/DoS guard.
 const MAX_BULK_ACCOUNTS = 2000;
-
-// Directory that holds the TwitchDropsBot config files + docker-compose.yml.
-// Defaults to the production path; override with TWITCHBOT_DIR for local testing.
-const BOT_DIR = process.env.TWITCHBOT_DIR || "/root/twitchbot";
 
 // Only files matching this pattern are ever read/written. This is the security
 // boundary that prevents path traversal / reading arbitrary files.
@@ -37,6 +23,28 @@ const ALLOW_RESTART = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
 // Bot configuration is a superadmin-only capability. The guard is applied
 // per-route (not via router.use) because this router is mounted at "/", so a
 // router-level guard would intercept unrelated requests and redirect them.
+
+// Resolve the host a request targets. Accepts ?host= (query) or { host } in the
+// body; missing/empty defaults to the local server, so old URLs keep working.
+// Returns null for an unknown host id (the caller turns that into a 400).
+function hostFromReq(req) {
+  const id = (req.query && req.query.host) || (req.body && req.body.host) || "";
+  return hosts.resolveHost(id);
+}
+
+function badHost(res) {
+  return res.status(400).json({ success: false, message: "Unknown host" });
+}
+
+// Translate a transport/SSH failure into a friendly message. Unreachable hosts
+// (e.g. a Raspberry Pi that's powered off) are reported as such rather than as
+// a generic server error.
+function hostErrorMessage(host, e) {
+  if (e && e.unreachable) {
+    return host.label + " is unreachable (host offline or SSH not set up)";
+  }
+  return (e && e.message) || "Operation failed";
+}
 
 // config.json -> twitchbot ; config_02.json -> twitchbotx2 ; config_06.json -> twitchbotx6
 function containerForFile(file) {
@@ -50,17 +58,9 @@ function containerForFile(file) {
   return null;
 }
 
-// Validate a requested filename and resolve it safely inside BOT_DIR.
-function resolveConfigPath(file) {
-  if (typeof file !== "string" || !FILE_RE.test(file)) {
-    return null;
-  }
-  const full = path.join(BOT_DIR, file);
-  const rel = path.relative(BOT_DIR, full);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    return null;
-  }
-  return full;
+// Validate a requested config filename (the path-traversal security boundary).
+function validFile(file) {
+  return typeof file === "string" && FILE_RE.test(file);
 }
 
 // Normalize a comma-separated string (or array) of game names into a clean
@@ -83,8 +83,7 @@ function parseGamesList(v) {
 // null when there's no usable auth token.
 function normalizeAccount(o, defaultGames) {
   if (!o || typeof o !== "object") return null;
-  const token =
-    typeof o.ClientSecret === "string" ? o.ClientSecret.trim() : "";
+  const token = typeof o.ClientSecret === "string" ? o.ClientSecret.trim() : "";
   if (!token) return null;
   let fav = Array.isArray(o.FavouriteGames)
     ? o.FavouriteGames.map((g) => String(g).trim()).filter(Boolean)
@@ -178,7 +177,7 @@ function parseAccounts(text, defaultGames) {
   return out;
 }
 
-// Given the list of files in BOT_DIR, work out the next free bot slot.
+// Given the list of files in a host dir, work out the next free bot slot.
 // config.json -> index 1 (twitchbot); config_0N.json -> index N (twitchbotxN).
 function findNextSlot(files) {
   let max = 0;
@@ -209,24 +208,15 @@ function pickDefaultTemplate(files) {
   return cfgs[0] || null;
 }
 
-// Locate the docker compose file inside BOT_DIR (first candidate that exists).
-function findComposePath() {
-  for (const name of COMPOSE_NAMES) {
-    const p = path.join(BOT_DIR, name);
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-// Add a new service (mirroring the existing twitchbotxN ones) to the compose
-// file. Uses js-yaml to parse + re-emit so hand-written indentation can't be
-// corrupted. Backs up the original to .bak and writes atomically.
-function addServiceToCompose(composePath, container, file) {
+// Add a new service (mirroring the existing twitchbotxN ones) to a compose
+// document given its raw YAML text. Uses js-yaml to parse + re-emit so
+// hand-written indentation can't be corrupted. Returns the new text plus
+// whether the service already existed.
+function addServiceToComposeText(raw, container, file) {
   const yaml = require("js-yaml");
-  const raw = fs.readFileSync(composePath, "utf8");
   const doc = yaml.load(raw) || {};
   if (!doc.services || typeof doc.services !== "object") doc.services = {};
-  if (doc.services[container]) return { exists: true };
+  if (doc.services[container]) return { exists: true, text: raw };
 
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
@@ -244,51 +234,20 @@ function addServiceToCompose(composePath, container, file) {
     volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
   };
 
-  fs.writeFileSync(composePath + ".bak", raw, "utf8");
   const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });
-  const tmp = composePath + ".tmp-" + process.pid;
-  fs.writeFileSync(tmp, text, "utf8");
-  fs.renameSync(tmp, composePath);
-  return { exists: false, image };
+  return { exists: false, image, text };
 }
 
-// Remove a service from the compose file (used when deleting a bot).
-function removeServiceFromCompose(composePath, container) {
+// Remove a service from a compose document given its raw YAML text. Returns the
+// new text plus whether anything was removed.
+function removeServiceFromComposeText(raw, container) {
   const yaml = require("js-yaml");
-  const raw = fs.readFileSync(composePath, "utf8");
   const doc = yaml.load(raw) || {};
-  if (!doc.services || !doc.services[container]) return false;
+  if (!doc.services || !doc.services[container])
+    return { removed: false, text: raw };
   delete doc.services[container];
-  fs.writeFileSync(composePath + ".bak", raw, "utf8");
   const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });
-  const tmp = composePath + ".tmp-" + process.pid;
-  fs.writeFileSync(tmp, text, "utf8");
-  fs.renameSync(tmp, composePath);
-  return true;
-}
-
-// Detect whether to use `docker compose` (v2 plugin) or `docker-compose` (v1).
-// Cached after the first probe.
-let _composeCmd = null;
-function detectComposeCmd(cb) {
-  if (_composeCmd) return cb(_composeCmd);
-  execFile("docker", ["compose", "version"], { timeout: 8000 }, (err) => {
-    _composeCmd = err ? { cmd: "docker-compose", pre: [] } : { cmd: "docker", pre: ["compose"] };
-    cb(_composeCmd);
-  });
-}
-
-// Write a config object to disk atomically, keeping a .bak of any prior file.
-async function writeConfigAtomic(full, data) {
-  try {
-    const cur = await fsp.readFile(full, "utf8");
-    await fsp.writeFile(full + ".bak", cur, "utf8");
-  } catch (e) {
-    if (e.code !== "ENOENT") throw e;
-  }
-  const tmp = full + ".tmp-" + process.pid;
-  await fsp.writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
-  await fsp.rename(tmp, full);
+  return { removed: true, text };
 }
 
 function summarize(file, data) {
@@ -312,28 +271,42 @@ function summarize(file, data) {
   };
 }
 
-// LIST all config files with a parsed summary.
+// LIST the configured hosts (so the UI can render a tab per host).
+router.get("/bot-configs/hosts", requireSuperadmin, (req, res) => {
+  res.json({ success: true, hosts: hosts.listHosts() });
+});
+
+// LIST all config files on a host with a parsed summary.
 router.get("/bot-configs", requireSuperadmin, async (req, res) => {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
   try {
     let files;
     try {
-      files = await fsp.readdir(BOT_DIR);
+      files = await hosts.readdir(host);
     } catch (e) {
+      if (e.unreachable) {
+        return res.status(502).json({
+          success: false,
+          offline: true,
+          message: hostErrorMessage(host, e),
+        });
+      }
       return res.status(500).json({
         success: false,
         message:
           "Config directory not found: " +
-          BOT_DIR +
+          host.dir +
           " (" +
-          e.code +
-          "). Set TWITCHBOT_DIR if it lives elsewhere.",
+          (e.code || e.message) +
+          ").",
       });
     }
     const configs = files.filter((f) => FILE_RE.test(f)).sort();
     const out = [];
     for (const file of configs) {
       try {
-        const raw = await fsp.readFile(path.join(BOT_DIR, file), "utf8");
+        const raw = await hosts.readFile(host, file);
         out.push({ ...summarize(file, JSON.parse(raw)), ok: true });
       } catch (e) {
         out.push({
@@ -344,20 +317,35 @@ router.get("/bot-configs", requireSuperadmin, async (req, res) => {
         });
       }
     }
-    res.json({ success: true, dir: BOT_DIR, configs: out });
+    res.json({ success: true, host: host.id, dir: host.dir, configs: out });
   } catch (err) {
     console.error("bot-configs list error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-// HEALTH summary per config file: account scan status counts, total drops and
-// last-drop time. Aggregated from the BotAccount/DropLog archive (the scanner's
-// data), keyed by configFile so the Bots page can show it per bot. Best effort:
-// returns an empty map on error so the page still renders.
+// HEALTH summary per config file for a host: account scan status counts, total
+// drops and last-drop time. Aggregated from the BotAccount/DropLog archive (the
+// scanner's data), keyed by configFile so the Bots page can show it per bot.
+// Best effort: returns an empty map on error so the page still renders.
 router.get("/bot-configs/health", requireSuperadmin, async (req, res) => {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
   try {
+    // Local accounts may predate the `host` field, so treat missing as local.
+    const hostMatch =
+      host.id === "local"
+        ? {
+            $or: [
+              { host: "local" },
+              { host: { $exists: false } },
+              { host: "" },
+            ],
+          }
+        : { host: host.id };
+
     const byFile = await BotAccount.aggregate([
+      { $match: hostMatch },
       {
         $group: {
           _id: "$configFile",
@@ -381,7 +369,14 @@ router.get("/bot-configs/health", requireSuperadmin, async (req, res) => {
     ]);
 
     // Most recent drop time per account, then rolled up to the config file.
+    const accs = await BotAccount.find(hostMatch, { configFile: 1 }).lean();
+    const accIdToFile = {};
+    accs.forEach((a) => {
+      accIdToFile[String(a._id)] = a.configFile || "";
+    });
+    const accIds = accs.map((a) => a._id);
     const lastDropByAccount = await DropLog.aggregate([
+      { $match: { account: { $in: accIds } } },
       {
         $group: {
           _id: "$account",
@@ -389,11 +384,6 @@ router.get("/bot-configs/health", requireSuperadmin, async (req, res) => {
         },
       },
     ]);
-    const accIdToFile = {};
-    const accs = await BotAccount.find({}, { configFile: 1 }).lean();
-    accs.forEach((a) => {
-      accIdToFile[String(a._id)] = a.configFile || "";
-    });
     const lastDropByFile = {};
     lastDropByAccount.forEach((r) => {
       const f = accIdToFile[String(r._id)];
@@ -426,12 +416,13 @@ router.get("/bot-configs/health", requireSuperadmin, async (req, res) => {
 
 // READ one full config (parsed JSON object).
 router.get("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
-  const full = resolveConfigPath(req.params.file);
-  if (!full) {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  if (!validFile(req.params.file)) {
     return res.status(400).json({ success: false, message: "Invalid file" });
   }
   try {
-    const raw = await fsp.readFile(full, "utf8");
+    const raw = await hosts.readFile(host, req.params.file);
     res.json({
       success: true,
       file: req.params.file,
@@ -447,6 +438,15 @@ router.get("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
         .status(422)
         .json({ success: false, message: "File is not valid JSON" });
     }
+    if (e.unreachable) {
+      return res
+        .status(502)
+        .json({
+          success: false,
+          offline: true,
+          message: hostErrorMessage(host, e),
+        });
+    }
     console.error("bot-configs read error:", e.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
@@ -455,8 +455,9 @@ router.get("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
 // WRITE one config (full replace). Keeps a .bak of the previous version and
 // writes atomically via a temp file + rename.
 router.put("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
-  const full = resolveConfigPath(req.params.file);
-  if (!full) {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  if (!validFile(req.params.file)) {
     return res.status(400).json({ success: false, message: "Invalid file" });
   }
   const data = req.body && req.body.data;
@@ -475,92 +476,92 @@ router.put("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
     }
   }
   try {
-    // Back up the current file (best effort).
-    try {
-      const cur = await fsp.readFile(full, "utf8");
-      await fsp.writeFile(full + ".bak", cur, "utf8");
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
-    }
     const text = JSON.stringify(data, null, 2);
-    const tmp = full + ".tmp-" + process.pid;
-    await fsp.writeFile(tmp, text, "utf8");
-    await fsp.rename(tmp, full);
+    await hosts.writeFileAtomic(host, req.params.file, text);
     res.json({ success: true });
   } catch (e) {
+    if (e.unreachable) {
+      return res
+        .status(502)
+        .json({
+          success: false,
+          offline: true,
+          message: hostErrorMessage(host, e),
+        });
+    }
     console.error("bot-configs write error:", e.message);
     res
       .status(500)
-      .json({ success: false, message: "Write failed: " + e.code });
+      .json({
+        success: false,
+        message: "Write failed: " + (e.code || e.message),
+      });
   }
 });
 
 // Docker container statuses (best effort; empty map if docker unavailable).
-router.get("/bot-configs/status", requireSuperadmin, (req, res) => {
-  execFile(
-    "docker",
-    ["ps", "-a", "--format", "{{.Names}}\t{{.State}}\t{{.Status}}"],
-    { timeout: 8000 },
-    (err, stdout) => {
-      if (err) {
-        return res.json({ success: true, available: false, states: {} });
-      }
-      const states = {};
-      stdout
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .forEach((line) => {
-          const [name, state, status] = line.split("\t");
-          states[name] = { state, status };
-        });
-      res.json({ success: true, available: true, states });
-    },
-  );
+router.get("/bot-configs/status", requireSuperadmin, async (req, res) => {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  try {
+    const states = await hosts.dockerPs(host);
+    res.json({ success: true, available: true, states });
+  } catch (e) {
+    res.json({
+      success: true,
+      available: false,
+      offline: !!e.unreachable,
+      states: {},
+    });
+  }
 });
 
 // RESTART the docker container backing a config file.
-router.post("/bot-configs/restart/:file", requireSuperadmin, (req, res) => {
-  if (!ALLOW_RESTART) {
-    return res
-      .status(403)
-      .json({ success: false, message: "Restart disabled on this server" });
-  }
-  if (!FILE_RE.test(req.params.file)) {
-    return res.status(400).json({ success: false, message: "Invalid file" });
-  }
-  const container = containerForFile(req.params.file);
-  if (!container) {
-    return res
-      .status(400)
-      .json({ success: false, message: "No container mapped to this file" });
-  }
-  // Confirm the config exists before bouncing the container.
-  if (!fs.existsSync(path.join(BOT_DIR, req.params.file))) {
-    return res
-      .status(404)
-      .json({ success: false, message: "Config not found" });
-  }
-  execFile(
-    "docker",
-    ["restart", container],
-    { timeout: 60000 },
-    (err, stdout, stderr) => {
-      if (err) {
-        return res.status(500).json({
-          success: false,
-          message: (stderr || err.message || "restart failed").trim(),
-        });
+router.post(
+  "/bot-configs/restart/:file",
+  requireSuperadmin,
+  async (req, res) => {
+    const host = hostFromReq(req);
+    if (!host) return badHost(res);
+    if (!ALLOW_RESTART) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Restart disabled on this server" });
+    }
+    if (!validFile(req.params.file)) {
+      return res.status(400).json({ success: false, message: "Invalid file" });
+    }
+    const container = containerForFile(req.params.file);
+    if (!container) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No container mapped to this file" });
+    }
+    try {
+      // Confirm the config exists before bouncing the container.
+      if (!(await hosts.exists(host, req.params.file))) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Config not found" });
       }
-      res.json({ success: true, container, output: stdout.trim() });
-    },
-  );
-});
+      const output = await hosts.dockerContainer(host, "restart", container);
+      res.json({ success: true, container, output });
+    } catch (e) {
+      res.status(e.unreachable ? 502 : 500).json({
+        success: false,
+        offline: !!e.unreachable,
+        message: hostErrorMessage(host, e),
+      });
+    }
+  },
+);
 
 // CREATE a brand-new bot: pick the next slot, clone a template's settings
 // (without its accounts), seed any pasted accounts, register a compose service,
 // and (by default) start the container.
 router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
   try {
     const body = req.body || {};
     const startRunning = body.startRunning !== false; // default true
@@ -582,27 +583,33 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       });
     }
 
-    const composePath = findComposePath();
-    if (!composePath) {
-      return res.status(500).json({
+    let files;
+    try {
+      files = await hosts.readdir(host);
+    } catch (e) {
+      return res.status(e.unreachable ? 502 : 500).json({
         success: false,
-        message: "No docker compose file found in " + BOT_DIR,
+        offline: !!e.unreachable,
+        message: e.unreachable
+          ? hostErrorMessage(host, e)
+          : "Config directory not found: " +
+            host.dir +
+            " (" +
+            (e.code || e.message) +
+            ")",
       });
     }
 
-    let files;
-    try {
-      files = await fsp.readdir(BOT_DIR);
-    } catch (e) {
+    const composeFile = await hosts.composeName(host);
+    if (!composeFile) {
       return res.status(500).json({
         success: false,
-        message: "Config directory not found: " + BOT_DIR + " (" + e.code + ")",
+        message: "No docker compose file found in " + host.dir,
       });
     }
 
     const slot = findNextSlot(files);
-    const newPath = path.join(BOT_DIR, slot.file);
-    if (fs.existsSync(newPath)) {
+    if (await hosts.exists(host, slot.file)) {
       return res.status(409).json({
         success: false,
         message: "Target config already exists: " + slot.file,
@@ -617,15 +624,14 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
         message: "No template config available to clone from",
       });
     }
-    const tplPath = resolveConfigPath(templateName);
-    if (!tplPath) {
+    if (!validFile(templateName)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid template" });
     }
     let data;
     try {
-      data = JSON.parse(await fsp.readFile(tplPath, "utf8"));
+      data = JSON.parse(await hosts.readFile(host, templateName));
     } catch (e) {
       if (e.code === "ENOENT") {
         return res
@@ -649,15 +655,24 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       data.KickSettings.KickUsers = [];
     }
 
-    await writeConfigAtomic(newPath, data);
+    await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
 
+    // Register the compose service (read -> edit YAML -> write back).
     try {
-      addServiceToCompose(composePath, slot.container, slot.file);
+      const raw = await hosts.composeRead(host, composeFile);
+      const edited = addServiceToComposeText(raw, slot.container, slot.file);
+      if (!edited.exists) {
+        await hosts.composeWrite(host, composeFile, edited.text);
+      }
     } catch (e) {
       // Roll back the config file so a failed compose edit doesn't leave an
       // orphan config behind.
       try {
-        await fsp.unlink(newPath);
+        await hosts.rename(
+          host,
+          slot.file,
+          slot.file + ".rollback-" + Date.now(),
+        );
       } catch {
         /* ignore */
       }
@@ -669,6 +684,7 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
 
     const base = {
       success: true,
+      host: host.id,
       file: slot.file,
       container: slot.container,
       accountCount: accounts.length,
@@ -678,32 +694,24 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       return res.json(Object.assign({ started: false }, base));
     }
 
-    detectComposeCmd((c) => {
-      const args = [...c.pre, "up", "-d", slot.container];
-      execFile(
-        c.cmd,
-        args,
-        { cwd: BOT_DIR, timeout: 120000 },
-        (err, stdout, stderr) => {
-          if (err) {
-            // Config + compose were written; only the start failed. Report 207
-            // so the UI can show a partial-success warning.
-            return res.status(207).json(
-              Object.assign(
-                {
-                  started: false,
-                  warning:
-                    "Bot created, but starting the container failed: " +
-                    (stderr || err.message || "").trim(),
-                },
-                base,
-              ),
-            );
-          }
-          res.json(Object.assign({ started: true, output: (stdout || "").trim() }, base));
-        },
+    try {
+      const output = await hosts.composeUp(host, slot.container);
+      res.json(Object.assign({ started: true, output }, base));
+    } catch (e) {
+      // Config + compose were written; only the start failed. Report 207 so
+      // the UI can show a partial-success warning.
+      res.status(207).json(
+        Object.assign(
+          {
+            started: false,
+            warning:
+              "Bot created, but starting the container failed: " +
+              hostErrorMessage(host, e),
+          },
+          base,
+        ),
       );
-    });
+    }
   } catch (err) {
     console.error("bot create error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -716,15 +724,13 @@ router.post(
   "/bot-configs/file/:file/accounts",
   requireSuperadmin,
   async (req, res) => {
-    const full = resolveConfigPath(req.params.file);
-    if (!full) {
+    const host = hostFromReq(req);
+    if (!host) return badHost(res);
+    if (!validFile(req.params.file)) {
       return res.status(400).json({ success: false, message: "Invalid file" });
     }
     const defaultGames = parseGamesList(req.body && req.body.favouriteGames);
-    const accounts = parseAccounts(
-      req.body && req.body.accounts,
-      defaultGames,
-    );
+    const accounts = parseAccounts(req.body && req.body.accounts, defaultGames);
     if (!accounts.length) {
       return res
         .status(400)
@@ -734,12 +740,10 @@ router.post(
     try {
       let data;
       try {
-        data = JSON.parse(await fsp.readFile(full, "utf8"));
+        data = JSON.parse(await hosts.readFile(host, req.params.file));
       } catch (e) {
         if (e.code === "ENOENT") {
-          return res
-            .status(404)
-            .json({ success: false, message: "Not found" });
+          return res.status(404).json({ success: false, message: "Not found" });
         }
         if (e instanceof SyntaxError) {
           return res
@@ -757,7 +761,11 @@ router.post(
       data.TwitchSettings.TwitchUsers.push(...accounts);
       const total = data.TwitchSettings.TwitchUsers.length;
 
-      await writeConfigAtomic(full, data);
+      await hosts.writeFileAtomic(
+        host,
+        req.params.file,
+        JSON.stringify(data, null, 2),
+      );
 
       const container = containerForFile(req.params.file);
       if (!wantRestart || !ALLOW_RESTART || !container) {
@@ -768,31 +776,43 @@ router.post(
           restarted: false,
         });
       }
-      execFile("docker", ["restart", container], { timeout: 60000 }, (err) => {
-        res.json({
-          success: true,
-          added: accounts.length,
-          total,
-          restarted: !err,
-        });
-      });
+      let restarted = true;
+      try {
+        await hosts.dockerContainer(host, "restart", container);
+      } catch {
+        restarted = false;
+      }
+      res.json({ success: true, added: accounts.length, total, restarted });
     } catch (e) {
+      if (e.unreachable) {
+        return res
+          .status(502)
+          .json({
+            success: false,
+            offline: true,
+            message: hostErrorMessage(host, e),
+          });
+      }
       console.error("bulk accounts error:", e.message);
       res
         .status(500)
-        .json({ success: false, message: "Write failed: " + (e.code || e.message) });
+        .json({
+          success: false,
+          message: "Write failed: " + (e.code || e.message),
+        });
     }
   },
 );
 
 // START / STOP the container backing a config file.
-function dockerSimpleAction(action, file, res) {
+async function dockerSimpleAction(host, action, file, res) {
   if (!ALLOW_RESTART) {
-    return res
-      .status(403)
-      .json({ success: false, message: "Container control disabled on this server" });
+    return res.status(403).json({
+      success: false,
+      message: "Container control disabled on this server",
+    });
   }
-  if (!FILE_RE.test(file)) {
+  if (!validFile(file)) {
     return res.status(400).json({ success: false, message: "Invalid file" });
   }
   const container = containerForFile(file);
@@ -801,76 +821,107 @@ function dockerSimpleAction(action, file, res) {
       .status(400)
       .json({ success: false, message: "No container mapped to this file" });
   }
-  execFile(
-    "docker",
-    [action, container],
-    { timeout: 60000 },
-    (err, stdout, stderr) => {
-      if (err) {
-        return res.status(500).json({
-          success: false,
-          message: (stderr || err.message || action + " failed").trim(),
-        });
-      }
-      res.json({ success: true, container, output: (stdout || "").trim() });
-    },
-  );
+  try {
+    const output = await hosts.dockerContainer(host, action, container);
+    res.json({ success: true, container, output });
+  } catch (e) {
+    res.status(e.unreachable ? 502 : 500).json({
+      success: false,
+      offline: !!e.unreachable,
+      message: hostErrorMessage(host, e),
+    });
+  }
 }
 
 router.post("/bot-configs/start/:file", requireSuperadmin, (req, res) => {
-  dockerSimpleAction("start", req.params.file, res);
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  dockerSimpleAction(host, "start", req.params.file, res);
 });
 
 router.post("/bot-configs/stop/:file", requireSuperadmin, (req, res) => {
-  dockerSimpleAction("stop", req.params.file, res);
+  const host = hostFromReq(req);
+  if (!host) return badHost(res);
+  dockerSimpleAction(host, "stop", req.params.file, res);
 });
 
 // DELETE a bot: force-remove its container, drop the compose service, and
 // archive (not destroy) its config file so it can be recovered if needed.
 // The base config.json / twitchbot is protected from deletion.
-router.delete("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
-  const file = req.params.file;
-  if (!FILE_RE.test(file)) {
-    return res.status(400).json({ success: false, message: "Invalid file" });
-  }
-  if (file === "config.json") {
-    return res
-      .status(400)
-      .json({ success: false, message: "The base bot cannot be deleted here" });
-  }
-  const full = resolveConfigPath(file);
-  const container = containerForFile(file);
-  if (!full || !container) {
-    return res.status(400).json({ success: false, message: "Invalid file" });
-  }
-  if (!fs.existsSync(full)) {
-    return res.status(404).json({ success: false, message: "Config not found" });
-  }
-  try {
-    // Remove the compose service first (best effort if a compose file exists).
-    const composePath = findComposePath();
-    if (composePath) {
-      try {
-        removeServiceFromCompose(composePath, container);
-      } catch (e) {
-        return res.status(500).json({
-          success: false,
-          message: "Failed to update compose file: " + e.message,
-        });
-      }
+router.delete(
+  "/bot-configs/file/:file",
+  requireSuperadmin,
+  async (req, res) => {
+    const host = hostFromReq(req);
+    if (!host) return badHost(res);
+    const file = req.params.file;
+    if (!validFile(file)) {
+      return res.status(400).json({ success: false, message: "Invalid file" });
     }
-    // Archive the config rather than deleting outright.
-    const archive = full + ".deleted-" + Date.now();
-    await fsp.rename(full, archive);
+    if (file === "config.json") {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "The base bot cannot be deleted here",
+        });
+    }
+    const container = containerForFile(file);
+    if (!container) {
+      return res.status(400).json({ success: false, message: "Invalid file" });
+    }
+    try {
+      if (!(await hosts.exists(host, file))) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Config not found" });
+      }
+      // Remove the compose service first (best effort if a compose file exists).
+      const composeFile = await hosts.composeName(host);
+      if (composeFile) {
+        try {
+          const raw = await hosts.composeRead(host, composeFile);
+          const edited = removeServiceFromComposeText(raw, container);
+          if (edited.removed) {
+            await hosts.composeWrite(host, composeFile, edited.text);
+          }
+        } catch (e) {
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update compose file: " + e.message,
+          });
+        }
+      }
+      // Archive the config rather than deleting outright.
+      const archive = file + ".deleted-" + Date.now();
+      await hosts.rename(host, file, archive);
 
-    // Force-remove the container (ignore "no such container").
-    execFile("docker", ["rm", "-f", container], { timeout: 60000 }, () => {
-      res.json({ success: true, container, archived: path.basename(archive) });
-    });
-  } catch (e) {
-    console.error("bot delete error:", e.message);
-    res.status(500).json({ success: false, message: "Delete failed: " + (e.code || e.message) });
-  }
-});
+      // Force-remove the container (ignore "no such container").
+      try {
+        await hosts.dockerContainer(host, "rm", container);
+      } catch {
+        /* ignore */
+      }
+      res.json({ success: true, container, archived: archive });
+    } catch (e) {
+      if (e.unreachable) {
+        return res
+          .status(502)
+          .json({
+            success: false,
+            offline: true,
+            message: hostErrorMessage(host, e),
+          });
+      }
+      console.error("bot delete error:", e.message);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: "Delete failed: " + (e.code || e.message),
+        });
+    }
+  },
+);
 
 module.exports = router;

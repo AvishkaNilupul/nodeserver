@@ -1,6 +1,4 @@
 const express = require("express");
-const fsp = require("fs/promises");
-const path = require("path");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
@@ -8,11 +6,11 @@ const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
+const hosts = require("../utils/botHosts");
 
 const router = express.Router();
 
-// Same directory + filename rules as the bot manager.
-const BOT_DIR = process.env.TWITCHBOT_DIR || "/root/twitchbot";
+// Same filename rules as the bot manager.
 const FILE_RE = /^config(_\d{1,3})?\.json$/;
 
 function containerForFile(file) {
@@ -203,57 +201,83 @@ router.post(
 // ------------------------------------------------------------------
 router.post("/drops-archive/sync", requireSuperadmin, async (req, res) => {
   try {
-    let files;
-    try {
-      files = await fsp.readdir(BOT_DIR);
-    } catch (e) {
-      return res.status(500).json({
-        success: false,
-        message: "Config directory not found: " + BOT_DIR + " (" + e.code + ")",
-      });
-    }
-    const configs = files.filter((f) => FILE_RE.test(f)).sort();
     let found = 0;
     let inserted = 0;
     let updated = 0;
-    for (const file of configs) {
-      let data;
+    let filesRead = 0;
+    const offlineHosts = [];
+
+    // Sync across every managed host (the local server plus any remote hosts),
+    // so accounts running on a Raspberry Pi etc. are tracked too. A host that's
+    // unreachable is skipped (best effort) and reported back.
+    for (const h of hosts.listHosts()) {
+      const host = hosts.resolveHost(h.id);
+      let files;
       try {
-        data = JSON.parse(await fsp.readFile(path.join(BOT_DIR, file), "utf8"));
-      } catch {
+        files = await hosts.readdir(host);
+      } catch (e) {
+        if (e.unreachable) {
+          offlineHosts.push(host.id);
+          continue;
+        }
+        // Local config dir missing is a hard error; remote dir issues are soft.
+        if (host.id === "local") {
+          return res.status(500).json({
+            success: false,
+            message:
+              "Config directory not found: " +
+              host.dir +
+              " (" +
+              (e.code || e.message) +
+              ")",
+          });
+        }
+        offlineHosts.push(host.id);
         continue;
       }
-      const users =
-        (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
-      for (const u of users) {
-        const token =
-          typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
-        if (!token) continue;
-        found++;
-        const r = await BotAccount.updateOne(
-          { clientSecret: token },
-          {
-            $set: {
-              login: u.Login || "",
-              twitchId: u.Id == null ? "" : String(u.Id),
-              uniqueId: u.UniqueId || "",
-              configFile: file,
-              container: containerForFile(file),
-              enabled: u.Enabled !== false,
+      const configs = files.filter((f) => FILE_RE.test(f)).sort();
+      for (const file of configs) {
+        let data;
+        try {
+          data = JSON.parse(await hosts.readFile(host, file));
+        } catch {
+          continue;
+        }
+        filesRead++;
+        const users =
+          (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
+        for (const u of users) {
+          const token =
+            typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
+          if (!token) continue;
+          found++;
+          const r = await BotAccount.updateOne(
+            { clientSecret: token },
+            {
+              $set: {
+                login: u.Login || "",
+                twitchId: u.Id == null ? "" : String(u.Id),
+                uniqueId: u.UniqueId || "",
+                configFile: file,
+                container: containerForFile(file),
+                host: host.id,
+                enabled: u.Enabled !== false,
+              },
             },
-          },
-          { upsert: true },
-        );
-        if (r.upsertedCount) inserted++;
-        else if (r.modifiedCount) updated++;
+            { upsert: true },
+          );
+          if (r.upsertedCount) inserted++;
+          else if (r.modifiedCount) updated++;
+        }
       }
     }
     res.json({
       success: true,
-      filesRead: configs.length,
+      filesRead,
       accountsFound: found,
       inserted,
       updated,
+      offlineHosts,
     });
   } catch (err) {
     console.error("drops-archive sync error:", err.message);
