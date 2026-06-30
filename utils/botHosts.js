@@ -439,14 +439,19 @@ async function dockerLogs(host, container, { tail = 200 } = {}) {
 // from /proc/meminfo, disk for the bot directory's filesystem, uptime and the
 // CPU count. Emitted as "key value" lines so parsing stays trivial and works
 // identically over SSH or locally.
+//
+// IMPORTANT: memory/disk are emitted in KILOBYTES, not bytes. The conversion to
+// bytes happens in JS (64-bit). mawk (default on Raspberry Pi OS) uses 32-bit
+// ints for printf %d, so multiplying kB*1024 inside awk overflows at ~2.1 GB
+// and clamps everything to ~2.0 GB. Keeping the awk values small avoids that.
 function statsScript(dir) {
   return [
     "S1=$(awk '/^cpu /{t=0;for(i=2;i<=NF;i++)t+=$i;print t\" \"($5+$6)}' /proc/stat)",
     "sleep 0.4",
     "S2=$(awk '/^cpu /{t=0;for(i=2;i<=NF;i++)t+=$i;print t\" \"($5+$6)}' /proc/stat)",
     'echo "cpu $(awk -v a="$S1" -v b="$S2" \'BEGIN{split(a,x);split(b,y);dt=y[1]-x[1];di=y[2]-x[2];if(dt<=0){print 0}else{p=(1-di/dt)*100;if(p<0)p=0;printf "%.1f",p}}\')"',
-    "awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf \"mem_total %d\\nmem_used %d\\n\",t*1024,(t-a)*1024}' /proc/meminfo",
-    "df -P -B1 " + shq(dir) + " 2>/dev/null | awk 'NR==2{printf \"disk_total %d\\ndisk_used %d\\n\",$2,$3}'",
+    "awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf \"mem_total_kb %d\\nmem_avail_kb %d\\n\",t,a}' /proc/meminfo",
+    "df -P -k " + shq(dir) + " 2>/dev/null | awk 'NR==2{printf \"disk_total_kb %d\\ndisk_used_kb %d\\n\",$2,$3}'",
     "awk '{printf \"uptime %d\\n\",$1}' /proc/uptime",
     'echo "ncpu $(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)"',
   ].join("; ");
@@ -467,13 +472,19 @@ async function hostStats(host) {
       const v = Number(line.slice(sp + 1).trim());
       if (k && !Number.isNaN(v)) out[k] = v;
     });
+  const kb = (v) => (v == null ? null : v * 1024); // JS is 64-bit: no overflow
+  const memTotal = out.mem_total_kb != null ? kb(out.mem_total_kb) : null;
+  const memUsed =
+    out.mem_total_kb != null && out.mem_avail_kb != null
+      ? kb(out.mem_total_kb - out.mem_avail_kb)
+      : null;
   return {
     cpu: out.cpu ?? null,
     ncpu: out.ncpu ?? null,
-    memTotal: out.mem_total ?? null,
-    memUsed: out.mem_used ?? null,
-    diskTotal: out.disk_total ?? null,
-    diskUsed: out.disk_used ?? null,
+    memTotal,
+    memUsed,
+    diskTotal: out.disk_total_kb != null ? kb(out.disk_total_kb) : null,
+    diskUsed: out.disk_used_kb != null ? kb(out.disk_used_kb) : null,
     uptime: out.uptime ?? null,
   };
 }
