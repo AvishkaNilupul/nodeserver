@@ -29,12 +29,15 @@ async function ensureDir() {
   dirReady = true;
 }
 
-// Twitch image URLs sometimes carry {width}/{height} placeholders.
+// Twitch image URLs sometimes carry {width}/{height} placeholders. We request a
+// larger size than the UI thumbnails so the archived copy stays usable at
+// higher resolutions long after Twitch removes the original CDN asset.
+const CACHE_IMAGE_SIZE = "512";
 function resolveUrl(url) {
   return String(url || "")
     .trim()
-    .replace(/\{width\}/g, "80")
-    .replace(/\{height\}/g, "80");
+    .replace(/\{width\}/g, CACHE_IMAGE_SIZE)
+    .replace(/\{height\}/g, CACHE_IMAGE_SIZE);
 }
 
 function hashFor(url) {

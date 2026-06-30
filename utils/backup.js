@@ -5,6 +5,9 @@
 //   db/<collection>.json   every MongoDB collection, in MongoDB Extended JSON
 //                          (so ObjectIds / Dates restore with their real types)
 //   uploads/...            the chat image uploads (public/uploads)
+//   drop-images/...        locally cached drop reward images (public/drop-images)
+//                          — these survive Twitch removing the CDN asset, so a
+//                          restore must carry them or the archive loses its art
 //   config/botHosts.json   remote SSH host definitions (gitignored on disk)
 //   snapshots/...          the last-known Pi bot configs (accounts/passwords)
 //   manifest.json          createdAt, reason, per-collection counts, file counts
@@ -28,6 +31,7 @@ const { EJSON } = require("bson");
 const BACKUP_DIR =
   process.env.BACKUP_DIR || path.join(os.homedir(), "redeemer-backups");
 const UPLOADS_DIR = path.join(__dirname, "..", "public", "uploads");
+const DROP_IMAGES_DIR = path.join(__dirname, "..", "public", "drop-images");
 const HOSTS_FILE = path.join(__dirname, "..", "config", "botHosts.json");
 const SNAPSHOT_DIR =
   process.env.TWITCHBOT_SNAPSHOT_DIR ||
@@ -163,6 +167,12 @@ async function createBackup({ reason = "manual" } = {}) {
 
     // 2. Uploaded images.
     manifest.files.uploads = await copyDir(UPLOADS_DIR, path.join(staging, "uploads"));
+    // 2b. Locally cached drop reward images (outlive Twitch's CDN, so they must
+    // be in the backup or a restore would leave the archive's images broken).
+    manifest.files.dropImages = await copyDir(
+      DROP_IMAGES_DIR,
+      path.join(staging, "drop-images"),
+    );
     // 3. Remote host config + Pi snapshot copies.
     if (await exists(HOSTS_FILE)) {
       await fsp.mkdir(path.join(staging, "config"), { recursive: true });
@@ -289,6 +299,11 @@ async function restoreBackup(archivePath, { drop = true } = {}) {
 
     // 2. Uploaded images (additive; restore never deletes existing uploads).
     summary.files.uploads = await copyDir(path.join(work, "uploads"), UPLOADS_DIR);
+    // 2b. Cached drop reward images (additive, same as uploads).
+    summary.files.dropImages = await copyDir(
+      path.join(work, "drop-images"),
+      DROP_IMAGES_DIR,
+    );
     // 3. Config + snapshots.
     const hostsBak = path.join(work, "config", "botHosts.json");
     if (await exists(hostsBak)) {
