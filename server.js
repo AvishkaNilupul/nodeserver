@@ -28,10 +28,12 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
+const backup = require("./utils/backup");
 const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
 const {
@@ -312,6 +314,10 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
+app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "backup.html"));
+});
+
 app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
 });
@@ -371,6 +377,7 @@ app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
 app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
+app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 
 // =========================
@@ -401,6 +408,9 @@ mongoose
     // Listen for admins confirming a Telegram link from inside the app's bot.
     // No-op when TG_TOKEN is unset.
     telegramBot.start();
+    // Schedule the daily full-site backup (DB + uploads + config). Wrapped
+    // internally so a backup failure can never crash the server.
+    backup.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

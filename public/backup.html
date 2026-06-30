@@ -1,0 +1,226 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Backup &amp; Restore</title>
+    <style>
+      :root {
+        --bg: #f6f7fb; --surface: #ffffff; --surface-2: #f8fafc;
+        --line: #e7eaf0; --ink: #0f172a; --muted: #6b7280;
+        --accent: #4f46e5; --green: #059669; --red: #dc2626;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014; --surface: #161a22; --surface-2: #1e232e;
+        --line: #2a3140; --ink: #e8ebf2; --muted: #9aa3b4;
+        --green: #34d399; --red: #f87171; color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); display: flex; min-height: 100vh; }
+      a { color: inherit; text-decoration: none; }
+      .nav { width: 248px; flex: none; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 18px 14px; gap: 6px; position: sticky; top: 0; height: 100vh; }
+      .nav .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 14px; }
+      .nav .brand .mark { width: 34px; height: 34px; border-radius: 9px; background: var(--accent); display: grid; place-items: center; }
+      .nav .brand b { font-size: 15px; display: flex; flex-direction: column; line-height: 1.2; }
+      .nav .brand b span { font-size: 11px; color: var(--muted); font-weight: 500; }
+      .nav .links { display: flex; flex-direction: column; gap: 3px; }
+      .nav .links a { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 10px; font-size: 13.5px; color: var(--muted); font-weight: 500; }
+      .nav .links a:hover { background: var(--surface-2); color: var(--ink); }
+      .nav .links a.active { background: var(--accent); color: #fff; }
+      .nav .me { margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 10px 8px 2px; border-top: 1px solid var(--line); }
+      .nav .me .av { width: 34px; height: 34px; border-radius: 50%; background: var(--surface-2); display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+      .nav .me .who { display: flex; flex-direction: column; line-height: 1.25; flex: 1; min-width: 0; }
+      .nav .me .who b { font-size: 13px; } .nav .me .who span { font-size: 11px; color: var(--muted); }
+      .themebtn { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; display: grid; place-items: center; }
+
+      main { flex: 1; padding: 30px 34px; max-width: 980px; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      .sub { color: var(--muted); font-size: 14px; margin-bottom: 22px; }
+      .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 18px; }
+      .card h2 { font-size: 15px; margin: 0 0 4px; }
+      .card p.hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+      .btn { padding: 10px 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 13.5px; font-weight: 600; cursor: pointer; }
+      .btn:hover { background: var(--surface-2); }
+      .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .btn-primary:hover { opacity: .92; background: var(--accent); }
+      .btn-danger { color: var(--red); border-color: var(--line); }
+      .btn-danger:hover { background: #fef2f2; }
+      html[data-theme="dark"] .btn-danger:hover { background: rgba(220,38,38,.12); }
+      .btn:disabled { opacity: .55; cursor: not-allowed; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+      th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+      th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; }
+      td .acts { display: flex; gap: 6px; }
+      .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 8px; }
+      .muted { color: var(--muted); }
+      .danger-zone { border-color: #fecaca; }
+      html[data-theme="dark"] .danger-zone { border-color: rgba(220,38,38,.35); }
+      .warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 11px 14px; border-radius: 10px; font-size: 13px; margin-bottom: 14px; }
+      html[data-theme="dark"] .warn { background: rgba(251,191,36,.10); border-color: rgba(251,191,36,.3); color: #fbbf24; }
+      input[type="text"], select { padding: 9px 11px; border-radius: 9px; border: 1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; }
+      input[type="file"] { font-size: 13px; }
+      .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 11px 18px; border-radius: 11px; font-size: 13.5px; opacity: 0; pointer-events: none; transition: all .2s; z-index: 120; box-shadow: 0 10px 30px rgba(0,0,0,.25); max-width: 90vw; }
+      .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      .toast.err { background: #b91c1c; }
+      .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+      @keyframes sp { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+        <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+        <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+        <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+        <button class="themebtn" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false">
+          <svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+          <svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>
+        </button>
+      </div>
+    </aside>
+
+    <main>
+      <h1>Backup &amp; Restore</h1>
+      <div class="sub">A full backup contains your entire database (orders, accounts, inventory, drops, messages…), uploaded images, and bot/host config. Daily automatic backups run on the server; you can also back up on demand and download.</div>
+
+      <div class="card">
+        <h2>Back up now</h2>
+        <p class="hint">Creates a fresh full backup on the server and downloads it to this device. Read-only — it never affects the live site.</p>
+        <div class="row">
+          <button class="btn btn-primary" id="btnBackupDownload">Back up now &amp; download</button>
+          <button class="btn" id="btnBackupOnly">Back up (keep on server only)</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Saved backups</h2>
+        <p class="hint">Newest first. Daily backups are kept on the server (last 14). Download any to keep an off-server copy.</p>
+        <div id="list"><div class="muted">Loading…</div></div>
+      </div>
+
+      <div class="card danger-zone">
+        <h2>Restore from a backup</h2>
+        <div class="warn">⚠️ Restore replaces your current data with the contents of the uploaded backup. A fresh safety backup of the current state is taken automatically first, so you can always roll back. Type <b>CONFIRM</b> to enable the button.</div>
+        <div class="row" style="margin-bottom:12px;">
+          <input type="file" id="restoreFile" accept=".tar.gz,.tgz" />
+          <select id="restoreMode" title="How to apply the backup">
+            <option value="replace">Replace (exact point-in-time restore)</option>
+            <option value="merge">Merge (add/update, keep extra current data)</option>
+          </select>
+        </div>
+        <div class="row">
+          <input type="text" id="restoreConfirm" placeholder="Type CONFIRM" autocomplete="off" />
+          <button class="btn btn-danger" id="btnRestore" disabled>Restore</button>
+        </div>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script>
+      var $ = function (id) { return document.getElementById(id); };
+      function toast(msg, err) {
+        var t = $("toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : "");
+        clearTimeout(toast._t); toast._t = setTimeout(function () { t.className = "toast"; }, err ? 6000 : 3500);
+      }
+      function fmtSize(b) {
+        if (b == null) return "?";
+        var u = ["B", "KB", "MB", "GB"], i = 0;
+        while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+        return b.toFixed(b < 10 && i > 0 ? 1 : 0) + " " + u[i];
+      }
+      function fmtDate(s) { try { return new Date(s).toLocaleString(); } catch (e) { return s; } }
+
+      async function api(url, opts) {
+        var r = await fetch(url, Object.assign({ credentials: "same-origin" }, opts || {}));
+        var j = await r.json().catch(function () { return {}; });
+        if (!r.ok || j.success === false) throw new Error(j.message || ("HTTP " + r.status));
+        return j;
+      }
+
+      async function loadList() {
+        try {
+          var r = await api("/backups");
+          var b = r.backups || [];
+          if (!b.length) { $("list").innerHTML = '<div class="muted">No backups yet. Click “Back up now”.</div>'; return; }
+          var rows = b.map(function (x) {
+            var safety = x.id.indexOf("pre-restore") !== -1 ? ' <span class="muted">(safety)</span>' : (x.id.indexOf("daily") !== -1 ? '' : '');
+            return '<tr><td>' + x.id + safety + '</td><td>' + fmtDate(x.createdAt) + '</td><td>' + fmtSize(x.size) + '</td>' +
+              '<td><div class="acts">' +
+              '<a class="btn btn-sm" href="/backups/download/' + encodeURIComponent(x.id) + '">Download</a>' +
+              '<button class="btn btn-sm btn-danger" onclick="delBackup(\'' + x.id + '\')">Delete</button>' +
+              '</div></td></tr>';
+          }).join("");
+          $("list").innerHTML = '<table><thead><tr><th>Backup</th><th>Created</th><th>Size</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+        } catch (e) { $("list").innerHTML = '<div class="muted">Failed to load: ' + e.message + '</div>'; }
+      }
+
+      window.delBackup = async function (id) {
+        if (!confirm("Delete backup " + id + "? This cannot be undone.")) return;
+        try { await api("/backups/" + encodeURIComponent(id), { method: "DELETE" }); toast("Deleted " + id); loadList(); }
+        catch (e) { toast("Delete failed: " + e.message, true); }
+      };
+
+      async function runBackup(download) {
+        var b1 = $("btnBackupDownload"), b2 = $("btnBackupOnly");
+        b1.disabled = b2.disabled = true;
+        var old = (download ? b1 : b2).textContent;
+        (download ? b1 : b2).innerHTML = '<span class="spin"></span>Backing up…';
+        try {
+          var r = await api("/backups/run", { method: "POST" });
+          var counts = Object.values(r.manifest.collections || {}).reduce(function (a, n) { return a + n; }, 0);
+          toast("Backup created: " + r.id + " · " + counts + " records · " + fmtSize(r.size));
+          if (download) window.location.href = "/backups/download/" + encodeURIComponent(r.id);
+          loadList();
+        } catch (e) { toast("Backup failed: " + e.message, true); }
+        finally { b1.disabled = b2.disabled = false; (download ? b1 : b2).textContent = old; }
+      }
+      $("btnBackupDownload").addEventListener("click", function () { runBackup(true); });
+      $("btnBackupOnly").addEventListener("click", function () { runBackup(false); });
+
+      $("restoreConfirm").addEventListener("input", function () {
+        $("btnRestore").disabled = this.value.trim() !== "CONFIRM";
+      });
+      $("btnRestore").addEventListener("click", async function () {
+        var f = $("restoreFile").files[0];
+        if (!f) { toast("Choose a backup file first", true); return; }
+        if (!confirm("Restore from " + f.name + "?\n\nA safety backup of the CURRENT state is taken first, then your data is " + ($("restoreMode").value === "merge" ? "merged with" : "replaced by") + " the backup. Continue?")) return;
+        var btn = this; btn.disabled = true; var old = btn.textContent; btn.innerHTML = '<span class="spin"></span>Restoring…';
+        try {
+          var fd = new FormData();
+          fd.append("backup", f);
+          fd.append("confirm", "YES");
+          fd.append("mode", $("restoreMode").value);
+          var r = await api("/backups/restore", { method: "POST", body: fd });
+          var n = Object.values(r.summary.collections || {}).reduce(function (a, x) { return a + x; }, 0);
+          toast("Restored " + n + " records. Safety backup: " + r.summary.safetyBackup);
+          $("restoreConfirm").value = ""; $("restoreFile").value = "";
+          loadList();
+        } catch (e) { toast("Restore failed: " + e.message, true); }
+        finally { btn.disabled = true; btn.textContent = old; }
+      });
+
+      loadList();
+    </script>
+  </body>
+</html>
