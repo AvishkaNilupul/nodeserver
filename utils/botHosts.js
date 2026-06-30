@@ -16,7 +16,15 @@
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
+const os = require("os");
 const { execFile } = require("child_process");
+
+// Reuse a single SSH connection across the many short-lived commands the Bots
+// page fires per refresh (list, status, file reads, stats). Without this each
+// command pays a full TCP+SSH handshake (~hundreds of ms each, over the
+// internet); with ControlMaster the first connection is kept alive and the
+// rest piggyback on it, making the Raspberry Pi tab feel near-instant.
+const SSH_CONTROL_PATH = path.join(os.tmpdir(), "redeemhub-ssh-%C");
 
 // Local bot directory (unchanged default + override). The implicit `local`
 // host points at this.
@@ -148,6 +156,12 @@ function sshBaseArgs(host) {
     "StrictHostKeyChecking=accept-new",
     "-o",
     "ConnectTimeout=8",
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    "ControlPath=" + SSH_CONTROL_PATH,
+    "-o",
+    "ControlPersist=60",
   ];
   if (host.ssh.identityFile) args.push("-i", host.ssh.identityFile);
   if (host.ssh.port) args.push("-p", String(host.ssh.port));

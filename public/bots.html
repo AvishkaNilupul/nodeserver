@@ -71,6 +71,7 @@
   .logbar .live { display:inline-flex; align-items:center; gap:5px; }
   .logbar .live i { width:8px; height:8px; border-radius:50%; background: var(--green); display:inline-block; animation: livepulse 1.4s infinite; }
   @keyframes livepulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .btn-sm.dirty { background: var(--accent); color:#fff; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent); }
   .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
   .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
   .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
@@ -226,6 +227,8 @@
   let CSTATS = {};    // container -> { cpu, mem, memPerc } (from docker stats)
   let _statsTimer = null; // periodic host-usage refresh
   let _logTimer = null;   // live-log poll while the logs modal is open
+  let _loadSeq = 0;       // guards against a slow load() overwriting a newer tab
+  const HOST_CACHE = {};  // hostId -> last-seen { configs, states, health, cstats, usage }
 
   // Which managed host the page is currently showing (the local server by
   // default; remote hosts such as a Raspberry Pi appear as extra tabs).
@@ -282,31 +285,44 @@
   }
 
   async function load() {
-    $("bots").innerHTML = '<div class="empty">Loading configs…</div>';
+    // Every load is tagged; if the user switches tabs mid-flight, the older
+    // (now-stale) load sees a newer _loadSeq and bails before touching the UI.
+    const seq = ++_loadSeq;
+    const host = CURRENT_HOST;
+    const url = (u) => u + (u.includes("?") ? "&" : "?") + "host=" + encodeURIComponent(host);
+    if (!HOST_CACHE[host]) $("bots").innerHTML = '<div class="empty">Loading…</div>';
+
+    // Status and health don't depend on the config list, so fetch all three in
+    // parallel instead of one after another.
+    const statusP = api(url("/bot-configs/status")).then((s) => s.states || {}).catch(() => ({}));
+    const healthP = api(url("/bot-configs/health")).then((h) => h.health || {}).catch(() => ({}));
+
     let list;
-    try { list = await api(hq("/bot-configs")); }
+    try { list = await api(url("/bot-configs")); }
     catch (e) {
+      if (seq !== _loadSeq) return;
       CONFIGS = {}; STATES = {}; HEALTH = {};
-      renderStats([]);
+      renderStats([]); renderAllTable([]);
       const offline = /unreachable|offline/i.test(e.message);
       $("bots").innerHTML = '<div class="empty">' + (offline ? "⚠️ " : "") + esc(e.message) + "</div>";
       return;
     }
+    if (seq !== _loadSeq) return;
     $("dirLabel").textContent = list.dir || "/root/twitchbot";
-    // fetch docker statuses (best effort)
-    try { const s = await api(hq("/bot-configs/status")); STATES = s.states || {}; } catch (e) { STATES = {}; }
-    // fetch per-bot health from the drops archive (best effort)
-    try { const h = await api(hq("/bot-configs/health")); HEALTH = h.health || {}; } catch (e) { HEALTH = {}; }
 
-    CONFIGS = {};
     const files = list.configs.map((c) => c.file);
-    // load full data for files that parsed OK
+    const newConfigs = {};
     await Promise.all(list.configs.map(async (c) => {
-      if (!c.ok) { CONFIGS[c.file] = { container: c.container, ok: false, error: c.error }; return; }
-      try { const full = await api(hq("/bot-configs/file/" + encodeURIComponent(c.file))); CONFIGS[c.file] = { container: full.container, data: full.data, ok: true }; }
-      catch (e) { CONFIGS[c.file] = { container: c.container, ok: false, error: e.message }; }
+      if (!c.ok) { newConfigs[c.file] = { container: c.container, ok: false, error: c.error }; return; }
+      try { const full = await api(url("/bot-configs/file/" + encodeURIComponent(c.file))); newConfigs[c.file] = { container: full.container, data: full.data, ok: true }; }
+      catch (e) { newConfigs[c.file] = { container: c.container, ok: false, error: e.message }; }
     }));
+    STATES = await statusP; HEALTH = await healthP;
+    if (seq !== _loadSeq) return;
+
+    CONFIGS = newConfigs;
     renderAll(files);
+    HOST_CACHE[host] = Object.assign(HOST_CACHE[host] || {}, { configs: CONFIGS, states: STATES, health: HEALTH });
     loadHostStats();
   }
 
@@ -326,7 +342,25 @@
   }
   window.switchHost = function (id) {
     if (id === CURRENT_HOST) return;
-    CURRENT_HOST = id; CSTATS = {}; renderHostTabs(); load();
+    CURRENT_HOST = id;
+    renderHostTabs();
+    const cached = HOST_CACHE[id];
+    if (cached) {
+      // Show this host's last-known data instantly, then refresh in the
+      // background — no stale data from the previous tab, no blank wait.
+      CONFIGS = cached.configs || {}; STATES = cached.states || {}; HEALTH = cached.health || {}; CSTATS = cached.cstats || {};
+      renderAll(Object.keys(CONFIGS));
+      if (cached.usage) renderHostUsage(cached.usage);
+      else { const u = $("hostUsage"); if (u) { u.style.display = "flex"; u.innerHTML = '<div class="uoff">Loading usage…</div>'; } }
+    } else {
+      // First visit to this tab: clear the previous host's data immediately so
+      // the user never sees the wrong machine's numbers.
+      CONFIGS = {}; STATES = {}; HEALTH = {}; CSTATS = {};
+      $("bots").innerHTML = '<div class="empty">Loading…</div>';
+      renderStats([]); renderAllTable([]);
+      const u = $("hostUsage"); if (u) { u.style.display = "flex"; u.innerHTML = '<div class="uoff">Loading usage…</div>'; }
+    }
+    load();
   };
 
   // Resource usage for the active host: CPU / memory / disk / uptime, refreshed
@@ -352,15 +386,36 @@
       '<div class="ustat"><b>' + fmtBytes(s.diskUsed) + " / " + fmtBytes(s.diskTotal) + '</b><span>Disk · ' + diskPct.toFixed(0) + '%</span>' + uBar(diskPct) + "</div>" +
       '<div class="ustat"><b>' + fmtUptime(s.uptime) + '</b><span>Uptime</span></div>';
   }
+  // Text for a bot's per-container CPU·mem chip.
+  function cstatText(container) {
+    const s = CSTATS[container];
+    if (!s) return "";
+    return (s.cpu || "") + " · " + String(s.mem || "").split("/")[0].trim();
+  }
+  // Update just the per-bot CPU·mem chips in place. We deliberately do NOT
+  // rebuild the whole bot list here: that runs every few seconds and would
+  // steal focus from whatever field you're editing and collapse/scroll the
+  // list. Targeted text updates leave your edits and cursor untouched.
+  function updateContainerChips() {
+    Object.keys(CONFIGS).forEach((file) => {
+      const c = CONFIGS[file];
+      if (!c || !c.container) return;
+      const el = document.getElementById("cstat-" + c.container);
+      if (!el) return;
+      if (CSTATS[c.container]) { el.style.display = ""; el.textContent = cstatText(c.container); }
+      else el.style.display = "none";
+    });
+  }
   async function loadHostStats() {
     const hostAtCall = CURRENT_HOST;
+    const url = "/bot-configs/host-stats?host=" + encodeURIComponent(hostAtCall);
     try {
-      const r = await api(hq("/bot-configs/host-stats"));
+      const r = await api(url);
+      HOST_CACHE[hostAtCall] = Object.assign(HOST_CACHE[hostAtCall] || {}, { usage: r, cstats: r.containers || {} });
       if (hostAtCall !== CURRENT_HOST) return; // tab changed mid-flight
       CSTATS = r.containers || {};
       renderHostUsage(r);
-      // refresh the per-bot container chips without a full reload
-      if (Object.keys(CONFIGS).length) renderAll(Object.keys(CONFIGS));
+      updateContainerChips(); // in-place, no full re-render (keeps edits/focus)
     } catch (e) {
       if (hostAtCall === CURRENT_HOST) renderHostUsage({ available: false });
     }
@@ -509,7 +564,7 @@
         '<div class="right">' +
           '<span class="chip"><span class="dot ' + dotCls + '"></span>' + statusTxt + '</span>' +
           '<span class="chip">' + users.length + ' account' + (users.length === 1 ? "" : "s") + '</span>' +
-          (CSTATS[c.container] ? '<span class="chip" title="Container CPU · memory">' + esc(CSTATS[c.container].cpu || "") + " · " + esc(String(CSTATS[c.container].mem || "").split("/")[0].trim()) + "</span>" : "") +
+          '<span class="chip cstat" id="cstat-' + esc(c.container || "") + '" title="Container CPU · memory"' + (CSTATS[c.container] ? "" : ' style="display:none"') + ">" + esc(cstatText(c.container)) + "</span>" +
           healthHtml +
           '<button class="btn-ghost btn-sm" onclick="addAccount(\'' + esc(file) + '\')">+ Account</button>' +
           '<button class="btn-ghost btn-sm" onclick="openBulkModal(\'' + esc(file) + '\')">Mass add</button>' +
@@ -518,7 +573,7 @@
             : '<button class="btn-ghost btn-sm" onclick="botPower(\'' + esc(file) + "','start',this)\">Start</button>") +
           '<button class="btn-ghost btn-sm" onclick="openLogs(\'' + esc(file) + '\')">Logs</button>' +
           '<button class="btn-ghost btn-sm" onclick="restartBot(\'' + esc(file) + '\',this)">Restart</button>' +
-          '<button class="btn-sm" onclick="saveBot(\'' + esc(file) + '\',this)">Save</button>' +
+          '<button class="btn-sm" data-save="' + esc(file) + '" onclick="saveBot(\'' + esc(file) + '\',this)">Save</button>' +
           (file === "config.json" ? "" : '<button class="btn-danger btn-sm" onclick="deleteBot(\'' + esc(file) + '\',this)">Delete</button>') +
         '</div>' +
       '</header>' +
@@ -557,6 +612,7 @@
     } else if (kind === "root") {
       c.data[key] = val;
     }
+    markDirty(file);
     if (kind === "acct" && (key === "Enabled" || key === "Login" || key === "Id" || key === "FavouriteGames")) {
       renderStats(Object.keys(CONFIGS));
       renderAllTable(Object.keys(CONFIGS));
@@ -580,25 +636,37 @@
     if (!Array.isArray(c.data.TwitchSettings.TwitchUsers)) c.data.TwitchSettings.TwitchUsers = [];
     c.data.TwitchSettings.TwitchUsers.push({ ClientSecret: "", UniqueId: randHex(32), Login: "", Id: "", Enabled: true, FavouriteGames: [] });
     renderAll(Object.keys(CONFIGS));
-    toast("Account added — fill it in and Save");
+    markDirty(file);
+    toast("Account added — fill it in, then click Save to apply");
   };
 
   window.removeAccount = function (file, idx) {
     const c = CONFIGS[file]; if (!c || !c.ok) return;
     const u = c.data.TwitchSettings.TwitchUsers[idx];
-    if (!confirm("Remove account " + (u && u.Login ? u.Login : "#" + (idx + 1)) + " from " + file + "? (Saved only when you click Save)")) return;
+    if (!confirm("Remove account " + (u && u.Login ? u.Login : "#" + (idx + 1)) + " from " + file + "?\n\nThis is staged — it is only applied when you click Save.")) return;
     c.data.TwitchSettings.TwitchUsers.splice(idx, 1);
     renderAll(Object.keys(CONFIGS));
+    markDirty(file);
+    toast("Account removed — click Save to apply");
   };
+
+  // Highlight a bot's Save button so it's obvious that add/remove/edit changes
+  // are staged and need saving (the file on the host isn't touched until then).
+  function markDirty(file) {
+    const btn = document.querySelector('button[data-save="' + cssId(file) + '"]');
+    if (btn) { btn.classList.add("dirty"); btn.textContent = "Save *"; }
+  }
+  function cssId(s) { return String(s).replace(/["\\]/g, "\\$&"); }
 
   window.saveBot = async function (file, btn) {
     const c = CONFIGS[file]; if (!c || !c.ok) return;
-    btn.disabled = true; const old = btn.textContent; btn.textContent = "Saving…";
+    btn.disabled = true; btn.textContent = "Saving…";
     try {
       await api(hq("/bot-configs/file/" + encodeURIComponent(file)), { method: "PUT", body: JSON.stringify({ data: c.data }) });
+      btn.classList.remove("dirty");
       toast("Saved " + file + " (a .bak backup was kept)");
     } catch (e) { toast("Save failed: " + e.message, true); }
-    finally { btn.disabled = false; btn.textContent = old; }
+    finally { btn.disabled = false; btn.textContent = "Save"; }
   };
 
   window.restartBot = async function (file, btn) {
