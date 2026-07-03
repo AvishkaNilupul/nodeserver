@@ -2405,23 +2405,48 @@
         }
       });
 
+      // Sync runs server-side in the background (a big bot set can take
+      // minutes, longer than proxy request timeouts), so this only starts it
+      // and then polls the status endpoint until it finishes.
+      function sleep(ms) {
+        return new Promise((r) => setTimeout(r, ms));
+      }
+
       $("syncBtn").addEventListener("click", async (e) => {
         const btn = e.currentTarget;
         const old = btn.textContent;
         btn.disabled = true;
         btn.textContent = "Syncing…";
         try {
-          const d = await api("/drops-archive/sync", { method: "POST" });
+          const start = await api("/drops-archive/sync", { method: "POST" });
+          if (!start.started && start.running) {
+            banner("A sync is already running — waiting for it…", "ok");
+          } else {
+            banner("Sync started — reading bot configs…", "ok");
+          }
+          let s;
+          do {
+            await sleep(2000);
+            s = await api("/drops-archive/sync/status");
+          } while (s.running);
+          if (s.error) {
+            banner("Sync failed: " + s.error, "err");
+            return;
+          }
+          const d = s.result || {};
           banner(
             "Synced " +
-              d.accountsFound +
+              (d.accountsFound || 0) +
               " account(s) from " +
-              d.filesRead +
+              (d.filesRead || 0) +
               " config file(s): " +
-              d.inserted +
+              (d.inserted || 0) +
               " new, " +
-              d.updated +
-              " updated.",
+              (d.updated || 0) +
+              " updated." +
+              (d.offlineHosts && d.offlineHosts.length
+                ? " Offline hosts skipped: " + d.offlineHosts.join(", ")
+                : ""),
             "ok",
           );
           loadOverview();

@@ -199,61 +199,73 @@ router.post(
 // ------------------------------------------------------------------
 // Sync accounts from the bot config files
 // ------------------------------------------------------------------
-router.post("/drops-archive/sync", requireSuperadmin, async (req, res) => {
-  try {
-    let found = 0;
-    let inserted = 0;
-    let updated = 0;
-    let filesRead = 0;
-    const offlineHosts = [];
+// A full sync (many config files, possibly over SSH to remote hosts) can take
+// several minutes, which outlives typical reverse-proxy request timeouts and
+// surfaces as a 504 even though the work keeps going. So the route only kicks
+// the sync off and the client polls /drops-archive/sync/status.
+let syncState = {
+  running: false,
+  startedAt: null,
+  finishedAt: null,
+  result: null,
+  error: null,
+};
 
-    // Sync across every managed host (the local server plus any remote hosts),
-    // so accounts running on a Raspberry Pi etc. are tracked too. A host that's
-    // unreachable is skipped (best effort) and reported back.
-    for (const h of hosts.listHosts()) {
-      const host = hosts.resolveHost(h.id);
-      let files;
-      try {
-        files = await hosts.readdir(host);
-      } catch (e) {
-        if (e.unreachable) {
-          offlineHosts.push(host.id);
-          continue;
-        }
-        // Local config dir missing is a hard error; remote dir issues are soft.
-        if (host.id === "local") {
-          return res.status(500).json({
-            success: false,
-            message:
-              "Config directory not found: " +
-              host.dir +
-              " (" +
-              (e.code || e.message) +
-              ")",
-          });
-        }
+async function runSync() {
+  let found = 0;
+  let inserted = 0;
+  let updated = 0;
+  let filesRead = 0;
+  const offlineHosts = [];
+
+  // Sync across every managed host (the local server plus any remote hosts),
+  // so accounts running on a Raspberry Pi etc. are tracked too. A host that's
+  // unreachable is skipped (best effort) and reported back.
+  for (const h of hosts.listHosts()) {
+    const host = hosts.resolveHost(h.id);
+    let files;
+    try {
+      files = await hosts.readdir(host);
+    } catch (e) {
+      if (e.unreachable) {
         offlineHosts.push(host.id);
         continue;
       }
-      const configs = files.filter((f) => FILE_RE.test(f)).sort();
-      for (const file of configs) {
-        let data;
-        try {
-          data = JSON.parse(await hosts.readFile(host, file));
-        } catch {
-          continue;
-        }
-        filesRead++;
-        const users =
-          (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
-        for (const u of users) {
-          const token =
-            typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
-          if (!token) continue;
-          found++;
-          const r = await BotAccount.updateOne(
-            { clientSecret: token },
-            {
+      // Local config dir missing is a hard error; remote dir issues are soft.
+      if (host.id === "local") {
+        throw new Error(
+          "Config directory not found: " +
+            host.dir +
+            " (" +
+            (e.code || e.message) +
+            ")",
+        );
+      }
+      offlineHosts.push(host.id);
+      continue;
+    }
+    const configs = files.filter((f) => FILE_RE.test(f)).sort();
+    for (const file of configs) {
+      let data;
+      try {
+        data = JSON.parse(await hosts.readFile(host, file));
+      } catch {
+        continue;
+      }
+      filesRead++;
+      const users =
+        (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
+      // One bulk upsert per config file instead of a round trip per account.
+      const ops = [];
+      for (const u of users) {
+        const token =
+          typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
+        if (!token) continue;
+        found++;
+        ops.push({
+          updateOne: {
+            filter: { clientSecret: token },
+            update: {
               $set: {
                 login: u.Login || "",
                 twitchId: u.Id == null ? "" : String(u.Id),
@@ -264,25 +276,54 @@ router.post("/drops-archive/sync", requireSuperadmin, async (req, res) => {
                 enabled: u.Enabled !== false,
               },
             },
-            { upsert: true },
-          );
-          if (r.upsertedCount) inserted++;
-          else if (r.modifiedCount) updated++;
-        }
+            upsert: true,
+          },
+        });
+      }
+      if (ops.length) {
+        const r = await BotAccount.bulkWrite(ops, { ordered: false });
+        inserted += r.upsertedCount || 0;
+        updated += r.modifiedCount || 0;
       }
     }
-    res.json({
-      success: true,
-      filesRead,
-      accountsFound: found,
-      inserted,
-      updated,
-      offlineHosts,
-    });
-  } catch (err) {
-    console.error("drops-archive sync error:", err.message);
-    res.status(500).json({ success: false, message: "Server error" });
   }
+  return {
+    filesRead,
+    accountsFound: found,
+    inserted,
+    updated,
+    offlineHosts,
+  };
+}
+
+router.post("/drops-archive/sync", requireSuperadmin, (req, res) => {
+  if (syncState.running) {
+    return res.json({ success: true, started: false, running: true });
+  }
+  syncState = {
+    running: true,
+    startedAt: new Date(),
+    finishedAt: null,
+    result: null,
+    error: null,
+  };
+  runSync()
+    .then((result) => {
+      syncState.running = false;
+      syncState.finishedAt = new Date();
+      syncState.result = result;
+    })
+    .catch((err) => {
+      console.error("drops-archive sync error:", err.message);
+      syncState.running = false;
+      syncState.finishedAt = new Date();
+      syncState.error = err.message;
+    });
+  res.json({ success: true, started: true, running: true });
+});
+
+router.get("/drops-archive/sync/status", requireSuperadmin, (req, res) => {
+  res.json({ success: true, ...syncState });
 });
 
 // ------------------------------------------------------------------
