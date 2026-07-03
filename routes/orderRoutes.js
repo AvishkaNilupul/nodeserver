@@ -22,11 +22,23 @@ router.get("/orders/list", async (req, res) => {
 // ADD ORDER
 router.post("/orders/add", async (req, res) => {
   try {
-    const { orderId, username, password } = req.body;
+    const { orderId, username, password, accounts } = req.body;
 
     if (!orderId) {
       return res.status(400).json({ success: false });
     }
+
+    // Optional list of accounts for multi-account orders (a buyer purchasing
+    // 2+ at once). Falls back to the legacy single username/password pair.
+    const accountList = Array.isArray(accounts)
+      ? accounts
+          .slice(0, 20)
+          .map((a) => ({
+            username: String((a && a.username) || "").trim(),
+            password: String((a && a.password) || "").trim(),
+          }))
+          .filter((a) => a.username || a.password)
+      : [];
 
     await addOrder({
       sellerId: req.session.admin.id,
@@ -34,6 +46,7 @@ router.post("/orders/add", async (req, res) => {
       orderId: String(orderId).trim(),
       username: String(username || "").trim(),
       password: String(password || "").trim(),
+      accounts: accountList,
     });
 
     res.json({ success: true });

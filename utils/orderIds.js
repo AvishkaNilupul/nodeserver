@@ -72,17 +72,46 @@ async function getOrdersBySeller(sellerId) {
   return orders.map(({ _id, ...rest }) => ({ id: _id.toString(), ...rest }));
 }
 
-function addOrder({ sellerId, sellerName, orderId, username, password }) {
+function addOrder({ sellerId, sellerName, orderId, username, password, accounts }) {
+  const list = Array.isArray(accounts)
+    ? accounts
+        .map((a) => ({
+          username: String((a && a.username) || "").trim(),
+          password: String((a && a.password) || "").trim(),
+        }))
+        .filter((a) => a.username || a.password)
+    : [];
+  if (!list.length && (username || password)) {
+    list.push({ username: username || "", password: password || "" });
+  }
+  const first = list[0] || { username: "", password: "" };
   return Order.create({
     sellerId,
     sellerName,
     orderId,
-    username,
-    password,
+    // Legacy fields mirror the first account so older readers keep working.
+    username: first.username,
+    password: first.password,
+    accounts: list,
     used: false,
     gamerTag: null,
     usedAt: null,
   });
+}
+
+// Normalised list of accounts attached to an order (handles legacy rows that
+// only have the single username/password pair).
+function orderAccounts(order) {
+  if (order && Array.isArray(order.accounts) && order.accounts.length) {
+    return order.accounts.map((a) => ({
+      username: a.username || "",
+      password: a.password || "",
+    }));
+  }
+  if (order && (order.username || order.password)) {
+    return [{ username: order.username || "", password: order.password || "" }];
+  }
+  return [];
 }
 
 function deleteOrder(id, sellerId) {
@@ -98,5 +127,6 @@ module.exports = {
   authorizeBuyerByOrder,
   getOrdersBySeller,
   addOrder,
+  orderAccounts,
   deleteOrder,
 };

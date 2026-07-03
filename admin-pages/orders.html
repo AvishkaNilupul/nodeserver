@@ -89,6 +89,11 @@
     .modal input { width: 100%; padding: 12px 14px; border-radius: 11px; border: 1.5px solid var(--line); background: var(--surface-2); outline: none; font-family: inherit; font-size: 14px; color: var(--ink); }
     .modal input:focus { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
     .modal .foot { display: flex; gap: 10px; margin-top: 8px; }
+    .acct-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .acct-row input { flex: 1; min-width: 0; }
+    .acct-row .rm { flex: none; width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; padding: 0; }
+    .acct-row .rm:hover { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
+    .acct-more { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: var(--accent); font-size: 11.5px; font-weight: 700; }
     .modal .foot .btn { flex: 1; justify-content: center; }
 
     .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 12px 20px; border-radius: 12px; font-size: 13.5px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.25s ease; z-index: 99; box-shadow: 0 12px 30px rgba(15,23,42,0.3); }
@@ -169,7 +174,7 @@
   <div class="modal-bg" id="modalBg">
     <div class="modal">
       <h3>New order</h3>
-      <p class="sub">Generate an order ID and attach the account to send.</p>
+      <p class="sub">Generate an order ID and attach one or more accounts to send.</p>
       <div class="field">
         <label>Order ID</label>
         <div class="genrow">
@@ -177,8 +182,11 @@
           <button class="btn ghost" style="white-space:nowrap" onclick="genId()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg> Generate</button>
         </div>
       </div>
-      <div class="field"><label>Account / username</label><input id="newUsername" placeholder="twitch_user" /></div>
-      <div class="field"><label>Password</label><input id="newPassword" placeholder="account password" /></div>
+      <div class="field">
+        <label>Accounts</label>
+        <div id="acctList"></div>
+        <button class="btn ghost" style="width:100%;justify-content:center;margin-top:2px" onclick="addAcctRow()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg> Add another account</button>
+      </div>
       <div class="foot">
         <button class="btn ghost" onclick="closeModal()">Cancel</button>
         <button class="btn primary" onclick="createOrder()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Create &amp; copy ID</button>
@@ -237,6 +245,38 @@
       copyText(link, "Redeem link");
     }
 
+    // All accounts on an order (multi-account orders store a list; legacy
+    // orders only have the single username/password pair).
+    function orderAccounts(o) {
+      if (o && Array.isArray(o.accounts) && o.accounts.length) {
+        return o.accounts;
+      }
+      if (o && (o.username || o.password)) {
+        return [{ username: o.username, password: o.password }];
+      }
+      return [];
+    }
+
+    function usernameCell(o) {
+      const accts = orderAccounts(o);
+      if (!accts.length) return "&mdash;";
+      const first = esc(accts[0].username) || "&mdash;";
+      if (accts.length === 1) return first;
+      const rest = accts
+        .slice(1)
+        .map((a) => esc(a.username))
+        .filter(Boolean)
+        .join(", ");
+      return (
+        first +
+        '<span class="acct-more" title="' +
+        rest +
+        '">+' +
+        (accts.length - 1) +
+        " more</span>"
+      );
+    }
+
     function isToday(d) {
       if (!d) return false;
       const x = new Date(d);
@@ -267,7 +307,9 @@
         if (!q) return true;
         return (
           String(o.orderId || "").toLowerCase().includes(q) ||
-          String(o.username || "").toLowerCase().includes(q) ||
+          orderAccounts(o).some((a) =>
+            String(a.username || "").toLowerCase().includes(q)
+          ) ||
           String(o.gamerTag || "").toLowerCase().includes(q)
         );
       });
@@ -285,10 +327,12 @@
           ICON_COPY +
           "</button></td>" +
           '<td class="cred">' +
-          (esc(o.username) || "&mdash;") +
+          usernameCell(o) +
           "</td>" +
           '<td class="cred">' +
-          (o.password ? "&bull;&bull;&bull;&bull;&bull;&bull;" : "&mdash;") +
+          (orderAccounts(o).some((a) => a.password)
+            ? "&bull;&bull;&bull;&bull;&bull;&bull;"
+            : "&mdash;") +
           "</td>" +
           "<td>" +
           (o.used
@@ -342,10 +386,43 @@
       document.getElementById("newOrderId").value = id;
     }
 
+    function acctRowHTML() {
+      return (
+        '<input class="acct-user" placeholder="twitch_user" />' +
+        '<input class="acct-pass" placeholder="password" />' +
+        '<button class="rm" title="Remove account" onclick="removeAcctRow(this)">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"></path></svg>' +
+        "</button>"
+      );
+    }
+
+    function addAcctRow() {
+      const list = document.getElementById("acctList");
+      if (list.children.length >= 20) {
+        toast("Max 20 accounts per order");
+        return;
+      }
+      const row = document.createElement("div");
+      row.className = "acct-row";
+      row.innerHTML = acctRowHTML();
+      list.appendChild(row);
+      row.querySelector(".acct-user").focus();
+    }
+
+    function removeAcctRow(btn) {
+      const list = document.getElementById("acctList");
+      if (list.children.length <= 1) {
+        toast("An order needs at least one account row");
+        return;
+      }
+      btn.closest(".acct-row").remove();
+    }
+
     function openModal() {
       document.getElementById("newOrderId").value = "";
-      document.getElementById("newUsername").value = "";
-      document.getElementById("newPassword").value = "";
+      const list = document.getElementById("acctList");
+      list.innerHTML = "";
+      addAcctRow();
       genId();
       document.getElementById("modalBg").classList.add("show");
     }
@@ -356,16 +433,28 @@
 
     async function createOrder() {
       const orderId = document.getElementById("newOrderId").value.trim();
-      const username = document.getElementById("newUsername").value.trim();
-      const password = document.getElementById("newPassword").value.trim();
+      const accounts = Array.from(
+        document.querySelectorAll("#acctList .acct-row")
+      )
+        .map((row) => ({
+          username: row.querySelector(".acct-user").value.trim(),
+          password: row.querySelector(".acct-pass").value.trim(),
+        }))
+        .filter((a) => a.username || a.password);
       if (!orderId) {
         toast("Order ID is required");
         return;
       }
+      const first = accounts[0] || { username: "", password: "" };
       const res = await fetch("/orders/add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId, username, password }),
+        body: JSON.stringify({
+          orderId,
+          username: first.username,
+          password: first.password,
+          accounts,
+        }),
       });
       const data = await res.json();
       if (!data.success) {

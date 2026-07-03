@@ -1003,6 +1003,77 @@
         td.hide-sm {
           display: none;
         }
+        /* Phone layout: the archive is used on the go to fill orders, so
+           search, tabs and item cards get the full width and bigger touch
+           targets. */
+        .page {
+          padding: 14px 12px;
+        }
+        .page h1 {
+          font-size: 19px;
+        }
+        .toolbar {
+          gap: 8px;
+        }
+        .search {
+          flex: 1 1 100%;
+          min-width: 0;
+          max-width: none;
+        }
+        .combo {
+          flex: 1 1 100%;
+          min-width: 0;
+        }
+        .search input,
+        .combo > input {
+          padding-top: 12px;
+          padding-bottom: 12px;
+          font-size: 16px; /* prevents iOS zoom-on-focus */
+        }
+        .tabs {
+          position: sticky;
+          top: 54px; /* below the mobile topbar */
+          z-index: 40;
+          background: var(--bg);
+        }
+        .tab {
+          flex: 1;
+          padding: 12px 8px;
+        }
+        .igrid {
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+        .icard {
+          padding: 11px;
+        }
+        .panel .pb {
+          padding: 12px;
+        }
+        .pctl {
+          gap: 10px;
+        }
+        .modal-bg {
+          padding: 8px;
+          align-items: stretch;
+        }
+        .modal {
+          max-width: none;
+        }
+        .modal > header {
+          position: sticky;
+          top: 0;
+          background: var(--surface);
+          z-index: 5;
+          border-radius: 16px 16px 0 0;
+        }
+        .mbody {
+          padding: 14px 12px;
+        }
+        th,
+        td {
+          padding: 10px 10px;
+        }
       }
     </style>
   </head>
@@ -1879,7 +1950,7 @@
             : "") +
           '<button class="btn-ghost btn-sm" id="copyLogins" style="margin-left:auto;">Copy logins</button>' +
           "</div>" +
-          '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Held</th><th>State</th><th class="hide-sm">Bot</th><th class="hide-sm">Password</th></tr></thead><tbody>' +
+          '<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Held</th><th>State</th><th class="hide-sm">Bot</th><th>Creds</th></tr></thead><tbody>' +
           currentItemAccounts
             .map(
               (a) =>
@@ -1898,10 +1969,14 @@
                 '<td class="hide-sm mono">' +
                 esc(a.container || a.configFile || "—") +
                 "</td>" +
-                '<td class="hide-sm">' +
+                "<td>" +
                 (a.hasPassword
-                  ? '<span class="chip on">saved</span>'
-                  : '<span class="chip warn">none</span>') +
+                  ? '<button class="btn-ghost btn-sm" data-copycred="' +
+                    attr(a.accountId) +
+                    '" data-login="' +
+                    attr(a.login || "") +
+                    '">Copy user:pass</button>'
+                  : '<span class="chip warn">no pw</span>') +
                 "</td>" +
                 "</tr>",
             )
@@ -1910,7 +1985,41 @@
         $("iBody").innerHTML = html;
       }
 
+      // Copies with a hidden-textarea fallback for mobile browsers where the
+      // async clipboard API is unavailable or blocked.
+      function copyToClipboard(text) {
+        return navigator.clipboard.writeText(text).catch(() => {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        });
+      }
+
+      // One-tap credential copy from the item modal — the main mobile flow
+      // when filling an order (find item → copy login:password → send).
+      async function copyCred(btn) {
+        const id = btn.dataset.copycred;
+        const login = btn.dataset.login || "";
+        btn.disabled = true;
+        try {
+          const d = await api(
+            "/drops-archive/accounts/" + encodeURIComponent(id) + "/password",
+          );
+          await copyToClipboard(login + ":" + (d.password || ""));
+          banner("Copied " + login + " credentials.", "ok");
+        } catch (e) {
+          banner(e.message || "Copy failed", "err");
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
       $("iBody").addEventListener("click", (e) => {
+        const cp = e.target.closest("[data-copycred]");
+        if (cp) return copyCred(cp);
         const c = e.target.closest("[data-acc]");
         if (c) {
           $("itemBg").classList.remove("show");

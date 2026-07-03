@@ -5,8 +5,21 @@ const orderSchema = new mongoose.Schema(
     sellerId: { type: String, required: true, index: true },
     sellerName: { type: String, default: "" },
     orderId: { type: String, required: true, index: true },
+    // Legacy single-account fields, kept in sync with accounts[0] so older
+    // rows and older readers keep working.
     username: { type: String, default: "" },
     password: { type: String, default: "" },
+    // One order can bundle several accounts (a buyer purchasing 2+ at once).
+    accounts: {
+      type: [
+        {
+          _id: false,
+          username: { type: String, default: "" },
+          password: { type: String, default: "" },
+        },
+      ],
+      default: [],
+    },
     used: { type: Boolean, default: false },
     gamerTag: { type: String, default: null, index: true },
     // Stable per-order chat identity ("<gamerTag> #<orderId>"). Unique per

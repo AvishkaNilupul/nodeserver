@@ -2,6 +2,7 @@ const {
   getOrderByOrderId,
   getOrderByChatId,
   buildChatId,
+  orderAccounts,
 } = require("../utils/orderIds");
 const {
   addMessage,
@@ -107,17 +108,26 @@ function chatSocket(io) {
 
         const hasWelcome = await userHasWelcome(order.sellerId, userId);
 
-        if (!hasWelcome && order.used && order.username && order.password) {
+        const accounts = orderAccounts(order);
+        if (!hasWelcome && order.used && accounts.length) {
+          const loginBlock =
+            accounts.length === 1
+              ? `User: ${accounts[0].username}\nPass: ${accounts[0].password}`
+              : accounts
+                  .map(
+                    (a, i) =>
+                      `Account ${i + 1}\nUser: ${a.username}\nPass: ${a.password}`,
+                  )
+                  .join("\n\n");
           await addMessage(
             userId,
             order.sellerId,
             "admin",
             `📋TWITCH DROP GUIDE
 
-🔑Login
+🔑Login${accounts.length > 1 ? ` (${accounts.length} accounts)` : ""}
 
-User: ${order.username}
-Pass: ${order.password}
+${loginBlock}
 
 1. Log in → https://www.twitch.tv/drops/inventory
 
