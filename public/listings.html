@@ -2207,6 +2207,7 @@
                 var gid = g.attribute_group_id || g.attribute_group || g.id || "";
                 var gname =
                   g.attribute_group_name || g.group_name || g.name || "Attribute";
+                if (g.is_required) gname += " *";
                 var opts = (g.attributes || g.attribute_list || g.children || [])
                   .map(function (a) {
                     return (

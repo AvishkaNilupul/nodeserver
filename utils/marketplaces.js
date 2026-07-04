@@ -607,28 +607,28 @@ function g2gBrands(serviceId) {
   );
 }
 async function g2gProducts(serviceId, brandId, categoryId) {
-  // G2G rejects requests that pair category_id with service_id or brand_id
-  // ("... is not required when category_id is exists"), so when a category
-  // is selected send only category_id, then narrow the results back down to
-  // the chosen brand ourselves.
+  // G2G treats category_id as mutually exclusive with service_id/brand_id
+  // ("... is not required when category_id is exists"), and a category-only
+  // query returns every brand's products. Querying by service + brand is the
+  // reliable way to get one game's products, so always do that and only use
+  // the category (if picked) to narrow the results locally.
   const qs = new URLSearchParams();
-  if (categoryId) {
-    qs.set("category_id", categoryId);
-  } else {
-    qs.set("brand_id", brandId);
-    qs.set("service_id", serviceId);
-  }
+  qs.set("service_id", serviceId);
+  qs.set("brand_id", brandId);
   const d = await g2gRequest("get", "/v2/products?" + qs.toString());
-  if (categoryId && brandId) {
+  if (categoryId) {
     const payload = d.payload || d.data || d;
     for (const key of Object.keys(payload)) {
       if (Array.isArray(payload[key])) {
-        payload[key] = payload[key].filter(
+        const filtered = payload[key].filter(
           (row) =>
             !row ||
-            row.brand_id === undefined ||
-            String(row.brand_id) === String(brandId),
+            row.category_id === undefined ||
+            String(row.category_id) === String(categoryId),
         );
+        // If the rows don't carry a matching category, keep the full list
+        // rather than showing an empty dropdown.
+        if (filtered.length) payload[key] = filtered;
       }
     }
   }
@@ -645,6 +645,8 @@ function g2gAttributes(productId) {
 // supply productId (+ any required attributes picked from g2gAttributes).
 async function g2gPublish({
   productId,
+  title,
+  description,
   priceUsd,
   qty,
   minQty,
@@ -657,23 +659,51 @@ async function g2gPublish({
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("G2G needs a price above 0");
   }
-  // Field set mirrors G2G's official OpenAPI sample: offers derive their
-  // title/description from the catalog product, so only pricing/stock is sent.
   const body = {
     product_id: String(productId),
+    title: String(title || "").slice(0, 128),
+    description: String(description || title || ""),
     currency: currency || "USD",
     unit_price: price,
     min_qty: Number(minQty) || 1,
     api_qty: Number(qty) || 1,
+    available_qty: Number(qty) || 1,
     low_stock_alert_qty: 0,
   };
   if (Array.isArray(offerAttributes) && offerAttributes.length) {
     body.offer_attributes = offerAttributes;
   }
-  if (Array.isArray(deliveryMethodIds) && deliveryMethodIds.length) {
-    body.delivery_method_ids = deliveryMethodIds;
+  let dmIds = deliveryMethodIds;
+  if (!Array.isArray(dmIds) || !dmIds.length) {
+    // The catalog product dictates the allowed delivery methods; send them
+    // all so G2G doesn't reject the offer for missing delivery info.
+    try {
+      const a = await g2gAttributes(productId);
+      const p = a.payload || a.data || a;
+      dmIds = (p.delivery_method_list || [])
+        .map((m) => m.delivery_method_id)
+        .filter(Boolean);
+    } catch {
+      dmIds = [];
+    }
   }
-  const d = await g2gRequest("post", "/v2/offers", body);
+  if (Array.isArray(dmIds) && dmIds.length) {
+    body.delivery_method_ids = dmIds;
+  }
+  let d;
+  try {
+    d = await g2gRequest("post", "/v2/offers", body);
+  } catch (err) {
+    if (/delivery_speed/i.test(err.message)) {
+      throw new Error(
+        "G2G's API only accepts instant-delivery offers (gift cards / top-ups " +
+          "or API-delivered stock). This product uses manual/gifting delivery, " +
+          "which G2G does not allow to be created through the API — create the " +
+          "offer once on g2g.com, after which price/stock can be managed here.",
+      );
+    }
+    throw err;
+  }
   const payload = d.payload || d.data || d;
   const offerId = payload.offer_id || payload.id;
   if (!offerId) {
