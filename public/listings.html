@@ -806,12 +806,192 @@
 
       <!-- Existing listings -->
       <section class="card" style="margin-top: 22px">
-        <h2>Existing listings</h2>
-        <div id="listings">
+        <div
+          style="
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+          "
+        >
+          <h2 style="margin: 0">Existing listings</h2>
+          <button class="btn" id="mpKeysBtn">Marketplace keys</button>
+        </div>
+        <div id="listings" style="margin-top: 12px">
           <div class="empty">Loading…</div>
         </div>
       </section>
     </main>
+
+    <!-- Marketplace modals -->
+    <style>
+      .mp-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        z-index: 60;
+        padding: 24px 10px;
+        overflow-y: auto;
+      }
+      .mp-overlay.open {
+        display: flex;
+      }
+      .mp-modal {
+        background: var(--card, #171a21);
+        color: inherit;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 18px;
+        width: 100%;
+        max-width: 560px;
+      }
+      .mp-modal h3 {
+        margin: 0 0 10px;
+      }
+      .mp-modal label {
+        display: block;
+        font-size: 12px;
+        opacity: 0.8;
+        margin: 10px 0 4px;
+      }
+      .mp-modal input,
+      .mp-modal textarea,
+      .mp-modal select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(0, 0, 0, 0.25);
+        color: inherit;
+        font-size: 14px;
+      }
+      .mp-modal .mp-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .mp-check {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 14px;
+        margin: 6px 12px 6px 0;
+      }
+      .mp-check input {
+        width: auto;
+      }
+      .mp-hint {
+        font-size: 12px;
+        opacity: 0.7;
+        margin-top: 4px;
+      }
+      .mp-ext {
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        margin-top: 12px;
+        padding-top: 10px;
+      }
+      .mp-ext .mp-item {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13px;
+        padding: 6px 0;
+        border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+        flex-wrap: wrap;
+      }
+      .mp-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 14px;
+        flex-wrap: wrap;
+      }
+      .mp-keysblock {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-top: 12px;
+      }
+      .mp-keysblock h4 {
+        margin: 0;
+        font-size: 14px;
+      }
+      @media (max-width: 768px) {
+        .mp-modal {
+          max-width: 100%;
+          padding: 14px;
+        }
+      }
+    </style>
+
+    <div class="mp-overlay" id="mpKeysOverlay">
+      <div class="mp-modal">
+        <h3>Marketplace API keys</h3>
+        <div class="mp-hint">
+          Keys are stored encrypted on the server. Leave a field blank to keep
+          its current value; type a new value to replace it.
+        </div>
+        <div id="mpKeysBody"><div class="empty">Loading…</div></div>
+        <div class="mp-actions">
+          <button class="btn ghost" id="mpKeysClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="mp-overlay" id="mpPubOverlay">
+      <div class="mp-modal">
+        <h3 id="mpPubTitle">Sell on marketplaces</h3>
+        <div class="mp-row" id="mpPubTargets"></div>
+        <label for="mpPubName">Title</label>
+        <input type="text" id="mpPubName" maxlength="200" />
+        <label for="mpPubDesc">Description</label>
+        <textarea id="mpPubDesc" rows="4"></textarea>
+        <label for="mpPubPrice">Price (USD)</label>
+        <input type="number" id="mpPubPrice" min="0" step="0.01" />
+
+        <div id="mpG2gBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">G2G offer details</b>
+            <div class="mp-hint">
+              G2G offers attach to a catalog product — pick where the offer goes.
+            </div>
+            <label>Service</label>
+            <select id="mpG2gService"><option value="">Loading…</option></select>
+            <label>Brand / game</label>
+            <select id="mpG2gBrand"><option value="">Pick a service first</option></select>
+            <label>Product</label>
+            <select id="mpG2gProduct"><option value="">Pick a brand first</option></select>
+            <div id="mpG2gAttrs"></div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Qty</label>
+                <input type="number" id="mpG2gQty" min="1" value="1" />
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Min qty per order</label>
+                <input type="number" id="mpG2gMinQty" min="1" value="1" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-ext">
+          <b style="font-size: 13px">Published on marketplaces</b>
+          <div id="mpExtList"><div class="empty">None yet.</div></div>
+        </div>
+
+        <div class="mp-actions">
+          <button class="btn ghost" id="mpPubClose">Close</button>
+          <button class="btn primary" id="mpPubGo">Publish</button>
+        </div>
+      </div>
+    </div>
 
     <div class="toast" id="toast"></div>
 
@@ -1288,6 +1468,9 @@
           '">' +
           (set.listed ? "Unlist" : "Publish") +
           "</button>" +
+          '<button class="btn" data-mp="' +
+          attr(set.id) +
+          '">Sell on…</button>' +
           '<button class="btn danger" data-del="' +
           attr(set.id) +
           '">Delete</button>' +
@@ -1334,6 +1517,12 @@
         var ed = e.target.closest("[data-edit]");
         var tg = e.target.closest("[data-toggle]");
         var dl = e.target.closest("[data-del]");
+        var mpb = e.target.closest("[data-mp]");
+        if (mpb) {
+          var mset = listingsCache.find((x) => x.id === mpb.dataset.mp);
+          if (mset) openPublishModal(mset);
+          return;
+        }
         if (ed) {
           var s = listingsCache.find((x) => x.id === ed.dataset.edit);
           if (s) startEdit(s);
@@ -1370,6 +1559,504 @@
             })
             .catch(function (err) {
               toast(err.message || "Delete failed");
+            });
+        }
+      });
+
+      // ---- external marketplaces (Gameflip / Plati+GGsell / G2G) ----
+      var MP_LABELS = {
+        gameflip: "Gameflip",
+        digiseller: "Plati / GGsell (Digiseller)",
+        g2g: "G2G",
+      };
+      var MP_KEY_LABELS = {
+        gameflip: { apiKey: "API key", apiSecret: "API secret (TOTP secret)" },
+        digiseller: { sellerId: "Seller ID", apiKey: "API key" },
+        g2g: { userId: "User ID", apiKey: "API key", apiSecret: "API secret" },
+      };
+      var mpStatus = null;
+
+      function loadMpStatus() {
+        return api("/marketplaces/keys").then(function (j) {
+          mpStatus = j.marketplaces || {};
+          return mpStatus;
+        });
+      }
+
+      // -- keys modal --
+      function renderKeysModal() {
+        var box = $("mpKeysBody");
+        if (!mpStatus) {
+          box.innerHTML = '<div class="empty">Loading…</div>';
+          return;
+        }
+        box.innerHTML = Object.keys(MP_LABELS)
+          .map(function (mp) {
+            var st = mpStatus[mp] || { fields: {} };
+            var fields = Object.keys(MP_KEY_LABELS[mp])
+              .map(function (f) {
+                var cur = st.fields && st.fields[f];
+                return (
+                  "<label>" +
+                  esc(MP_KEY_LABELS[mp][f]) +
+                  (cur
+                    ? ' <span style="opacity:.6">(saved: ' + esc(cur) + ")</span>"
+                    : "") +
+                  "</label>" +
+                  '<input type="password" autocomplete="off" data-mpkey="' +
+                  attr(mp + "." + f) +
+                  '" placeholder="' +
+                  (cur ? "Keep current" : "Not set") +
+                  '" />'
+                );
+              })
+              .join("");
+            return (
+              '<div class="mp-keysblock">' +
+              "<h4>" +
+              esc(MP_LABELS[mp]) +
+              (st.configured
+                ? ' <span style="color:#4caf7d;font-size:12px">configured</span>'
+                : ' <span style="color:#e0a34e;font-size:12px">not configured</span>') +
+              "</h4>" +
+              fields +
+              '<div class="mp-actions" style="margin-top:8px">' +
+              '<button class="btn" data-mptest="' +
+              attr(mp) +
+              '">Test</button>' +
+              '<button class="btn primary" data-mpsave="' +
+              attr(mp) +
+              '">Save</button>' +
+              "</div></div>"
+            );
+          })
+          .join("");
+      }
+
+      $("mpKeysBtn").addEventListener("click", function () {
+        $("mpKeysOverlay").classList.add("open");
+        loadMpStatus().then(renderKeysModal).catch(function (e) {
+          $("mpKeysBody").innerHTML =
+            '<div class="empty">' + esc(e.message) + "</div>";
+        });
+      });
+      $("mpKeysClose").addEventListener("click", function () {
+        $("mpKeysOverlay").classList.remove("open");
+      });
+
+      $("mpKeysBody").addEventListener("click", function (e) {
+        var sv = e.target.closest("[data-mpsave]");
+        var ts = e.target.closest("[data-mptest]");
+        if (sv) {
+          var mp = sv.dataset.mpsave;
+          var body = {};
+          document
+            .querySelectorAll('[data-mpkey^="' + mp + '."]')
+            .forEach(function (inp) {
+              var v = inp.value;
+              if (v && v.trim()) body[inp.dataset.mpkey.split(".")[1]] = v.trim();
+            });
+          if (!Object.keys(body).length) {
+            toast("Nothing to save");
+            return;
+          }
+          sv.disabled = true;
+          api("/marketplaces/keys/" + mp, { method: "PUT", body: body })
+            .then(function (j) {
+              mpStatus = j.marketplaces || mpStatus;
+              renderKeysModal();
+              toast(MP_LABELS[mp] + " keys saved");
+            })
+            .catch(function (err) {
+              toast(err.message || "Save failed");
+            })
+            .finally(function () {
+              sv.disabled = false;
+            });
+        } else if (ts) {
+          var mpt = ts.dataset.mptest;
+          ts.disabled = true;
+          ts.textContent = "Testing…";
+          api("/marketplaces/test/" + mpt, { method: "POST" })
+            .then(function (j) {
+              toast(
+                j.success
+                  ? MP_LABELS[mpt] + ": " + (j.detail || "OK")
+                  : MP_LABELS[mpt] + " failed: " + (j.message || "error"),
+              );
+            })
+            .catch(function (err) {
+              toast(err.message || "Test failed");
+            })
+            .finally(function () {
+              ts.disabled = false;
+              ts.textContent = "Test";
+            });
+        }
+      });
+
+      // -- publish modal --
+      var mpSet = null;
+
+      function mpBuildDescription(set) {
+        var lines = [set.note || "", "", "Includes:"];
+        (set.items || []).forEach(function (i) {
+          lines.push("- " + i.name + (i.game ? " (" + i.game + ")" : ""));
+        });
+        return lines.join("\n").trim();
+      }
+
+      function renderPubTargets() {
+        $("mpPubTargets").innerHTML = Object.keys(MP_LABELS)
+          .map(function (mp) {
+            var ok = mpStatus && mpStatus[mp] && mpStatus[mp].configured;
+            return (
+              '<label class="mp-check" title="' +
+              (ok ? "" : "Set API keys first (Marketplace keys button)") +
+              '"><input type="checkbox" data-mptarget="' +
+              attr(mp) +
+              '"' +
+              (ok ? "" : " disabled") +
+              " />" +
+              esc(MP_LABELS[mp]) +
+              (ok ? "" : " (no keys)") +
+              "</label>"
+            );
+          })
+          .join("");
+      }
+
+      function loadExtListings(setId) {
+        api("/marketplaces/listings?setId=" + encodeURIComponent(setId))
+          .then(function (j) {
+            var rows = (j.listings || []).filter(function (r) {
+              return r.status !== "delisted";
+            });
+            if (!rows.length) {
+              $("mpExtList").innerHTML = '<div class="empty">None yet.</div>';
+              return;
+            }
+            $("mpExtList").innerHTML = rows
+              .map(function (r) {
+                return (
+                  '<div class="mp-item">' +
+                  "<span><b>" +
+                  esc(MP_LABELS[r.marketplace] || r.marketplace) +
+                  "</b> — " +
+                  (r.url
+                    ? '<a href="' +
+                      attr(r.url) +
+                      '" target="_blank" rel="noopener">' +
+                      esc(r.externalId) +
+                      "</a>"
+                    : esc(r.externalId)) +
+                  " ($" +
+                  (Number(r.price) || 0) +
+                  ")" +
+                  (r.note
+                    ? '<div class="mp-hint">' + esc(r.note) + "</div>"
+                    : "") +
+                  "</span>" +
+                  "<span>" +
+                  (r.marketplace === "digiseller"
+                    ? '<button class="btn" data-mpstock="' +
+                      attr(r.id) +
+                      '">Add stock</button> '
+                    : "") +
+                  '<button class="btn danger" data-mpdelist="' +
+                  attr(r.id) +
+                  '">Delist</button></span>' +
+                  "</div>"
+                );
+              })
+              .join("");
+          })
+          .catch(function () {});
+      }
+
+      function openPublishModal(set) {
+        mpSet = set;
+        $("mpPubTitle").innerText = 'Sell "' + set.name + '" on marketplaces';
+        $("mpPubName").value = set.name || "";
+        $("mpPubDesc").value = mpBuildDescription(set);
+        $("mpPubPrice").value = Number(set.price) || "";
+        $("mpG2gBox").style.display = "none";
+        $("mpG2gAttrs").innerHTML = "";
+        $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
+        $("mpPubOverlay").classList.add("open");
+        var p = mpStatus ? Promise.resolve(mpStatus) : loadMpStatus();
+        p.then(renderPubTargets).catch(function () {
+          renderPubTargets();
+        });
+        loadExtListings(set.id);
+      }
+
+      $("mpPubClose").addEventListener("click", function () {
+        $("mpPubOverlay").classList.remove("open");
+      });
+
+      // Show G2G catalog picker only when G2G is ticked.
+      var g2gLoaded = false;
+      $("mpPubTargets").addEventListener("change", function (e) {
+        var t = e.target.closest('[data-mptarget="g2g"]');
+        if (!t) return;
+        $("mpG2gBox").style.display = t.checked ? "block" : "none";
+        if (t.checked && !g2gLoaded) loadG2gServices();
+      });
+
+      function fillSelect(sel, items, placeholder) {
+        sel.innerHTML =
+          '<option value="">' +
+          esc(placeholder) +
+          "</option>" +
+          items
+            .map(function (it) {
+              return (
+                '<option value="' +
+                attr(it.id) +
+                '">' +
+                esc(it.label) +
+                "</option>"
+              );
+            })
+            .join("");
+      }
+
+      // G2G payloads vary a bit; pull id + best-guess label generically.
+      function g2gRows(data) {
+        var payload = (data && (data.payload || data.data)) || data || {};
+        var list =
+          payload.results || payload.list || payload.items || payload || [];
+        if (!Array.isArray(list)) return [];
+        return list.map(function (r) {
+          return {
+            id:
+              r.service_id ||
+              r.brand_id ||
+              r.product_id ||
+              r.category_id ||
+              r.id ||
+              "",
+            label:
+              r.service_name ||
+              r.brand_name ||
+              r.product_name ||
+              r.category_name ||
+              r.name ||
+              r.title ||
+              String(r.id || ""),
+            raw: r,
+          };
+        });
+      }
+
+      function loadG2gServices() {
+        g2gLoaded = true;
+        api("/marketplaces/g2g/services")
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "G2G error");
+            fillSelect($("mpG2gService"), g2gRows(j.data), "Pick a service…");
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      }
+
+      $("mpG2gService").addEventListener("change", function () {
+        var sid = this.value;
+        $("mpG2gBrand").innerHTML = '<option value="">Loading…</option>';
+        $("mpG2gProduct").innerHTML =
+          '<option value="">Pick a brand first</option>';
+        $("mpG2gAttrs").innerHTML = "";
+        if (!sid) return;
+        api("/marketplaces/g2g/brands?serviceId=" + encodeURIComponent(sid))
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "G2G error");
+            fillSelect($("mpG2gBrand"), g2gRows(j.data), "Pick a brand…");
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      });
+
+      $("mpG2gBrand").addEventListener("change", function () {
+        var sid = $("mpG2gService").value;
+        var bid = this.value;
+        $("mpG2gProduct").innerHTML = '<option value="">Loading…</option>';
+        $("mpG2gAttrs").innerHTML = "";
+        if (!sid || !bid) return;
+        api(
+          "/marketplaces/g2g/products?serviceId=" +
+            encodeURIComponent(sid) +
+            "&brandId=" +
+            encodeURIComponent(bid),
+        )
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "G2G error");
+            fillSelect($("mpG2gProduct"), g2gRows(j.data), "Pick a product…");
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      });
+
+      $("mpG2gProduct").addEventListener("change", function () {
+        var pid = this.value;
+        $("mpG2gAttrs").innerHTML = "";
+        if (!pid) return;
+        api("/marketplaces/g2g/attributes?productId=" + encodeURIComponent(pid))
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "G2G error");
+            var payload = (j.data && (j.data.payload || j.data.data)) || {};
+            var groups =
+              payload.attribute_groups ||
+              payload.results ||
+              payload.list ||
+              [];
+            if (!Array.isArray(groups) || !groups.length) return;
+            $("mpG2gAttrs").innerHTML = groups
+              .map(function (g) {
+                var gid = g.attribute_group_id || g.id || "";
+                var gname = g.attribute_group_name || g.name || "Attribute";
+                var opts = (g.attributes || g.children || [])
+                  .map(function (a) {
+                    return (
+                      '<option value="' +
+                      attr(a.attribute_id || a.id || "") +
+                      '">' +
+                      esc(a.attribute_name || a.name || a.value || "") +
+                      "</option>"
+                    );
+                  })
+                  .join("");
+                return (
+                  "<label>" +
+                  esc(gname) +
+                  "</label>" +
+                  '<select data-g2gattr="' +
+                  attr(gid) +
+                  '"><option value="">(skip)</option>' +
+                  opts +
+                  "</select>"
+                );
+              })
+              .join("");
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      });
+
+      $("mpPubGo").addEventListener("click", function () {
+        if (!mpSet) return;
+        var targets = [];
+        document
+          .querySelectorAll("#mpPubTargets [data-mptarget]:checked")
+          .forEach(function (c) {
+            targets.push(c.dataset.mptarget);
+          });
+        if (!targets.length) {
+          toast("Tick at least one marketplace");
+          return;
+        }
+        var body = {
+          setId: mpSet.id,
+          marketplaces: targets,
+          title: $("mpPubName").value.trim(),
+          description: $("mpPubDesc").value,
+          price: parseFloat($("mpPubPrice").value),
+        };
+        if (!body.title) {
+          toast("Enter a title");
+          return;
+        }
+        if (!(body.price > 0)) {
+          toast("Enter a price in USD");
+          return;
+        }
+        if (targets.indexOf("g2g") !== -1) {
+          var pid = $("mpG2gProduct").value;
+          if (!pid) {
+            toast("Pick a G2G product first");
+            return;
+          }
+          var attrs = [];
+          document.querySelectorAll("[data-g2gattr]").forEach(function (sel) {
+            if (sel.value) {
+              attrs.push({
+                attribute_group_id: sel.dataset.g2gattr,
+                attribute_id: sel.value,
+              });
+            }
+          });
+          body.g2g = {
+            productId: pid,
+            qty: parseInt($("mpG2gQty").value, 10) || 1,
+            minQty: parseInt($("mpG2gMinQty").value, 10) || 1,
+            offerAttributes: attrs,
+          };
+        }
+        var btn = $("mpPubGo");
+        btn.disabled = true;
+        btn.textContent = "Publishing…";
+        api("/marketplaces/publish", { method: "POST", body: body })
+          .then(function (j) {
+            var res = j.results || {};
+            var msgs = [];
+            Object.keys(res).forEach(function (mp) {
+              msgs.push(
+                (MP_LABELS[mp] || mp) +
+                  ": " +
+                  (res[mp].success ? "published" : res[mp].message),
+              );
+            });
+            toast(msgs.join(" · "));
+            loadExtListings(mpSet.id);
+          })
+          .catch(function (err) {
+            toast(err.message || "Publish failed");
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = "Publish";
+          });
+      });
+
+      $("mpExtList").addEventListener("click", function (e) {
+        var dl = e.target.closest("[data-mpdelist]");
+        var st = e.target.closest("[data-mpstock]");
+        if (dl) {
+          if (!confirm("Delist this listing from the marketplace?")) return;
+          dl.disabled = true;
+          api("/marketplaces/listings/" + dl.dataset.mpdelist, {
+            method: "DELETE",
+          })
+            .then(function (j) {
+              toast(j.success ? "Delisted" : j.message || "Delist failed");
+              if (mpSet) loadExtListings(mpSet.id);
+            })
+            .catch(function (err) {
+              toast(err.message || "Delist failed");
+              dl.disabled = false;
+            });
+        } else if (st) {
+          var lines = prompt(
+            "Paste delivery content — one unit per line (each sale delivers one line):",
+          );
+          if (!lines) return;
+          api("/marketplaces/listings/" + st.dataset.mpstock + "/content", {
+            method: "POST",
+            body: { lines: lines },
+          })
+            .then(function (j) {
+              toast(
+                j.success
+                  ? "Added " + j.added + " unit(s) of stock"
+                  : j.message || "Failed",
+              );
+            })
+            .catch(function (err) {
+              toast(err.message || "Failed");
             });
         }
       });

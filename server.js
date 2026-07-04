@@ -28,6 +28,7 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
@@ -377,6 +378,7 @@ app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
 app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
+app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 

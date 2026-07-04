@@ -33,6 +33,7 @@ const BACKUP_DIR =
 const UPLOADS_DIR = path.join(__dirname, "..", "public", "uploads");
 const DROP_IMAGES_DIR = path.join(__dirname, "..", "public", "drop-images");
 const HOSTS_FILE = path.join(__dirname, "..", "config", "botHosts.json");
+const SETTINGS_FILE = path.join(__dirname, "settings.json");
 const SNAPSHOT_DIR =
   process.env.TWITCHBOT_SNAPSHOT_DIR ||
   path.join(path.dirname(process.env.TWITCHBOT_DIR || "/root/twitchbot"), "twitchbot-snapshots");
@@ -179,6 +180,12 @@ async function createBackup({ reason = "manual" } = {}) {
       await fsp.copyFile(HOSTS_FILE, path.join(staging, "config", "botHosts.json"));
       manifest.files.botHosts = 1;
     }
+    // Site settings (incl. encrypted marketplace API keys).
+    if (await exists(SETTINGS_FILE)) {
+      await fsp.mkdir(path.join(staging, "config"), { recursive: true });
+      await fsp.copyFile(SETTINGS_FILE, path.join(staging, "config", "settings.json"));
+      manifest.files.settings = 1;
+    }
     manifest.files.snapshots = await copyDir(SNAPSHOT_DIR, path.join(staging, "snapshots"));
 
     await fsp.writeFile(
@@ -310,6 +317,11 @@ async function restoreBackup(archivePath, { drop = true } = {}) {
       await fsp.mkdir(path.dirname(HOSTS_FILE), { recursive: true });
       await fsp.copyFile(hostsBak, HOSTS_FILE);
       summary.files.botHosts = 1;
+    }
+    const settingsBak = path.join(work, "config", "settings.json");
+    if (await exists(settingsBak)) {
+      await fsp.copyFile(settingsBak, SETTINGS_FILE);
+      summary.files.settings = 1;
     }
     summary.files.snapshots = await copyDir(path.join(work, "snapshots"), SNAPSHOT_DIR);
 
