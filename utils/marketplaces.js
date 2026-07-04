@@ -288,6 +288,22 @@ async function digisellerToken() {
   }
 }
 
+// Digiseller reports failures as { retval: 1, retdesc: "Validation error",
+// errors: [{code, message}] } — pull the messages out so errors are actionable.
+function dsErrorText(d) {
+  let msg = d.retdesc || "retval " + d.retval;
+  if (Array.isArray(d.errors) && d.errors.length) {
+    msg +=
+      " — " +
+      d.errors
+        .map((e) => (e.code ? e.code + ": " : "") + (e.message || ""))
+        .join("; ");
+  } else if (d.errors && typeof d.errors === "object") {
+    msg += " — " + JSON.stringify(d.errors).slice(0, 300);
+  }
+  return msg;
+}
+
 function dsLocales(value) {
   // Digiseller wants ru-RU and en-US variants; we use the same text for both.
   return [
@@ -323,9 +339,7 @@ async function digisellerPublish({ title, description, priceUsd }) {
     );
     const d = r.data || {};
     if (d.retval !== undefined && String(d.retval) !== "0") {
-      throw new Error(
-        "create failed: " + (d.retdesc || JSON.stringify(d).slice(0, 300)),
-      );
+      throw new Error("create failed: " + dsErrorText(d));
     }
     const productId =
       (d.content && (d.content.product_id || d.content.id)) ||
@@ -362,7 +376,7 @@ async function digisellerAddContent(productId, lines) {
     );
     const d = r.data || {};
     if (d.retval !== undefined && String(d.retval) !== "0") {
-      throw new Error(d.retdesc || JSON.stringify(d).slice(0, 300));
+      throw new Error(dsErrorText(d));
     }
     return { added: content.length };
   } catch (e) {
@@ -385,7 +399,7 @@ async function digisellerDelist(productId) {
     );
     const d = r.data || {};
     if (d.retval !== undefined && String(d.retval) !== "0") {
-      throw new Error(d.retdesc || JSON.stringify(d).slice(0, 300));
+      throw new Error(dsErrorText(d));
     }
   } catch (e) {
     throw apiError("Digiseller delist", e);
