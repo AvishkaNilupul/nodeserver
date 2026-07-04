@@ -1,3 +1,4 @@
+const fsp = require("fs/promises");
 const path = require("path");
 
 const express = require("express");
@@ -6,6 +7,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const mp = require("../utils/marketplaces");
+const { buildSetGridImage } = require("../utils/setImage");
 
 const router = express.Router();
 
@@ -158,6 +160,16 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     const title = String(body.title || set.name).trim();
     const description = String(body.description || buildDescription(set));
     const priceUsd = Number(body.price != null ? body.price : set.price);
+    // A numbered grid collage of every item in the set makes a much better
+    // cover photo than a single item's icon; fall back to the first item.
+    let gridImage = "";
+    if (targets.includes("gameflip")) {
+      try {
+        gridImage = await buildSetGridImage(set);
+      } catch (err) {
+        console.error("set grid image failed:", err.message);
+      }
+    }
     const results = {};
     for (const name of targets) {
       try {
@@ -167,7 +179,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             title,
             description,
             priceUsd,
-            imagePath: coverImagePath(set),
+            imagePath: gridImage || coverImagePath(set),
           });
         } else if (name === "digiseller") {
           r = await mp.digisellerPublish({ title, description, priceUsd });
@@ -210,6 +222,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
         results[name] = { success: false, message: err.message };
       }
     }
+    if (gridImage) await fsp.unlink(gridImage).catch(() => {});
     res.json({ success: true, results });
   } catch (err) {
     console.error("marketplace publish error:", err.message);
