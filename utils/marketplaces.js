@@ -157,12 +157,23 @@ async function gfUploadPhoto(keys, listingId, imagePath) {
 }
 
 // Create a digital listing and put it on sale. Returns { externalId, url }.
-async function gameflipPublish({ title, description, priceUsd, imagePath }) {
+// When `autoDeliverCode` is set the listing is created as an auto-delivered
+// digital code: Gameflip stores the text and hands it to the buyer the moment
+// the purchase completes, with no seller action needed.
+async function gameflipPublish({
+  title,
+  description,
+  priceUsd,
+  imagePath,
+  autoDeliverCode,
+}) {
   const keys = requireKeys("gameflip");
   const cents = Math.round(Number(priceUsd) * 100);
   if (!Number.isFinite(cents) || cents < 75) {
     throw new Error("Gameflip minimum price is $0.75");
   }
+  const auto =
+    typeof autoDeliverCode === "string" && autoDeliverCode.trim().length > 0;
   let listingId;
   try {
     const r = await axios.post(
@@ -171,11 +182,14 @@ async function gameflipPublish({ title, description, priceUsd, imagePath }) {
         kind: "item",
         name: String(title).slice(0, 120),
         description: String(description || "").slice(0, 5000),
-        category: "DIGITAL_INGAME",
+        // Auto-delivered codes must not use DIGITAL_INGAME (that combination
+        // means a Steam bot trade on Gameflip); UNKNOWN is their generic
+        // digital-goods category.
+        category: auto ? "UNKNOWN" : "DIGITAL_INGAME",
         platform: "unknown",
         price: cents,
         accept_currency: "USD",
-        shipping_within_days: 3,
+        shipping_within_days: auto ? 0 : 3,
         expire_in_days: 30,
         shipping_fee: 0,
         shipping_paid_by: "seller",
@@ -183,7 +197,7 @@ async function gameflipPublish({ title, description, priceUsd, imagePath }) {
         digital: true,
         digital_region: "none",
         digital_fee_included: false,
-        digital_deliverable: "transfer",
+        digital_deliverable: auto ? "code" : "transfer",
         tags: ["twitch", "drops"],
       },
       { headers: gfHeaders(keys), timeout: 30000 },
@@ -197,6 +211,22 @@ async function gameflipPublish({ title, description, priceUsd, imagePath }) {
       await gfUploadPhoto(keys, listingId, imagePath);
     } catch (e) {
       console.error("gameflip photo upload failed:", e.message);
+    }
+  }
+  if (auto) {
+    try {
+      await axios.put(
+        GF_API + "/listing/" + listingId + "/digital_goods",
+        { code: autoDeliverCode },
+        { headers: gfHeaders(keys), timeout: 20000 },
+      );
+    } catch (e) {
+      throw apiError(
+        "Gameflip created draft " +
+          listingId +
+          " but could not attach the delivery content",
+        e,
+      );
     }
   }
   try {
@@ -222,6 +252,21 @@ async function gameflipPublish({ title, description, priceUsd, imagePath }) {
     externalId: listingId,
     url: "https://gameflip.com/item/" + listingId,
   };
+}
+
+// Current status of a listing (onsale / sold / draft / ...), used to detect
+// sales of auto-delivered listings.
+async function gameflipListingStatus(listingId) {
+  const keys = requireKeys("gameflip");
+  try {
+    const r = await axios.get(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+    return ((r.data && r.data.data) || {}).status || "";
+  } catch (e) {
+    throw apiError("Gameflip listing status", e);
+  }
 }
 
 async function gameflipDelist(listingId) {
@@ -728,6 +773,7 @@ module.exports = {
   keyStatus,
   gameflipTest,
   gameflipPublish,
+  gameflipListingStatus,
   gameflipDelist,
   digisellerTest,
   digisellerCategories,

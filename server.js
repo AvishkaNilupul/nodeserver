@@ -35,6 +35,7 @@ const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
 const backup = require("./utils/backup");
+const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
 const {
@@ -413,6 +414,9 @@ mongoose
     // Schedule the daily full-site backup (DB + uploads + config). Wrapped
     // internally so a backup failure can never crash the server.
     backup.start();
+    // Watch live Gameflip auto-delivery listings: mark sales and relist the
+    // next unit of multi-quantity chains. No-op without Gameflip listings.
+    gameflipFulfiller.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

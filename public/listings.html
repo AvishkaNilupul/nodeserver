@@ -955,6 +955,28 @@
         <label for="mpPubPrice">Price (USD)</label>
         <input type="number" id="mpPubPrice" min="0" step="0.01" />
 
+        <div id="mpGfBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">Gameflip delivery</b>
+            <label class="mp-check" style="margin-top: 6px">
+              <input type="checkbox" id="mpGfAuto" checked />
+              Auto-deliver farmed accounts
+            </label>
+            <label for="mpGfQty" style="margin-top: 6px">Quantity to sell</label>
+            <input type="number" id="mpGfQty" min="1" max="100" step="1" value="1" />
+            <div class="mp-hint">
+              Each unit is one in-stock account (login + password + connect
+              guide) attached as an auto-delivered digital code — Gameflip
+              sends it to the buyer the moment they pay, no manual fulfilment.
+              Gameflip listings have no stock count, so quantities above 1
+              are sold one at a time: when a unit sells, the site
+              automatically relists the next one with a fresh account until
+              the quantity is sold or you run out of stock. Accounts are
+              reserved while a listing is live and released if you delist.
+            </div>
+          </div>
+        </div>
+
         <div id="mpDsBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">Plati / GGsell placement</b>
@@ -1805,6 +1827,14 @@
                   " ($" +
                   (Number(r.price) || 0) +
                   ")" +
+                  (r.status === "sold"
+                    ? ' <span style="color:#4caf7d;font-weight:600">SOLD</span>'
+                    : "") +
+                  (r.autoDeliver && r.qtyRemaining > 0
+                    ? ' <span class="mp-hint" style="display:inline">· ' +
+                      r.qtyRemaining +
+                      " more queued</span>"
+                    : "") +
                   (r.note
                     ? '<div class="mp-hint">' + esc(r.note) + "</div>"
                     : "") +
@@ -1815,9 +1845,12 @@
                       attr(r.id) +
                       '">Add stock</button> '
                     : "") +
-                  '<button class="btn danger" data-mpdelist="' +
-                  attr(r.id) +
-                  '">Delist</button></span>' +
+                  (r.status === "sold"
+                    ? ""
+                    : '<button class="btn danger" data-mpdelist="' +
+                      attr(r.id) +
+                      '">Delist</button>') +
+                  "</span>" +
                   "</div>"
                 );
               })
@@ -1834,6 +1867,7 @@
         $("mpPubPrice").value = Number(set.price) || "";
         $("mpG2gBox").style.display = "none";
         $("mpDsBox").style.display = "none";
+        $("mpGfBox").style.display = "none";
         $("mpDsAttrs").innerHTML = "";
         $("mpG2gAttrs").innerHTML = "";
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
@@ -1842,7 +1876,12 @@
         p.then(renderPubTargets).catch(function () {
           renderPubTargets();
         });
-        loadExtListings(set.id);
+        // Refresh sold status of auto-delivery listings, then show the list.
+        api("/marketplaces/sync", { method: "POST", body: {} })
+          .catch(function () {})
+          .then(function () {
+            loadExtListings(set.id);
+          });
       }
 
       $("mpPubClose").addEventListener("click", function () {
@@ -1857,6 +1896,10 @@
         if (t) {
           $("mpG2gBox").style.display = t.checked ? "block" : "none";
           if (t.checked && !g2gLoaded) loadG2gServices();
+        }
+        var gf = e.target.closest('[data-mptarget="gameflip"]');
+        if (gf) {
+          $("mpGfBox").style.display = gf.checked ? "block" : "none";
         }
         var d = e.target.closest('[data-mptarget="digiseller"]');
         if (d) {
@@ -2263,6 +2306,11 @@
         if (!(body.price > 0)) {
           toast("Enter a price in USD");
           return;
+        }
+        if (targets.indexOf("gameflip") !== -1) {
+          var gfQty = parseInt($("mpGfQty").value, 10);
+          if (!(gfQty >= 1)) gfQty = 1;
+          body.gameflip = { autoDeliver: $("mpGfAuto").checked, qty: gfQty };
         }
         if (targets.indexOf("digiseller") !== -1) {
           if (!dsSelected) {

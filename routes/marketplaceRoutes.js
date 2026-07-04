@@ -6,6 +6,7 @@ const express = require("express");
 const { requireSuperadmin } = require("../middleware/auth");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const gfFulfiller = require("../utils/gameflipFulfiller");
 const mp = require("../utils/marketplaces");
 const { buildSetGridImage } = require("../utils/setImage");
 
@@ -212,6 +213,28 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
       try {
         let r;
         if (name === "gameflip") {
+          const gfOpts = body.gameflip || {};
+          if (gfOpts.autoDeliver) {
+            // Auto-delivery chain: one live listing per unit, relisted by the
+            // background watcher after each sale until qty is sold.
+            const qty = Math.max(1, parseInt(gfOpts.qty, 10) || 1);
+            const doc = await gfFulfiller.publishAutoDelivery({
+              set,
+              title,
+              description,
+              priceUsd,
+              imagePath: gridImage || coverImagePath(set),
+              qtyRemaining: qty - 1,
+            });
+            results[name] = {
+              success: true,
+              id: String(doc._id),
+              externalId: doc.externalId,
+              url: doc.url || "",
+              note: doc.note || "",
+            };
+            continue;
+          }
           r = await mp.gameflipPublish({
             title,
             description,
@@ -249,6 +272,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           externalId: r.externalId,
           url: r.url || "",
           title,
+          description,
           price: priceUsd,
           status: "active",
           note: r.note || "",
@@ -296,6 +320,8 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
         status: r.status,
         note: r.note,
         lastError: r.lastError,
+        autoDeliver: !!r.autoDeliver,
+        qtyRemaining: Number(r.qtyRemaining) || 0,
         createdAt: r.createdAt,
       })),
     });
@@ -333,6 +359,10 @@ router.delete(
       row.status = "delisted";
       row.lastError = "";
       await row.save();
+      // A delisted auto-delivery listing frees its reserved account.
+      if (row.autoDeliver && row.accountId) {
+        await gfFulfiller.releaseAccount(row.accountId);
+      }
       res.json({ success: true });
     } catch (err) {
       console.error("marketplace delist error:", err.message);
@@ -340,6 +370,20 @@ router.delete(
     }
   },
 );
+
+// Check every live Gameflip auto-delivery listing against Gameflip, mark the
+// ones that sold and relist the next unit of any chain with quantity left.
+// (The background watcher does the same every minute; this makes the admin
+// page reflect sales immediately.)
+router.post("/marketplaces/sync", requireSuperadmin, async (req, res) => {
+  try {
+    const r = await gfFulfiller.syncOnce();
+    res.json({ success: true, ...r });
+  } catch (err) {
+    console.error("marketplace sync error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 // Push delivery content (account credential lines) to a Digiseller product so
 // it becomes sellable/auto-deliverable.

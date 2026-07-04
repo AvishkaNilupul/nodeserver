@@ -581,3 +581,6 @@ router.get("/shop/purchases/:id", requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+// Also used by the marketplace publisher to pick an account that can fulfil a
+// whole bundle (Gameflip auto-delivery).
+module.exports.availableAccountsForSet = availableAccountsForSet;
