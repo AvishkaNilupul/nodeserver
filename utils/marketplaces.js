@@ -650,6 +650,7 @@ async function g2gPublish({
     unit_price: price,
     min_qty: Number(minQty) || 1,
     api_qty: Number(qty) || 1,
+    low_stock_alert_qty: 0,
   };
   if (Array.isArray(offerAttributes) && offerAttributes.length) {
     body.offer_attributes = offerAttributes;

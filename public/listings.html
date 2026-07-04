@@ -2070,16 +2070,16 @@
         return list.map(function (r) {
           return {
             id:
-              r.service_id ||
-              r.brand_id ||
               r.product_id ||
+              r.brand_id ||
+              r.service_id ||
               r.category_id ||
               r.id ||
               "",
             label:
-              r.service_name ||
-              r.brand_name ||
               r.product_name ||
+              r.brand_name ||
+              r.service_name ||
               r.category_name ||
               r.name ||
               r.title ||
