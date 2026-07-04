@@ -966,6 +966,13 @@
             <label>Category</label>
             <select id="mpG2gCategory"><option value="">Pick a service first</option></select>
             <label>Brand / game</label>
+            <input
+              type="text"
+              id="mpG2gBrandFilter"
+              placeholder="Type to search games…"
+              autocomplete="off"
+              style="margin-bottom: 6px"
+            />
             <select id="mpG2gBrand"><option value="">Pick a service first</option></select>
             <label>Product</label>
             <select id="mpG2gProduct"><option value="">Pick a brand first</option></select>
@@ -1904,15 +1911,45 @@
           cats,
           cats.length ? "Pick a category…" : "(no categories)",
         );
+        g2gBrandRows = [];
+        $("mpG2gBrandFilter").value = "";
         api("/marketplaces/g2g/brands?serviceId=" + encodeURIComponent(sid))
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "G2G error");
-            fillSelect($("mpG2gBrand"), g2gRows(j.data), "Pick a brand…");
+            g2gBrandRows = g2gRows(j.data);
+            renderG2gBrands();
           })
           .catch(function (e) {
             toast("G2G: " + e.message);
           });
       });
+
+      // The brand list can be hundreds of games long, so a text box filters it.
+      var g2gBrandRows = [];
+      function renderG2gBrands() {
+        var q = $("mpG2gBrandFilter").value.trim().toLowerCase();
+        var rows = q
+          ? g2gBrandRows.filter(function (r) {
+              return String(r.label).toLowerCase().indexOf(q) !== -1;
+            })
+          : g2gBrandRows;
+        var keep = $("mpG2gBrand").value;
+        fillSelect(
+          $("mpG2gBrand"),
+          rows,
+          rows.length
+            ? "Pick a brand… (" + rows.length + ")"
+            : "No games match “" + $("mpG2gBrandFilter").value.trim() + "”",
+        );
+        // Keep the current pick selected if it survived the filter.
+        if (keep) $("mpG2gBrand").value = keep;
+        // A single match is almost always the one they want.
+        if (q && rows.length === 1) {
+          $("mpG2gBrand").value = rows[0].id;
+          $("mpG2gBrand").dispatchEvent(new Event("change"));
+        }
+      }
+      $("mpG2gBrandFilter").addEventListener("input", renderG2gBrands);
 
       $("mpG2gBrand").addEventListener("change", function () {
         var sid = $("mpG2gService").value;
