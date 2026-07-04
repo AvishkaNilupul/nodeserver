@@ -399,7 +399,10 @@ const G2G_API = "https://open-api.g2g.com";
 
 function g2gHeaders(keys, urlPath) {
   const timestamp = String(Date.now());
-  const canonical = urlPath + keys.apiKey + keys.userId + timestamp;
+  // The signature is computed over the URL *path* only — never the query
+  // string (per G2G's official Postman collection).
+  const pathOnly = urlPath.split("?")[0];
+  const canonical = pathOnly + keys.apiKey + keys.userId + timestamp;
   const signature = crypto
     .createHmac("sha256", keys.apiSecret)
     .update(canonical)
@@ -462,8 +465,6 @@ function g2gAttributes(productId) {
 // supply productId (+ any required attributes picked from g2gAttributes).
 async function g2gPublish({
   productId,
-  title,
-  description,
   priceUsd,
   qty,
   minQty,
@@ -476,14 +477,13 @@ async function g2gPublish({
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("G2G needs a price above 0");
   }
+  // Field set mirrors G2G's official OpenAPI sample: offers derive their
+  // title/description from the catalog product, so only pricing/stock is sent.
   const body = {
     product_id: String(productId),
-    title: String(title || "").slice(0, 200) || undefined,
-    description: String(description || "").slice(0, 3000) || undefined,
     currency: currency || "USD",
     unit_price: price,
     min_qty: Number(minQty) || 1,
-    qty: Number(qty) || 1,
     api_qty: Number(qty) || 1,
   };
   if (Array.isArray(offerAttributes) && offerAttributes.length) {

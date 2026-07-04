@@ -963,6 +963,8 @@
             </div>
             <label>Service</label>
             <select id="mpG2gService"><option value="">Loading…</option></select>
+            <label>Category</label>
+            <select id="mpG2gCategory"><option value="">Pick a service first</option></select>
             <label>Brand / game</label>
             <select id="mpG2gBrand"><option value="">Pick a service first</option></select>
             <label>Product</label>
@@ -1822,11 +1824,23 @@
             .join("");
       }
 
-      // G2G payloads vary a bit; pull id + best-guess label generically.
+      // G2G payloads vary a bit (service_list / brand_list / results / …);
+      // find the first array in the payload and pull id + best-guess label.
+      function g2gFirstArray(payload) {
+        if (Array.isArray(payload)) return payload;
+        if (!payload || typeof payload !== "object") return [];
+        var direct =
+          payload.results || payload.list || payload.items || null;
+        if (Array.isArray(direct)) return direct;
+        var keys = Object.keys(payload);
+        for (var k = 0; k < keys.length; k++) {
+          if (Array.isArray(payload[keys[k]])) return payload[keys[k]];
+        }
+        return [];
+      }
       function g2gRows(data) {
         var payload = (data && (data.payload || data.data)) || data || {};
-        var list =
-          payload.results || payload.list || payload.items || payload || [];
+        var list = g2gFirstArray(payload);
         if (!Array.isArray(list)) return [];
         return list.map(function (r) {
           return {
@@ -1850,12 +1864,14 @@
         });
       }
 
+      var g2gServiceRows = [];
       function loadG2gServices() {
         g2gLoaded = true;
         api("/marketplaces/g2g/services")
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "G2G error");
-            fillSelect($("mpG2gService"), g2gRows(j.data), "Pick a service…");
+            g2gServiceRows = g2gRows(j.data);
+            fillSelect($("mpG2gService"), g2gServiceRows, "Pick a service…");
           })
           .catch(function (e) {
             toast("G2G: " + e.message);
@@ -1864,11 +1880,30 @@
 
       $("mpG2gService").addEventListener("change", function () {
         var sid = this.value;
+        $("mpG2gCategory").innerHTML =
+          '<option value="">Pick a service first</option>';
         $("mpG2gBrand").innerHTML = '<option value="">Loading…</option>';
         $("mpG2gProduct").innerHTML =
           '<option value="">Pick a brand first</option>';
         $("mpG2gAttrs").innerHTML = "";
         if (!sid) return;
+        // Categories come embedded in the service row itself.
+        var row = g2gServiceRows.filter(function (r) {
+          return String(r.id) === String(sid);
+        })[0];
+        var cats = ((row && row.raw && row.raw.categories) || []).map(
+          function (c) {
+            return {
+              id: c.category_id || c.id || "",
+              label: c.category_name || c.name || String(c.category_id || ""),
+            };
+          },
+        );
+        fillSelect(
+          $("mpG2gCategory"),
+          cats,
+          cats.length ? "Pick a category…" : "(no categories)",
+        );
         api("/marketplaces/g2g/brands?serviceId=" + encodeURIComponent(sid))
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "G2G error");
@@ -1882,6 +1917,7 @@
       $("mpG2gBrand").addEventListener("change", function () {
         var sid = $("mpG2gService").value;
         var bid = this.value;
+        var cid = $("mpG2gCategory").value;
         $("mpG2gProduct").innerHTML = '<option value="">Loading…</option>';
         $("mpG2gAttrs").innerHTML = "";
         if (!sid || !bid) return;
@@ -1889,7 +1925,8 @@
           "/marketplaces/g2g/products?serviceId=" +
             encodeURIComponent(sid) +
             "&brandId=" +
-            encodeURIComponent(bid),
+            encodeURIComponent(bid) +
+            (cid ? "&categoryId=" + encodeURIComponent(cid) : ""),
         )
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "G2G error");
@@ -1908,17 +1945,14 @@
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "G2G error");
             var payload = (j.data && (j.data.payload || j.data.data)) || {};
-            var groups =
-              payload.attribute_groups ||
-              payload.results ||
-              payload.list ||
-              [];
+            var groups = payload.attribute_groups || g2gFirstArray(payload);
             if (!Array.isArray(groups) || !groups.length) return;
             $("mpG2gAttrs").innerHTML = groups
               .map(function (g) {
-                var gid = g.attribute_group_id || g.id || "";
-                var gname = g.attribute_group_name || g.name || "Attribute";
-                var opts = (g.attributes || g.children || [])
+                var gid = g.attribute_group_id || g.attribute_group || g.id || "";
+                var gname =
+                  g.attribute_group_name || g.group_name || g.name || "Attribute";
+                var opts = (g.attributes || g.attribute_list || g.children || [])
                   .map(function (a) {
                     return (
                       '<option value="' +
