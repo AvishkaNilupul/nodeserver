@@ -1,6 +1,7 @@
-// Composes a numbered grid image from a drop set's item images (like the
+// Composes a grid cover image from a drop set's item images (like the
 // hand-made collages used on marketplace listings), so published listings get
-// a proper cover photo automatically.
+// a proper cover photo automatically: white rounded cards on a vivid purple
+// background.
 const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
@@ -11,16 +12,11 @@ const sharp = require("sharp");
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 const CELL = 300; // full cell incl. padding
-const PAD = 14; // gap around each tile
+const PAD = 16; // gap around each tile
 const TILE = CELL - PAD * 2;
-const IMG = TILE - 24; // image inside the tile
+const IMG = TILE - 40; // image inside the tile
 const MAX_ITEMS = 36;
-const BG = "#14161c";
-const TILE_BG = "#23262f";
-
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";");
-}
+const BADGE = "#7c3aed";
 
 // Resolve an item's image to a Buffer: local cached file when possible,
 // otherwise a (best-effort) download of the remote URL.
@@ -63,26 +59,84 @@ async function buildSetGridImage(set) {
   const width = cols * CELL;
   const height = rows * CELL;
 
-  // Base layer: dark canvas + rounded tiles. Badge layer (numbers) is a
-  // separate transparent SVG composited last so it sits on top of the images.
   const open =
     '<svg xmlns="http://www.w3.org/2000/svg" width="' +
     width +
     '" height="' +
     height +
     '">';
+
+  // Base layer: vivid purple gradient with soft diagonal light streaks, plus
+  // white rounded cards. Badge layer (numbers) is a separate transparent SVG
+  // composited last so it sits on top of the images.
   let baseSvg =
-    open + '<rect width="100%" height="100%" fill="' + esc(BG) + '"/>';
+    open +
+    "<defs>" +
+    '<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">' +
+    '<stop offset="0" stop-color="#a855f7"/>' +
+    '<stop offset="0.5" stop-color="#8b5cf6"/>' +
+    '<stop offset="1" stop-color="#6d28d9"/>' +
+    "</linearGradient>" +
+    '<linearGradient id="streak" x1="0" y1="0" x2="1" y2="1">' +
+    '<stop offset="0" stop-color="rgba(255,255,255,0.16)"/>' +
+    '<stop offset="1" stop-color="rgba(255,255,255,0)"/>' +
+    "</linearGradient>" +
+    "</defs>" +
+    '<rect width="100%" height="100%" fill="url(#bg)"/>' +
+    '<polygon points="0,0 ' +
+    Math.round(width * 0.55) +
+    ",0 0," +
+    Math.round(height * 0.55) +
+    '" fill="url(#streak)"/>' +
+    '<polygon points="' +
+    width +
+    "," +
+    height +
+    " " +
+    Math.round(width * 0.45) +
+    "," +
+    height +
+    " " +
+    width +
+    "," +
+    Math.round(height * 0.45) +
+    '" fill="rgba(0,0,0,0.10)"/>';
   let badgeSvgStr = open;
   for (let i = 0; i < n; i++) {
     const x = (i % cols) * CELL + PAD;
     const y = Math.floor(i / cols) * CELL + PAD;
     baseSvg +=
-      '<rect x="' + x + '" y="' + y + '" width="' + TILE + '" height="' +
-      TILE + '" rx="16" fill="' + esc(TILE_BG) + '"/>';
+      '<rect x="' +
+      (x + 3) +
+      '" y="' +
+      (y + 6) +
+      '" width="' +
+      TILE +
+      '" height="' +
+      TILE +
+      '" rx="24" fill="rgba(0,0,0,0.18)"/>' +
+      '<rect x="' +
+      x +
+      '" y="' +
+      y +
+      '" width="' +
+      TILE +
+      '" height="' +
+      TILE +
+      '" rx="24" fill="#ffffff"/>';
     badgeSvgStr +=
-      '<rect x="' + (x + 8) + '" y="' + (y + 8) + '" width="44" height="34" rx="8" fill="rgba(0,0,0,0.65)"/>' +
-      '<text x="' + (x + 30) + '" y="' + (y + 33) + '" font-family="Arial, sans-serif" font-size="22" font-weight="bold" fill="#ffffff" text-anchor="middle">' +
+      '<rect x="' +
+      (x + 12) +
+      '" y="' +
+      (y + 12) +
+      '" width="46" height="32" rx="16" fill="' +
+      BADGE +
+      '"/>' +
+      '<text x="' +
+      (x + 35) +
+      '" y="' +
+      (y + 35) +
+      '" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">' +
       (i + 1) +
       "</text>";
   }
@@ -95,7 +149,10 @@ async function buildSetGridImage(set) {
     const cy = Math.floor(i / cols) * CELL;
     try {
       const resized = await sharp(buffers[i])
-        .resize(IMG, IMG, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .resize(IMG, IMG, {
+          fit: "contain",
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
         .png()
         .toBuffer();
       composites.push({
@@ -111,7 +168,11 @@ async function buildSetGridImage(set) {
 
   const out = path.join(
     os.tmpdir(),
-    "set-grid-" + Date.now() + "-" + Math.random().toString(36).slice(2) + ".png",
+    "set-grid-" +
+      Date.now() +
+      "-" +
+      Math.random().toString(36).slice(2) +
+      ".png",
   );
   await sharp(Buffer.from(baseSvg, "utf8"))
     .composite(
