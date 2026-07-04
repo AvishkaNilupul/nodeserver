@@ -140,6 +140,9 @@ async function gfUploadPhoto(keys, listingId, imagePath) {
     GF_API + "/listing/" + listingId,
     [
       { op: "replace", path: "/photo/" + photoId + "/status", value: "active" },
+      // display_order puts the photo in the listing's gallery — without it the
+      // image only shows as the search thumbnail, not on the listing page.
+      { op: "replace", path: "/photo/" + photoId + "/display_order", value: 0 },
       { op: "replace", path: "/cover_photo", value: photoId },
     ],
     {
