@@ -217,7 +217,10 @@ async function gameflipPublish({ title, description, priceUsd, imagePath }) {
       e,
     );
   }
-  return { externalId: listingId, url: "https://gameflip.com/item/" + listingId };
+  return {
+    externalId: listingId,
+    url: "https://gameflip.com/item/" + listingId,
+  };
 }
 
 async function gameflipDelist(listingId) {
@@ -328,22 +331,39 @@ function dsLocales(value) {
 async function digisellerCategories(rootCategoryId) {
   const token = await digisellerToken();
   try {
-    let url =
-      DS_API +
-      "/cataloguer/categories?page=1&count=999&token=" +
-      encodeURIComponent(token);
-    if (rootCategoryId) {
-      url += "&rootCategoryId=" + encodeURIComponent(rootCategoryId);
+    const COUNT = 500;
+    const all = [];
+    const seen = new Set();
+    for (let page = 1; page <= 40; page++) {
+      let url =
+        DS_API +
+        "/cataloguer/categories?page=" +
+        page +
+        "&count=" +
+        COUNT +
+        "&token=" +
+        encodeURIComponent(token);
+      if (rootCategoryId) {
+        url += "&rootCategoryId=" + encodeURIComponent(rootCategoryId);
+      }
+      const r = await axios.get(url, {
+        headers: { Accept: "application/json" },
+        timeout: 20000,
+      });
+      const d = r.data || {};
+      if (d.retval !== undefined && String(d.retval) !== "0") {
+        throw new Error(dsErrorText(d));
+      }
+      const rows = d.content || [];
+      for (const row of rows) {
+        const id = String(row.category_id);
+        if (seen.has(id) || id === String(rootCategoryId || "")) continue;
+        seen.add(id);
+        all.push(row);
+      }
+      if (rows.length < COUNT) break;
     }
-    const r = await axios.get(url, {
-      headers: { Accept: "application/json" },
-      timeout: 20000,
-    });
-    const d = r.data || {};
-    if (d.retval !== undefined && String(d.retval) !== "0") {
-      throw new Error(dsErrorText(d));
-    }
-    return d.content || [];
+    return all;
   } catch (e) {
     throw apiError("Digiseller categories", e);
   }
@@ -427,7 +447,9 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
       d.product_id ||
       d.id;
     if (!productId) {
-      throw new Error("no product id in response: " + JSON.stringify(d).slice(0, 300));
+      throw new Error(
+        "no product id in response: " + JSON.stringify(d).slice(0, 300),
+      );
     }
     return {
       externalId: String(productId),
