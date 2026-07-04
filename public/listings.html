@@ -955,6 +955,25 @@
         <label for="mpPubPrice">Price (USD)</label>
         <input type="number" id="mpPubPrice" min="0" step="0.01" />
 
+        <div id="mpDsBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">Plati / GGsell placement</b>
+            <div class="mp-hint">
+              Pick which marketplace catalog category the product goes in
+              (e.g. Digital Goods → Game Accounts → Twitch drops Accounts).
+            </div>
+            <label>Catalog category</label>
+            <input
+              type="text"
+              id="mpDsCatFilter"
+              placeholder="Type to search categories…"
+              autocomplete="off"
+              style="margin-bottom: 6px"
+            />
+            <select id="mpDsCategory"><option value="">Loading…</option></select>
+          </div>
+        </div>
+
         <div id="mpG2gBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">G2G offer details</b>
@@ -998,6 +1017,28 @@
         <div class="mp-actions">
           <button class="btn ghost" id="mpPubClose">Close</button>
           <button class="btn primary" id="mpPubGo">Publish</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="mp-overlay" id="mpStockOverlay">
+      <div class="mp-modal">
+        <h3>Add stock (auto-delivery)</h3>
+        <div class="mp-hint">
+          One account per line (user:pass). Each sale automatically delivers the
+          next unused account, wrapped in the delivery message below.
+        </div>
+        <label for="mpStockAccounts">Accounts (one per line)</label>
+        <textarea
+          id="mpStockAccounts"
+          rows="6"
+          placeholder="username:password&#10;username:password"
+        ></textarea>
+        <label for="mpStockTemplate">Delivery message ({account} = the account line)</label>
+        <textarea id="mpStockTemplate" rows="8"></textarea>
+        <div class="mp-actions">
+          <button class="btn ghost" id="mpStockClose">Cancel</button>
+          <button class="btn primary" id="mpStockGo">Add stock</button>
         </div>
       </div>
     </div>
@@ -1790,6 +1831,7 @@
         $("mpPubDesc").value = mpBuildDescription(set);
         $("mpPubPrice").value = Number(set.price) || "";
         $("mpG2gBox").style.display = "none";
+        $("mpDsBox").style.display = "none";
         $("mpG2gAttrs").innerHTML = "";
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
         $("mpPubOverlay").classList.add("open");
@@ -1804,14 +1846,82 @@
         $("mpPubOverlay").classList.remove("open");
       });
 
-      // Show G2G catalog picker only when G2G is ticked.
+      // Show G2G / Plati pickers only when those marketplaces are ticked.
       var g2gLoaded = false;
+      var dsCatsLoaded = false;
       $("mpPubTargets").addEventListener("change", function (e) {
         var t = e.target.closest('[data-mptarget="g2g"]');
-        if (!t) return;
-        $("mpG2gBox").style.display = t.checked ? "block" : "none";
-        if (t.checked && !g2gLoaded) loadG2gServices();
+        if (t) {
+          $("mpG2gBox").style.display = t.checked ? "block" : "none";
+          if (t.checked && !g2gLoaded) loadG2gServices();
+        }
+        var d = e.target.closest('[data-mptarget="digiseller"]');
+        if (d) {
+          $("mpDsBox").style.display = d.checked ? "block" : "none";
+          if (d.checked && !dsCatsLoaded) loadDsCategories();
+        }
       });
+
+      // Plati catalog tree, flattened so the whole path is visible per option
+      // (e.g. "Digital Goods → Game Accounts → Twitch drops Accounts").
+      var dsCatRows = [];
+      function dsFlatten(nodes, path, out) {
+        (nodes || []).forEach(function (n) {
+          var name =
+            (Array.isArray(n.name)
+              ? (n.name.filter(function (l) {
+                  return l.locale === "en-US";
+                })[0] || n.name[0] || {}).value
+              : n.name) || String(n.id);
+          var full = path ? path + " → " + name : name;
+          out.push({ id: n.id, label: full, canAdd: n.can_add !== false });
+          dsFlatten(n.children, full, out);
+        });
+        return out;
+      }
+      function loadDsCategories() {
+        dsCatsLoaded = true;
+        api("/marketplaces/digiseller/categories?platform=plati")
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "Digiseller error");
+            dsCatRows = dsFlatten(j.data, "", []);
+            renderDsCategories();
+          })
+          .catch(function (e) {
+            dsCatsLoaded = false;
+            toast("Plati: " + e.message);
+          });
+      }
+      function renderDsCategories() {
+        var q = $("mpDsCatFilter").value.trim().toLowerCase();
+        var rows = q
+          ? dsCatRows.filter(function (r) {
+              return r.label.toLowerCase().indexOf(q) !== -1;
+            })
+          : dsCatRows;
+        var keep = $("mpDsCategory").value;
+        $("mpDsCategory").innerHTML =
+          '<option value="">' +
+          esc(
+            rows.length ? "Pick a category… (" + rows.length + ")" : "No match",
+          ) +
+          "</option>" +
+          rows
+            .map(function (r) {
+              return (
+                '<option value="' +
+                attr(r.id) +
+                '"' +
+                (r.canAdd ? "" : " disabled") +
+                ">" +
+                esc(r.label) +
+                "</option>"
+              );
+            })
+            .join("");
+        if (keep) $("mpDsCategory").value = keep;
+      }
+      $("mpDsCatFilter").addEventListener("input", renderDsCategories);
 
       function fillSelect(sel, items, placeholder) {
         sel.innerHTML =
@@ -2045,6 +2155,16 @@
           toast("Enter a price in USD");
           return;
         }
+        if (targets.indexOf("digiseller") !== -1) {
+          var dsCat = $("mpDsCategory").value;
+          if (!dsCat) {
+            toast("Pick a Plati catalog category first");
+            return;
+          }
+          body.digiseller = {
+            categories: [{ owner: 1, categoryId: dsCat }],
+          };
+        }
         if (targets.indexOf("g2g") !== -1) {
           var pid = $("mpG2gProduct").value;
           if (!pid) {
@@ -2111,25 +2231,63 @@
               dl.disabled = false;
             });
         } else if (st) {
-          var lines = prompt(
-            "Paste delivery content — one unit per line (each sale delivers one line):",
-          );
-          if (!lines) return;
-          api("/marketplaces/listings/" + st.dataset.mpstock + "/content", {
-            method: "POST",
-            body: { lines: lines },
-          })
-            .then(function (j) {
-              toast(
-                j.success
-                  ? "Added " + j.added + " unit(s) of stock"
-                  : j.message || "Failed",
-              );
-            })
-            .catch(function (err) {
-              toast(err.message || "Failed");
-            });
+          mpStockListingId = st.dataset.mpstock;
+          $("mpStockAccounts").value = "";
+          if (!$("mpStockTemplate").value.trim()) {
+            $("mpStockTemplate").value = MP_STOCK_TEMPLATE_DEFAULT;
+          }
+          $("mpStockOverlay").classList.add("open");
         }
+      });
+
+      // -- Digiseller stock feeder --
+      var mpStockListingId = "";
+      var MP_STOCK_TEMPLATE_DEFAULT =
+        "{account}\n\n" +
+        "1. Log in to the received Twitch account, then go to " +
+        "https://www.twitch.tv/drops/inventory and scroll to the bottom of " +
+        'the page, to the "Received" section.\n\n' +
+        '2. Click on the purple "Connect" button, which is located below ' +
+        "the item you want to add to your account.\n\n" +
+        "3. Connect the account by following the instructions shown on the " +
+        "site where the connection is made.";
+
+      $("mpStockClose").addEventListener("click", function () {
+        $("mpStockOverlay").classList.remove("open");
+      });
+
+      $("mpStockGo").addEventListener("click", function () {
+        if (!mpStockListingId) return;
+        var accounts = $("mpStockAccounts").value.trim();
+        if (!accounts) {
+          toast("Paste at least one account line");
+          return;
+        }
+        var btn = $("mpStockGo");
+        btn.disabled = true;
+        btn.textContent = "Adding…";
+        api("/marketplaces/listings/" + mpStockListingId + "/content", {
+          method: "POST",
+          body: {
+            accounts: accounts,
+            template: $("mpStockTemplate").value,
+          },
+        })
+          .then(function (j) {
+            toast(
+              j.success
+                ? "Added " + j.added + " unit(s) of stock"
+                : j.message || "Failed",
+            );
+            if (j.success) $("mpStockOverlay").classList.remove("open");
+          })
+          .catch(function (err) {
+            toast(err.message || "Failed");
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = "Add stock";
+          });
       });
 
       // ---- me / logout ----

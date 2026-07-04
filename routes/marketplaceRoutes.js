@@ -54,6 +54,43 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
 });
 
 // ------------------------------------------------------------------
+// Digiseller marketplace catalog (for placing products on Plati / GGsell)
+// ------------------------------------------------------------------
+router.get(
+  "/marketplaces/digiseller/categories",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const platform = String(req.query.platform || "plati");
+      if (!["plati", "ggsel", "wmcentre"].includes(platform)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Unknown platform" });
+      }
+      res.json({ success: true, data: await mp.digisellerCategories(platform) });
+    } catch (err) {
+      res.json({ success: false, message: err.message });
+    }
+  },
+);
+
+router.get(
+  "/marketplaces/digiseller/subcategories",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.query.id || "");
+      if (!id) {
+        return res.status(400).json({ success: false, message: "id required" });
+      }
+      res.json({ success: true, data: await mp.digisellerSubcategories(id) });
+    } catch (err) {
+      res.json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
 // G2G catalog browsing (service -> brand -> product -> attributes)
 // ------------------------------------------------------------------
 router.get("/marketplaces/g2g/services", requireSuperadmin, async (req, res) => {
@@ -182,7 +219,13 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             imagePath: gridImage || coverImagePath(set),
           });
         } else if (name === "digiseller") {
-          r = await mp.digisellerPublish({ title, description, priceUsd });
+          const ds = body.digiseller || {};
+          r = await mp.digisellerPublish({
+            title,
+            description,
+            priceUsd,
+            categories: ds.categories,
+          });
         } else if (name === "g2g") {
           const g = body.g2g || {};
           r = await mp.g2gPublish({
@@ -317,10 +360,27 @@ router.post(
           message: "Content upload is only for Digiseller products",
         });
       }
-      const lines = String((req.body || {}).lines || "")
-        .split(/\r?\n/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const body = req.body || {};
+      let lines;
+      if (body.accounts != null) {
+        // One delivery unit per account line; a template (with {account})
+        // wraps each one so buyers also get the redemption instructions.
+        const template = String(body.template || "{account}");
+        lines = String(body.accounts)
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((acc) =>
+            template.indexOf("{account}") !== -1
+              ? template.split("{account}").join(acc)
+              : acc + "\n\n" + template,
+          );
+      } else {
+        lines = String(body.lines || "")
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
       const r = await mp.digisellerAddContent(row.externalId, lines);
       res.json({ success: true, added: r.added });
     } catch (err) {

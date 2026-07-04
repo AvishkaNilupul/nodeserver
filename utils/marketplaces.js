@@ -312,17 +312,66 @@ function dsLocales(value) {
   ];
 }
 
+// Marketplace catalog tree (no auth needed). platform: 'plati' | 'ggsel'.
+async function digisellerCategories(platform) {
+  try {
+    const r = await axios.get(
+      DS_API +
+        "/dictionary/platforms/categories/" +
+        encodeURIComponent(platform),
+      { headers: { Accept: "application/json" }, timeout: 20000 },
+    );
+    const d = r.data || {};
+    if (d.retval !== undefined && String(d.retval) !== "0") {
+      throw new Error(dsErrorText(d));
+    }
+    return d.content || [];
+  } catch (e) {
+    throw apiError("Digiseller categories", e);
+  }
+}
+
+// Plati-only second level under a marketplace category.
+async function digisellerSubcategories(categoryId) {
+  try {
+    const r = await axios.get(
+      DS_API +
+        "/dictionary/platforms/subcategories/" +
+        encodeURIComponent(categoryId),
+      { headers: { Accept: "application/json" }, timeout: 20000 },
+    );
+    const d = r.data || {};
+    if (d.retval !== undefined && String(d.retval) !== "0") {
+      throw new Error(dsErrorText(d));
+    }
+    return d.content || [];
+  } catch (e) {
+    throw apiError("Digiseller subcategories", e);
+  }
+}
+
 async function digisellerTest() {
   await digisellerToken();
   return { ok: true, detail: "Token issued — connection OK" };
 }
 
 // Create a "unique product with fixed price". Returns { externalId, url }.
-async function digisellerPublish({ title, description, priceUsd }) {
+async function digisellerPublish({ title, description, priceUsd, categories }) {
   const token = await digisellerToken();
   const price = Math.round(Number(priceUsd) * 100) / 100;
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("Digiseller needs a price above 0");
+  }
+  // Digiseller rejects products that aren't placed in a marketplace catalog
+  // category (owner: 1 = Plati.Market, 3 = GGsell).
+  const cats = (Array.isArray(categories) ? categories : [])
+    .filter((c) => c && c.categoryId)
+    .map((c) => ({
+      owner: Number(c.owner),
+      cataloguer_category_id: Number(c.categoryId),
+    }));
+  if (!cats.length) {
+    throw new Error("Pick a Plati catalog category first");
   }
   try {
     const r = await axios.post(
@@ -332,6 +381,7 @@ async function digisellerPublish({ title, description, priceUsd }) {
         name: dsLocales(String(title).slice(0, 200)),
         price: { price, currency: "USD" },
         description: dsLocales(String(description || "").slice(0, 5000)),
+        categories: cats,
         address_required: false,
         guarantee: { enabled: true, value: 3 },
       },
@@ -533,6 +583,8 @@ module.exports = {
   gameflipPublish,
   gameflipDelist,
   digisellerTest,
+  digisellerCategories,
+  digisellerSubcategories,
   digisellerPublish,
   digisellerAddContent,
   digisellerDelist,
