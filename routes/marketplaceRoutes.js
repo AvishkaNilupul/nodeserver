@@ -61,13 +61,8 @@ router.get(
   requireSuperadmin,
   async (req, res) => {
     try {
-      const platform = String(req.query.platform || "plati");
-      if (!["plati", "ggsel", "wmcentre"].includes(platform)) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Unknown platform" });
-      }
-      res.json({ success: true, data: await mp.digisellerCategories(platform) });
+      const rootId = String(req.query.rootId || "");
+      res.json({ success: true, data: await mp.digisellerCategories(rootId) });
     } catch (err) {
       res.json({ success: false, message: err.message });
     }
@@ -75,15 +70,20 @@ router.get(
 );
 
 router.get(
-  "/marketplaces/digiseller/subcategories",
+  "/marketplaces/digiseller/attributes",
   requireSuperadmin,
   async (req, res) => {
     try {
-      const id = String(req.query.id || "");
+      const id = String(req.query.categoryId || "");
       if (!id) {
-        return res.status(400).json({ success: false, message: "id required" });
+        return res
+          .status(400)
+          .json({ success: false, message: "categoryId required" });
       }
-      res.json({ success: true, data: await mp.digisellerSubcategories(id) });
+      res.json({
+        success: true,
+        data: await mp.digisellerCategoryAttributes(id),
+      });
     } catch (err) {
       res.json({ success: false, message: err.message });
     }

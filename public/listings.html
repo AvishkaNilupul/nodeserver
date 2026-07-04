@@ -963,14 +963,16 @@
               (e.g. Digital Goods → Game Accounts → Twitch drops Accounts).
             </div>
             <label>Catalog category</label>
+            <div class="mp-hint" id="mpDsPath" style="margin-bottom: 4px"></div>
             <input
               type="text"
               id="mpDsCatFilter"
-              placeholder="Type to search categories…"
+              placeholder="Type to search this level…"
               autocomplete="off"
               style="margin-bottom: 6px"
             />
             <select id="mpDsCategory"><option value="">Loading…</option></select>
+            <div id="mpDsAttrs"></div>
           </div>
         </div>
 
@@ -1832,6 +1834,7 @@
         $("mpPubPrice").value = Number(set.price) || "";
         $("mpG2gBox").style.display = "none";
         $("mpDsBox").style.display = "none";
+        $("mpDsAttrs").innerHTML = "";
         $("mpG2gAttrs").innerHTML = "";
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
         $("mpPubOverlay").classList.add("open");
@@ -1858,70 +1861,175 @@
         var d = e.target.closest('[data-mptarget="digiseller"]');
         if (d) {
           $("mpDsBox").style.display = d.checked ? "block" : "none";
-          if (d.checked && !dsCatsLoaded) loadDsCategories();
+          if (d.checked && !dsCatsLoaded) {
+            dsStack = [];
+            dsSelected = null;
+            loadDsCategories("");
+          }
         }
       });
 
-      // Plati catalog tree, flattened so the whole path is visible per option
-      // (e.g. "Digital Goods → Game Accounts → Twitch drops Accounts").
-      var dsCatRows = [];
-      function dsFlatten(nodes, path, out) {
-        (nodes || []).forEach(function (n) {
-          var name =
-            (Array.isArray(n.name)
-              ? (n.name.filter(function (l) {
-                  return l.locale === "en-US";
-                })[0] || n.name[0] || {}).value
-              : n.name) || String(n.id);
-          var full = path ? path + " → " + name : name;
-          out.push({ id: n.id, label: full, canAdd: n.can_add !== false });
-          dsFlatten(n.children, full, out);
-        });
-        return out;
+      // Digiseller cataloguer drill-down: one level per request; picking a
+      // branch loads its children, picking a leaf selects it. dsStack holds
+      // the breadcrumb of entered branches.
+      var dsRows = [];
+      var dsStack = [];
+      var dsSelected = null; // { id, label }
+      function dsName(n) {
+        var name = n.name;
+        if (Array.isArray(name)) {
+          var en = name.filter(function (l) {
+            return l.locale === "en-US";
+          })[0];
+          name = (en || name[0] || {}).value;
+        }
+        return String(name || n.category_id || "");
       }
-      function loadDsCategories() {
+      function dsRenderPath() {
+        $("mpDsPath").textContent = dsSelected
+          ? "Selected: " +
+            dsStack
+              .map(function (s) {
+                return s.label;
+              })
+              .concat(dsSelected.label)
+              .join(" → ")
+          : dsStack.length
+            ? dsStack
+                .map(function (s) {
+                  return s.label;
+                })
+                .join(" → ") + " → …"
+            : "Top level — pick a section, then drill down to the exact category.";
+      }
+      function loadDsCategories(rootId) {
         dsCatsLoaded = true;
-        api("/marketplaces/digiseller/categories?platform=plati")
+        $("mpDsCategory").innerHTML = '<option value="">Loading…</option>';
+        api(
+          "/marketplaces/digiseller/categories" +
+            (rootId ? "?rootId=" + encodeURIComponent(rootId) : ""),
+        )
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "Digiseller error");
-            dsCatRows = dsFlatten(j.data, "", []);
+            dsRows = (j.data || []).map(function (n) {
+              return {
+                id: n.category_id,
+                label: dsName(n),
+                hasChildren: !!n.has_child_categories,
+              };
+            });
+            $("mpDsCatFilter").value = "";
             renderDsCategories();
+            dsRenderPath();
           })
           .catch(function (e) {
-            dsCatsLoaded = false;
+            if (!rootId) dsCatsLoaded = false;
             toast("Plati: " + e.message);
           });
       }
       function renderDsCategories() {
         var q = $("mpDsCatFilter").value.trim().toLowerCase();
         var rows = q
-          ? dsCatRows.filter(function (r) {
+          ? dsRows.filter(function (r) {
               return r.label.toLowerCase().indexOf(q) !== -1;
             })
-          : dsCatRows;
-        var keep = $("mpDsCategory").value;
+          : dsRows;
         $("mpDsCategory").innerHTML =
           '<option value="">' +
           esc(
             rows.length ? "Pick a category… (" + rows.length + ")" : "No match",
           ) +
           "</option>" +
+          (dsStack.length
+            ? '<option value="__back">⬅ Back to ' +
+              esc(
+                dsStack.length > 1
+                  ? dsStack[dsStack.length - 2].label
+                  : "top level",
+              ) +
+              "</option>"
+            : "") +
           rows
             .map(function (r) {
               return (
                 '<option value="' +
                 attr(r.id) +
-                '"' +
-                (r.canAdd ? "" : " disabled") +
-                ">" +
-                esc(r.label) +
+                '">' +
+                esc(r.label + (r.hasChildren ? " »" : "")) +
                 "</option>"
               );
             })
             .join("");
-        if (keep) $("mpDsCategory").value = keep;
       }
       $("mpDsCatFilter").addEventListener("input", renderDsCategories);
+      $("mpDsCategory").addEventListener("change", function () {
+        var v = this.value;
+        dsSelected = null;
+        $("mpDsAttrs").innerHTML = "";
+        if (!v) {
+          dsRenderPath();
+          return;
+        }
+        if (v === "__back") {
+          dsStack.pop();
+          loadDsCategories(
+            dsStack.length ? dsStack[dsStack.length - 1].id : "",
+          );
+          return;
+        }
+        var row = dsRows.filter(function (r) {
+          return String(r.id) === String(v);
+        })[0];
+        if (!row) return;
+        if (row.hasChildren) {
+          dsStack.push(row);
+          loadDsCategories(row.id);
+          return;
+        }
+        dsSelected = row;
+        dsRenderPath();
+        loadDsAttributes(row.id);
+      });
+      // Some categories require attributes (platform, region…) — show pickers.
+      function loadDsAttributes(categoryId) {
+        api(
+          "/marketplaces/digiseller/attributes?categoryId=" +
+            encodeURIComponent(categoryId),
+        )
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "error");
+            $("mpDsAttrs").innerHTML = (j.data || [])
+              .map(function (a) {
+                var opts = (a.values || [])
+                  .map(function (val) {
+                    return (
+                      '<option value="' +
+                      attr(val.attribute_value_id) +
+                      '">' +
+                      esc(dsName(val)) +
+                      "</option>"
+                    );
+                  })
+                  .join("");
+                return (
+                  "<label>" +
+                  esc(dsName(a)) +
+                  (a.is_necessary ? " *" : "") +
+                  '</label><select data-dsattr="' +
+                  attr(a.attribute_id) +
+                  '" data-dsrequired="' +
+                  (a.is_necessary ? "1" : "") +
+                  '"><option value="">—</option>' +
+                  opts +
+                  "</select>"
+                );
+              })
+              .join("");
+          })
+          .catch(function (e) {
+            toast("Plati attributes: " + e.message);
+          });
+      }
 
       function fillSelect(sel, items, placeholder) {
         sel.innerHTML =
@@ -2156,13 +2264,30 @@
           return;
         }
         if (targets.indexOf("digiseller") !== -1) {
-          var dsCat = $("mpDsCategory").value;
-          if (!dsCat) {
-            toast("Pick a Plati catalog category first");
+          if (!dsSelected) {
+            toast("Drill down to a Plati catalog category first");
+            return;
+          }
+          var dsAttrs = [];
+          var dsMissing = false;
+          document.querySelectorAll("[data-dsattr]").forEach(function (sel) {
+            if (sel.value) {
+              dsAttrs.push({
+                attributeId: sel.dataset.dsattr,
+                attributeValueId: sel.value,
+              });
+            } else if (sel.dataset.dsrequired) {
+              dsMissing = true;
+            }
+          });
+          if (dsMissing) {
+            toast("Fill the required (*) Plati category attributes");
             return;
           }
           body.digiseller = {
-            categories: [{ owner: 1, categoryId: dsCat }],
+            categories: [
+              { owner: 1, categoryId: dsSelected.id, attributes: dsAttrs },
+            ],
           };
         }
         if (targets.indexOf("g2g") !== -1) {

@@ -322,15 +322,23 @@ function dsLocales(value) {
   ];
 }
 
-// Marketplace catalog tree (no auth needed). platform: 'plati' | 'ggsel'.
-async function digisellerCategories(platform) {
+// Cataloguer categories — the authorized catalog whose IDs product/create
+// accepts (the public dictionary tree returns IDs create rejects). Drill down
+// one level at a time via rootCategoryId.
+async function digisellerCategories(rootCategoryId) {
+  const token = await digisellerToken();
   try {
-    const r = await axios.get(
+    let url =
       DS_API +
-        "/dictionary/platforms/categories/" +
-        encodeURIComponent(platform),
-      { headers: { Accept: "application/json" }, timeout: 20000 },
-    );
+      "/cataloguer/categories?page=1&count=999&token=" +
+      encodeURIComponent(token);
+    if (rootCategoryId) {
+      url += "&rootCategoryId=" + encodeURIComponent(rootCategoryId);
+    }
+    const r = await axios.get(url, {
+      headers: { Accept: "application/json" },
+      timeout: 20000,
+    });
     const d = r.data || {};
     if (d.retval !== undefined && String(d.retval) !== "0") {
       throw new Error(dsErrorText(d));
@@ -341,13 +349,16 @@ async function digisellerCategories(platform) {
   }
 }
 
-// Plati-only second level under a marketplace category.
-async function digisellerSubcategories(categoryId) {
+// Attributes (e.g. platform / region pickers) a cataloguer category may need.
+async function digisellerCategoryAttributes(categoryId) {
+  const token = await digisellerToken();
   try {
     const r = await axios.get(
       DS_API +
-        "/dictionary/platforms/subcategories/" +
-        encodeURIComponent(categoryId),
+        "/cataloguer/" +
+        encodeURIComponent(categoryId) +
+        "/attributes?token=" +
+        encodeURIComponent(token),
       { headers: { Accept: "application/json" }, timeout: 20000 },
     );
     const d = r.data || {};
@@ -356,7 +367,7 @@ async function digisellerSubcategories(categoryId) {
     }
     return d.content || [];
   } catch (e) {
-    throw apiError("Digiseller subcategories", e);
+    throw apiError("Digiseller attributes", e);
   }
 }
 
@@ -376,10 +387,20 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
   // category (owner: 1 = Plati.Market, 3 = GGsell).
   const cats = (Array.isArray(categories) ? categories : [])
     .filter((c) => c && c.categoryId)
-    .map((c) => ({
-      owner: Number(c.owner),
-      cataloguer_category_id: Number(c.categoryId),
-    }));
+    .map((c) => {
+      const out = {
+        owner: Number(c.owner),
+        cataloguer_category_id: Number(c.categoryId),
+      };
+      const attrs = (Array.isArray(c.attributes) ? c.attributes : [])
+        .filter((a) => a && a.attributeId && a.attributeValueId)
+        .map((a) => ({
+          attribute_id: Number(a.attributeId),
+          attribute_value_id: Number(a.attributeValueId),
+        }));
+      if (attrs.length) out.cataloguer_attributes = attrs;
+      return out;
+    });
   if (!cats.length) {
     throw new Error("Pick a Plati catalog category first");
   }
@@ -594,7 +615,7 @@ module.exports = {
   gameflipDelist,
   digisellerTest,
   digisellerCategories,
-  digisellerSubcategories,
+  digisellerCategoryAttributes,
   digisellerPublish,
   digisellerAddContent,
   digisellerDelist,
