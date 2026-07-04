@@ -607,14 +607,14 @@ function g2gBrands(serviceId) {
   );
 }
 function g2gProducts(serviceId, brandId, categoryId) {
-  // G2G rejects requests that include service_id alongside category_id
-  // ("service_id is not required when category_id is exists"), so send
-  // service_id only when no category is selected.
+  // G2G rejects requests that pair category_id with service_id or brand_id
+  // ("... is not required when category_id is exists"), so when a category
+  // is selected send only category_id.
   const qs = new URLSearchParams();
-  qs.set("brand_id", brandId);
   if (categoryId) {
     qs.set("category_id", categoryId);
   } else {
+    qs.set("brand_id", brandId);
     qs.set("service_id", serviceId);
   }
   return g2gRequest("get", "/v2/products?" + qs.toString());
