@@ -292,14 +292,24 @@ async function digisellerToken() {
 // errors: [{code, message}] } — pull the messages out so errors are actionable.
 function dsErrorText(d) {
   let msg = d.retdesc || "retval " + d.retval;
+  const text = (v) => {
+    if (v == null) return "";
+    if (typeof v === "string") return v;
+    if (Array.isArray(v)) return v.map(text).filter(Boolean).join(" / ");
+    if (typeof v === "object") {
+      if (v.value) return String(v.value);
+      return JSON.stringify(v).slice(0, 200);
+    }
+    return String(v);
+  };
   if (Array.isArray(d.errors) && d.errors.length) {
     msg +=
       " — " +
       d.errors
-        .map((e) => (e.code ? e.code + ": " : "") + (e.message || ""))
+        .map((e) => (e.code ? e.code + ": " : "") + text(e.message || e))
         .join("; ");
   } else if (d.errors && typeof d.errors === "object") {
-    msg += " — " + JSON.stringify(d.errors).slice(0, 300);
+    msg += " — " + JSON.stringify(d.errors).slice(0, 400);
   }
   return msg;
 }
