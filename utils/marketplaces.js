@@ -606,10 +606,11 @@ function g2gBrands(serviceId) {
     "/v2/services/" + encodeURIComponent(serviceId) + "/brands",
   );
 }
-function g2gProducts(serviceId, brandId, categoryId) {
+async function g2gProducts(serviceId, brandId, categoryId) {
   // G2G rejects requests that pair category_id with service_id or brand_id
   // ("... is not required when category_id is exists"), so when a category
-  // is selected send only category_id.
+  // is selected send only category_id, then narrow the results back down to
+  // the chosen brand ourselves.
   const qs = new URLSearchParams();
   if (categoryId) {
     qs.set("category_id", categoryId);
@@ -617,7 +618,21 @@ function g2gProducts(serviceId, brandId, categoryId) {
     qs.set("brand_id", brandId);
     qs.set("service_id", serviceId);
   }
-  return g2gRequest("get", "/v2/products?" + qs.toString());
+  const d = await g2gRequest("get", "/v2/products?" + qs.toString());
+  if (categoryId && brandId) {
+    const payload = d.payload || d.data || d;
+    for (const key of Object.keys(payload)) {
+      if (Array.isArray(payload[key])) {
+        payload[key] = payload[key].filter(
+          (row) =>
+            !row ||
+            row.brand_id === undefined ||
+            String(row.brand_id) === String(brandId),
+        );
+      }
+    }
+  }
+  return d;
 }
 function g2gAttributes(productId) {
   return g2gRequest(
