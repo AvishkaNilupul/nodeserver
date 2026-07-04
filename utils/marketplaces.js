@@ -10,6 +10,7 @@ const fs = require("fs");
 const path = require("path");
 
 const axios = require("axios");
+const FormData = require("form-data");
 const otplib = require("otplib");
 
 const { loadSettings, saveSettings } = require("./settings");
@@ -463,6 +464,47 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
   }
 }
 
+// Upload a gallery image to a Digiseller product (needs [Gallery]: Adding
+// token permission).
+async function digisellerUploadImage(productId, imagePath) {
+  const token = await digisellerToken();
+  const buf = fs.readFileSync(imagePath);
+  const url =
+    DS_API +
+    "/product/preview/add/images/" +
+    encodeURIComponent(productId) +
+    "?token=" +
+    encodeURIComponent(token);
+  // Digiseller's docs only say "a product image file in multipart/form-data
+  // format" without naming the form field, so try the common field names.
+  let lastErr;
+  for (const field of ["file", "image", "files[]"]) {
+    const form = new FormData();
+    form.append(field, buf, {
+      filename: "cover.png",
+      contentType: "image/png",
+    });
+    try {
+      const r = await axios.post(url, form, {
+        headers: Object.assign(
+          { Accept: "application/json" },
+          form.getHeaders(),
+        ),
+        timeout: 60000,
+        maxBodyLength: 30e6,
+      });
+      const d = r.data || {};
+      if (d.retval !== undefined && String(d.retval) !== "0") {
+        throw new Error(dsErrorText(d));
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw apiError("Digiseller image upload", lastErr);
+}
+
 // Attach delivery content (e.g. "user:pass" lines) so the product is sellable.
 async function digisellerAddContent(productId, lines) {
   const token = await digisellerToken();
@@ -639,6 +681,7 @@ module.exports = {
   digisellerCategories,
   digisellerCategoryAttributes,
   digisellerPublish,
+  digisellerUploadImage,
   digisellerAddContent,
   digisellerDelist,
   g2gTest,
