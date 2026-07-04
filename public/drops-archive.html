@@ -1424,6 +1424,10 @@
             <option value="token_invalid">Token invalid</option>
             <option value="error">Error</option>
           </select>
+          <select id="setSelect">
+            <option value="">Pick a set to scan…</option>
+          </select>
+          <button class="btn-ghost btn-sm" id="setScanBtn">Scan set</button>
         </div>
         <div class="panel">
           <div class="pb" style="padding: 0">
@@ -1697,13 +1701,26 @@
           '<div class="stat red"><b>' +
           c.error +
           "</b><span>Errors</span></div>";
+        const q = p.queue || {};
         $("scanState").innerHTML = p.scanning
           ? '<span class="pulse"></span> Scanning ' +
             esc(p.currentLogin || "") +
-            "…"
-          : p.enabled
-            ? "Idle — waiting for next due account"
-            : "Scanner paused";
+            "…" +
+            (q.pending
+              ? " (" +
+                q.pending +
+                " left" +
+                (q.label ? " in " + esc(q.label) : "") +
+                ")"
+              : "")
+          : q.pending
+            ? q.pending +
+              " queued" +
+              (q.label ? " from " + esc(q.label) : "") +
+              " — scanning shortly…"
+            : p.enabled
+              ? "Idle — waiting for next due account"
+              : "Scanner paused";
         if (document.activeElement !== $("schedToggle"))
           $("schedToggle").checked = p.enabled;
         $("schedLabel").textContent = p.enabled
@@ -1977,6 +1994,13 @@
                     attr(a.login || "") +
                     '">Copy user:pass</button>'
                   : '<span class="chip warn">no pw</span>') +
+                ' <span class="chip" data-copies="' +
+                attr(a.accountId) +
+                '"' +
+                (a.copiedCount ? "" : ' style="display:none;"') +
+                ">copied " +
+                (a.copiedCount || 0) +
+                "\u00d7</span>" +
                 "</td>" +
                 "</tr>",
             )
@@ -2009,7 +2033,33 @@
             "/drops-archive/accounts/" + encodeURIComponent(id) + "/password",
           );
           await copyToClipboard(login + ":" + (d.password || ""));
-          banner("Copied " + login + " credentials.", "ok");
+          // Bump the per-account copy counter so accounts already handed to a
+          // buyer are visibly flagged ("copied 2×") on later lookups.
+          let n = 0;
+          try {
+            const r = await api(
+              "/drops-archive/accounts/" + encodeURIComponent(id) + "/copied",
+              { method: "POST" },
+            );
+            n = r.copiedCount || 0;
+            document
+              .querySelectorAll('[data-copies="' + id + '"]')
+              .forEach((b) => {
+                b.textContent = "copied " + n + "\u00d7";
+                b.style.display = "";
+              });
+            const it = currentItemAccounts.find((a) => a.accountId === id);
+            if (it) it.copiedCount = n;
+          } catch {}
+          banner(
+            "Copied " +
+              login +
+              " credentials." +
+              (n > 1
+                ? " This account has now been copied " + n + "\u00d7."
+                : ""),
+            "ok",
+          );
         } catch (e) {
           banner(e.message || "Copy failed", "err");
         } finally {
@@ -2121,6 +2171,7 @@
           return;
         }
         accounts = data.accounts || [];
+        renderSetSelect();
         if (!accounts.length) {
           $("rows").innerHTML =
             '<tr><td colspan="8" class="empty">No accounts yet. Click <b>Sync from bots</b> to import them from your bot configs.</td></tr>';
@@ -2128,6 +2179,72 @@
         }
         $("rows").innerHTML = accounts.map(rowHTML).join("");
       }
+
+      // Distinct bot sets (container/config file) from the loaded accounts,
+      // for the on-demand "Scan set" picker.
+      function renderSetSelect() {
+        const sel = $("setSelect");
+        const prev = sel.value;
+        const counts = new Map();
+        for (const a of accounts) {
+          const key = a.container
+            ? "c:" + a.container
+            : a.configFile
+              ? "f:" + a.configFile
+              : "";
+          if (!key) continue;
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        const opts = [...counts.entries()].sort((x, y) =>
+          x[0].localeCompare(y[0], undefined, { numeric: true }),
+        );
+        sel.innerHTML =
+          '<option value="">Pick a set to scan…</option>' +
+          opts
+            .map(
+              ([key, n]) =>
+                '<option value="' +
+                attr(key) +
+                '">' +
+                esc(key.slice(2)) +
+                " (" +
+                n +
+                " accounts)</option>",
+            )
+            .join("");
+        if ([...counts.keys()].includes(prev)) sel.value = prev;
+      }
+
+      $("setScanBtn").addEventListener("click", async (e) => {
+        const key = $("setSelect").value;
+        if (!key) return banner("Pick a set first.", "err");
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try {
+          const body = key.startsWith("c:")
+            ? { container: key.slice(2) }
+            : { configFile: key.slice(2) };
+          const d = await api("/drops-archive/scan-set", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          banner(
+            d.queued
+              ? "Queued " +
+                  d.queued +
+                  " account(s) from " +
+                  key.slice(2) +
+                  " — they'll scan back-to-back now (watch the progress bar)."
+              : "Those accounts are already queued.",
+            "ok",
+          );
+          loadProgress();
+        } catch (err) {
+          banner(err.message, "err");
+        } finally {
+          btn.disabled = false;
+        }
+      });
 
       function rowHTML(a) {
         const pw = a.hasPassword
@@ -2260,6 +2377,7 @@
           d.totalDrops +
           " logged drop(s) · last scan " +
           esc(timeAgo(acc.lastScanAt)) +
+          (acc.copiedCount ? " · copied " + acc.copiedCount + "\u00d7" : "") +
           " · " +
           statusChip(acc.lastScanStatus) +
           "</span>" +

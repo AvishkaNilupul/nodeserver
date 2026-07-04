@@ -36,6 +36,33 @@ const state = {
 let timer = null;
 let started = false;
 
+// Priority queue for on-demand "scan this set" requests. Queued accounts
+// jump ahead of the daily rotation and are scanned back-to-back with a short
+// delay, so a whole bot set can be refreshed in minutes instead of a day.
+const PRIORITY_DELAY_MS = 5000;
+let priorityQueue = [];
+let priorityTotal = 0;
+let priorityLabel = "";
+
+async function queueSetScan(filter, label) {
+  const rows = await BotAccount.find(filter).select("_id").lean();
+  const have = new Set(priorityQueue);
+  let added = 0;
+  for (const r of rows) {
+    const id = String(r._id);
+    if (!have.has(id)) {
+      priorityQueue.push(id);
+      added++;
+    }
+  }
+  if (added) {
+    priorityTotal += added;
+    priorityLabel = label || priorityLabel;
+    schedule(500);
+  }
+  return { queued: added, pending: priorityQueue.length };
+}
+
 function jitter(ms) {
   // +/- 30% so the cadence isn't perfectly periodic.
   const f = 0.7 + Math.random() * 0.6;
@@ -134,7 +161,8 @@ async function scanAccountNow(id) {
 }
 
 async function tick() {
-  if (!state.enabled) {
+  // Priority (set) scans run even while the daily scheduler is paused.
+  if (!state.enabled && !priorityQueue.length) {
     schedule(state.intervalMs);
     return;
   }
@@ -144,8 +172,14 @@ async function tick() {
     schedule(jitter(state.intervalMs));
     return;
   }
+  let fromQueue = false;
   try {
-    const acc = await nextDueAccount();
+    let acc = null;
+    while (priorityQueue.length && !acc) {
+      acc = await BotAccount.findById(priorityQueue.shift());
+    }
+    if (acc) fromQueue = true;
+    else if (state.enabled) acc = await nextDueAccount();
     if (!acc) {
       // Nothing due — idle a bit before checking again.
       schedule(Math.max(state.intervalMs, 60000));
@@ -161,7 +195,15 @@ async function tick() {
     state.scanning = false;
     state.currentLogin = null;
   }
-  schedule(jitter(state.intervalMs));
+  if (!priorityQueue.length) {
+    priorityTotal = 0;
+    priorityLabel = "";
+  }
+  schedule(
+    fromQueue && priorityQueue.length
+      ? jitter(PRIORITY_DELAY_MS)
+      : jitter(state.intervalMs),
+  );
 }
 
 function schedule(ms) {
@@ -252,6 +294,11 @@ async function getProgress() {
       errors: state.sessionErrors,
       startedAt: state.startedAt,
     },
+    queue: {
+      pending: priorityQueue.length,
+      total: priorityTotal,
+      label: priorityLabel,
+    },
   };
 }
 
@@ -273,6 +320,7 @@ module.exports = {
   start,
   getProgress,
   scanAccountNow,
+  queueSetScan,
   setEnabled,
   setIntervalMs,
   backfillItemKeys,

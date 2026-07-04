@@ -48,6 +48,11 @@ const botAccountSchema = new mongoose.Schema(
     },
     lastScanError: { type: String, default: "" },
     dropCount: { type: Number, default: 0 },
+
+    // How many times this account's credentials were copied from the archive
+    // UI (delivery bookkeeping — flags accounts already handed to a buyer).
+    copiedCount: { type: Number, default: 0 },
+    lastCopiedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

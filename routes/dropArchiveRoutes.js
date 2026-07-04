@@ -35,6 +35,8 @@ function publicAccount(a) {
     hasPassword: a.hasPassword,
     credUsername: a.credUsername || "",
     credEmail: decrypt(a.credEmail),
+    copiedCount: a.copiedCount || 0,
+    lastCopiedAt: a.lastCopiedAt || null,
   };
 }
 
@@ -180,6 +182,62 @@ router.put(
     }
   },
 );
+
+// Record that this account's credentials were copied (delivery bookkeeping),
+// so the UI can flag accounts that were already handed out.
+router.post(
+  "/drops-archive/accounts/:id/copied",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acc = await BotAccount.findByIdAndUpdate(
+        req.params.id,
+        { $inc: { copiedCount: 1 }, $set: { lastCopiedAt: new Date() } },
+        { new: true },
+      ).lean();
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      res.json({
+        success: true,
+        copiedCount: acc.copiedCount || 0,
+        lastCopiedAt: acc.lastCopiedAt,
+      });
+    } catch (err) {
+      console.error("drops-archive copied error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Queue an on-demand scan of a whole bot set (by container or config file).
+// Accounts are scanned back-to-back by the scanner's priority queue instead
+// of waiting for the daily rotation.
+router.post("/drops-archive/scan-set", requireSuperadmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const container = String(body.container || "").trim();
+    const configFile = String(body.configFile || "").trim();
+    const host = String(body.host || "").trim();
+    const filter = {};
+    if (container) filter.container = container;
+    if (configFile) filter.configFile = configFile;
+    if (host) filter.host = host;
+    if (!Object.keys(filter).length) {
+      return res
+        .status(400)
+        .json({ success: false, message: "container or configFile required" });
+    }
+    const label = container || configFile;
+    const r = await scanner.queueSetScan(filter, label);
+    res.json({ success: true, ...r });
+  } catch (err) {
+    console.error("drops-archive scan-set error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 // Force-scan one account immediately.
 router.post(
@@ -608,6 +666,7 @@ router.get(
             container: "$acc.container",
             configFile: "$acc.configFile",
             hasPassword: "$acc.hasPassword",
+            copiedCount: { $ifNull: ["$acc.copiedCount", 0] },
             name: 1,
             game: 1,
             campaign: 1,
