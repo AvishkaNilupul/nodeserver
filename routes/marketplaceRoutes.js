@@ -43,6 +43,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     if (name === "gameflip") r = await mp.gameflipTest();
     else if (name === "digiseller") r = await mp.digisellerTest();
     else if (name === "g2g") r = await mp.g2gTest();
+    else if (name === "ggsel") r = await mp.ggselTest();
     else {
       return res
         .status(400)
@@ -92,15 +93,35 @@ router.get(
 );
 
 // ------------------------------------------------------------------
+// GGSel catalog browsing (drill down the category tree one level at a time)
+// ------------------------------------------------------------------
+router.get(
+  "/marketplaces/ggsel/categories",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const parentId = String(req.query.parentId || "");
+      res.json({ success: true, data: await mp.ggselCategories(parentId) });
+    } catch (err) {
+      res.json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
 // G2G catalog browsing (service -> brand -> product -> attributes)
 // ------------------------------------------------------------------
-router.get("/marketplaces/g2g/services", requireSuperadmin, async (req, res) => {
-  try {
-    res.json({ success: true, data: await mp.g2gServices() });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
-});
+router.get(
+  "/marketplaces/g2g/services",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      res.json({ success: true, data: await mp.g2gServices() });
+    } catch (err) {
+      res.json({ success: false, message: err.message });
+    }
+  },
+);
 
 router.get("/marketplaces/g2g/brands", requireSuperadmin, async (req, res) => {
   try {
@@ -116,26 +137,30 @@ router.get("/marketplaces/g2g/brands", requireSuperadmin, async (req, res) => {
   }
 });
 
-router.get("/marketplaces/g2g/products", requireSuperadmin, async (req, res) => {
-  try {
-    const { serviceId, brandId, categoryId } = req.query;
-    if (!serviceId || !brandId) {
-      return res
-        .status(400)
-        .json({ success: false, message: "serviceId and brandId required" });
+router.get(
+  "/marketplaces/g2g/products",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const { serviceId, brandId, categoryId } = req.query;
+      if (!serviceId || !brandId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "serviceId and brandId required" });
+      }
+      res.json({
+        success: true,
+        data: await mp.g2gProducts(
+          String(serviceId),
+          String(brandId),
+          String(categoryId || ""),
+        ),
+      });
+    } catch (err) {
+      res.json({ success: false, message: err.message });
     }
-    res.json({
-      success: true,
-      data: await mp.g2gProducts(
-        String(serviceId),
-        String(brandId),
-        String(categoryId || ""),
-      ),
-    });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
-});
+  },
+);
 
 router.get(
   "/marketplaces/g2g/attributes",
@@ -262,6 +287,18 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             offerAttributes: g.offerAttributes,
             deliveryMethodIds: g.deliveryMethodIds,
           });
+        } else if (name === "ggsel") {
+          const gg = body.ggsel || {};
+          r = await mp.ggselPublish({
+            title,
+            description,
+            priceUsd,
+            priceRub: gg.priceRub,
+            categoryId: gg.categoryId,
+            quantity: gg.quantity,
+            delivery: gg.delivery,
+            instructions: gg.instructions,
+          });
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -350,6 +387,8 @@ router.delete(
           await mp.digisellerDelist(row.externalId);
         } else if (row.marketplace === "g2g") {
           await mp.g2gDelist(row.externalId);
+        } else if (row.marketplace === "ggsel") {
+          await mp.ggselDelist(row.externalId);
         }
       } catch (err) {
         row.lastError = err.message.slice(0, 400);

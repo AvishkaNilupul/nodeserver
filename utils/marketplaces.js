@@ -21,6 +21,7 @@ const FIELDS = {
   gameflip: ["apiKey", "apiSecret"],
   digiseller: ["sellerId", "apiKey"],
   g2g: ["userId", "apiKey", "apiSecret"],
+  ggsel: ["apiKey"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -597,6 +598,174 @@ async function digisellerDelist(productId) {
 }
 
 // ------------------------------------------------------------------
+// GGSel (seller.ggsel.com) — its own v2 seller API, separate from the
+// Digiseller/Plati path above. Auth is a single API key in the Authorization
+// header; offers are always priced in RUB.
+// ------------------------------------------------------------------
+const GG_API = "https://seller.ggsel.com/api_sellers/v2";
+
+function ggHeaders(keys) {
+  return { Authorization: keys.apiKey, "Content-Type": "application/json" };
+}
+
+// USD -> RUB, cached ~6h. GGSel offers must be priced in RUB, but the rest of
+// the site works in USD, so convert at publish time. Falls back to a static
+// rate when the FX lookup is unavailable.
+let rubRate = { value: 0, until: 0 };
+const RUB_FALLBACK = 90;
+async function usdToRub() {
+  const now = Date.now();
+  if (rubRate.value && now < rubRate.until) return rubRate.value;
+  try {
+    const r = await axios.get("https://open.er-api.com/v6/latest/USD", {
+      timeout: 15000,
+    });
+    const v = r.data && r.data.rates && Number(r.data.rates.RUB);
+    if (Number.isFinite(v) && v > 0) {
+      rubRate = { value: v, until: now + 6 * 60 * 60 * 1000 };
+      return v;
+    }
+  } catch {
+    /* fall through to fallback */
+  }
+  return rubRate.value || RUB_FALLBACK;
+}
+
+async function ggselTest() {
+  const keys = requireKeys("ggsel");
+  try {
+    const r = await axios.get(GG_API + "/offers", {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    });
+    const n = Array.isArray(r.data && r.data.data) ? r.data.data.length : 0;
+    return { ok: true, detail: "Connected — " + n + " offer(s) visible" };
+  } catch (e) {
+    throw apiError("GGSel test", e);
+  }
+}
+
+// Category tree, one level per request. Pass a parentId to drill into a
+// section's children; omit it for the top level. Each node is
+// { id, title, tree, content_type, fee, has_children }.
+async function ggselCategories(parentId) {
+  const keys = requireKeys("ggsel");
+  try {
+    const r = await axios.get(GG_API + "/categories", {
+      headers: ggHeaders(keys),
+      params: parentId ? { parent_id: parentId } : {},
+      timeout: 20000,
+    });
+    return Array.isArray(r.data && r.data.data) ? r.data.data : [];
+  } catch (e) {
+    throw apiError("GGSel categories", e);
+  }
+}
+
+// Create an offer, then activate it so buyers can see it. GGSel prices are in
+// RUB, so a USD price is converted unless priceRub is passed explicitly.
+// Returns { externalId, url, note }.
+async function ggselPublish({
+  title,
+  description,
+  priceUsd,
+  priceRub,
+  categoryId,
+  quantity,
+  delivery,
+  instructions,
+}) {
+  const keys = requireKeys("ggsel");
+  if (!categoryId) throw new Error("Pick a GGSel category first");
+  let price = Number(priceRub);
+  let note = "";
+  if (!Number.isFinite(price) || price <= 0) {
+    const rate = await usdToRub();
+    price = Math.round(Number(priceUsd) * rate * 100) / 100;
+    note =
+      "Priced at " +
+      price +
+      "₽ (~$" +
+      Number(priceUsd) +
+      " @ " +
+      rate.toFixed(2) +
+      "₽/$).";
+  }
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("GGSel needs a price above 0");
+  }
+  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  const t = String(title || "").slice(0, 200);
+  const d = String(description || "").slice(0, 5000);
+  let created;
+  try {
+    const r = await axios.post(
+      GG_API + "/offers",
+      {
+        category_id: Number(categoryId),
+        title_ru: t,
+        title_en: t,
+        description_ru: d,
+        description_en: d,
+        instructions_ru: instructions ? String(instructions) : undefined,
+        instructions_en: instructions ? String(instructions) : undefined,
+        price,
+        currency: "RUB",
+        delivery: delivery === "auto" ? "auto" : "manual",
+        quantity: qty,
+        min_quantity: 1,
+        max_quantity: qty,
+      },
+      { headers: ggHeaders(keys), timeout: 30000 },
+    );
+    created = (r.data && r.data.data) || {};
+  } catch (e) {
+    throw apiError("GGSel create", e);
+  }
+  const offerId = created.id;
+  if (!offerId) {
+    throw new Error(
+      "GGSel create: no offer id in response: " +
+        JSON.stringify(created).slice(0, 300),
+    );
+  }
+  // New offers start as drafts; activate so they go live.
+  try {
+    await axios.post(
+      GG_API + "/offers/batch_activate",
+      { offer_ids: [offerId] },
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
+  } catch (e) {
+    note =
+      (note ? note + " " : "") +
+      "Created as draft but activation failed — activate it in the GGSel " +
+      "panel. (" +
+      (e.message || "error") +
+      ")";
+  }
+  return {
+    externalId: String(offerId),
+    url: "https://ggsel.net/en/catalog/product/" + offerId,
+    note,
+  };
+}
+
+// GGSel has no delete-offer API; pausing takes it off sale (reversible).
+async function ggselDelist(offerId) {
+  const keys = requireKeys("ggsel");
+  try {
+    await axios.post(
+      GG_API + "/offers/batch_pause",
+      { offer_ids: [Number(offerId)] },
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
+  } catch (e) {
+    throw apiError("GGSel delist", e);
+  }
+}
+
+// ------------------------------------------------------------------
 // G2G Open API
 // ------------------------------------------------------------------
 const G2G_API = "https://open-api.g2g.com";
@@ -789,4 +958,8 @@ module.exports = {
   g2gAttributes,
   g2gPublish,
   g2gDelist,
+  ggselTest,
+  ggselCategories,
+  ggselPublish,
+  ggselDelist,
 };

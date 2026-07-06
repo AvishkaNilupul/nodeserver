@@ -962,17 +962,26 @@
               <input type="checkbox" id="mpGfAuto" checked />
               Auto-deliver farmed accounts
             </label>
-            <label for="mpGfQty" style="margin-top: 6px">Quantity to sell</label>
-            <input type="number" id="mpGfQty" min="1" max="100" step="1" value="1" />
+            <label for="mpGfQty" style="margin-top: 6px"
+              >Quantity to sell</label
+            >
+            <input
+              type="number"
+              id="mpGfQty"
+              min="1"
+              max="100"
+              step="1"
+              value="1"
+            />
             <div class="mp-hint">
               Each unit is one in-stock account (login + password + connect
-              guide) attached as an auto-delivered digital code — Gameflip
-              sends it to the buyer the moment they pay, no manual fulfilment.
-              Gameflip listings have no stock count, so quantities above 1
-              are sold one at a time: when a unit sells, the site
-              automatically relists the next one with a fresh account until
-              the quantity is sold or you run out of stock. Accounts are
-              reserved while a listing is live and released if you delist.
+              guide) attached as an auto-delivered digital code — Gameflip sends
+              it to the buyer the moment they pay, no manual fulfilment.
+              Gameflip listings have no stock count, so quantities above 1 are
+              sold one at a time: when a unit sells, the site automatically
+              relists the next one with a fresh account until the quantity is
+              sold or you run out of stock. Accounts are reserved while a
+              listing is live and released if you delist.
             </div>
           </div>
         </div>
@@ -981,8 +990,8 @@
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">Plati / GGsell placement</b>
             <div class="mp-hint">
-              Pick which marketplace catalog category the product goes in
-              (e.g. Digital Goods → Game Accounts → Twitch drops Accounts).
+              Pick which marketplace catalog category the product goes in (e.g.
+              Digital Goods → Game Accounts → Twitch drops Accounts).
             </div>
             <label>Catalog category</label>
             <div class="mp-hint" id="mpDsPath" style="margin-bottom: 4px"></div>
@@ -993,7 +1002,9 @@
               autocomplete="off"
               style="margin-bottom: 6px"
             />
-            <select id="mpDsCategory"><option value="">Loading…</option></select>
+            <select id="mpDsCategory">
+              <option value="">Loading…</option>
+            </select>
             <div id="mpDsAttrs"></div>
           </div>
         </div>
@@ -1002,12 +1013,17 @@
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">G2G offer details</b>
             <div class="mp-hint">
-              G2G offers attach to a catalog product — pick where the offer goes.
+              G2G offers attach to a catalog product — pick where the offer
+              goes.
             </div>
             <label>Service</label>
-            <select id="mpG2gService"><option value="">Loading…</option></select>
+            <select id="mpG2gService">
+              <option value="">Loading…</option>
+            </select>
             <label>Category</label>
-            <select id="mpG2gCategory"><option value="">Pick a service first</option></select>
+            <select id="mpG2gCategory">
+              <option value="">Pick a service first</option>
+            </select>
             <label>Brand / game</label>
             <input
               type="text"
@@ -1016,9 +1032,13 @@
               autocomplete="off"
               style="margin-bottom: 6px"
             />
-            <select id="mpG2gBrand"><option value="">Pick a service first</option></select>
+            <select id="mpG2gBrand">
+              <option value="">Pick a service first</option>
+            </select>
             <label>Product</label>
-            <select id="mpG2gProduct"><option value="">Pick a brand first</option></select>
+            <select id="mpG2gProduct">
+              <option value="">Pick a brand first</option>
+            </select>
             <div id="mpG2gAttrs"></div>
             <div class="mp-row" style="margin-top: 8px">
               <div style="flex: 1">
@@ -1029,6 +1049,50 @@
                 <label style="margin-top: 0">Min qty per order</label>
                 <input type="number" id="mpG2gMinQty" min="1" value="1" />
               </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="mpGgselBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">GGSel placement</b>
+            <div class="mp-hint">
+              GGSel offers are priced in rubles — the USD price above is
+              converted to ₽ automatically at the live rate. Pick the catalog
+              category the offer goes in (e.g. Games → Overwatch → Twitch
+              Drops). The offer is created and activated so it goes live; leave
+              stock/delivery managed on GGSel as you do today.
+            </div>
+            <label>Catalog category</label>
+            <div class="mp-hint" id="mpGgPath" style="margin-bottom: 4px"></div>
+            <input
+              type="text"
+              id="mpGgCatFilter"
+              placeholder="Type to search this level…"
+              autocomplete="off"
+              style="margin-bottom: 6px"
+            />
+            <select id="mpGgCategory">
+              <option value="">Loading…</option>
+            </select>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Quantity</label>
+                <input type="number" id="mpGgQty" min="1" value="1" />
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Delivery</label>
+                <select id="mpGgDelivery">
+                  <option value="manual">Manual</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </div>
+            </div>
+            <label style="margin-top: 6px">Price override (₽, optional)</label>
+            <input type="number" id="mpGgPriceRub" min="0" step="0.01" />
+            <div class="mp-hint">
+              Leave blank to auto-convert the USD price. Set a value to price
+              the offer in rubles directly.
             </div>
           </div>
         </div>
@@ -1058,7 +1122,9 @@
           rows="6"
           placeholder="username:password&#10;username:password"
         ></textarea>
-        <label for="mpStockTemplate">Delivery message ({account} = the account line)</label>
+        <label for="mpStockTemplate"
+          >Delivery message ({account} = the account line)</label
+        >
         <textarea id="mpStockTemplate" rows="8"></textarea>
         <div class="mp-actions">
           <button class="btn ghost" id="mpStockClose">Cancel</button>
@@ -1640,13 +1706,15 @@
       // ---- external marketplaces (Gameflip / Plati+GGsell / G2G) ----
       var MP_LABELS = {
         gameflip: "Gameflip",
-        digiseller: "Plati / GGsell (Digiseller)",
+        digiseller: "Plati.Market (Digiseller)",
         g2g: "G2G",
+        ggsel: "GGSel",
       };
       var MP_KEY_LABELS = {
         gameflip: { apiKey: "API key", apiSecret: "API secret (TOTP secret)" },
         digiseller: { sellerId: "Seller ID", apiKey: "API key" },
         g2g: { userId: "User ID", apiKey: "API key", apiSecret: "API secret" },
+        ggsel: { apiKey: "API key" },
       };
       var mpStatus = null;
 
@@ -1674,7 +1742,9 @@
                   "<label>" +
                   esc(MP_KEY_LABELS[mp][f]) +
                   (cur
-                    ? ' <span style="opacity:.6">(saved: ' + esc(cur) + ")</span>"
+                    ? ' <span style="opacity:.6">(saved: ' +
+                      esc(cur) +
+                      ")</span>"
                     : "") +
                   "</label>" +
                   '<input type="password" autocomplete="off" data-mpkey="' +
@@ -1709,10 +1779,12 @@
 
       $("mpKeysBtn").addEventListener("click", function () {
         $("mpKeysOverlay").classList.add("open");
-        loadMpStatus().then(renderKeysModal).catch(function (e) {
-          $("mpKeysBody").innerHTML =
-            '<div class="empty">' + esc(e.message) + "</div>";
-        });
+        loadMpStatus()
+          .then(renderKeysModal)
+          .catch(function (e) {
+            $("mpKeysBody").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
       });
       $("mpKeysClose").addEventListener("click", function () {
         $("mpKeysOverlay").classList.remove("open");
@@ -1728,7 +1800,8 @@
             .querySelectorAll('[data-mpkey^="' + mp + '."]')
             .forEach(function (inp) {
               var v = inp.value;
-              if (v && v.trim()) body[inp.dataset.mpkey.split(".")[1]] = v.trim();
+              if (v && v.trim())
+                body[inp.dataset.mpkey.split(".")[1]] = v.trim();
             });
           if (!Object.keys(body).length) {
             toast("Nothing to save");
@@ -1868,6 +1941,7 @@
         $("mpG2gBox").style.display = "none";
         $("mpDsBox").style.display = "none";
         $("mpGfBox").style.display = "none";
+        $("mpGgselBox").style.display = "none";
         $("mpDsAttrs").innerHTML = "";
         $("mpG2gAttrs").innerHTML = "";
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
@@ -1910,6 +1984,127 @@
             loadDsCategories("");
           }
         }
+        var gg = e.target.closest('[data-mptarget="ggsel"]');
+        if (gg) {
+          $("mpGgselBox").style.display = gg.checked ? "block" : "none";
+          if (gg.checked && !ggCatsLoaded) {
+            ggStack = [];
+            ggSelected = null;
+            loadGgCategories("");
+          }
+        }
+      });
+
+      // GGSel category drill-down: mirrors the Plati picker but against the
+      // GGSel v2 category tree (one level per request, parentId to descend).
+      var ggRows = [];
+      var ggStack = [];
+      var ggSelected = null; // { id, label }
+      var ggCatsLoaded = false;
+      function ggRenderPath() {
+        $("mpGgPath").textContent = ggSelected
+          ? "Selected: " +
+            ggStack
+              .map(function (s) {
+                return s.label;
+              })
+              .concat(ggSelected.label)
+              .join(" \u2192 ")
+          : ggStack.length
+            ? ggStack
+                .map(function (s) {
+                  return s.label;
+                })
+                .join(" \u2192 ") + " \u2192 \u2026"
+            : "Top level \u2014 pick a section, then drill down to the exact category.";
+      }
+      function loadGgCategories(parentId) {
+        ggCatsLoaded = true;
+        $("mpGgCategory").innerHTML = '<option value="">Loading\u2026</option>';
+        api(
+          "/marketplaces/ggsel/categories" +
+            (parentId ? "?parentId=" + encodeURIComponent(parentId) : ""),
+        )
+          .then(function (j) {
+            if (!j.success) throw new Error(j.message || "GGSel error");
+            ggRows = (j.data || []).map(function (n) {
+              return {
+                id: n.id,
+                label: String(n.title || n.id),
+                hasChildren: !!n.has_children,
+              };
+            });
+            $("mpGgCatFilter").value = "";
+            renderGgCategories();
+            ggRenderPath();
+          })
+          .catch(function (e) {
+            if (!parentId) ggCatsLoaded = false;
+            toast("GGSel: " + e.message);
+          });
+      }
+      function renderGgCategories() {
+        var q = $("mpGgCatFilter").value.trim().toLowerCase();
+        var rows = q
+          ? ggRows.filter(function (r) {
+              return r.label.toLowerCase().indexOf(q) !== -1;
+            })
+          : ggRows;
+        $("mpGgCategory").innerHTML =
+          '<option value="">' +
+          esc(
+            rows.length
+              ? "Pick a category\u2026 (" + rows.length + ")"
+              : "No match",
+          ) +
+          "</option>" +
+          (ggStack.length
+            ? '<option value="__back">\u2b05 Back to ' +
+              esc(
+                ggStack.length > 1
+                  ? ggStack[ggStack.length - 2].label
+                  : "top level",
+              ) +
+              "</option>"
+            : "") +
+          rows
+            .map(function (r) {
+              return (
+                '<option value="' +
+                attr(r.id) +
+                '">' +
+                esc(r.label + (r.hasChildren ? " \u00bb" : "")) +
+                "</option>"
+              );
+            })
+            .join("");
+      }
+      $("mpGgCatFilter").addEventListener("input", renderGgCategories);
+      $("mpGgCategory").addEventListener("change", function () {
+        var v = this.value;
+        ggSelected = null;
+        if (!v) {
+          ggRenderPath();
+          return;
+        }
+        if (v === "__back") {
+          ggStack.pop();
+          loadGgCategories(
+            ggStack.length ? ggStack[ggStack.length - 1].id : "",
+          );
+          return;
+        }
+        var row = ggRows.filter(function (r) {
+          return String(r.id) === String(v);
+        })[0];
+        if (!row) return;
+        if (row.hasChildren) {
+          ggStack.push(row);
+          loadGgCategories(row.id);
+          return;
+        }
+        ggSelected = row;
+        ggRenderPath();
       });
 
       // Digiseller cataloguer drill-down: one level per request; picking a
@@ -2097,8 +2292,7 @@
       function g2gFirstArray(payload) {
         if (Array.isArray(payload)) return payload;
         if (!payload || typeof payload !== "object") return [];
-        var direct =
-          payload.results || payload.list || payload.items || null;
+        var direct = payload.results || payload.list || payload.items || null;
         if (Array.isArray(direct)) return direct;
         var keys = Object.keys(payload);
         for (var k = 0; k < keys.length; k++) {
@@ -2247,11 +2441,20 @@
             if (!Array.isArray(groups) || !groups.length) return;
             $("mpG2gAttrs").innerHTML = groups
               .map(function (g) {
-                var gid = g.attribute_group_id || g.attribute_group || g.id || "";
+                var gid =
+                  g.attribute_group_id || g.attribute_group || g.id || "";
                 var gname =
-                  g.attribute_group_name || g.group_name || g.name || "Attribute";
+                  g.attribute_group_name ||
+                  g.group_name ||
+                  g.name ||
+                  "Attribute";
                 if (g.is_required) gname += " *";
-                var opts = (g.attributes || g.attribute_list || g.children || [])
+                var opts = (
+                  g.attributes ||
+                  g.attribute_list ||
+                  g.children ||
+                  []
+                )
                   .map(function (a) {
                     return (
                       '<option value="' +
@@ -2359,6 +2562,19 @@
             qty: parseInt($("mpG2gQty").value, 10) || 1,
             minQty: parseInt($("mpG2gMinQty").value, 10) || 1,
             offerAttributes: attrs,
+          };
+        }
+        if (targets.indexOf("ggsel") !== -1) {
+          if (!ggSelected) {
+            toast("Drill down to a GGSel catalog category first");
+            return;
+          }
+          var ggRub = parseFloat($("mpGgPriceRub").value);
+          body.ggsel = {
+            categoryId: ggSelected.id,
+            quantity: parseInt($("mpGgQty").value, 10) || 1,
+            delivery: $("mpGgDelivery").value,
+            priceRub: ggRub > 0 ? ggRub : undefined,
           };
         }
         var btn = $("mpPubGo");

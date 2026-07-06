@@ -12,7 +12,7 @@ const marketplaceListingSchema = new mongoose.Schema(
     },
     marketplace: {
       type: String,
-      enum: ["gameflip", "digiseller", "g2g"],
+      enum: ["gameflip", "digiseller", "g2g", "ggsel"],
       required: true,
       index: true,
     },
@@ -43,7 +43,4 @@ const marketplaceListingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-module.exports = mongoose.model(
-  "MarketplaceListing",
-  marketplaceListingSchema,
-);
+module.exports = mongoose.model("MarketplaceListing", marketplaceListingSchema);
