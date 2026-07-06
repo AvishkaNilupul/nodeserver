@@ -598,6 +598,32 @@ async function digisellerAddContent(productId, lines) {
   }
 }
 
+// How many delivery units a product still has, via the public product-info
+// endpoint (no token needed). Returns a number, or null when the response
+// doesn't carry a recognisable stock field.
+async function digisellerProductStock(productId) {
+  try {
+    const r = await axios.get(
+      DS_API + "/products/" + encodeURIComponent(productId) + "/data",
+      { headers: { Accept: "application/json" }, timeout: 20000 },
+    );
+    const d = r.data || {};
+    const p = d.product || d.content || d;
+    for (const f of [
+      "num_in_stock",
+      "in_stock",
+      "count_goods",
+      "num_in_lock",
+    ]) {
+      const v = Number(p && p[f]);
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Disable sales for a product (soft delist).
 async function digisellerDelist(productId) {
   const token = await digisellerToken();
@@ -847,6 +873,43 @@ async function ggselPublish({
   };
 }
 
+// Remaining sellable units of an offer. Tries the single-offer endpoint and
+// falls back to scanning the offer list. Returns a number or null when the
+// response doesn't carry a recognisable stock field.
+function ggselStockField(o) {
+  if (!o || typeof o !== "object") return null;
+  for (const f of ["available_quantity", "products_count", "quantity"]) {
+    const v = Number(o[f]);
+    if (Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
+async function ggselOfferStock(offerId) {
+  const keys = requireKeys("ggsel");
+  try {
+    const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    });
+    const v = ggselStockField((r.data && r.data.data) || r.data);
+    if (v !== null) return v;
+  } catch {
+    /* fall through to the list scan */
+  }
+  try {
+    const r = await axios.get(GG_API + "/offers", {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    });
+    const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
+    const row = rows.find((o) => String(o && o.id) === String(offerId));
+    return ggselStockField(row);
+  } catch {
+    return null;
+  }
+}
+
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).
 async function ggselDelist(offerId) {
   const keys = requireKeys("ggsel");
@@ -1046,6 +1109,7 @@ module.exports = {
   digisellerPublish,
   digisellerUploadImage,
   digisellerAddContent,
+  digisellerProductStock,
   digisellerDelist,
   g2gTest,
   g2gServices,
@@ -1058,5 +1122,6 @@ module.exports = {
   ggselCategories,
   ggselPublish,
   ggselAddProducts,
+  ggselOfferStock,
   ggselDelist,
 };

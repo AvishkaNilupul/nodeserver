@@ -36,6 +36,7 @@ const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
+const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
 const {
@@ -324,6 +325,12 @@ app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
 });
 
+// Marketplace integrity guard (superadmin only) — review queue for the
+// background checker's findings.
+app.get("/integrity.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "integrity.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -417,6 +424,9 @@ mongoose
     // Watch live Gameflip auto-delivery listings: mark sales and relist the
     // next unit of multi-quantity chains. No-op without Gameflip listings.
     gameflipFulfiller.start();
+    // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
+    // fresh accounts and flags cross-platform integrity issues for review.
+    marketplaceGuardian.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

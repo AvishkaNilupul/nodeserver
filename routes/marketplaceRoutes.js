@@ -5,11 +5,13 @@ const path = require("path");
 const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
+const AuditFinding = require("../models/AuditFinding");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const dsFulfiller = require("../utils/digisellerFulfiller");
 const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
+const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
 const { buildSetGridImage } = require("../utils/setImage");
 
@@ -334,6 +336,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               autoDeliver: true,
               accountId: claimed.map((c) => c.accountId).join(","),
               accountLogin: claimed.map((c) => c.login).join(", "),
+              qtyTarget: qtyWanted,
             });
             results[name] = {
               success: true,
@@ -430,6 +433,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               autoDeliver: true,
               accountId: claimed.map((c) => c.accountId).join(","),
               accountLogin: claimed.map((c) => c.login).join(", "),
+              qtyTarget: qtyWanted,
             });
             results[name] = {
               success: true,
@@ -638,6 +642,99 @@ router.post(
       res.json({ success: true, added: r.added, retired });
     } catch (err) {
       res.json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
+// Integrity guardian (auto-feed + cross-platform checks + review queue)
+// ------------------------------------------------------------------
+router.get("/marketplaces/guardian/status", requireSuperadmin, (req, res) => {
+  res.json({ success: true, ...guardian.status() });
+});
+
+router.post(
+  "/marketplaces/guardian/run",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const r = await guardian.runOnce();
+      res.json({ success: true, lastRun: r });
+    } catch (err) {
+      console.error("guardian run error:", err.message);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+router.get(
+  "/marketplaces/guardian/findings",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const q = {};
+      const st = String(req.query.status || "");
+      if (st) q.status = st;
+      const rows = await AuditFinding.find(q)
+        .sort({ status: 1, severity: 1, lastSeenAt: -1 })
+        .limit(300)
+        .lean();
+      res.json({
+        success: true,
+        findings: rows.map((f) => ({
+          id: String(f._id),
+          type: f.type,
+          severity: f.severity,
+          marketplace: f.marketplace,
+          listingId: f.listing ? String(f.listing) : "",
+          accountId: f.accountId,
+          accountLogin: f.accountLogin,
+          message: f.message,
+          status: f.status,
+          resolution: f.resolution,
+          detectedAt: f.detectedAt,
+          lastSeenAt: f.lastSeenAt,
+        })),
+      });
+    } catch (err) {
+      console.error("guardian findings error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Mark a finding ignored / resolved / open again (human review actions).
+router.post(
+  "/marketplaces/guardian/findings/:id",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const action = String((req.body || {}).action || "");
+      if (["ignore", "resolve", "reopen"].indexOf(action) === -1) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Unknown action" });
+      }
+      const f = await AuditFinding.findById(req.params.id);
+      if (!f) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Finding not found" });
+      }
+      if (action === "reopen") {
+        f.status = "open";
+        f.resolution = "";
+        f.resolvedAt = null;
+      } else {
+        f.status = action === "ignore" ? "ignored" : "resolved";
+        f.resolution = "manually " + f.status;
+        f.resolvedAt = new Date();
+      }
+      await f.save();
+      res.json({ success: true });
+    } catch (err) {
+      console.error("guardian finding update error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
     }
   },
 );

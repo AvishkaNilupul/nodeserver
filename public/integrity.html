@@ -1,0 +1,710 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Integrity</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --green: #059669;
+        --red: #dc2626;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        display: flex;
+        min-height: 100vh;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .nav {
+        width: 248px;
+        flex: none;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 18px 14px;
+        gap: 6px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 8px 14px;
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: var(--accent);
+        display: grid;
+        place-items: center;
+      }
+      .nav .brand b {
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+      }
+      .nav .brand b span {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        border-radius: 10px;
+        font-size: 13.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+        color: var(--ink);
+      }
+      .nav .links a.active {
+        background: var(--accent);
+        color: #fff;
+      }
+      .nav .me {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 8px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .nav .me .av {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: var(--surface-2);
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .nav .me .who {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.25;
+        flex: 1;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13px;
+      }
+      .nav .me .who span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .themebtn {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+      }
+
+      main {
+        flex: 1;
+        padding: 30px 34px;
+        max-width: 980px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 14px;
+        margin-bottom: 22px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 18px;
+      }
+      .card h2 {
+        font-size: 15px;
+        margin: 0 0 4px;
+      }
+      .card p.hint {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0 0 14px;
+      }
+      .btn {
+        padding: 10px 16px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn:hover {
+        background: var(--surface-2);
+      }
+      .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .btn-primary:hover {
+        opacity: 0.92;
+        background: var(--accent);
+      }
+      .btn-danger {
+        color: var(--red);
+        border-color: var(--line);
+      }
+      .btn-danger:hover {
+        background: #fef2f2;
+      }
+      html[data-theme="dark"] .btn-danger:hover {
+        background: rgba(220, 38, 38, 0.12);
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      td .acts {
+        display: flex;
+        gap: 6px;
+      }
+      .btn-sm {
+        padding: 6px 10px;
+        font-size: 12.5px;
+        border-radius: 8px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .danger-zone {
+        border-color: #fecaca;
+      }
+      html[data-theme="dark"] .danger-zone {
+        border-color: rgba(220, 38, 38, 0.35);
+      }
+      .warn {
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        color: #92400e;
+        padding: 11px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+        margin-bottom: 14px;
+      }
+      html[data-theme="dark"] .warn {
+        background: rgba(251, 191, 36, 0.1);
+        border-color: rgba(251, 191, 36, 0.3);
+        color: #fbbf24;
+      }
+      input[type="text"],
+      select {
+        padding: 9px 11px;
+        border-radius: 9px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 13.5px;
+      }
+      input[type="file"] {
+        font-size: 13px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%) translateY(20px);
+        background: #0f172a;
+        color: #fff;
+        padding: 11px 18px;
+        border-radius: 11px;
+        font-size: 13.5px;
+        opacity: 0;
+        pointer-events: none;
+        transition: all 0.2s;
+        z-index: 120;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        max-width: 90vw;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+      .toast.err {
+        background: #b91c1c;
+      }
+      .spin {
+        display: inline-block;
+        width: 13px;
+        height: 13px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: sp 0.7s linear infinite;
+        vertical-align: -2px;
+        margin-right: 6px;
+      }
+      @keyframes sp {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>
+          </svg>
+          Bots</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main>
+      <h1>Integrity guard</h1>
+      <div class="sub">
+        A background checker runs every 5 minutes over all live auto-delivery
+        listings: it tops sold-down Plati / GGSel listings back up with fresh
+        server accounts, and flags anything that could burn a buyer — the same
+        account listed on two platforms, an account already sold to someone
+        else, redeemed drops in a live listing, or a dead Twitch token. Review
+        each finding below and fix, ignore, or delist.
+      </div>
+
+      <div class="card">
+        <h2>Checker</h2>
+        <p class="hint" id="statusLine">Loading status…</p>
+        <div class="row">
+          <button class="btn btn-primary" id="btnRun">Run check now</button>
+          <button class="btn" id="btnRefresh">Refresh</button>
+          <select id="statusFilter">
+            <option value="open">Open findings</option>
+            <option value="ignored">Ignored</option>
+            <option value="resolved">Resolved / activity log</option>
+            <option value="">Everything</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Findings</h2>
+        <p class="hint">
+          High severity = a buyer would run into a problem right now. Findings
+          auto-resolve when a later pass no longer detects the issue.
+        </p>
+        <div id="list"><div class="muted">Loading…</div></div>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script>
+      var $ = function (id) {
+        return document.getElementById(id);
+      };
+      function toast(msg, err) {
+        var t = $("toast");
+        t.textContent = msg;
+        t.className = "toast show" + (err ? " err" : "");
+        clearTimeout(toast._t);
+        toast._t = setTimeout(
+          function () {
+            t.className = "toast";
+          },
+          err ? 6000 : 3500,
+        );
+      }
+      function fmtDate(s) {
+        try {
+          return new Date(s).toLocaleString();
+        } catch (e) {
+          return s;
+        }
+      }
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c];
+        });
+      }
+
+      async function api(url, opts) {
+        var r = await fetch(
+          url,
+          Object.assign({ credentials: "same-origin" }, opts || {}),
+        );
+        var j = await r.json().catch(function () {
+          return {};
+        });
+        if (!r.ok || j.success === false)
+          throw new Error(j.message || "HTTP " + r.status);
+        return j;
+      }
+
+      var TYPE_LABEL = {
+        "duplicate-account": "Duplicate account",
+        "claim-mismatch": "Reservation mismatch",
+        "redeemed-drops": "Redeemed drops",
+        "dead-token": "Dead token",
+        "stock-unknown": "Stock unreadable",
+        "restock-failed": "Restock failed",
+        restocked: "Restocked",
+      };
+      var SEV_COLOR = {
+        high: "var(--red)",
+        medium: "#d97706",
+        low: "var(--muted)",
+        info: "var(--green)",
+      };
+
+      async function loadStatus() {
+        try {
+          var j = await api("/marketplaces/guardian/status");
+          var lr = j.lastRun;
+          $("statusLine").textContent = j.running
+            ? "Checking now…"
+            : lr
+              ? "Last pass " +
+                fmtDate(lr.at) +
+                " — " +
+                lr.listingsChecked +
+                " listing(s) checked, " +
+                lr.accountsFed +
+                " account(s) auto-fed, " +
+                lr.openFindings +
+                " open finding(s)."
+              : "No pass has run yet since the server started. Runs automatically every 5 minutes, or run one now.";
+        } catch (e) {
+          $("statusLine").textContent = "Status unavailable: " + e.message;
+        }
+      }
+
+      async function loadFindings() {
+        try {
+          var st = $("statusFilter").value;
+          var j = await api(
+            "/marketplaces/guardian/findings" +
+              (st ? "?status=" + encodeURIComponent(st) : ""),
+          );
+          var rows = j.findings || [];
+          if (!rows.length) {
+            $("list").innerHTML =
+              '<div class="muted">Nothing here — all clear.</div>';
+            return;
+          }
+          $("list").innerHTML =
+            "<table><thead><tr><th>Severity</th><th>Issue</th><th>Where</th><th>Details</th><th>Seen</th><th></th></tr></thead><tbody>" +
+            rows
+              .map(function (f) {
+                var acts = "";
+                if (f.status === "open") {
+                  acts =
+                    '<button class="btn btn-sm" onclick="act(\'' +
+                    f.id +
+                    "','resolve')\">Resolve</button>" +
+                    '<button class="btn btn-sm" onclick="act(\'' +
+                    f.id +
+                    "','ignore')\">Ignore</button>";
+                } else if (f.status !== "resolved" || f.type !== "restocked") {
+                  acts =
+                    '<button class="btn btn-sm" onclick="act(\'' +
+                    f.id +
+                    "','reopen')\">Reopen</button>";
+                }
+                return (
+                  '<tr><td><b style="color:' +
+                  (SEV_COLOR[f.severity] || "inherit") +
+                  '">' +
+                  esc(f.severity) +
+                  "</b>" +
+                  (f.status !== "open"
+                    ? '<div class="muted">' + esc(f.status) + "</div>"
+                    : "") +
+                  "</td><td>" +
+                  esc(TYPE_LABEL[f.type] || f.type) +
+                  "</td><td>" +
+                  esc(f.marketplace || "—") +
+                  (f.accountLogin
+                    ? '<div class="muted">' + esc(f.accountLogin) + "</div>"
+                    : "") +
+                  "</td><td>" +
+                  esc(f.message) +
+                  (f.resolution
+                    ? '<div class="muted">' + esc(f.resolution) + "</div>"
+                    : "") +
+                  "</td><td>" +
+                  esc(fmtDate(f.lastSeenAt)) +
+                  '</td><td><div class="acts">' +
+                  acts +
+                  "</div></td></tr>"
+                );
+              })
+              .join("") +
+            "</tbody></table>";
+        } catch (e) {
+          $("list").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      }
+
+      async function act(id, action) {
+        try {
+          await api(
+            "/marketplaces/guardian/findings/" + encodeURIComponent(id),
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: action }),
+            },
+          );
+          toast("Finding " + action + (action === "reopen" ? "ed" : "d"));
+          loadFindings();
+          loadStatus();
+        } catch (e) {
+          toast("Failed: " + e.message, true);
+        }
+      }
+
+      $("btnRun").addEventListener("click", async function () {
+        var b = this;
+        b.disabled = true;
+        b.innerHTML = '<span class="spin"></span>Checking…';
+        try {
+          var j = await api("/marketplaces/guardian/run", { method: "POST" });
+          var lr = j.lastRun || {};
+          toast(
+            "Checked " +
+              lr.listingsChecked +
+              " listing(s) — fed " +
+              lr.accountsFed +
+              " account(s), " +
+              lr.openFindings +
+              " open finding(s).",
+          );
+        } catch (e) {
+          toast("Check failed: " + e.message, true);
+        }
+        b.disabled = false;
+        b.textContent = "Run check now";
+        loadStatus();
+        loadFindings();
+      });
+      $("btnRefresh").addEventListener("click", function () {
+        loadStatus();
+        loadFindings();
+      });
+      $("statusFilter").addEventListener("change", loadFindings);
+
+      loadStatus();
+      loadFindings();
+      setInterval(loadStatus, 30000);
+    </script>
+  </body>
+</html>

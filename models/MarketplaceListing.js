@@ -39,6 +39,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     accountLogin: { type: String, default: "" },
     // How many more units to relist (one at a time) after this one sells.
     qtyRemaining: { type: Number, default: 0 },
+    // Quantity-based auto-delivery (Plati / GGSel): how many units the
+    // guardian keeps available on the platform, topping the listing up with
+    // freshly claimed accounts as units sell. 0 disables auto-feeding.
+    qtyTarget: { type: Number, default: 0 },
   },
   { timestamps: true },
 );
