@@ -80,8 +80,15 @@ async function autoResolveStale(seenKeys) {
   await AuditFinding.updateMany(
     {
       status: "open",
-      type: { $in: CONDITION_TYPES },
       dedupeKey: { $nin: [...seenKeys] },
+      $or: [
+        { type: { $in: CONDITION_TYPES } },
+        // "Nothing to feed" restock findings are condition-based too (stable
+        // dedupe key, re-flagged every pass while stock is short) — once the
+        // listing gets fed or delisted they must clear, or the tab shows a
+        // stale alarm forever. One-shot "restock-err:<ts>" events stay.
+        { type: "restock-failed", dedupeKey: /^restock-empty:/ },
+      ],
     },
     {
       $set: {
@@ -242,11 +249,19 @@ async function runChecks(rows, seenKeys) {
       if (!byAcc.has(k)) byAcc.set(k, []);
       byAcc.get(k).push(d.name || "item");
     }
+    // On quantity listings (Plati / GGSel) the platform hands the delivery
+    // codes out itself, and delivered accounts stay attached to the row — so
+    // redeemed drops there usually just mean a completed sale whose buyer
+    // already connected the game. Flag it lower and say so, instead of
+    // raising a false "buyer would be burned" alarm after every sale.
+    const qtyListing =
+      (row.marketplace === "digiseller" || row.marketplace === "ggsel") &&
+      Number(row.qtyTarget) > 0;
     for (const [accId, items] of byAcc) {
       const acc = accMap.get(accId);
       await flag({
         type: "redeemed-drops",
-        severity: "high",
+        severity: qtyListing ? "low" : "high",
         marketplace: row.marketplace,
         listing: row._id,
         accountId: accId,
@@ -259,8 +274,11 @@ async function runChecks(rows, seenKeys) {
           row.marketplace +
           " listing already redeemed: " +
           [...new Set(items)].slice(0, 5).join(", ") +
-          " — the buyer could not redeem these. Replace the account or " +
-          "delist.",
+          (qtyListing
+            ? " — likely a completed sale (the buyer connected it). Only " +
+              "act if this unit was never sold."
+            : " — the buyer could not redeem these. Replace the account or " +
+              "delist."),
       });
     }
   }

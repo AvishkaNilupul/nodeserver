@@ -609,13 +609,13 @@ async function digisellerProductStock(productId) {
     );
     const d = r.data || {};
     const p = d.product || d.content || d;
-    for (const f of [
-      "num_in_stock",
-      "in_stock",
-      "count_goods",
-      "num_in_lock",
-    ]) {
-      const v = Number(p && p[f]);
+    // Only trust real numeric stock fields: booleans coerce to 0/1 and
+    // num_in_lock counts locked (not sellable) units, so both would make the
+    // auto-feeder misjudge stock and over-feed accounts.
+    for (const f of ["num_in_stock", "in_stock", "count_goods"]) {
+      const raw = p && p[f];
+      if (typeof raw === "boolean") continue;
+      const v = Number(raw);
       if (Number.isFinite(v)) return v;
     }
     return null;

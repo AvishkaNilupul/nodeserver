@@ -936,8 +936,10 @@ router.get(
       }
 
       // Per account: which of the set's items they hold and the count of each.
+      // Connected/redeemed drops can't be delivered again, so they don't count
+      // — this keeps these numbers identical to the Shop's stock.
       const rows = await DropLog.aggregate([
-        { $match: { itemKey: { $in: keys } } },
+        { $match: { itemKey: { $in: keys }, connected: { $ne: true } } },
         {
           $group: {
             _id: { account: "$account", k: "$itemKey" },
@@ -1013,7 +1015,7 @@ router.get(
 
       // Per-item stock across all accounts.
       const perItem = await DropLog.aggregate([
-        { $match: { itemKey: { $in: keys } } },
+        { $match: { itemKey: { $in: keys }, connected: { $ne: true } } },
         {
           $group: {
             _id: "$itemKey",

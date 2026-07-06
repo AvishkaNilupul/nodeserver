@@ -304,10 +304,17 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
                 priceUsd,
                 categories: ds.categories,
               });
-              await mp.digisellerAddContent(
-                r.externalId,
-                claimed.map((c) => c.code),
-              );
+              try {
+                await mp.digisellerAddContent(
+                  r.externalId,
+                  claimed.map((c) => c.code),
+                );
+              } catch (err) {
+                // The product exists but got no delivery content — disable it
+                // so an empty listing doesn't sit live on Plati.
+                await mp.digisellerDelist(r.externalId).catch(() => {});
+                throw err;
+              }
             } catch (err) {
               await dsFulfiller.releaseAccounts(
                 claimed.map((c) => c.accountId),

@@ -117,7 +117,7 @@ async function stopFarmingGame(acc, game) {
     'Buyer connected "' +
       g +
       '" on sold account ' +
-      (acc.login || acc.clientSecret.slice(0, 6)) +
+      (acc.login || String(acc.clientSecret || "").slice(0, 6)) +
       " — " +
       (disabled
         ? "no games left, account disabled"
