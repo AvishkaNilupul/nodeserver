@@ -13,6 +13,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const { fetchInventory } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
+const { stopFarmingGame } = require("./farmControl");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -120,6 +121,32 @@ async function scanAccount(acc) {
     }
     if (twitchId) acc.twitchId = twitchId;
     if (login && !acc.login) acc.login = login;
+    // A sold account whose buyer has connected a game shouldn't keep farming
+    // that game. Remove it from the account's bot-config FavouriteGames (the
+    // account keeps farming its other games); best-effort, never fails a scan.
+    if (acc.soldAt) {
+      const connectedGames = [
+        ...new Set(
+          drops.filter((d) => d.connected && d.game).map((d) => d.game),
+        ),
+      ];
+      for (const game of connectedGames) {
+        try {
+          const r = await stopFarmingGame(acc, game);
+          if (r.changed) {
+            console.log(
+              `dropScanner: stopped farming "${game}" on sold account ` +
+                `${maskedLogin(acc)}${r.reason ? " (" + r.reason + ")" : ""}`,
+            );
+          }
+        } catch (e) {
+          console.error(
+            `dropScanner: stop-farming "${game}" on ${maskedLogin(acc)} ` +
+              `failed: ${e.message}`,
+          );
+        }
+      }
+    }
     acc.dropCount = await DropLog.countDocuments({ account: acc._id });
     acc.lastScanAt = now;
     acc.lastScanStatus = "ok";
