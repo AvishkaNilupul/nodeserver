@@ -1254,11 +1254,6 @@
           return n + (Number(s.qty) || 1);
         }, 0);
       }
-      function anyQtyVaries() {
-        return selected.some(function (s) {
-          return (Number(s.qtyMax) || 0) > (Number(s.qty) || 1);
-        });
-      }
       function uniqueGames() {
         var games = [];
         selected.forEach(function (s) {
@@ -1284,7 +1279,6 @@
           more +
           " (" +
           total +
-          (anyQtyVaries() ? "+" : "") +
           " item" +
           (total === 1 ? "" : "s") +
           ")"
@@ -1298,7 +1292,6 @@
         lines.push(
           "This account includes " +
             total +
-            (anyQtyVaries() ? " or more" : "") +
             " item" +
             (total === 1 ? "" : "s") +
             (games.length === 1 ? " from " + games[0] : "") +
@@ -1306,25 +1299,17 @@
         );
         selected.forEach(function (s) {
           var q = Number(s.qty) || 1;
-          var hi = Number(s.qtyMax) || q;
           lines.push(
             "\u2022 " +
-              (q > 1 || hi > q ? q + "\u00d7 " : "") +
+              (q > 1 ? q + "\u00d7 " : "") +
               s.name +
-              (s.game ? " (" + s.game + ")" : "") +
-              (hi > q ? " — some accounts include up to " + hi + "\u00d7" : ""),
+              (s.game ? " (" + s.game + ")" : ""),
           );
         });
         lines.push("");
         lines.push(
           "Buyer receives one in-stock account holding every item listed above.",
         );
-        if (anyQtyVaries()) {
-          lines.push(
-            "Quantities marked \u201cup to\u201d vary by account — the listed " +
-              "minimum is always included.",
-          );
-        }
         return lines.join("\n");
       }
       function refreshAuto() {
@@ -1349,6 +1334,8 @@
         } else {
           box.innerHTML = selected
             .map(function (it) {
+              var q = Number(it.qty) || 1;
+              var hi = Number(it.qtyMax) || q;
               return (
                 '<div class="row">' +
                 imgTag(it.image) +
@@ -1358,9 +1345,17 @@
                 "</div>" +
                 '<div class="gm">' +
                 esc(it.game || "Other rewards") +
+                (hi > 1 ? " \u00b7 accounts hold up to " + hi + "\u00d7" : "") +
                 "</div></div>" +
-                (qtyLabel(it)
-                  ? '<span class="qty">' + qtyLabel(it) + "\u00d7</span>"
+                (hi > 1
+                  ? '<label class="gm" style="display:flex;align-items:center;gap:4px;white-space:nowrap;">Qty ' +
+                    '<input type="number" min="1" max="' +
+                    hi +
+                    '" value="' +
+                    q +
+                    '" data-qty="' +
+                    attr(it.itemKey) +
+                    '" style="width:56px;background:transparent;color:inherit;border:1px solid rgba(255,255,255,0.2);border-radius:6px;padding:2px 6px;" />\u00d7</label>'
                   : "") +
                 '<button class="x" data-rm="' +
                 attr(it.itemKey) +
@@ -1398,6 +1393,24 @@
       $("selList").addEventListener("click", function (e) {
         var b = e.target.closest("[data-rm]");
         if (b) removeItem(b.dataset.rm);
+      });
+      // Exact quantity per item: stock only counts accounts holding at least
+      // this many copies, so the listing text and delivery always match.
+      $("selList").addEventListener("change", function (e) {
+        var inp = e.target.closest("[data-qty]");
+        if (!inp) return;
+        var it = selected.find(function (s) {
+          return s.itemKey === inp.dataset.qty;
+        });
+        if (!it) return;
+        var hi = Number(it.qtyMax) || 1;
+        var v = Math.floor(Number(inp.value));
+        if (!(v >= 1)) v = 1;
+        if (v > hi) v = hi;
+        it.qty = v;
+        inp.value = v;
+        refreshAuto();
+        $("selCount").innerText = totalItemCount();
       });
 
       // ---- picker ----
@@ -1548,12 +1561,17 @@
           $("fPrice").focus();
           return null;
         }
+        var itemQuantities = {};
+        selected.forEach(function (s) {
+          itemQuantities[s.itemKey] = Number(s.qty) || 1;
+        });
         return {
           name: name,
           note: $("fNote").value.trim(),
           price: price,
           listed: !!listed,
           itemKeys: selected.map((s) => s.itemKey),
+          itemQuantities: itemQuantities,
         };
       }
       function save(listed) {
@@ -1603,13 +1621,19 @@
         titleEdited = true;
         noteEdited = true;
         selected = (set.items || []).map(function (i) {
+          // The saved item doesn't carry the live max; take it from the
+          // catalog so the qty stepper still allows the full range.
+          var cat = catalog.find(function (c) {
+            return c.itemKey === i.itemKey;
+          });
+          var q = Number(i.qty) || 1;
           return {
             itemKey: i.itemKey,
             name: i.name,
             game: i.game,
             image: i.image,
-            qty: Number(i.qty) || 1,
-            qtyMax: Number(i.qtyMax) || Number(i.qty) || 1,
+            qty: q,
+            qtyMax: Math.max(q, (cat && Number(cat.qtyMax)) || 0, 1),
           };
         });
         $("fName").value = set.name || "";

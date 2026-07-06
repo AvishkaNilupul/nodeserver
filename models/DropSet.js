@@ -10,6 +10,9 @@ const dropSetItemSchema = new mongoose.Schema(
     name: { type: String, default: "" },
     game: { type: String, default: "" },
     image: { type: String, default: "" },
+    // Exact copies of this item the bundle promises. Stock and delivery only
+    // count accounts holding at least this many, so listings never lie.
+    qty: { type: Number, default: 1, min: 1 },
   },
   { _id: false },
 );

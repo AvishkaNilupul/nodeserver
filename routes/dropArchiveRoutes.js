@@ -758,6 +758,16 @@ async function resolveItemsMeta(keys) {
   });
 }
 
+// Apply the exact per-item quantities the seller chose ({itemKey: qty}) to a
+// resolved item list. Stock only counts accounts holding at least item.qty.
+function applyItemQuantities(items, quantities) {
+  const q = quantities && typeof quantities === "object" ? quantities : {};
+  return items.map((it) => {
+    const n = Math.floor(Number(q[it.itemKey]));
+    return { ...it, qty: Number.isFinite(n) && n >= 1 ? n : 1 };
+  });
+}
+
 function publicSet(s) {
   return {
     id: String(s._id),
@@ -804,7 +814,10 @@ router.post("/drops-archive/sets", requireSuperadmin, async (req, res) => {
       return res.status(400).json({ success: false, message: "Name required" });
     }
     const keys = Array.isArray(body.itemKeys) ? body.itemKeys : [];
-    const items = await resolveItemsMeta(keys);
+    const items = applyItemQuantities(
+      await resolveItemsMeta(keys),
+      body.itemQuantities,
+    );
     const doc = {
       name,
       note: String(body.note || "").trim(),
@@ -864,7 +877,13 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
       const rm = new Set(body.removeItemKeys);
       keys = keys.filter((k) => !rm.has(k));
     }
-    set.items = await resolveItemsMeta(keys);
+    // Keep each item's chosen qty unless the caller sends new ones.
+    const prevQty = {};
+    for (const i of set.items) prevQty[i.itemKey] = i.qty || 1;
+    set.items = applyItemQuantities(
+      await resolveItemsMeta(keys),
+      body.itemQuantities !== undefined ? body.itemQuantities : prevQty,
+    );
     await set.save();
     res.json({ success: true, set: publicSet(set) });
   } catch (err) {
@@ -960,10 +979,19 @@ router.get(
       ]);
 
       const total = keys.length;
+      // An account is only "complete" when it holds at least the promised
+      // qty of EVERY item, so the exact numbers on the listing always hold.
+      const needByKey = new Map(
+        (set.items || []).map((i) => [i.itemKey, Math.max(1, i.qty || 1)]),
+      );
       const accounts = rows
         .map((r) => {
           const have = r.items.length;
-          const complete = have === total;
+          const complete =
+            have === total &&
+            r.items.every(
+              (i) => (i.count || 0) >= (needByKey.get(i.itemKey) || 1),
+            );
           const minCount = complete
             ? Math.min(...r.items.map((i) => i.count || 0))
             : 0;

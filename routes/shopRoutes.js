@@ -75,6 +75,13 @@ async function sellableAccountMap(ids) {
 async function availableAccountsForSet(set) {
   const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
   if (!keys.length) return [];
+  // Each item can promise an exact copy count (item.qty); only accounts that
+  // hold at least that many of every item are deliverable.
+  const needByKey = new Map(
+    (set.items || [])
+      .filter((i) => i.itemKey)
+      .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
+  );
   const rows = await holdingsForKeys(keys);
   if (!rows.length) return [];
   const accMap = await sellableAccountMap(rows.map((r) => r._id));
@@ -82,6 +89,10 @@ async function availableAccountsForSet(set) {
   for (const r of rows) {
     const acc = accMap.get(String(r._id));
     if (!acc) continue;
+    const enough = (r.items || []).every(
+      (it) => (it.count || 0) >= (needByKey.get(it.k) || 1),
+    );
+    if (!enough) continue;
     out.push({
       accountId: r._id,
       login: acc.login,
@@ -110,7 +121,9 @@ async function stockForSets(sets) {
   // Union of every key across all listed sets -> one indexed aggregation.
   const allKeys = [
     ...new Set(
-      sets.flatMap((s) => (s.items || []).map((i) => i.itemKey).filter(Boolean)),
+      sets.flatMap((s) =>
+        (s.items || []).map((i) => i.itemKey).filter(Boolean),
+      ),
     ),
   ];
   if (!allKeys.length) {
@@ -150,6 +163,11 @@ async function stockForSets(sets) {
       result.set(String(set._id), { stock: 0, topItems: [] });
       continue;
     }
+    const needByKey = new Map(
+      (set.items || [])
+        .filter((i) => i.itemKey)
+        .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
+    );
     let stock = 0;
     let bestMin = -1;
     let bestMap = null;
@@ -157,8 +175,8 @@ async function stockForSets(sets) {
       let ok = true;
       let min = Infinity;
       for (const k of keys) {
-        const c = m.get(k);
-        if (!c) {
+        const c = m.get(k) || 0;
+        if (c < (needByKey.get(k) || 1)) {
           ok = false;
           break;
         }
@@ -217,6 +235,7 @@ function listingView(set, stock, countsByKey = null) {
       name: i.name,
       game: i.game,
       image: i.image,
+      qty: Math.max(1, Number(i.qty) || 1),
       count: countsByKey ? countsByKey.get(i.itemKey) || 0 : null,
     })),
     stock,
