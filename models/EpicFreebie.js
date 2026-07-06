@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const epicFreebieSchema = new mongoose.Schema(
   {
     offerId: { type: String, required: true, unique: true, index: true },
+    namespace: { type: String, default: "" },
     title: { type: String, default: "" },
     description: { type: String, default: "" },
     image: { type: String, default: "" },

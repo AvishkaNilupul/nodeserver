@@ -1,0 +1,770 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Epic Accounts</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --green: #059669;
+        --red: #dc2626;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        display: flex;
+        min-height: 100vh;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .nav {
+        width: 248px;
+        flex: none;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 18px 14px;
+        gap: 6px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 8px 14px;
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: var(--accent);
+        display: grid;
+        place-items: center;
+      }
+      .nav .brand b {
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+      }
+      .nav .brand b span {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        border-radius: 10px;
+        font-size: 13.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+        color: var(--ink);
+      }
+      .nav .links a.active {
+        background: var(--accent);
+        color: #fff;
+      }
+      .nav .me {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 8px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .nav .me .av {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: var(--surface-2);
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .nav .me .who {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.25;
+        flex: 1;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13px;
+      }
+      .nav .me .who span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .themebtn {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+      }
+
+      main {
+        flex: 1;
+        padding: 30px 34px;
+        max-width: 980px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 14px;
+        margin-bottom: 22px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 18px;
+      }
+      .card h2 {
+        font-size: 15px;
+        margin: 0 0 4px;
+      }
+      .card p.hint {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0 0 14px;
+      }
+      .btn {
+        padding: 10px 16px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn:hover {
+        background: var(--surface-2);
+      }
+      .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .btn-primary:hover {
+        opacity: 0.92;
+        background: var(--accent);
+      }
+      .btn-danger {
+        color: var(--red);
+        border-color: var(--line);
+      }
+      .btn-danger:hover {
+        background: #fef2f2;
+      }
+      html[data-theme="dark"] .btn-danger:hover {
+        background: rgba(220, 38, 38, 0.12);
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      td .acts {
+        display: flex;
+        gap: 6px;
+      }
+      .btn-sm {
+        padding: 6px 10px;
+        font-size: 12.5px;
+        border-radius: 8px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .danger-zone {
+        border-color: #fecaca;
+      }
+      html[data-theme="dark"] .danger-zone {
+        border-color: rgba(220, 38, 38, 0.35);
+      }
+      .warn {
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        color: #92400e;
+        padding: 11px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+        margin-bottom: 14px;
+      }
+      html[data-theme="dark"] .warn {
+        background: rgba(251, 191, 36, 0.1);
+        border-color: rgba(251, 191, 36, 0.3);
+        color: #fbbf24;
+      }
+      input[type="text"],
+      select {
+        padding: 9px 11px;
+        border-radius: 9px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 13.5px;
+      }
+      input[type="file"] {
+        font-size: 13px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%) translateY(20px);
+        background: #0f172a;
+        color: #fff;
+        padding: 11px 18px;
+        border-radius: 11px;
+        font-size: 13.5px;
+        opacity: 0;
+        pointer-events: none;
+        transition: all 0.2s;
+        z-index: 120;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        max-width: 90vw;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+      .toast.err {
+        background: #b91c1c;
+      }
+      .spin {
+        display: inline-block;
+        width: 13px;
+        height: 13px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: sp 0.7s linear infinite;
+        vertical-align: -2px;
+        margin-right: 6px;
+      }
+      @keyframes sp {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>
+          </svg>
+          Bots</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main>
+      <h1>Epic accounts</h1>
+      <div class="sub">
+        Stock Epic Games accounts for weekly free-game bundles. Tokens last ~1
+        year, libraries re-sync every 6 hours, and when a giveaway goes live
+        every account that's missing it gets a one-tap claim link in Telegram
+        (the link signs into that account and opens checkout — the final click
+        stays with you because Epic captcha-gates orders).
+      </div>
+
+      <div class="card">
+        <h2>Add account</h2>
+        <p class="hint">
+          While logged into the Epic account in your browser, open
+          <a href="#" id="redirectLink" target="_blank" rel="noopener"
+            >this authorization link</a
+          >
+          and paste the <b>authorizationCode</b> value below (codes are
+          single-use and expire in ~5 minutes). No password or cookies are
+          stored — only an encrypted refresh token.
+        </p>
+        <div class="row">
+          <input
+            id="addLabel"
+            placeholder="Label (e.g. epic-stock-01)"
+            style="max-width: 220px"
+          />
+          <input
+            id="addCode"
+            placeholder="authorizationCode (32 chars)"
+            style="max-width: 320px"
+          />
+          <button class="btn btn-primary" id="btnAdd">Add account</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Accounts</h2>
+        <p class="hint" id="statusLine">Loading…</p>
+        <div class="row">
+          <button class="btn btn-primary" id="btnSync">Sync all now</button>
+          <button class="btn" id="btnRefresh">Refresh</button>
+        </div>
+        <div id="list"><div class="muted">Loading…</div></div>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script>
+      var $ = function (id) {
+        return document.getElementById(id);
+      };
+      function toast(msg, err) {
+        var t = $("toast");
+        t.textContent = msg;
+        t.className = "toast show" + (err ? " err" : "");
+        clearTimeout(toast._t);
+        toast._t = setTimeout(
+          function () {
+            t.className = "toast";
+          },
+          err ? 6000 : 3500,
+        );
+      }
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c];
+        });
+      }
+      async function api(url, opts) {
+        var r = await fetch(
+          url,
+          Object.assign(
+            {
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+            },
+            opts || {},
+          ),
+        );
+        var j = await r.json().catch(function () {
+          return {};
+        });
+        if (!r.ok || j.success === false)
+          throw new Error(j.message || "HTTP " + r.status);
+        return j;
+      }
+
+      var accounts = [];
+
+      function libHtml(a) {
+        if (!(a.library || []).length)
+          return '<div class="muted">No games yet.</div>';
+        return (
+          "<ul style='margin:6px 0 0;padding-left:18px'>" +
+          a.library
+            .map(function (g) {
+              return (
+                "<li>" +
+                esc(g.title) +
+                (g.priceUsd
+                  ? ' <span class="muted">($' +
+                    g.priceUsd.toFixed(2) +
+                    ")</span>"
+                  : "") +
+                "</li>"
+              );
+            })
+            .join("") +
+          "</ul>"
+        );
+      }
+
+      function render() {
+        if (!accounts.length) {
+          $("list").innerHTML =
+            '<div class="muted">No accounts yet — add your first one above.</div>';
+          return;
+        }
+        $("list").innerHTML =
+          "<table><thead><tr><th>Account</th><th>Status</th><th>Library</th><th>Value</th><th>Missing live games</th><th></th></tr></thead><tbody>" +
+          accounts
+            .map(function (a) {
+              return (
+                "<tr" +
+                (a.sold ? ' style="opacity:.55"' : "") +
+                "><td><b>" +
+                esc(a.label || a.displayName || a.accountId) +
+                '</b><div class="muted">' +
+                esc(a.displayName) +
+                (a.sold ? " · SOLD" : "") +
+                "</div></td><td>" +
+                (a.status === "ok"
+                  ? '<b style="color:var(--green)">ok</b>'
+                  : '<b style="color:var(--red)">needs login</b>' +
+                    (a.lastError
+                      ? '<div class="muted">' + esc(a.lastError) + "</div>"
+                      : "")) +
+                "</td><td>" +
+                a.libraryCount +
+                ' game(s)<details><summary class="muted" style="cursor:pointer">show</summary>' +
+                libHtml(a) +
+                "</details></td><td>$" +
+                (a.libraryValueUsd || 0).toFixed(2) +
+                "</td><td>" +
+                ((a.missingLive || []).length
+                  ? a.missingLive
+                      .map(function (m) {
+                        return (
+                          '<div style="margin:2px 0">' +
+                          esc(m.title) +
+                          ' <button class="btn btn-sm" onclick="claimNow(\'' +
+                          a._id +
+                          "','" +
+                          esc(m.offerId) +
+                          "')\">Claim</button></div>"
+                        );
+                      })
+                      .join("")
+                  : '<span class="muted">none 🎉</span>') +
+                "</td><td>" +
+                '<button class="btn btn-sm" onclick="toggleSold(\'' +
+                a._id +
+                "'," +
+                !a.sold +
+                ')">' +
+                (a.sold ? "Unmark sold" : "Mark sold") +
+                "</button> " +
+                '<button class="btn btn-sm" onclick="delAcc(\'' +
+                a._id +
+                "')\">Remove</button>" +
+                "</td></tr>"
+              );
+            })
+            .join("") +
+          "</tbody></table>";
+      }
+
+      function renderStatus(st) {
+        if (!st) return;
+        $("statusLine").textContent = st.lastRun
+          ? "Last sync " +
+            new Date(st.lastRun).toLocaleString() +
+            " — " +
+            st.lastCounts.accounts +
+            " account(s), " +
+            st.lastCounts.pendingClaims +
+            " pending claim(s)" +
+            (st.lastCounts.needsLogin
+              ? ", " + st.lastCounts.needsLogin + " need login"
+              : "") +
+            ". Auto-sync every " +
+            st.intervalHours +
+            "h."
+          : "Not synced yet — syncs every " + st.intervalHours + "h.";
+      }
+
+      async function load() {
+        try {
+          var j = await api("/api/epic/accounts");
+          accounts = j.accounts || [];
+          $("redirectLink").href = j.redirectUrl;
+          renderStatus(j.status);
+          render();
+        } catch (e) {
+          $("list").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      }
+
+      window.claimNow = async function (id, offerId) {
+        try {
+          var j = await api("/api/epic/accounts/" + id + "/claim-link", {
+            method: "POST",
+            body: JSON.stringify({ offerId: offerId }),
+          });
+          window.open(j.url, "_blank");
+          toast(
+            "Checkout opened signed in as that account — place the free order there.",
+          );
+        } catch (e) {
+          toast("Claim link failed: " + e.message, true);
+        }
+      };
+
+      window.toggleSold = async function (id, sold) {
+        try {
+          await api("/api/epic/accounts/" + id, {
+            method: "PATCH",
+            body: JSON.stringify({ sold: sold }),
+          });
+          load();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+
+      window.delAcc = async function (id) {
+        if (!confirm("Remove this account from tracking?")) return;
+        try {
+          await api("/api/epic/accounts/" + id, { method: "DELETE" });
+          load();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+
+      $("btnAdd").addEventListener("click", async function () {
+        var code = $("addCode").value.trim();
+        var m = code.match(/[0-9a-f]{32}/i);
+        if (m) code = m[0]; // allow pasting the whole JSON blob
+        var b = this;
+        b.disabled = true;
+        try {
+          await api("/api/epic/accounts", {
+            method: "POST",
+            body: JSON.stringify({
+              code: code,
+              label: $("addLabel").value.trim(),
+            }),
+          });
+          $("addCode").value = "";
+          toast("Account added — library sync started.");
+          setTimeout(load, 4000);
+          load();
+        } catch (e) {
+          toast(e.message, true);
+        }
+        b.disabled = false;
+      });
+
+      $("btnSync").addEventListener("click", async function () {
+        var b = this;
+        b.disabled = true;
+        b.innerHTML = '<span class="spin"></span>Syncing…';
+        try {
+          var j = await api("/api/epic/accounts/sync", { method: "POST" });
+          toast(
+            "Synced " +
+              j.counts.synced +
+              "/" +
+              j.counts.accounts +
+              " account(s), " +
+              j.counts.pendingClaims +
+              " pending claim(s).",
+          );
+        } catch (e) {
+          toast("Sync failed: " + e.message, true);
+        }
+        b.disabled = false;
+        b.textContent = "Sync all now";
+        load();
+      });
+      $("btnRefresh").addEventListener("click", load);
+
+      load();
+    </script>
+  </body>
+</html>

@@ -33,6 +33,7 @@ const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
+const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
@@ -42,6 +43,7 @@ const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
 const epicWatcher = require("./utils/epicWatcher");
+const epicClaimer = require("./utils/epicClaimer");
 const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
 const {
@@ -346,6 +348,11 @@ app.get("/radar.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "radar.html"));
 });
 
+// Epic accounts manager (superadmin only) — stock accounts + auto-claim.
+app.get("/epic-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "epic-accounts.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -406,6 +413,7 @@ app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
+app.use(enforce2fa, epicAccountRoutes);
 
 // =========================
 // Socket.IO
@@ -451,6 +459,9 @@ mongoose
     // and Epic free-games watcher, both alerting via Telegram + the tab.
     campaignWatcher.start();
     epicWatcher.start();
+    // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
+    // sends one-tap claim links when live giveaways are missing.
+    epicClaimer.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

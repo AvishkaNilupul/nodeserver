@@ -61,6 +61,7 @@ function normalize(el) {
     ) || (el.keyImages || [])[0];
   return {
     offerId: el.id,
+    namespace: el.namespace || "",
     title: el.title || "",
     description: el.description || "",
     image: (img && img.url) || "",
@@ -185,6 +186,12 @@ async function runOnce() {
       new: fresh.length,
       wentLive: wentLive.length,
     };
+    // A giveaway just went live (or a brand-new one appeared already live):
+    // kick the account claimer so claim links go out immediately.
+    if (!seeding && (wentLive.length || fresh.some((o) => !o.upcoming))) {
+      const epicClaimer = require("./epicClaimer");
+      epicClaimer.runOnce().catch(() => {});
+    }
     state.lastError = "";
     return state.lastCounts;
   } catch (err) {

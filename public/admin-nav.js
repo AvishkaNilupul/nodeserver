@@ -10,6 +10,7 @@
     "integrity.html",
     "prime.html",
     "radar.html",
+    "epic-accounts.html",
     "backup.html",
   ];
 
@@ -100,6 +101,16 @@
       '<path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49">' +
       '</path><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 ' +
       '0 1 0-14.14"></path></svg> Drops radar'
+    );
+  }
+
+  function epicAccountsLinkMarkup() {
+    return (
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" ' +
+      'rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path>' +
+      "</svg> Epic accounts"
     );
   }
 
@@ -262,6 +273,22 @@
       }
     }
 
+    // Epic accounts (superadmin only) — grouped right after the radar.
+    if (isSuper && !links.querySelector('a[href="/epic-accounts.html"]')) {
+      var elink = document.createElement("a");
+      elink.href = "/epic-accounts.html";
+      elink.innerHTML = epicAccountsLinkMarkup();
+      if (window.location.pathname === "/epic-accounts.html") {
+        elink.className = "active";
+      }
+      var radarAnchor = links.querySelector('a[href="/radar.html"]');
+      if (radarAnchor && radarAnchor.nextSibling) {
+        links.insertBefore(elink, radarAnchor.nextSibling);
+      } else {
+        links.appendChild(elink);
+      }
+    }
+
     // Backup & restore (superadmin only) — grouped right after the radar.
     if (isSuper && !links.querySelector('a[href="/backup.html"]')) {
       var blink = document.createElement("a");
@@ -271,6 +298,7 @@
         blink.className = "active";
       }
       var listAnchor =
+        links.querySelector('a[href="/epic-accounts.html"]') ||
         links.querySelector('a[href="/radar.html"]') ||
         links.querySelector('a[href="/prime.html"]') ||
         links.querySelector('a[href="/integrity.html"]') ||
