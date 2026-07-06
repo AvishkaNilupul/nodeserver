@@ -8,6 +8,7 @@
     "drops-archive.html",
     "listings.html",
     "integrity.html",
+    "prime.html",
     "backup.html",
   ];
 
@@ -74,6 +75,19 @@
       'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
       'stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 ' +
       '10 8 10z"></path><path d="M9 12l2 2 4-4"></path></svg> Integrity'
+    );
+  }
+
+  function primeLinkMarkup() {
+    return (
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"><polyline points="20 12 20 22 4 22 4 12">' +
+      '</polyline><rect x="2" y="7" width="20" height="5"></rect>' +
+      '<line x1="12" y1="22" x2="12" y2="7"></line>' +
+      '<path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"></path>' +
+      '<path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"></path></svg> ' +
+      "Prime Gaming"
     );
   }
 
@@ -204,7 +218,23 @@
       }
     }
 
-    // Backup & restore (superadmin only) — grouped right after Integrity.
+    // Prime Gaming watcher (superadmin only) — grouped right after Integrity.
+    if (isSuper && !links.querySelector('a[href="/prime.html"]')) {
+      var plink = document.createElement("a");
+      plink.href = "/prime.html";
+      plink.innerHTML = primeLinkMarkup();
+      if (window.location.pathname === "/prime.html") {
+        plink.className = "active";
+      }
+      var intAnchor = links.querySelector('a[href="/integrity.html"]');
+      if (intAnchor && intAnchor.nextSibling) {
+        links.insertBefore(plink, intAnchor.nextSibling);
+      } else {
+        links.appendChild(plink);
+      }
+    }
+
+    // Backup & restore (superadmin only) — grouped right after Prime Gaming.
     if (isSuper && !links.querySelector('a[href="/backup.html"]')) {
       var blink = document.createElement("a");
       blink.href = "/backup.html";
@@ -213,6 +243,7 @@
         blink.className = "active";
       }
       var listAnchor =
+        links.querySelector('a[href="/prime.html"]') ||
         links.querySelector('a[href="/integrity.html"]') ||
         links.querySelector('a[href="/listings.html"]');
       if (listAnchor && listAnchor.nextSibling) {

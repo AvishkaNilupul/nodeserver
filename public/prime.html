@@ -1,0 +1,694 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prime Gaming</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --green: #059669;
+        --red: #dc2626;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        display: flex;
+        min-height: 100vh;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .nav {
+        width: 248px;
+        flex: none;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 18px 14px;
+        gap: 6px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 8px 14px;
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: var(--accent);
+        display: grid;
+        place-items: center;
+      }
+      .nav .brand b {
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+      }
+      .nav .brand b span {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        border-radius: 10px;
+        font-size: 13.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+        color: var(--ink);
+      }
+      .nav .links a.active {
+        background: var(--accent);
+        color: #fff;
+      }
+      .nav .me {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 8px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .nav .me .av {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: var(--surface-2);
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .nav .me .who {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.25;
+        flex: 1;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13px;
+      }
+      .nav .me .who span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .themebtn {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+      }
+
+      main {
+        flex: 1;
+        padding: 30px 34px;
+        max-width: 980px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 14px;
+        margin-bottom: 22px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 18px;
+      }
+      .card h2 {
+        font-size: 15px;
+        margin: 0 0 4px;
+      }
+      .card p.hint {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0 0 14px;
+      }
+      .btn {
+        padding: 10px 16px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn:hover {
+        background: var(--surface-2);
+      }
+      .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .btn-primary:hover {
+        opacity: 0.92;
+        background: var(--accent);
+      }
+      .btn-danger {
+        color: var(--red);
+        border-color: var(--line);
+      }
+      .btn-danger:hover {
+        background: #fef2f2;
+      }
+      html[data-theme="dark"] .btn-danger:hover {
+        background: rgba(220, 38, 38, 0.12);
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      td .acts {
+        display: flex;
+        gap: 6px;
+      }
+      .btn-sm {
+        padding: 6px 10px;
+        font-size: 12.5px;
+        border-radius: 8px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .danger-zone {
+        border-color: #fecaca;
+      }
+      html[data-theme="dark"] .danger-zone {
+        border-color: rgba(220, 38, 38, 0.35);
+      }
+      .warn {
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        color: #92400e;
+        padding: 11px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+        margin-bottom: 14px;
+      }
+      html[data-theme="dark"] .warn {
+        background: rgba(251, 191, 36, 0.1);
+        border-color: rgba(251, 191, 36, 0.3);
+        color: #fbbf24;
+      }
+      input[type="text"],
+      select {
+        padding: 9px 11px;
+        border-radius: 9px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 13.5px;
+      }
+      input[type="file"] {
+        font-size: 13px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%) translateY(20px);
+        background: #0f172a;
+        color: #fff;
+        padding: 11px 18px;
+        border-radius: 11px;
+        font-size: 13.5px;
+        opacity: 0;
+        pointer-events: none;
+        transition: all 0.2s;
+        z-index: 120;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        max-width: 90vw;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+      .toast.err {
+        background: #b91c1c;
+      }
+      .spin {
+        display: inline-block;
+        width: 13px;
+        height: 13px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: sp 0.7s linear infinite;
+        vertical-align: -2px;
+        margin-right: 6px;
+      }
+      @keyframes sp {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>
+          </svg>
+          Bots</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main>
+      <h1>Prime Gaming watcher</h1>
+      <div class="sub">
+        A background checker polls Amazon's Prime Gaming catalog every 6 hours
+        and keeps this list in sync: free game claims and in-game loot, which
+        platform each claim lands on, whether it hands out a resellable code,
+        and when it expires. New offers, new in-game loot and offers ending
+        within 48 hours are pushed to the super-admin Telegram chats
+        automatically.
+      </div>
+
+      <div class="card">
+        <h2>Checker</h2>
+        <p class="hint" id="statusLine">Loading status…</p>
+        <div class="row">
+          <button class="btn btn-primary" id="btnRun">Check now</button>
+          <button class="btn" id="btnRefresh">Refresh</button>
+          <select id="catFilter">
+            <option value="">All offers</option>
+            <option value="LOOT">In-game loot only</option>
+            <option value="FULL_GAME">Free games only</option>
+            <option value="code">Gives a code (resellable)</option>
+          </select>
+          <label
+            style="
+              font-size: 13px;
+              display: flex;
+              align-items: center;
+              gap: 6px;
+            "
+            ><input type="checkbox" id="showEnded" /> show ended</label
+          >
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Offers</h2>
+        <p class="hint">
+          “Code” platforms (e.g. GOG) hand you a key you can resell directly;
+          “link” platforms (e.g. Epic) claim onto the linked external account.
+        </p>
+        <div id="list"><div class="muted">Loading…</div></div>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script>
+      var $ = function (id) {
+        return document.getElementById(id);
+      };
+      function toast(msg, err) {
+        var t = $("toast");
+        t.textContent = msg;
+        t.className = "toast show" + (err ? " err" : "");
+        clearTimeout(toast._t);
+        toast._t = setTimeout(
+          function () {
+            t.className = "toast";
+          },
+          err ? 6000 : 3500,
+        );
+      }
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c];
+        });
+      }
+      function fmtDate(s) {
+        if (!s) return "—";
+        try {
+          return new Date(s).toLocaleDateString();
+        } catch (e) {
+          return s;
+        }
+      }
+      function daysLeft(s) {
+        if (!s) return null;
+        var ms = new Date(s).getTime() - Date.now();
+        return Math.ceil(ms / 86400000);
+      }
+
+      async function api(url, opts) {
+        var r = await fetch(
+          url,
+          Object.assign({ credentials: "same-origin" }, opts || {}),
+        );
+        var j = await r.json().catch(function () {
+          return {};
+        });
+        if (!r.ok || j.success === false)
+          throw new Error(j.message || "HTTP " + r.status);
+        return j;
+      }
+
+      var CODE_PLATFORMS = { gog: 1, code: 1 };
+
+      function renderStatus(st) {
+        if (!st) return;
+        $("statusLine").textContent = st.running
+          ? "Checking now…"
+          : st.lastRun
+            ? "Last check " +
+              new Date(st.lastRun).toLocaleString() +
+              " — " +
+              st.lastCounts.games +
+              " free game(s), " +
+              st.lastCounts.loot +
+              " in-game loot offer(s)" +
+              (st.lastCounts.new ? ", " + st.lastCounts.new + " new" : "") +
+              (st.lastError ? " · last error: " + st.lastError : ".") +
+              " Checks run every " +
+              st.intervalHours +
+              "h."
+            : "No check has run yet since the server started" +
+              (st.lastError ? " (last error: " + st.lastError + ")" : "") +
+              ". Runs automatically, or check now.";
+      }
+
+      async function load() {
+        try {
+          var ended = $("showEnded").checked ? "?ended=1" : "";
+          var j = await api("/api/prime/offers" + ended);
+          renderStatus(j.status);
+          var f = $("catFilter").value;
+          var rows = (j.offers || []).filter(function (o) {
+            if (!f) return true;
+            if (f === "code") return o.grantsCode || CODE_PLATFORMS[o.platform];
+            return o.category === f;
+          });
+          if (!rows.length) {
+            $("list").innerHTML =
+              '<div class="muted">Nothing here yet — run a check.</div>';
+            return;
+          }
+          $("list").innerHTML =
+            "<table><thead><tr><th></th><th>Offer</th><th>Type</th><th>Platform</th><th>Ends</th><th></th></tr></thead><tbody>" +
+            rows
+              .map(function (o) {
+                var d = daysLeft(o.endTime);
+                var endCell = o.active
+                  ? esc(fmtDate(o.endTime)) +
+                    (d != null
+                      ? '<div class="muted"' +
+                        (d <= 2 ? ' style="color:var(--red)"' : "") +
+                        ">" +
+                        (d <= 0 ? "today!" : d + " day(s) left") +
+                        "</div>"
+                      : "")
+                  : '<span class="muted">ended</span>';
+                var isCode = o.grantsCode || CODE_PLATFORMS[o.platform];
+                return (
+                  "<tr" +
+                  (o.active ? "" : ' style="opacity:.55"') +
+                  "><td>" +
+                  (o.image
+                    ? '<img src="' +
+                      esc(o.image) +
+                      '" style="width:52px;height:30px;object-fit:cover;border-radius:6px" loading="lazy">'
+                    : "") +
+                  "</td><td><b>" +
+                  esc(o.title) +
+                  "</b>" +
+                  (o.game && o.game !== o.title
+                    ? '<div class="muted">' + esc(o.game) + "</div>"
+                    : "") +
+                  "</td><td>" +
+                  (o.category === "LOOT"
+                    ? '<b style="color:var(--accent)">in-game loot</b>'
+                    : "free game") +
+                  "</td><td>" +
+                  esc(o.platform || "—") +
+                  (isCode
+                    ? '<div style="color:var(--green);font-size:12px">gives a code</div>'
+                    : '<div class="muted" style="font-size:12px">account link</div>') +
+                  "</td><td>" +
+                  endCell +
+                  "</td><td>" +
+                  (o.claimLink
+                    ? '<a class="btn btn-sm" href="' +
+                      esc(o.claimLink) +
+                      '" target="_blank" rel="noopener">Open</a>'
+                    : "") +
+                  "</td></tr>"
+                );
+              })
+              .join("") +
+            "</tbody></table>";
+        } catch (e) {
+          $("list").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      }
+
+      $("btnRun").addEventListener("click", async function () {
+        var b = this;
+        b.disabled = true;
+        b.innerHTML = '<span class="spin"></span>Checking…';
+        try {
+          var j = await api("/api/prime/check", { method: "POST" });
+          toast(
+            "Checked — " +
+              j.counts.games +
+              " game(s), " +
+              j.counts.loot +
+              " loot offer(s), " +
+              j.counts.new +
+              " new.",
+          );
+        } catch (e) {
+          toast("Check failed: " + e.message, true);
+        }
+        b.disabled = false;
+        b.textContent = "Check now";
+        load();
+      });
+      $("btnRefresh").addEventListener("click", load);
+      $("catFilter").addEventListener("change", load);
+      $("showEnded").addEventListener("change", load);
+
+      load();
+    </script>
+  </body>
+</html>

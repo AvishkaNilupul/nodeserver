@@ -31,12 +31,14 @@ const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
+const primeRoutes = require("./routes/primeRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
+const primeWatcher = require("./utils/primeWatcher");
 const telegramBot = require("./utils/telegramBot");
 const chatSocket = require("./socket/chatSocket");
 const {
@@ -331,6 +333,11 @@ app.get("/integrity.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "integrity.html"));
 });
 
+// Prime Gaming watcher (superadmin only) — tracked offers + alerts.
+app.get("/prime.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "prime.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -389,6 +396,7 @@ app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
+app.use(enforce2fa, primeRoutes);
 
 // =========================
 // Socket.IO
@@ -427,6 +435,9 @@ mongoose
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();
+    // Prime Gaming watcher: polls Amazon's public offer catalog and alerts
+    // on new / expiring offers via Telegram + the Prime Gaming tab.
+    primeWatcher.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
