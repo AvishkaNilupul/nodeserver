@@ -2130,7 +2130,8 @@
       }
       function loadGgCategories(parentId) {
         ggCatsLoaded = true;
-        $("mpGgCategory").innerHTML = '<option value="">Loading\u2026</option>';
+        $("mpGgCategory").innerHTML =
+          '<option value="">Loading\u2026 (large sections can take up to a minute the first time)</option>';
         api(
           "/marketplaces/ggsel/categories" +
             (parentId ? "?parentId=" + encodeURIComponent(parentId) : ""),
@@ -2160,11 +2161,22 @@
               return r.label.toLowerCase().indexOf(q) !== -1;
             })
           : ggRows;
+        // Some levels are huge (Games has 24k+ entries); rendering them all
+        // freezes the dropdown, so cap it and let the search box narrow down.
+        var CAP = 500;
+        var capped = rows.length > CAP;
+        var shown = capped ? rows.slice(0, CAP) : rows;
         $("mpGgCategory").innerHTML =
           '<option value="">' +
           esc(
             rows.length
-              ? "Pick a category\u2026 (" + rows.length + ")"
+              ? capped
+                ? "Pick a category\u2026 (showing " +
+                  CAP +
+                  " of " +
+                  rows.length +
+                  " \u2014 type to search)"
+                : "Pick a category\u2026 (" + rows.length + ")"
               : "No match",
           ) +
           "</option>" +
@@ -2177,7 +2189,7 @@
               ) +
               "</option>"
             : "") +
-          rows
+          shown
             .map(function (r) {
               return (
                 '<option value="' +

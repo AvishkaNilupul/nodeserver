@@ -697,16 +697,62 @@ async function ggselTest() {
 // Category tree, one level per request. Pass a parentId to drill into a
 // section's children; omit it for the top level. Each node is
 // { id, title, tree, content_type, fee, has_children }.
+//
+// The API paginates at 100 rows and some levels are huge (Games has 24k+
+// children), so every page is fetched — in parallel batches — and the full
+// level is cached for a few hours. Previously only page 1 was read, which is
+// why most games (e.g. Rocket League) never appeared in the dropdown.
+const ggCatCache = new Map(); // parentId -> { rows, until }
+const GG_CAT_TTL_MS = 12 * 60 * 60 * 1000;
+
+async function ggCategoriesPage(keys, parentId, page) {
+  const params = { page };
+  if (parentId) params.parent_id = parentId;
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await axios.get(GG_API + "/categories", {
+        headers: ggHeaders(keys),
+        params,
+        timeout: 30000,
+      });
+      const d = r.data || {};
+      return {
+        rows: Array.isArray(d.data) ? d.data : [],
+        totalPages: Number(d.pagination && d.pagination.total_pages) || 1,
+      };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
 async function ggselCategories(parentId) {
+  const cacheKey = String(parentId || "");
+  const hit = ggCatCache.get(cacheKey);
+  if (hit && Date.now() < hit.until) return hit.rows;
   const keys = requireKeys("ggsel");
   try {
-    const r = await axios.get(GG_API + "/categories", {
-      headers: ggHeaders(keys),
-      params: parentId ? { parent_id: parentId } : {},
-      timeout: 20000,
-    });
-    return Array.isArray(r.data && r.data.data) ? r.data.data : [];
+    const first = await ggCategoriesPage(keys, parentId, 1);
+    const all = [...first.rows];
+    const totalPages = Math.min(first.totalPages, 400);
+    const BATCH = 8;
+    for (let start = 2; start <= totalPages; start += BATCH) {
+      const pages = [];
+      for (let p = start; p < start + BATCH && p <= totalPages; p++) {
+        pages.push(p);
+      }
+      const results = await Promise.all(
+        pages.map((p) => ggCategoriesPage(keys, parentId, p)),
+      );
+      for (const r of results) all.push(...r.rows);
+    }
+    ggCatCache.set(cacheKey, { rows: all, until: Date.now() + GG_CAT_TTL_MS });
+    return all;
   } catch (e) {
+    // A stale cache entry is far more useful than a timeout error.
+    if (hit) return hit.rows;
     throw apiError("GGSel categories", e);
   }
 }
