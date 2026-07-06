@@ -2210,6 +2210,9 @@
           })
           .catch(function (e) {
             if (!rootId) dsCatsLoaded = false;
+            $("mpDsCategory").innerHTML =
+              '<option value="">Failed to load</option>' +
+              '<option value="__retry">⟳ Retry loading this level</option>';
             toast("Plati: " + e.message);
           });
       }
@@ -2258,6 +2261,12 @@
         }
         if (v === "__back") {
           dsStack.pop();
+          loadDsCategories(
+            dsStack.length ? dsStack[dsStack.length - 1].id : "",
+          );
+          return;
+        }
+        if (v === "__retry") {
           loadDsCategories(
             dsStack.length ? dsStack[dsStack.length - 1].id : "",
           );

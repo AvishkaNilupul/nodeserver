@@ -375,33 +375,53 @@ function dsLocales(value) {
 // Cataloguer categories — the authorized catalog whose IDs product/create
 // accepts (the public dictionary tree returns IDs create rejects). Drill down
 // one level at a time via rootCategoryId.
+// Digiseller's cataloguer API is slow and flaky, so each level is cached for
+// a few hours and every page request gets one retry before giving up.
+const dsCatCache = new Map(); // rootId -> { rows, until }
+const DS_CAT_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function dsCategoriesPage(token, rootCategoryId, page, count) {
+  let url =
+    DS_API +
+    "/cataloguer/categories?page=" +
+    page +
+    "&count=" +
+    count +
+    "&token=" +
+    encodeURIComponent(token);
+  if (rootCategoryId) {
+    url += "&rootCategoryId=" + encodeURIComponent(rootCategoryId);
+  }
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await axios.get(url, {
+        headers: { Accept: "application/json" },
+        timeout: 30000,
+      });
+      const d = r.data || {};
+      if (d.retval !== undefined && String(d.retval) !== "0") {
+        throw new Error(dsErrorText(d));
+      }
+      return d.content || [];
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
 async function digisellerCategories(rootCategoryId) {
+  const cacheKey = String(rootCategoryId || "");
+  const hit = dsCatCache.get(cacheKey);
+  if (hit && Date.now() < hit.until) return hit.rows;
   const token = await digisellerToken();
   try {
     const COUNT = 500;
     const all = [];
     const seen = new Set();
     for (let page = 1; page <= 40; page++) {
-      let url =
-        DS_API +
-        "/cataloguer/categories?page=" +
-        page +
-        "&count=" +
-        COUNT +
-        "&token=" +
-        encodeURIComponent(token);
-      if (rootCategoryId) {
-        url += "&rootCategoryId=" + encodeURIComponent(rootCategoryId);
-      }
-      const r = await axios.get(url, {
-        headers: { Accept: "application/json" },
-        timeout: 20000,
-      });
-      const d = r.data || {};
-      if (d.retval !== undefined && String(d.retval) !== "0") {
-        throw new Error(dsErrorText(d));
-      }
-      const rows = d.content || [];
+      const rows = await dsCategoriesPage(token, rootCategoryId, page, COUNT);
       for (const row of rows) {
         const id = String(row.category_id);
         if (seen.has(id) || id === String(rootCategoryId || "")) continue;
@@ -410,8 +430,11 @@ async function digisellerCategories(rootCategoryId) {
       }
       if (rows.length < COUNT) break;
     }
+    dsCatCache.set(cacheKey, { rows: all, until: Date.now() + DS_CAT_TTL_MS });
     return all;
   } catch (e) {
+    // A stale cache entry is far more useful than a timeout error.
+    if (hit) return hit.rows;
     throw apiError("Digiseller categories", e);
   }
 }
