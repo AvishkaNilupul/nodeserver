@@ -9,6 +9,7 @@
     "listings.html",
     "integrity.html",
     "prime.html",
+    "radar.html",
     "backup.html",
   ];
 
@@ -88,6 +89,17 @@
       '<path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"></path>' +
       '<path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"></path></svg> ' +
       "Prime Gaming"
+    );
+  }
+
+  function radarLinkMarkup() {
+    return (
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round"><circle cx="12" cy="12" r="2"></circle>' +
+      '<path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49">' +
+      '</path><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 ' +
+      '0 1 0-14.14"></path></svg> Drops radar'
     );
   }
 
@@ -234,7 +246,23 @@
       }
     }
 
-    // Backup & restore (superadmin only) — grouped right after Prime Gaming.
+    // Drops radar (superadmin only) — grouped right after Prime Gaming.
+    if (isSuper && !links.querySelector('a[href="/radar.html"]')) {
+      var rlink = document.createElement("a");
+      rlink.href = "/radar.html";
+      rlink.innerHTML = radarLinkMarkup();
+      if (window.location.pathname === "/radar.html") {
+        rlink.className = "active";
+      }
+      var primeAnchor = links.querySelector('a[href="/prime.html"]');
+      if (primeAnchor && primeAnchor.nextSibling) {
+        links.insertBefore(rlink, primeAnchor.nextSibling);
+      } else {
+        links.appendChild(rlink);
+      }
+    }
+
+    // Backup & restore (superadmin only) — grouped right after the radar.
     if (isSuper && !links.querySelector('a[href="/backup.html"]')) {
       var blink = document.createElement("a");
       blink.href = "/backup.html";
@@ -243,6 +271,7 @@
         blink.className = "active";
       }
       var listAnchor =
+        links.querySelector('a[href="/radar.html"]') ||
         links.querySelector('a[href="/prime.html"]') ||
         links.querySelector('a[href="/integrity.html"]') ||
         links.querySelector('a[href="/listings.html"]');

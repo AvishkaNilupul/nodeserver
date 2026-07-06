@@ -47,6 +47,28 @@ query Inventory {
   }
 }`;
 
+// Every drop campaign visible to a logged-in viewer (Twitch's drops
+// dashboard shows all current + upcoming campaigns, not just joined ones).
+const CAMPAIGNS_QUERY = `
+query ViewerDropsDashboard {
+  currentUser {
+    id
+    dropCampaigns {
+      id
+      name
+      status
+      startAt
+      endAt
+      detailsURL
+      accountLinkURL
+      imageURL
+      game { id displayName boxArtURL }
+      owner { name }
+      self { isAccountConnected }
+    }
+  }
+}`;
+
 function cleanToken(raw) {
   return String(raw || "")
     .trim()
@@ -74,9 +96,13 @@ async function gqlRequest(token, clientId, body) {
 // together in aggregate views (case/space-insensitive name + game).
 function itemKeyFor(name, game) {
   return (
-    String(name || "").trim().toLowerCase() +
+    String(name || "")
+      .trim()
+      .toLowerCase() +
     "|" +
-    String(game || "").trim().toLowerCase()
+    String(game || "")
+      .trim()
+      .toLowerCase()
   );
 }
 
@@ -203,4 +229,33 @@ async function fetchInventory(token, clientId) {
   };
 }
 
-module.exports = { fetchInventory, DEFAULT_CLIENT_ID };
+// Fetch the full drop-campaign dashboard with any valid account token.
+// Throws an Error with .code = "token_invalid" when Twitch rejects the token.
+async function fetchDropCampaigns(token, clientId) {
+  const tok = cleanToken(token);
+  const cid = clientId || DEFAULT_CLIENT_ID;
+  if (!tok) {
+    const e = new Error("No token");
+    e.code = "token_invalid";
+    throw e;
+  }
+  const { parsed } = await gqlRequest(tok, cid, [
+    {
+      operationName: "ViewerDropsDashboard",
+      query: CAMPAIGNS_QUERY,
+      variables: {},
+    },
+  ]);
+  if (parsed?.errors?.length) {
+    throw new Error(parsed.errors.map((e) => e.message).join("; "));
+  }
+  const user = parsed?.data?.currentUser;
+  if (!user) {
+    const e = new Error("Token invalid/expired or client-id mismatch");
+    e.code = "token_invalid";
+    throw e;
+  }
+  return user.dropCampaigns || [];
+}
+
+module.exports = { fetchInventory, fetchDropCampaigns, DEFAULT_CLIENT_ID };
