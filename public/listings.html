@@ -1997,6 +1997,27 @@
 
       // GGSel category drill-down: mirrors the Plati picker but against the
       // GGSel v2 category tree (one level per request, parentId to descend).
+      // GGSel's API only returns Russian category names; translate the handful
+      // of top-level sections (and a few common words) to English for display.
+      // The category id sent on publish is unaffected — this is display-only.
+      var GG_CAT_EN = {
+        "Программное обеспечение": "Software",
+        "Цифровые товары": "Digital goods",
+        Игры: "Games",
+        "Сервисы и соцсети": "Services & social",
+        "Новые ниши": "New niches",
+        "Крипто-индустрия": "Crypto industry",
+        Аккаунты: "Accounts",
+        Ключи: "Keys",
+        Подписки: "Subscriptions",
+        Пополнения: "Top-ups",
+        Гейминг: "Gaming",
+      };
+      function ggEnLabel(title) {
+        var t = String(title || "");
+        if (GG_CAT_EN[t]) return GG_CAT_EN[t] + " (" + t + ")";
+        return t;
+      }
       var ggRows = [];
       var ggStack = [];
       var ggSelected = null; // { id, label }
@@ -2030,7 +2051,7 @@
             ggRows = (j.data || []).map(function (n) {
               return {
                 id: n.id,
-                label: String(n.title || n.id),
+                label: ggEnLabel(n.title || n.id),
                 hasChildren: !!n.has_children,
               };
             });
