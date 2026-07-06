@@ -578,16 +578,17 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
       // Fall back to a computed name|game key for any row whose itemKey
       // wasn't backfilled yet, so items never merge into one bucket.
       { $addFields: { _k: itemKeyExpr } },
+      // First collapse per (item, account) so min/max copies per holding
+      // account are exact — accounts holding e.g. 4x vs 5x of a drop differ.
       {
         $group: {
-          _id: "$_k",
+          _id: { k: "$_k", acct: "$account" },
           name: { $first: "$name" },
           game: { $first: "$game" },
           imageLocal: { $max: "$imageLocal" },
           imageURL: { $first: "$imageURL" },
           campaign: { $first: "$campaign" },
-          totalCount: { $sum: "$count" },
-          accounts: { $addToSet: "$account" },
+          cnt: { $sum: "$count" },
           claimed: {
             $sum: { $cond: [{ $eq: ["$state", "claimed"] }, 1, 0] },
           },
@@ -597,6 +598,23 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
           connected: {
             $sum: { $cond: [{ $eq: ["$state", "connected"] }, 1, 0] },
           },
+        },
+      },
+      {
+        $group: {
+          _id: "$_id.k",
+          name: { $first: "$name" },
+          game: { $first: "$game" },
+          imageLocal: { $max: "$imageLocal" },
+          imageURL: { $first: "$imageURL" },
+          campaign: { $first: "$campaign" },
+          totalCount: { $sum: "$cnt" },
+          accounts: { $sum: 1 },
+          minPerAcct: { $min: "$cnt" },
+          maxPerAcct: { $max: "$cnt" },
+          claimed: { $sum: "$claimed" },
+          connect: { $sum: "$connect" },
+          connected: { $sum: "$connected" },
         },
       },
       {
@@ -617,7 +635,9 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
           imageURL: 1,
           campaign: 1,
           totalCount: 1,
-          accounts: { $size: "$accounts" },
+          accounts: 1,
+          minPerAcct: 1,
+          maxPerAcct: 1,
           claimed: 1,
           connect: 1,
           connected: 1,

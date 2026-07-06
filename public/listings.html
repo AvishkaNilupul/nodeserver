@@ -1226,8 +1226,18 @@
         });
       }
 
+      // Range label for items whose copies differ between accounts, e.g.
+      // "4–5"; a plain number when every account holds the same amount; ""
+      // when it's just 1x so no badge is shown.
+      function qtyLabel(it) {
+        var lo = Number(it.qty) || 1;
+        var hi = Number(it.qtyMax) || lo;
+        if (hi > lo) return lo + "–" + hi;
+        return lo > 1 ? String(lo) : "";
+      }
+
       // ---- state ----
-      var selected = []; // [{itemKey,name,game,image,qty}]
+      var selected = []; // [{itemKey,name,game,image,qty,qtyMax}]
       var catalog = []; // by-item rows
       var editId = null;
       // Track whether the seller has hand-edited the title / description so the
@@ -1236,12 +1246,18 @@
       var noteEdited = false;
 
       // ---- auto title / description helpers ----
-      // qty = copies of a drop a holding account typically has, so a "pack"
-      // that grants 3 items counts as 3 items, not 1.
+      // qty = guaranteed copies per holding account (the minimum), so a
+      // "pack" that grants 3 items counts as 3 items, not 1, and totals never
+      // promise more than the least-stocked account actually delivers.
       function totalItemCount() {
         return selected.reduce(function (n, s) {
           return n + (Number(s.qty) || 1);
         }, 0);
+      }
+      function anyQtyVaries() {
+        return selected.some(function (s) {
+          return (Number(s.qtyMax) || 0) > (Number(s.qty) || 1);
+        });
       }
       function uniqueGames() {
         var games = [];
@@ -1268,6 +1284,7 @@
           more +
           " (" +
           total +
+          (anyQtyVaries() ? "+" : "") +
           " item" +
           (total === 1 ? "" : "s") +
           ")"
@@ -1281,6 +1298,7 @@
         lines.push(
           "This account includes " +
             total +
+            (anyQtyVaries() ? " or more" : "") +
             " item" +
             (total === 1 ? "" : "s") +
             (games.length === 1 ? " from " + games[0] : "") +
@@ -1288,17 +1306,25 @@
         );
         selected.forEach(function (s) {
           var q = Number(s.qty) || 1;
+          var hi = Number(s.qtyMax) || q;
           lines.push(
             "\u2022 " +
-              (q > 1 ? q + "\u00d7 " : "") +
+              (q > 1 || hi > q ? q + "\u00d7 " : "") +
               s.name +
-              (s.game ? " (" + s.game + ")" : ""),
+              (s.game ? " (" + s.game + ")" : "") +
+              (hi > q ? " — some accounts include up to " + hi + "\u00d7" : ""),
           );
         });
         lines.push("");
         lines.push(
           "Buyer receives one in-stock account holding every item listed above.",
         );
+        if (anyQtyVaries()) {
+          lines.push(
+            "Quantities marked \u201cup to\u201d vary by account — the listed " +
+              "minimum is always included.",
+          );
+        }
         return lines.join("\n");
       }
       function refreshAuto() {
@@ -1323,7 +1349,6 @@
         } else {
           box.innerHTML = selected
             .map(function (it) {
-              var q = Number(it.qty) || 1;
               return (
                 '<div class="row">' +
                 imgTag(it.image) +
@@ -1334,7 +1359,9 @@
                 '<div class="gm">' +
                 esc(it.game || "Other rewards") +
                 "</div></div>" +
-                (q > 1 ? '<span class="qty">' + q + "\u00d7</span>" : "") +
+                (qtyLabel(it)
+                  ? '<span class="qty">' + qtyLabel(it) + "\u00d7</span>"
+                  : "") +
                 '<button class="x" data-rm="' +
                 attr(it.itemKey) +
                 '" title="Remove">&times;</button>' +
@@ -1360,6 +1387,7 @@
           game: row.game,
           image: row.image,
           qty: Number(row.qty) || 1,
+          qtyMax: Number(row.qtyMax) || Number(row.qty) || 1,
         });
         renderSelected();
       }
@@ -1396,12 +1424,10 @@
               (it.accounts || 0) +
               " acct" +
               (it.accounts === 1 ? "" : "s") +
-              ((Number(it.qty) || 1) > 1
-                ? " · " + it.qty + "\u00d7 per acct"
-                : "") +
+              (qtyLabel(it) ? " · " + qtyLabel(it) + "\u00d7 per acct" : "") +
               "</div></div>" +
-              ((Number(it.qty) || 1) > 1
-                ? '<span class="qty">' + it.qty + "\u00d7</span>"
+              (qtyLabel(it)
+                ? '<span class="qty">' + qtyLabel(it) + "\u00d7</span>"
                 : "") +
               '<div class="tick">&#10003;</div>' +
               "</div>"
@@ -1430,10 +1456,21 @@
         return api("/drops-archive/by-item" + qs)
           .then(function (j) {
             catalog = (j.items || []).map(function (it) {
-              var acc = Number(it.accounts) || 0;
-              var tot = Number(it.totalCount) || 0;
-              it.qty =
-                acc > 0 ? Math.max(1, Math.round(tot / acc)) : Math.max(1, tot);
+              // qty = guaranteed copies per holding account (the minimum any
+              // account holds); qtyMax shows the range when accounts differ.
+              var lo = Number(it.minPerAcct) || 0;
+              var hi = Number(it.maxPerAcct) || 0;
+              if (!lo) {
+                var acc = Number(it.accounts) || 0;
+                var tot = Number(it.totalCount) || 0;
+                lo =
+                  acc > 0
+                    ? Math.max(1, Math.round(tot / acc))
+                    : Math.max(1, tot);
+                hi = lo;
+              }
+              it.qty = Math.max(1, lo);
+              it.qtyMax = Math.max(it.qty, hi);
               return it;
             });
             renderPicker(catalog);
@@ -1572,6 +1609,7 @@
             game: i.game,
             image: i.image,
             qty: Number(i.qty) || 1,
+            qtyMax: Number(i.qtyMax) || Number(i.qty) || 1,
           };
         });
         $("fName").value = set.name || "";
