@@ -662,9 +662,60 @@ async function ggselCategories(parentId) {
   }
 }
 
+// GGSel wants cover images as a data-URI base64 string (raw base64 is
+// rejected with "wrong file format"). Reads a local file and encodes it;
+// returns "" when there is no usable image so the offer just has no cover.
+function ggselImageDataUri(imagePath) {
+  if (!imagePath) return "";
+  let buf;
+  try {
+    buf = fs.readFileSync(imagePath);
+  } catch {
+    return "";
+  }
+  const ext = String(path.extname(imagePath) || "").toLowerCase();
+  const mime =
+    ext === ".jpg" || ext === ".jpeg"
+      ? "image/jpeg"
+      : ext === ".webp"
+        ? "image/webp"
+        : ext === ".gif"
+          ? "image/gif"
+          : "image/png";
+  return "data:" + mime + ";base64," + buf.toString("base64");
+}
+
+// Push deliverable content lines to an offer. Each value becomes one product
+// GGSel hands to a buyer automatically (autoselling must be on). Returns the
+// number of products the API accepted.
+async function ggselAddProducts(offerId, values) {
+  const keys = requireKeys("ggsel");
+  const products = (Array.isArray(values) ? values : [])
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+    .map((value) => ({ value }));
+  if (!products.length) return 0;
+  try {
+    await axios.post(
+      GG_API + "/offers/" + Number(offerId) + "/products",
+      { products },
+      { headers: ggHeaders(keys), timeout: 30000 },
+    );
+  } catch (e) {
+    throw apiError("GGSel add products", e);
+  }
+  return products.length;
+}
+
 // Create an offer, then activate it so buyers can see it. GGSel prices are in
 // RUB, so a USD price is converted unless priceRub is passed explicitly.
-// Returns { externalId, url, note }.
+//
+// When `products` (an array of delivery-content strings) is supplied the offer
+// is created with autoselling on and those items are attached, so GGSel hands
+// one to each buyer automatically — this is the real "Automatic" delivery, as
+// opposed to just setting delivery:"auto" on an empty offer (which GGSel shows
+// as Manual because there is nothing to deliver). `coverImagePath` points at a
+// local image used as the offer cover. Returns { externalId, url, note, qty }.
 async function ggselPublish({
   title,
   description,
@@ -674,6 +725,8 @@ async function ggselPublish({
   quantity,
   delivery,
   instructions,
+  coverImagePath,
+  products,
 }) {
   const keys = requireKeys("ggsel");
   if (!categoryId) throw new Error("Pick a GGSel category first");
@@ -694,9 +747,20 @@ async function ggselPublish({
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("GGSel needs a price above 0");
   }
-  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  const content = (Array.isArray(products) ? products : [])
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+  // Autoselling is what actually makes GGSel auto-deliver; it needs stock, so
+  // it is only enabled when we have content lines to attach.
+  const autoselling = delivery === "auto" && content.length > 0;
+  // With autoselling the sellable count is driven by attached products; keep
+  // the offer's quantity in sync so stock is not artificially capped.
+  const qty = autoselling
+    ? content.length
+    : Math.max(1, parseInt(quantity, 10) || 1);
   const t = String(title || "").slice(0, 200);
   const d = String(description || "").slice(0, 5000);
+  const cover = ggselImageDataUri(coverImagePath);
   let created;
   try {
     const r = await axios.post(
@@ -709,8 +773,11 @@ async function ggselPublish({
         description_en: d,
         instructions_ru: instructions ? String(instructions) : undefined,
         instructions_en: instructions ? String(instructions) : undefined,
+        cover_image_ru: cover || undefined,
+        cover_image_en: cover || undefined,
         price,
         currency: "RUB",
+        is_autoselling: autoselling,
         delivery: delivery === "auto" ? "auto" : "manual",
         quantity: qty,
         min_quantity: 1,
@@ -728,6 +795,11 @@ async function ggselPublish({
       "GGSel create: no offer id in response: " +
         JSON.stringify(created).slice(0, 300),
     );
+  }
+  // Attach the delivery content so autoselling has stock to hand out. If this
+  // fails the offer would go live with no stock, so surface it as an error.
+  if (autoselling) {
+    await ggselAddProducts(offerId, content);
   }
   // New offers start as drafts; activate so they go live.
   try {
@@ -748,6 +820,7 @@ async function ggselPublish({
     externalId: String(offerId),
     url: "https://ggsel.net/en/catalog/product/" + offerId,
     note,
+    qty,
   };
 }
 
@@ -961,5 +1034,6 @@ module.exports = {
   ggselTest,
   ggselCategories,
   ggselPublish,
+  ggselAddProducts,
   ggselDelist,
 };
