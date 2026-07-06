@@ -10,6 +10,27 @@
 // Raspberry Pi or the server.
 
 const hosts = require("./botHosts");
+const AuditFinding = require("../models/AuditFinding");
+
+// Log each stop as an already-resolved finding so it shows up as activity on
+// the Integrity page, next to the guardian's restock log.
+async function logStop(acc, game, detail) {
+  try {
+    await AuditFinding.create({
+      type: "farm-stopped",
+      severity: "info",
+      accountId: String(acc._id || ""),
+      accountLogin: acc.login || "",
+      dedupeKey: "farm-stopped:" + acc._id + ":" + Date.now(),
+      status: "resolved",
+      resolution: "auto",
+      resolvedAt: new Date(),
+      message: detail,
+    });
+  } catch (e) {
+    console.error("farmControl: failed to log stop:", e.message);
+  }
+}
 
 // (hostId|configFile|clientSecret|game) combos already handled this process,
 // so a scan of the same sold account doesn't re-read the config every pass.
@@ -72,7 +93,8 @@ async function stopFarmingGame(acc, game) {
   // An empty per-account list means "inherit the config-level games", which
   // would bring the removed game right back — so when no games remain for
   // this account, disable it instead. The other accounts keep farming.
-  if (!next.length) me.Enabled = false;
+  const disabled = !next.length;
+  if (disabled) me.Enabled = false;
 
   await hosts.saveSnapshot(hostId, file, raw);
   await hosts.writeFileAtomic(host, file, JSON.stringify(cfg, null, 2));
@@ -81,17 +103,35 @@ async function stopFarmingGame(acc, game) {
   // Restart only this account's container so the bot reloads its config.
   // The rest of the fleet keeps running untouched.
   const container = String(acc.container || "").trim();
+  let restartNote = container ? "" : " (no container known — not restarted)";
   if (container) {
     try {
       await hosts.dockerContainer(host, "restart", container);
     } catch (e) {
-      return {
-        changed: true,
-        reason:
-          "config updated but container restart failed: " +
-          (e.message || String(e)),
-      };
+      restartNote = " — container restart FAILED: " + (e.message || String(e));
     }
+  }
+  await logStop(
+    acc,
+    g,
+    'Buyer connected "' +
+      g +
+      '" on sold account ' +
+      (acc.login || acc.clientSecret.slice(0, 6)) +
+      " — " +
+      (disabled
+        ? "no games left, account disabled"
+        : "stopped farming it (still farming: " + next.join(", ") + ")") +
+      " in " +
+      file +
+      " on " +
+      hostId +
+      (container ? ", restarted " + container : "") +
+      restartNote +
+      ".",
+  );
+  if (restartNote && container) {
+    return { changed: true, reason: restartNote.trim() };
   }
   return { changed: true, reason: "" };
 }

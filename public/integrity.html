@@ -556,6 +556,7 @@
         "stock-unknown": "Stock unreadable",
         "restock-failed": "Restock failed",
         restocked: "Restocked",
+        "farm-stopped": "Farming stopped",
       };
       var SEV_COLOR = {
         high: "var(--red)",
@@ -612,7 +613,10 @@
                     '<button class="btn btn-sm" onclick="act(\'' +
                     f.id +
                     "','ignore')\">Ignore</button>";
-                } else if (f.status !== "resolved" || f.type !== "restocked") {
+                } else if (
+                  f.status !== "resolved" ||
+                  (f.type !== "restocked" && f.type !== "farm-stopped")
+                ) {
                   acts =
                     '<button class="btn btn-sm" onclick="act(\'' +
                     f.id +
