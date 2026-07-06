@@ -7,6 +7,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const gfFulfiller = require("../utils/gameflipFulfiller");
+const ggFulfiller = require("../utils/ggselFulfiller");
 const mp = require("../utils/marketplaces");
 const { buildSetGridImage } = require("../utils/setImage");
 
@@ -226,7 +227,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     // A numbered grid collage of every item in the set makes a much better
     // cover photo than a single item's icon; fall back to the first item.
     let gridImage = "";
-    if (targets.includes("gameflip")) {
+    if (targets.includes("gameflip") || targets.includes("ggsel")) {
       try {
         gridImage = await buildSetGridImage(set);
       } catch (err) {
@@ -289,6 +290,70 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           });
         } else if (name === "ggsel") {
           const gg = body.ggsel || {};
+          const ggCover = gridImage || coverImagePath(set);
+          if (gg.delivery === "auto") {
+            // Real GGSel auto-delivery: reserve up to `quantity` farmed
+            // accounts that hold the whole bundle, attach each as an
+            // auto-delivered product, and let GGSel fulfil sales itself.
+            const qtyWanted = Math.max(1, parseInt(gg.quantity, 10) || 1);
+            const claimed = await ggFulfiller.claimAccountsForSet(
+              set,
+              qtyWanted,
+            );
+            if (!claimed.length) {
+              results[name] = {
+                success: false,
+                message:
+                  "Out of stock — no unsold account holds this whole " +
+                  "bundle, so there is nothing to auto-deliver",
+              };
+              continue;
+            }
+            try {
+              r = await mp.ggselPublish({
+                title,
+                description,
+                priceUsd,
+                priceRub: gg.priceRub,
+                categoryId: gg.categoryId,
+                delivery: "auto",
+                instructions: gg.instructions,
+                coverImagePath: ggCover,
+                products: claimed.map((c) => c.code),
+              });
+            } catch (err) {
+              await ggFulfiller.releaseAccounts(
+                claimed.map((c) => c.accountId),
+              );
+              throw err;
+            }
+            const doc = await MarketplaceListing.create({
+              set: set._id,
+              marketplace: "ggsel",
+              externalId: r.externalId,
+              url: r.url || "",
+              title,
+              description,
+              price: priceUsd,
+              status: "active",
+              note:
+                (r.note ? r.note + " " : "") +
+                "auto-delivery: " +
+                claimed.length +
+                " account(s)",
+              autoDeliver: true,
+              accountId: claimed.map((c) => c.accountId).join(","),
+              accountLogin: claimed.map((c) => c.login).join(", "),
+            });
+            results[name] = {
+              success: true,
+              id: String(doc._id),
+              externalId: r.externalId,
+              url: r.url || "",
+              note: doc.note,
+            };
+            continue;
+          }
           r = await mp.ggselPublish({
             title,
             description,
@@ -298,6 +363,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             quantity: gg.quantity,
             delivery: gg.delivery,
             instructions: gg.instructions,
+            coverImagePath: ggCover,
           });
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
@@ -398,9 +464,13 @@ router.delete(
       row.status = "delisted";
       row.lastError = "";
       await row.save();
-      // A delisted auto-delivery listing frees its reserved account.
+      // A delisted auto-delivery listing frees its reserved account(s).
       if (row.autoDeliver && row.accountId) {
-        await gfFulfiller.releaseAccount(row.accountId);
+        if (row.marketplace === "ggsel") {
+          await ggFulfiller.releaseAccounts(row.accountId.split(","));
+        } else {
+          await gfFulfiller.releaseAccount(row.accountId);
+        }
       }
       res.json({ success: true });
     } catch (err) {
