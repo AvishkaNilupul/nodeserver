@@ -1,3 +1,4 @@
+const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 
@@ -6,6 +7,7 @@ const express = require("express");
 const { requireSuperadmin } = require("../middleware/auth");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const dsFulfiller = require("../utils/digisellerFulfiller");
 const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
 const mp = require("../utils/marketplaces");
@@ -227,7 +229,11 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     // A numbered grid collage of every item in the set makes a much better
     // cover photo than a single item's icon; fall back to the first item.
     let gridImage = "";
-    if (targets.includes("gameflip") || targets.includes("ggsel")) {
+    if (
+      targets.includes("gameflip") ||
+      targets.includes("ggsel") ||
+      targets.includes("digiseller")
+    ) {
       try {
         gridImage = await buildSetGridImage(set);
       } catch (err) {
@@ -269,12 +275,92 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           });
         } else if (name === "digiseller") {
           const ds = body.digiseller || {};
+          const dsCover = gridImage || coverImagePath(set);
+          if (ds.delivery === "auto") {
+            // Auto-delivery: reserve up to `quantity` farmed accounts that
+            // hold the whole bundle and attach each as delivery content, so
+            // Digiseller/Plati fulfils sales itself. The manual "Add stock"
+            // flow still works for accounts not tracked on the server.
+            const qtyWanted = Math.max(1, parseInt(ds.quantity, 10) || 1);
+            const claimed = await dsFulfiller.claimAccountsForSet(
+              set,
+              qtyWanted,
+            );
+            if (!claimed.length) {
+              results[name] = {
+                success: false,
+                message:
+                  "Out of stock — no unsold account holds this whole " +
+                  "bundle, so there is nothing to auto-deliver",
+              };
+              continue;
+            }
+            try {
+              r = await mp.digisellerPublish({
+                title,
+                description,
+                priceUsd,
+                categories: ds.categories,
+              });
+              await mp.digisellerAddContent(
+                r.externalId,
+                claimed.map((c) => c.code),
+              );
+            } catch (err) {
+              await dsFulfiller.releaseAccounts(
+                claimed.map((c) => c.accountId),
+              );
+              throw err;
+            }
+            let dsNote = "auto-delivery: " + claimed.length + " account(s)";
+            if (dsCover && fs.existsSync(dsCover)) {
+              try {
+                await mp.digisellerUploadImage(r.externalId, dsCover);
+              } catch (err) {
+                console.error("digiseller image upload failed:", err.message);
+                dsNote += " — image upload failed: " + err.message;
+              }
+            }
+            const doc = await MarketplaceListing.create({
+              set: set._id,
+              marketplace: "digiseller",
+              externalId: r.externalId,
+              url: r.url || "",
+              title,
+              description,
+              price: priceUsd,
+              status: "active",
+              note: dsNote,
+              autoDeliver: true,
+              accountId: claimed.map((c) => c.accountId).join(","),
+              accountLogin: claimed.map((c) => c.login).join(", "),
+            });
+            results[name] = {
+              success: true,
+              id: String(doc._id),
+              externalId: r.externalId,
+              url: r.url || "",
+              note: doc.note,
+            };
+            continue;
+          }
           r = await mp.digisellerPublish({
             title,
             description,
             priceUsd,
             categories: ds.categories,
           });
+          if (dsCover && fs.existsSync(dsCover)) {
+            try {
+              await mp.digisellerUploadImage(r.externalId, dsCover);
+            } catch (err) {
+              console.error("digiseller image upload failed:", err.message);
+              r.note =
+                (r.note ? r.note + " " : "") +
+                "Image upload failed: " +
+                err.message;
+            }
+          }
         } else if (name === "g2g") {
           const g = body.g2g || {};
           r = await mp.g2gPublish({
@@ -468,6 +554,8 @@ router.delete(
       if (row.autoDeliver && row.accountId) {
         if (row.marketplace === "ggsel") {
           await ggFulfiller.releaseAccounts(row.accountId.split(","));
+        } else if (row.marketplace === "digiseller") {
+          await dsFulfiller.releaseAccounts(row.accountId.split(","));
         } else {
           await gfFulfiller.releaseAccount(row.accountId);
         }
@@ -535,7 +623,19 @@ router.post(
           .filter(Boolean);
       }
       const r = await mp.digisellerAddContent(row.externalId, lines);
-      res.json({ success: true, added: r.added });
+      // Manually-added accounts that are also tracked on the server are
+      // retired from the sellable pool so they can't be sold twice across
+      // platforms.
+      let retired = 0;
+      if (body.accounts != null) {
+        retired = await dsFulfiller.retireManualAccounts(
+          String(body.accounts)
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean),
+        );
+      }
+      res.json({ success: true, added: r.added, retired });
     } catch (err) {
       res.json({ success: false, message: err.message });
     }

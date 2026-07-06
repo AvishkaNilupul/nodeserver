@@ -28,8 +28,10 @@ function isSuper(req) {
 async function holdingsForKeys(keys) {
   if (!keys.length) return [];
   const total = keys.length;
+  // Drops already connected/redeemed on a game account cannot be delivered
+  // again, so they never count as sellable stock.
   return DropLog.aggregate([
-    { $match: { itemKey: { $in: keys } } },
+    { $match: { itemKey: { $in: keys }, connected: { $ne: true } } },
     {
       $group: {
         _id: { account: "$account", k: "$itemKey" },
@@ -117,7 +119,7 @@ async function stockForSets(sets) {
   }
   // account -> [{k,count}] across the union of keys (accounts holding ANY key).
   const rows = await DropLog.aggregate([
-    { $match: { itemKey: { $in: allKeys } } },
+    { $match: { itemKey: { $in: allKeys }, connected: { $ne: true } } },
     {
       $group: {
         _id: { account: "$account", k: "$itemKey" },

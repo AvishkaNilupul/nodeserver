@@ -1006,6 +1006,27 @@
               <option value="">Loading…</option>
             </select>
             <div id="mpDsAttrs"></div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Quantity</label>
+                <input type="number" id="mpDsQty" min="1" value="1" />
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Delivery</label>
+                <select id="mpDsDelivery">
+                  <option value="auto">Auto (server accounts)</option>
+                  <option value="manual">Manual (add stock later)</option>
+                </select>
+              </div>
+            </div>
+            <div class="mp-hint">
+              Auto reserves up to <em>Quantity</em> in-stock accounts holding
+              this whole bundle and uploads each as Plati auto-delivery content,
+              so buyers are handed one automatically. Manual creates the product
+              empty — add accounts yourself later with “Add stock” (useful for
+              accounts that are not on the server). The set's cover image is
+              uploaded to the product either way.
+            </div>
           </div>
         </div>
 
@@ -2567,6 +2588,8 @@
             categories: [
               { owner: 1, categoryId: dsSelected.id, attributes: dsAttrs },
             ],
+            delivery: $("mpDsDelivery").value,
+            quantity: parseInt($("mpDsQty").value, 10) || 1,
           };
         }
         if (targets.indexOf("g2g") !== -1) {
