@@ -1323,6 +1323,7 @@
         <button class="tab active" data-tab="items">By item</button>
         <button class="tab" data-tab="games">By game</button>
         <button class="tab" data-tab="accounts">Accounts</button>
+        <button class="tab" data-tab="badtokens">Bad tokens</button>
       </div>
 
       <!-- By item -->
@@ -1421,7 +1422,6 @@
             <option value="">All statuses</option>
             <option value="ok">Scanned OK</option>
             <option value="pending">Not scanned yet</option>
-            <option value="token_invalid">Token invalid</option>
             <option value="error">Error</option>
           </select>
           <select id="setSelect">
@@ -1448,6 +1448,68 @@
                 <tbody id="rows">
                   <tr>
                     <td colspan="8" class="empty">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bad tokens -->
+      <section class="view" id="view-badtokens">
+        <div class="toolbar">
+          <div class="search">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            >
+              <circle cx="11" cy="11" r="7"></circle>
+              <path d="m21 21-4.3-4.3"></path>
+            </svg>
+            <input
+              id="badSearch"
+              type="text"
+              placeholder="Search by login, username or config…"
+            />
+          </div>
+          <span class="sub" id="badCount"></span>
+          <button
+            class="btn-ghost btn-sm"
+            id="purgeBad"
+            style="margin-left: auto"
+          >
+            Remove all from bots
+          </button>
+        </div>
+        <div class="note" style="margin: 10px 0">
+          These accounts have a dead Twitch token and can no longer farm or be
+          logged into, so they're hidden from every other view (By item, By
+          game, Accounts and Copy logins). Use <b>Remove all from bots</b> to
+          delete them from the bot config files — a <code>.bak</code> backup of
+          each config is kept.
+        </div>
+        <div class="panel">
+          <div class="pb" style="padding: 0">
+            <div style="overflow-x: auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Login</th>
+                    <th>Email</th>
+                    <th class="hide-sm">Bot</th>
+                    <th class="hide-sm">Last scan</th>
+                    <th>State</th>
+                  </tr>
+                </thead>
+                <tbody id="badRows">
+                  <tr>
+                    <td colspan="5" class="empty">Loading…</td>
                   </tr>
                 </tbody>
               </table>
@@ -1637,6 +1699,7 @@
         $("view-" + t).classList.add("active");
         if (t === "items") loadItems();
         else if (t === "games") loadGames();
+        else if (t === "badtokens") loadBadTokens();
         else loadAccounts();
       }
       document
@@ -2179,6 +2242,110 @@
         }
         $("rows").innerHTML = accounts.map(rowHTML).join("");
       }
+
+      // -------- Bad tokens (dead accounts) --------
+      let badAccounts = [];
+      async function loadBadTokens() {
+        const search = encodeURIComponent($("badSearch").value.trim());
+        let data;
+        try {
+          data = await api("/drops-archive/bad-tokens?search=" + search);
+        } catch (e) {
+          $("badRows").innerHTML =
+            '<tr><td colspan="5" class="empty">' +
+            esc(e.message) +
+            "</td></tr>";
+          return;
+        }
+        badAccounts = data.accounts || [];
+        $("badCount").textContent =
+          badAccounts.length +
+          " dead account" +
+          (badAccounts.length === 1 ? "" : "s");
+        if (!badAccounts.length) {
+          $("badRows").innerHTML =
+            '<tr><td colspan="5" class="empty">No bad-token accounts.</td></tr>';
+          return;
+        }
+        $("badRows").innerHTML = badAccounts
+          .map(
+            (a) =>
+              "<tr>" +
+              "<td>" +
+              esc(a.login || "(no login)") +
+              "</td>" +
+              "<td>" +
+              (a.credEmail
+                ? esc(a.credEmail)
+                : '<span style="color:var(--muted)">—</span>') +
+              "</td>" +
+              '<td class="hide-sm mono">' +
+              esc(a.container || a.configFile || "—") +
+              "</td>" +
+              '<td class="hide-sm">' +
+              esc(timeAgo(a.lastScanAt)) +
+              "</td>" +
+              "<td>" +
+              (a.container || a.configFile
+                ? '<span class="chip off">In bot config</span>'
+                : '<span class="chip">Removed from bots</span>') +
+              "</td>" +
+              "</tr>",
+          )
+          .join("");
+      }
+
+      let badSearchTimer;
+      $("badSearch").addEventListener("input", () => {
+        clearTimeout(badSearchTimer);
+        badSearchTimer = setTimeout(loadBadTokens, 250);
+      });
+
+      // Bulk-remove every dead account from the bot config files. Their docs
+      // stay in this tab (flagged "Removed from bots"); the configs get a .bak.
+      $("purgeBad").addEventListener("click", async (e) => {
+        if (!badAccounts.length) return banner("Nothing to remove.", "ok");
+        const inConfigs = badAccounts.filter(
+          (a) => a.container || a.configFile,
+        ).length;
+        if (
+          !confirm(
+            "Remove " +
+              (inConfigs || badAccounts.length) +
+              " bad-token account(s) from the bot config files? This edits the " +
+              "configs (a .bak backup is kept) so the bots stop using them.",
+          )
+        )
+          return;
+        const btn = e.currentTarget;
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Removing…";
+        try {
+          const d = await api("/drops-archive/bad-tokens/purge", {
+            method: "POST",
+          });
+          let msg =
+            "Removed " +
+            d.removedFromConfigs +
+            " account(s) from " +
+            d.filesUpdated +
+            " config file(s).";
+          if (d.offlineHosts && d.offlineHosts.length)
+            msg +=
+              " Skipped offline host(s): " + d.offlineHosts.join(", ") + ".";
+          if (d.missingFiles && d.missingFiles.length)
+            msg += " Missing file(s): " + d.missingFiles.join(", ") + ".";
+          banner(msg, "ok");
+          await loadBadTokens();
+          await loadOverview();
+        } catch (err) {
+          banner(err.message, "err");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
 
       // Distinct bot sets (container/config file) from the loaded accounts,
       // for the on-demand "Scan set" picker.
