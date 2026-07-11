@@ -20,6 +20,19 @@ function regenerateSession(req) {
   });
 }
 
+// After regenerate() + writing session data, the client is about to redirect
+// and immediately re-authenticate (whoami fetch, socket handshake) against
+// that same session. express-session normally saves before the response
+// flushes, but that auto-save can race a fresh session id from regenerate()
+// against a cold session-store connection (e.g. right after a server
+// restart) — so save explicitly and await it before responding, to guarantee
+// the session is durably written before the client can act on the response.
+function saveSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.save((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 function requireAdmin(req, res, next) {
   if (req.session?.admin) {
     return next();
@@ -74,6 +87,7 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
         role: admin.role === "superadmin" ? "superadmin" : "admin",
         at: Date.now(),
       };
+      await saveSession(req);
       return res.json({ success: true, twofa: true });
     }
 
@@ -83,6 +97,7 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
       role: admin.role === "superadmin" ? "superadmin" : "admin",
       tfa: false,
     };
+    await saveSession(req);
 
     // When 2FA is mandatory site-wide but this admin hasn't set it up, let them
     // in only to enrol — the UI sends them to the security page.

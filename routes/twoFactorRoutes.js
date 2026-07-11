@@ -14,6 +14,16 @@ const { loginLimiter } = require("../utils/rateLimit");
 
 const router = express.Router();
 
+// The client redirects and immediately re-authenticates (whoami fetch,
+// socket handshake) against this session right after the response — see
+// the matching helper in adminAuthRoutes.js for why this must be awaited
+// instead of relying on express-session's auto-save-on-response-end.
+function saveSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.save((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 // Status of the current admin's 2FA (and whether the site enforces it).
 router.get("/admin/2fa/status", requireAdmin, (req, res) => {
   const admin = getAdminById(req.session.admin.id);
@@ -33,7 +43,9 @@ router.post("/admin/2fa/setup", requireAdmin, async (req, res) => {
   try {
     const admin = getAdminById(req.session.admin.id);
     if (!admin) {
-      return res.status(404).json({ success: false, message: "Admin not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Admin not found" });
     }
     const { secret, uri } = await totp.newSecret(admin.username);
     await setTotpPending(admin.id, totp.encrypt(secret));
@@ -64,6 +76,7 @@ router.post("/admin/2fa/enable", requireAdmin, async (req, res) => {
     const hashes = await totp.hashBackupCodes(backupCodes);
     await enableTotp(admin.id, totp.encrypt(secret), hashes);
     req.session.admin.tfa = true;
+    await saveSession(req);
     res.json({ success: true, backupCodes });
   } catch (err) {
     console.error("2fa enable error:", err.message);
@@ -91,6 +104,7 @@ router.post("/admin/2fa/disable", requireAdmin, async (req, res) => {
     }
     await disableTotp(admin.id);
     req.session.admin.tfa = false;
+    await saveSession(req);
     res.json({ success: true });
   } catch (err) {
     console.error("2fa disable error:", err.message);
@@ -110,25 +124,21 @@ router.post("/admin/2fa/require", requireSuperadmin, async (req, res) => {
 });
 
 // Superadmin: reset (disable) another admin's 2FA if they're locked out.
-router.post(
-  "/admins/:id/2fa-reset",
-  requireSuperadmin,
-  async (req, res) => {
-    try {
-      const admin = getAdminById(req.params.id);
-      if (!admin) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Admin not found" });
-      }
-      await disableTotp(admin.id);
-      res.json({ success: true });
-    } catch (err) {
-      console.error("2fa reset error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
+router.post("/admins/:id/2fa-reset", requireSuperadmin, async (req, res) => {
+  try {
+    const admin = getAdminById(req.params.id);
+    if (!admin) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Admin not found" });
     }
-  },
-);
+    await disableTotp(admin.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("2fa reset error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 // Second step of login: verify the 6-digit code (or a backup code) against the
 // pending login established by /admin-login, then create the real session.
@@ -167,6 +177,7 @@ router.post("/admin-2fa", loginLimiter, async (req, res) => {
       role: admin.role === "superadmin" ? "superadmin" : "admin",
       tfa: true,
     };
+    await saveSession(req);
     res.json({ success: true, usedBackupCode: backupIdx >= 0 });
   } catch (err) {
     console.error("admin-2fa error:", err.message);
