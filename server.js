@@ -62,6 +62,33 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e5 });
 
+// engine.io's socket handshake runs sessionMiddleware (below) as one of its
+// own middlewares — the session lookup is an async MongoStore round-trip, so
+// a client that disconnects mid-handshake can have engine.io try to abort an
+// already-dead response by the time that lookup resolves. Node's http
+// internals throw ERR_HTTP_HEADERS_SENT for that (not fixed upstream as of
+// engine.io 6.6.9), which — with no handler here — took the whole process
+// down for every other connected admin/buyer over one abandoned handshake.
+// Only this specific, already-understood race is swallowed; anything else
+// still crashes and lets PM2 restart the process as before, so a genuinely
+// unknown bug doesn't get silently masked.
+process.on("uncaughtException", (err) => {
+  if (
+    err &&
+    err.code === "ERR_HTTP_HEADERS_SENT" &&
+    typeof err.stack === "string" &&
+    err.stack.includes("engine.io")
+  ) {
+    console.error(
+      "[engine.io] ignored a stale-handshake abort race:",
+      err.message,
+    );
+    return;
+  }
+  console.error("Uncaught exception, exiting:", err);
+  process.exit(1);
+});
+
 app.disable("x-powered-by");
 // Trust a single proxy hop (the reverse proxy in front of the app) so client
 // IPs and `secure` cookie detection are based on the real edge, not on a
