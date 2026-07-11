@@ -219,6 +219,14 @@ router.post(
           }
           removedFromConfigs += removed;
           filesUpdated++;
+          // A purge can empty a config out entirely — a running bot with no
+          // accounts left hits TwitchDropsBot's infinite-retry-loop bug (see
+          // utils/botHosts.js), so stop it rather than leave it spinning.
+          if (!kept.length) {
+            await hosts
+              .stopIfNoAccounts(host, file, containerForFile(file))
+              .catch(() => {});
+          }
         }
       }
 
@@ -773,6 +781,14 @@ router.post(
           }
           removedFromConfigs += removed;
           filesUpdated++;
+          // Same reasoning as the bad-tokens purge: don't leave a bot
+          // running with zero accounts, it'll hit TwitchDropsBot's
+          // infinite-retry-loop bug (utils/botHosts.js).
+          if (!kept.length) {
+            await hosts
+              .stopIfNoAccounts(host, file, containerForFile(file))
+              .catch(() => {});
+          }
         }
       }
 

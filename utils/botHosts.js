@@ -620,6 +620,52 @@ async function farmingStatus(host, container) {
   return { line: last, detail: last.slice(0, 180) };
 }
 
+// Set a container's restart policy (survives a docker/host restart, unlike a
+// plain `docker stop` — a `restart: always` container comes back on the next
+// daemon restart even if it was manually stopped beforehand).
+async function setRestartPolicy(host, container, policy) {
+  const args = ["update", "--restart=" + policy, container];
+  if (host.transport === "local") {
+    await localRun("docker", args);
+  } else {
+    await sshRun(host, "docker " + args.map(shq).join(" "));
+  }
+}
+
+// TwitchDropsBot has a known bug: with zero accounts configured, it retries
+// an interactive login prompt in a tight loop with no backoff — tens of
+// thousands of log lines per second, which has filled a disk and pegged a
+// CPU core in production. A bot's account list can end up empty from several
+// places (a raw config save, purging bad tokens, resolving duplicates), so
+// this is called after any of those instead of duplicating the check at each
+// call site. If the container is currently running, stops it and clears its
+// restart policy so it can't come back — including across a host reboot —
+// until accounts are added again (see restoreRestartPolicy).
+async function stopIfNoAccounts(host, file, container) {
+  let data;
+  try {
+    data = JSON.parse(await readFile(host, file));
+  } catch {
+    return { stopped: false };
+  }
+  const users = (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
+  if (users.length > 0) return { stopped: false };
+
+  const states = await dockerPs(host).catch(() => ({}));
+  const running = states[container] && states[container].state === "running";
+  if (!running) return { stopped: false };
+
+  await setRestartPolicy(host, container, "no").catch(() => {});
+  await dockerContainer(host, "stop", container).catch(() => {});
+  return { stopped: true };
+}
+
+// Re-enable normal crash/reboot auto-restart once a bot has accounts again —
+// pairs with stopIfNoAccounts, which clears the policy on the way out.
+async function restoreRestartPolicy(host, container) {
+  await setRestartPolicy(host, container, "always").catch(() => {});
+}
+
 module.exports = {
   BOT_DIR,
   COMPOSE_NAMES,
@@ -645,4 +691,6 @@ module.exports = {
   readMeta,
   writeMeta,
   farmingStatus,
+  stopIfNoAccounts,
+  restoreRestartPolicy,
 };

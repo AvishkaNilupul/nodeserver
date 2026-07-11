@@ -113,31 +113,106 @@ sudo systemctl disable --now twitchdrops 2>/dev/null || true
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER      # then log out/in so `docker` works without sudo
 
-# 3. create the bot directory and move your existing config in
+# 3. build the bot image from source (see "Building the bot image" below —
+#    do NOT `docker pull ghcr.io/alorf/twitchdropsbot`, it reads its config
+#    from a different path than this app expects and will silently start
+#    every bot with a blank config)
+
+# 4. create the bot directory and move your existing config in
 mkdir -p ~/twitchbot/logs
 cp ~/TwitchDropsBot-Console-linux-arm64-1.2.4/config.json ~/twitchbot/config.json
 
-# 4. create the compose file (multi-arch image runs on the Pi's arm64)
+# 5. create the compose file
 cat > ~/twitchbot/docker-compose.yml <<'EOF'
 services:
   twitchbot:
-    image: ghcr.io/alorf/twitchdropsbot:latest
+    image: avishkarex/twitchbot:latest
     container_name: twitchbot
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./config.json:/app/config.json
       - ./logs:/app/logs
 EOF
 
-# 5. start it
+# 6. start it
 cd ~/twitchbot && docker compose up -d
 docker ps
 ```
 
 > The directory (`~/twitchbot` → `/home/avishka/twitchbot`) and the compose
-> service naming must match what you put in the host config below. If your image
-> expects the config at a different path inside the container, adjust the volume
-> mapping — the host side (`./config.json`) is what matters to this feature.
+> service naming must match what you put in the host config below. The
+> `logging:` block matters — see "Why the log cap" below.
+
+### Building the bot image
+
+The Bots page manages TwitchDropsBot instances by mounting a single
+`config.json` file into the container at `/app/config.json`. The official
+image (`ghcr.io/alorf/twitchdropsbot`) defaults to reading its config from
+`/app/Configuration/config.json` instead (an `INSIDE_DOCKER=true` env var
+baked into its Dockerfile) — mount a file at the old path against that image
+and it finds nothing there, auto-creates an empty `{}` config, and every bot
+silently starts with zero accounts. Build your own image with that one env
+var flipped, and everything else about the official release is untouched:
+
+```bash
+git clone --branch <release-tag> https://github.com/Alorf/TwitchDropsBot.git
+cd TwitchDropsBot
+sed -i 's/ENV INSIDE_DOCKER=true/ENV INSIDE_DOCKER=false/' TwitchDropsBot.Console/Dockerfile
+docker build -f TwitchDropsBot.Console/Dockerfile -t avishkarex/twitchbot:latest .
+```
+
+Run this on each host natively (the main server is amd64, a Raspberry Pi is
+usually arm64 — cross-building is possible via `docker buildx` but a native
+build is simpler and just as fast). Before rolling a new build out to a bot
+that's actively farming, sanity-check it in isolation first:
+
+```bash
+docker run -d --name twitchbot-testrun \
+  -v /root/twitchbot/config_02.json:/app/config.json \
+  avishkarex/twitchbot:latest
+docker logs -f twitchbot-testrun   # should show accounts loading, not "No users found"
+docker rm -f twitchbot-testrun
+```
+
+Then recreate bots one at a time (`docker compose up -d --no-deps <service>`
+per bot) rather than all at once, checking each one's logs before moving to
+the next.
+
+### Why the log cap
+
+TwitchDropsBot has a real bug: with **zero accounts** configured, it retries
+an interactive login prompt in a tight loop with no backoff — tens of
+thousands of log lines per second. This has filled a host's disk and pegged
+a CPU core in production before the `logging:` block above existed (Docker's
+own container log driver has no size limit by default). The app itself now
+also refuses to start/restart a bot with zero accounts and auto-stops one
+that ends up empty (see `utils/botHosts.js`'s `stopIfNoAccounts`), but the
+`logging:` cap is defense-in-depth for containers created outside the app
+(like the manual setup above) — set it on **every** host, including a fresh
+one. As a second layer, also cap it at the Docker daemon level so it applies
+to every container on the host, not just ones this app creates:
+
+```bash
+sudo tee /etc/docker/daemon.json > /dev/null <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+EOF
+sudo systemctl restart docker
+```
+
+> A `docker`/`dockerd` restart does **not** stop running containers, but any
+> container whose `restart` policy is `always` **will** come back up on a
+> daemon restart even if it was manually `docker stop`-ed beforehand — if you
+> have a bot deliberately stopped (e.g. because it has no accounts), also run
+> `docker update --restart=no <container>` so a daemon restart can't silently
+> resurrect it.
 
 ---
 
@@ -233,3 +308,6 @@ matter where the bot physically runs.
   fast and cleanly rather than hanging.
 - Set `TWITCHBOT_ALLOW_RESTART=0` to disable all container start/stop/restart
   actions (config viewing/editing still works).
+- The app won't start or restart a bot with zero accounts, and auto-stops one
+  that ends up empty (a raw config save, a bad-tokens purge, or a duplicates
+  purge can all zero out a file) — see "Why the log cap" above for why.

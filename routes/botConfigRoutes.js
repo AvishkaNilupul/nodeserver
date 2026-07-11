@@ -258,6 +258,28 @@ async function upsertBotAccounts(accounts, host, file) {
   await BotAccount.bulkWrite(ops, { ordered: false }).catch(() => {});
 }
 
+// Refuse to start a bot with no accounts — see stopIfNoAccounts in
+// utils/botHosts.js for why: TwitchDropsBot retries a login prompt in a
+// tight, unthrottled loop when its config has zero users, which has taken
+// down a production host (disk + CPU) before. Fails open (allows the start)
+// if the config can't be read, since that's a different, more visible error
+// the operator will hit immediately anyway.
+async function hasAccounts(host, file) {
+  let data;
+  try {
+    data = JSON.parse(await hosts.readFile(host, file));
+  } catch {
+    return true;
+  }
+  const users = (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
+  return users.length > 0;
+}
+
+const NO_ACCOUNTS_MESSAGE =
+  "This bot has no accounts — starting it would trigger a known " +
+  "TwitchDropsBot bug (infinite login-retry loop with no backoff) that " +
+  "floods logs and pegs CPU. Add accounts first.";
+
 // Given the list of files in a host dir, work out the next free bot slot.
 // config.json -> index 1 (twitchbot); config_0N.json -> index N (twitchbotxN).
 function findNextSlot(files) {
@@ -312,6 +334,17 @@ function addServiceToComposeText(raw, container, file) {
     image,
     container_name: container,
     restart: "always",
+    // Caps each container's own stdout/stderr log (separate from the app's
+    // internal log files under ./logs) so a bot stuck retrying in a tight
+    // loop — e.g. TwitchDropsBot's known infinite-retry bug when a config
+    // has zero accounts — can never fill the disk on its own. Baked in here
+    // (rather than only as a host-level Docker daemon default) so a fresh
+    // server gets this automatically the moment a bot is created through
+    // the app, with no separate manual setup step.
+    logging: {
+      driver: "json-file",
+      options: { "max-size": "10m", "max-file": "3" },
+    },
     volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
   };
 
@@ -643,7 +676,13 @@ router.put("/bot-configs/file/:file", requireSuperadmin, async (req, res) => {
   try {
     const text = JSON.stringify(data, null, 2);
     await hosts.writeFileAtomic(host, req.params.file, text);
-    res.json({ success: true });
+    const container = containerForFile(req.params.file);
+    let stoppedEmpty = false;
+    if (container) {
+      const r = await hosts.stopIfNoAccounts(host, req.params.file, container);
+      stoppedEmpty = r.stopped;
+    }
+    res.json({ success: true, stoppedEmpty });
   } catch (e) {
     if (e.unreachable) {
       return res
@@ -761,7 +800,13 @@ router.post(
           .status(404)
           .json({ success: false, message: "Config not found" });
       }
+      if (!(await hasAccounts(host, req.params.file))) {
+        return res
+          .status(400)
+          .json({ success: false, message: NO_ACCOUNTS_MESSAGE });
+      }
       const output = await hosts.dockerContainer(host, "restart", container);
+      await hosts.restoreRestartPolicy(host, container);
       res.json({ success: true, container, output });
     } catch (e) {
       res.status(e.unreachable ? 502 : 500).json({
@@ -913,8 +958,16 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       })),
     };
 
-    if (!startRunning) {
-      return res.json(Object.assign({ started: false }, base));
+    if (!startRunning || !accounts.length) {
+      return res.json(
+        Object.assign(
+          {
+            started: false,
+            warning: !startRunning ? undefined : NO_ACCOUNTS_MESSAGE,
+          },
+          base,
+        ),
+      );
     }
 
     try {
@@ -1102,7 +1155,14 @@ router.post("/bot-configs/move", requireSuperadmin, async (req, res) => {
     container: slot.container,
     accountCount: summarize(file, data).accountCount,
   };
-  if (!start) return res.json(Object.assign({ started: false }, base));
+  if (!start || !base.accountCount) {
+    return res.json(
+      Object.assign(
+        { started: false, warning: start ? NO_ACCOUNTS_MESSAGE : undefined },
+        base,
+      ),
+    );
+  }
   try {
     const output = await hosts.composeUp(toHost, slot.container);
     res.json(Object.assign({ started: true, output }, base));
@@ -1200,6 +1260,10 @@ router.post(
       }
       let restarted = true;
       try {
+        // Undoes stopIfNoAccounts's restart=no from an earlier empty-account
+        // stop, if this bot had one — otherwise it'd stay unprotected
+        // against crash/reboot recovery even though it has accounts again.
+        await hosts.restoreRestartPolicy(host, container);
         await hosts.dockerContainer(host, "restart", container);
       } catch {
         restarted = false;
@@ -1250,7 +1314,15 @@ async function dockerSimpleAction(host, action, file, res) {
       .json({ success: false, message: "No container mapped to this file" });
   }
   try {
+    if (action === "start" && !(await hasAccounts(host, file))) {
+      return res
+        .status(400)
+        .json({ success: false, message: NO_ACCOUNTS_MESSAGE });
+    }
     const output = await hosts.dockerContainer(host, action, container);
+    if (action === "start") {
+      await hosts.restoreRestartPolicy(host, container);
+    }
     res.json({ success: true, container, output });
   } catch (e) {
     res.status(e.unreachable ? 502 : 500).json({
