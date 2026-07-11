@@ -199,8 +199,15 @@ async function dedupeAccounts(accounts) {
   }
   if (!unique.length) return { kept: [], skipped };
 
+  // A BotAccount doc can exist with no active placement — e.g. pulled out by
+  // the bad-tokens purge, or un-claimed when its bot was deleted (see the
+  // DELETE /bot-configs/file/:file route) — so only a non-empty configFile
+  // counts as "still assigned to a bot," not merely "known to the index."
   const existing = await BotAccount.find(
-    { clientSecret: { $in: unique.map((a) => a.ClientSecret) } },
+    {
+      clientSecret: { $in: unique.map((a) => a.ClientSecret) },
+      configFile: { $nin: ["", null] },
+    },
     { clientSecret: 1, host: 1, configFile: 1, login: 1 },
   ).lean();
   const bySecret = new Map(existing.map((e) => [e.clientSecret, e]));
@@ -1334,6 +1341,16 @@ router.delete(
       } catch {
         /* ignore */
       }
+
+      // Un-claim these accounts in the cross-host index — otherwise they'd
+      // stay stamped as belonging to this now-archived file forever, and the
+      // duplicate check on a future paste would keep rejecting them as
+      // "already assigned" to a bot that no longer exists.
+      await BotAccount.updateMany(
+        { host: host.id, configFile: file },
+        { $set: { configFile: "", container: "" } },
+      ).catch(() => {});
+
       res.json({ success: true, container, archived: archive });
     } catch (e) {
       if (e.unreachable) {

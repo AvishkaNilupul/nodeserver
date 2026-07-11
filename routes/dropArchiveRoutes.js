@@ -535,6 +535,16 @@ async function runSync() {
         updated += r.modifiedCount || 0;
       }
     }
+
+    // Any account still recorded against this host but not in a config file
+    // we just read has a stale placement — its bot was deleted (or moved)
+    // since the last sync. Clear it so it stops being treated as "still
+    // assigned to a bot" (e.g. by the duplicate check when re-adding it
+    // elsewhere), the same way deleting a bot does going forward.
+    await BotAccount.updateMany(
+      { host: host.id, configFile: { $nin: [...configs, "", null] } },
+      { $set: { configFile: "", container: "" } },
+    ).catch(() => {});
   }
 
   lastDuplicates = [...occurrences.entries()]
