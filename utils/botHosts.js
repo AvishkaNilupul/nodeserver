@@ -685,6 +685,8 @@ module.exports = {
   dockerStats,
   hostStats,
   composeUp,
+  runShell,
+  shq,
   saveSnapshot,
   readSnapshot,
   listSnapshot,
@@ -693,4 +695,5 @@ module.exports = {
   farmingStatus,
   stopIfNoAccounts,
   restoreRestartPolicy,
+  setRestartPolicy,
 };

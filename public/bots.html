@@ -222,6 +222,21 @@
     </div>
   </div>
 
+  <div class="panel" id="updatePanel">
+    <div style="padding:14px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line);">
+      <b style="font-size:15px;">TwitchDropsBot version</b>
+      <span class="chip" id="updChip">checking…</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn-ghost btn-sm" id="updRefreshBtn">Check for updates</button>
+        <button class="btn-sm" id="updStartBtn" disabled>Roll out</button>
+      </div>
+    </div>
+    <div style="padding:14px 18px;display:none;" id="updDetail">
+      <div class="sub" id="updNote" style="white-space:pre-line;"></div>
+      <div class="logwrap" id="updLog" style="display:none;height:220px;margin-top:12px;"></div>
+    </div>
+  </div>
+
   <div id="hostTabs" class="hosttabs" style="display:none;"></div>
 
   <div class="toolbar">
@@ -1053,6 +1068,87 @@
     }
   };
 
+  // TwitchDropsBot version rollout panel
+  let _updTimer = null;
+  let _updWasRunning = false;
+
+  function renderUpdateLog(s) {
+    const box = $("updLog");
+    if (!s.log || !s.log.length) return;
+    box.style.display = "";
+    const lines = s.log.map((l) => "[" + l.ts.slice(11, 19) + "]" + (l.host ? " [" + l.host + "] " : " ") + l.message);
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent = lines.join("\n");
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  async function pollUpdateStatus() {
+    let s;
+    try { s = await api("/api/bot-update/status"); } catch (e) { return; }
+    renderUpdateLog(s);
+    if (s.running) {
+      _updWasRunning = true;
+      $("updStartBtn").disabled = true;
+      $("updStartBtn").textContent = "Rolling out " + s.targetTag + "…";
+      if (!_updTimer) _updTimer = setInterval(pollUpdateStatus, 2500);
+      return;
+    }
+    if (_updTimer) { clearInterval(_updTimer); _updTimer = null; }
+    if (_updWasRunning) {
+      _updWasRunning = false;
+      if (s.ok === true) toast("TwitchDropsBot updated to " + s.targetTag);
+      else if (s.ok === false) toast("Rollout failed: " + s.error, true);
+      loadUpdatePanel();
+    }
+  }
+
+  async function loadUpdatePanel() {
+    $("updChip").textContent = "checking…";
+    $("updChip").className = "chip";
+    try {
+      const r = await api("/api/bot-update/latest");
+      const rel = r.release || {};
+      const applied = r.applied || {};
+      const versions = HOSTS.map((h) => (h.label || h.id) + ": " + ((applied[h.id] && applied[h.id].tag) || "unknown")).join("  ·  ");
+      $("updNote").textContent =
+        "Latest release: " + (rel.name || rel.tag) + (rel.publishedAt ? " (" + new Date(rel.publishedAt).toLocaleDateString() + ")" : "") +
+        "\nCurrently applied — " + versions;
+      $("updDetail").style.display = "";
+      const allOnLatest = HOSTS.length > 0 && HOSTS.every((h) => applied[h.id] && applied[h.id].tag === rel.tag);
+      if (allOnLatest) {
+        $("updChip").textContent = "up to date (" + rel.tag + ")";
+        $("updChip").className = "chip on";
+        $("updStartBtn").disabled = true;
+      } else {
+        $("updChip").textContent = "update available: " + rel.tag;
+        $("updChip").className = "chip off";
+        $("updStartBtn").disabled = false;
+      }
+      $("updStartBtn").textContent = "Roll out " + rel.tag;
+    } catch (e) {
+      $("updChip").textContent = "check failed";
+      $("updChip").className = "chip off";
+      $("updNote").textContent = e.message;
+      $("updDetail").style.display = "";
+    }
+    pollUpdateStatus();
+  }
+
+  async function startRollout() {
+    if (!confirm("Roll out the latest TwitchDropsBot release to every host, one bot at a time?\n\nA bot that fails its post-update health check is rolled back automatically and the whole rollout stops there — later bots are left untouched.")) return;
+    $("updStartBtn").disabled = true;
+    $("updStartBtn").textContent = "Starting…";
+    try {
+      await api("/api/bot-update/start", { method: "POST" });
+      toast("Rollout started");
+      _updWasRunning = true;
+      pollUpdateStatus();
+    } catch (e) {
+      toast("Couldn't start: " + e.message, true);
+      loadUpdatePanel();
+    }
+  }
+
   // events
   $("addBotBtn").addEventListener("click", openCreateModal);
   $("bots").addEventListener("input", onEdit);
@@ -1060,6 +1156,8 @@
   $("search").addEventListener("input", () => renderAllTable(Object.keys(CONFIGS)));
   $("refreshBtn").addEventListener("click", load);
   $("allHead").addEventListener("click", () => $("allPanel").classList.toggle("collapsed"));
+  $("updRefreshBtn").addEventListener("click", loadUpdatePanel);
+  $("updStartBtn").addEventListener("click", startRollout);
 
   $("logoutBtn").addEventListener("click", async () => {
     try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
@@ -1079,6 +1177,7 @@
     await loadHosts();
     load();
     startStatsTimer();
+    loadUpdatePanel();
   })();
 </script>
 <script src="/admin-nav.js"></script>
