@@ -402,7 +402,7 @@ app.get("/", (req, res) => {
 // Routes
 // =========================
 app.use(redeemRoutes);
-app.use(chatRoutes);
+app.use(enforce2fa, chatRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);

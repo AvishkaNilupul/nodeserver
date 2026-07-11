@@ -1087,6 +1087,7 @@
             )
           )
             return;
+          resetBtn.disabled = true;
           try {
             await api(
               "POST",
@@ -1096,6 +1097,7 @@
             loadAdmins();
           } catch (err) {
             showMsg(err.message, "err");
+            resetBtn.disabled = false;
           }
           return;
         }
@@ -1105,12 +1107,14 @@
           const name = delBtn.getAttribute("data-name");
           if (!confirm("Delete admin '" + name + "'? This cannot be undone."))
             return;
+          delBtn.disabled = true;
           try {
             await api("DELETE", "/admins/" + encodeURIComponent(id));
             showMsg("Admin '" + name + "' deleted.", "ok");
             loadAdmins();
           } catch (err) {
             showMsg(err.message, "err");
+            delBtn.disabled = false;
           }
         }
       });

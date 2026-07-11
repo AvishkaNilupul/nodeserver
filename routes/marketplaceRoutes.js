@@ -501,7 +501,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
 router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
   try {
     const q = {};
-    if (req.query.setId) q.set = req.query.setId;
+    if (req.query.setId) q.set = String(req.query.setId);
     const rows = await MarketplaceListing.find(q)
       .sort({ createdAt: -1 })
       .limit(500)

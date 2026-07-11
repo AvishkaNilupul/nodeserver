@@ -15,6 +15,18 @@ const { sendTelegramToSeller } = require("../utils/telegram");
 
 const cooldowns = new Map();
 
+// A "[IMAGE]<url>" message is only ever supposed to point at a file this
+// server itself hosted via /upload-image (server.js), i.e. a bare
+// "/uploads/<filename>" path. Anything else — an external URL, a
+// protocol-relative "//host/...", a data: URI — would render as a live
+// <img src> in the recipient's chat panel (see public/admin.html,
+// public/result.html), letting either side plant a tracking pixel or worse
+// against the other. Reject those instead of relaying them as images.
+const IMAGE_URL_RE = /^\/uploads\/[A-Za-z0-9._-]+$/;
+function isTrustedImageMessage(message) {
+  return IMAGE_URL_RE.test(message.slice("[IMAGE]".length));
+}
+
 // A chat id ("<gamerTag> #<orderId>") is already sanitized when the order is
 // claimed, so it is only length-guarded here — re-escaping would corrupt the
 // already-escaped value and break room/message matching.
@@ -173,6 +185,9 @@ Rust:
 
         const message = String(data.message).trim().slice(0, 1000);
         if (!message) return;
+        if (message.startsWith("[IMAGE]") && !isTrustedImageMessage(message)) {
+          return;
+        }
 
         const now = Date.now();
         const last = cooldowns.get(socket.id);
@@ -233,6 +248,9 @@ ${new Date().toISOString()}`,
         const userId = cleanChatId(data.userId);
         const message = String(data.message).trim().slice(0, 1000);
         if (!userId || !message) return;
+        if (message.startsWith("[IMAGE]") && !isTrustedImageMessage(message)) {
+          return;
+        }
 
         // The admin may only message buyers that belong to them. A buyer
         // belongs to the seller if there is a live order with this chat id

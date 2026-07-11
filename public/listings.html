@@ -1780,6 +1780,7 @@
           var did = dl.dataset.del;
           var ds = listingsCache.find((x) => x.id === did);
           if (!confirm('Delete listing "' + (ds ? ds.name : "") + '"?')) return;
+          dl.disabled = true;
           api("/drops-archive/sets/" + did, { method: "DELETE" })
             .then(function () {
               toast("Listing deleted");
@@ -1788,6 +1789,7 @@
             })
             .catch(function (err) {
               toast(err.message || "Delete failed");
+              dl.disabled = false;
             });
         }
       });

@@ -167,9 +167,15 @@ async function runOnce() {
     }
 
     if (seeding && fresh.length) {
+      // Suppress the "new/live" ping for the initial catalog, but only mark
+      // liveNotifiedAt on offers already live — an "upcoming" one must keep
+      // it unset so its future upcoming -> live transition still alerts.
+      await EpicFreebie.updateMany({}, { $set: { notifiedAt: now } }).catch(
+        () => {},
+      );
       await EpicFreebie.updateMany(
-        {},
-        { $set: { notifiedAt: now, liveNotifiedAt: now } },
+        { upcoming: false },
+        { $set: { liveNotifiedAt: now } },
       ).catch(() => {});
       await sendTelegram(
         "🕹 Epic free-games watcher is live — tracking " +

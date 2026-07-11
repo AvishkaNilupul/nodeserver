@@ -187,10 +187,12 @@ async function runOnce() {
     }
 
     if (seeding && fresh.length) {
-      await PrimeOffer.updateMany(
-        {},
-        { $set: { notifiedAt: now, endingNotifiedAt: now } },
-      ).catch(() => {});
+      // Only suppress the "new offer" ping for the initial catalog — leave
+      // endingNotifiedAt untouched so offers already close to expiring still
+      // get their 48h reminder below instead of being silenced forever.
+      await PrimeOffer.updateMany({}, { $set: { notifiedAt: now } }).catch(
+        () => {},
+      );
       await sendTelegram(
         "🎮 Prime Gaming watcher is live — tracking " +
           fresh.length +

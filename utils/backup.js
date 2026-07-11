@@ -132,10 +132,11 @@ async function dumpCollection(coll, outFile) {
   return count;
 }
 
-// Build a full backup. Returns { id, file, size, manifest }.
-async function createBackup({ reason = "manual" } = {}) {
-  if (_busy) throw new Error("Another backup/restore is already running");
-  _busy = true;
+// Build a full backup. Returns { id, file, size, manifest }. Does NOT manage
+// the _busy lock itself — restoreBackup needs to hold that lock continuously
+// across its own safety-backup call, so the lock is only acquired/released
+// by the public wrappers below (createBackup and restoreBackup).
+async function createBackupUnlocked({ reason = "manual" } = {}) {
   const id = makeId(reason);
   const outFile = path.join(BACKUP_DIR, id + ".tar.gz");
   const staging = path.join(BACKUP_DIR, ".staging-" + id);
@@ -203,6 +204,14 @@ async function createBackup({ reason = "manual" } = {}) {
     await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
     await fsp.rm(outFile, { force: true }).catch(() => {});
     throw e;
+  }
+}
+
+async function createBackup(opts) {
+  if (_busy) throw new Error("Another backup/restore is already running");
+  _busy = true;
+  try {
+    return await createBackupUnlocked(opts);
   } finally {
     _busy = false;
   }
@@ -251,15 +260,19 @@ async function enforceRetention() {
 // upserted on top of what's there.
 async function restoreBackup(archivePath, { drop = true } = {}) {
   if (_busy) throw new Error("Another backup/restore is already running");
-  // Safety net first (uses its own _busy lock, so take it before we set ours).
+  // Held for the whole operation, including the safety backup below — using
+  // the unlocked core there (instead of createBackup) means _busy never
+  // drops back to false between the safety backup and the restore itself,
+  // so a concurrent create/restore request can't slip into that gap.
+  _busy = true;
   let safety = null;
   try {
-    safety = await createBackup({ reason: "pre-restore-safety" });
+    safety = await createBackupUnlocked({ reason: "pre-restore-safety" });
   } catch (e) {
+    _busy = false;
     throw new Error("Aborted: could not take a safety backup first (" + e.message + ")");
   }
 
-  _busy = true;
   const work = path.join(BACKUP_DIR, ".restore-" + Date.now());
   const summary = { safetyBackup: safety.id, collections: {}, files: {}, drop };
   try {

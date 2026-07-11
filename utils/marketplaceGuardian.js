@@ -357,10 +357,29 @@ async function feedListing(row, seenKeys) {
       );
     }
   } catch (e) {
-    await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
+    // The bulk add call can fail as a whole even though the platform already
+    // accepted some of the lines — both APIs return one error code for the
+    // entire batch, with no per-line status. Blindly releasing every claimed
+    // account back to the pool in that case risks a second buyer being
+    // handed an account whose code is already live on the listing. Re-check
+    // stock first: if it moved, leave the accounts reserved and flag for a
+    // human instead of guessing which ones are safe to release.
+    let stockAfter = null;
+    try {
+      stockAfter =
+        row.marketplace === "ggsel"
+          ? await mp.ggselOfferStock(row.externalId)
+          : await mp.digisellerProductStock(row.externalId);
+    } catch {
+      stockAfter = null;
+    }
+    const partial = stockAfter !== null && stockAfter > remaining;
+    if (!partial) {
+      await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
+    }
     await upsertFinding({
       type: "restock-failed",
-      severity: "medium",
+      severity: partial ? "high" : "medium",
       marketplace: row.marketplace,
       listing: row._id,
       dedupeKey: "restock-err:" + row._id + ":" + Date.now(),
@@ -370,7 +389,12 @@ async function feedListing(row, seenKeys) {
         " listing " +
         row.externalId +
         " failed: " +
-        e.message,
+        e.message +
+        (partial
+          ? " — stock moved despite the error, so the claimed account(s) " +
+            "were kept reserved instead of released (avoids risking a " +
+            "double-delivered account); check manually."
+          : ""),
     });
     return 0;
   }

@@ -1194,7 +1194,14 @@ router.delete(
           .status(404)
           .json({ success: false, message: "Config not found" });
       }
-      // Remove the compose service first (best effort if a compose file exists).
+      // Archive the config first (same ordering as /bot-configs/create: do
+      // the file op first, so a failure in the second step below has a live
+      // config to roll back to instead of leaving the compose file already
+      // edited but the config still live and un-archived).
+      const archive = file + ".deleted-" + Date.now();
+      await hosts.rename(host, file, archive);
+
+      // Remove the compose service (best effort if a compose file exists).
       const composeFile = await hosts.composeName(host);
       if (composeFile) {
         try {
@@ -1204,15 +1211,19 @@ router.delete(
             await hosts.composeWrite(host, composeFile, edited.text);
           }
         } catch (e) {
+          // Roll back the archive so a failed compose edit doesn't leave the
+          // container running with no compose entry pointing at it.
+          try {
+            await hosts.rename(host, archive, file);
+          } catch {
+            /* ignore */
+          }
           return res.status(500).json({
             success: false,
             message: "Failed to update compose file: " + e.message,
           });
         }
       }
-      // Archive the config rather than deleting outright.
-      const archive = file + ".deleted-" + Date.now();
-      await hosts.rename(host, file, archive);
 
       // Force-remove the container (ignore "no such container").
       try {
