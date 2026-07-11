@@ -330,6 +330,109 @@
           transform: rotate(360deg);
         }
       }
+      .modal-bg {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        z-index: 130;
+        padding: 56px 16px;
+        overflow-y: auto;
+      }
+      .modal-bg.show {
+        display: flex;
+      }
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        width: 100%;
+        max-width: 480px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+      }
+      .modal header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      .modal header b {
+        font-size: 15px;
+      }
+      .modal header .x {
+        border: none;
+        background: none;
+        color: var(--muted);
+        font-size: 18px;
+        cursor: pointer;
+        line-height: 1;
+      }
+      .modal .mbody {
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .modal footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 14px 18px;
+        border-top: 1px solid var(--line);
+      }
+      .lbl {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--muted);
+        display: block;
+        margin-bottom: 5px;
+      }
+      .modal input[type="text"],
+      .modal select,
+      .modal textarea {
+        width: 100%;
+      }
+      .modal textarea {
+        padding: 9px 11px;
+        border-radius: 9px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 13.5px;
+        font-family: inherit;
+        resize: vertical;
+        min-height: 60px;
+      }
+      code.mono {
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 12.5px;
+      }
+      .chip {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: var(--surface-2);
+        color: var(--muted);
+      }
+      .chip.sold {
+        background: #ecfdf5;
+        color: var(--green);
+      }
+      html[data-theme="dark"] .chip.sold {
+        background: rgba(52, 211, 153, 0.14);
+      }
+      .chip.listed {
+        background: #eef2ff;
+        color: var(--accent);
+      }
+      html[data-theme="dark"] .chip.listed {
+        background: rgba(99, 102, 241, 0.16);
+      }
     </style>
   </head>
   <body>
@@ -503,7 +606,75 @@
         </p>
         <div id="list"><div class="muted">Loading…</div></div>
       </div>
+
+      <div class="card">
+        <h2>Key vault</h2>
+        <p class="hint">
+          Codes you've claimed by hand from Amazon — pick the game from the list
+          above (or type a title) and paste the code; everything else here is
+          just for tracking and resale.
+        </p>
+        <div class="row" style="margin-bottom: 14px">
+          <button class="btn btn-primary" id="btnAddKey">+ Add key</button>
+          <input
+            type="text"
+            id="keySearch"
+            placeholder="Search title / claimed from / note…"
+            style="flex: 1; min-width: 180px"
+          />
+          <select id="keyStatusFilter">
+            <option value="">All statuses</option>
+            <option value="unused">Unused</option>
+            <option value="listed">Listed</option>
+            <option value="sold">Sold</option>
+          </select>
+        </div>
+        <div id="keyList"><div class="muted">Loading…</div></div>
+      </div>
     </main>
+
+    <div class="modal-bg" id="keyModalBg">
+      <div class="modal">
+        <header>
+          <b>Add key</b>
+          <button class="x" id="keyModalClose" type="button">&times;</button>
+        </header>
+        <div class="mbody">
+          <div>
+            <label class="lbl">Game</label>
+            <select id="kGame">
+              <option value="">— pick from tracked offers —</option>
+            </select>
+          </div>
+          <div>
+            <label class="lbl">Or type a title (if not in the list)</label>
+            <input type="text" id="kTitle" placeholder="Game title" />
+          </div>
+          <div>
+            <label class="lbl">Code</label>
+            <input
+              type="text"
+              id="kCode"
+              placeholder="Paste the redemption code"
+            />
+          </div>
+          <div>
+            <label class="lbl">Claimed from (optional)</label>
+            <input type="text" id="kFrom" placeholder="e.g. main account" />
+          </div>
+          <div>
+            <label class="lbl">Note (optional)</label>
+            <textarea id="kNote"></textarea>
+          </div>
+        </div>
+        <footer>
+          <button class="btn" id="keyModalCancel" type="button">Cancel</button>
+          <button class="btn btn-primary" id="keyModalSave" type="button">
+            Save
+          </button>
+        </footer>
+      </div>
+    </div>
 
     <div class="toast" id="toast"></div>
 
@@ -564,6 +735,7 @@
       }
 
       var CODE_PLATFORMS = { gog: 1, code: 1 };
+      var ALL_OFFERS = [];
 
       function renderStatus(st) {
         if (!st) return;
@@ -592,6 +764,8 @@
           var ended = $("showEnded").checked ? "?ended=1" : "";
           var j = await api("/api/prime/offers" + ended);
           renderStatus(j.status);
+          ALL_OFFERS = j.offers || [];
+          populateGamePicker();
           var f = $("catFilter").value;
           var rows = (j.offers || []).filter(function (o) {
             if (!f) return true;
@@ -688,7 +862,257 @@
       $("catFilter").addEventListener("change", load);
       $("showEnded").addEventListener("change", load);
 
+      // -------- Key vault --------
+      function populateGamePicker() {
+        var sel = $("kGame");
+        var current = sel.value;
+        var sorted = ALL_OFFERS.slice().sort(function (a, b) {
+          return (a.title || "").localeCompare(b.title || "");
+        });
+        sel.innerHTML =
+          '<option value="">— pick from tracked offers —</option>' +
+          sorted
+            .map(function (o) {
+              return (
+                '<option value="' +
+                esc(o.itemId) +
+                '">' +
+                esc(o.title) +
+                (o.platform ? " (" + esc(o.platform) + ")" : "") +
+                "</option>"
+              );
+            })
+            .join("");
+        sel.value = current;
+      }
+
+      function statusChip(s) {
+        if (s === "sold") return '<span class="chip sold">sold</span>';
+        if (s === "listed") return '<span class="chip listed">listed</span>';
+        return '<span class="chip">unused</span>';
+      }
+
+      var keySearchTimer;
+      async function loadKeys() {
+        try {
+          var params = [];
+          var s = $("keySearch").value.trim();
+          if (s) params.push("search=" + encodeURIComponent(s));
+          var st = $("keyStatusFilter").value;
+          if (st) params.push("status=" + encodeURIComponent(st));
+          var j = await api(
+            "/api/prime/keys" + (params.length ? "?" + params.join("&") : ""),
+          );
+          var keys = j.keys || [];
+          if (!keys.length) {
+            $("keyList").innerHTML =
+              '<div class="muted">No keys yet — add one above.</div>';
+            return;
+          }
+          $("keyList").innerHTML =
+            "<table><thead><tr><th></th><th>Game</th><th>Platform</th><th>Claimed</th><th>From</th><th>Status</th><th></th></tr></thead><tbody>" +
+            keys
+              .map(function (k) {
+                return (
+                  "<tr><td>" +
+                  (k.image
+                    ? '<img src="' +
+                      esc(k.image) +
+                      '" style="width:44px;height:26px;object-fit:cover;border-radius:5px" loading="lazy">'
+                    : "") +
+                  "</td><td><b>" +
+                  esc(k.title) +
+                  "</b>" +
+                  (k.note
+                    ? '<div class="muted" style="font-size:12px">' +
+                      esc(k.note) +
+                      "</div>"
+                    : "") +
+                  "</td><td>" +
+                  esc(k.platform || "—") +
+                  "</td><td>" +
+                  esc(fmtDate(k.claimedAt)) +
+                  "</td><td>" +
+                  (k.claimedFrom
+                    ? esc(k.claimedFrom)
+                    : '<span class="muted">—</span>') +
+                  "</td><td>" +
+                  statusChip(k.status) +
+                  (k.status === "sold"
+                    ? '<div class="muted" style="font-size:12px">' +
+                      esc(k.soldToUsername || "") +
+                      (k.soldPrice ? " · " + k.soldPrice : "") +
+                      "</div>"
+                    : "") +
+                  '</td><td><div class="acts">' +
+                  '<button class="btn btn-sm" data-reveal="' +
+                  k.id +
+                  '">Reveal</button>' +
+                  (k.status !== "sold"
+                    ? '<button class="btn btn-sm" data-sold="' +
+                      k.id +
+                      '">Mark sold</button>'
+                    : '<button class="btn btn-sm" data-unsold="' +
+                      k.id +
+                      '">Unsell</button>') +
+                  '<button class="btn btn-sm btn-danger" data-del="' +
+                  k.id +
+                  '">Delete</button>' +
+                  "</div></td></tr>"
+                );
+              })
+              .join("") +
+            "</tbody></table>";
+        } catch (e) {
+          $("keyList").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      }
+
+      $("keySearch").addEventListener("input", function () {
+        clearTimeout(keySearchTimer);
+        keySearchTimer = setTimeout(loadKeys, 250);
+      });
+      $("keyStatusFilter").addEventListener("change", loadKeys);
+
+      function openKeyModal() {
+        $("kGame").value = "";
+        $("kTitle").value = "";
+        $("kCode").value = "";
+        $("kFrom").value = "";
+        $("kNote").value = "";
+        $("keyModalBg").classList.add("show");
+      }
+      function closeKeyModal() {
+        $("keyModalBg").classList.remove("show");
+      }
+      $("btnAddKey").addEventListener("click", openKeyModal);
+      $("keyModalClose").addEventListener("click", closeKeyModal);
+      $("keyModalCancel").addEventListener("click", closeKeyModal);
+      $("keyModalBg").addEventListener("click", function (e) {
+        if (e.target === $("keyModalBg")) closeKeyModal();
+      });
+
+      $("keyModalSave").addEventListener("click", async function () {
+        var offerId = $("kGame").value;
+        var title = $("kTitle").value.trim();
+        var code = $("kCode").value.trim();
+        if (!offerId && !title) {
+          return toast("Pick a game or type a title", true);
+        }
+        if (!code) return toast("Paste the code", true);
+        var btn = this;
+        btn.disabled = true;
+        try {
+          await api("/api/prime/keys", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              offerId: offerId,
+              title: title,
+              code: code,
+              claimedFrom: $("kFrom").value.trim(),
+              note: $("kNote").value.trim(),
+            }),
+          });
+          toast("Key added.");
+          closeKeyModal();
+          loadKeys();
+        } catch (e) {
+          toast("Add failed: " + e.message, true);
+        }
+        btn.disabled = false;
+      });
+
+      $("keyList").addEventListener("click", async function (e) {
+        var revealBtn = e.target.closest("[data-reveal]");
+        if (revealBtn) {
+          var id = revealBtn.getAttribute("data-reveal");
+          var old = revealBtn.textContent;
+          revealBtn.disabled = true;
+          try {
+            var j = await api("/api/prime/keys/" + id + "/reveal");
+            var copied = false;
+            try {
+              await navigator.clipboard.writeText(j.code);
+              copied = true;
+            } catch (err) {
+              /* clipboard may be unavailable; still show it */
+            }
+            window.prompt(
+              copied ? "Code (copied to clipboard):" : "Code:",
+              j.code,
+            );
+          } catch (err) {
+            toast("Reveal failed: " + err.message, true);
+          }
+          revealBtn.disabled = false;
+          revealBtn.textContent = old;
+          return;
+        }
+
+        var soldBtn = e.target.closest("[data-sold]");
+        if (soldBtn) {
+          var sid = soldBtn.getAttribute("data-sold");
+          var buyer = window.prompt("Sold to (username, optional):", "");
+          if (buyer === null) return;
+          var priceStr = window.prompt("Price (optional):", "");
+          if (priceStr === null) return;
+          try {
+            await api("/api/prime/keys/" + sid, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                status: "sold",
+                soldToUsername: buyer,
+                soldPrice: Number(priceStr) || 0,
+              }),
+            });
+            toast("Marked sold.");
+            loadKeys();
+          } catch (err) {
+            toast("Update failed: " + err.message, true);
+          }
+          return;
+        }
+
+        var unsoldBtn = e.target.closest("[data-unsold]");
+        if (unsoldBtn) {
+          var uid = unsoldBtn.getAttribute("data-unsold");
+          try {
+            await api("/api/prime/keys/" + uid, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "unused" }),
+            });
+            toast("Marked unused.");
+            loadKeys();
+          } catch (err) {
+            toast("Update failed: " + err.message, true);
+          }
+          return;
+        }
+
+        var delBtn = e.target.closest("[data-del]");
+        if (delBtn) {
+          var did = delBtn.getAttribute("data-del");
+          if (!window.confirm("Delete this key? This cannot be undone.")) {
+            return;
+          }
+          delBtn.disabled = true;
+          try {
+            await api("/api/prime/keys/" + did, { method: "DELETE" });
+            toast("Deleted.");
+            loadKeys();
+          } catch (err) {
+            toast("Delete failed: " + err.message, true);
+            delBtn.disabled = false;
+          }
+        }
+      });
+
       load();
+      loadKeys();
     </script>
   </body>
 </html>

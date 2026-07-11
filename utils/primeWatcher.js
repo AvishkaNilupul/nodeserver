@@ -270,4 +270,4 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { start, runOnce, status };
+module.exports = { start, runOnce, status, platformOf };
