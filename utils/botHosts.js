@@ -600,20 +600,31 @@ async function farmingStatus(host, container) {
     .map((l) => l.trim())
     .filter(Boolean);
   if (!lines.length) return null;
+  // These require a literal colon after the trigger word, not just any
+  // whitespace — TwitchDropsBot's real status line is "Current drop
+  // campaign: <name>, watching <streamer>", but plain chatter like "No
+  // broadcaster or campaign left." also contains the bare word "campaign"
+  // followed by a space, and used to be misread as a campaign name.
   const patterns = [
-    /watching\s+(.+)/i,
-    /now watching\s+(.+)/i,
-    /mining\s+(.+)/i,
-    /farming\s+(.+)/i,
-    /campaign[:\s]+(.+)/i,
-    /current drop[:\s]+(.+)/i,
-    /\bdrop[:\s]+(.+)/i,
-    /streamer[:\s]+(.+)/i,
+    /\bnow watching\s+(.+)/i,
+    /\bwatching\s+(.+)/i,
+    /\bmining\s+(.+)/i,
+    /\bfarming\s+(.+)/i,
+    /\bcampaign:\s*(.+)/i,
+    /\bcurrent drop:\s*(.+)/i,
+    /\bdrop:\s*(.+)/i,
+    /\bstreamer:\s*(.+)/i,
   ];
+  // Guards against known junk captures (e.g. the "campaign left." line
+  // above) slipping through as a plausible-looking but meaningless detail.
+  const junkDetail = /^(left|found|n\/a)\.?$/i;
   for (let i = lines.length - 1; i >= 0; i--) {
     for (const re of patterns) {
       const m = lines[i].match(re);
-      if (m) return { line: lines[i], detail: m[1].slice(0, 180) };
+      if (!m) continue;
+      const detail = m[1].trim();
+      if (detail.length < 4 || junkDetail.test(detail)) continue;
+      return { line: lines[i], detail: detail.slice(0, 180) };
     }
   }
   const last = lines[lines.length - 1];
