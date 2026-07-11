@@ -177,6 +177,80 @@ function parseAccounts(text, defaultGames) {
   return out;
 }
 
+// Split freshly-parsed accounts into ones safe to add and ones already
+// claimed elsewhere, so a mass paste never silently double-assigns an
+// account to two bots (or duplicates it within the same one). Checks two
+// things: repeats within the same paste, and a ClientSecret already tracked
+// by BotAccount (the cross-host index kept in sync by /drops-archive/sync
+// and by writes through this router) — including one already sitting in the
+// very file being written to, since re-appending it would just create an
+// in-array duplicate there too.
+async function dedupeAccounts(accounts) {
+  const seen = new Set();
+  const skipped = [];
+  const unique = [];
+  for (const a of accounts) {
+    if (seen.has(a.ClientSecret)) {
+      skipped.push({ account: a, reason: "duplicate in the pasted list" });
+    } else {
+      seen.add(a.ClientSecret);
+      unique.push(a);
+    }
+  }
+  if (!unique.length) return { kept: [], skipped };
+
+  const existing = await BotAccount.find(
+    { clientSecret: { $in: unique.map((a) => a.ClientSecret) } },
+    { clientSecret: 1, host: 1, configFile: 1, login: 1 },
+  ).lean();
+  const bySecret = new Map(existing.map((e) => [e.clientSecret, e]));
+
+  const kept = [];
+  for (const a of unique) {
+    const ex = bySecret.get(a.ClientSecret);
+    if (ex) {
+      skipped.push({
+        account: a,
+        reason:
+          "already assigned to " +
+          (ex.login || "an account") +
+          " in " +
+          ex.configFile +
+          " on " +
+          ex.host,
+      });
+    } else {
+      kept.push(a);
+    }
+  }
+  return { kept, skipped };
+}
+
+// Keep the cross-host BotAccount index current the moment accounts are
+// written, instead of only after a manual "Sync from bots" — so the very
+// next paste (to this bot or another) sees them as already claimed.
+async function upsertBotAccounts(accounts, host, file) {
+  if (!accounts.length) return;
+  const ops = accounts.map((u) => ({
+    updateOne: {
+      filter: { clientSecret: u.ClientSecret },
+      update: {
+        $set: {
+          login: u.Login || "",
+          twitchId: u.Id == null ? "" : String(u.Id),
+          uniqueId: u.UniqueId || "",
+          configFile: file,
+          container: containerForFile(file),
+          host: host.id,
+          enabled: u.Enabled !== false,
+        },
+      },
+      upsert: true,
+    },
+  }));
+  await BotAccount.bulkWrite(ops, { ordered: false }).catch(() => {});
+}
+
 // Given the list of files in a host dir, work out the next free bot slot.
 // config.json -> index 1 (twitchbot); config_0N.json -> index N (twitchbotxN).
 function findNextSlot(files) {
@@ -785,13 +859,15 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       data.TwitchSettings = {};
     }
     const defaultGames = parseGamesList(body.favouriteGames);
-    const accounts = parseAccounts(body.accounts, defaultGames);
+    const parsed = parseAccounts(body.accounts, defaultGames);
+    const { kept: accounts, skipped } = await dedupeAccounts(parsed);
     data.TwitchSettings.TwitchUsers = accounts;
     if (data.KickSettings && typeof data.KickSettings === "object") {
       data.KickSettings.KickUsers = [];
     }
 
     await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
+    await upsertBotAccounts(accounts, host, slot.file);
 
     // Register the compose service (read -> edit YAML -> write back).
     try {
@@ -824,6 +900,10 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       file: slot.file,
       container: slot.container,
       accountCount: accounts.length,
+      skippedDuplicates: skipped.map((s) => ({
+        login: s.account.Login,
+        reason: s.reason,
+      })),
     };
 
     if (!startRunning) {
@@ -1048,11 +1128,26 @@ router.post(
       return res.status(400).json({ success: false, message: "Invalid file" });
     }
     const defaultGames = parseGamesList(req.body && req.body.favouriteGames);
-    const accounts = parseAccounts(req.body && req.body.accounts, defaultGames);
-    if (!accounts.length) {
+    const parsed = parseAccounts(req.body && req.body.accounts, defaultGames);
+    if (!parsed.length) {
       return res
         .status(400)
         .json({ success: false, message: "No valid accounts found in input" });
+    }
+    const { kept: accounts, skipped } = await dedupeAccounts(parsed);
+    const skippedDuplicates = skipped.map((s) => ({
+      login: s.account.Login,
+      reason: s.reason,
+    }));
+    if (!accounts.length) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "No new accounts to add — all " +
+          skipped.length +
+          " were already assigned elsewhere",
+        skippedDuplicates,
+      });
     }
     const wantRestart = !!(req.body && req.body.restart);
     try {
@@ -1084,6 +1179,7 @@ router.post(
         req.params.file,
         JSON.stringify(data, null, 2),
       );
+      await upsertBotAccounts(accounts, host, req.params.file);
 
       const container = containerForFile(req.params.file);
       if (!wantRestart || !ALLOW_RESTART || !container) {
@@ -1092,6 +1188,7 @@ router.post(
           added: accounts.length,
           total,
           restarted: false,
+          skippedDuplicates,
         });
       }
       let restarted = true;
@@ -1100,7 +1197,13 @@ router.post(
       } catch {
         restarted = false;
       }
-      res.json({ success: true, added: accounts.length, total, restarted });
+      res.json({
+        success: true,
+        added: accounts.length,
+        total,
+        restarted,
+        skippedDuplicates,
+      });
     } catch (e) {
       if (e.unreachable) {
         return res

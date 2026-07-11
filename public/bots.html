@@ -944,6 +944,20 @@
     $("modalBg").classList.add("show");
   };
 
+  // Duplicate accounts are skipped server-side (never silently double-assigned
+  // to two bots); surface what got skipped and why beyond the one-line toast.
+  function reportSkipped(list) {
+    if (!list || !list.length) return;
+    var lines = list.slice(0, 25).map(function (s) {
+      return "• " + (s.login || "(no login)") + " — " + s.reason;
+    });
+    if (list.length > 25) lines.push("…and " + (list.length - 25) + " more");
+    alert(
+      "Skipped " + list.length + " duplicate account" + (list.length === 1 ? "" : "s") + ":\n\n" +
+      lines.join("\n"),
+    );
+  }
+
   window.submitCreate = async function (btn) {
     const template = $("mTemplate") ? $("mTemplate").value : "";
     const accounts = $("mAccounts") ? $("mAccounts").value : "";
@@ -957,7 +971,8 @@
       });
       closeModal();
       if (r.warning) toast(r.warning, true);
-      else toast("Created " + r.container + " with " + r.accountCount + " account" + (r.accountCount === 1 ? "" : "s") + (r.started ? " — running" : ""));
+      else toast("Created " + r.container + " with " + r.accountCount + " account" + (r.accountCount === 1 ? "" : "s") + (r.started ? " — running" : "") + (r.skippedDuplicates && r.skippedDuplicates.length ? " — " + r.skippedDuplicates.length + " duplicate" + (r.skippedDuplicates.length === 1 ? "" : "s") + " skipped" : ""));
+      reportSkipped(r.skippedDuplicates);
       setTimeout(load, 1200);
     } catch (e) {
       btn.disabled = false; btn.textContent = old;
@@ -1002,7 +1017,8 @@
         body: JSON.stringify({ accounts, favouriteGames, restart }),
       });
       closeModal();
-      toast("Added " + r.added + " account" + (r.added === 1 ? "" : "s") + " (now " + r.total + ")" + (r.restarted ? " — restarted" : ""));
+      toast("Added " + r.added + " account" + (r.added === 1 ? "" : "s") + " (now " + r.total + ")" + (r.restarted ? " — restarted" : "") + (r.skippedDuplicates && r.skippedDuplicates.length ? " — " + r.skippedDuplicates.length + " duplicate" + (r.skippedDuplicates.length === 1 ? "" : "s") + " skipped" : ""));
+      reportSkipped(r.skippedDuplicates);
       setTimeout(load, restart ? 1500 : 300);
     } catch (e) {
       btn.disabled = false; btn.textContent = old;

@@ -444,12 +444,21 @@ let syncState = {
   error: null,
 };
 
+// Duplicate accounts found by the most recent sync — the same account
+// (ClientSecret) present in more than one bot config, which means two bots
+// are simultaneously farming with the same Twitch session. Populated as a
+// side effect of runSync()'s walk so detecting duplicates doesn't need its
+// own separate pass over every host. Null until a sync has run at least once.
+let lastDuplicates = null;
+
 async function runSync() {
   let found = 0;
   let inserted = 0;
   let updated = 0;
   let filesRead = 0;
   const offlineHosts = [];
+  // clientSecret -> every (host, file) it was seen in during this walk.
+  const occurrences = new Map();
 
   // Sync across every managed host (the local server plus any remote hosts),
   // so accounts running on a Raspberry Pi etc. are tracked too. A host that's
@@ -495,6 +504,13 @@ async function runSync() {
           typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
         if (!token) continue;
         found++;
+        if (!occurrences.has(token)) occurrences.set(token, []);
+        occurrences.get(token).push({
+          host: host.id,
+          file,
+          login: u.Login || "",
+          enabled: u.Enabled !== false,
+        });
         ops.push({
           updateOne: {
             filter: { clientSecret: token },
@@ -520,12 +536,22 @@ async function runSync() {
       }
     }
   }
+
+  lastDuplicates = [...occurrences.entries()]
+    .filter(([, occ]) => occ.length > 1)
+    .map(([clientSecret, occ]) => ({
+      clientSecret,
+      login: occ.find((o) => o.login)?.login || "",
+      occurrences: occ,
+    }));
+
   return {
     filesRead,
     accountsFound: found,
     inserted,
     updated,
     offlineHosts,
+    duplicateAccounts: lastDuplicates.length,
   };
 }
 
@@ -558,6 +584,199 @@ router.post("/drops-archive/sync", requireSuperadmin, (req, res) => {
 router.get("/drops-archive/sync/status", requireSuperadmin, (req, res) => {
   res.json({ success: true, ...syncState });
 });
+
+// ------------------------------------------------------------------
+// Duplicate accounts (same ClientSecret in more than one bot config) — a
+// side effect of the last sync's walk, so this just reads what it found
+// rather than re-walking every host again.
+// ------------------------------------------------------------------
+function maskToken(v) {
+  if (!v) return "";
+  if (v.length <= 4) return "****";
+  return v.slice(0, 3) + "…" + v.slice(-2);
+}
+
+router.get("/drops-archive/duplicates", requireSuperadmin, async (req, res) => {
+  if (lastDuplicates === null) {
+    return res.json({
+      success: true,
+      ranAt: null,
+      duplicates: [],
+      message: "Run a sync first to check for duplicates.",
+    });
+  }
+  if (!lastDuplicates.length) {
+    return res.json({
+      success: true,
+      ranAt: syncState.finishedAt,
+      duplicates: [],
+    });
+  }
+  const canonical = await BotAccount.find(
+    { clientSecret: { $in: lastDuplicates.map((d) => d.clientSecret) } },
+    { clientSecret: 1, host: 1, configFile: 1 },
+  ).lean();
+  const canonicalBySecret = new Map(canonical.map((c) => [c.clientSecret, c]));
+
+  res.json({
+    success: true,
+    ranAt: syncState.finishedAt,
+    duplicates: lastDuplicates.map((d) => {
+      const c = canonicalBySecret.get(d.clientSecret);
+      const keep =
+        c &&
+        d.occurrences.some((o) => o.host === c.host && o.file === c.configFile)
+          ? { host: c.host, file: c.configFile }
+          : null;
+      return {
+        token: maskToken(d.clientSecret),
+        login: d.login,
+        occurrences: d.occurrences,
+        keep,
+      };
+    }),
+  });
+});
+
+// Resolve every known duplicate group by keeping whichever bot BotAccount
+// currently considers canonical for that account (the same pointer the rest
+// of the app already treats as "where this account lives") and removing it
+// from every other config file it was also found in. Requires a sync to have
+// run first; a group whose BotAccount pointer doesn't match any occurrence
+// from that sync (e.g. the account moved again since) is left alone rather
+// than guessed at.
+router.post(
+  "/drops-archive/duplicates/purge",
+  requireSuperadmin,
+  async (req, res) => {
+    if (!lastDuplicates || !lastDuplicates.length) {
+      return res.json({
+        success: true,
+        groupsResolved: 0,
+        groupsSkipped: 0,
+        removedFromConfigs: 0,
+        filesUpdated: 0,
+        offlineHosts: [],
+        missingFiles: [],
+      });
+    }
+    try {
+      const secrets = lastDuplicates.map((d) => d.clientSecret);
+      const canonical = await BotAccount.find(
+        { clientSecret: { $in: secrets } },
+        { clientSecret: 1, host: 1, configFile: 1 },
+      ).lean();
+      const canonicalBySecret = new Map(
+        canonical.map((c) => [c.clientSecret, c]),
+      );
+
+      // Group removals by host + config file so each file is only
+      // read/rewritten once, same as the bad-tokens purge above.
+      const byHostFile = new Map(); // host -> Map(file -> Set(clientSecret))
+      let groupsSkipped = 0;
+      const resolvedGroups = [];
+      for (const d of lastDuplicates) {
+        const keep = canonicalBySecret.get(d.clientSecret);
+        const keepMatchesOccurrence =
+          keep &&
+          d.occurrences.some(
+            (o) => o.host === keep.host && o.file === keep.configFile,
+          );
+        if (!keepMatchesOccurrence) {
+          groupsSkipped++;
+          continue;
+        }
+        resolvedGroups.push(d);
+        for (const o of d.occurrences) {
+          if (o.host === keep.host && o.file === keep.configFile) continue;
+          if (!byHostFile.has(o.host)) byHostFile.set(o.host, new Map());
+          const byFile = byHostFile.get(o.host);
+          if (!byFile.has(o.file)) byFile.set(o.file, new Set());
+          byFile.get(o.file).add(d.clientSecret);
+        }
+      }
+
+      let removedFromConfigs = 0;
+      let filesUpdated = 0;
+      const offlineHosts = new Set();
+      const missingFiles = [];
+
+      for (const [hostId, byFile] of byHostFile) {
+        const host = hosts.resolveHost(hostId);
+        if (!host) continue;
+
+        for (const [file, secretSet] of byFile) {
+          let data;
+          try {
+            data = JSON.parse(await hosts.readFile(host, file));
+          } catch (e) {
+            if (e.unreachable) {
+              offlineHosts.add(hostId);
+            } else if (e.code === "ENOENT") {
+              missingFiles.push(file);
+            }
+            continue;
+          }
+
+          const ts = data.TwitchSettings;
+          const users =
+            ts && Array.isArray(ts.TwitchUsers) ? ts.TwitchUsers : null;
+          if (!users || !users.length) continue;
+
+          const kept = [];
+          let removed = 0;
+          for (const u of users) {
+            const tok =
+              typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
+            if (tok && secretSet.has(tok)) {
+              removed++;
+            } else {
+              kept.push(u);
+            }
+          }
+          if (!removed) continue;
+
+          ts.TwitchUsers = kept;
+          try {
+            await hosts.writeFileAtomic(
+              host,
+              file,
+              JSON.stringify(data, null, 2) + "\n",
+            );
+          } catch (e) {
+            if (e.unreachable) offlineHosts.add(hostId);
+            continue;
+          }
+          removedFromConfigs += removed;
+          filesUpdated++;
+        }
+      }
+
+      // Optimistically drop resolved groups from the in-memory report so the
+      // tab reflects the cleanup immediately, without waiting on another
+      // full sync.
+      const resolvedSecrets = new Set(
+        resolvedGroups.map((d) => d.clientSecret),
+      );
+      lastDuplicates = lastDuplicates.filter(
+        (d) => !resolvedSecrets.has(d.clientSecret),
+      );
+
+      res.json({
+        success: true,
+        groupsResolved: resolvedGroups.length,
+        groupsSkipped,
+        removedFromConfigs,
+        filesUpdated,
+        offlineHosts: [...offlineHosts],
+        missingFiles,
+      });
+    } catch (err) {
+      console.error("drops-archive duplicates purge error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 // ------------------------------------------------------------------
 // Import credentials ({username, password, email}[]), match by login

@@ -1324,6 +1324,7 @@
         <button class="tab" data-tab="games">By game</button>
         <button class="tab" data-tab="accounts">Accounts</button>
         <button class="tab" data-tab="badtokens">Bad tokens</button>
+        <button class="tab" data-tab="duplicates">Duplicates</button>
       </div>
 
       <!-- By item -->
@@ -1517,6 +1518,51 @@
           </div>
         </div>
       </section>
+
+      <!-- Duplicates -->
+      <section class="view" id="view-duplicates">
+        <div class="toolbar">
+          <span class="sub" id="dupCount"></span>
+          <span class="sub" id="dupRanAt" style="margin-left: 10px"></span>
+          <button
+            class="btn-ghost btn-sm"
+            id="fixDups"
+            style="margin-left: auto"
+          >
+            Fix all duplicates
+          </button>
+        </div>
+        <div class="note" style="margin: 10px 0">
+          The same account showing up in two bot configs means both bots try to
+          farm with the same Twitch session at once. <b>Fix all duplicates</b>
+          keeps each account in whichever bot it's currently tracked under and
+          removes it from every other config it's also found in — a
+          <code>.bak</code> backup of each edited config is kept. Findings come
+          from the last <b>Sync from bots</b> run, so sync first if this looks
+          out of date.
+        </div>
+        <div class="panel">
+          <div class="pb" style="padding: 0">
+            <div style="overflow-x: auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Login</th>
+                    <th>Token</th>
+                    <th>Keeps in</th>
+                    <th>Removed from</th>
+                  </tr>
+                </thead>
+                <tbody id="dupRows">
+                  <tr>
+                    <td colspan="4" class="empty">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <!-- Item -> accounts modal -->
@@ -1700,6 +1746,7 @@
         if (t === "items") loadItems();
         else if (t === "games") loadGames();
         else if (t === "badtokens") loadBadTokens();
+        else if (t === "duplicates") loadDuplicates();
         else loadAccounts();
       }
       document
@@ -2338,6 +2385,114 @@
             msg += " Missing file(s): " + d.missingFiles.join(", ") + ".";
           banner(msg, "ok");
           await loadBadTokens();
+          await loadOverview();
+        } catch (err) {
+          banner(err.message, "err");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
+
+      // -------- Duplicates (same account in more than one bot config) --------
+      let dupGroups = [];
+      function locLabel(o) {
+        return esc(o.host) + ":" + esc(o.file);
+      }
+      async function loadDuplicates() {
+        let data;
+        try {
+          data = await api("/drops-archive/duplicates");
+        } catch (e) {
+          $("dupRows").innerHTML =
+            '<tr><td colspan="4" class="empty">' +
+            esc(e.message) +
+            "</td></tr>";
+          return;
+        }
+        dupGroups = data.duplicates || [];
+        $("dupCount").textContent =
+          dupGroups.length +
+          " duplicate account" +
+          (dupGroups.length === 1 ? "" : "s");
+        $("dupRanAt").textContent = data.ranAt
+          ? "as of last sync " + timeAgo(data.ranAt)
+          : data.message || "";
+        if (!dupGroups.length) {
+          $("dupRows").innerHTML =
+            '<tr><td colspan="4" class="empty">No duplicate accounts found.</td></tr>';
+          return;
+        }
+        $("dupRows").innerHTML = dupGroups
+          .map((d) => {
+            const removed = d.occurrences.filter(
+              (o) =>
+                !d.keep || o.host !== d.keep.host || o.file !== d.keep.file,
+            );
+            return (
+              "<tr>" +
+              "<td>" +
+              esc(d.login || "(no login)") +
+              "</td>" +
+              '<td class="mono">' +
+              esc(d.token) +
+              "</td>" +
+              "<td>" +
+              (d.keep
+                ? locLabel(d.keep)
+                : '<span class="chip off">unresolved — re-sync</span>') +
+              "</td>" +
+              "<td>" +
+              removed.map(locLabel).join(", ") +
+              "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+      }
+
+      // Keeps whichever bot each duplicate account is currently tracked under
+      // (per the last sync) and removes it from every other config it's also
+      // found in.
+      $("fixDups").addEventListener("click", async (e) => {
+        if (!dupGroups.length) return banner("Nothing to fix.", "ok");
+        if (
+          !confirm(
+            "Resolve " +
+              dupGroups.length +
+              " duplicate account(s)? Each one is removed from every bot " +
+              "config except the one it's currently tracked under (a .bak " +
+              "backup of each edited config is kept).",
+          )
+        )
+          return;
+        const btn = e.currentTarget;
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Fixing…";
+        try {
+          const d = await api("/drops-archive/duplicates/purge", {
+            method: "POST",
+          });
+          let msg =
+            "Resolved " +
+            d.groupsResolved +
+            " duplicate(s) — removed " +
+            d.removedFromConfigs +
+            " entr" +
+            (d.removedFromConfigs === 1 ? "y" : "ies") +
+            " from " +
+            d.filesUpdated +
+            " config file(s).";
+          if (d.groupsSkipped)
+            msg += " " + d.groupsSkipped + " skipped (re-sync and try again).";
+          if (d.offlineHosts && d.offlineHosts.length)
+            msg +=
+              " Skipped offline host(s): " + d.offlineHosts.join(", ") + ".";
+          if (d.missingFiles && d.missingFiles.length)
+            msg += " Missing file(s): " + d.missingFiles.join(", ") + ".";
+          banner(msg, "ok");
+          await loadDuplicates();
           await loadOverview();
         } catch (err) {
           banner(err.message, "err");
