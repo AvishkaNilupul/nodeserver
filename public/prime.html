@@ -433,6 +433,21 @@
       html[data-theme="dark"] .chip.listed {
         background: rgba(99, 102, 241, 0.16);
       }
+      .chip.redeemed {
+        background: #f5f3ff;
+        color: #7c3aed;
+      }
+      html[data-theme="dark"] .chip.redeemed {
+        background: rgba(167, 139, 250, 0.16);
+        color: #c4b5fd;
+      }
+      .chip.warn {
+        background: #fef2f2;
+        color: var(--red);
+      }
+      html[data-theme="dark"] .chip.warn {
+        background: rgba(248, 113, 113, 0.14);
+      }
     </style>
   </head>
   <body>
@@ -627,9 +642,26 @@
             <option value="unused">Unused</option>
             <option value="listed">Listed</option>
             <option value="sold">Sold</option>
+            <option value="redeemed">Redeemed</option>
           </select>
         </div>
         <div id="keyList"><div class="muted">Loading…</div></div>
+      </div>
+
+      <div class="card">
+        <h2>GOG accounts</h2>
+        <p class="hint">
+          Dedicated accounts you've created for redeeming keys that are about to
+          expire unsold. Redeem the code on GOG yourself, then record it here —
+          auto-redeeming isn't possible (GOG's login and redeem pages are both
+          behind reCAPTCHA).
+        </p>
+        <div class="row" style="margin-bottom: 14px">
+          <button class="btn btn-primary" id="btnAddGogAccount">
+            + Add account
+          </button>
+        </div>
+        <div id="gogAccountList"><div class="muted">Loading…</div></div>
       </div>
     </main>
 
@@ -663,6 +695,10 @@
             <input type="text" id="kFrom" placeholder="e.g. main account" />
           </div>
           <div>
+            <label class="lbl">Expires on GOG (optional)</label>
+            <input type="date" id="kExpires" />
+          </div>
+          <div>
             <label class="lbl">Note (optional)</label>
             <textarea id="kNote"></textarea>
           </div>
@@ -670,6 +706,68 @@
         <footer>
           <button class="btn" id="keyModalCancel" type="button">Cancel</button>
           <button class="btn btn-primary" id="keyModalSave" type="button">
+            Save
+          </button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="modal-bg" id="redeemModalBg">
+      <div class="modal">
+        <header>
+          <b>Redeem onto a GOG account</b>
+          <button class="x" id="redeemModalClose" type="button">&times;</button>
+        </header>
+        <div class="mbody">
+          <p class="hint">
+            Redeem the code on GOG.com yourself first, then record which account
+            it landed on.
+          </p>
+          <div>
+            <label class="lbl">GOG account</label>
+            <select id="rdAccount">
+              <option value="">— pick an account —</option>
+            </select>
+          </div>
+        </div>
+        <footer>
+          <button class="btn" id="redeemModalCancel" type="button">
+            Cancel
+          </button>
+          <button class="btn btn-primary" id="redeemModalSave" type="button">
+            Mark redeemed
+          </button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="modal-bg" id="gogModalBg">
+      <div class="modal">
+        <header>
+          <b>Add GOG account</b>
+          <button class="x" id="gogModalClose" type="button">&times;</button>
+        </header>
+        <div class="mbody">
+          <div>
+            <label class="lbl">Label</label>
+            <input type="text" id="gLabel" placeholder="e.g. GOG vault 1" />
+          </div>
+          <div>
+            <label class="lbl">Login (email)</label>
+            <input type="text" id="gLogin" placeholder="account@example.com" />
+          </div>
+          <div>
+            <label class="lbl">Password</label>
+            <input type="text" id="gPassword" placeholder="Account password" />
+          </div>
+          <div>
+            <label class="lbl">Note (optional)</label>
+            <textarea id="gNote"></textarea>
+          </div>
+        </div>
+        <footer>
+          <button class="btn" id="gogModalCancel" type="button">Cancel</button>
+          <button class="btn btn-primary" id="gogModalSave" type="button">
             Save
           </button>
         </footer>
@@ -889,7 +987,33 @@
       function statusChip(s) {
         if (s === "sold") return '<span class="chip sold">sold</span>';
         if (s === "listed") return '<span class="chip listed">listed</span>';
+        if (s === "redeemed") {
+          return '<span class="chip redeemed">redeemed</span>';
+        }
         return '<span class="chip">unused</span>';
+      }
+
+      // Days-left pill for the Expires column — quiet by default, red once
+      // inside the 72h alert window (matching primeWatcher's threshold) so
+      // it's obvious which keys need attention before they go dead.
+      function expiryChip(expiresAt) {
+        if (!expiresAt) return '<span class="muted">—</span>';
+        var ms = new Date(expiresAt).getTime() - Date.now();
+        var hours = Math.round(ms / 3600000);
+        var label =
+          hours <= 0
+            ? "expired"
+            : hours < 48
+              ? hours + "h left"
+              : Math.round(hours / 24) + "d left";
+        var warn = hours < 72;
+        return (
+          '<span class="chip' +
+          (warn ? " warn" : "") +
+          '">' +
+          esc(label) +
+          "</span>"
+        );
       }
 
       var keySearchTimer;
@@ -910,7 +1034,7 @@
             return;
           }
           $("keyList").innerHTML =
-            "<table><thead><tr><th></th><th>Game</th><th>Platform</th><th>Claimed</th><th>From</th><th>Status</th><th></th></tr></thead><tbody>" +
+            "<table><thead><tr><th></th><th>Game</th><th>Platform</th><th>Claimed</th><th>From</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>" +
             keys
               .map(function (k) {
                 return (
@@ -937,6 +1061,10 @@
                     ? esc(k.claimedFrom)
                     : '<span class="muted">—</span>') +
                   "</td><td>" +
+                  (k.status === "sold" || k.status === "redeemed"
+                    ? '<span class="muted">—</span>'
+                    : expiryChip(k.expiresAt)) +
+                  "</td><td>" +
                   statusChip(k.status) +
                   (k.status === "sold"
                     ? '<div class="muted" style="font-size:12px">' +
@@ -948,13 +1076,20 @@
                   '<button class="btn btn-sm" data-reveal="' +
                   k.id +
                   '">Reveal</button>' +
-                  (k.status !== "sold"
+                  (k.status !== "sold" && k.status !== "redeemed"
                     ? '<button class="btn btn-sm" data-sold="' +
                       k.id +
-                      '">Mark sold</button>'
-                    : '<button class="btn btn-sm" data-unsold="' +
+                      '">Mark sold</button>' +
+                      '<button class="btn btn-sm" data-redeem="' +
                       k.id +
-                      '">Unsell</button>') +
+                      '">Redeem</button>'
+                    : k.status === "sold"
+                      ? '<button class="btn btn-sm" data-unsold="' +
+                        k.id +
+                        '">Unsell</button>'
+                      : '<button class="btn btn-sm" data-unsold="' +
+                        k.id +
+                        '">Un-redeem</button>') +
                   '<button class="btn btn-sm btn-danger" data-del="' +
                   k.id +
                   '">Delete</button>' +
@@ -980,6 +1115,7 @@
         $("kTitle").value = "";
         $("kCode").value = "";
         $("kFrom").value = "";
+        $("kExpires").value = "";
         $("kNote").value = "";
         $("keyModalBg").classList.add("show");
       }
@@ -1012,6 +1148,7 @@
               title: title,
               code: code,
               claimedFrom: $("kFrom").value.trim(),
+              expiresAt: $("kExpires").value || "",
               note: $("kNote").value.trim(),
             }),
           });
@@ -1048,6 +1185,12 @@
           }
           revealBtn.disabled = false;
           revealBtn.textContent = old;
+          return;
+        }
+
+        var redeemBtn = e.target.closest("[data-redeem]");
+        if (redeemBtn) {
+          openRedeemModal(redeemBtn.getAttribute("data-redeem"));
           return;
         }
 
@@ -1111,8 +1254,255 @@
         }
       });
 
+      // -------- Redeem-to-account modal --------
+      var redeemKeyId = null;
+      async function openRedeemModal(keyId) {
+        redeemKeyId = keyId;
+        var sel = $("rdAccount");
+        sel.innerHTML = '<option value="">— pick an account —</option>';
+        try {
+          var j = await api("/api/prime/gog-accounts");
+          (j.accounts || [])
+            .filter(function (a) {
+              return a.status === "active";
+            })
+            .forEach(function (a) {
+              var opt = document.createElement("option");
+              opt.value = a.id;
+              opt.textContent = a.label + " (" + a.login + ")";
+              sel.appendChild(opt);
+            });
+        } catch (err) {
+          toast("Couldn't load accounts: " + err.message, true);
+        }
+        $("redeemModalBg").classList.add("show");
+      }
+      function closeRedeemModal() {
+        $("redeemModalBg").classList.remove("show");
+        redeemKeyId = null;
+      }
+      $("redeemModalClose").addEventListener("click", closeRedeemModal);
+      $("redeemModalCancel").addEventListener("click", closeRedeemModal);
+      $("redeemModalBg").addEventListener("click", function (e) {
+        if (e.target === $("redeemModalBg")) closeRedeemModal();
+      });
+      $("redeemModalSave").addEventListener("click", async function () {
+        var accountId = $("rdAccount").value;
+        if (!accountId) return toast("Pick which account", true);
+        var btn = this;
+        btn.disabled = true;
+        try {
+          await api("/api/prime/keys/" + redeemKeyId, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              status: "redeemed",
+              redeemedAccount: accountId,
+            }),
+          });
+          toast("Marked redeemed.");
+          closeRedeemModal();
+          loadKeys();
+          loadGogAccounts();
+        } catch (err) {
+          toast("Update failed: " + err.message, true);
+        }
+        btn.disabled = false;
+      });
+
+      // -------- GOG account vault --------
+      async function loadGogAccounts() {
+        try {
+          var j = await api("/api/prime/gog-accounts");
+          var accounts = j.accounts || [];
+          if (!accounts.length) {
+            $("gogAccountList").innerHTML =
+              '<div class="muted">No accounts yet — add one above.</div>';
+            return;
+          }
+          $("gogAccountList").innerHTML =
+            "<table><thead><tr><th>Label</th><th>Login</th><th>Games</th><th>Status</th><th></th></tr></thead><tbody>" +
+            accounts
+              .map(function (a) {
+                return (
+                  "<tr><td><b>" +
+                  esc(a.label) +
+                  "</b>" +
+                  (a.note
+                    ? '<div class="muted" style="font-size:12px">' +
+                      esc(a.note) +
+                      "</div>"
+                    : "") +
+                  "</td><td>" +
+                  esc(a.login) +
+                  "</td><td>" +
+                  a.gamesCount +
+                  "</td><td>" +
+                  (a.status === "retired"
+                    ? '<span class="chip">retired</span>'
+                    : '<span class="chip listed">active</span>') +
+                  '</td><td><div class="acts">' +
+                  '<button class="btn btn-sm" data-greveal="' +
+                  a.id +
+                  '">Reveal</button>' +
+                  (a.status === "retired"
+                    ? '<button class="btn btn-sm" data-gactivate="' +
+                      a.id +
+                      '">Activate</button>'
+                    : '<button class="btn btn-sm" data-gretire="' +
+                      a.id +
+                      '">Retire</button>') +
+                  '<button class="btn btn-sm btn-danger" data-gdel="' +
+                  a.id +
+                  '">Delete</button>' +
+                  "</div></td></tr>"
+                );
+              })
+              .join("") +
+            "</tbody></table>";
+        } catch (e) {
+          $("gogAccountList").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      }
+
+      function openGogModal() {
+        $("gLabel").value = "";
+        $("gLogin").value = "";
+        $("gPassword").value = "";
+        $("gNote").value = "";
+        $("gogModalBg").classList.add("show");
+      }
+      function closeGogModal() {
+        $("gogModalBg").classList.remove("show");
+      }
+      $("btnAddGogAccount").addEventListener("click", openGogModal);
+      $("gogModalClose").addEventListener("click", closeGogModal);
+      $("gogModalCancel").addEventListener("click", closeGogModal);
+      $("gogModalBg").addEventListener("click", function (e) {
+        if (e.target === $("gogModalBg")) closeGogModal();
+      });
+      $("gogModalSave").addEventListener("click", async function () {
+        var label = $("gLabel").value.trim();
+        var login = $("gLogin").value.trim();
+        var password = $("gPassword").value;
+        if (!label || !login || !password) {
+          return toast("Label, login and password are all required", true);
+        }
+        var btn = this;
+        btn.disabled = true;
+        try {
+          await api("/api/prime/gog-accounts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              label: label,
+              login: login,
+              password: password,
+              note: $("gNote").value.trim(),
+            }),
+          });
+          toast("Account added.");
+          closeGogModal();
+          loadGogAccounts();
+        } catch (e) {
+          toast("Add failed: " + e.message, true);
+        }
+        btn.disabled = false;
+      });
+
+      $("gogAccountList").addEventListener("click", async function (e) {
+        var revealBtn = e.target.closest("[data-greveal]");
+        if (revealBtn) {
+          var id = revealBtn.getAttribute("data-greveal");
+          var old = revealBtn.textContent;
+          revealBtn.disabled = true;
+          try {
+            var j = await api("/api/prime/gog-accounts/" + id + "/reveal");
+            var copied = false;
+            try {
+              await navigator.clipboard.writeText(j.password);
+              copied = true;
+            } catch (err) {
+              /* clipboard may be unavailable; still show it */
+            }
+            window.prompt(
+              copied ? "Password (copied to clipboard):" : "Password:",
+              j.password,
+            );
+          } catch (err) {
+            toast("Reveal failed: " + err.message, true);
+          }
+          revealBtn.disabled = false;
+          revealBtn.textContent = old;
+          return;
+        }
+
+        var retireBtn = e.target.closest("[data-gretire]");
+        if (retireBtn) {
+          try {
+            await api(
+              "/api/prime/gog-accounts/" +
+                retireBtn.getAttribute("data-gretire"),
+              {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status: "retired" }),
+              },
+            );
+            toast("Retired.");
+            loadGogAccounts();
+          } catch (err) {
+            toast("Update failed: " + err.message, true);
+          }
+          return;
+        }
+
+        var activateBtn = e.target.closest("[data-gactivate]");
+        if (activateBtn) {
+          try {
+            await api(
+              "/api/prime/gog-accounts/" +
+                activateBtn.getAttribute("data-gactivate"),
+              {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status: "active" }),
+              },
+            );
+            toast("Activated.");
+            loadGogAccounts();
+          } catch (err) {
+            toast("Update failed: " + err.message, true);
+          }
+          return;
+        }
+
+        var delBtn = e.target.closest("[data-gdel]");
+        if (delBtn) {
+          if (
+            !window.confirm("Delete this GOG account? This cannot be undone.")
+          ) {
+            return;
+          }
+          delBtn.disabled = true;
+          try {
+            await api(
+              "/api/prime/gog-accounts/" + delBtn.getAttribute("data-gdel"),
+              { method: "DELETE" },
+            );
+            toast("Deleted.");
+            loadGogAccounts();
+          } catch (err) {
+            toast("Delete failed: " + err.message, true);
+            delBtn.disabled = false;
+          }
+        }
+      });
+
       load();
       loadKeys();
+      loadGogAccounts();
     </script>
   </body>
 </html>

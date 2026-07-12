@@ -14,6 +14,7 @@
 const axios = require("axios");
 
 const PrimeOffer = require("../models/PrimeOffer");
+const PrimeKey = require("../models/PrimeKey");
 const { sendTelegram } = require("./telegram");
 
 const LUNA = "https://luna.amazon.com";
@@ -22,6 +23,12 @@ const UA =
   "Chrome/126.0.0.0 Safari/537.36";
 const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
 const ENDING_SOON_MS = 48 * 60 * 60 * 1000;
+// A claimed key's redemption window is usually much tighter than an offer's
+// claim window, so this fires well before ENDING_SOON_MS-style urgency —
+// enough runway to sell it or redeem it onto a stored GOG account by hand
+// (auto-redeeming isn't possible: GOG's login and redeem-code pages are both
+// behind reCAPTCHA).
+const KEY_EXPIRY_ALERT_MS = 72 * 60 * 60 * 1000;
 
 // Same shape the Luna page requests, trimmed to the fields we store.
 const QUERY =
@@ -253,6 +260,41 @@ function status() {
   };
 }
 
+// Warns about claimed-but-unsold/unredeemed keys before their redemption
+// window closes — the alert fires once per key (expiryAlertSentAt guards
+// against repeating it every tick) and leaves the actual sell/redeem
+// decision to the operator, since auto-redeeming onto GOG isn't possible.
+async function checkExpiringKeys() {
+  const now = new Date();
+  const soon = new Date(now.getTime() + KEY_EXPIRY_ALERT_MS);
+  const keys = await PrimeKey.find({
+    status: { $in: ["unused", "listed"] },
+    expiresAt: { $ne: null, $gt: now, $lt: soon },
+    expiryAlertSentAt: null,
+  }).lean();
+  for (const k of keys) {
+    const hoursLeft = Math.max(
+      1,
+      Math.round((new Date(k.expiresAt).getTime() - now.getTime()) / 3600000),
+    );
+    await sendTelegram(
+      "⏳ GOG key expiring soon: “" +
+        k.title +
+        "” expires in ~" +
+        hoursLeft +
+        "h (" +
+        new Date(k.expiresAt).toISOString().slice(0, 16).replace("T", " ") +
+        " UTC). Sell it now or redeem it onto a stored GOG account before " +
+        "it goes dead.",
+    ).catch(() => {});
+    await PrimeKey.updateOne(
+      { _id: k._id },
+      { $set: { expiryAlertSentAt: now } },
+    ).catch(() => {});
+  }
+  return keys.length;
+}
+
 function start() {
   if (state.started) return;
   state.started = true;
@@ -262,6 +304,11 @@ function start() {
     } catch (err) {
       console.error("primeWatcher error:", err.message);
     }
+    try {
+      await checkExpiringKeys();
+    } catch (err) {
+      console.error("primeWatcher expiry check error:", err.message);
+    }
     const t = setTimeout(tick, TICK_MS);
     if (t.unref) t.unref();
   };
@@ -270,4 +317,4 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { start, runOnce, status, platformOf };
+module.exports = { start, runOnce, status, platformOf, checkExpiringKeys };
