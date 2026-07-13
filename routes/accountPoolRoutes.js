@@ -15,6 +15,7 @@ const mongoose = require("mongoose");
 const { requireSuperadmin } = require("../middleware/auth");
 const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const dropScanner = require("../utils/dropScanner");
 const { encrypt, decrypt } = require("../utils/secretBox");
@@ -260,17 +261,24 @@ router.get(
   },
 );
 
-// Sweeps every account that has a clientSecret but was never checked — the
-// backlog from before auto-check-on-import existed, or anything imported
-// while this feature was down. New imports queue themselves automatically;
-// this is only for catching up the rest by hand, once.
+// Sweeps every account that has a clientSecret but hasn't fed the drops
+// archive yet. That's not just accounts with lastCheckStatus:"" — plenty
+// were auto-checked (and are sitting there "verified" with a real dropCount)
+// from before the archive-write step existed on that path, so their actual
+// per-item drops were never persisted anywhere. Re-checking is what
+// backfills them; the cached dropCount alone isn't enough to reconstruct the
+// item list. New imports queue themselves automatically going forward — this
+// is for catching up the historical backlog by hand, once.
 router.post(
   "/account-pool/check-queue/enqueue-unchecked",
   requireSuperadmin,
   async (req, res) => {
     try {
+      const archivedIds = await DropLog.distinct("account", {
+        accountModel: "AvailableAccount",
+      });
       const rows = await AvailableAccount.find(
-        { clientSecret: { $ne: "" }, lastCheckStatus: "" },
+        { clientSecret: { $ne: "" }, _id: { $nin: archivedIds } },
         { _id: 1 },
       ).lean();
       const ids = rows.map((r) => r._id);
