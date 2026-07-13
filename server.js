@@ -28,6 +28,8 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const botUpdateRoutes = require("./routes/botUpdateRoutes");
+const botHealthRoutes = require("./routes/botHealthRoutes");
+const botHealthMonitor = require("./utils/botHealthMonitor");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
@@ -436,6 +438,7 @@ app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
 app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, botUpdateRoutes);
+app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
@@ -469,6 +472,10 @@ mongoose
     // Begin the background drop-archive scanner (gentle, one account at a
     // time). Safe no-op until accounts are synced from the bot configs.
     dropScanner.start();
+    // Watches running bot containers for a silent stall (Twitch changed
+    // something the bot can't handle) and pings Telegram — see
+    // utils/botHealthMonitor.js.
+    botHealthMonitor.start();
     // Listen for admins confirming a Telegram link from inside the app's bot.
     // No-op when TG_TOKEN is unset.
     telegramBot.start();
