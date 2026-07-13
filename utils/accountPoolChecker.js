@@ -5,6 +5,7 @@
 // time in the background so importing hundreds of accounts at once doesn't
 // fire that many concurrent requests at Twitch.
 const AvailableAccount = require("../models/AvailableAccount");
+const dropScanner = require("./dropScanner");
 const { fetchInventory } = require("./twitchInventory");
 
 const CHECK_DELAY_MS = Number(process.env.ACCOUNT_POOL_CHECK_DELAY_MS) || 1200;
@@ -24,6 +25,17 @@ async function checkOne(id) {
     acc.lastCheckAt = now;
     acc.lastCheckStatus = "ok";
     acc.lastCheckError = "";
+    // Best-effort — a drops-archive write hiccup shouldn't fail the check
+    // itself (the account is still verified either way).
+    await dropScanner
+      .upsertDrops(acc._id, "AvailableAccount", acc.username, drops)
+      .catch((e) =>
+        console.error(
+          "accountPoolChecker: drop-archive upsert failed for",
+          id,
+          e.message,
+        ),
+      );
   } catch (e) {
     acc.lastCheckAt = now;
     acc.lastCheckStatus =

@@ -84,41 +84,59 @@ async function nextDueAccount() {
     .exec();
 }
 
+// Upserts one account's inventory drops into the archive. Shared by the
+// BotAccount scan loop below and the account-pool checks (utils/
+// accountPoolChecker.js, routes/accountPoolRoutes.js's manual check) — a
+// pool account's `accountModel` is "AvailableAccount" so it never gets
+// counted as deployed/sellable stock by the drops-archive aggregates, but it
+// still shows up there as a distinct, clearly-labelled "in pool" entry.
+async function upsertDrops(accountId, accountModel, login, drops) {
+  const now = new Date();
+  let newDrops = 0;
+  for (const d of drops) {
+    // Cache the image locally (deduped on disk; a no-op once downloaded) so
+    // the archive doesn't depend on Twitch's CDN long-term.
+    const imageLocal = d.imageURL ? await cacheImage(d.imageURL) : "";
+    const set = {
+      login: login || "",
+      accountModel,
+      dropId: d.dropId,
+      name: d.name,
+      imageURL: d.imageURL,
+      game: d.game,
+      gameId: d.gameId,
+      campaign: d.campaign || "",
+      itemKey: d.itemKey || "",
+      count: d.count,
+      awardedAt: d.awardedAt,
+      connected: d.connected,
+      requiredAccountLink: d.requiredAccountLink,
+      state: d.state,
+      source: d.source,
+      lastSeenAt: now,
+    };
+    if (imageLocal) set.imageLocal = imageLocal;
+    const r = await DropLog.updateOne(
+      { account: accountId, benefitId: d.benefitId },
+      { $set: set, $setOnInsert: { firstSeenAt: now } },
+      { upsert: true },
+    );
+    if (r.upsertedCount) newDrops++;
+  }
+  return newDrops;
+}
+
 // Scan a single account doc: fetch inventory, upsert its drops, update status.
 async function scanAccount(acc) {
   const now = new Date();
   try {
     const { twitchId, login, drops } = await fetchInventory(acc.clientSecret);
-    let newDrops = 0;
-    for (const d of drops) {
-      // Cache the image locally (deduped on disk; a no-op once downloaded) so
-      // the archive doesn't depend on Twitch's CDN long-term.
-      const imageLocal = d.imageURL ? await cacheImage(d.imageURL) : "";
-      const set = {
-        login: login || acc.login || "",
-        dropId: d.dropId,
-        name: d.name,
-        imageURL: d.imageURL,
-        game: d.game,
-        gameId: d.gameId,
-        campaign: d.campaign || "",
-        itemKey: d.itemKey || "",
-        count: d.count,
-        awardedAt: d.awardedAt,
-        connected: d.connected,
-        requiredAccountLink: d.requiredAccountLink,
-        state: d.state,
-        source: d.source,
-        lastSeenAt: now,
-      };
-      if (imageLocal) set.imageLocal = imageLocal;
-      const r = await DropLog.updateOne(
-        { account: acc._id, benefitId: d.benefitId },
-        { $set: set, $setOnInsert: { firstSeenAt: now } },
-        { upsert: true },
-      );
-      if (r.upsertedCount) newDrops++;
-    }
+    const newDrops = await upsertDrops(
+      acc._id,
+      "BotAccount",
+      login || acc.login || "",
+      drops,
+    );
     if (twitchId) acc.twitchId = twitchId;
     if (login && !acc.login) acc.login = login;
     // A sold account whose buyer has connected a game shouldn't keep farming
@@ -351,4 +369,5 @@ module.exports = {
   setEnabled,
   setIntervalMs,
   backfillItemKeys,
+  upsertDrops,
 };

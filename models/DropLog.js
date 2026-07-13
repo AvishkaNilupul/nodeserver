@@ -9,8 +9,21 @@ const dropLogSchema = new mongoose.Schema(
   {
     account: {
       type: mongoose.Schema.Types.ObjectId,
+      // Usually a BotAccount (a deployed, farming account); can also be an
+      // AvailableAccount (account-pool entry checked before it's wired into
+      // any bot) — see accountModel. Left as a plain ObjectId ref rather than
+      // a Mongoose refPath so every existing BotAccount-only query keeps
+      // working unchanged; only the few call sites that actually populate
+      // the account (the item-accounts drill-down, fulfillment) need to know
+      // which collection to look in.
       ref: "BotAccount",
       required: true,
+      index: true,
+    },
+    accountModel: {
+      type: String,
+      enum: ["BotAccount", "AvailableAccount"],
+      default: "BotAccount",
       index: true,
     },
     login: { type: String, default: "", index: true },

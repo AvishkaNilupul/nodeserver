@@ -1384,11 +1384,12 @@
                     <th>Distinct items</th>
                     <th>Accounts</th>
                     <th class="hide-sm">Total drops</th>
+                    <th class="hide-sm">In pool</th>
                   </tr>
                 </thead>
                 <tbody id="gameRows">
                   <tr>
-                    <td colspan="5" class="empty">Loading…</td>
+                    <td colspan="6" class="empty">Loading…</td>
                   </tr>
                 </tbody>
               </table>
@@ -1779,7 +1780,14 @@
             "</b><span>Accounts</span></div>" +
             '<div class="stat"><b>' +
             o.totalDrops +
-            "</b><span>Log entries</span></div>";
+            "</b><span>Log entries</span></div>" +
+            (o.poolItems
+              ? '<div class="stat" title="' +
+                o.poolDrops +
+                ' log entries from account-pool accounts not yet wired into a bot"><b>' +
+                o.poolItems +
+                "</b><span>Distinct items in pool</span></div>"
+              : "");
         } catch {}
       }
 
@@ -1972,6 +1980,15 @@
           " account" +
           (it.accounts > 1 ? "s" : "") +
           "</span></div>" +
+          (it.poolCount
+            ? '<div class="gm">+' +
+              it.poolCount +
+              " in pool (" +
+              it.poolAccounts +
+              " account" +
+              (it.poolAccounts > 1 ? "s" : "") +
+              ")</div>"
+            : "") +
           '<div class="sb">' +
           sb.join("") +
           "</div>" +
@@ -2064,6 +2081,7 @@
           (s, a) => s + (a.count || 0),
           0,
         );
+        const poolAccts = currentItemAccounts.filter((a) => a.inPool);
         let html =
           '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
           '<div class="stat accent"><b>' +
@@ -2072,6 +2090,11 @@
           '<div class="stat"><b>' +
           currentItemAccounts.length +
           "</b><span>Accounts</span></div>" +
+          (poolAccts.length
+            ? '<span class="chip" title="Checked accounts not yet wired into a bot — not sellable stock">' +
+              poolAccts.length +
+              " in pool</span>"
+            : "") +
           (it.campaign
             ? '<span class="chip">Set: ' + esc(it.campaign) + "</span>"
             : "") +
@@ -2086,7 +2109,9 @@
                 attr(a.accountId) +
                 '">' +
                 esc(a.login || "(no login)") +
-                "</span></td>" +
+                "</span>" +
+                (a.inPool ? ' <span class="chip">pool</span>' : "") +
+                "</td>" +
                 "<td><b>" +
                 (a.count || 1) +
                 "</b></td>" +
@@ -2094,23 +2119,27 @@
                 stateChipInline(a.state) +
                 "</td>" +
                 '<td class="hide-sm mono">' +
-                esc(a.container || a.configFile || "—") +
+                (a.inPool ? "—" : esc(a.container || a.configFile || "—")) +
                 "</td>" +
                 "<td>" +
-                (a.hasPassword
-                  ? '<button class="btn-ghost btn-sm" data-copycred="' +
+                (a.inPool
+                  ? '<span class="chip" title="Not deployed to a bot yet — manage on the Account Pool page">in pool</span>'
+                  : a.hasPassword
+                    ? '<button class="btn-ghost btn-sm" data-copycred="' +
+                      attr(a.accountId) +
+                      '" data-login="' +
+                      attr(a.login || "") +
+                      '">Copy user:pass</button>'
+                    : '<span class="chip warn">no pw</span>') +
+                (a.inPool
+                  ? ""
+                  : ' <span class="chip" data-copies="' +
                     attr(a.accountId) +
-                    '" data-login="' +
-                    attr(a.login || "") +
-                    '">Copy user:pass</button>'
-                  : '<span class="chip warn">no pw</span>') +
-                ' <span class="chip" data-copies="' +
-                attr(a.accountId) +
-                '"' +
-                (a.copiedCount ? "" : ' style="display:none;"') +
-                ">copied " +
-                (a.copiedCount || 0) +
-                "\u00d7</span>" +
+                    '"' +
+                    (a.copiedCount ? "" : ' style="display:none;"') +
+                    ">copied " +
+                    (a.copiedCount || 0) +
+                    "\u00d7</span>") +
                 "</td>" +
                 "</tr>",
             )
@@ -2217,7 +2246,7 @@
           data = await api("/drops-archive/by-game");
         } catch (e) {
           $("gameRows").innerHTML =
-            '<tr><td colspan="5" class="empty">' +
+            '<tr><td colspan="6" class="empty">' +
             esc(e.message) +
             "</td></tr>";
           return;
@@ -2225,7 +2254,7 @@
         const games = data.games || [];
         if (!games.length) {
           $("gameRows").innerHTML =
-            '<tr><td colspan="5" class="empty">No drops logged yet.</td></tr>';
+            '<tr><td colspan="6" class="empty">No drops logged yet.</td></tr>';
           return;
         }
         $("gameRows").innerHTML = games
@@ -2248,6 +2277,17 @@
               "</td>" +
               '<td class="hide-sm">' +
               g.drops +
+              "</td>" +
+              '<td class="hide-sm">' +
+              (g.poolCount
+                ? '<span class="chip">' +
+                  g.poolCount +
+                  " (" +
+                  g.poolAccounts +
+                  " acct" +
+                  (g.poolAccounts === 1 ? "" : "s") +
+                  ")</span>"
+                : "—") +
               "</td>" +
               "</tr>",
           )

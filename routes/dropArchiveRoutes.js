@@ -934,27 +934,48 @@ const itemKeyExpr = {
 };
 
 // High-level totals for the dashboard header. Bad-token accounts (and their
-// drops) are left out so the header only counts sellable stock.
+// drops) are left out so the header only counts sellable stock. Pool-account
+// drops (accountModel: "AvailableAccount" — checked but not deployed to any
+// bot yet) are also excluded from these deployed/sellable numbers and
+// reported separately as poolItems/poolDrops instead of inflating them.
 router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
   try {
     const badIds = await badAccountIds();
-    const dropMatch = { account: { $nin: badIds } };
-    const [accounts, totalDrops, totalItemsHeld, games, items] =
-      await Promise.all([
-        BotAccount.countDocuments({ lastScanStatus: { $ne: BAD_STATUS } }),
-        DropLog.countDocuments(dropMatch),
-        DropLog.aggregate([
-          { $match: dropMatch },
-          { $group: { _id: null, n: { $sum: "$count" } } },
-        ]),
-        DropLog.distinct("game", dropMatch),
-        DropLog.aggregate([
-          { $match: dropMatch },
-          { $addFields: { _k: itemKeyExpr } },
-          { $group: { _id: "$_k" } },
-          { $count: "n" },
-        ]),
-      ]);
+    const dropMatch = {
+      account: { $nin: badIds },
+      accountModel: { $ne: "AvailableAccount" },
+    };
+    const poolMatch = { accountModel: "AvailableAccount" };
+    const [
+      accounts,
+      totalDrops,
+      totalItemsHeld,
+      games,
+      items,
+      poolDrops,
+      poolItems,
+    ] = await Promise.all([
+      BotAccount.countDocuments({ lastScanStatus: { $ne: BAD_STATUS } }),
+      DropLog.countDocuments(dropMatch),
+      DropLog.aggregate([
+        { $match: dropMatch },
+        { $group: { _id: null, n: { $sum: "$count" } } },
+      ]),
+      DropLog.distinct("game", dropMatch),
+      DropLog.aggregate([
+        { $match: dropMatch },
+        { $addFields: { _k: itemKeyExpr } },
+        { $group: { _id: "$_k" } },
+        { $count: "n" },
+      ]),
+      DropLog.countDocuments(poolMatch),
+      DropLog.aggregate([
+        { $match: poolMatch },
+        { $addFields: { _k: itemKeyExpr } },
+        { $group: { _id: "$_k" } },
+        { $count: "n" },
+      ]),
+    ]);
     res.json({
       success: true,
       overview: {
@@ -963,6 +984,8 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         totalItemsHeld: (totalItemsHeld[0] && totalItemsHeld[0].n) || 0,
         games: games.filter(Boolean).length,
         items: (items[0] && items[0].n) || 0,
+        poolDrops,
+        poolItems: (poolItems[0] && poolItems[0].n) || 0,
       },
     });
   } catch (err) {
@@ -971,20 +994,29 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
   }
 });
 
-// One row per game: how many rewards, distinct items, accounts, total held.
+// One row per game: how many rewards, distinct items, accounts, total held —
+// split into deployed (BotAccount) vs. in-pool (AvailableAccount, checked but
+// not wired into a bot yet) rather than merging them into one number.
 router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
   try {
     const badIds = await badAccountIds();
+    const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
     const rows = await DropLog.aggregate([
       { $match: { account: { $nin: badIds } } },
       { $addFields: { _k: itemKeyExpr } },
       {
         $group: {
           _id: "$game",
-          drops: { $sum: 1 },
-          totalCount: { $sum: "$count" },
-          accounts: { $addToSet: "$account" },
-          items: { $addToSet: "$_k" },
+          drops: { $sum: { $cond: [isPool, 0, 1] } },
+          totalCount: { $sum: { $cond: [isPool, 0, "$count"] } },
+          accounts: { $addToSet: { $cond: [isPool, "$$REMOVE", "$account"] } },
+          items: { $addToSet: { $cond: [isPool, "$$REMOVE", "$_k"] } },
+          poolDrops: { $sum: { $cond: [isPool, 1, 0] } },
+          poolCount: { $sum: { $cond: [isPool, "$count", 0] } },
+          poolAccounts: {
+            $addToSet: { $cond: [isPool, "$account", "$$REMOVE"] },
+          },
+          poolItems: { $addToSet: { $cond: [isPool, "$_k", "$$REMOVE"] } },
         },
       },
       {
@@ -995,6 +1027,10 @@ router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
           totalCount: 1,
           accounts: { $size: "$accounts" },
           items: { $size: "$items" },
+          poolDrops: 1,
+          poolCount: 1,
+          poolAccounts: { $size: "$poolAccounts" },
+          poolItems: { $size: "$poolItems" },
         },
       },
       { $sort: { totalCount: -1 } },
@@ -1017,6 +1053,7 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
     const search = String(req.query.search || "").trim();
     if (search) match.name = searchRegex(search);
 
+    const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
     const rows = await DropLog.aggregate([
       { $match: match },
       // Fall back to a computed name|game key for any row whose itemKey
@@ -1032,6 +1069,7 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
           imageLocal: { $max: "$imageLocal" },
           imageURL: { $first: "$imageURL" },
           campaign: { $first: "$campaign" },
+          pool: { $first: isPool },
           cnt: { $sum: "$count" },
           claimed: {
             $sum: { $cond: [{ $eq: ["$state", "claimed"] }, 1, 0] },
@@ -1052,13 +1090,18 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
           imageLocal: { $max: "$imageLocal" },
           imageURL: { $first: "$imageURL" },
           campaign: { $first: "$campaign" },
-          totalCount: { $sum: "$cnt" },
-          accounts: { $sum: 1 },
-          minPerAcct: { $min: "$cnt" },
-          maxPerAcct: { $max: "$cnt" },
-          claimed: { $sum: "$claimed" },
-          connect: { $sum: "$connect" },
-          connected: { $sum: "$connected" },
+          // "Deployed" numbers — accounts actually wired into a bot, the
+          // sellable stock this view has always meant.
+          totalCount: { $sum: { $cond: ["$pool", 0, "$cnt"] } },
+          accounts: { $sum: { $cond: ["$pool", 0, 1] } },
+          minPerAcct: { $min: { $cond: ["$pool", "$$REMOVE", "$cnt"] } },
+          maxPerAcct: { $max: { $cond: ["$pool", "$$REMOVE", "$cnt"] } },
+          claimed: { $sum: { $cond: ["$pool", 0, "$claimed"] } },
+          connect: { $sum: { $cond: ["$pool", 0, "$connect"] } },
+          connected: { $sum: { $cond: ["$pool", 0, "$connected"] } },
+          // "In pool" numbers — checked, not yet wired into any bot.
+          poolCount: { $sum: { $cond: ["$pool", "$cnt", 0] } },
+          poolAccounts: { $sum: { $cond: ["$pool", 1, 0] } },
         },
       },
       {
@@ -1085,6 +1128,8 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
           claimed: 1,
           connect: 1,
           connected: 1,
+          poolCount: 1,
+          poolAccounts: 1,
         },
       },
       { $sort: { accounts: -1, totalCount: -1 } },
@@ -1124,11 +1169,27 @@ router.get(
           },
         },
         { $unwind: { path: "$acc", preserveNullAndEmptyArrays: true } },
+        // Pool accounts (accountModel: "AvailableAccount") aren't in
+        // botaccounts, so the lookup above leaves "acc" empty for them —
+        // this second lookup fills in a username so they show as something
+        // other than a blank row, labelled via inPool below.
+        {
+          $lookup: {
+            from: "availableaccounts",
+            localField: "account",
+            foreignField: "_id",
+            as: "poolAcc",
+          },
+        },
+        { $unwind: { path: "$poolAcc", preserveNullAndEmptyArrays: true } },
         {
           $project: {
             _id: 0,
             accountId: "$account",
-            login: { $ifNull: ["$acc.login", "$login"] },
+            inPool: { $eq: ["$accountModel", "AvailableAccount"] },
+            login: {
+              $ifNull: ["$acc.login", { $ifNull: ["$poolAcc.username", "$login"] }],
+            },
             container: "$acc.container",
             configFile: "$acc.configFile",
             hasPassword: "$acc.hasPassword",

@@ -16,6 +16,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const accountPoolChecker = require("../utils/accountPoolChecker");
+const dropScanner = require("../utils/dropScanner");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const { fetchInventory } = require("../utils/twitchInventory");
 
@@ -333,6 +334,13 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
       acc.lastCheckStatus = "ok";
       acc.lastCheckError = "";
       await acc.save();
+      // Best-effort — feeds the drops-archive "in pool" view; a write
+      // hiccup here shouldn't fail the check itself.
+      await dropScanner
+        .upsertDrops(acc._id, "AvailableAccount", login || acc.username, drops)
+        .catch((e) =>
+          console.error("account-pool check: drop-archive upsert failed:", e.message),
+        );
       res.json({
         success: true,
         status: "ok",
