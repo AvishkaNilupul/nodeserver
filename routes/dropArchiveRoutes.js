@@ -74,7 +74,14 @@ router.get("/drops-archive/progress", requireSuperadmin, async (req, res) => {
 // ------------------------------------------------------------------
 router.get("/drops-archive/accounts", requireSuperadmin, async (req, res) => {
   try {
-    const q = {};
+    // Accounts with no configFile aren't wired into any bot — usually a
+    // stale leftover from a deleted/moved config (see stopIfNoAccounts /
+    // dedupeAccounts in botConfigRoutes.js, which already treat these as
+    // "not really placed" for the same reason). Left in, they show up as
+    // confusing duplicates of the same login's real, deployed account. Their
+    // drop history isn't hidden — By item/By game and the item drill-down
+    // still include them — this only trims the account-management list.
+    const q = { configFile: { $nin: ["", null] } };
     const search = String(req.query.search || "").trim();
     if (search) {
       const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
