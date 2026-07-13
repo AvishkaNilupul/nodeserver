@@ -178,7 +178,7 @@
   .modal > header .x:hover { background:var(--surface-2); opacity:1; }
   .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
   .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
-  .mbody select, .mbody textarea, .mbody input[type="text"], .mbody input:not([type]) { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody select, .mbody textarea, .mbody input[type="text"], .mbody input[type="number"], .mbody input:not([type]) { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
   .mbody textarea { min-height:150px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
   .mbody select:focus, .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
   .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
@@ -272,6 +272,8 @@
   let _logTimer = null;   // live-log poll while the logs modal is open
   let _loadSeq = 0;       // guards against a slow load() overwriting a newer tab
   const HOST_CACHE = {};  // hostId -> last-seen { configs, states, health, cstats, usage }
+  let poolAccountsCache = null; // account-pool entries with auth ready, cached per modal open
+  let poolPickedIds = new Set(); // pool account ids added to the textarea this modal session
 
   // Which managed host the page is currently showing (the local server by
   // default; remote hosts such as a Raspberry Pi appear as extra tabs).
@@ -926,12 +928,97 @@
     return { file: "config_" + String(i).padStart(2, "0") + ".json", container: "twitchbotx" + i };
   }
 
-  window.openCreateModal = function () {
+  // Account-pool picker, shared by the "Create bot" and "Mass add accounts"
+  // modals. Only surfaces pool accounts with stored auth (ClientSecret +
+  // UniqueId) — accounts that only have a password/email aren't usable here,
+  // since /bot-configs/create and /accounts both require a ClientSecret.
+  async function loadPoolAccounts() {
+    try {
+      const r = await api("/account-pool/list?status=available");
+      poolAccountsCache = (r.accounts || []).filter((a) => a.hasAuth);
+    } catch (e) {
+      poolAccountsCache = [];
+    }
+    return poolAccountsCache;
+  }
+
+  function poolPickerHtml(idPrefix) {
+    if (!poolAccountsCache || !poolAccountsCache.length) {
+      return '<div class="hint">No auth-ready accounts in the pool right now. <a href="/account-pool.html" target="_blank">Manage pool</a></div>';
+    }
+    const n = poolAccountsCache.length;
+    return (
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+        '<input type="number" id="' + idPrefix + 'PoolAmount" min="1" max="' + n + '" value="' + Math.min(n, 5) + '" style="width:90px;">' +
+        '<button type="button" class="btn-ghost btn-sm" onclick="addFromPool(\'' + idPrefix + '\')">Add from pool</button>' +
+        '<span class="hint" id="' + idPrefix + 'PoolHint">' + n + ' available</span>' +
+      '</div>'
+    );
+  }
+
+  // Takes however many the amount field asks for straight off the top of the
+  // pool (newest-added first, same order the Account Pool page lists them) —
+  // no picking accounts one by one.
+  window.addFromPool = async function (idPrefix) {
+    const amountEl = $(idPrefix + "PoolAmount");
+    const n = Math.max(0, Math.min(parseInt(amountEl.value, 10) || 0, poolAccountsCache.length));
+    if (!n) { toast("Enter how many to add", true); return; }
+    const picks = poolAccountsCache.slice(0, n);
+    const ta = $(idPrefix === "m" ? "mAccounts" : "bAccounts");
+    const objs = [];
+    for (const a of picks) {
+      try {
+        const r = await api("/account-pool/" + a.id + "/password");
+        if (!r.clientSecret) { toast(a.username + " has no stored auth, skipped", true); continue; }
+        objs.push({
+          ClientSecret: r.clientSecret,
+          UniqueId: r.uniqueId || "",
+          Login: a.username,
+          Id: r.twitchId || "",
+          Enabled: true,
+          FavouriteGames: [],
+        });
+        poolPickedIds.add(a.id);
+      } catch (e) {
+        toast(a.username + ": " + e.message, true);
+      }
+    }
+    // Drop the picks (successful or not — a failed one still shouldn't be
+    // offered again in this same modal) so re-clicking "Add from pool"
+    // pulls the next batch instead of repeating these.
+    poolAccountsCache = poolAccountsCache.slice(picks.length);
+    const hint = $(idPrefix + "PoolHint");
+    if (hint) hint.textContent = poolAccountsCache.length + " available";
+    if (amountEl) amountEl.max = poolAccountsCache.length;
+    if (!objs.length) return;
+    const addition = objs.map((o) => JSON.stringify(o) + ",").join("\n");
+    ta.value = ta.value.trim() ? ta.value.trim() + "\n" + addition : addition;
+    toast(objs.length + " account" + (objs.length === 1 ? "" : "s") + " added from pool");
+  };
+
+  // Mark whichever pool accounts fed this modal's textarea as claimed, once
+  // the bot they were added to was actually created/saved successfully.
+  // Best-effort and reversible (Unclaim on the Account Pool page) — if the
+  // operator deletes a pasted-in entry before submitting, it'll still get
+  // marked claimed here; not worth the complexity of diffing textarea content
+  // for a single-operator internal tool.
+  async function claimPoolPicks() {
+    if (!poolPickedIds.size) return;
+    const ids = Array.from(poolPickedIds);
+    poolPickedIds = new Set();
+    await Promise.allSettled(
+      ids.map((id) => api("/account-pool/" + id + "/claim", { method: "POST", body: JSON.stringify({ note: "assigned to a bot" }) })),
+    );
+  }
+
+  window.openCreateModal = async function () {
+    poolPickedIds = new Set();
     const slot = nextSlot();
     const opts = Object.keys(CONFIGS)
       .filter((f) => CONFIGS[f] && CONFIGS[f].ok)
       .map((f) => '<option value="' + esc(f) + '"' + (f === "config.json" ? " selected" : "") + ">" + esc((CONFIGS[f].container || f)) + " (" + esc(f) + ")</option>")
       .join("");
+    await loadPoolAccounts();
     $("modalBg").innerHTML =
       '<div class="modal" role="dialog" aria-modal="true">' +
         '<header><b>Create new bot</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
@@ -941,6 +1028,7 @@
             '<select id="mTemplate">' + (opts || '<option value="">(no existing config)</option>') + '</select>' +
             '<div class="hint" style="margin-top:6px;">Copies that bot\u2019s games/options only \u2014 <b>not</b> its accounts. The new bot starts with just the accounts you paste below.</div>' +
           '</div>' +
+          '<div><label class="lbl">From account pool (optional)</label>' + poolPickerHtml("m") + '</div>' +
           '<div><label class="lbl">Accounts</label>' +
             '<textarea id="mAccounts" placeholder="One per line:&#10;auth_token_one&#10;login2:auth_token_two&#10;&#10;…or paste JSON account objects copied from a config."></textarea>' +
             '<div class="hint" style="margin-top:6px;">One per line (just the <b>auth token</b>, or <b>login:token</b>) — <b>or</b> paste full JSON account objects (with or without <code>[ ]</code> / trailing commas). Leave empty to create an empty bot.</div>' +
@@ -988,6 +1076,7 @@
       if (r.warning) toast(r.warning, true);
       else toast("Created " + r.container + " with " + r.accountCount + " account" + (r.accountCount === 1 ? "" : "s") + (r.started ? " — running" : "") + (r.skippedDuplicates && r.skippedDuplicates.length ? " — " + r.skippedDuplicates.length + " duplicate" + (r.skippedDuplicates.length === 1 ? "" : "s") + " skipped" : ""));
       reportSkipped(r.skippedDuplicates);
+      await claimPoolPicks();
       setTimeout(load, 1200);
     } catch (e) {
       btn.disabled = false; btn.textContent = old;
@@ -995,13 +1084,16 @@
     }
   };
 
-  window.openBulkModal = function (file) {
+  window.openBulkModal = async function (file) {
     const c = CONFIGS[file]; if (!c) return;
+    poolPickedIds = new Set();
+    await loadPoolAccounts();
     $("modalBg").innerHTML =
       '<div class="modal" role="dialog" aria-modal="true">' +
         '<header><b>Mass add accounts</b><button class="x" type="button" onclick="closeModal()">✕</button></header>' +
         '<div class="mbody">' +
           '<div class="hint">Appending to <span class="slotpill">' + esc(c.container || file) + '</span> (' + esc(file) + ').</div>' +
+          '<div><label class="lbl">From account pool (optional)</label>' + poolPickerHtml("b") + '</div>' +
           '<div><label class="lbl">Accounts</label>' +
             '<textarea id="bAccounts" placeholder="One per line:&#10;auth_token_one&#10;login2:auth_token_two&#10;&#10;…or paste JSON account objects copied from a config."></textarea>' +
             '<div class="hint" style="margin-top:6px;">One per line (<b>auth token</b> or <b>login:token</b>) — <b>or</b> paste full JSON account objects (with or without <code>[ ]</code> / trailing commas). Appended to the existing accounts.</div>' +
@@ -1034,6 +1126,7 @@
       closeModal();
       toast("Added " + r.added + " account" + (r.added === 1 ? "" : "s") + " (now " + r.total + ")" + (r.restarted ? " — restarted" : "") + (r.skippedDuplicates && r.skippedDuplicates.length ? " — " + r.skippedDuplicates.length + " duplicate" + (r.skippedDuplicates.length === 1 ? "" : "s") + " skipped" : ""));
       reportSkipped(r.skippedDuplicates);
+      await claimPoolPicks();
       setTimeout(load, restart ? 1500 : 300);
     } catch (e) {
       btn.disabled = false; btn.textContent = old;
