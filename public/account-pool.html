@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Account Pool</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .themebtn{cursor:pointer;}
+
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+
+  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 20px 0 14px; }
+  .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
+  .search input { width:100%; padding: 11px 13px 11px 38px; border-radius: 11px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline:none; font-family:inherit; }
+  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color: var(--muted); }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; }
+  .stat b { font-size: 18px; display:block; }
+  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  button { padding: 9px 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 13.5px; }
+  button:hover { opacity: 0.94; }
+  button:disabled { opacity:.5; cursor: default; }
+  .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
+  .btn-ghost:hover { background: var(--surface-2); opacity:1; }
+  .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
+  .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
+  .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
+
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin: 4px 0 14px; }
+  .tab { background: var(--surface); color: var(--muted); border:1px solid var(--line); padding:8px 16px; border-radius:10px; font-weight:600; font-size:13px; }
+  .tab:hover { background: var(--surface-2); opacity:1; color: var(--ink); }
+  .tab.active { background: linear-gradient(180deg, var(--accent2), var(--accent)); color:#fff; border-color: transparent; }
+
+  .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 20px; overflow:hidden; }
+  table { width:100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align:left; padding: 10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  td.mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
+
+  .chip { display:inline-flex; align-items:center; gap:5px; padding: 3px 9px; border-radius: 999px; font-size:11.5px; font-weight:600; background: var(--surface-2); color: var(--muted); }
+  .chip.on { background:#ecfdf5; color: var(--green); }
+  .chip.off { background:#fef2f2; color: var(--red); }
+  .chip.warn { background:#fffbeb; color: var(--yellow); }
+
+  .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px); background:#0f172a; color:#fff; padding: 11px 18px; border-radius: 11px; font-size: 13.5px; opacity:0; pointer-events:none; transition: all .2s; z-index:120; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+  .toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
+  .toast.err { background:#b91c1c; }
+  .empty { padding: 40px; text-align:center; color: var(--muted); }
+
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:56px 16px; overflow-y:auto; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:560px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
+  .modal > header { display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal > header b { font-size:16px; }
+  .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
+  .modal > header .x:hover { background:var(--surface-2); opacity:1; }
+  .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
+  .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
+  .mbody textarea, .mbody input[type="text"] { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody textarea { min-height:220px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
+  .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
+  .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
+  .revealbox { font-family: ui-monospace, monospace; font-size: 13px; background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; line-height:1.7; word-break:break-all; }
+  .revealbox .k { color: var(--muted); }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links"></nav>
+  <div class="me">
+    <div class="av" id="meAvatar">--</div>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Account Pool</h1>
+      <div class="sub">Accounts ready to hand to a new bot — not wired into any config yet.</div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
+      <button class="btn-ghost btn-sm" id="exportBtn" title="Download {username, password} for accounts with no working auth token yet">Export needs-auth (JSON)</button>
+      <button class="btn-ghost btn-sm" id="checkUncheckedBtn" title="Queue every account that has a token but was never verified against Twitch">Auto-check unverified</button>
+      <button class="btn-sm" id="importBtn">Import accounts</button>
+    </div>
+  </div>
+
+  <div id="checkQueueBanner" style="display:none;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:10px 16px;margin:14px 0 0;font-size:13px;color:var(--muted);"></div>
+
+  <div class="toolbar">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+      <input id="search" type="text" placeholder="Search by username…" />
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" id="tabAvailable" data-status="available">Available</button>
+    <button class="tab" id="tabClaimed" data-status="claimed">Claimed</button>
+    <button class="tab" id="tabAll" data-status="all">All</button>
+  </div>
+
+  <div class="panel">
+    <div style="overflow-x:auto;">
+      <table id="tbl">
+        <thead>
+          <tr><th>Username</th><th>Ready</th><th>Verified</th><th>Twitch ID</th><th>Status</th><th>Added</th><th></th></tr>
+        </thead>
+        <tbody id="tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<div class="modal-bg" id="importBg">
+  <div class="modal" style="max-width:640px;">
+    <header><b>Import accounts</b><button class="x" id="importClose">&times;</button></header>
+    <div class="mbody">
+      <div>
+        <label class="lbl">Accounts JSON</label>
+        <textarea id="importInput" placeholder='[
+  { "username": "puvig", "password": "cb7XEN...", "email": "..." }
+]
+
+or
+
+[
+  { "Login": "marol4uow39", "ClientSecret": "01r414...", "UniqueId": "25a7c8...", "Id": "1519257141", "Enabled": true }
+]'></textarea>
+        <div class="hint" style="margin-top:8px;">
+          Paste either shape — raw <code>{ username, password, email }</code> credentials, or a bot-config
+          <code>{ Login, ClientSecret, UniqueId, Id }</code> entry — or a mix of both. Matched by username;
+          if the same account already exists here it's filled in rather than duplicated, and anything
+          already running in a live bot is skipped automatically.
+        </div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="importCancel">Cancel</button>
+      <button id="importSubmit">Import</button>
+    </footer>
+  </div>
+</div>
+
+<div class="modal-bg" id="revealBg">
+  <div class="modal">
+    <header><b id="revealTitle">Account details</b><button class="x" id="revealClose">&times;</button></header>
+    <div class="mbody">
+      <div class="revealbox" id="revealBox"></div>
+      <div id="checkResult"></div>
+      <button class="btn-ghost" id="checkBtn">Check inventory (verify token against Twitch)</button>
+      <button class="btn-ghost" id="claimBtn">Mark as claimed (used for a new bot)</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/theme.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let ACCOUNTS = [];
+  let CURRENT_STATUS = "available";
+  let REVEAL_ID = null;
+
+  async function api(url, opts) {
+    const r = await fetch(url, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts));
+    if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
+    let j = {}; try { j = await r.json(); } catch (e) {}
+    if (!r.ok || j.success === false) throw new Error(j.message || ("HTTP " + r.status));
+    return j;
+  }
+
+  function toast(msg, err) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.className = "toast show" + (err ? " err" : "");
+    clearTimeout(t._h);
+    t._h = setTimeout(() => (t.className = "toast"), 3200);
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderStats() {
+    const avail = ACCOUNTS.filter((a) => a.status === "available").length;
+    const ready = ACCOUNTS.filter((a) => a.status === "available" && (a.hasPassword || a.hasAuth)).length;
+    $("stats").innerHTML =
+      '<div class="stat"><b>' + ACCOUNTS.length + '</b><span>Shown</span></div>' +
+      '<div class="stat"><b>' + avail + '</b><span>Available</span></div>' +
+      '<div class="stat"><b>' + ready + '</b><span>Ready (has creds)</span></div>';
+  }
+
+  function verifiedChip(a) {
+    if (!a.hasAuth) return '<span class="chip">—</span>';
+    if (a.lastCheckStatus === "ok") return '<span class="chip on" title="' + esc(a.lastCheckAt ? new Date(a.lastCheckAt).toLocaleString() : "") + '">✓ verified · ' + a.dropCount + ' drops</span>';
+    if (a.lastCheckStatus === "token_invalid") return '<span class="chip off" title="' + esc(a.lastCheckError || "") + '">✗ invalid</span>';
+    if (a.lastCheckStatus === "error") return '<span class="chip warn" title="' + esc(a.lastCheckError || "") + '">check error</span>';
+    return '<span class="chip">not checked</span>';
+  }
+
+  function render() {
+    const q = $("search").value.trim().toLowerCase();
+    const rows = ACCOUNTS.filter((a) => !q || a.username.toLowerCase().includes(q));
+    if (!rows.length) {
+      $("tbody").innerHTML = '<tr><td colspan="7" class="empty">No accounts here.</td></tr>';
+      renderStats();
+      return;
+    }
+    $("tbody").innerHTML = rows.map((a) => {
+      const readyChip = a.hasAuth
+        ? '<span class="chip on">auth ready</span>'
+        : a.hasPassword
+        ? '<span class="chip warn">needs auth</span>'
+        : '<span class="chip off">no creds</span>';
+      const statusChip = a.status === "claimed" ? '<span class="chip off">claimed</span>' : '<span class="chip on">available</span>';
+      const added = a.createdAt ? new Date(a.createdAt).toLocaleDateString() : "";
+      const actions = (a.status === "claimed"
+        ? '<button class="btn-ghost btn-sm" data-unclaim="' + a.id + '">Unclaim</button>'
+        : '<button class="btn-ghost btn-sm" data-reveal="' + a.id + '">View</button>') +
+        (a.hasAuth ? '<button class="btn-ghost btn-sm" data-check="' + a.id + '">Check</button>' : "");
+      return "<tr>" +
+        "<td>" + esc(a.username) + "</td>" +
+        "<td>" + readyChip + "</td>" +
+        "<td>" + verifiedChip(a) + "</td>" +
+        '<td class="mono">' + esc(a.twitchId || "—") + "</td>" +
+        "<td>" + statusChip + "</td>" +
+        "<td>" + added + "</td>" +
+        '<td style="display:flex;gap:6px;">' + actions +
+          '<button class="btn-danger btn-sm" data-delete="' + a.id + '">Delete</button></td>' +
+        "</tr>";
+    }).join("");
+    renderStats();
+  }
+
+  async function load() {
+    try {
+      const r = await api("/account-pool/list?status=" + encodeURIComponent(CURRENT_STATUS));
+      ACCOUNTS = r.accounts || [];
+      render();
+    } catch (e) {
+      $("tbody").innerHTML = '<tr><td colspan="7" class="empty">' + esc(e.message) + "</td></tr>";
+    }
+  }
+
+  function setTab(status, btn) {
+    CURRENT_STATUS = status;
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    btn.classList.add("active");
+    load();
+  }
+  $("tabAvailable").addEventListener("click", (e) => setTab("available", e.target));
+  $("tabClaimed").addEventListener("click", (e) => setTab("claimed", e.target));
+  $("tabAll").addEventListener("click", (e) => setTab("all", e.target));
+  $("search").addEventListener("input", render);
+  $("refreshBtn").addEventListener("click", load);
+
+  $("exportBtn").addEventListener("click", async () => {
+    const btn = $("exportBtn");
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Exporting…";
+    try {
+      const r = await api("/account-pool/export-needs-auth?status=" + encodeURIComponent(CURRENT_STATUS));
+      if (!r.count) { toast("Nothing to export — everything here already has a working token"); return; }
+      const blob = new Blob([JSON.stringify(r.accounts, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "needs-auth-accounts.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast("Downloaded " + r.count + " account(s) needing a working token");
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  });
+
+  $("tbody").addEventListener("click", async (e) => {
+    const revealId = e.target.getAttribute("data-reveal");
+    const unclaimId = e.target.getAttribute("data-unclaim");
+    const deleteId = e.target.getAttribute("data-delete");
+    const checkId = e.target.getAttribute("data-check");
+    if (revealId) return openReveal(revealId);
+    if (checkId) return runCheck(checkId, e.target);
+    if (unclaimId) {
+      try { await api("/account-pool/" + unclaimId + "/unclaim", { method: "POST" }); toast("Marked available again"); load(); }
+      catch (err) { toast(err.message, true); }
+      return;
+    }
+    if (deleteId) {
+      if (!confirm("Delete this account from the pool? This can't be undone.")) return;
+      try { await api("/account-pool/" + deleteId, { method: "DELETE" }); toast("Deleted"); load(); }
+      catch (err) { toast(err.message, true); }
+    }
+  });
+
+  // Calls Twitch's own inventory API with the stored token — real proof the
+  // account works, not just "a value is stored". Updates the row's chip and,
+  // if the reveal modal is open for this account, shows the drop list there.
+  async function runCheck(id, btn) {
+    const old = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+    try {
+      const r = await api("/account-pool/" + id + "/check", { method: "POST" });
+      const acc = ACCOUNTS.find((a) => a.id === id);
+      if (acc) {
+        acc.lastCheckStatus = r.status;
+        acc.lastCheckAt = new Date().toISOString();
+        acc.dropCount = r.dropCount || 0;
+        if (r.twitchId) acc.twitchId = r.twitchId;
+        render();
+      }
+      if (r.status === "ok") {
+        toast("Verified — " + r.dropCount + " drop(s) on Twitch right now");
+      } else if (r.status === "token_invalid") {
+        toast("Token invalid/expired — Twitch rejected it", true);
+      } else {
+        toast("Check failed: " + (r.message || "unknown error"), true);
+      }
+      if (REVEAL_ID === id) renderCheckResult(r);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+  }
+
+  function renderCheckResult(r) {
+    if (r.status === "ok") {
+      const rows = (r.drops || []).slice(0, 100).map((d) =>
+        '<div>' + esc(d.name) + (d.game ? ' — <span class="k">' + esc(d.game) + '</span>' : '') + (d.count > 1 ? ' x' + d.count : '') + '</div>'
+      ).join("") || '<div class="k">No drops in inventory yet.</div>';
+      $("checkResult").innerHTML =
+        '<div class="revealbox" style="margin-top:10px;"><div><span class="k">Twitch login confirmed:</span> ' + esc(r.login || "") + '</div>' +
+        '<div><span class="k">Total drops:</span> ' + r.dropCount + '</div>' +
+        (r.dropCount > 100 ? '<div class="k">(showing first 100)</div>' : '') +
+        '<div style="margin-top:8px;max-height:200px;overflow-y:auto;">' + rows + '</div></div>';
+    } else {
+      $("checkResult").innerHTML =
+        '<div class="revealbox" style="margin-top:10px;color:var(--red);">' + esc(r.message || "Check failed") + '</div>';
+    }
+  }
+
+  async function openReveal(id) {
+    try {
+      const acc = ACCOUNTS.find((a) => a.id === id);
+      const r = await api("/account-pool/" + id + "/password");
+      REVEAL_ID = id;
+      $("revealTitle").textContent = acc ? acc.username : "Account details";
+      const lines = [];
+      lines.push('<div><span class="k">Username:</span> ' + esc(acc ? acc.username : "") + "</div>");
+      if (r.password) lines.push('<div><span class="k">Password:</span> ' + esc(r.password) + "</div>");
+      if (r.email) lines.push('<div><span class="k">Email:</span> ' + esc(r.email) + "</div>");
+      if (r.clientSecret) lines.push('<div><span class="k">ClientSecret:</span> ' + esc(r.clientSecret) + "</div>");
+      if (r.uniqueId) lines.push('<div><span class="k">UniqueId:</span> ' + esc(r.uniqueId) + "</div>");
+      if (r.twitchId) lines.push('<div><span class="k">Twitch ID:</span> ' + esc(r.twitchId) + "</div>");
+      if (!r.password && !r.clientSecret) lines.push('<div class="k">No credentials stored yet for this account.</div>');
+      $("revealBox").innerHTML = lines.join("");
+      $("checkResult").innerHTML = "";
+      $("checkBtn").style.display = r.clientSecret ? "" : "none";
+      $("claimBtn").style.display = acc && acc.status === "claimed" ? "none" : "";
+      $("revealBg").classList.add("show");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+  $("revealClose").addEventListener("click", () => $("revealBg").classList.remove("show"));
+  $("revealBg").addEventListener("click", (e) => { if (e.target === $("revealBg")) $("revealBg").classList.remove("show"); });
+  $("checkBtn").addEventListener("click", (e) => { if (REVEAL_ID) runCheck(REVEAL_ID, e.target); });
+  $("claimBtn").addEventListener("click", async () => {
+    if (!REVEAL_ID) return;
+    try {
+      await api("/account-pool/" + REVEAL_ID + "/claim", { method: "POST", body: JSON.stringify({}) });
+      toast("Marked claimed");
+      $("revealBg").classList.remove("show");
+      load();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("importBtn").addEventListener("click", () => { $("importInput").value = ""; $("importBg").classList.add("show"); });
+  $("importClose").addEventListener("click", () => $("importBg").classList.remove("show"));
+  $("importCancel").addEventListener("click", () => $("importBg").classList.remove("show"));
+  $("importBg").addEventListener("click", (e) => { if (e.target === $("importBg")) $("importBg").classList.remove("show"); });
+  $("importSubmit").addEventListener("click", async () => {
+    const raw = $("importInput").value.trim();
+    if (!raw) { toast("Paste some accounts first", true); return; }
+    const btn = $("importSubmit");
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Importing…";
+    try {
+      const r = await api("/account-pool/import", { method: "POST", body: JSON.stringify({ accounts: raw }) });
+      const parts = [];
+      if (r.added) parts.push(r.added + " added");
+      if (r.merged) parts.push(r.merged + " filled in on existing entries");
+      if (r.alreadyInUseCount) parts.push(r.alreadyInUseCount + " already in use in a bot, skipped");
+      if (r.autoChecking) parts.push("auto-checking " + r.autoChecking + " against Twitch");
+      toast(parts.length ? parts.join(" · ") : "Nothing new to import");
+      $("importBg").classList.remove("show");
+      CURRENT_STATUS = "available";
+      load();
+      if (r.autoChecking) pollCheckQueue();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  });
+
+  $("checkUncheckedBtn").addEventListener("click", async () => {
+    const btn = $("checkUncheckedBtn");
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Queuing…";
+    try {
+      const r = await api("/account-pool/check-queue/enqueue-unchecked", { method: "POST" });
+      toast(r.queued ? "Queued " + r.queued + " account(s) for auto-check" : "Nothing to check — everything with a token has already been checked");
+      if (r.queued) pollCheckQueue();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  });
+
+  $("logoutBtn").addEventListener("click", async () => {
+    try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+    window.location.href = "/admin-login.html";
+  });
+
+  // Polls the background auto-check queue (kicked off by an import that
+  // brought in accounts with a clientSecret) so the page shows live progress
+  // instead of the admin wondering whether anything is happening.
+  let _checkQueueTimer = null;
+  async function pollCheckQueue() {
+    let s;
+    try { s = await api("/account-pool/check-queue/status"); }
+    catch (e) { return; }
+    const banner = $("checkQueueBanner");
+    if (s.running || s.queued > 0) {
+      banner.style.display = "";
+      banner.textContent = "Auto-checking accounts against Twitch: " + s.checked + " of " + s.total + " done" + (s.queued ? " (" + s.queued + " queued)" : "") + "…";
+      if (!_checkQueueTimer) _checkQueueTimer = setInterval(pollCheckQueue, 2000);
+      load();
+    } else {
+      if (_checkQueueTimer) { clearInterval(_checkQueueTimer); _checkQueueTimer = null; }
+      if (s.total > 0 && banner.style.display !== "none") {
+        banner.textContent = "Auto-check finished — " + s.total + " account(s) checked.";
+        setTimeout(() => { banner.style.display = "none"; }, 4000);
+        load();
+      } else {
+        banner.style.display = "none";
+      }
+    }
+  }
+
+  load();
+  pollCheckQueue();
+</script>
+<script src="/admin-nav.js"></script>
+</body>
+</html>

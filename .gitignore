@@ -4,6 +4,9 @@ node_modules
 # Admin credentials (bcrypt hashes) — never commit
 admins.json
 
+# Real account credentials staged for the account-pool importer — never commit
+scripts/accounts.json
+
 # Local JSON data (migrated into MongoDB)
 orderIds.json
 messages.json
