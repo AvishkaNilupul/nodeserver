@@ -12,6 +12,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
     <title>Japanese N5 · RedeemHub</title>
+    <!-- Installable offline PWA (see /japanese-sw.js, scoped to this page). -->
+    <link rel="manifest" href="/japanese-manifest.json" />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="日本語 N5" />
+    <link rel="apple-touch-icon" href="/japanese-icon-192.png" />
     <style>
       :root {
         --bg: #f6f7fb;
@@ -1731,7 +1738,23 @@
           const hello = h < 11 ? "おはよう" : h < 18 ? "こんにちは" : "こんばんは";
           const studiedToday = (stats.history[todayStr()] || 0) > 0;
 
+          const standalone = window.matchMedia && (window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone);
+          const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent || "");
+          let installHtml = "";
+          if (!standalone) {
+            if (window.__jpDeferredInstall)
+              installHtml =
+                '<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(225,29,72,.08))">' +
+                '<b style="font-size:14px">📲 Install this app</b><span class="hint" style="flex:1;min-width:160px">Add to your home screen — full-screen, and works offline on the train.</span>' +
+                '<button class="btn primary sm" onclick="jpInstall()">Install</button></div>';
+            else if (isIOS)
+              installHtml =
+                '<div class="card" style="background:linear-gradient(135deg,rgba(99,102,241,.10),rgba(225,29,72,.06))"><b style="font-size:14px">📲 Install this app</b>' +
+                '<div class="hint" style="margin-top:4px">In Safari: tap the <b>Share</b> button, then <b>Add to Home Screen</b> — it opens full-screen and works offline.</div></div>';
+          }
+
           v.innerHTML =
+            installHtml +
             '<div class="card" style="background:linear-gradient(135deg,rgba(99,102,241,.10),rgba(225,29,72,.08));">' +
             '<h2 class="jp" style="font-size:20px;">' + hello +
             "！ <span style='font-size:14px;color:var(--muted)'>Ready for today's session?</span></h2>" +
@@ -2990,6 +3013,7 @@
             '<div class="chiprow" style="margin:14px 0 0">' +
             '<button class="chip ' + (drillMode === "conjugation" ? "active" : "") + '" onclick="setDrill(\'conjugation\')">🔀 Conjugation</button>' +
             '<button class="chip ' + (drillMode === "numbers" ? "active" : "") + '" onclick="setDrill(\'numbers\')">🔢 Numbers &amp; counters</button>' +
+            '<button class="chip ' + (drillMode === "particles" ? "active" : "") + '" onclick="setDrill(\'particles\')">🧩 Particles</button>' +
             "</div></div><div id=\"drillBody\"></div>";
           paintDrill();
         };
@@ -2999,7 +3023,69 @@
         };
         function paintDrill() {
           if (drillMode === "conjugation") paintConjHub();
+          else if (drillMode === "particles") paintPartHub();
           else paintNumHub();
+        }
+        function paintPartHub() {
+          el("drillBody").innerHTML =
+            '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">Fill the blank with the right particle — ' +
+            DATA.particles.length + " N5 sentences (は・が・を・に・で・へ・と・も・の).</div>" +
+            '<button class="btn jp" onclick="startParticles()">▶ Start particle drill</button></div>';
+        }
+        window.startParticles = function () {
+          const items = shuffle(DATA.particles).map((p) => {
+            const opts = new Set([p.a[0]]);
+            for (const x of shuffle(DATA.particlePool)) {
+              if (opts.size >= 4) break;
+              if (!p.a.includes(x)) opts.add(x);
+            }
+            return { p, opts: shuffle(Array.from(opts)) };
+          });
+          partDrill(items);
+        };
+        function partDrill(items) {
+          const v = $('[data-view="drills"]');
+          let idx = 0, score = 0, answered = false;
+          function render() {
+            if (idx >= items.length) {
+              markStudied(items.length);
+              const pct = Math.round((score / items.length) * 100);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">' + (pct >= 80 ? "🏆" : pct >= 50 ? "👍" : "💪") + "</div><b>" +
+                score + " / " + items.length + ' correct</b><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_drills()">Back to Drills</button></div></div></div>';
+              return;
+            }
+            const it = items[idx];
+            const done = it.p.j.replace("＿", "〔 ? 〕");
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>Particles</span><span>' + (idx + 1) + " / " + items.length + " · ✅ " + score + "</span></div>" +
+              '<div class="flashcard" style="min-height:150px;cursor:default"><div class="front jp" style="font-size:26px">' + escapeHtml(done) + "</div>" +
+              '<div class="tap">' + escapeHtml(it.p.e) + "</div></div>" +
+              '<div class="opts" id="opts">' + it.opts.map((o) => '<button class="opt jp" data-v="' + escapeAttr(o) + '">' + o + "</button>").join("") + "</div></div>";
+            v.querySelectorAll(".opt").forEach((b) =>
+              b.addEventListener("click", () => {
+                if (answered) return;
+                answered = true;
+                const ok = it.p.a.includes(b.dataset.v);
+                if (ok) score++;
+                v.querySelectorAll(".opt").forEach((x) => {
+                  if (it.p.a.includes(x.dataset.v)) x.classList.add("correct");
+                  else if (x === b) x.classList.add("wrong");
+                  x.style.pointerEvents = "none";
+                });
+                // show the completed sentence + speak it
+                const fc = v.querySelector(".flashcard .front");
+                fc.textContent = it.p.j.replace("＿", it.p.a[0]);
+                speak(it.p.j.replace("＿", it.p.a[0]));
+                setTimeout(() => {
+                  answered = false;
+                  idx++;
+                  render();
+                }, ok ? 900 : 1600);
+              }),
+            );
+          }
+          render();
         }
 
         let conjFormSel = "mixed";
@@ -3235,6 +3321,11 @@
         // ===============================================================
         // Boot
         // ===============================================================
+        // Re-render the dashboard when the install prompt becomes available.
+        window.__jpRefreshInstall = function () {
+          const cur = document.querySelector(".view.active");
+          if (cur && cur.dataset.view === "dashboard") RENDER.dashboard();
+        };
         buildTabs();
         (async function () {
           await pullState();
@@ -3245,30 +3336,71 @@
     </script>
 
     <script>
-      // Standard admin shell boilerplate (identity + logout), matching the
-      // other console pages.
+      // Admin shell boilerplate (identity + logout) — offline-tolerant so the
+      // installed PWA still opens with no connection.
       document.getElementById("logoutBtn").addEventListener("click", async () => {
         try {
           await fetch("/admin-logout", { method: "POST", credentials: "same-origin" });
         } catch (e) {}
         window.location.href = "/admin-login.html";
       });
+      function jpSetMe(name) {
+        document.getElementById("meName").innerText = name;
+        document.getElementById("meAvatar").innerText = String(name).slice(0, 2).toUpperCase();
+      }
       (async () => {
         try {
           const r = await fetch("/whoami", { credentials: "same-origin" });
-          if (!r.ok) {
+          // Only a real "unauthorized" bounces to login. A network failure
+          // (offline) must NOT — the cached app should still open.
+          if (r.status === 401 || r.status === 403) {
             window.location.href = "/admin-login.html";
             return;
           }
-          const data = await r.json();
-          const me = (data && data.admin) || {};
-          const name = me.username || "Admin";
-          document.getElementById("meName").innerText = name;
-          document.getElementById("meAvatar").innerText = name.slice(0, 2).toUpperCase();
+          if (r.ok) {
+            const data = await r.json();
+            const name = ((data && data.admin) || {}).username || "Admin";
+            try {
+              localStorage.setItem("jp_me", name);
+            } catch (e) {}
+            jpSetMe(name);
+            return;
+          }
         } catch (e) {
-          window.location.href = "/admin-login.html";
+          /* offline — fall through to the cached identity */
         }
+        let cached = "Admin";
+        try {
+          cached = localStorage.getItem("jp_me") || "Admin";
+        } catch (e) {}
+        jpSetMe(cached);
       })();
+
+      // Register the offline service worker, scoped to just this page.
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker
+            .register("/japanese-sw.js", { scope: "/japanese.html" })
+            .catch(function () {});
+        });
+      }
+      // Capture the browser's install prompt so the dashboard can offer it.
+      window.__jpDeferredInstall = null;
+      window.addEventListener("beforeinstallprompt", function (e) {
+        e.preventDefault();
+        window.__jpDeferredInstall = e;
+        if (window.__jpRefreshInstall) window.__jpRefreshInstall();
+      });
+      window.jpInstall = async function () {
+        const d = window.__jpDeferredInstall;
+        if (!d) return;
+        window.__jpDeferredInstall = null;
+        try {
+          d.prompt();
+          await d.userChoice;
+        } catch (e) {}
+        if (window.__jpRefreshInstall) window.__jpRefreshInstall();
+      };
     </script>
     <script src="/theme.js"></script>
     <script src="/admin-nav.js"></script>

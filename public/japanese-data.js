@@ -968,6 +968,42 @@
       rows: [[1,"いっぷん"],[2,"にふん"],[3,"さんぷん"],[4,"よんぷん"],[5,"ごふん"],[6,"ろっぷん"],[7,"ななふん"],[8,"はっぷん"],[9,"きゅうふん"],[10,"じゅっぷん"]] },
   ];
 
+  // --- Particles: fill-in-the-blank ---------------------------------------
+  // "＿" marks the gap. `a` lists every acceptable particle (some slots take
+  // more than one, e.g. destination に/へ). The drill offers 4 choices.
+  const pa = (j, a, e) => ({ j, a, e });
+  const particles = [
+    pa("わたし＿がくせいです。", ["は"], "I am a student."),
+    pa("これ＿ほんです。", ["は"], "This is a book."),
+    pa("ねこ＿います。", ["が"], "There is a cat."),
+    pa("パン＿たべます。", ["を"], "I eat bread."),
+    pa("コーヒー＿のみます。", ["を"], "I drink coffee."),
+    pa("がっこう＿いきます。", ["に", "へ"], "I go to school."),
+    pa("うち＿かえります。", ["に", "へ"], "I return home."),
+    pa("としょかん＿べんきょうします。", ["で"], "I study at the library."),
+    pa("バス＿いきます。", ["で"], "I go by bus."),
+    pa("はし＿たべます。", ["で"], "I eat with chopsticks."),
+    pa("ペン＿かきます。", ["で"], "I write with a pen."),
+    pa("しちじ＿おきます。", ["に"], "I get up at 7."),
+    pa("でんしゃ＿のります。", ["に"], "I get on the train. (乗る takes に)"),
+    pa("きょうしつ＿はいります。", ["に"], "I enter the classroom. (入る takes に)"),
+    pa("ともだち＿あそびます。", ["と"], "I hang out with a friend."),
+    pa("せんせい＿はなします。", ["と", "に"], "I talk with/to the teacher."),
+    pa("パン＿たまご＿かいます。", ["と"], "I buy bread and eggs. (first blank)"),
+    pa("わたし＿いきます。", ["も"], "I'll go too."),
+    pa("にほんご＿せんせい。", ["の"], "a Japanese-language teacher."),
+    pa("わたし＿ほん。", ["の"], "my book."),
+    pa("みず＿ほしいです。", ["が"], "I want water."),
+    pa("にく＿すきです。", ["が"], "I like meat."),
+    pa("えいご＿わかります。", ["が"], "I understand English."),
+    pa("あね＿います。", ["が"], "I have an older sister."),
+    pa("くつ＿かいます。", ["を"], "I buy shoes."),
+    pa("なまえ＿かいてください。", ["を"], "Please write your name."),
+    pa("えいが＿みます。", ["を"], "I watch a movie."),
+    pa("あした＿やすみです。", ["は"], "Tomorrow is a day off."),
+  ];
+  const particlePool = ["は", "が", "を", "に", "で", "へ", "と", "も", "の", "から"];
+
   window.JP_DATA = {
     kana: { gojuon, dakuten, yoon },
     kanji,
@@ -980,5 +1016,7 @@
     conjVerbs,
     conjForms,
     counters,
+    particles,
+    particlePool,
   };
 })();
