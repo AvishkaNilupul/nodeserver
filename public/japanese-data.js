@@ -890,6 +890,84 @@
     },
   ];
 
+  // --- Conjugation: N5 verbs tagged by group ------------------------------
+  // group: "ichidan" (る-verbs) | "godan" (う-verbs) | "irregular".
+  // The app's conjugation engine derives every form from these.
+  const cv = (w, k, m, group) => ({ w, k, m, group });
+  const conjVerbs = [
+    cv("食べる", "たべる", "to eat", "ichidan"),
+    cv("見る", "みる", "to see / watch", "ichidan"),
+    cv("起きる", "おきる", "to get up", "ichidan"),
+    cv("寝る", "ねる", "to sleep", "ichidan"),
+    cv("出る", "でる", "to leave / exit", "ichidan"),
+    cv("教える", "おしえる", "to teach", "ichidan"),
+    cv("開ける", "あける", "to open", "ichidan"),
+    cv("閉める", "しめる", "to close", "ichidan"),
+    cv("借りる", "かりる", "to borrow", "ichidan"),
+    cv("覚える", "おぼえる", "to memorize", "ichidan"),
+    cv("忘れる", "わすれる", "to forget", "ichidan"),
+    cv("降りる", "おりる", "to get off", "ichidan"),
+    cv("いる", "いる", "to be / exist (animate)", "ichidan"),
+    cv("飲む", "のむ", "to drink", "godan"),
+    cv("読む", "よむ", "to read", "godan"),
+    cv("書く", "かく", "to write", "godan"),
+    cv("話す", "はなす", "to speak", "godan"),
+    cv("聞く", "きく", "to listen / ask", "godan"),
+    cv("行く", "いく", "to go", "godan"),
+    cv("買う", "かう", "to buy", "godan"),
+    cv("待つ", "まつ", "to wait", "godan"),
+    cv("立つ", "たつ", "to stand", "godan"),
+    cv("泳ぐ", "およぐ", "to swim", "godan"),
+    cv("遊ぶ", "あそぶ", "to play", "godan"),
+    cv("会う", "あう", "to meet", "godan"),
+    cv("使う", "つかう", "to use", "godan"),
+    cv("作る", "つくる", "to make", "godan"),
+    cv("帰る", "かえる", "to return home", "godan"),
+    cv("分かる", "わかる", "to understand", "godan"),
+    cv("持つ", "もつ", "to hold / have", "godan"),
+    cv("死ぬ", "しぬ", "to die", "godan"),
+    cv("呼ぶ", "よぶ", "to call", "godan"),
+    cv("住む", "すむ", "to live", "godan"),
+    cv("走る", "はしる", "to run", "godan"),
+    cv("歩く", "あるく", "to walk", "godan"),
+    cv("ある", "ある", "to be / exist (things)", "godan"),
+    cv("する", "する", "to do", "irregular"),
+    cv("勉強する", "べんきょうする", "to study", "irregular"),
+    cv("来る", "くる", "to come", "irregular"),
+  ];
+
+  // The polite/plain forms the drill asks for, with a short teaching hint.
+  const conjForms = [
+    { key: "masu", label: "ます-form (polite)", hint: "polite present/future" },
+    { key: "masen", label: "ません (polite neg.)", hint: "polite negative" },
+    { key: "mashita", label: "ました (polite past)", hint: "polite past" },
+    { key: "te", label: "て-form", hint: "connecting form: requests, -ing, sequences" },
+    { key: "nai", label: "ない-form (plain neg.)", hint: "plain negative" },
+    { key: "ta", label: "た-form (plain past)", hint: "plain past" },
+  ];
+
+  // --- Counters: irregular readings, where all the difficulty lives --------
+  const counters = [
+    { key: "tsu", unit: "つ", label: "General things (〜つ)", note: "Native numbers 1–10.",
+      rows: [[1,"ひとつ"],[2,"ふたつ"],[3,"みっつ"],[4,"よっつ"],[5,"いつつ"],[6,"むっつ"],[7,"ななつ"],[8,"やっつ"],[9,"ここのつ"],[10,"とお"]] },
+    { key: "nin", unit: "人", label: "People (〜人)", note: "1 and 2 are irregular.",
+      rows: [[1,"ひとり"],[2,"ふたり"],[3,"さんにん"],[4,"よにん"],[5,"ごにん"],[6,"ろくにん"],[7,"しちにん"],[8,"はちにん"],[9,"きゅうにん"],[10,"じゅうにん"]] },
+    { key: "ko", unit: "個", label: "Small objects (〜個)", note: "1, 6, 8, 10 change sound.",
+      rows: [[1,"いっこ"],[2,"にこ"],[3,"さんこ"],[4,"よんこ"],[5,"ごこ"],[6,"ろっこ"],[7,"ななこ"],[8,"はっこ"],[9,"きゅうこ"],[10,"じゅっこ"]] },
+    { key: "mai", unit: "枚", label: "Flat things (〜枚)", note: "Regular — paper, tickets, shirts.",
+      rows: [[1,"いちまい"],[2,"にまい"],[3,"さんまい"],[4,"よんまい"],[5,"ごまい"],[6,"ろくまい"],[7,"ななまい"],[8,"はちまい"],[9,"きゅうまい"],[10,"じゅうまい"]] },
+    { key: "hon", unit: "本", label: "Long things (〜本)", note: "ほん / ぼん / ぽん — bottles, pens.",
+      rows: [[1,"いっぽん"],[2,"にほん"],[3,"さんぼん"],[4,"よんほん"],[5,"ごほん"],[6,"ろっぽん"],[7,"ななほん"],[8,"はっぽん"],[9,"きゅうほん"],[10,"じゅっぽん"]] },
+    { key: "hai", unit: "杯", label: "Cups / glasses (〜杯)", note: "はい / ばい / ぱい.",
+      rows: [[1,"いっぱい"],[2,"にはい"],[3,"さんばい"],[4,"よんはい"],[5,"ごはい"],[6,"ろっぱい"],[7,"ななはい"],[8,"はっぱい"],[9,"きゅうはい"],[10,"じゅっぱい"]] },
+    { key: "sai", unit: "歳", label: "Age (〜歳)", note: "20 is はたち (二十歳).",
+      rows: [[1,"いっさい"],[2,"にさい"],[3,"さんさい"],[4,"よんさい"],[5,"ごさい"],[6,"ろくさい"],[7,"ななさい"],[8,"はっさい"],[9,"きゅうさい"],[10,"じゅっさい"]] },
+    { key: "ji", unit: "時", label: "O'clock (〜時)", note: "4, 7, 9 are よ / しち / く.",
+      rows: [[1,"いちじ"],[2,"にじ"],[3,"さんじ"],[4,"よじ"],[5,"ごじ"],[6,"ろくじ"],[7,"しちじ"],[8,"はちじ"],[9,"くじ"],[10,"じゅうじ"],[11,"じゅういちじ"],[12,"じゅうにじ"]] },
+    { key: "fun", unit: "分", label: "Minutes (〜分)", note: "ふん / ぷん changes a lot.",
+      rows: [[1,"いっぷん"],[2,"にふん"],[3,"さんぷん"],[4,"よんぷん"],[5,"ごふん"],[6,"ろっぷん"],[7,"ななふん"],[8,"はっぷん"],[9,"きゅうふん"],[10,"じゅっぷん"]] },
+  ];
+
   window.JP_DATA = {
     kana: { gojuon, dakuten, yoon },
     kanji,
@@ -899,5 +977,8 @@
     phrases,
     phraseCatLabels,
     scenarios,
+    conjVerbs,
+    conjForms,
+    counters,
   };
 })();

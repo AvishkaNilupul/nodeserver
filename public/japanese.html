@@ -1031,6 +1031,41 @@
       .bubble .b-r { font-size: 12px; color: var(--muted); font-style: italic; margin-top: 2px; }
       .bubble .you-prompt { font-size: 13.5px; margin-bottom: 8px; }
 
+      /* drills: counter tables + number display */
+      .ctable { width: 100%; border-collapse: collapse; }
+      .ctable td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        font-size: 16px;
+      }
+      .ctable td:first-child {
+        width: 54px;
+        font-weight: 700;
+        color: var(--muted);
+      }
+      .ctable tr:last-child td { border-bottom: none; }
+      .ctable .cbtn { cursor: pointer; }
+      .ctable .cbtn:hover { color: var(--accent); }
+      .big-num {
+        font-size: 54px;
+        font-weight: 800;
+        letter-spacing: 1px;
+        line-height: 1.1;
+      }
+      .pill {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        color: var(--muted);
+        border: 1px solid var(--line);
+      }
+      .pill.godan { color: var(--accent); }
+      .pill.ichidan { color: var(--green); }
+      .pill.irregular { color: var(--jp); }
+
       @media (max-width: 700px) {
         .page {
           padding: 18px 14px 90px;
@@ -1233,6 +1268,7 @@
       <section class="view" data-view="grammar"></section>
       <section class="view" data-view="review"></section>
       <section class="view" data-view="quiz"></section>
+      <section class="view" data-view="drills"></section>
       <section class="view" data-view="phrases"></section>
     </main>
 
@@ -1649,6 +1685,7 @@
           ["grammar", "Grammar"],
           ["review", "Review"],
           ["quiz", "Quiz"],
+          ["drills", "Drills"],
           ["phrases", "Phrases"],
         ];
         function buildTabs() {
@@ -2857,6 +2894,294 @@
           const r = (o.kun !== "—" ? o.kun : o.on).split(",")[0].trim();
           return r.replace(/[（(].*/, "") || o.on;
         }
+
+        // ===============================================================
+        // Drills — conjugation + numbers / counters
+        // ===============================================================
+        // Conjugation engine (unit-tested): derives every N5 form from the
+        // dictionary form + verb group.
+        const C_IROW = { う: "い", つ: "ち", る: "り", む: "み", ぬ: "に", ぶ: "び", く: "き", ぐ: "ぎ", す: "し" };
+        const C_AROW = { う: "わ", つ: "た", る: "ら", む: "ま", ぬ: "な", ぶ: "ば", く: "か", ぐ: "が", す: "さ" };
+        const C_TE = { う: "って", つ: "って", る: "って", む: "んで", ぶ: "んで", ぬ: "んで", く: "いて", ぐ: "いで", す: "して" };
+        const C_TA = { う: "った", つ: "った", る: "った", む: "んだ", ぶ: "んだ", ぬ: "んだ", く: "いた", ぐ: "いだ", す: "した" };
+        function masuStem(w, g) {
+          if (g === "irregular") {
+            if (w.endsWith("する")) return w.slice(0, -2) + "し";
+            if (w === "来る") return "来";
+            if (w === "くる") return "き";
+          }
+          if (g === "ichidan") return w.slice(0, -1);
+          return w.slice(0, -1) + C_IROW[w.slice(-1)];
+        }
+        function conjugate(w, g, form) {
+          if (w === "ある") return { dict: "ある", masu: "あります", masen: "ありません", mashita: "ありました", te: "あって", ta: "あった", nai: "ない" }[form];
+          if (form === "dict") return w;
+          const st = w.slice(0, -1), end = w.slice(-1);
+          if (form === "masu") return masuStem(w, g) + "ます";
+          if (form === "masen") return masuStem(w, g) + "ません";
+          if (form === "mashita") return masuStem(w, g) + "ました";
+          if (g === "ichidan") {
+            if (form === "te") return st + "て";
+            if (form === "ta") return st + "た";
+            if (form === "nai") return st + "ない";
+          }
+          if (g === "irregular") {
+            if (w.endsWith("する")) {
+              const b = w.slice(0, -2);
+              return { te: b + "して", ta: b + "した", nai: b + "しない" }[form];
+            }
+            if (w === "来る") return { te: "来て", ta: "来た", nai: "来ない" }[form];
+            if (w === "くる") return { te: "きて", ta: "きた", nai: "こない" }[form];
+          }
+          if (w === "行く" || w === "いく") {
+            if (form === "te") return st + "って";
+            if (form === "ta") return st + "った";
+          }
+          if (form === "te") return st + C_TE[end];
+          if (form === "ta") return st + C_TA[end];
+          if (form === "nai") return st + C_AROW[end] + "ない";
+          return w;
+        }
+        const FORM_HINT = {
+          masu: "Polite present/future: stem + ます. (godan: last kana → i-row)",
+          masen: "Polite negative: ます-stem + ません.",
+          mashita: "Polite past: ます-stem + ました.",
+          te: "godan: う/つ/る→って, む/ぶ/ぬ→んで, く→いて, ぐ→いで, す→して. ichidan: drop る +て. 行く is the exception → 行って.",
+          nai: "Plain negative. godan: last kana → a-row + ない (う→わ). ichidan: drop る +ない.",
+          ta: "Plain past: like the て-form but with た / だ.",
+        };
+        const GROUP_SHORT = { godan: "u-verb", ichidan: "ru-verb", irregular: "irr." };
+
+        // Number reader (unit-tested), 1–99,999 with the sound changes.
+        const N_ONES = { 1: "いち", 2: "に", 3: "さん", 4: "よん", 5: "ご", 6: "ろく", 7: "なな", 8: "はち", 9: "きゅう" };
+        const N_HYAKU = { 1: "ひゃく", 2: "にひゃく", 3: "さんびゃく", 4: "よんひゃく", 5: "ごひゃく", 6: "ろっぴゃく", 7: "ななひゃく", 8: "はっぴゃく", 9: "きゅうひゃく" };
+        const N_SEN = { 1: "せん", 2: "にせん", 3: "さんぜん", 4: "よんせん", 5: "ごせん", 6: "ろくせん", 7: "ななせん", 8: "はっせん", 9: "きゅうせん" };
+        function n_u100(n) {
+          if (n < 10) return N_ONES[n] || "";
+          const j = Math.floor(n / 10), o = n % 10;
+          return (j === 1 ? "じゅう" : N_ONES[j] + "じゅう") + (o ? N_ONES[o] : "");
+        }
+        function n_u10000(n) {
+          let out = "";
+          const s = Math.floor(n / 1000); n %= 1000;
+          if (s) out += N_SEN[s];
+          const h = Math.floor(n / 100); n %= 100;
+          if (h) out += N_HYAKU[h];
+          if (n) out += n_u100(n);
+          return out;
+        }
+        function numReading(n) {
+          if (n === 0) return "ゼロ";
+          let out = "";
+          const m = Math.floor(n / 10000); n %= 10000;
+          if (m) out += n_u10000(m) + "まん";
+          if (n) out += n_u10000(n);
+          return out;
+        }
+        const JI = {};
+        (DATA.counters.find((c) => c.key === "ji") || { rows: [] }).rows.forEach(([n, r]) => (JI[n] = r));
+        const MINMAP = { 0: "", 5: "ごふん", 10: "じゅっぷん", 15: "じゅうごふん", 20: "にじゅっぷん", 25: "にじゅうごふん", 30: "はん" };
+
+        let drillMode = "conjugation";
+        RENDER.drills = function () {
+          const v = $('[data-view="drills"]');
+          v.innerHTML =
+            '<div class="card"><h2>Drills 🏋️</h2><div class="hint">The mechanics N5 tests hardest — verb conjugation and number / counter readings. Reveal the answer, self-check, tap 🔊 to hear it.</div>' +
+            '<div class="chiprow" style="margin:14px 0 0">' +
+            '<button class="chip ' + (drillMode === "conjugation" ? "active" : "") + '" onclick="setDrill(\'conjugation\')">🔀 Conjugation</button>' +
+            '<button class="chip ' + (drillMode === "numbers" ? "active" : "") + '" onclick="setDrill(\'numbers\')">🔢 Numbers &amp; counters</button>' +
+            "</div></div><div id=\"drillBody\"></div>";
+          paintDrill();
+        };
+        window.setDrill = function (m) {
+          drillMode = m;
+          RENDER.drills();
+        };
+        function paintDrill() {
+          if (drillMode === "conjugation") paintConjHub();
+          else paintNumHub();
+        }
+
+        let conjFormSel = "mixed";
+        function paintConjHub() {
+          el("drillBody").innerHTML =
+            '<div class="chiprow">' +
+            '<button class="chip ' + (conjFormSel === "mixed" ? "active" : "") + '" onclick="setConjForm(\'mixed\')">Mixed</button>' +
+            DATA.conjForms.map((f) => '<button class="chip ' + (conjFormSel === f.key ? "active" : "") + '" onclick="setConjForm(\'' + f.key + "')\">" + escapeHtml(f.label.split(" ")[0]) + "</button>").join("") +
+            "</div>" +
+            '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:10px">' + DATA.conjVerbs.length +
+            ' N5 verbs · <span class="pill ichidan">ru-verb</span> <span class="pill godan">u-verb</span> <span class="pill irregular">irregular</span></div>' +
+            '<div class="btnrow" style="justify-content:center"><button class="btn jp" onclick="startConj()">▶ Start conjugation drill</button><button class="btn" onclick="showConjTable()">Reference table</button></div></div>';
+        }
+        window.setConjForm = function (f) {
+          conjFormSel = f;
+          paintConjHub();
+        };
+        window.startConj = function () {
+          const forms = conjFormSel === "mixed" ? DATA.conjForms.map((f) => f.key) : [conjFormSel];
+          let items = [];
+          DATA.conjVerbs.forEach((vb) => {
+            forms.forEach((fk) => {
+              const fdef = DATA.conjForms.find((f) => f.key === fk);
+              items.push({ vb, fk, flabel: fdef.label, answer: conjugate(vb.w, vb.group, fk), answerK: conjugate(vb.k, vb.group, fk) });
+            });
+          });
+          items = shuffle(items).slice(0, conjFormSel === "mixed" ? 24 : DATA.conjVerbs.length);
+          conjDrill(items);
+        };
+        function conjDrill(items) {
+          const v = $('[data-view="drills"]');
+          let idx = 0, revealed = false;
+          function render() {
+            if (idx >= items.length) {
+              markStudied(items.length);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">💪</div><b>Drill done!</b><div style="margin-top:8px">' + items.length +
+                ' conjugations practised.</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_drills()">Back to Drills</button></div></div></div>';
+              return;
+            }
+            const it = items[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>Conjugation</span><span>' + (idx + 1) + " / " + items.length + "</span></div>" +
+              '<div class="flashcard" id="fc" style="cursor:pointer;min-height:210px"><div class="front jp small">' + escapeHtml(it.vb.w) + "</div>" +
+              '<div style="font-size:13px;color:var(--muted);margin-top:6px">' + escapeHtml(it.vb.m) + ' · <span class="pill ' + it.vb.group + '">' + GROUP_SHORT[it.vb.group] + "</span></div>" +
+              '<div style="font-size:15px;font-weight:700;margin-top:14px">→ ' + escapeHtml(it.flabel) + "</div>" +
+              (revealed
+                ? '<div class="back"><div class="b1 jp">' + escapeHtml(it.answer) + '</div><div class="b2" style="margin-top:8px">' + escapeHtml(FORM_HINT[it.fk]) + "</div></div>"
+                : '<div class="tap">Think, then tap to reveal</div>') +
+              "</div>" +
+              '<div class="spk-controls">' + (revealed ? '<button class="btn" id="hearBtn">' + spk + " Hear</button>" : "") +
+              '<button class="btn primary" id="nextBtn">' + (revealed ? (idx + 1 >= items.length ? "Finish" : "Next →") : "Reveal") + "</button></div></div>";
+            el("fc").onclick = () => {
+              if (!revealed) {
+                revealed = true;
+                render();
+                speak(it.answerK);
+              }
+            };
+            const hb = el("hearBtn");
+            if (hb) hb.onclick = () => speak(it.answerK);
+            el("nextBtn").onclick = () => {
+              if (!revealed) {
+                revealed = true;
+                render();
+                speak(it.answerK);
+              } else {
+                idx++;
+                revealed = false;
+                render();
+              }
+            };
+          }
+          render();
+        }
+        window.showConjTable = function () {
+          const v = $('[data-view="drills"]');
+          v.innerHTML =
+            '<div class="btnrow" style="margin-bottom:14px"><button class="btn" onclick="RENDER_drills()">← Back</button></div>' +
+            '<div class="card" style="overflow-x:auto"><table class="ctable"><tr><td style="width:auto"><b>Verb</b></td><td><b>ます</b></td><td><b>て</b></td><td><b>ない</b></td><td><b>た</b></td></tr>' +
+            DATA.conjVerbs.map((vb) =>
+              '<tr><td style="width:auto"><span class="jp">' + vb.w + '</span> <span class="pill ' + vb.group + '">' + GROUP_SHORT[vb.group] + '</span></td><td class="jp">' + conjugate(vb.w, vb.group, "masu") + '</td><td class="jp">' + conjugate(vb.w, vb.group, "te") + '</td><td class="jp">' + conjugate(vb.w, vb.group, "nai") + '</td><td class="jp">' + conjugate(vb.w, vb.group, "ta") + "</td></tr>",
+            ).join("") +
+            "</table></div>";
+        };
+
+        let numSub = "numbers";
+        function paintNumHub() {
+          el("drillBody").innerHTML =
+            '<div class="chiprow">' +
+            [["numbers", "Read numbers"], ["money", "Money (¥)"], ["time", "Time (〜時〜分)"], ["counters", "Counters"]]
+              .map(([k, l]) => '<button class="chip ' + (numSub === k ? "active" : "") + '" onclick="setNumSub(\'' + k + "')\">" + l + "</button>").join("") +
+            '</div><div id="numBody"></div>';
+          paintNumSub();
+        }
+        window.setNumSub = function (s) {
+          numSub = s;
+          paintNumHub();
+        };
+        function paintNumSub() {
+          const b = el("numBody");
+          if (numSub === "counters") {
+            b.innerHTML = DATA.counters
+              .map((c) =>
+                '<div class="card"><h2>' + escapeHtml(c.label) + '</h2><div class="hint" style="margin-bottom:8px">' + escapeHtml(c.note) + "</div>" +
+                '<table class="ctable">' + c.rows.map(([n, r]) => "<tr><td>" + n + c.unit + '</td><td class="cbtn jp" data-speak="' + escapeAttr(r) + '">' + r + "</td></tr>").join("") + "</table></div>",
+              ).join("");
+            b.querySelectorAll("[data-speak]").forEach((x) => x.addEventListener("click", () => speak(x.getAttribute("data-speak"))));
+            return;
+          }
+          const label = numSub === "money" ? "prices in yen" : numSub === "time" ? "clock times" : "numbers";
+          const btn = numSub === "time" ? "time" : numSub === "money" ? "money" : "number";
+          b.innerHTML =
+            '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">Read the ' + label +
+            ' aloud, then reveal &amp; check.</div><button class="btn jp" onclick="startNumDrill()">▶ Start ' + btn + " drill</button></div>";
+        }
+        window.startNumDrill = function () {
+          const items = [];
+          const mins = [0, 5, 10, 15, 20, 25, 30];
+          for (let i = 0; i < 15; i++) {
+            if (numSub === "time") {
+              const h = 1 + Math.floor(Math.random() * 12);
+              const m = mins[Math.floor(Math.random() * mins.length)];
+              const disp = h + "時" + (m === 30 ? "半" : m ? m + "分" : "");
+              items.push({ disp, read: (JI[h] || "") + (MINMAP[m] || "") });
+            } else {
+              let n;
+              if (numSub === "money") {
+                const picks = [Math.floor(Math.random() * 9 + 1) * 100, Math.floor(Math.random() * 9 + 1) * 1000, Math.floor(Math.random() * 900 + 100), (Math.floor(Math.random() * 90) + 10) * 100];
+                n = picks[Math.floor(Math.random() * picks.length)];
+              } else {
+                n = Math.floor(Math.random() * 9999) + 1;
+              }
+              const read = numSub === "money" ? numReading(n) + "えん" : numReading(n);
+              const disp = numSub === "money" ? "¥" + n.toLocaleString() : n.toLocaleString();
+              items.push({ disp, read });
+            }
+          }
+          numDrill(items);
+        };
+        function numDrill(items) {
+          const v = $('[data-view="drills"]');
+          let idx = 0, revealed = false;
+          function render() {
+            if (idx >= items.length) {
+              markStudied(items.length);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">🔢</div><b>Done!</b><div style="margin-top:8px">' + items.length +
+                ' read.</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_drills()">Back to Drills</button></div></div></div>';
+              return;
+            }
+            const it = items[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>Read it aloud</span><span>' + (idx + 1) + " / " + items.length + "</span></div>" +
+              '<div class="flashcard" id="fc" style="cursor:pointer;min-height:200px"><div class="big-num">' + escapeHtml(it.disp) + "</div>" +
+              (revealed ? '<div class="back"><div class="b1 jp">' + escapeHtml(it.read) + "</div></div>" : '<div class="tap">Say it, then tap to reveal</div>') + "</div>" +
+              '<div class="spk-controls">' + (revealed ? '<button class="btn" id="hearBtn">' + spk + " Hear</button>" : "") +
+              '<button class="btn primary" id="nextBtn">' + (revealed ? (idx + 1 >= items.length ? "Finish" : "Next →") : "Reveal") + "</button></div></div>";
+            el("fc").onclick = () => {
+              if (!revealed) {
+                revealed = true;
+                render();
+                speak(it.read);
+              }
+            };
+            const hb = el("hearBtn");
+            if (hb) hb.onclick = () => speak(it.read);
+            el("nextBtn").onclick = () => {
+              if (!revealed) {
+                revealed = true;
+                render();
+                speak(it.read);
+              } else {
+                idx++;
+                revealed = false;
+                render();
+              }
+            };
+          }
+          render();
+        }
+        window.RENDER_drills = RENDER.drills;
 
         // ===============================================================
         // Modal
