@@ -162,6 +162,24 @@
     k("少", "few, little", "ショウ", "すく(ない), すこ(し)", "少し (すこし) — a little"),
   ];
 
+  // Stroke counts, attached to each kanji for the detail view / writing hint.
+  const STROKES = {
+    日: 4, 一: 1, 二: 2, 三: 3, 四: 5, 五: 4, 六: 4, 七: 2, 八: 2, 九: 2,
+    十: 2, 百: 6, 千: 3, 万: 3, 円: 4, 月: 4, 火: 4, 水: 4, 木: 4, 金: 8,
+    土: 3, 曜: 18, 本: 5, 人: 2, 大: 3, 小: 3, 中: 4, 上: 3, 下: 3, 左: 5,
+    右: 5, 前: 9, 後: 9, 外: 5, 名: 6, 学: 8, 校: 10, 生: 5, 先: 6, 年: 6,
+    時: 10, 分: 4, 間: 12, 今: 4, 半: 5, 何: 7, 語: 14, 話: 13, 読: 14,
+    書: 10, 聞: 14, 見: 7, 言: 7, 食: 9, 飲: 12, 行: 6, 来: 7, 帰: 10,
+    出: 5, 入: 2, 立: 5, 休: 6, 買: 12, 車: 7, 電: 13, 気: 6, 天: 4, 雨: 8,
+    花: 7, 川: 3, 山: 3, 田: 5, 目: 5, 口: 3, 手: 4, 足: 7, 耳: 6, 父: 4,
+    母: 5, 友: 4, 高: 10, 安: 6, 新: 13, 古: 5, 白: 5, 長: 8, 毎: 6, 週: 11,
+    道: 12, 店: 8, 駅: 14, 社: 7, 会: 6, 国: 8, 東: 8, 西: 6, 南: 9, 北: 5,
+    午: 4, 女: 3, 男: 7, 子: 3, 多: 6, 少: 4,
+  };
+  kanji.forEach((o) => {
+    o.s = STROKES[o.c] || null;
+  });
+
   // --- Vocabulary (N5) ------------------------------------------------------
   // {w: written form, k: kana, r: romaji, m: meaning, cat: category key}
   const v = (w, kk, r, m, cat) => ({ w, k: kk, r, m, cat });
@@ -785,6 +803,93 @@
     help: "Help & emergencies",
   };
 
+  // --- Work (アルバイト) conversation scenarios ------------------------------
+  // Role-plays for part-time work. Each turn is spoken by "them" (the app reads
+  // it aloud) or "you" (you say it — checked by speech recognition). Some lines
+  // use set keigo phrases that are above N5 grammar but essential on the job;
+  // the English makes them memorisable as fixed expressions.
+  const t = (who, j, r, e) => ({ who, j, r, e });
+  const scenarios = [
+    {
+      id: "konbini",
+      title: "Convenience store register",
+      place: "🏪",
+      desc: "You're the clerk (店員). Serve a customer at the register.",
+      turns: [
+        t("you", "いらっしゃいませ。", "Irasshaimase.", "Welcome! (greet the customer)"),
+        t("them", "これ、お願いします。", "Kore, onegai shimasu.", "This one, please."),
+        t("you", "袋はご利用ですか。", "Fukuro wa go-riyō desu ka.", "Do you need a bag?"),
+        t("them", "はい、お願いします。", "Hai, onegai shimasu.", "Yes, please."),
+        t("you", "お弁当は温めますか。", "O-bentō wa atatamemasu ka.", "Shall I heat up the bento?"),
+        t("them", "はい、お願いします。", "Hai, onegai shimasu.", "Yes, please."),
+        t("you", "五百円になります。", "Gohyaku-en ni narimasu.", "That'll be 500 yen."),
+        t("them", "カードでお願いします。", "Kādo de onegai shimasu.", "By card, please."),
+        t("you", "ありがとうございます。またお越しくださいませ。", "Arigatō gozaimasu. Mata o-koshi kudasaimase.", "Thank you. Please come again."),
+      ],
+    },
+    {
+      id: "cafe",
+      title: "Café — serving a customer",
+      place: "☕",
+      desc: "You're waiting tables at a café. Seat and take an order.",
+      turns: [
+        t("you", "いらっしゃいませ。何名様ですか。", "Irasshaimase. Nan-mei-sama desu ka.", "Welcome. How many people?"),
+        t("them", "一人です。", "Hitori desu.", "One person."),
+        t("you", "こちらへどうぞ。", "Kochira e dōzo.", "This way, please."),
+        t("you", "ご注文はお決まりですか。", "Go-chūmon wa o-kimari desu ka.", "Are you ready to order?"),
+        t("them", "ホットコーヒーを一つください。", "Hotto kōhī o hitotsu kudasai.", "One hot coffee, please."),
+        t("you", "かしこまりました。少々お待ちください。", "Kashikomarimashita. Shōshō o-machi kudasai.", "Certainly. Please wait a moment."),
+      ],
+    },
+    {
+      id: "interview",
+      title: "Job interview (面接)",
+      place: "💼",
+      desc: "You're the applicant. Answer basic part-time interview questions.",
+      turns: [
+        t("them", "面接を始めます。よろしくお願いします。", "Mensetsu o hajimemasu. Yoroshiku onegai shimasu.", "Let's start the interview."),
+        t("you", "よろしくお願いします。", "Yoroshiku onegai shimasu.", "Nice to meet you / thank you."),
+        t("them", "どうしてこの仕事を選びましたか。", "Dōshite kono shigoto o erabimashita ka.", "Why did you choose this job?"),
+        t("you", "日本語を練習したいからです。", "Nihongo o renshū shitai kara desu.", "Because I want to practice Japanese."),
+        t("them", "週に何日働けますか。", "Shū ni nan-nichi hatarakemasu ka.", "How many days a week can you work?"),
+        t("you", "週に三日、働けます。", "Shū ni mikka, hatarakemasu.", "I can work three days a week."),
+        t("them", "いつから働けますか。", "Itsu kara hatarakemasu ka.", "When can you start?"),
+        t("you", "来週から働けます。", "Raishū kara hatarakemasu.", "I can start next week."),
+        t("them", "わかりました。ありがとうございました。", "Wakarimashita. Arigatō gozaimashita.", "Understood. Thank you."),
+      ],
+    },
+    {
+      id: "restaurant",
+      title: "Ordering at a restaurant",
+      place: "🍜",
+      desc: "You're the customer this time — order a meal and pay.",
+      turns: [
+        t("them", "いらっしゃいませ。", "Irasshaimase.", "Welcome."),
+        t("you", "すみません、メニューをお願いします。", "Sumimasen, menyū o onegai shimasu.", "Excuse me, a menu please."),
+        t("them", "ご注文はお決まりですか。", "Go-chūmon wa o-kimari desu ka.", "Are you ready to order?"),
+        t("you", "これを一つください。", "Kore o hitotsu kudasai.", "One of these, please."),
+        t("them", "お飲み物はいかがですか。", "O-nomimono wa ikaga desu ka.", "How about a drink?"),
+        t("you", "お水をお願いします。", "O-mizu o onegai shimasu.", "Water, please."),
+        t("you", "すみません、お会計をお願いします。", "Sumimasen, o-kaikei o onegai shimasu.", "Excuse me, the bill please."),
+      ],
+    },
+    {
+      id: "workplace",
+      title: "Workplace basics",
+      place: "🧑‍🍳",
+      desc: "Everyday phrases for getting through a shift with coworkers.",
+      turns: [
+        t("you", "おはようございます。", "Ohayō gozaimasu.", "Good morning."),
+        t("them", "おはよう。今日もよろしくね。", "Ohayō. Kyō mo yoroshiku ne.", "Morning. Let's have a good day."),
+        t("you", "すみません、これはどうやってやりますか。", "Sumimasen, kore wa dō yatte yarimasu ka.", "Excuse me, how do I do this?"),
+        t("them", "こうやってやります。", "Kō yatte yarimasu.", "You do it like this."),
+        t("you", "わかりました。ありがとうございます。", "Wakarimashita. Arigatō gozaimasu.", "Got it. Thank you."),
+        t("you", "お先に失礼します。", "O-saki ni shitsurei shimasu.", "Excuse me, I'm leaving (before you)."),
+        t("them", "おつかれさまでした。", "Otsukaresama deshita.", "Good work today."),
+      ],
+    },
+  ];
+
   window.JP_DATA = {
     kana: { gojuon, dakuten, yoon },
     kanji,
@@ -793,5 +898,6 @@
     grammar,
     phrases,
     phraseCatLabels,
+    scenarios,
   };
 })();
