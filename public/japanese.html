@@ -1,0 +1,2500 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+    <title>Japanese N5 · RedeemHub</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --accent2: #6366f1;
+        --green: #059669;
+        --red: #ef4444;
+        --jp: #e11d48;
+        --jp2: #f43f5e;
+        --amber: #d97706;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      html[data-theme="dark"] .chip.active,
+      html[data-theme="dark"] .tabs button.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        height: 100vh;
+        display: flex;
+        overflow: hidden;
+        -webkit-text-size-adjust: 100%;
+      }
+      .jp {
+        font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo",
+          "MS PGothic", sans-serif;
+      }
+
+      /* ---- Sidebar (shared shell) ---- */
+      .nav {
+        width: 236px;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        box-shadow: 0 6px 14px rgba(79, 70, 229, 0.32);
+      }
+      .nav .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        overflow-y: auto;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: #eef2ff;
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .nav .me {
+        border-top: 1px solid var(--line);
+        padding: 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .nav .me .av {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #34d399, #10b981);
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-weight: 700;
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+      .nav .me .who {
+        line-height: 1.2;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13.5px;
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 110px;
+      }
+      .nav .me .who span {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .nav .me .logout {
+        margin-left: auto;
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+      .nav .me .logout + .logout {
+        margin-left: 8px;
+      }
+      .nav .me .logout:hover {
+        color: #ef4444;
+        border-color: #fecaca;
+        background: #fef2f2;
+      }
+
+      /* ---- Page ---- */
+      .page {
+        flex: 1;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        padding: 26px 30px 80px;
+        min-width: 0;
+      }
+      .page-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-bottom: 18px;
+      }
+      .page-head h1 {
+        font-size: 22px;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .page-head h1 .badge-jp {
+        font-size: 12px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, var(--jp2), var(--jp));
+        padding: 3px 9px;
+        border-radius: 999px;
+      }
+      .page-head .sub {
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 4px;
+      }
+      .head-right {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .sync {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--muted);
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .sync .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--muted);
+        flex-shrink: 0;
+      }
+      .sync.ok .dot {
+        background: var(--green);
+      }
+      .sync.saving .dot {
+        background: var(--amber);
+      }
+      .sync.off .dot {
+        background: var(--red);
+      }
+
+      .tabs {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 22px;
+      }
+      .tabs button {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 8px 14px;
+        border-radius: 999px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .tabs button:hover {
+        background: var(--surface-2);
+      }
+      .tabs button.active {
+        background: #eef2ff;
+        color: var(--accent);
+        border-color: transparent;
+      }
+
+      .view {
+        display: none;
+      }
+      .view.active {
+        display: block;
+        animation: fade 0.18s ease;
+      }
+      @keyframes fade {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 18px;
+      }
+      .card h2 {
+        font-size: 15px;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+      .card .hint {
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        gap: 14px;
+      }
+      .cols-3 {
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      }
+
+      /* stat tiles */
+      .stat {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 16px 18px;
+      }
+      .stat .k {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .stat .v {
+        font-size: 26px;
+        font-weight: 800;
+        margin-top: 6px;
+      }
+      .stat .v small {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+      .progress {
+        height: 8px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        overflow: hidden;
+        margin-top: 12px;
+        border: 1px solid var(--line);
+      }
+      .progress > i {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        border-radius: 999px;
+        transition: width 0.4s ease;
+      }
+
+      .btn {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 9px 15px;
+        border-radius: 10px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .btn:hover {
+        background: var(--surface-2);
+      }
+      .btn.primary {
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        color: #fff;
+        border-color: transparent;
+      }
+      .btn.primary:hover {
+        filter: brightness(1.05);
+      }
+      .btn.jp {
+        background: linear-gradient(135deg, var(--jp2), var(--jp));
+        color: #fff;
+        border-color: transparent;
+      }
+      .btn.sm {
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+      .btn.danger {
+        color: var(--red);
+        border-color: rgba(239, 68, 68, 0.4);
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .btnrow {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .chip {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 999px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .chip.active {
+        background: #eef2ff;
+        color: var(--accent);
+        border-color: transparent;
+      }
+      .chiprow {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+
+      .search {
+        width: 100%;
+        max-width: 320px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        border-radius: 10px;
+        padding: 10px 13px;
+        font: inherit;
+        font-size: 16px;
+        margin-bottom: 16px;
+      }
+      .search:focus {
+        outline: none;
+        border-color: var(--accent2);
+      }
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+      }
+      .toolbar .search {
+        margin-bottom: 0;
+      }
+
+      /* form fields (custom words / sentences) */
+      .field {
+        margin-bottom: 12px;
+      }
+      .field label {
+        display: block;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        margin: 0 0 5px 2px;
+      }
+      .field input,
+      .field textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        border-radius: 10px;
+        padding: 11px 13px;
+        font: inherit;
+        font-size: 16px;
+      }
+      .field textarea {
+        min-height: 64px;
+        resize: vertical;
+      }
+      .field input:focus,
+      .field textarea:focus {
+        outline: none;
+        border-color: var(--accent2);
+      }
+      .field .jpin {
+        font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo",
+          sans-serif;
+      }
+      .field2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      /* kana grid */
+      .kana-block {
+        margin-bottom: 22px;
+      }
+      .kana-block h3 {
+        font-size: 12.5px;
+        color: var(--muted);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 10px;
+      }
+      .kana-grid {
+        display: grid;
+        gap: 7px;
+      }
+      .kana-cell {
+        aspect-ratio: 1;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: transform 0.08s ease, border-color 0.1s ease;
+        min-height: 52px;
+      }
+      .kana-cell:hover {
+        border-color: var(--accent2);
+        transform: translateY(-2px);
+      }
+      .kana-cell.empty {
+        border: 1px dashed transparent;
+        background: transparent;
+        cursor: default;
+      }
+      .kana-cell .g {
+        font-size: 23px;
+        font-weight: 600;
+        line-height: 1;
+      }
+      .kana-cell .r {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 5px;
+      }
+      .kana-cell.learned {
+        border-color: var(--green);
+        box-shadow: inset 0 0 0 1px rgba(5, 150, 105, 0.35);
+      }
+
+      /* kanji cards */
+      .kanji-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+        padding: 14px;
+        cursor: pointer;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        transition: transform 0.08s ease, border-color 0.1s ease;
+      }
+      .kanji-card:hover {
+        border-color: var(--accent2);
+        transform: translateY(-2px);
+      }
+      .kanji-card .c {
+        font-size: 34px;
+        font-weight: 600;
+        line-height: 1;
+        flex-shrink: 0;
+      }
+      .kanji-card .m {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .kanji-card .rd {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .kanji-card.in-srs {
+        border-color: var(--accent);
+      }
+      .tick {
+        margin-left: auto;
+        font-size: 11px;
+        color: var(--accent);
+        font-weight: 700;
+        flex-shrink: 0;
+      }
+
+      /* list rows (vocab / words / sentences) */
+      .item-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        margin-bottom: 8px;
+      }
+      .item-row .word {
+        font-size: 17px;
+        font-weight: 700;
+        min-width: 88px;
+      }
+      .item-row .read {
+        font-size: 12.5px;
+        color: var(--muted);
+        min-width: 84px;
+      }
+      .item-row .mean {
+        font-size: 13.5px;
+        flex: 1;
+        min-width: 110px;
+      }
+      .item-row .mean .note {
+        display: block;
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .item-row .romaji {
+        font-size: 12px;
+        color: var(--muted);
+        font-style: italic;
+        min-width: 80px;
+      }
+      .item-row .acts {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+        margin-left: auto;
+      }
+      .iconbtn {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        width: 36px;
+        height: 36px;
+        border-radius: 9px;
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        flex-shrink: 0;
+        font-size: 14px;
+      }
+      .iconbtn:hover {
+        color: var(--accent);
+        border-color: var(--accent2);
+      }
+      .iconbtn.on {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: #eef2ff;
+      }
+      html[data-theme="dark"] .iconbtn.on,
+      html[data-theme="dark"] .kanji-card.in-srs {
+        background: rgba(99, 102, 241, 0.15);
+      }
+
+      /* grammar / phrases */
+      .acc {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        margin-bottom: 8px;
+        overflow: hidden;
+      }
+      .acc > summary {
+        padding: 14px 16px;
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 14px;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .acc > summary::-webkit-details-marker {
+        display: none;
+      }
+      .acc > summary .struct {
+        margin-left: auto;
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 600;
+        background: #eef2ff;
+        padding: 3px 9px;
+        border-radius: 7px;
+      }
+      html[data-theme="dark"] .acc > summary .struct {
+        background: rgba(99, 102, 241, 0.18);
+      }
+      .acc .body {
+        padding: 0 16px 16px;
+      }
+      .acc .body .note {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.6;
+        margin-bottom: 12px;
+      }
+      .ex {
+        border-left: 3px solid var(--accent2);
+        padding: 4px 0 4px 12px;
+        margin-bottom: 12px;
+      }
+      .ex .j {
+        font-size: 15px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .ex .r {
+        font-size: 12px;
+        color: var(--muted);
+        font-style: italic;
+        margin-top: 2px;
+      }
+      .ex .e {
+        font-size: 13px;
+        margin-top: 2px;
+      }
+
+      /* flashcard / review / quiz */
+      .study {
+        max-width: 520px;
+        margin: 0 auto;
+      }
+      .flashcard {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--surface);
+        padding: 40px 22px;
+        text-align: center;
+        min-height: 230px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        user-select: none;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+      }
+      .flashcard .front {
+        font-size: 56px;
+        font-weight: 600;
+        line-height: 1.15;
+      }
+      .flashcard .front.small {
+        font-size: 32px;
+      }
+      .flashcard .back {
+        margin-top: 18px;
+        border-top: 1px dashed var(--line);
+        padding-top: 18px;
+        width: 100%;
+      }
+      .flashcard .back .b1 {
+        font-size: 22px;
+        font-weight: 700;
+      }
+      .flashcard .back .b2 {
+        font-size: 14px;
+        color: var(--muted);
+        margin-top: 6px;
+        line-height: 1.5;
+      }
+      .flashcard .tap {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 16px;
+      }
+      .rate {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .rate button {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        font: inherit;
+        font-weight: 700;
+        font-size: 13px;
+        padding: 14px 8px;
+        border-radius: 12px;
+        cursor: pointer;
+      }
+      .rate button small {
+        display: block;
+        font-size: 10.5px;
+        font-weight: 500;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .rate .again {
+        color: var(--red);
+        border-color: rgba(239, 68, 68, 0.35);
+      }
+      .rate .good {
+        color: var(--accent);
+        border-color: rgba(79, 70, 229, 0.35);
+      }
+      .rate .easy {
+        color: var(--green);
+        border-color: rgba(5, 150, 105, 0.35);
+      }
+      .rate button:hover {
+        background: var(--surface-2);
+      }
+      .sess-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+        font-size: 13px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .opt {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        font: inherit;
+        font-size: 16px;
+        font-weight: 600;
+        padding: 16px;
+        border-radius: 12px;
+        cursor: pointer;
+        text-align: center;
+        color: var(--ink);
+      }
+      .opt:hover {
+        background: var(--surface-2);
+      }
+      .opt.correct {
+        border-color: var(--green);
+        background: rgba(5, 150, 105, 0.12);
+        color: var(--green);
+      }
+      .opt.wrong {
+        border-color: var(--red);
+        background: rgba(239, 68, 68, 0.12);
+        color: var(--red);
+      }
+      .opts {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 40px 20px;
+        color: var(--muted);
+      }
+      .empty-state .big {
+        font-size: 44px;
+        margin-bottom: 10px;
+      }
+      .plan li {
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 14px;
+      }
+      .plan li:last-child {
+        border-bottom: none;
+      }
+      .plan li .dot {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        border: 2px solid var(--line);
+        flex-shrink: 0;
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+      }
+      .plan li.done .dot {
+        background: var(--green);
+        border-color: var(--green);
+        color: #fff;
+      }
+      .plan li.done .label {
+        color: var(--muted);
+        text-decoration: line-through;
+      }
+      .plan li .label {
+        flex: 1;
+      }
+      .plan li .go {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--accent);
+        cursor: pointer;
+      }
+
+      .toast {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%) translateY(20px);
+        background: var(--ink);
+        color: var(--bg);
+        padding: 10px 18px;
+        border-radius: 10px;
+        font-size: 13px;
+        font-weight: 600;
+        opacity: 0;
+        pointer-events: none;
+        transition: all 0.2s ease;
+        z-index: 300;
+        max-width: 90vw;
+        text-align: center;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      .modal-wrap {
+        position: fixed;
+        inset: 0;
+        z-index: 250;
+        display: grid;
+        place-items: center;
+        background: rgba(15, 23, 42, 0.5);
+        padding: 16px;
+      }
+      .modal-box {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 22px;
+        max-width: 440px;
+        width: 100%;
+        max-height: 90vh;
+        overflow: auto;
+        position: relative;
+      }
+
+      @media (max-width: 700px) {
+        .page {
+          padding: 18px 14px 90px;
+        }
+        .tabs {
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+          margin: 0 -14px 18px;
+          padding: 0 14px 2px;
+        }
+        .tabs::-webkit-scrollbar {
+          display: none;
+        }
+        .opts {
+          grid-template-columns: 1fr;
+        }
+        .field2 {
+          grid-template-columns: 1fr;
+        }
+        .item-row {
+          flex-wrap: wrap;
+          gap: 6px 12px;
+        }
+        .item-row .romaji {
+          display: none;
+        }
+        .item-row .word {
+          min-width: 0;
+        }
+        .item-row .read {
+          min-width: 0;
+        }
+        .item-row .mean {
+          flex-basis: 100%;
+          order: 5;
+        }
+        .item-row .acts {
+          order: 4;
+        }
+        .page-head h1 {
+          font-size: 19px;
+        }
+        .flashcard .front {
+          font-size: 48px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Admin</span>
+        </div>
+        <button
+          class="logout themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg
+          ><svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+        <button class="logout" id="logoutBtn" title="Log out">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="page">
+      <div class="page-head">
+        <div>
+          <h1>日本語 <span class="badge-jp">N5</span></h1>
+          <div class="sub" id="headSub">Learn fast — kana, kanji, vocab, grammar & spaced repetition.</div>
+        </div>
+        <div class="head-right">
+          <span class="sync" id="syncBadge"><span class="dot"></span><span id="syncText">Local</span></span>
+          <button class="btn primary" onclick="go('review')" id="headReview">
+            Review
+          </button>
+        </div>
+      </div>
+
+      <div class="tabs" id="tabs"></div>
+
+      <section class="view" data-view="dashboard"></section>
+      <section class="view" data-view="kana"></section>
+      <section class="view" data-view="kanji"></section>
+      <section class="view" data-view="vocab"></section>
+      <section class="view" data-view="mywords"></section>
+      <section class="view" data-view="sentences"></section>
+      <section class="view" data-view="grammar"></section>
+      <section class="view" data-view="review"></section>
+      <section class="view" data-view="quiz"></section>
+      <section class="view" data-view="phrases"></section>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="/japanese-data.js"></script>
+    <script>
+      (function () {
+        "use strict";
+        const DATA = window.JP_DATA;
+        const $ = (s, r) => (r || document).querySelector(s);
+        const el = (id) => document.getElementById(id);
+
+        // ===============================================================
+        // State — single source of truth, mirrored to localStorage (for
+        // offline/instant use) and synced to the server (cross-device).
+        // ===============================================================
+        const srs = {};
+        const words = [];
+        const sentences = [];
+        const stats = { streak: 0, lastStudy: null, history: {}, reviewsTotal: 0 };
+        const settings = { script: "hiragana", showRomaji: true };
+        const state = { updatedAt: 0 };
+        const LS_KEY = "jp_state_v2";
+
+        function snapshot() {
+          return {
+            srs,
+            stats,
+            settings,
+            words,
+            sentences,
+            updatedAt: state.updatedAt,
+          };
+        }
+        // Replace all live containers in place so existing references stay valid.
+        function adopt(ns) {
+          if (!ns) return;
+          Object.keys(srs).forEach((k) => delete srs[k]);
+          Object.assign(srs, ns.srs || {});
+          Object.keys(stats).forEach((k) => delete stats[k]);
+          Object.assign(
+            stats,
+            { streak: 0, lastStudy: null, history: {}, reviewsTotal: 0 },
+            ns.stats || {},
+          );
+          Object.keys(settings).forEach((k) => delete settings[k]);
+          Object.assign(
+            settings,
+            { script: "hiragana", showRomaji: true },
+            ns.settings || {},
+          );
+          words.length = 0;
+          (ns.words || []).forEach((w) => words.push(w));
+          sentences.length = 0;
+          (ns.sentences || []).forEach((s) => sentences.push(s));
+          state.updatedAt = ns.updatedAt || 0;
+        }
+
+        function localSave() {
+          try {
+            localStorage.setItem(LS_KEY, JSON.stringify(snapshot()));
+          } catch (e) {}
+        }
+        function localLoad() {
+          try {
+            const raw = localStorage.getItem(LS_KEY);
+            if (raw) return JSON.parse(raw);
+            // Migrate from the first (localStorage-only) version if present.
+            const oldSrs = localStorage.getItem("jp_srs_v1");
+            if (oldSrs) {
+              return {
+                srs: JSON.parse(oldSrs || "{}"),
+                stats: JSON.parse(localStorage.getItem("jp_stats_v1") || "{}"),
+                settings: JSON.parse(
+                  localStorage.getItem("jp_settings_v1") || "{}",
+                ),
+                words: [],
+                sentences: [],
+                updatedAt: Date.now(),
+              };
+            }
+          } catch (e) {}
+          return null;
+        }
+
+        // Any local mutation goes through here: bump timestamp, cache, sync.
+        function touch() {
+          state.updatedAt = Date.now();
+          localSave();
+          schedulePush();
+        }
+
+        // ---- Server sync ---------------------------------------------
+        async function api(method, url, body) {
+          const opts = { method, credentials: "same-origin", headers: {} };
+          if (body !== undefined) {
+            opts.headers["Content-Type"] = "application/json";
+            opts.body = JSON.stringify(body);
+          }
+          const res = await fetch(url, opts);
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        }
+        let syncState = "local";
+        function setSync(s) {
+          syncState = s;
+          const badge = el("syncBadge");
+          const txt = el("syncText");
+          if (!badge) return;
+          badge.className =
+            "sync " +
+            (s === "saved" ? "ok" : s === "saving" ? "saving" : s === "off" ? "off" : "");
+          txt.textContent =
+            s === "saved"
+              ? "Synced"
+              : s === "saving"
+                ? "Saving…"
+                : s === "off"
+                  ? "Offline"
+                  : "Local";
+        }
+        let pushTimer = null;
+        let pushing = false;
+        let pushAgain = false;
+        function schedulePush(now) {
+          clearTimeout(pushTimer);
+          pushTimer = setTimeout(doPush, now ? 0 : 1400);
+        }
+        async function doPush() {
+          if (pushing) {
+            pushAgain = true;
+            return;
+          }
+          pushing = true;
+          setSync("saving");
+          try {
+            await api("PUT", "/japanese/state", snapshot());
+            setSync("saved");
+          } catch (e) {
+            setSync("off");
+          } finally {
+            pushing = false;
+            if (pushAgain) {
+              pushAgain = false;
+              schedulePush(true);
+            }
+          }
+        }
+        async function pullState() {
+          // Load local first so the UI is instant and works offline.
+          adopt(localLoad());
+          try {
+            const r = await api("GET", "/japanese/state");
+            const server = r.state;
+            if (server && (server.updatedAt || 0) >= (state.updatedAt || 0)) {
+              adopt(server);
+              localSave();
+              setSync("saved");
+            } else if (server) {
+              // Local is newer than server — push it.
+              setSync("saving");
+              schedulePush(true);
+            } else {
+              // Nothing on the server yet — seed it with whatever we have.
+              if (Object.keys(srs).length || words.length || sentences.length) {
+                schedulePush(true);
+              } else {
+                setSync("saved");
+              }
+            }
+          } catch (e) {
+            setSync("off");
+          }
+        }
+        // Flush when connectivity returns or the tab is hidden/closed.
+        window.addEventListener("online", () => schedulePush(true));
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "hidden" && syncState !== "saved")
+            schedulePush(true);
+        });
+
+        // ===============================================================
+        // Text-to-speech (browser Web Speech API — no network needed)
+        // ===============================================================
+        let jaVoice = null;
+        function pickVoice() {
+          if (!("speechSynthesis" in window)) return;
+          const vs = speechSynthesis.getVoices();
+          jaVoice =
+            vs.find((v) => v.lang === "ja-JP") ||
+            vs.find((v) => v.lang && v.lang.indexOf("ja") === 0) ||
+            null;
+        }
+        if ("speechSynthesis" in window) {
+          pickVoice();
+          speechSynthesis.onvoiceschanged = pickVoice;
+        }
+        function speak(text, rate) {
+          if (!("speechSynthesis" in window) || !text) return;
+          try {
+            speechSynthesis.cancel();
+            const u = new SpeechSynthesisUtterance(text);
+            u.lang = "ja-JP";
+            u.rate = rate || 0.9;
+            if (jaVoice) u.voice = jaVoice;
+            speechSynthesis.speak(u);
+          } catch (e) {}
+        }
+        window.__jpSpeak = speak;
+
+        function toast(msg) {
+          const t = el("toast");
+          t.textContent = msg;
+          t.classList.add("show");
+          clearTimeout(toast._t);
+          toast._t = setTimeout(() => t.classList.remove("show"), 1600);
+        }
+
+        const spk =
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
+
+        // ===============================================================
+        // Lookups for the spaced-repetition engine
+        // ===============================================================
+        const KANA_MAP = {};
+        const KANA_FLAT = [];
+        ["gojuon", "dakuten", "yoon"].forEach((sec) =>
+          DATA.kana[sec].forEach((row) =>
+            row.forEach((cell) => {
+              if (cell) {
+                KANA_FLAT.push(cell);
+                KANA_MAP[cell.h] = cell.r;
+                KANA_MAP[cell.k] = cell.r;
+              }
+            }),
+          ),
+        );
+        const KANJI_MAP = {};
+        DATA.kanji.forEach((o) => (KANJI_MAP[o.c] = o));
+        const VOCAB_MAP = {};
+        DATA.vocab.forEach((o) => (VOCAB_MAP[o.w + "|" + o.k] = o));
+        const wordMap = () => {
+          const m = {};
+          words.forEach((w) => (m[w.id] = w));
+          return m;
+        };
+        const sentMap = () => {
+          const m = {};
+          sentences.forEach((s) => (m[s.id] = s));
+          return m;
+        };
+
+        const vocabId = (o) => "vocab:" + o.w + "|" + o.k;
+        const kanjiId = (o) => "kanji:" + o.c;
+        const kanaId = (glyph) => "kana:" + glyph;
+        const wordCardId = (w) => "word:" + w.id;
+        const sentCardId = (s) => "sent:" + s.id;
+
+        function resolveCard(id) {
+          const i = id.indexOf(":");
+          const type = id.slice(0, i);
+          const rest = id.slice(i + 1);
+          if (type === "kana") {
+            return { front: rest, b1: KANA_MAP[rest] || "?", b2: "Kana", speak: rest };
+          }
+          if (type === "kanji") {
+            const o = KANJI_MAP[rest];
+            if (!o) return null;
+            return {
+              front: o.c,
+              b1: o.m,
+              b2: "on " + o.on + "  ·  kun " + o.kun + "\n" + o.ex,
+              speak: o.c,
+            };
+          }
+          if (type === "vocab") {
+            const o = VOCAB_MAP[rest];
+            if (!o) return null;
+            return {
+              front: o.w,
+              fsmall: o.w.length > 4,
+              b1: o.k,
+              b2: o.m + "  ·  " + o.r,
+              speak: o.k,
+            };
+          }
+          if (type === "word") {
+            const o = wordMap()[rest];
+            if (!o) return null;
+            return {
+              front: o.w,
+              fsmall: (o.w || "").length > 4,
+              b1: o.k || "",
+              b2: o.m + (o.r ? "  ·  " + o.r : "") + (o.note ? "\n" + o.note : ""),
+              speak: o.k || o.w,
+            };
+          }
+          if (type === "sent") {
+            const o = sentMap()[rest];
+            if (!o) return null;
+            // Talk practice: prompt with the meaning, recall/say the Japanese.
+            return {
+              front: o.m || o.j,
+              fsmall: true,
+              b1: o.j,
+              b2: (o.r || "") + (o.note ? "\n" + o.note : ""),
+              speak: o.j,
+            };
+          }
+          return null;
+        }
+
+        const INTERVALS = [0, 1, 2, 4, 8, 16, 32, 60];
+        function ensureCard(id) {
+          if (!srs[id]) srs[id] = { box: 0, due: todayStr(), reps: 0, lapses: 0 };
+          return srs[id];
+        }
+        function addToSrs(id) {
+          if (srs[id]) return false;
+          ensureCard(id);
+          touch();
+          return true;
+        }
+        function removeFromSrs(id) {
+          if (srs[id]) {
+            delete srs[id];
+            touch();
+          }
+        }
+        function grade(id, q) {
+          const card = ensureCard(id);
+          card.reps += 1;
+          if (q === "again") {
+            card.box = 0;
+            card.lapses += 1;
+            card.due = todayStr();
+          } else {
+            const step = q === "easy" ? 2 : 1;
+            card.box = Math.min(INTERVALS.length - 1, card.box + step);
+            card.due = addDays(todayStr(), INTERVALS[card.box]);
+          }
+          touch();
+        }
+        const isDue = (id) => srs[id] && srs[id].due <= todayStr();
+        function dueIds() {
+          return Object.keys(srs).filter((id) => isDue(id) && !!resolveCard(id));
+        }
+        function counts() {
+          let kana = 0, kanji = 0, vocab = 0, word = 0, sent = 0;
+          Object.keys(srs).forEach((id) => {
+            if (id.startsWith("kana:")) kana++;
+            else if (id.startsWith("kanji:")) kanji++;
+            else if (id.startsWith("vocab:")) vocab++;
+            else if (id.startsWith("word:")) word++;
+            else if (id.startsWith("sent:")) sent++;
+          });
+          return {
+            kana, kanji, vocab, word, sent,
+            deck: kana + kanji + vocab + word + sent,
+            due: dueIds().length,
+          };
+        }
+
+        // ---- dates ----
+        function todayStr() {
+          const d = new Date();
+          return (
+            d.getFullYear() + "-" +
+            String(d.getMonth() + 1).padStart(2, "0") + "-" +
+            String(d.getDate()).padStart(2, "0")
+          );
+        }
+        function addDays(str, n) {
+          const [y, m, d] = str.split("-").map(Number);
+          const dt = new Date(y, m - 1, d + n);
+          return (
+            dt.getFullYear() + "-" +
+            String(dt.getMonth() + 1).padStart(2, "0") + "-" +
+            String(dt.getDate()).padStart(2, "0")
+          );
+        }
+        function markStudied(n) {
+          const t = todayStr();
+          if (stats.lastStudy !== t) {
+            if (stats.lastStudy === addDays(t, -1)) stats.streak += 1;
+            else stats.streak = 1;
+            stats.lastStudy = t;
+          }
+          stats.history[t] = (stats.history[t] || 0) + (n || 0);
+          stats.reviewsTotal += n || 0;
+          touch();
+        }
+
+        function uid(p) {
+          return (
+            (p || "x") +
+            Date.now().toString(36) +
+            Math.random().toString(36).slice(2, 7)
+          );
+        }
+
+        // ===============================================================
+        // Router / tabs
+        // ===============================================================
+        const TABS = [
+          ["dashboard", "Dashboard"],
+          ["kana", "Kana"],
+          ["kanji", "Kanji"],
+          ["vocab", "Vocabulary"],
+          ["mywords", "My Words"],
+          ["sentences", "Sentences"],
+          ["grammar", "Grammar"],
+          ["review", "Review"],
+          ["quiz", "Quiz"],
+          ["phrases", "Phrases"],
+        ];
+        function buildTabs() {
+          el("tabs").innerHTML = TABS.map(
+            ([k, label]) => '<button data-tab="' + k + '">' + label + "</button>",
+          ).join("");
+          el("tabs")
+            .querySelectorAll("button")
+            .forEach((b) => b.addEventListener("click", () => go(b.dataset.tab)));
+        }
+        const RENDER = {};
+        function go(view) {
+          document
+            .querySelectorAll(".view")
+            .forEach((v) => v.classList.toggle("active", v.dataset.view === view));
+          el("tabs")
+            .querySelectorAll("button")
+            .forEach((b) => b.classList.toggle("active", b.dataset.tab === view));
+          const active = el("tabs").querySelector("button.active");
+          if (active) active.scrollIntoView({ inline: "center", block: "nearest" });
+          if (RENDER[view]) RENDER[view]();
+          try {
+            location.hash = view;
+          } catch (e) {}
+          $(".page").scrollTop = 0;
+        }
+        window.go = go;
+        function rerender() {
+          const cur = document.querySelector(".view.active");
+          if (cur && RENDER[cur.dataset.view]) RENDER[cur.dataset.view]();
+        }
+
+        // ===============================================================
+        // Dashboard
+        // ===============================================================
+        RENDER.dashboard = function () {
+          const v = $('[data-view="dashboard"]');
+          const c = counts();
+          const kanaPct = Math.round((c.kana / KANA_FLAT.length) * 100);
+          const kanjiPct = Math.round((c.kanji / DATA.kanji.length) * 100);
+          const vocabPct = Math.round((c.vocab / DATA.vocab.length) * 100);
+          const h = new Date().getHours();
+          const hello = h < 11 ? "おはよう" : h < 18 ? "こんにちは" : "こんばんは";
+          const studiedToday = (stats.history[todayStr()] || 0) > 0;
+
+          v.innerHTML =
+            '<div class="card" style="background:linear-gradient(135deg,rgba(99,102,241,.10),rgba(225,29,72,.08));">' +
+            '<h2 class="jp" style="font-size:20px;">' + hello +
+            "！ <span style='font-size:14px;color:var(--muted)'>Ready for today's session?</span></h2>" +
+            '<div class="hint" style="margin-top:6px">You\'ve got <b>' + c.due +
+            "</b> card" + (c.due === 1 ? "" : "s") + " due for review" +
+            (c.due ? "" : " — nothing pending, add some new ones below") + ".</div>" +
+            '<div class="btnrow" style="margin-top:14px">' +
+            '<button class="btn primary" onclick="go(\'review\')">Start review (' + c.due + ")</button>" +
+            "<button class=\"btn\" onclick=\"go('kana')\">Practice kana</button>" +
+            "<button class=\"btn\" onclick=\"go('quiz')\">Quick quiz</button></div></div>" +
+            '<div class="grid cols-3" style="margin-bottom:18px">' +
+            statTile("🔥 Streak", stats.streak + '<small> day' + (stats.streak === 1 ? "" : "s") + "</small>", null) +
+            statTile("✅ Reviewed today", (stats.history[todayStr()] || 0) + "", null) +
+            statTile("📚 In your deck", c.deck + '<small> cards</small>', null) +
+            "</div>" +
+            '<div class="grid cols-3" style="margin-bottom:18px">' +
+            statTile("Kana", c.kana + '<small>/' + KANA_FLAT.length + "</small>", kanaPct) +
+            statTile("Kanji", c.kanji + '<small>/' + DATA.kanji.length + "</small>", kanjiPct) +
+            statTile("Vocabulary", c.vocab + '<small>/' + DATA.vocab.length + "</small>", vocabPct) +
+            "</div>" +
+            '<div class="card"><h2>Today\'s plan</h2><ul class="plan" id="planList"></ul></div>' +
+            '<div class="card"><h2>Jump-start your deck</h2><div class="hint">Load a batch of cards into spaced repetition and start reviewing. Your progress syncs to every device.</div>' +
+            '<div class="btnrow" style="margin-top:14px">' +
+            '<button class="btn" onclick="seedKana()">+ All hiragana</button>' +
+            '<button class="btn" onclick="seedKana(\'k\')">+ All katakana</button>' +
+            '<button class="btn" onclick="seedNew(\'kanji\',10)">+ 10 kanji</button>' +
+            '<button class="btn" onclick="seedNew(\'vocab\',15)">+ 15 vocab</button>' +
+            '<button class="btn" onclick="go(\'mywords\')">+ Add your own words</button>' +
+            "</div></div>";
+
+          const plan = [
+            { label: "Review your due cards" + (c.due ? " (" + c.due + ")" : ""), done: c.due === 0 && studiedToday, go: "review" },
+            { label: "Practice a kana set", done: c.kana > 0, go: "kana" },
+            { label: "Learn 5 new kanji", done: c.kanji >= 5, go: "kanji" },
+            { label: "Add a word or sentence of your own", done: words.length + sentences.length > 0, go: "mywords" },
+            { label: "Study 1 grammar point", done: false, go: "grammar" },
+          ];
+          el("planList").innerHTML = plan
+            .map(
+              (p) =>
+                '<li class="' + (p.done ? "done" : "") + '"><span class="dot">' +
+                (p.done ? "✓" : "") + '</span><span class="label">' + p.label +
+                '</span><span class="go" onclick="go(\'' + p.go + "')\">Open →</span></li>",
+            )
+            .join("");
+          updateHeadReview();
+        };
+        function statTile(k, v, pct) {
+          return (
+            '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + "</div>" +
+            (pct === null ? "" : '<div class="progress"><i style="width:' + pct + '%"></i></div>') +
+            "</div>"
+          );
+        }
+        function updateHeadReview() {
+          const d = counts().due;
+          el("headReview").textContent = d ? "Review (" + d + ")" : "Review";
+        }
+
+        window.seedKana = function (which) {
+          let added = 0;
+          KANA_FLAT.forEach((cell) => {
+            const glyph = which === "k" ? cell.k : cell.h;
+            if (!srs[kanaId(glyph)]) {
+              ensureCard(kanaId(glyph));
+              added++;
+            }
+          });
+          if (added) touch();
+          toast(added + " kana added to review");
+          RENDER.dashboard();
+        };
+        window.seedNew = function (type, n) {
+          const pool = type === "kanji" ? DATA.kanji.map(kanjiId) : DATA.vocab.map(vocabId);
+          let added = 0;
+          for (const id of pool) {
+            if (added >= n) break;
+            if (!srs[id]) {
+              ensureCard(id);
+              added++;
+            }
+          }
+          if (added) touch();
+          toast(added + " " + type + " cards added");
+          rerender();
+        };
+
+        // ===============================================================
+        // Kana
+        // ===============================================================
+        RENDER.kana = function () {
+          const v = $('[data-view="kana"]');
+          const script = settings.script;
+          v.innerHTML =
+            '<div class="card"><div class="toolbar">' +
+            '<div class="chiprow" style="margin:0">' +
+            '<button class="chip ' + (script === "hiragana" ? "active" : "") + '" onclick="setScript(\'hiragana\')">ひらがな Hiragana</button>' +
+            '<button class="chip ' + (script === "katakana" ? "active" : "") + '" onclick="setScript(\'katakana\')">カタカナ Katakana</button>' +
+            "</div>" +
+            '<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);font-weight:600;margin-left:auto;cursor:pointer">' +
+            '<input type="checkbox" id="romajiToggle" ' + (settings.showRomaji ? "checked" : "") + "> show romaji</label></div>" +
+            '<div class="hint">Tap any kana to hear it. Green outline = in your review deck.</div>' +
+            '<div class="btnrow" style="margin-top:12px">' +
+            '<button class="btn jp" onclick="startKanaPractice()">▶ Practice this set</button>' +
+            '<button class="btn" onclick="seedKana(\'' + (script === "katakana" ? "k" : "h") + "')\">+ Add all to review</button></div></div>" +
+            '<div id="kanaGrids"></div>';
+          el("romajiToggle").addEventListener("change", (e) => {
+            settings.showRomaji = e.target.checked;
+            touch();
+            paintKana();
+          });
+          paintKana();
+        };
+        function paintKana() {
+          const script = settings.script;
+          const key = script === "katakana" ? "k" : "h";
+          const cellHtml = (cell) => {
+            if (!cell) return '<div class="kana-cell empty"></div>';
+            const glyph = cell[key];
+            const inDeck = !!srs[kanaId(glyph)];
+            return (
+              '<div class="kana-cell jp ' + (inDeck ? "learned" : "") +
+              '" onclick="__jpSpeak(\'' + glyph + "');\"><span class=\"g\">" + glyph + "</span>" +
+              (settings.showRomaji ? '<span class="r">' + cell.r + "</span>" : "") + "</div>"
+            );
+          };
+          const block = (title, rows, cols) =>
+            '<div class="kana-block"><h3>' + title + '</h3><div class="kana-grid" style="grid-template-columns:repeat(' + cols + ',1fr)">' +
+            rows.map((row) => row.map(cellHtml).join("")).join("") + "</div></div>";
+          el("kanaGrids").innerHTML =
+            block("Basic (gojūon)", DATA.kana.gojuon, 5) +
+            block("Dakuten / Handakuten", DATA.kana.dakuten, 5) +
+            block("Combinations (yōon)", DATA.kana.yoon, 3);
+        }
+        window.setScript = function (s) {
+          settings.script = s;
+          touch();
+          RENDER.kana();
+        };
+        window.startKanaPractice = function () {
+          const key = settings.script === "katakana" ? "k" : "h";
+          const pool = KANA_FLAT.slice();
+          const queue = shuffle(pool).slice(0, 20);
+          runMcSession({
+            title: (settings.script === "katakana" ? "Katakana" : "Hiragana") + " practice",
+            back: "kana",
+            items: queue.map((cell) => ({
+              prompt: cell[key],
+              promptClass: "jp",
+              answer: cell.r,
+              speak: cell[key],
+              choices: uniqueChoices(cell.r, pool.map((c2) => c2.r), 4),
+            })),
+          });
+        };
+
+        // ===============================================================
+        // Kanji
+        // ===============================================================
+        let kanjiQuery = "";
+        RENDER.kanji = function () {
+          const v = $('[data-view="kanji"]');
+          const c = counts();
+          v.innerHTML =
+            '<div class="toolbar">' +
+            '<input class="search" id="kanjiSearch" placeholder="Search kanji, meaning, reading…" value="' + escapeAttr(kanjiQuery) + '">' +
+            '<button class="btn" onclick="seedNew(\'kanji\',10)">+ 10 new to review</button>' +
+            '<span style="font-size:12.5px;color:var(--muted);font-weight:600">' + c.kanji + " / " + DATA.kanji.length + " in deck</span></div>" +
+            '<div class="grid cols-3" id="kanjiGrid"></div>';
+          el("kanjiSearch").addEventListener("input", (e) => {
+            kanjiQuery = e.target.value;
+            paintKanji();
+          });
+          paintKanji();
+        };
+        function paintKanji() {
+          const q = kanjiQuery.trim().toLowerCase();
+          const list = DATA.kanji.filter(
+            (o) => !q || o.c.includes(q) || o.m.toLowerCase().includes(q) ||
+              o.on.toLowerCase().includes(q) || o.kun.toLowerCase().includes(q) ||
+              o.ex.toLowerCase().includes(q),
+          );
+          el("kanjiGrid").innerHTML = list.length
+            ? list.map((o) => {
+                const inSrs = !!srs[kanjiId(o)];
+                return (
+                  '<div class="kanji-card ' + (inSrs ? "in-srs" : "") + '" onclick="kanjiDetail(\'' + o.c + "')\"><span class=\"c jp\">" + o.c +
+                  '</span><div><div class="m">' + o.m + '</div><div class="rd">on ' + o.on + " · kun " + o.kun + "</div></div>" +
+                  (inSrs ? '<span class="tick">✓</span>' : "") + "</div>"
+                );
+              }).join("")
+            : '<div class="empty-state">No kanji match "' + escapeHtml(kanjiQuery) + '".</div>';
+        }
+        window.kanjiDetail = function (ch) {
+          const o = KANJI_MAP[ch];
+          if (!o) return;
+          const inSrs = !!srs[kanjiId(o)];
+          openModal(
+            '<div style="text-align:center"><div class="jp" style="font-size:76px;font-weight:600;line-height:1">' + o.c +
+              '</div><div style="font-size:17px;font-weight:700;margin-top:8px">' + o.m + "</div></div>" +
+              '<div style="margin-top:18px;font-size:14px;line-height:1.9">' +
+              rowKV("On'yomi", '<span class="jp">' + o.on + "</span>") +
+              rowKV("Kun'yomi", '<span class="jp">' + o.kun + "</span>") +
+              rowKV("Example", '<span class="jp">' + o.ex + "</span>") + "</div>" +
+              '<div class="btnrow" style="margin-top:18px;justify-content:center">' +
+              '<button class="btn" onclick="__jpSpeak(\'' + o.c + "')\">" + spk + " Hear</button>" +
+              '<button class="btn ' + (inSrs ? "danger" : "primary") + '" onclick="toggleKanji(\'' + o.c + "')\">" +
+              (inSrs ? "Remove from review" : "+ Add to review") + "</button></div>",
+          );
+        };
+        window.toggleKanji = function (ch) {
+          const id = kanjiId(KANJI_MAP[ch]);
+          if (srs[id]) {
+            removeFromSrs(id);
+            toast("Removed from review");
+          } else {
+            addToSrs(id);
+            toast("Added to review");
+          }
+          closeModal();
+          rerender();
+          updateHeadReview();
+        };
+        function rowKV(k, v) {
+          return (
+            '<div style="display:flex;gap:12px;border-bottom:1px solid var(--line);padding:7px 0"><b style="min-width:88px;color:var(--muted);font-size:12.5px">' +
+            k + "</b><span>" + v + "</span></div>"
+          );
+        }
+
+        // ===============================================================
+        // Vocabulary (built-in N5)
+        // ===============================================================
+        let vocabCat = "all";
+        let vocabQuery = "";
+        RENDER.vocab = function () {
+          const v = $('[data-view="vocab"]');
+          const cats = Object.keys(DATA.catLabels);
+          v.innerHTML =
+            '<div class="toolbar">' +
+            '<input class="search" id="vocabSearch" placeholder="Search word, reading, meaning…" value="' + escapeAttr(vocabQuery) + '">' +
+            '<button class="btn jp" onclick="startVocabFlash()">▶ Flashcards</button></div>' +
+            '<div class="chiprow">' +
+            '<button class="chip ' + (vocabCat === "all" ? "active" : "") + '" onclick="setVocabCat(\'all\')">All</button>' +
+            cats.map((k) => '<button class="chip ' + (vocabCat === k ? "active" : "") + '" onclick="setVocabCat(\'' + k + "')\">" + DATA.catLabels[k] + "</button>").join("") +
+            '</div><div id="vocabList"></div>';
+          el("vocabSearch").addEventListener("input", (e) => {
+            vocabQuery = e.target.value;
+            paintVocab();
+          });
+          paintVocab();
+        };
+        function filteredVocab() {
+          const q = vocabQuery.trim().toLowerCase();
+          return DATA.vocab.filter((o) => {
+            if (vocabCat !== "all" && o.cat !== vocabCat) return false;
+            if (!q) return true;
+            return o.w.toLowerCase().includes(q) || o.k.includes(q) || o.r.toLowerCase().includes(q) || o.m.toLowerCase().includes(q);
+          });
+        }
+        function paintVocab() {
+          const list = filteredVocab();
+          el("vocabList").innerHTML = list.length
+            ? list.map((o) => {
+                const id = vocabId(o);
+                const inSrs = !!srs[id];
+                return (
+                  '<div class="item-row"><span class="word jp">' + o.w + '</span><span class="read jp">' + o.k +
+                  '</span><span class="mean">' + escapeHtml(o.m) + '</span><span class="romaji">' + o.r + "</span>" +
+                  '<span class="acts"><button class="iconbtn" title="Hear" onclick="__jpSpeak(\'' + o.k + "')\">" + spk + "</button>" +
+                  '<button class="iconbtn ' + (inSrs ? "on" : "") + '" title="' + (inSrs ? "In review deck" : "Add to review") +
+                  '" onclick="toggleVocab(this,\'' + encodeURIComponent(id) + "')\">" + (inSrs ? "✓" : "+") + "</button></span></div>"
+                );
+              }).join("")
+            : '<div class="empty-state">Nothing here yet.</div>';
+        }
+        window.setVocabCat = function (c) {
+          vocabCat = c;
+          RENDER.vocab();
+        };
+        window.toggleVocab = function (btn, encId) {
+          const id = decodeURIComponent(encId);
+          if (srs[id]) {
+            removeFromSrs(id);
+            btn.classList.remove("on");
+            btn.textContent = "+";
+            btn.title = "Add to review";
+          } else {
+            addToSrs(id);
+            btn.classList.add("on");
+            btn.textContent = "✓";
+            btn.title = "In review deck";
+            toast("Added to review");
+          }
+          updateHeadReview();
+        };
+        window.startVocabFlash = function () {
+          const list = shuffle(filteredVocab()).slice(0, 20);
+          if (!list.length) return toast("No words to study");
+          runFlashSession({
+            title: "Flashcards · " + (vocabCat === "all" ? "All" : DATA.catLabels[vocabCat]),
+            back: "vocab",
+            cards: list.map((o) => ({
+              front: o.w, fsmall: o.w.length > 4, b1: o.k, b2: o.m + "  ·  " + o.r, speak: o.k,
+            })),
+          });
+        };
+
+        // ===============================================================
+        // My Words (custom vocabulary)
+        // ===============================================================
+        RENDER.mywords = function () {
+          const v = $('[data-view="mywords"]');
+          v.innerHTML =
+            '<div class="card"><h2>My Words</h2><div class="hint">Add words you pick up in class or on the street. They join the same spaced-repetition review and sync to all your devices.</div>' +
+            '<div class="btnrow" style="margin-top:14px">' +
+            '<button class="btn primary" onclick="wordForm()">+ Add word</button>' +
+            (words.length ? '<button class="btn jp" onclick="startWordFlash()">▶ Flashcards</button><button class="btn" onclick="addAllCustom(\'word\')">+ Add all to review</button>' : "") +
+            "</div></div>" +
+            '<div id="myWordsList"></div>';
+          paintCustom("myWordsList", words, "word");
+        };
+        RENDER.sentences = function () {
+          const v = $('[data-view="sentences"]');
+          v.innerHTML =
+            '<div class="card"><h2>Sentences to talk</h2><div class="hint">Save full sentences you want to be able to say. Practice mode shows the meaning first so you produce the Japanese, then reveals it — tap 🔊 to shadow the pronunciation.</div>' +
+            '<div class="btnrow" style="margin-top:14px">' +
+            '<button class="btn primary" onclick="sentForm()">+ Add sentence</button>' +
+            (sentences.length ? '<button class="btn jp" onclick="startSentPractice()">▶ Practice</button><button class="btn" onclick="addAllCustom(\'sent\')">+ Add all to review</button>' : "") +
+            "</div></div>" +
+            '<div id="mySentList"></div>';
+          paintCustom("mySentList", sentences, "sent");
+        };
+        function paintCustom(containerId, arr, type) {
+          const box = el(containerId);
+          if (!arr.length) {
+            box.innerHTML =
+              '<div class="empty-state"><div class="big">' + (type === "word" ? "📝" : "💬") + "</div><b>Nothing here yet.</b><div style='margin-top:6px'>" +
+              (type === "word" ? "Add your first word to start building a personal deck." : "Add a sentence you want to practice saying.") + "</div></div>";
+            return;
+          }
+          box.innerHTML = arr.map((o) => {
+            const id = type === "word" ? wordCardId(o) : sentCardId(o);
+            const inSrs = !!srs[id];
+            const front = type === "word" ? o.w : o.j;
+            const read = type === "word" ? o.k || "" : o.r || "";
+            const mean = o.m || "";
+            return (
+              '<div class="item-row"><span class="word jp">' + escapeHtml(front) + "</span>" +
+              (read ? '<span class="read jp">' + escapeHtml(read) + "</span>" : "") +
+              '<span class="mean">' + escapeHtml(mean) + (o.note ? '<span class="note">' + escapeHtml(o.note) + "</span>" : "") + "</span>" +
+              '<span class="acts">' +
+              '<button class="iconbtn" data-act="speak" data-id="' + o.id + '" title="Hear">' + spk + "</button>" +
+              '<button class="iconbtn" data-act="edit" data-id="' + o.id + '" title="Edit">✎</button>' +
+              '<button class="iconbtn ' + (inSrs ? "on" : "") + '" data-act="srs" data-id="' + o.id + '" title="' + (inSrs ? "In review" : "Add to review") + '">' + (inSrs ? "✓" : "+") + "</button>" +
+              '<button class="iconbtn" data-act="del" data-id="' + o.id + '" title="Delete">🗑</button>' +
+              "</span></div>"
+            );
+          }).join("");
+          box.onclick = (e) => {
+            const btn = e.target.closest("[data-act]");
+            if (!btn) return;
+            const o = arr.find((x) => x.id === btn.dataset.id);
+            if (!o) return;
+            const act = btn.dataset.act;
+            const id = type === "word" ? wordCardId(o) : sentCardId(o);
+            if (act === "speak") speak(type === "word" ? o.k || o.w : o.j);
+            else if (act === "edit") type === "word" ? wordForm(o) : sentForm(o);
+            else if (act === "del") deleteCustom(type, o.id);
+            else if (act === "srs") {
+              if (srs[id]) {
+                removeFromSrs(id);
+                btn.classList.remove("on");
+                btn.textContent = "+";
+              } else {
+                addToSrs(id);
+                btn.classList.add("on");
+                btn.textContent = "✓";
+                toast("Added to review");
+              }
+              updateHeadReview();
+            }
+          };
+        }
+        window.addAllCustom = function (type) {
+          const arr = type === "word" ? words : sentences;
+          let added = 0;
+          arr.forEach((o) => {
+            const id = type === "word" ? wordCardId(o) : sentCardId(o);
+            if (!srs[id]) {
+              ensureCard(id);
+              added++;
+            }
+          });
+          if (added) touch();
+          toast(added + " added to review");
+          rerender();
+          updateHeadReview();
+        };
+        window.deleteCustom = function (type, id) {
+          const arr = type === "word" ? words : sentences;
+          const i = arr.findIndex((x) => x.id === id);
+          if (i < 0) return;
+          arr.splice(i, 1);
+          const cardId = (type === "word" ? "word:" : "sent:") + id;
+          if (srs[cardId]) delete srs[cardId];
+          touch();
+          rerender();
+          updateHeadReview();
+          toast("Deleted");
+        };
+        window.wordForm = function (existing) {
+          const o = existing || {};
+          openModal(
+            '<h2 style="font-size:16px;font-weight:700;margin-bottom:14px">' + (existing ? "Edit word" : "Add a word") + "</h2>" +
+            field("w_w", "Japanese (word)", o.w, "e.g. 面白い", true) +
+            '<div class="field2">' + field("w_k", "Reading (kana)", o.k, "おもしろい", true) + field("w_r", "Romaji (optional)", o.r, "omoshiroi") + "</div>" +
+            field("w_m", "Meaning", o.m, "interesting / funny") +
+            fieldArea("w_note", "Note (optional)", o.note, "example, nuance, where you heard it…") +
+            '<div class="btnrow" style="justify-content:flex-end;margin-top:8px"><button class="btn" onclick="closeModal()">Cancel</button>' +
+            '<button class="btn primary" onclick="saveWord(' + (existing ? "'" + existing.id + "'" : "") + ')">Save</button></div>',
+          );
+          setTimeout(() => el("w_w") && el("w_w").focus(), 60);
+        };
+        window.saveWord = function (id) {
+          const w = val("w_w"), k = val("w_k"), m = val("w_m");
+          if (!w && !k) return toast("Enter at least the word or reading");
+          const rec = { w, k, r: val("w_r"), m, note: val("w_note") };
+          if (id) {
+            const o = words.find((x) => x.id === id);
+            if (o) Object.assign(o, rec);
+          } else {
+            words.unshift(Object.assign({ id: uid("w"), createdAt: Date.now() }, rec));
+          }
+          touch();
+          closeModal();
+          RENDER.mywords();
+          toast(id ? "Saved" : "Word added");
+        };
+        window.sentForm = function (existing) {
+          const o = existing || {};
+          openModal(
+            '<h2 style="font-size:16px;font-weight:700;margin-bottom:14px">' + (existing ? "Edit sentence" : "Add a sentence") + "</h2>" +
+            fieldArea("s_j", "Japanese sentence", o.j, "e.g. 今日は天気がいいですね。", true) +
+            field("s_r", "Romaji (optional)", o.r, "Kyō wa tenki ga ii desu ne.") +
+            field("s_m", "Meaning (English)", o.m, "The weather is nice today, isn't it?") +
+            fieldArea("s_note", "Note (optional)", o.note, "when to use it, who said it…") +
+            '<div class="btnrow" style="justify-content:flex-end;margin-top:8px"><button class="btn" onclick="closeModal()">Cancel</button>' +
+            '<button class="btn primary" onclick="saveSent(' + (existing ? "'" + existing.id + "'" : "") + ')">Save</button></div>',
+          );
+          setTimeout(() => el("s_j") && el("s_j").focus(), 60);
+        };
+        window.saveSent = function (id) {
+          const j = val("s_j");
+          if (!j) return toast("Enter the Japanese sentence");
+          const rec = { j, r: val("s_r"), m: val("s_m"), note: val("s_note") };
+          if (id) {
+            const o = sentences.find((x) => x.id === id);
+            if (o) Object.assign(o, rec);
+          } else {
+            sentences.unshift(Object.assign({ id: uid("s"), createdAt: Date.now() }, rec));
+          }
+          touch();
+          closeModal();
+          RENDER.sentences();
+          toast(id ? "Saved" : "Sentence added");
+        };
+        window.startWordFlash = function () {
+          const list = shuffle(words.slice()).slice(0, 30);
+          if (!list.length) return toast("No words yet");
+          runFlashSession({
+            title: "My Words", back: "mywords",
+            cards: list.map((o) => ({
+              front: o.w || o.k, fsmall: (o.w || "").length > 4, b1: o.k || "", b2: (o.m || "") + (o.r ? "  ·  " + o.r : ""), speak: o.k || o.w,
+            })),
+          });
+        };
+        window.startSentPractice = function () {
+          const list = shuffle(sentences.slice()).slice(0, 30);
+          if (!list.length) return toast("No sentences yet");
+          runFlashSession({
+            title: "Sentence practice", back: "sentences",
+            cards: list.map((o) => ({
+              front: o.m || o.j, fsmall: true, b1: o.j, b2: o.r || "", speak: o.j,
+            })),
+          });
+        };
+
+        function field(id, label, value, ph, jp) {
+          return (
+            '<div class="field"><label>' + label + '</label><input id="' + id + '" class="' + (jp ? "jpin" : "") +
+            '" value="' + escapeAttr(value || "") + '" placeholder="' + escapeAttr(ph || "") + '"></div>'
+          );
+        }
+        function fieldArea(id, label, value, ph, jp) {
+          return (
+            '<div class="field"><label>' + label + '</label><textarea id="' + id + '" class="' + (jp ? "jpin" : "") +
+            '" placeholder="' + escapeAttr(ph || "") + '">' + escapeHtml(value || "") + "</textarea></div>"
+          );
+        }
+        const val = (id) => (el(id) ? el(id).value.trim() : "");
+
+        // ===============================================================
+        // Grammar
+        // ===============================================================
+        RENDER.grammar = function () {
+          const v = $('[data-view="grammar"]');
+          v.innerHTML =
+            '<div class="card"><h2>N5 grammar</h2><div class="hint">' + DATA.grammar.length +
+            " core patterns. Tap one to see the structure and example sentences — tap the speaker on any example to hear it.</div></div>" +
+            DATA.grammar.map((gp) =>
+              '<details class="acc"><summary>' + escapeHtml(gp.t) + '<span class="struct jp">' + escapeHtml(gp.s) +
+              '</span></summary><div class="body"><div class="note">' + escapeHtml(gp.m) + "</div>" +
+              gp.ex.map((e) => exampleRow(e.j, e.r, e.e)).join("") + "</div></details>",
+            ).join("");
+          bindSpeakers(v);
+        };
+
+        // ===============================================================
+        // Phrases
+        // ===============================================================
+        RENDER.phrases = function () {
+          const v = $('[data-view="phrases"]');
+          const groups = {};
+          DATA.phrases.forEach((p) => (groups[p.cat] = groups[p.cat] || []).push(p));
+          v.innerHTML =
+            '<div class="card"><h2>Survival phrases</h2><div class="hint">Ready-made sentences for life in Japan — the classroom, shops, restaurants, getting around and asking for help.</div></div>' +
+            Object.keys(DATA.phraseCatLabels).filter((k) => groups[k]).map((k) =>
+              '<div class="card"><h2>' + DATA.phraseCatLabels[k] + "</h2>" +
+              groups[k].map((p) => exampleRow(p.j, p.r, p.e)).join("") + "</div>",
+            ).join("");
+          bindSpeakers(v);
+        };
+        // Grammar/phrase example row — speaker wired via data-speak (no inline
+        // interpolation of the Japanese text, so quotes etc. can't break out).
+        function exampleRow(j, r, e) {
+          return (
+            '<div class="ex"><div class="j jp">' + escapeHtml(j) +
+            '<button class="iconbtn" style="width:28px;height:28px" data-speak="' + escapeAttr(j) + '">' + spk + "</button></div>" +
+            '<div class="r">' + escapeHtml(r) + '</div><div class="e">' + escapeHtml(e) + "</div></div>"
+          );
+        }
+        function bindSpeakers(root) {
+          root.querySelectorAll("[data-speak]").forEach((b) =>
+            b.addEventListener("click", () => speak(b.getAttribute("data-speak"))),
+          );
+        }
+
+        // ===============================================================
+        // Review (spaced repetition session)
+        // ===============================================================
+        RENDER.review = function () {
+          const v = $('[data-view="review"]');
+          const due = dueIds();
+          const c = counts();
+          if (!due.length) {
+            v.innerHTML =
+              '<div class="card study"><div class="empty-state"><div class="big">🎉</div>' +
+              (c.deck === 0
+                ? "<b>Your review deck is empty.</b><div style='margin-top:8px'>Add cards from Kana, Kanji, Vocabulary or your own words, or jump-start below.</div>"
+                : "<b>All caught up!</b><div style='margin-top:8px'>No cards are due right now. Come back later, or learn ahead.</div>") +
+              '<div class="btnrow" style="justify-content:center;margin-top:18px">' +
+              '<button class="btn primary" onclick="seedNew(\'vocab\',10);go(\'review\')">+ 10 vocab & review</button>' +
+              '<button class="btn" onclick="seedNew(\'kanji\',10);go(\'review\')">+ 10 kanji</button></div></div></div>';
+            return;
+          }
+          runReviewSession(shuffle(due));
+        };
+        function runReviewSession(queue) {
+          const v = $('[data-view="review"]');
+          const total = queue.length;
+          let idx = 0, done = 0, revealed = false;
+          function render() {
+            if (idx >= queue.length) {
+              markStudied(done);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">✅</div><b>Session complete!</b>' +
+                "<div style='margin-top:8px'>You reviewed <b>" + done + "</b> card" + (done === 1 ? "" : "s") + ". 🔥 " + stats.streak + "-day streak.</div>" +
+                '<div class="btnrow" style="justify-content:center;margin-top:18px">' +
+                "<button class=\"btn primary\" onclick=\"go('review')\">Review more</button>" +
+                "<button class=\"btn\" onclick=\"go('dashboard')\">Dashboard</button></div></div></div>";
+              updateHeadReview();
+              return;
+            }
+            const id = queue[idx];
+            const card = resolveCard(id);
+            if (!card) {
+              idx++;
+              return render();
+            }
+            const box = srs[id].box || 0;
+            v.innerHTML =
+              '<div class="study">' +
+              '<div class="sess-top"><span>Review</span><span>' + (idx + 1) + " / " + total + "</span></div>" +
+              '<div class="progress" style="margin-bottom:16px"><i style="width:' + ((idx / total) * 100).toFixed(0) + '%"></i></div>' +
+              '<div class="flashcard" id="fc"><div class="front jp ' + (card.fsmall ? "small" : "") + '">' + escapeHtml(card.front) + "</div>" +
+              (revealed
+                ? '<div class="back"><div class="b1 jp">' + escapeHtml(card.b1) + '</div><div class="b2" style="white-space:pre-line">' + escapeHtml(card.b2) + "</div></div>"
+                : '<div class="tap">Tap to reveal</div>') + "</div>" +
+              (revealed
+                ? '<div class="rate">' +
+                  '<button class="again" data-q="again">Again<small>&lt; 1 min</small></button>' +
+                  '<button class="good" data-q="good">Good<small>+' + INTERVALS[Math.min(INTERVALS.length - 1, box + 1)] + 'd</small></button>' +
+                  '<button class="easy" data-q="easy">Easy<small>+' + INTERVALS[Math.min(INTERVALS.length - 1, box + 2)] + "d</small></button></div>"
+                : '<div class="btnrow" style="justify-content:center;margin-top:16px"><button class="btn" id="hearBtn">' + spk + " Hear</button></div>") +
+              "</div>";
+            const fc = el("fc");
+            fc.onclick = () => {
+              if (!revealed) {
+                revealed = true;
+                speak(card.speak);
+                render();
+              }
+            };
+            if (!revealed && el("hearBtn"))
+              el("hearBtn").addEventListener("click", (e) => {
+                e.stopPropagation();
+                speak(card.speak);
+              });
+            if (revealed)
+              v.querySelectorAll(".rate button").forEach((b) =>
+                b.addEventListener("click", () => {
+                  grade(id, b.dataset.q);
+                  done++;
+                  idx++;
+                  revealed = false;
+                  render();
+                }),
+              );
+          }
+          render();
+        }
+
+        // ===============================================================
+        // Flashcard session (study — no SRS writeback)
+        // ===============================================================
+        function runFlashSession(cfg) {
+          const v = $('[data-view="' + cfg.back + '"]');
+          let idx = 0, revealed = false;
+          function render() {
+            if (idx >= cfg.cards.length) {
+              markStudied(cfg.cards.length);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">🎴</div><b>Deck finished!</b><div style="margin-top:8px">' +
+                cfg.cards.length + ' cards reviewed.</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" id="flashDone">Done</button></div></div></div>';
+              el("flashDone").addEventListener("click", () => rerender());
+              return;
+            }
+            const card = cfg.cards[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>' + escapeHtml(cfg.title) + "</span><span>" + (idx + 1) + " / " + cfg.cards.length + "</span></div>" +
+              '<div class="flashcard" id="fc"><div class="front jp ' + (card.fsmall ? "small" : "") + '">' + escapeHtml(card.front) + "</div>" +
+              (revealed
+                ? '<div class="back"><div class="b1 jp">' + escapeHtml(card.b1) + '</div><div class="b2" style="white-space:pre-line">' + escapeHtml(card.b2) + "</div></div>"
+                : '<div class="tap">Tap to reveal</div>') + "</div>" +
+              '<div class="btnrow" style="justify-content:space-between;margin-top:16px">' +
+              '<button class="btn" id="hearBtn">' + spk + " Hear</button>" +
+              '<button class="btn primary" id="nextBtn">' + (revealed ? "Next →" : "Reveal") + "</button></div></div>";
+            el("fc").onclick = () => {
+              if (!revealed) {
+                revealed = true;
+                speak(card.speak);
+                render();
+              }
+            };
+            el("hearBtn").addEventListener("click", (e) => {
+              e.stopPropagation();
+              speak(card.speak);
+            });
+            el("nextBtn").addEventListener("click", () => {
+              if (!revealed) {
+                revealed = true;
+                speak(card.speak);
+                render();
+              } else {
+                idx++;
+                revealed = false;
+                render();
+              }
+            });
+          }
+          render();
+        }
+
+        // ===============================================================
+        // Multiple-choice session (kana practice + quizzes)
+        // ===============================================================
+        function runMcSession(cfg) {
+          const v = $('[data-view="' + cfg.back + '"]');
+          let idx = 0, score = 0, answered = false;
+          function render() {
+            if (idx >= cfg.items.length) {
+              markStudied(cfg.items.length);
+              const pct = Math.round((score / cfg.items.length) * 100);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">' + (pct >= 80 ? "🏆" : pct >= 50 ? "👍" : "💪") + "</div><b>" +
+                score + " / " + cfg.items.length + " correct</b><div style='margin-top:8px'>" +
+                (pct >= 80 ? "Excellent!" : pct >= 50 ? "Good progress — keep going." : "Keep practising, you'll get there.") +
+                '</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" id="mcDone">Back</button></div></div></div>';
+              el("mcDone").addEventListener("click", () => rerender());
+              return;
+            }
+            const item = cfg.items[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>' + escapeHtml(cfg.title) + "</span><span>" + (idx + 1) + " / " + cfg.items.length + " · ✅ " + score + "</span></div>" +
+              '<div class="flashcard" style="min-height:150px;cursor:default"><div class="front ' + (item.promptClass || "") + '">' + escapeHtml(item.prompt) + "</div>" +
+              (item.sub ? '<div class="tap">' + escapeHtml(item.sub) + "</div>" : "") + "</div>" +
+              '<div class="opts">' + item.choices.map((ch) => '<button class="opt" data-v="' + escapeAttr(ch) + '">' + escapeHtml(ch) + "</button>").join("") + "</div></div>";
+            if (item.speak) speak(item.speak);
+            v.querySelectorAll(".opt").forEach((b) =>
+              b.addEventListener("click", () => {
+                if (answered) return;
+                answered = true;
+                const correct = b.dataset.v === item.answer;
+                if (correct) score++;
+                v.querySelectorAll(".opt").forEach((x) => {
+                  if (x.dataset.v === item.answer) x.classList.add("correct");
+                  else if (x === b) x.classList.add("wrong");
+                  x.style.pointerEvents = "none";
+                });
+                setTimeout(() => {
+                  answered = false;
+                  idx++;
+                  render();
+                }, correct ? 550 : 1100);
+              }),
+            );
+          }
+          render();
+        }
+
+        // ===============================================================
+        // Quiz hub
+        // ===============================================================
+        RENDER.quiz = function () {
+          const v = $('[data-view="quiz"]');
+          v.innerHTML =
+            '<div class="card"><h2>Quick quiz</h2><div class="hint">10 questions, multiple choice. Great for a fast warm-up or cool-down.</div></div>' +
+            '<div class="grid cols-3">' +
+            quizTile("あ→a", "Kana reading", "kanaRead") +
+            quizTile("a→あ", "Romaji → kana", "kanaWrite") +
+            quizTile("日→meaning", "Kanji meaning", "kanjiMean") +
+            quizTile("語→reading", "Kanji reading", "kanjiRead") +
+            quizTile("word→meaning", "Vocab meaning", "vocabMean") +
+            quizTile("meaning→word", "Meaning → word", "vocabWord") +
+            "</div>";
+        };
+        function quizTile(big, label, mode) {
+          return (
+            '<div class="stat" style="cursor:pointer" onclick="startQuiz(\'' + mode + "')\"><div class=\"v jp\" style=\"font-size:20px\">" + big +
+            '</div><div class="k" style="margin-top:8px">' + label + " →</div></div>"
+          );
+        }
+        window.startQuiz = function (mode) {
+          let items = [];
+          if (mode === "kanaRead" || mode === "kanaWrite") {
+            const key = settings.script === "katakana" ? "k" : "h";
+            const pool = shuffle(KANA_FLAT).slice(0, 10);
+            items = pool.map((cell) =>
+              mode === "kanaRead"
+                ? { prompt: cell[key], promptClass: "jp", answer: cell.r, speak: cell[key], choices: uniqueChoices(cell.r, KANA_FLAT.map((c) => c.r), 4) }
+                : { prompt: cell.r, answer: cell[key], speak: cell[key], choices: uniqueChoices(cell[key], KANA_FLAT.map((c) => c[key]), 4) },
+            );
+          } else if (mode === "kanjiMean" || mode === "kanjiRead") {
+            const pool = shuffle(DATA.kanji).slice(0, 10);
+            items = pool.map((o) =>
+              mode === "kanjiMean"
+                ? { prompt: o.c, promptClass: "jp", sub: "What does it mean?", answer: o.m, speak: o.c, choices: uniqueChoices(o.m, DATA.kanji.map((k) => k.m), 4) }
+                : { prompt: o.c, promptClass: "jp", sub: "Pick a reading", answer: firstReading(o), speak: o.c, choices: uniqueChoices(firstReading(o), DATA.kanji.map(firstReading), 4) },
+            );
+          } else {
+            const pool = shuffle(DATA.vocab).slice(0, 10);
+            items = pool.map((o) =>
+              mode === "vocabMean"
+                ? { prompt: o.w, promptClass: "jp", sub: o.k, answer: o.m, speak: o.k, choices: uniqueChoices(o.m, DATA.vocab.map((x) => x.m), 4) }
+                : { prompt: o.m, sub: "Which word?", answer: o.w, speak: o.k, choices: uniqueChoices(o.w, DATA.vocab.map((x) => x.w), 4) },
+            );
+          }
+          runMcSession({ title: "Quiz", back: "quiz", items });
+        };
+        function firstReading(o) {
+          const r = (o.kun !== "—" ? o.kun : o.on).split(",")[0].trim();
+          return r.replace(/[（(].*/, "") || o.on;
+        }
+
+        // ===============================================================
+        // Modal
+        // ===============================================================
+        function openModal(html) {
+          let m = el("jpModal");
+          if (!m) {
+            m = document.createElement("div");
+            m.id = "jpModal";
+            m.className = "modal-wrap";
+            m.addEventListener("click", (e) => {
+              if (e.target === m) closeModal();
+            });
+            document.body.appendChild(m);
+          }
+          m.innerHTML =
+            '<div class="modal-box"><button onclick="closeModal()" class="iconbtn" style="position:absolute;top:14px;right:14px">✕</button>' + html + "</div>";
+          m.style.display = "grid";
+        }
+        window.closeModal = function () {
+          const m = el("jpModal");
+          if (m) m.style.display = "none";
+        };
+
+        // ===============================================================
+        // Helpers
+        // ===============================================================
+        function shuffle(arr) {
+          const a = arr.slice();
+          for (let i = a.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [a[i], a[j]] = [a[j], a[i]];
+          }
+          return a;
+        }
+        function uniqueChoices(answer, pool, n) {
+          const set = new Set([answer]);
+          for (const x of shuffle(pool)) {
+            if (set.size >= n) break;
+            if (x && x !== answer) set.add(x);
+          }
+          return shuffle(Array.from(set));
+        }
+        function escapeHtml(s) {
+          return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+          );
+        }
+        const escapeAttr = escapeHtml;
+
+        // ===============================================================
+        // Boot
+        // ===============================================================
+        buildTabs();
+        (async function () {
+          await pullState();
+          const start = (location.hash || "").replace("#", "");
+          go(TABS.some((t) => t[0] === start) ? start : "dashboard");
+        })();
+      })();
+    </script>
+
+    <script>
+      // Standard admin shell boilerplate (identity + logout), matching the
+      // other console pages.
+      document.getElementById("logoutBtn").addEventListener("click", async () => {
+        try {
+          await fetch("/admin-logout", { method: "POST", credentials: "same-origin" });
+        } catch (e) {}
+        window.location.href = "/admin-login.html";
+      });
+      (async () => {
+        try {
+          const r = await fetch("/whoami", { credentials: "same-origin" });
+          if (!r.ok) {
+            window.location.href = "/admin-login.html";
+            return;
+          }
+          const data = await r.json();
+          const me = (data && data.admin) || {};
+          const name = me.username || "Admin";
+          document.getElementById("meName").innerText = name;
+          document.getElementById("meAvatar").innerText = name.slice(0, 2).toUpperCase();
+        } catch (e) {
+          window.location.href = "/admin-login.html";
+        }
+      })();
+    </script>
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+  </body>
+</html>

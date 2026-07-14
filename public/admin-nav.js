@@ -71,6 +71,10 @@
       '<rect x="4" y="8" width="16" height="12" rx="2"></rect>' +
       '<path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
+    japanese:
+      '<path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 ' +
+      '1 0 0 1-1-1v-2"></path><path d="M8 4v16"></path>' +
+      '<path d="M11 9h6M14 9v6M11 14h6"></path>',
   };
 
   // Every href this script manages (either as a standalone link or grouped
@@ -180,6 +184,12 @@
     },
   ];
   var STANDALONE = [
+    {
+      href: "/japanese.html",
+      label: "Japanese N5",
+      icon: ICONS.japanese,
+      superOnly: false,
+    },
     {
       href: "/settings.html",
       label: "Settings",
