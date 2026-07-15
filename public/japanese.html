@@ -1267,6 +1267,7 @@
 
       <section class="view" data-view="dashboard"></section>
       <section class="view" data-view="kana"></section>
+      <section class="view" data-view="write"></section>
       <section class="view" data-view="kanji"></section>
       <section class="view" data-view="vocab"></section>
       <section class="view" data-view="mywords"></section>
@@ -1274,6 +1275,7 @@
       <section class="view" data-view="speak"></section>
       <section class="view" data-view="listen"></section>
       <section class="view" data-view="podcast"></section>
+      <section class="view" data-view="reading"></section>
       <section class="view" data-view="grammar"></section>
       <section class="view" data-view="review"></section>
       <section class="view" data-view="quiz"></section>
@@ -1286,6 +1288,7 @@
 
     <script src="/japanese-data.js"></script>
     <script src="/japanese-n4-data.js"></script>
+    <script src="/japanese-extra-data.js"></script>
     <script>
       (function () {
         "use strict";
@@ -1298,6 +1301,8 @@
           (N4[key] || []).forEach((o) => (o.lv = "n4"));
           DATA[key] = DATA[key].concat(N4[key] || []);
         });
+        // Reading passages + listening dialogues (already level-tagged).
+        const EXTRA = window.JP_EXTRA || { readings: [], dialogues: [] };
         const LEVELS = [["n5", "N5"], ["n4", "N4"], ["all", "All"]];
         const lvName = () => (settings.level === "all" ? "N5+N4" : (settings.level || "n5").toUpperCase());
         function byLevel(arr) {
@@ -1492,13 +1497,14 @@
           pickVoice();
           speechSynthesis.onvoiceschanged = pickVoice;
         }
-        function speak(text, rate) {
+        function speak(text, rate, pitch) {
           if (!("speechSynthesis" in window) || !text) return;
           try {
             speechSynthesis.cancel();
             const u = new SpeechSynthesisUtterance(text);
             u.lang = "ja-JP";
             u.rate = rate || 0.9;
+            if (pitch) u.pitch = pitch;
             if (jaVoice) u.voice = jaVoice;
             speechSynthesis.speak(u);
           } catch (e) {}
@@ -1694,9 +1700,65 @@
             else stats.streak = 1;
             stats.lastStudy = t;
           }
-          stats.history[t] = (stats.history[t] || 0) + (n || 0);
+          const prev = stats.history[t] || 0;
+          stats.history[t] = prev + (n || 0);
           stats.reviewsTotal += n || 0;
+          const beforeLvl = xpInfo().lvl;
+          stats.xp = (stats.xp || 0) + (n || 0);
+          if (xpInfo().lvl > beforeLvl) celebrate("⬆️ Level up! You are now " + xpInfo().title);
+          const goal = settings.dailyGoal || 30;
+          if (prev < goal && stats.history[t] >= goal) celebrate("🎉 Daily goal reached — " + goal + " items! すごい！");
           touch();
+        }
+
+        // ---- XP levels & celebrations ---------------------------------
+        const XP_TITLES = [
+          [0, "🌱 Beginner"],
+          [150, "📖 Student"],
+          [400, "🍙 Apprentice"],
+          [900, "🎒 Adventurer"],
+          [1800, "🗡️ Samurai"],
+          [3200, "🎓 Sensei"],
+          [5200, "🏯 Master"],
+          [8000, "🐉 Legend"],
+        ];
+        function xpInfo() {
+          const xp = stats.xp || 0;
+          let lvl = 0;
+          for (let i = 0; i < XP_TITLES.length; i++) if (xp >= XP_TITLES[i][0]) lvl = i;
+          const cur = XP_TITLES[lvl][0];
+          const next = lvl + 1 < XP_TITLES.length ? XP_TITLES[lvl + 1][0] : null;
+          return {
+            lvl, xp,
+            title: XP_TITLES[lvl][1],
+            next,
+            pct: next === null ? 100 : Math.min(100, Math.round(((xp - cur) / (next - cur)) * 100)),
+          };
+        }
+        const PRAISE = ["よくできました！ Well done!", "すごい！ Amazing!", "いいね！ Keep it up!", "がんばったね！ Great effort!", "継続は力なり — consistency is power!"];
+        const praise = () => PRAISE[Math.floor(Math.random() * PRAISE.length)];
+        function confetti() {
+          if (!document.getElementById("jpConfettiCss")) {
+            const st = document.createElement("style");
+            st.id = "jpConfettiCss";
+            st.textContent = "@keyframes jpConfettiFall{0%{transform:translateY(-40px) rotate(0);opacity:1}100%{transform:translateY(105vh) rotate(720deg);opacity:.4}}.jp-confetti{position:fixed;top:0;z-index:9999;pointer-events:none;font-size:22px;animation:jpConfettiFall linear forwards}";
+            document.head.appendChild(st);
+          }
+          const emo = ["🎉", "✨", "🌸", "⭐", "🎊"];
+          for (let i = 0; i < 26; i++) {
+            const s = document.createElement("span");
+            s.className = "jp-confetti";
+            s.textContent = emo[Math.floor(Math.random() * emo.length)];
+            s.style.left = Math.random() * 100 + "vw";
+            s.style.animationDuration = 1.4 + Math.random() * 1.6 + "s";
+            s.style.animationDelay = Math.random() * 0.5 + "s";
+            document.body.appendChild(s);
+            setTimeout(() => s.remove(), 3600);
+          }
+        }
+        function celebrate(msg) {
+          toast(msg);
+          confetti();
         }
 
         function uid(p) {
@@ -1713,6 +1775,7 @@
         const TABS = [
           ["dashboard", "Dashboard"],
           ["kana", "Kana"],
+          ["write", "Write"],
           ["kanji", "Kanji"],
           ["vocab", "Vocabulary"],
           ["mywords", "My Words"],
@@ -1720,6 +1783,7 @@
           ["speak", "Speak"],
           ["listen", "Listen"],
           ["podcast", "Podcast"],
+          ["reading", "Reading"],
           ["grammar", "Grammar"],
           ["review", "Review"],
           ["quiz", "Quiz"],
@@ -1820,6 +1884,7 @@
             "<button class=\"btn\" onclick=\"go('quiz')\">Quick quiz</button>" +
             "<button class=\"btn\" onclick=\"go('exam')\">📝 Mock exam</button></div></div>" +
             levelChips() +
+            xpCard() +
             '<div class="grid cols-3" style="margin-bottom:18px">' +
             statTile("🔥 Streak", stats.streak + '<small> day' + (stats.streak === 1 ? "" : "s") + "</small>", null) +
             statTile("✅ Reviewed today", (stats.history[todayStr()] || 0) + "", null) +
@@ -1838,13 +1903,21 @@
             '<button class="btn" onclick="seedNew(\'kanji\',10)">+ 10 kanji</button>' +
             '<button class="btn" onclick="seedNew(\'vocab\',15)">+ 15 vocab</button>' +
             '<button class="btn" onclick="go(\'mywords\')">+ Add your own words</button>' +
-            "</div></div>";
+            "</div></div>" +
+            '<div class="card"><h2>Backup &amp; restore</h2><div class="hint">Download all your progress as a file, or restore it on another device.</div>' +
+            '<div class="btnrow" style="margin-top:14px"><button class="btn" onclick="jpExport()">⬇️ Export backup</button>' +
+            '<button class="btn" onclick="jpImport()">⬆️ Import backup</button>' +
+            '<input type="file" id="jpImportFile" accept="application/json" style="display:none"></div></div>';
+          const fi = el("jpImportFile");
+          if (fi) fi.addEventListener("change", jpImportFile);
 
           const plan = [
             { label: "Review your due cards" + (c.due ? " (" + c.due + ")" : ""), done: c.due === 0 && studiedToday, go: "review" },
             { label: "Practice a kana set", done: c.kana > 0, go: "kana" },
             { label: "Learn 5 new kanji", done: c.kanji >= 5, go: "kanji" },
             { label: "Add a word or sentence of your own", done: words.length + sentences.length > 0, go: "mywords" },
+            { label: "Read a passage (Reading tab)", done: false, go: "reading" },
+            { label: "Listen to a dialogue or podcast episode", done: false, go: "listen" },
             { label: "Study 1 grammar point", done: false, go: "grammar" },
           ];
           el("planList").innerHTML = plan
@@ -1857,6 +1930,63 @@
             .join("");
           updateHeadReview();
         };
+        function xpCard() {
+          const x = xpInfo();
+          const goal = settings.dailyGoal || 30;
+          const today = stats.history[todayStr()] || 0;
+          const gPct = Math.min(100, Math.round((today / goal) * 100));
+          return (
+            '<div class="card" style="margin-bottom:18px">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">' +
+            '<b style="font-size:15px">' + x.title + '</b><span class="hint">' + x.xp + " XP" +
+            (x.next === null ? " · max level!" : " · " + (x.next - x.xp) + " XP to next level") + "</span></div>" +
+            '<div class="progress" style="margin-top:8px"><i style="width:' + x.pct + '%"></i></div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;flex-wrap:wrap;gap:8px">' +
+            '<span style="font-size:13px;font-weight:600">' + (gPct >= 100 ? "🎉 " : "🎯 ") + "Daily goal: " + today + " / " + goal + "</span>" +
+            '<span class="chiprow" style="margin:0">' +
+            [15, 30, 60, 100].map((n) => '<button class="chip ' + (goal === n ? "active" : "") + '" onclick="setGoal(' + n + ')">' + n + "</button>").join("") +
+            "</span></div>" +
+            '<div class="progress" style="margin-top:8px"><i style="width:' + gPct + '%"></i></div></div>'
+          );
+        }
+        window.setGoal = function (n) {
+          settings.dailyGoal = n;
+          touch();
+          rerender();
+        };
+        window.jpExport = function () {
+          const blob = new Blob([JSON.stringify(snapshot(), null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "japanese-progress-" + todayStr() + ".json";
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+          toast("Backup downloaded");
+        };
+        window.jpImport = function () {
+          const fi = el("jpImportFile");
+          if (fi) fi.click();
+        };
+        function jpImportFile(ev) {
+          const f = ev.target.files && ev.target.files[0];
+          if (!f) return;
+          const rd = new FileReader();
+          rd.onload = () => {
+            try {
+              const ns = JSON.parse(rd.result);
+              if (!ns || typeof ns.srs !== "object") throw new Error("bad file");
+              ns.updatedAt = Date.now();
+              adopt(ns);
+              touch();
+              rerender();
+              celebrate("Backup restored — " + Object.keys(srs).length + " cards");
+            } catch (e) {
+              toast("⚠️ Not a valid backup file");
+            }
+          };
+          rd.readAsText(f);
+          ev.target.value = "";
+        }
         function statTile(k, v, pct) {
           return (
             '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + "</div>" +
@@ -3005,8 +3135,21 @@
           ["vocab", "Vocabulary"],
           ["kanji", "Kanji"],
           ["grammar", "Grammar & particles"],
+          ["reading", "Reading"],
           ["listen", "Listening"],
         ];
+        // Weighted shuffle: cards you struggle with (lapsed / low box) come up
+        // more often, unseen ones next, well-known ones least.
+        function weightedShuffle(pool, idFn) {
+          return pool
+            .map((o) => {
+              const c = srs[idFn(o)];
+              const w = !c ? 2 : c.lapses > 0 || (c.box || 0) <= 1 ? 3 : 1;
+              return { o, k: Math.pow(Math.random(), 1 / w) };
+            })
+            .sort((a, b) => b.k - a.k)
+            .map((x) => x.o);
+        }
         let examLevel = "n5";
         RENDER.exam = function () {
           const v = $('[data-view="exam"]');
@@ -3015,7 +3158,7 @@
             "<tr><td>" + escapeHtml(e.d) + "</td><td>" + escapeHtml(String(e.level).toUpperCase()) + "</td><td>" +
             e.score + " / " + e.total + "</td><td>" + e.pct + "%" + (e.pct >= 70 ? " ✅" : "") + "</td></tr>").join("");
           v.innerHTML =
-            '<div class="card"><h2>Mock exam 📝</h2><div class="hint">35 questions — vocabulary, kanji, grammar/particles and listening. 70% is a pass. Questions are drawn fresh every time.</div>' +
+            '<div class="card"><h2>Mock exam 📝</h2><div class="hint">Vocabulary, kanji, grammar/particles, reading and listening. 70% is a pass. Questions are drawn fresh every time — and weighted toward the cards you get wrong in review.</div>' +
             '<div class="chiprow" style="margin:14px 0 0">' +
             '<button class="chip ' + (examLevel === "n5" ? "active" : "") + '" onclick="setExamLevel(\'n5\')">N5 exam</button>' +
             '<button class="chip ' + (examLevel === "n4" ? "active" : "") + '" onclick="setExamLevel(\'n4\')">N4 exam</button></div>' +
@@ -3077,13 +3220,13 @@
           const kanjiPool = pick(DATA.kanji);
           const partPool = pick(DATA.particles);
           const items = [];
-          shuffle(vocabPool).slice(0, 10).forEach((o) =>
+          weightedShuffle(vocabPool, vocabId).slice(0, 10).forEach((o) =>
             items.push({
               sec: "vocab", prompt: o.w, promptClass: "jp", sub: "What does it mean?",
               answer: o.m, choices: uniqueChoices(o.m, vocabPool.map((x) => x.m), 4),
             }),
           );
-          shuffle(kanjiPool).slice(0, 10).forEach((o, i) =>
+          weightedShuffle(kanjiPool, kanjiId).slice(0, 10).forEach((o, i) =>
             items.push(
               i % 2 === 0
                 ? { sec: "kanji", prompt: o.c, promptClass: "jp", sub: "Meaning?", answer: o.m, choices: uniqueChoices(o.m, kanjiPool.map((x) => x.m), 4) }
@@ -3102,6 +3245,16 @@
               speakAfter: p.j.replace("＿", p.a[0]),
             });
           });
+          const readPool = (EXTRA.readings || []).filter((r) => r.lv === lv);
+          if (readPool.length) {
+            const r = shuffle(readPool.slice())[0];
+            r.qs.slice(0, 3).forEach((qq) =>
+              items.push({
+                sec: "reading", passage: r, prompt: "📖", sub: qq.q,
+                answer: qq.a, choices: shuffle(qq.choices.slice()),
+              }),
+            );
+          }
           shuffle(vocabPool).slice(0, 5).forEach((o) =>
             items.push({
               sec: "listen", audio: o.k, prompt: "🔊", sub: "Listen — what does it mean?",
@@ -3121,7 +3274,10 @@
             v.innerHTML =
               '<div class="study"><div class="sess-top"><span>' + level.toUpperCase() + " exam</span><span>" + (idx + 1) + " / " + items.length + "</span></div>" +
               '<div class="progress" style="margin-bottom:16px"><i style="width:' + ((idx / items.length) * 100).toFixed(0) + '%"></i></div>' +
-              '<div class="flashcard" id="examCard" style="min-height:150px;cursor:default"><div class="front ' + (it.promptClass || "") + '">' + escapeHtml(it.prompt) + "</div>" +
+              '<div class="flashcard" id="examCard" style="min-height:150px;cursor:default">' +
+              (it.passage
+                ? '<div class="jp" style="font-size:16px;line-height:2;text-align:left">' + escapeHtml(it.passage.jp) + "</div>"
+                : '<div class="front ' + (it.promptClass || "") + '">' + escapeHtml(it.prompt) + "</div>") +
               (it.sub ? '<div class="tap">' + escapeHtml(it.sub) + "</div>" : "") + "</div>" +
               '<div class="opts">' + it.choices.map((ch) => '<button class="opt ' + (it.jpOpts ? "jp" : "") + '" data-v="' + escapeAttr(ch) + '">' + escapeHtml(ch) + "</button>").join("") + "</div></div>";
             if (it.audio) {
@@ -3163,6 +3319,7 @@
             stats.exams = stats.exams.slice(0, 20);
             markStudied(items.length);
             const passed = pct >= 70;
+            if (passed) confetti();
             const rows = EXAM_SECTIONS.filter(([k]) => secTotal[k]).map(([k, label]) => {
               const s = secScore[k] || 0, t = secTotal[k];
               const p = Math.round((s / t) * 100);
@@ -3174,7 +3331,7 @@
             v.innerHTML =
               '<div class="card study"><div class="empty-state"><div class="big">' + (passed ? "🏆" : "💪") + "</div><b>" +
               score + " / " + items.length + " — " + pct + "%</b><div style='margin-top:8px'>" +
-              (passed ? "Passed! (pass mark is 70%)" : "Below the 70% pass mark — check your weakest section below and retake it.") +
+              (passed ? "Passed! (pass mark is 70%) " + praise() : "Below the 70% pass mark — check your weakest section below and retake it.") +
               "</div></div>" + rows +
               '<div class="btnrow" style="justify-content:center;margin-top:18px">' +
               '<button class="btn primary" onclick="RENDER_exam()">Back to Exam</button>' +
@@ -3196,6 +3353,17 @@
         const C_AROW = { う: "わ", つ: "た", る: "ら", む: "ま", ぬ: "な", ぶ: "ば", く: "か", ぐ: "が", す: "さ" };
         const C_TE = { う: "って", つ: "って", る: "って", む: "んで", ぶ: "んで", ぬ: "んで", く: "いて", ぐ: "いで", す: "して" };
         const C_TA = { う: "った", つ: "った", る: "った", む: "んだ", ぶ: "んだ", ぬ: "んだ", く: "いた", ぐ: "いだ", す: "した" };
+        const C_EROW = { う: "え", つ: "て", る: "れ", む: "め", ぬ: "ね", ぶ: "べ", く: "け", ぐ: "げ", す: "せ" };
+        const C_OROW = { う: "お", つ: "と", る: "ろ", む: "も", ぬ: "の", ぶ: "ぼ", く: "こ", ぐ: "ご", す: "そ" };
+        const N4_FORMS = [
+          { key: "tai", label: "たい (want to)" },
+          { key: "potential", label: "potential (can …)" },
+          { key: "volitional", label: "volitional (let's …)" },
+          { key: "ba", label: "ば-conditional" },
+          { key: "passive", label: "passive" },
+          { key: "causative", label: "causative" },
+        ];
+        const N4_FORM_KEYS = N4_FORMS.map((f) => f.key);
         function masuStem(w, g) {
           if (g === "irregular") {
             if (w.endsWith("する")) return w.slice(0, -2) + "し";
@@ -3206,9 +3374,30 @@
           return w.slice(0, -1) + C_IROW[w.slice(-1)];
         }
         function conjugate(w, g, form) {
-          if (w === "ある") return { dict: "ある", masu: "あります", masen: "ありません", mashita: "ありました", te: "あって", ta: "あった", nai: "ない" }[form];
+          if (w === "ある") return { dict: "ある", masu: "あります", masen: "ありません", mashita: "ありました", te: "あって", ta: "あった", nai: "ない", ba: "あれば" }[form];
           if (form === "dict") return w;
           const st = w.slice(0, -1), end = w.slice(-1);
+          if (N4_FORM_KEYS.indexOf(form) >= 0) {
+            if (form === "tai") return masuStem(w, g) + "たい";
+            if (g === "irregular") {
+              if (w.endsWith("する")) {
+                const b = w.slice(0, -2);
+                return { potential: b + "できる", volitional: b + "しよう", ba: b + "すれば", passive: b + "される", causative: b + "させる" }[form];
+              }
+              if (w === "来る") return { potential: "来られる", volitional: "来よう", ba: "来れば", passive: "来られる", causative: "来させる" }[form];
+              if (w === "くる") return { potential: "こられる", volitional: "こよう", ba: "くれば", passive: "こられる", causative: "こさせる" }[form];
+              return undefined;
+            }
+            if (g === "ichidan")
+              return { potential: st + "られる", volitional: st + "よう", ba: st + "れば", passive: st + "られる", causative: st + "させる" }[form];
+            return {
+              potential: st + C_EROW[end] + "る",
+              volitional: st + C_OROW[end] + "う",
+              ba: st + C_EROW[end] + "ば",
+              passive: st + C_AROW[end] + "れる",
+              causative: st + C_AROW[end] + "せる",
+            }[form];
+          }
           if (form === "masu") return masuStem(w, g) + "ます";
           if (form === "masen") return masuStem(w, g) + "ません";
           if (form === "mashita") return masuStem(w, g) + "ました";
@@ -3241,6 +3430,12 @@
           te: "godan: う/つ/る→って, む/ぶ/ぬ→んで, く→いて, ぐ→いで, す→して. ichidan: drop る +て. 行く is the exception → 行って.",
           nai: "Plain negative. godan: last kana → a-row + ない (う→わ). ichidan: drop る +ない.",
           ta: "Plain past: like the て-form but with た / だ.",
+          tai: "Want to: ます-stem + たい (conjugates like an i-adjective).",
+          potential: "Can do: godan last kana → e-row + る. ichidan: drop る + られる. する → できる.",
+          volitional: "Let's / shall: godan last kana → o-row + う. ichidan: drop る + よう.",
+          ba: "If…: godan last kana → e-row + ば. ichidan: drop る + れば.",
+          passive: "Is done (to me): godan last kana → a-row + れる. ichidan: drop る + られる.",
+          causative: "Make/let someone do: godan a-row + せる. ichidan: drop る + させる.",
         };
         const GROUP_SHORT = { godan: "u-verb", ichidan: "ru-verb", irregular: "irr." };
 
@@ -3364,8 +3559,12 @@
             '<button class="chip ' + (conjFormSel === "mixed" ? "active" : "") + '" onclick="setConjForm(\'mixed\')">Mixed</button>' +
             DATA.conjForms.map((f) => '<button class="chip ' + (conjFormSel === f.key ? "active" : "") + '" onclick="setConjForm(\'' + f.key + "')\">" + escapeHtml(f.label.split(" ")[0]) + "</button>").join("") +
             "</div>" +
+            '<div class="hint" style="margin:10px 0 4px">N4 forms:</div><div class="chiprow">' +
+            '<button class="chip ' + (conjFormSel === "n4mixed" ? "active" : "") + '" onclick="setConjForm(\'n4mixed\')">N4 mixed</button>' +
+            N4_FORMS.map((f) => '<button class="chip ' + (conjFormSel === f.key ? "active" : "") + '" onclick="setConjForm(\'' + f.key + "')\">" + escapeHtml(f.label) + "</button>").join("") +
+            "</div>" +
             '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:10px">' + DATA.conjVerbs.length +
-            ' N5 verbs · <span class="pill ichidan">ru-verb</span> <span class="pill godan">u-verb</span> <span class="pill irregular">irregular</span></div>' +
+            ' verbs · <span class="pill ichidan">ru-verb</span> <span class="pill godan">u-verb</span> <span class="pill irregular">irregular</span></div>' +
             '<div class="btnrow" style="justify-content:center"><button class="btn jp" onclick="startConj()">▶ Start conjugation drill</button><button class="btn" onclick="showConjTable()">Reference table</button></div></div>';
         }
         window.setConjForm = function (f) {
@@ -3373,15 +3572,21 @@
           paintConjHub();
         };
         window.startConj = function () {
-          const forms = conjFormSel === "mixed" ? DATA.conjForms.map((f) => f.key) : [conjFormSel];
+          const allForms = DATA.conjForms.concat(N4_FORMS);
+          const forms =
+            conjFormSel === "mixed" ? DATA.conjForms.map((f) => f.key)
+            : conjFormSel === "n4mixed" ? N4_FORM_KEYS
+            : [conjFormSel];
           let items = [];
           DATA.conjVerbs.forEach((vb) => {
             forms.forEach((fk) => {
-              const fdef = DATA.conjForms.find((f) => f.key === fk);
-              items.push({ vb, fk, flabel: fdef.label, answer: conjugate(vb.w, vb.group, fk), answerK: conjugate(vb.k, vb.group, fk) });
+              const fdef = allForms.find((f) => f.key === fk);
+              const answer = conjugate(vb.w, vb.group, fk);
+              if (!answer) return;
+              items.push({ vb, fk, flabel: fdef.label, answer, answerK: conjugate(vb.k, vb.group, fk) });
             });
           });
-          items = shuffle(items).slice(0, conjFormSel === "mixed" ? 24 : DATA.conjVerbs.length);
+          items = shuffle(items).slice(0, forms.length > 1 ? 24 : DATA.conjVerbs.length);
           conjDrill(items);
         };
         function conjDrill(items) {
@@ -3542,7 +3747,7 @@
         // Listening / dictation — audio prompt, pick what you heard
         // ===============================================================
         let listenSrc = "kana";
-        const listenLabel = () => (listenSrc === "kana" ? "kana" : listenSrc === "vocab" ? "vocabulary" : "phrases");
+        const listenLabel = () => (listenSrc === "kana" ? "kana" : listenSrc === "vocab" ? "vocabulary" : listenSrc === "dialogs" ? "dialogues" : "phrases");
         // ===============================================================
         // Podcast — hands-free audio episodes built from the level's own
         // content with the device's speech synthesis, so they work offline
@@ -3753,11 +3958,20 @@
               ? "Tap ▶, listen to the Japanese, then pick what you heard. Perfect with earphones on the train."
               : "This browser has no speech synthesis, so audio won't play. Try Chrome or Safari.") +
             '</div><div class="chiprow" style="margin:14px 0 0">' +
-            [["kana", "Kana"], ["vocab", "Vocabulary"], ["phrases", "Phrases"]]
+            [["kana", "Kana"], ["vocab", "Vocabulary"], ["phrases", "Phrases"], ["dialogs", "Dialogues"]]
               .map(([k, l]) => '<button class="chip ' + (listenSrc === k ? "active" : "") + '" onclick="setListen(\'' + k + "')\">" + l + "</button>").join("") +
             "</div></div>" +
-            '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">Listen and choose what you heard — <b>' +
-            listenLabel() + "</b>.</div><button class=\"btn jp\" onclick=\"startListen()\">▶ Start listening drill</button></div>";
+            (listenSrc === "dialogs"
+              ? levelChips() +
+                '<div class="card"><h2>Dialogues 💬 · ' + lvName() + '</h2><div class="hint">Two-speaker conversations, JLPT-listening style. Listen (text hidden!), then answer the questions.</div></div>' +
+                byLevel(EXTRA.dialogues)
+                  .map((d, i) =>
+                    '<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1;min-width:180px"><b style="font-size:14px">' +
+                    escapeHtml(d.title) + '</b><div class="hint">' + d.lines.length + " lines · " + d.qs.length + ' questions</div></div>' +
+                    '<button class="btn primary sm" onclick="startDialogue(' + i + ')">▶ Listen</button></div>',
+                  ).join("")
+              : '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">Listen and choose what you heard — <b>' +
+                listenLabel() + "</b>.</div><button class=\"btn jp\" onclick=\"startListen()\">▶ Start listening drill</button></div>");
         };
         window.setListen = function (s) {
           listenSrc = s;
@@ -3830,6 +4044,330 @@
           render();
         }
         window.RENDER_listen = RENDER.listen;
+
+        // ---- Listening dialogues (two TTS "speakers" via pitch) --------
+        let dlgToken = 0;
+        function dlgSpeakAsync(text, pitch, token) {
+          return new Promise((resolve) => {
+            if (!("speechSynthesis" in window) || !text || token !== dlgToken) return resolve();
+            try {
+              const u = new SpeechSynthesisUtterance(text);
+              u.lang = "ja-JP";
+              u.rate = 0.88;
+              u.pitch = pitch;
+              if (jaVoice) u.voice = jaVoice;
+              u.onend = resolve;
+              u.onerror = resolve;
+              speechSynthesis.speak(u);
+            } catch (e) {
+              resolve();
+            }
+          });
+        }
+        const dlgPause = (ms) => new Promise((r) => setTimeout(r, ms));
+        window.startDialogue = function (i) {
+          const d = byLevel(EXTRA.dialogues)[i];
+          if (d) runDialogue(d);
+        };
+        function runDialogue(d) {
+          const v = $('[data-view="listen"]');
+          let showText = false, playing = false;
+          function paint() {
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>💬 ' + escapeHtml(d.title) + "</span><span>" + d.lines.length + " lines</span></div>" +
+              '<div class="card" style="min-height:120px">' +
+              (showText
+                ? d.lines.map((l) => '<div style="margin:8px 0;display:flex;gap:8px"><span>' + (l.sp === "A" ? "🧑" : "🧑‍🦰") + '</span><span><span class="jp">' + escapeHtml(l.ja) + '</span><div class="hint">' + escapeHtml(l.en) + "</div></span></div>").join("")
+                : '<div class="empty-state"><div class="big">🎧</div><div class="hint">Text hidden — train your ears first, like the real exam.</div></div>') +
+              "</div>" +
+              '<div class="btnrow" style="justify-content:center;margin-top:14px">' +
+              '<button class="btn jp" id="dlgPlay">' + (playing ? "⏸ Stop" : "▶ Play dialogue") + "</button>" +
+              '<button class="btn" id="dlgText">' + (showText ? "Hide text" : "Show text") + "</button>" +
+              '<button class="btn primary" id="dlgQ">Questions →</button>' +
+              '<button class="btn" id="dlgBack">← Back</button></div></div>';
+            el("dlgPlay").onclick = () => {
+              if (playing) {
+                playing = false;
+                dlgToken++;
+                try { speechSynthesis.cancel(); } catch (e) {}
+                paint();
+              } else {
+                playing = true;
+                paint();
+                playAll();
+              }
+            };
+            el("dlgText").onclick = () => {
+              showText = !showText;
+              paint();
+            };
+            el("dlgQ").onclick = () => {
+              dlgToken++;
+              try { speechSynthesis.cancel(); } catch (e) {}
+              dlgQuestions(d);
+            };
+            el("dlgBack").onclick = () => {
+              dlgToken++;
+              try { speechSynthesis.cancel(); } catch (e) {}
+              RENDER.listen();
+            };
+          }
+          async function playAll() {
+            const my = ++dlgToken;
+            try { speechSynthesis.cancel(); } catch (e) {}
+            for (const l of d.lines) {
+              if (my !== dlgToken || !playing) return;
+              await dlgSpeakAsync(l.ja, l.sp === "A" ? 1.0 : 0.8, my);
+              await dlgPause(600);
+            }
+            if (my === dlgToken) {
+              playing = false;
+              paint();
+            }
+          }
+          paint();
+        }
+        function dlgQuestions(d) {
+          const v = $('[data-view="listen"]');
+          let idx = 0, score = 0, answered = false;
+          function render() {
+            if (idx >= d.qs.length) {
+              markStudied(d.qs.length * 2);
+              const pct = Math.round((score / d.qs.length) * 100);
+              if (pct >= 80) confetti();
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">' + (pct >= 80 ? "🏆" : pct >= 50 ? "👍" : "💪") + "</div><b>" +
+                score + " / " + d.qs.length + " correct</b><div style='margin-top:8px'>" + (pct >= 80 ? praise() : "Replay the dialogue with the text shown, then try again.") +
+                '</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_listen()">Back to Listening</button></div></div></div>';
+              return;
+            }
+            const qq = d.qs[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>💬 ' + escapeHtml(d.title) + "</span><span>" + (idx + 1) + " / " + d.qs.length + " · ✅ " + score + "</span></div>" +
+              '<div class="flashcard" style="min-height:120px;cursor:default"><div class="front" style="font-size:18px">' + escapeHtml(qq.q) + "</div></div>" +
+              '<div class="opts">' + shuffle(qq.choices.slice()).map((c) => '<button class="opt" data-v="' + escapeAttr(c) + '">' + escapeHtml(c) + "</button>").join("") + "</div></div>";
+            v.querySelectorAll(".opt").forEach((b) =>
+              b.addEventListener("click", () => {
+                if (answered) return;
+                answered = true;
+                const good = b.dataset.v === qq.a;
+                if (good) score++;
+                v.querySelectorAll(".opt").forEach((x) => {
+                  if (x.dataset.v === qq.a) x.classList.add("correct");
+                  else if (x === b) x.classList.add("wrong");
+                  x.style.pointerEvents = "none";
+                });
+                setTimeout(() => {
+                  answered = false;
+                  idx++;
+                  render();
+                }, good ? 850 : 1500);
+              }),
+            );
+          }
+          render();
+        }
+
+        // ===============================================================
+        // Reading — graded passages with comprehension questions
+        // ===============================================================
+        RENDER.reading = function () {
+          const v = $('[data-view="reading"]');
+          const list = byLevel(EXTRA.readings);
+          v.innerHTML =
+            '<div class="card"><h2>Reading 📖</h2><div class="hint">Short graded passages, JLPT-reading style. Read the Japanese (tap 🔊 to hear it), then answer the questions. The translation is there if you get stuck.</div></div>' +
+            levelChips() +
+            list
+              .map(
+                (r, i) =>
+                  '<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1;min-width:180px"><b style="font-size:14px">' +
+                  escapeHtml(r.title) + '</b><div class="hint">' + r.jp.length + " chars · " + r.qs.length + ' questions</div></div>' +
+                  '<button class="btn primary sm" onclick="openReading(' + i + ')">Read →</button></div>',
+              ).join("");
+        };
+        window.RENDER_reading = RENDER.reading;
+        window.openReading = function (i) {
+          const r = byLevel(EXTRA.readings)[i];
+          if (!r) return;
+          const v = $('[data-view="reading"]');
+          let showEn = false;
+          function paint() {
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>📖 ' + escapeHtml(r.title) + "</span><span>" + r.qs.length + " questions</span></div>" +
+              '<div class="card"><div class="jp" style="font-size:18px;line-height:2.1">' + escapeHtml(r.jp) + "</div>" +
+              (showEn ? '<div class="hint" style="margin-top:12px;line-height:1.7">' + escapeHtml(r.en) + "</div>" : "") + "</div>" +
+              '<div class="btnrow" style="justify-content:center;margin-top:14px">' +
+              '<button class="btn" id="rdHear">' + spk + " Hear it</button>" +
+              '<button class="btn" id="rdEn">' + (showEn ? "Hide translation" : "Show translation") + "</button>" +
+              '<button class="btn primary" id="rdQ">Questions →</button>' +
+              '<button class="btn" onclick="RENDER_reading()">← Back</button></div></div>';
+            el("rdHear").onclick = () => speak(r.jp, 0.85);
+            el("rdEn").onclick = () => {
+              showEn = !showEn;
+              paint();
+            };
+            el("rdQ").onclick = () => readingQuestions(r);
+          }
+          paint();
+        };
+        function readingQuestions(r) {
+          const v = $('[data-view="reading"]');
+          let idx = 0, score = 0, answered = false;
+          function render() {
+            if (idx >= r.qs.length) {
+              markStudied(r.qs.length * 2);
+              const pct = Math.round((score / r.qs.length) * 100);
+              if (pct >= 80) confetti();
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">' + (pct >= 80 ? "🏆" : pct >= 50 ? "👍" : "💪") + "</div><b>" +
+                score + " / " + r.qs.length + " correct</b><div style='margin-top:8px'>" + (pct >= 80 ? praise() : "Re-read the passage with the translation, then try again.") +
+                '</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_reading()">Back to Reading</button></div></div></div>';
+              return;
+            }
+            const qq = r.qs[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>📖 ' + escapeHtml(r.title) + "</span><span>" + (idx + 1) + " / " + r.qs.length + " · ✅ " + score + "</span></div>" +
+              '<div class="card"><div class="jp" style="font-size:15px;line-height:1.9;color:var(--muted)">' + escapeHtml(r.jp) + "</div></div>" +
+              '<div class="flashcard" style="min-height:90px;cursor:default"><div class="front" style="font-size:17px">' + escapeHtml(qq.q) + "</div></div>" +
+              '<div class="opts">' + shuffle(qq.choices.slice()).map((c) => '<button class="opt" data-v="' + escapeAttr(c) + '">' + escapeHtml(c) + "</button>").join("") + "</div></div>";
+            v.querySelectorAll(".opt").forEach((b) =>
+              b.addEventListener("click", () => {
+                if (answered) return;
+                answered = true;
+                const good = b.dataset.v === qq.a;
+                if (good) score++;
+                v.querySelectorAll(".opt").forEach((x) => {
+                  if (x.dataset.v === qq.a) x.classList.add("correct");
+                  else if (x === b) x.classList.add("wrong");
+                  x.style.pointerEvents = "none";
+                });
+                setTimeout(() => {
+                  answered = false;
+                  idx++;
+                  render();
+                }, good ? 850 : 1600);
+              }),
+            );
+          }
+          render();
+        }
+
+        // ===============================================================
+        // Write — trace kana / kanji on a canvas with a fading guide
+        // ===============================================================
+        let writeSrc = "kana";
+        RENDER.write = function () {
+          const v = $('[data-view="write"]');
+          v.innerHTML =
+            '<div class="card"><h2>Writing ✍️</h2><div class="hint">Trace each character with your finger (or mouse) over the grey guide, then try it with the guide hidden. Muscle memory makes reading faster too.</div>' +
+            '<div class="chiprow" style="margin:14px 0 0">' +
+            [["kana", "Kana"], ["kanji", "Kanji"]]
+              .map(([k, l]) => '<button class="chip ' + (writeSrc === k ? "active" : "") + '" onclick="setWriteSrc(\'' + k + "')\">" + l + "</button>").join("") +
+            "</div></div>" +
+            (writeSrc === "kanji" ? levelChips() : "") +
+            '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">10 random ' +
+            (writeSrc === "kana" ? (settings.script === "katakana" ? "katakana" : "hiragana") : lvName() + " kanji") +
+            ' per session.</div><button class="btn jp" onclick="startWrite()">✍️ Start writing practice</button></div>';
+        };
+        window.RENDER_write = RENDER.write;
+        window.setWriteSrc = function (s) {
+          writeSrc = s;
+          RENDER.write();
+        };
+        window.startWrite = function () {
+          let items;
+          if (writeSrc === "kana") {
+            const key = settings.script === "katakana" ? "k" : "h";
+            items = shuffle(KANA_FLAT).slice(0, 10).map((c) => ({ glyph: c[key], hint: c.r, say: c[key] }));
+          } else {
+            items = shuffle(byLevel(DATA.kanji)).slice(0, 10).map((o) => ({ glyph: o.c, hint: o.m + (o.kun ? " · " + o.kun : ""), say: firstReading(o) }));
+          }
+          writeSession(items);
+        };
+        function writeSession(items) {
+          const v = $('[data-view="write"]');
+          let idx = 0, guide = true;
+          function render() {
+            if (idx >= items.length) {
+              markStudied(items.length);
+              confetti();
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">✍️</div><b>' + items.length +
+                " characters practised!</b><div style='margin-top:8px'>" + praise() +
+                '</div><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_write()">Back to Writing</button></div></div></div>';
+              return;
+            }
+            const it = items[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>Writing</span><span>' + (idx + 1) + " / " + items.length + "</span></div>" +
+              '<div class="card" style="text-align:center"><div style="font-size:14px;font-weight:600;margin-bottom:10px">' + escapeHtml(it.hint) + "</div>" +
+              '<canvas id="wrCanvas" width="280" height="280" style="touch-action:none;border-radius:16px;background:var(--card,#fff);box-shadow:inset 0 0 0 2px rgba(120,120,140,.25);max-width:100%"></canvas>' +
+              '<div class="btnrow" style="justify-content:center;margin-top:12px">' +
+              '<button class="btn" id="wrClear">Clear</button>' +
+              '<button class="btn" id="wrGuide">' + (guide ? "Hide guide" : "Show guide") + "</button>" +
+              '<button class="btn" id="wrHear">' + spk + "</button>" +
+              '<button class="btn primary" id="wrNext">' + (idx + 1 >= items.length ? "Finish" : "Next →") + "</button></div></div></div>";
+            const cv = el("wrCanvas");
+            const ctx = cv.getContext("2d");
+            function paintBase() {
+              ctx.clearRect(0, 0, cv.width, cv.height);
+              ctx.save();
+              ctx.strokeStyle = "rgba(120,120,140,.25)";
+              ctx.setLineDash([6, 6]);
+              ctx.beginPath();
+              ctx.moveTo(cv.width / 2, 0);
+              ctx.lineTo(cv.width / 2, cv.height);
+              ctx.moveTo(0, cv.height / 2);
+              ctx.lineTo(cv.width, cv.height / 2);
+              ctx.stroke();
+              ctx.restore();
+              if (guide) {
+                ctx.save();
+                ctx.fillStyle = "rgba(120,120,140,.28)";
+                ctx.font = '210px "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif';
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(it.glyph, cv.width / 2, cv.height / 2 + 10);
+                ctx.restore();
+              }
+            }
+            paintBase();
+            let drawing = false;
+            function pos(ev) {
+              const r = cv.getBoundingClientRect();
+              return [((ev.clientX - r.left) * cv.width) / r.width, ((ev.clientY - r.top) * cv.height) / r.height];
+            }
+            cv.addEventListener("pointerdown", (ev) => {
+              drawing = true;
+              cv.setPointerCapture(ev.pointerId);
+              ctx.strokeStyle = "#6366f1";
+              ctx.lineWidth = 7;
+              ctx.lineCap = "round";
+              ctx.lineJoin = "round";
+              ctx.beginPath();
+              const [x, y] = pos(ev);
+              ctx.moveTo(x, y);
+            });
+            cv.addEventListener("pointermove", (ev) => {
+              if (!drawing) return;
+              const [x, y] = pos(ev);
+              ctx.lineTo(x, y);
+              ctx.stroke();
+            });
+            cv.addEventListener("pointerup", () => (drawing = false));
+            el("wrClear").onclick = paintBase;
+            el("wrGuide").onclick = () => {
+              guide = !guide;
+              render();
+            };
+            el("wrHear").onclick = () => speak(it.say);
+            el("wrNext").onclick = () => {
+              idx++;
+              render();
+            };
+          }
+          render();
+        }
 
         // ===============================================================
         // Modal

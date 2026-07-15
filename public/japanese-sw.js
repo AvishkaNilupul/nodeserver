@@ -6,11 +6,12 @@
  * train with no signal); progress is kept in localStorage and syncs when the
  * connection returns. Auth/sync endpoints are never cached — the app handles
  * those offline itself. Bump CACHE to invalidate old assets. */
-const CACHE = "jp-n5-v3";
+const CACHE = "jp-n5-v4";
 const SHELL = [
   "/japanese.html",
   "/japanese-data.js",
   "/japanese-n4-data.js",
+  "/japanese-extra-data.js",
   "/theme.js",
   "/admin-nav.js",
   "/japanese-icon-192.png",
