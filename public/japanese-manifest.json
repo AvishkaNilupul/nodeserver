@@ -1,0 +1,17 @@
+{
+  "name": "日本語 N5 — RedeemHub",
+  "short_name": "日本語 N5",
+  "description": "JLPT N5 study — kana, kanji, vocab, grammar, speaking, drills and spaced repetition.",
+  "start_url": "/japanese.html",
+  "scope": "/japanese.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1014",
+  "theme_color": "#4f46e5",
+  "lang": "ja",
+  "icons": [
+    { "src": "/japanese-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/japanese-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/japanese-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

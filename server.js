@@ -40,6 +40,7 @@ const radarRoutes = require("./routes/radarRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
+const japaneseRoutes = require("./routes/japaneseRoutes");
 const dropScanner = require("./utils/dropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
@@ -130,6 +131,11 @@ app.use(
     },
   }),
 );
+// The Japanese study state is synced as one JSON blob that can exceed the
+// default cap once a user has a large deck plus custom words/sentences; parse
+// it with a roomier limit before the global 100kb parser (which then skips the
+// already-parsed body). Everything else stays at 100kb.
+app.use("/japanese/state", express.json({ limit: "2mb" }));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 
@@ -420,6 +426,13 @@ app.get("/shop.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "shop.html"));
 });
 
+// Personal Japanese (JLPT N5) study tab. Self-contained learning app
+// (kana / kanji / vocab / grammar + spaced repetition) with progress kept
+// client-side in the browser's localStorage.
+app.get("/japanese.html", requireAdmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "japanese.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -448,6 +461,7 @@ app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, epicAccountRoutes);
+app.use(enforce2fa, japaneseRoutes);
 
 // =========================
 // Socket.IO
