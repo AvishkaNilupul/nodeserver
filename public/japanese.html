@@ -1503,31 +1503,105 @@
         // ===============================================================
         // Text-to-speech (browser Web Speech API — no network needed)
         // ===============================================================
-        let jaVoice = null;
+        // Rank the device's Japanese voices by naturalness: neural/premium
+        // voices (Edge "Natural", Google, Apple's Kyoko/Otoya, MS neural names)
+        // beat the default robotic eSpeak-style ones. The user's pick (if any)
+        // is stored in settings.voice by voiceURI.
+        let jaVoice = null, jaVoices = [];
+        function voiceScore(v) {
+          const n = (v.name || "").toLowerCase();
+          let s = 0;
+          if (/natural|neural|premium|enhanced/.test(n)) s += 40;
+          if (n.indexOf("google") >= 0) s += 25;
+          if (/kyoko|otoya|o-ren|hattori|siri/.test(n)) s += 20;
+          if (/nanami|keita|mayu|naoki|aoi|daichi|shiori|ayumi|haruka|ichiro|sayaka/.test(n)) s += 15;
+          if (n.indexOf("online") >= 0) s += 10;
+          if (!v.localService) s += 8;
+          return s;
+        }
         function pickVoice() {
           if (!("speechSynthesis" in window)) return;
           const vs = speechSynthesis.getVoices();
-          jaVoice =
-            vs.find((v) => v.lang === "ja-JP") ||
-            vs.find((v) => v.lang && v.lang.indexOf("ja") === 0) ||
-            null;
+          jaVoices = vs
+            .filter((v) => v.lang && v.lang.replace("_", "-").toLowerCase().indexOf("ja") === 0)
+            .sort((a, b) => voiceScore(b) - voiceScore(a));
+          const saved = settings.voice && jaVoices.find((v) => v.voiceURI === settings.voice);
+          jaVoice = saved || jaVoices[0] || null;
         }
         if ("speechSynthesis" in window) {
           pickVoice();
           speechSynthesis.onvoiceschanged = pickVoice;
         }
+        // Split Japanese text at sentence ends so each sentence is its own
+        // utterance — the engine phrases each one naturally and the gap between
+        // them acts as a breath pause (also avoids Chrome stalling on long text).
+        function utterChunks(text, lang) {
+          if (lang && lang.indexOf("ja") !== 0) return [String(text)];
+          const out = [];
+          let cur = "";
+          for (const ch of String(text)) {
+            cur += ch;
+            if ("。！？".indexOf(ch) >= 0) {
+              out.push(cur);
+              cur = "";
+            }
+          }
+          if (cur.trim()) out.push(cur);
+          return out.length ? out : [String(text)];
+        }
+        function speakSeq(text, opts) {
+          return new Promise((resolve) => {
+            if (!("speechSynthesis" in window) || !text) return resolve();
+            const o = opts || {};
+            const lang = o.lang || "ja-JP";
+            const chunks = utterChunks(text, lang);
+            let done = 0;
+            try {
+              if (!jaVoice && !jaVoices.length) pickVoice();
+              chunks.forEach((c) => {
+                const u = new SpeechSynthesisUtterance(c);
+                u.lang = lang;
+                u.rate = o.rate || 0.9;
+                if (o.pitch) u.pitch = o.pitch;
+                if (lang.indexOf("ja") === 0 && jaVoice) u.voice = jaVoice;
+                u.onend = u.onerror = () => {
+                  if (++done >= chunks.length) resolve();
+                };
+                speechSynthesis.speak(u);
+              });
+            } catch (e) {
+              resolve();
+            }
+          });
+        }
         function speak(text, rate, pitch) {
           if (!("speechSynthesis" in window) || !text) return;
           try {
             speechSynthesis.cancel();
-            const u = new SpeechSynthesisUtterance(text);
-            u.lang = "ja-JP";
-            u.rate = rate || 0.9;
-            if (pitch) u.pitch = pitch;
-            if (jaVoice) u.voice = jaVoice;
-            speechSynthesis.speak(u);
           } catch (e) {}
+          speakSeq(text, { rate, pitch });
         }
+        function voicePickerHtml() {
+          if (!("speechSynthesis" in window)) return "";
+          if (!jaVoices.length) pickVoice();
+          if (jaVoices.length < 2) return "";
+          return (
+            '<div class="card"><b style="font-size:14px">🗣 Japanese voice</b><div class="hint">Pick the voice that sounds most natural on this device (★ = high quality).</div>' +
+            '<div class="btnrow" style="margin-top:10px;align-items:center">' +
+            '<select id="voiceSel" class="search" style="max-width:300px;flex:1" onchange="setVoice(this.value)">' +
+            jaVoices.map((v) => '<option value="' + escapeAttr(v.voiceURI) + '" ' + (jaVoice && v.voiceURI === jaVoice.voiceURI ? "selected" : "") + ">" + escapeHtml(v.name) + (voiceScore(v) >= 20 ? " ★" : "") + "</option>").join("") +
+            '</select><button class="btn sm" onclick="testVoice()">▶ Test</button></div></div>'
+          );
+        }
+        window.setVoice = function (uri) {
+          settings.voice = uri;
+          pickVoice();
+          touch();
+          speak("こんにちは。この声で勉強しましょう。");
+        };
+        window.testVoice = function () {
+          speak("こんにちは。日本語の勉強、楽しいですね。");
+        };
         window.__jpSpeak = speak;
 
         function toast(msg) {
@@ -3915,6 +3989,7 @@
               ? "Hands-free audio lessons made from your " + lvName() + " content — each item is read in Japanese, translated, then repeated. Press play, pocket your phone and listen on the train. Keeps playing while you use other tabs."
               : "⚠️ This browser has no speech synthesis — the audio episodes need it.") +
             "</div></div>" +
+            voicePickerHtml() +
             '<div class="card"><h2>Episodes · ' + lvName() + "</h2>" +
             eps.map((e) =>
               '<div class="ex" style="display:flex;align-items:center;justify-content:space-between;gap:10px"><div><div style="font-weight:700">' +
@@ -3938,20 +4013,7 @@
           podLoop();
         };
         function podSpeakAsync(text, lang, rate) {
-          return new Promise((resolve) => {
-            if (!("speechSynthesis" in window) || !text) return resolve();
-            try {
-              const u = new SpeechSynthesisUtterance(text);
-              u.lang = lang;
-              u.rate = rate;
-              if (lang === "ja-JP" && jaVoice) u.voice = jaVoice;
-              u.onend = resolve;
-              u.onerror = resolve;
-              speechSynthesis.speak(u);
-            } catch (e) {
-              resolve();
-            }
-          });
+          return speakSeq(text, { lang, rate });
         }
         const podPause = (ms) => new Promise((r) => setTimeout(r, ms));
         async function podLoop() {
@@ -4065,6 +4127,7 @@
             [["kana", "Kana"], ["vocab", "Vocabulary"], ["phrases", "Phrases"], ["dialogs", "Dialogues"]]
               .map(([k, l]) => '<button class="chip ' + (listenSrc === k ? "active" : "") + '" onclick="setListen(\'' + k + "')\">" + l + "</button>").join("") +
             "</div></div>" +
+            voicePickerHtml() +
             (listenSrc === "dialogs"
               ? levelChips() +
                 '<div class="card"><h2>Dialogues 💬 · ' + lvName() + '</h2><div class="hint">Two-speaker conversations, JLPT-listening style. Listen (text hidden!), then answer the questions.</div></div>' +
@@ -4152,21 +4215,8 @@
         // ---- Listening dialogues (two TTS "speakers" via pitch) --------
         let dlgToken = 0;
         function dlgSpeakAsync(text, pitch, token) {
-          return new Promise((resolve) => {
-            if (!("speechSynthesis" in window) || !text || token !== dlgToken) return resolve();
-            try {
-              const u = new SpeechSynthesisUtterance(text);
-              u.lang = "ja-JP";
-              u.rate = 0.88;
-              u.pitch = pitch;
-              if (jaVoice) u.voice = jaVoice;
-              u.onend = resolve;
-              u.onerror = resolve;
-              speechSynthesis.speak(u);
-            } catch (e) {
-              resolve();
-            }
-          });
+          if (token !== dlgToken) return Promise.resolve();
+          return speakSeq(text, { rate: 0.88, pitch });
         }
         const dlgPause = (ms) => new Promise((r) => setTimeout(r, ms));
         window.startDialogue = function (i) {
