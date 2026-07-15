@@ -1273,6 +1273,7 @@
       <section class="view" data-view="sentences"></section>
       <section class="view" data-view="speak"></section>
       <section class="view" data-view="listen"></section>
+      <section class="view" data-view="podcast"></section>
       <section class="view" data-view="grammar"></section>
       <section class="view" data-view="review"></section>
       <section class="view" data-view="quiz"></section>
@@ -1718,6 +1719,7 @@
           ["sentences", "Sentences"],
           ["speak", "Speak"],
           ["listen", "Listen"],
+          ["podcast", "Podcast"],
           ["grammar", "Grammar"],
           ["review", "Review"],
           ["quiz", "Quiz"],
@@ -3541,6 +3543,207 @@
         // ===============================================================
         let listenSrc = "kana";
         const listenLabel = () => (listenSrc === "kana" ? "kana" : listenSrc === "vocab" ? "vocabulary" : "phrases");
+        // ===============================================================
+        // Podcast — hands-free audio episodes built from the level's own
+        // content with the device's speech synthesis, so they work offline
+        // (e.g. on the train). Playback keeps going while you browse other
+        // tabs, like a real podcast app.
+        // ===============================================================
+        const podState = { playing: false, ep: null, idx: 0, jaOnly: false, rate: 0.9, token: 0 };
+        const POD_SHOWS = [
+          { lv: "n5", name: "Nihongo con Teppei for Beginners", url: "https://nihongoconteppei.com/", note: "Short, slow, all-Japanese episodes — the classic N5 listening podcast." },
+          { lv: "n5", name: "Sakura Tips", url: "https://sakuratips.com/", note: "3–5 minute slow Japanese episodes with transcripts." },
+          { lv: "n5", name: "Let's Learn Japanese from Small Talk", url: "https://podcasts.apple.com/us/podcast/lets-learn-japanese-from-small-talk/id1568190208", note: "Casual conversations between two friends, with vocab recaps." },
+          { lv: "n4", name: "Nihongo con Teppei (main show)", url: "https://teppeisensei.com/", note: "Natural-speed follow-up show — perfect once N5 feels easy." },
+          { lv: "n4", name: "YUYUの日本語Podcast", url: "https://www.youtube.com/@yuyunihongopodcast", note: "Clear, energetic Japanese-only talk on everyday topics." },
+          { lv: "n4", name: "Japanese with Shun", url: "https://podcasts.apple.com/us/podcast/japanese-with-shun/id1470126996", note: "Slow, clear monologues — great N5→N4 bridge." },
+        ];
+        function podEpisodes() {
+          const eps = [];
+          const cats = {};
+          byLevel(DATA.vocab).forEach((o) => (cats[o.cat] = cats[o.cat] || []).push(o));
+          Object.keys(DATA.catLabels).forEach((c) => {
+            if ((cats[c] || []).length >= 6)
+              eps.push({
+                id: "v:" + c, icon: "🗣️", title: "Vocabulary · " + DATA.catLabels[c],
+                items: cats[c].map((o) => ({ ja: o.k, en: o.m, line: o.w + "（" + o.k + "）", sub: o.m })),
+              });
+          });
+          const gr = byLevel(DATA.grammar);
+          for (let i = 0; i < gr.length; i += 8) {
+            const items = [];
+            gr.slice(i, i + 8).forEach((g) => (g.ex || []).forEach((x) => items.push({ ja: x.j, en: x.e, line: x.j, sub: x.e })));
+            if (items.length)
+              eps.push({ id: "g:" + i, icon: "📖", title: "Grammar sentences · patterns " + (i + 1) + "–" + Math.min(i + 8, gr.length), items });
+          }
+          if ((settings.level || "n5") !== "n4") {
+            const pg = {};
+            DATA.phrases.forEach((p) => (pg[p.cat] = pg[p.cat] || []).push(p));
+            Object.keys(DATA.phraseCatLabels).forEach((c) => {
+              if (pg[c])
+                eps.push({ id: "p:" + c, icon: "🧳", title: "Phrases · " + DATA.phraseCatLabels[c], items: pg[c].map((p) => ({ ja: p.j, en: p.e, line: p.j, sub: p.e })) });
+            });
+          }
+          if (words.length || sentences.length) {
+            const items = words
+              .map((w) => ({ ja: w.k || w.w, en: w.m, line: w.w || w.k, sub: w.m }))
+              .concat(sentences.map((s) => ({ ja: s.j, en: s.m, line: s.j, sub: s.m })))
+              .filter((x) => x.ja);
+            if (items.length) eps.push({ id: "mine", icon: "⭐", title: "My words & sentences", items });
+          }
+          return eps;
+        }
+        RENDER.podcast = function () {
+          const v = $('[data-view="podcast"]');
+          if (podState.ep) return paintPodPlayer();
+          const ok = "speechSynthesis" in window;
+          const eps = podEpisodes();
+          const shows = POD_SHOWS.filter((s) => (settings.level || "n5") === "all" || s.lv === (settings.level || "n5"));
+          v.innerHTML =
+            levelChips() +
+            '<div class="card"><h2>Podcast 🎧</h2><div class="hint">' +
+            (ok
+              ? "Hands-free audio lessons made from your " + lvName() + " content — each item is read in Japanese, translated, then repeated. Press play, pocket your phone and listen on the train. Keeps playing while you use other tabs."
+              : "⚠️ This browser has no speech synthesis — the audio episodes need it.") +
+            "</div></div>" +
+            '<div class="card"><h2>Episodes · ' + lvName() + "</h2>" +
+            eps.map((e) =>
+              '<div class="ex" style="display:flex;align-items:center;justify-content:space-between;gap:10px"><div><div style="font-weight:700">' +
+              e.icon + " " + escapeHtml(e.title) + '</div><div style="font-size:12.5px;color:var(--muted)">' + e.items.length + " items · ~" + Math.max(1, Math.round(e.items.length / 6)) + ' min</div></div>' +
+              '<button class="btn primary" style="flex-shrink:0" onclick="podOpen(\'' + e.id + "')\" " + (ok ? "" : "disabled") + ">▶ Play</button></div>",
+            ).join("") +
+            "</div>" +
+            '<div class="card"><h2>Real podcasts for ' + lvName() + '</h2><div class="hint" style="margin-bottom:8px">Native-hosted shows worth subscribing to (needs internet — download episodes in your podcast app before the train).</div>' +
+            shows.map((s) =>
+              '<div class="ex"><div style="font-weight:700"><a href="' + escapeAttr(s.url) + '" target="_blank" rel="noopener" style="color:var(--accent, #d33)">' + escapeHtml(s.name) + " ↗</a> <span style='font-size:11px;color:var(--muted)'>" + s.lv.toUpperCase() + '</span></div><div style="font-size:12.5px;color:var(--muted)">' + escapeHtml(s.note) + "</div></div>",
+            ).join("") +
+            "</div>";
+        };
+        window.podOpen = function (id) {
+          const ep = podEpisodes().find((e) => e.id === id);
+          if (!ep) return;
+          podState.ep = ep;
+          podState.idx = 0;
+          podState.playing = true;
+          paintPodPlayer();
+          podLoop();
+        };
+        function podSpeakAsync(text, lang, rate) {
+          return new Promise((resolve) => {
+            if (!("speechSynthesis" in window) || !text) return resolve();
+            try {
+              const u = new SpeechSynthesisUtterance(text);
+              u.lang = lang;
+              u.rate = rate;
+              if (lang === "ja-JP" && jaVoice) u.voice = jaVoice;
+              u.onend = resolve;
+              u.onerror = resolve;
+              speechSynthesis.speak(u);
+            } catch (e) {
+              resolve();
+            }
+          });
+        }
+        const podPause = (ms) => new Promise((r) => setTimeout(r, ms));
+        async function podLoop() {
+          const my = ++podState.token;
+          try {
+            speechSynthesis.cancel();
+          } catch (e) {}
+          while (podState.playing && podState.ep && podState.idx < podState.ep.items.length) {
+            const item = podState.ep.items[podState.idx];
+            paintPodPlayer();
+            await podSpeakAsync(item.ja, "ja-JP", podState.rate);
+            if (my !== podState.token) return;
+            await podPause(500);
+            if (my !== podState.token) return;
+            if (!podState.jaOnly && item.en) {
+              await podSpeakAsync(item.en, "en-US", 1);
+              if (my !== podState.token) return;
+              await podPause(350);
+              if (my !== podState.token) return;
+              await podSpeakAsync(item.ja, "ja-JP", podState.rate);
+              if (my !== podState.token) return;
+            }
+            await podPause(800);
+            if (my !== podState.token || !podState.playing) return;
+            podState.idx++;
+          }
+          if (my === podState.token && podState.playing && podState.ep && podState.idx >= podState.ep.items.length) {
+            podState.playing = false;
+            markStudied(podState.ep.items.length);
+            paintPodPlayer();
+          }
+        }
+        function paintPodPlayer() {
+          const v = $('[data-view="podcast"]');
+          if (!v.classList.contains("active") || !podState.ep) return;
+          const ep = podState.ep;
+          const finished = podState.idx >= ep.items.length;
+          const item = ep.items[Math.min(podState.idx, ep.items.length - 1)];
+          const pct = Math.round((Math.min(podState.idx, ep.items.length) / ep.items.length) * 100);
+          v.innerHTML =
+            '<div class="card study" style="text-align:center">' +
+            '<div class="sess-top"><span>' + ep.icon + " " + escapeHtml(ep.title) + "</span><span>" + Math.min(podState.idx + 1, ep.items.length) + " / " + ep.items.length + "</span></div>" +
+            '<div class="progress" style="margin-bottom:18px"><i style="width:' + pct + '%"></i></div>' +
+            (finished
+              ? '<div class="empty-state"><div class="big">✅</div><b>Episode finished!</b><div style="margin-top:8px">' + ep.items.length + " items listened.</div></div>"
+              : '<div class="jp" style="font-size:26px;font-weight:700;margin:14px 0 6px">' + escapeHtml(item.line) + '</div><div style="color:var(--muted);margin-bottom:14px">' + escapeHtml(podState.jaOnly ? "（Japanese only）" : item.sub || "") + "</div>") +
+            '<div class="btnrow" style="justify-content:center;margin-top:10px">' +
+            '<button class="btn" onclick="podPrev()">⏮</button>' +
+            '<button class="btn primary" style="min-width:110px" onclick="podToggle()">' + (podState.playing ? "⏸ Pause" : finished ? "↻ Replay" : "▶ Play") + "</button>" +
+            '<button class="btn" onclick="podNext()">⏭</button></div>' +
+            '<div class="chiprow" style="justify-content:center;margin-top:14px">' +
+            '<button class="chip ' + (podState.jaOnly ? "active" : "") + '" onclick="podJaOnly()">Japanese only</button>' +
+            [0.75, 0.9, 1.1].map((r) => '<button class="chip ' + (podState.rate === r ? "active" : "") + '" onclick="podRate(' + r + ')">' + r + "×</button>").join("") +
+            "</div>" +
+            '<div class="btnrow" style="justify-content:center;margin-top:14px"><button class="btn" onclick="podBack()">← All episodes</button></div></div>';
+        }
+        window.podToggle = function () {
+          if (!podState.ep) return;
+          if (podState.playing) {
+            podState.playing = false;
+            podState.token++;
+            try {
+              speechSynthesis.cancel();
+            } catch (e) {}
+            paintPodPlayer();
+          } else {
+            if (podState.idx >= podState.ep.items.length) podState.idx = 0;
+            podState.playing = true;
+            podLoop();
+          }
+        };
+        window.podNext = function () {
+          if (!podState.ep) return;
+          podState.idx = Math.min(podState.idx + 1, podState.ep.items.length - 1);
+          if (podState.playing) podLoop();
+          else paintPodPlayer();
+        };
+        window.podPrev = function () {
+          if (!podState.ep) return;
+          podState.idx = Math.max(0, podState.idx - 1);
+          if (podState.playing) podLoop();
+          else paintPodPlayer();
+        };
+        window.podJaOnly = function () {
+          podState.jaOnly = !podState.jaOnly;
+          paintPodPlayer();
+        };
+        window.podRate = function (r) {
+          podState.rate = r;
+          paintPodPlayer();
+        };
+        window.podBack = function () {
+          podState.playing = false;
+          podState.token++;
+          try {
+            speechSynthesis.cancel();
+          } catch (e) {}
+          podState.ep = null;
+          RENDER.podcast();
+        };
+
         RENDER.listen = function () {
           const v = $('[data-view="listen"]');
           const ok = "speechSynthesis" in window;
