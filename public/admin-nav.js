@@ -70,6 +70,9 @@
     bots:
       '<rect x="4" y="8" width="16" height="12" rx="2"></rect>' +
       '<path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>',
+    accountPool:
+      '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>' +
+      '<path d="M7 11V7a5 5 0 0 1 10 0v4"></path>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
     japanese:
       '<path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 ' +
@@ -103,6 +106,12 @@
           href: "/drops-archive.html",
           label: "Drops archive",
           icon: ICONS.dropsArchive,
+          superOnly: true,
+        },
+        {
+          href: "/account-pool.html",
+          label: "Account pool",
+          icon: ICONS.accountPool,
           superOnly: true,
         },
       ],

@@ -13,7 +13,7 @@ const axios = require("axios");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
 
-const REPO = "Alorf/TwitchDropsBot";
+const DEFAULT_REPO = "Alorf/TwitchDropsBot";
 const IMAGE = "avishkarex/twitchbot";
 const BUILD_TIMEOUT = 20 * 60 * 1000; // git clone + docker build, esp. on a Pi
 const SETTLE_MS = 12000; // time to let a recreated/test container start logging
@@ -28,11 +28,24 @@ const state = {
   running: false,
   startedAt: null,
   finishedAt: null,
+  targetRepo: "",
   targetTag: "",
   ok: null,
   error: "",
   log: [],
 };
+
+// owner/repo, letters/digits/._- only — this gets interpolated into a git
+// clone URL, so keep it as strict as GitHub's own naming rules.
+function validRepo(repo) {
+  return /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(String(repo || ""));
+}
+
+// A git ref (branch, tag, or commit) — no shell metacharacters. Broader than
+// validRepo since refs can contain slashes (e.g. "hotfix/gql-progress").
+function validRef(ref) {
+  return /^[A-Za-z0-9._\/-]{1,200}$/.test(String(ref || ""));
+}
 
 function log(hostLabel, message) {
   state.log.push({
@@ -51,6 +64,7 @@ function status() {
     running: state.running,
     startedAt: state.startedAt,
     finishedAt: state.finishedAt,
+    targetRepo: state.targetRepo,
     targetTag: state.targetTag,
     ok: state.ok,
     error: state.error,
@@ -58,9 +72,9 @@ function status() {
   };
 }
 
-async function latestRelease() {
+async function latestRelease(repo) {
   const r = await axios.get(
-    "https://api.github.com/repos/" + REPO + "/releases/latest",
+    "https://api.github.com/repos/" + (repo || DEFAULT_REPO) + "/releases/latest",
     {
       headers: {
         Accept: "application/vnd.github+json",
@@ -87,9 +101,9 @@ async function appliedVersions() {
   }
 }
 
-async function setAppliedVersion(hostId, tag) {
+async function setAppliedVersion(hostId, tag, repo) {
   const cur = await appliedVersions();
-  cur[hostId] = { tag, appliedAt: new Date().toISOString() };
+  cur[hostId] = { tag, repo: repo || DEFAULT_REPO, appliedAt: new Date().toISOString() };
   await hosts.writeMeta("bot-version.json", JSON.stringify(cur, null, 2));
 }
 
@@ -141,32 +155,42 @@ function natKey(container) {
 
 // Build + sanity-test + roll out a single host. Throws on any failure; the
 // caller treats that as "stop the whole rollout".
-async function buildAndRolloutHost(host, tag) {
+//
+// `repo` can point at a fork (e.g. for an emergency patch pushed ahead of an
+// upstream release), so the clone step re-points `origin` and fetches the
+// exact ref by name rather than assuming it's a tag — this also means a host
+// previously built from a different repo/ref (its build dir already has a
+// `.git`) gets correctly redirected instead of silently reusing stale history
+// from the old origin.
+async function buildAndRolloutHost(host, tag, repo) {
+  const sourceRepo = repo || DEFAULT_REPO;
   const dir = buildDir(host);
   const imageTag = IMAGE + ":" + sanitizeTag(tag);
   const shq = hosts.shq;
+  const url = "https://github.com/" + sourceRepo + ".git";
 
-  log(host.label, "cloning/checking out " + tag + " into " + dir);
+  log(
+    host.label,
+    "fetching " + sourceRepo + "@" + tag + " into " + dir,
+  );
   const cloneScript =
     "if [ -d " +
     shq(dir + "/.git") +
     " ]; then cd " +
     shq(dir) +
-    " && git fetch --tags --force origin && git checkout " +
-    shq(tag) +
-    " && git reset --hard " +
-    shq(tag) +
+    " && git remote set-url origin " +
+    shq(url) +
     "; else rm -rf " +
     shq(dir) +
-    " && git clone https://github.com/" +
-    REPO +
-    ".git " +
+    " && git init -q " +
     shq(dir) +
     " && cd " +
     shq(dir) +
-    " && git checkout " +
+    " && git remote add origin " +
+    shq(url) +
+    "; fi && git fetch --force origin " +
     shq(tag) +
-    "; fi";
+    " && git checkout --force FETCH_HEAD && git reset --hard FETCH_HEAD";
   await hosts.runShell(host, cloneScript, { timeout: BUILD_TIMEOUT });
 
   log(host.label, "patching Dockerfile (INSIDE_DOCKER=false)");
@@ -225,7 +249,7 @@ async function buildAndRolloutHost(host, tag) {
       "docker tag " + shq(imageTag) + " " + shq(IMAGE + ":latest"),
       { timeout: 15000 },
     );
-    await setAppliedVersion(host.id, tag);
+    await setAppliedVersion(host.id, tag, sourceRepo);
     return;
   }
 
@@ -285,7 +309,7 @@ async function buildAndRolloutHost(host, tag) {
 
   if (!running.length) {
     log(host.label, "no running bots on this host to recreate");
-    await setAppliedVersion(host.id, tag);
+    await setAppliedVersion(host.id, tag, sourceRepo);
     return;
   }
 
@@ -334,28 +358,37 @@ async function buildAndRolloutHost(host, tag) {
     log(host.label, container + " looks healthy on the new image");
   }
 
-  await setAppliedVersion(host.id, tag);
+  await setAppliedVersion(host.id, tag, sourceRepo);
 }
 
-async function runRollout(tag) {
+async function runRollout(tag, repo) {
+  const sourceRepo = repo || DEFAULT_REPO;
   try {
     for (const h of hosts.listHosts()) {
       const host = hosts.resolveHost(h.id);
       log(host.label, "=== starting build + rollout ===");
-      await buildAndRolloutHost(host, tag);
-      log(host.label, "=== done, now on " + tag + " ===");
+      await buildAndRolloutHost(host, tag, sourceRepo);
+      log(host.label, "=== done, now on " + sourceRepo + "@" + tag + " ===");
     }
     state.ok = true;
-    log("", "Rollout to " + tag + " complete on all hosts.");
+    log("", "Rollout to " + sourceRepo + "@" + tag + " complete on all hosts.");
     await sendTelegram(
-      "✅ TwitchDropsBot updated to " + tag + " on all hosts.",
+      "✅ TwitchDropsBot updated to " +
+        tag +
+        (sourceRepo !== DEFAULT_REPO ? " (from " + sourceRepo + ")" : "") +
+        " on all hosts.",
     ).catch(() => {});
   } catch (err) {
     state.ok = false;
     state.error = err.message || String(err);
     log("", "ABORTED: " + state.error);
     await sendTelegram(
-      "⚠️ TwitchDropsBot rollout to " + tag + " aborted: " + state.error,
+      "⚠️ TwitchDropsBot rollout to " +
+        sourceRepo +
+        "@" +
+        tag +
+        " aborted: " +
+        state.error,
     ).catch(() => {});
   } finally {
     state.running = false;
@@ -363,23 +396,45 @@ async function runRollout(tag) {
   }
 }
 
-async function start() {
+// { repo, ref }: both optional. With neither, behaves as before — rolls out
+// the latest upstream release. Passing `ref` (a branch, tag, or commit on
+// `repo`, which may be a fork) skips the "latest release" lookup entirely and
+// builds that exact ref — this is the emergency-patch path: push a fix to a
+// fork branch and roll it out immediately instead of waiting for an upstream
+// release to exist.
+async function start({ repo, ref } = {}) {
   if (state.running) {
     throw new Error("A rollout is already running");
   }
-  const rel = await latestRelease();
-  if (!rel.tag) {
-    throw new Error("Could not determine the latest release tag from GitHub");
+  if (repo && !validRepo(repo)) {
+    throw new Error("repo must look like owner/name");
   }
+  if (ref && !validRef(ref)) {
+    throw new Error("ref must be a valid branch, tag, or commit name");
+  }
+  const sourceRepo = repo || DEFAULT_REPO;
+
+  let tag = ref;
+  if (!tag) {
+    const rel = await latestRelease(sourceRepo);
+    if (!rel.tag) {
+      throw new Error(
+        "Could not determine the latest release tag from GitHub",
+      );
+    }
+    tag = rel.tag;
+  }
+
   state.running = true;
   state.startedAt = new Date().toISOString();
   state.finishedAt = null;
-  state.targetTag = rel.tag;
+  state.targetRepo = sourceRepo;
+  state.targetTag = tag;
   state.ok = null;
   state.error = "";
   state.log = [];
-  log("", "Starting rollout to " + rel.tag);
-  runRollout(rel.tag).catch((err) => {
+  log("", "Starting rollout to " + sourceRepo + "@" + tag);
+  runRollout(tag, sourceRepo).catch((err) => {
     // runRollout already catches everything internally; this is a final
     // backstop so a truly unexpected throw can't leave `running` stuck true.
     state.running = false;
@@ -387,7 +442,7 @@ async function start() {
     state.error = err.message || String(err);
     state.finishedAt = new Date().toISOString();
   });
-  return { tag: rel.tag };
+  return { repo: sourceRepo, tag };
 }
 
 module.exports = { latestRelease, appliedVersions, start, status };
