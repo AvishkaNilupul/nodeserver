@@ -1,4 +1,4 @@
-/* Service worker for the Japanese N5 study app.
+/* Service worker for the Japanese N5/N4 study app.
  *
  * Registered with scope "/japanese.html" so it ONLY controls that page and its
  * subresource fetches — the rest of the admin console is untouched. It caches
@@ -6,10 +6,11 @@
  * train with no signal); progress is kept in localStorage and syncs when the
  * connection returns. Auth/sync endpoints are never cached — the app handles
  * those offline itself. Bump CACHE to invalidate old assets. */
-const CACHE = "jp-n5-v1";
+const CACHE = "jp-n5-v2";
 const SHELL = [
   "/japanese.html",
   "/japanese-data.js",
+  "/japanese-n4-data.js",
   "/theme.js",
   "/admin-nav.js",
   "/japanese-icon-192.png",

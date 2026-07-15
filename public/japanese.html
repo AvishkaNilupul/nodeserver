@@ -1276,6 +1276,7 @@
       <section class="view" data-view="grammar"></section>
       <section class="view" data-view="review"></section>
       <section class="view" data-view="quiz"></section>
+      <section class="view" data-view="exam"></section>
       <section class="view" data-view="drills"></section>
       <section class="view" data-view="phrases"></section>
     </main>
@@ -1283,10 +1284,25 @@
     <div class="toast" id="toast"></div>
 
     <script src="/japanese-data.js"></script>
+    <script src="/japanese-n4-data.js"></script>
     <script>
       (function () {
         "use strict";
         const DATA = window.JP_DATA;
+        // Merge the N4 dataset in, tagging every item with its JLPT level so
+        // views, quizzes and exams can filter by level.
+        const N4 = window.JP_N4_DATA || { kanji: [], vocab: [], grammar: [], particles: [] };
+        ["kanji", "vocab", "grammar", "particles"].forEach((key) => {
+          DATA[key].forEach((o) => (o.lv = "n5"));
+          (N4[key] || []).forEach((o) => (o.lv = "n4"));
+          DATA[key] = DATA[key].concat(N4[key] || []);
+        });
+        const LEVELS = [["n5", "N5"], ["n4", "N4"], ["all", "All"]];
+        const lvName = () => (settings.level === "all" ? "N5+N4" : (settings.level || "n5").toUpperCase());
+        function byLevel(arr) {
+          const lv = settings.level || "n5";
+          return lv === "all" ? arr : arr.filter((o) => o.lv === lv);
+        }
         const $ = (s, r) => (r || document).querySelector(s);
         const el = (id) => document.getElementById(id);
 
@@ -1298,7 +1314,7 @@
         const words = [];
         const sentences = [];
         const stats = { streak: 0, lastStudy: null, history: {}, reviewsTotal: 0 };
-        const settings = { script: "hiragana", showRomaji: true };
+        const settings = { script: "hiragana", showRomaji: true, level: "n5" };
         const state = { updatedAt: 0 };
         const LS_KEY = "jp_state_v2";
 
@@ -1326,7 +1342,7 @@
           Object.keys(settings).forEach((k) => delete settings[k]);
           Object.assign(
             settings,
-            { script: "hiragana", showRomaji: true },
+            { script: "hiragana", showRomaji: true, level: "n5" },
             ns.settings || {},
           );
           words.length = 0;
@@ -1705,6 +1721,7 @@
           ["grammar", "Grammar"],
           ["review", "Review"],
           ["quiz", "Quiz"],
+          ["exam", "Exam"],
           ["drills", "Drills"],
           ["phrases", "Phrases"],
         ];
@@ -1737,6 +1754,21 @@
           const cur = document.querySelector(".view.active");
           if (cur && RENDER[cur.dataset.view]) RENDER[cur.dataset.view]();
         }
+        function levelChips() {
+          return (
+            '<div class="chiprow">' +
+            LEVELS.map(
+              ([k, label]) =>
+                '<button class="chip ' + ((settings.level || "n5") === k ? "active" : "") + '" onclick="setLevel(\'' + k + "')\">" + label + "</button>",
+            ).join("") +
+            "</div>"
+          );
+        }
+        window.setLevel = function (l) {
+          settings.level = l;
+          touch();
+          rerender();
+        };
 
         // ===============================================================
         // Dashboard
@@ -1745,9 +1777,13 @@
           const v = $('[data-view="dashboard"]');
           const c = counts();
           const weakCount = weakIds().length;
-          const kanaPct = Math.round((c.kana / KANA_FLAT.length) * 100);
-          const kanjiPct = Math.round((c.kanji / DATA.kanji.length) * 100);
-          const vocabPct = Math.round((c.vocab / DATA.vocab.length) * 100);
+          const lvKanji = byLevel(DATA.kanji);
+          const lvVocab = byLevel(DATA.vocab);
+          const kanjiIn = lvKanji.filter((o) => srs[kanjiId(o)]).length;
+          const vocabIn = lvVocab.filter((o) => srs[vocabId(o)]).length;
+          const kanaPct = Math.min(100, Math.round((c.kana / KANA_FLAT.length) * 100));
+          const kanjiPct = lvKanji.length ? Math.round((kanjiIn / lvKanji.length) * 100) : 0;
+          const vocabPct = lvVocab.length ? Math.round((vocabIn / lvVocab.length) * 100) : 0;
           const h = new Date().getHours();
           const hello = h < 11 ? "おはよう" : h < 18 ? "こんにちは" : "こんばんは";
           const studiedToday = (stats.history[todayStr()] || 0) > 0;
@@ -1779,7 +1815,9 @@
             '<button class="btn primary" onclick="go(\'review\')">Start review (' + c.due + ")</button>" +
             "<button class=\"btn\" onclick=\"go('kana')\">Practice kana</button>" +
             (weakCount ? '<button class="btn" onclick="startWeak()">🎯 Weak cards (' + weakCount + ")</button>" : "") +
-            "<button class=\"btn\" onclick=\"go('quiz')\">Quick quiz</button></div></div>" +
+            "<button class=\"btn\" onclick=\"go('quiz')\">Quick quiz</button>" +
+            "<button class=\"btn\" onclick=\"go('exam')\">📝 Mock exam</button></div></div>" +
+            levelChips() +
             '<div class="grid cols-3" style="margin-bottom:18px">' +
             statTile("🔥 Streak", stats.streak + '<small> day' + (stats.streak === 1 ? "" : "s") + "</small>", null) +
             statTile("✅ Reviewed today", (stats.history[todayStr()] || 0) + "", null) +
@@ -1787,8 +1825,8 @@
             "</div>" +
             '<div class="grid cols-3" style="margin-bottom:18px">' +
             statTile("Kana", c.kana + '<small>/' + KANA_FLAT.length + "</small>", kanaPct) +
-            statTile("Kanji", c.kanji + '<small>/' + DATA.kanji.length + "</small>", kanjiPct) +
-            statTile("Vocabulary", c.vocab + '<small>/' + DATA.vocab.length + "</small>", vocabPct) +
+            statTile("Kanji · " + lvName(), kanjiIn + '<small>/' + lvKanji.length + "</small>", kanjiPct) +
+            statTile("Vocabulary · " + lvName(), vocabIn + '<small>/' + lvVocab.length + "</small>", vocabPct) +
             "</div>" +
             '<div class="card"><h2>Today\'s plan</h2><ul class="plan" id="planList"></ul></div>' +
             '<div class="card"><h2>Jump-start your deck</h2><div class="hint">Load a batch of cards into spaced repetition and start reviewing. Your progress syncs to every device.</div>' +
@@ -1843,7 +1881,7 @@
           RENDER.dashboard();
         };
         window.seedNew = function (type, n) {
-          const pool = type === "kanji" ? DATA.kanji.map(kanjiId) : DATA.vocab.map(vocabId);
+          const pool = type === "kanji" ? byLevel(DATA.kanji).map(kanjiId) : byLevel(DATA.vocab).map(vocabId);
           let added = 0;
           for (const id of pool) {
             if (added >= n) break;
@@ -1932,12 +1970,13 @@
         let kanjiQuery = "";
         RENDER.kanji = function () {
           const v = $('[data-view="kanji"]');
-          const c = counts();
+          const inDeck = byLevel(DATA.kanji).filter((o) => srs[kanjiId(o)]).length;
           v.innerHTML =
+            levelChips() +
             '<div class="toolbar">' +
             '<input class="search" id="kanjiSearch" placeholder="Search kanji, meaning, reading…" value="' + escapeAttr(kanjiQuery) + '">' +
             '<button class="btn" onclick="seedNew(\'kanji\',10)">+ 10 new to review</button>' +
-            '<span style="font-size:12.5px;color:var(--muted);font-weight:600">' + c.kanji + " / " + DATA.kanji.length + " in deck</span></div>" +
+            '<span style="font-size:12.5px;color:var(--muted);font-weight:600">' + inDeck + " / " + byLevel(DATA.kanji).length + " in deck</span></div>" +
             '<div class="grid cols-3" id="kanjiGrid"></div>';
           el("kanjiSearch").addEventListener("input", (e) => {
             kanjiQuery = e.target.value;
@@ -1947,7 +1986,7 @@
         };
         function paintKanji() {
           const q = kanjiQuery.trim().toLowerCase();
-          const list = DATA.kanji.filter(
+          const list = byLevel(DATA.kanji).filter(
             (o) => !q || o.c.includes(q) || o.m.toLowerCase().includes(q) ||
               o.on.toLowerCase().includes(q) || o.kun.toLowerCase().includes(q) ||
               o.ex.toLowerCase().includes(q),
@@ -2032,6 +2071,7 @@
             '<div class="toolbar">' +
             '<input class="search" id="vocabSearch" placeholder="Search word, reading, meaning…" value="' + escapeAttr(vocabQuery) + '">' +
             '<button class="btn jp" onclick="startVocabFlash()">▶ Flashcards</button></div>' +
+            levelChips() +
             '<div class="chiprow">' +
             '<button class="chip ' + (vocabCat === "all" ? "active" : "") + '" onclick="setVocabCat(\'all\')">All</button>' +
             cats.map((k) => '<button class="chip ' + (vocabCat === k ? "active" : "") + '" onclick="setVocabCat(\'' + k + "')\">" + DATA.catLabels[k] + "</button>").join("") +
@@ -2044,7 +2084,7 @@
         };
         function filteredVocab() {
           const q = vocabQuery.trim().toLowerCase();
-          return DATA.vocab.filter((o) => {
+          return byLevel(DATA.vocab).filter((o) => {
             if (vocabCat !== "all" && o.cat !== vocabCat) return false;
             if (!q) return true;
             return o.w.toLowerCase().includes(q) || o.k.includes(q) || o.r.toLowerCase().includes(q) || o.m.toLowerCase().includes(q);
@@ -2297,10 +2337,12 @@
         // ===============================================================
         RENDER.grammar = function () {
           const v = $('[data-view="grammar"]');
+          const list = byLevel(DATA.grammar);
           v.innerHTML =
-            '<div class="card"><h2>N5 grammar</h2><div class="hint">' + DATA.grammar.length +
+            levelChips() +
+            '<div class="card"><h2>' + lvName() + ' grammar</h2><div class="hint">' + list.length +
             " core patterns. Tap one to see the structure and example sentences — tap the speaker on any example to hear it.</div></div>" +
-            DATA.grammar.map((gp) =>
+            list.map((gp) =>
               '<details class="acc"><summary>' + escapeHtml(gp.t) + '<span class="struct jp">' + escapeHtml(gp.s) +
               '</span></summary><div class="body"><div class="note">' + escapeHtml(gp.m) + "</div>" +
               gp.ex.map((e) => exampleRow(e.j, e.r, e.e)).join("") + "</div></details>",
@@ -2376,7 +2418,6 @@
         };
         function runReviewSession(queue) {
           const v = $('[data-view="review"]');
-          const total = queue.length;
           let idx = 0, done = 0, revealed = false;
           function render() {
             if (idx >= queue.length) {
@@ -2399,8 +2440,8 @@
             const box = srs[id].box || 0;
             v.innerHTML =
               '<div class="study">' +
-              '<div class="sess-top"><span>Review</span><span>' + (idx + 1) + " / " + total + "</span></div>" +
-              '<div class="progress" style="margin-bottom:16px"><i style="width:' + ((idx / total) * 100).toFixed(0) + '%"></i></div>' +
+              '<div class="sess-top"><span>Review</span><span>' + (idx + 1) + " / " + queue.length + "</span></div>" +
+              '<div class="progress" style="margin-bottom:16px"><i style="width:' + ((idx / queue.length) * 100).toFixed(0) + '%"></i></div>' +
               '<div class="flashcard" id="fc"><div class="front jp ' + (card.fsmall ? "small" : "") + '">' + escapeHtml(card.front) + "</div>" +
               (revealed
                 ? '<div class="back"><div class="b1 jp">' + escapeHtml(card.b1) + '</div><div class="b2" style="white-space:pre-line">' + escapeHtml(card.b2) + "</div></div>"
@@ -2429,6 +2470,9 @@
               v.querySelectorAll(".rate button").forEach((b) =>
                 b.addEventListener("click", () => {
                   grade(id, b.dataset.q);
+                  // Missed cards come back at the end of this same session
+                  // instead of waiting for the next one.
+                  if (b.dataset.q === "again") queue.push(id);
                   done++;
                   idx++;
                   revealed = false;
@@ -2928,18 +2972,20 @@
                 : { prompt: cell.r, answer: cell[key], speak: cell[key], choices: uniqueChoices(cell[key], KANA_FLAT.map((c) => c[key]), 4) },
             );
           } else if (mode === "kanjiMean" || mode === "kanjiRead") {
-            const pool = shuffle(DATA.kanji).slice(0, 10);
+            const all = byLevel(DATA.kanji);
+            const pool = shuffle(all).slice(0, 10);
             items = pool.map((o) =>
               mode === "kanjiMean"
-                ? { prompt: o.c, promptClass: "jp", sub: "What does it mean?", answer: o.m, speak: o.c, choices: uniqueChoices(o.m, DATA.kanji.map((k) => k.m), 4) }
-                : { prompt: o.c, promptClass: "jp", sub: "Pick a reading", answer: firstReading(o), speak: o.c, choices: uniqueChoices(firstReading(o), DATA.kanji.map(firstReading), 4) },
+                ? { prompt: o.c, promptClass: "jp", sub: "What does it mean?", answer: o.m, speak: o.c, choices: uniqueChoices(o.m, all.map((k) => k.m), 4) }
+                : { prompt: o.c, promptClass: "jp", sub: "Pick a reading", answer: firstReading(o), speak: o.c, choices: uniqueChoices(firstReading(o), all.map(firstReading), 4) },
             );
           } else {
-            const pool = shuffle(DATA.vocab).slice(0, 10);
+            const all = byLevel(DATA.vocab);
+            const pool = shuffle(all).slice(0, 10);
             items = pool.map((o) =>
               mode === "vocabMean"
-                ? { prompt: o.w, promptClass: "jp", sub: o.k, answer: o.m, speak: o.k, choices: uniqueChoices(o.m, DATA.vocab.map((x) => x.m), 4) }
-                : { prompt: o.m, sub: "Which word?", answer: o.w, speak: o.k, choices: uniqueChoices(o.w, DATA.vocab.map((x) => x.w), 4) },
+                ? { prompt: o.w, promptClass: "jp", sub: o.k, answer: o.m, speak: o.k, choices: uniqueChoices(o.m, all.map((x) => x.m), 4) }
+                : { prompt: o.m, sub: "Which word?", answer: o.w, speak: o.k, choices: uniqueChoices(o.w, all.map((x) => x.w), 4) },
             );
           }
           runMcSession({ title: "Quiz", back: "quiz", items });
@@ -2948,6 +2994,196 @@
           const r = (o.kun !== "—" ? o.kun : o.on).split(",")[0].trim();
           return r.replace(/[（(].*/, "") || o.on;
         }
+
+        // ===============================================================
+        // Exam — mock JLPT test with per-section scores, history and an
+        // "are you ready for N4?" readiness check.
+        // ===============================================================
+        const EXAM_SECTIONS = [
+          ["vocab", "Vocabulary"],
+          ["kanji", "Kanji"],
+          ["grammar", "Grammar & particles"],
+          ["listen", "Listening"],
+        ];
+        let examLevel = "n5";
+        RENDER.exam = function () {
+          const v = $('[data-view="exam"]');
+          const exams = Array.isArray(stats.exams) ? stats.exams : [];
+          const hist = exams.slice(0, 8).map((e) =>
+            "<tr><td>" + escapeHtml(e.d) + "</td><td>" + escapeHtml(String(e.level).toUpperCase()) + "</td><td>" +
+            e.score + " / " + e.total + "</td><td>" + e.pct + "%" + (e.pct >= 70 ? " ✅" : "") + "</td></tr>").join("");
+          v.innerHTML =
+            '<div class="card"><h2>Mock exam 📝</h2><div class="hint">35 questions — vocabulary, kanji, grammar/particles and listening. 70% is a pass. Questions are drawn fresh every time.</div>' +
+            '<div class="chiprow" style="margin:14px 0 0">' +
+            '<button class="chip ' + (examLevel === "n5" ? "active" : "") + '" onclick="setExamLevel(\'n5\')">N5 exam</button>' +
+            '<button class="chip ' + (examLevel === "n4" ? "active" : "") + '" onclick="setExamLevel(\'n4\')">N4 exam</button></div>' +
+            '<div class="btnrow" style="margin-top:14px"><button class="btn primary" onclick="startExam()">▶ Start ' + examLevel.toUpperCase() + " exam</button></div></div>" +
+            readinessHtml() +
+            (hist
+              ? '<div class="card"><h2>Past exams</h2><table class="ctable"><tr><td><b>Date</b></td><td><b>Level</b></td><td><b>Score</b></td><td><b>Result</b></td></tr>' + hist + "</table></div>"
+              : "");
+        };
+        window.setExamLevel = function (l) {
+          examLevel = l;
+          RENDER.exam();
+        };
+        function knownFrac(arr, idFn) {
+          if (!arr.length) return 0;
+          return arr.filter((o) => {
+            const c = srs[idFn(o)];
+            return c && (c.box || 0) >= 2;
+          }).length / arr.length;
+        }
+        function readinessHtml() {
+          const n5 = (a) => a.filter((o) => o.lv === "n5");
+          const kanjiF = knownFrac(n5(DATA.kanji), kanjiId);
+          const vocabF = knownFrac(n5(DATA.vocab), vocabId);
+          const kanaF = KANA_FLAT.filter((c) => {
+            const h = srs[kanaId(c.h)], kk = srs[kanaId(c.k)];
+            return (h && (h.box || 0) >= 2) || (kk && (kk.box || 0) >= 2);
+          }).length / (KANA_FLAT.length || 1);
+          const best = (Array.isArray(stats.exams) ? stats.exams : [])
+            .filter((e) => e.level === "n5")
+            .reduce((m, e) => Math.max(m, e.pct || 0), 0);
+          const checks = [
+            ["Score 80%+ on an N5 mock exam", best >= 80, best ? "best so far: " + best + "%" : "no exam taken yet"],
+            ["Know 90% of kana (box 2+ in review)", kanaF >= 0.9, Math.round(kanaF * 100) + "%"],
+            ["Know 70% of N5 kanji (box 2+)", kanjiF >= 0.7, Math.round(kanjiF * 100) + "%"],
+            ["Know 60% of N5 vocabulary (box 2+)", vocabF >= 0.6, Math.round(vocabF * 100) + "%"],
+          ];
+          const met = checks.filter((c) => c[1]).length;
+          const verdict =
+            met === checks.length
+              ? "🎉 <b>You're ready for N4!</b> Switch the level to N4 on the Kanji, Vocabulary and Grammar tabs and start studying."
+              : met >= 2
+                ? "🟡 <b>Getting close.</b> Clear the remaining checks below and you're good to move up."
+                : "🔴 <b>Not yet.</b> Keep building your N5 base — the checks below show exactly what's missing.";
+          return (
+            '<div class="card"><h2>Ready for N4?</h2><div class="hint" style="margin-bottom:10px">' + verdict + '</div><ul class="plan">' +
+            checks.map(
+              (c) =>
+                '<li class="' + (c[1] ? "done" : "") + '"><span class="dot">' + (c[1] ? "✓" : "") + '</span><span class="label">' + c[0] +
+                ' <span style="color:var(--muted)">— ' + c[2] + "</span></span></li>",
+            ).join("") +
+            "</ul></div>"
+          );
+        }
+        window.startExam = function () {
+          const lv = examLevel;
+          const pick = (a) => a.filter((o) => o.lv === lv);
+          const vocabPool = pick(DATA.vocab);
+          const kanjiPool = pick(DATA.kanji);
+          const partPool = pick(DATA.particles);
+          const items = [];
+          shuffle(vocabPool).slice(0, 10).forEach((o) =>
+            items.push({
+              sec: "vocab", prompt: o.w, promptClass: "jp", sub: "What does it mean?",
+              answer: o.m, choices: uniqueChoices(o.m, vocabPool.map((x) => x.m), 4),
+            }),
+          );
+          shuffle(kanjiPool).slice(0, 10).forEach((o, i) =>
+            items.push(
+              i % 2 === 0
+                ? { sec: "kanji", prompt: o.c, promptClass: "jp", sub: "Meaning?", answer: o.m, choices: uniqueChoices(o.m, kanjiPool.map((x) => x.m), 4) }
+                : { sec: "kanji", prompt: o.c, promptClass: "jp", sub: "Pick a reading", answer: firstReading(o), jpOpts: true, choices: uniqueChoices(firstReading(o), kanjiPool.map(firstReading), 4) },
+            ),
+          );
+          shuffle(partPool).slice(0, 10).forEach((p) => {
+            const opts = new Set([p.a[0]]);
+            for (const x of shuffle(DATA.particlePool)) {
+              if (opts.size >= 4) break;
+              if (!p.a.includes(x)) opts.add(x);
+            }
+            items.push({
+              sec: "grammar", prompt: p.j.replace("＿", "〔 ？ 〕"), promptClass: "jp", sub: p.e,
+              answers: p.a, answer: p.a[0], jpOpts: true, choices: shuffle(Array.from(opts)),
+              speakAfter: p.j.replace("＿", p.a[0]),
+            });
+          });
+          shuffle(vocabPool).slice(0, 5).forEach((o) =>
+            items.push({
+              sec: "listen", audio: o.k, prompt: "🔊", sub: "Listen — what does it mean?",
+              answer: o.m, choices: uniqueChoices(o.m, vocabPool.map((x) => x.m), 4),
+            }),
+          );
+          runExam(items, lv);
+        };
+        function runExam(items, level) {
+          const v = $('[data-view="exam"]');
+          const secScore = {}, secTotal = {};
+          items.forEach((it) => (secTotal[it.sec] = (secTotal[it.sec] || 0) + 1));
+          let idx = 0, score = 0, answered = false;
+          function render() {
+            if (idx >= items.length) return finish();
+            const it = items[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>' + level.toUpperCase() + " exam</span><span>" + (idx + 1) + " / " + items.length + "</span></div>" +
+              '<div class="progress" style="margin-bottom:16px"><i style="width:' + ((idx / items.length) * 100).toFixed(0) + '%"></i></div>' +
+              '<div class="flashcard" id="examCard" style="min-height:150px;cursor:default"><div class="front ' + (it.promptClass || "") + '">' + escapeHtml(it.prompt) + "</div>" +
+              (it.sub ? '<div class="tap">' + escapeHtml(it.sub) + "</div>" : "") + "</div>" +
+              '<div class="opts">' + it.choices.map((ch) => '<button class="opt ' + (it.jpOpts ? "jp" : "") + '" data-v="' + escapeAttr(ch) + '">' + escapeHtml(ch) + "</button>").join("") + "</div></div>";
+            if (it.audio) {
+              speak(it.audio);
+              el("examCard").onclick = () => speak(it.audio);
+            }
+            v.querySelectorAll(".opt").forEach((b) =>
+              b.addEventListener("click", () => {
+                if (answered) return;
+                answered = true;
+                const good = it.answers ? it.answers.includes(b.dataset.v) : b.dataset.v === it.answer;
+                if (good) {
+                  score++;
+                  secScore[it.sec] = (secScore[it.sec] || 0) + 1;
+                }
+                v.querySelectorAll(".opt").forEach((x) => {
+                  const right = it.answers ? it.answers.includes(x.dataset.v) : x.dataset.v === it.answer;
+                  if (right) x.classList.add("correct");
+                  else if (x === b) x.classList.add("wrong");
+                  x.style.pointerEvents = "none";
+                });
+                if (it.speakAfter) speak(it.speakAfter);
+                setTimeout(() => {
+                  answered = false;
+                  idx++;
+                  render();
+                }, good ? 650 : 1400);
+              }),
+            );
+          }
+          function finish() {
+            const pct = Math.round((score / items.length) * 100);
+            if (!Array.isArray(stats.exams)) stats.exams = [];
+            const secs = {};
+            EXAM_SECTIONS.forEach(([k]) => {
+              if (secTotal[k]) secs[k] = { s: secScore[k] || 0, t: secTotal[k] };
+            });
+            stats.exams.unshift({ d: todayStr(), level, score, total: items.length, pct, secs });
+            stats.exams = stats.exams.slice(0, 20);
+            markStudied(items.length);
+            const passed = pct >= 70;
+            const rows = EXAM_SECTIONS.filter(([k]) => secTotal[k]).map(([k, label]) => {
+              const s = secScore[k] || 0, t = secTotal[k];
+              const p = Math.round((s / t) * 100);
+              return (
+                '<div style="margin-top:10px;text-align:left"><div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600"><span>' +
+                label + "</span><span>" + s + " / " + t + '</span></div><div class="progress"><i style="width:' + p + '%"></i></div></div>'
+              );
+            }).join("");
+            v.innerHTML =
+              '<div class="card study"><div class="empty-state"><div class="big">' + (passed ? "🏆" : "💪") + "</div><b>" +
+              score + " / " + items.length + " — " + pct + "%</b><div style='margin-top:8px'>" +
+              (passed ? "Passed! (pass mark is 70%)" : "Below the 70% pass mark — check your weakest section below and retake it.") +
+              "</div></div>" + rows +
+              '<div class="btnrow" style="justify-content:center;margin-top:18px">' +
+              '<button class="btn primary" onclick="RENDER_exam()">Back to Exam</button>' +
+              '<button class="btn" onclick="startExam()">Retake</button></div></div>' +
+              (level === "n5" ? readinessHtml() : "");
+          }
+          render();
+        }
+        window.RENDER_exam = function () {
+          RENDER.exam();
+        };
 
         // ===============================================================
         // Drills — conjugation + numbers / counters
@@ -3060,11 +3296,11 @@
         function paintPartHub() {
           el("drillBody").innerHTML =
             '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">Fill the blank with the right particle — ' +
-            DATA.particles.length + " N5 sentences (は・が・を・に・で・へ・と・も・の).</div>" +
+            byLevel(DATA.particles).length + " " + lvName() + " sentences (は・が・を・に・で・へ・と・も・の).</div>" +
             '<button class="btn jp" onclick="startParticles()">▶ Start particle drill</button></div>';
         }
         window.startParticles = function () {
-          const items = shuffle(DATA.particles).map((p) => {
+          const items = shuffle(byLevel(DATA.particles)).map((p) => {
             const opts = new Set([p.a[0]]);
             for (const x of shuffle(DATA.particlePool)) {
               if (opts.size >= 4) break;
@@ -3334,7 +3570,7 @@
               choices: uniqueChoices(c[key], pool.map((x) => x[key]), 4),
             }));
           } else if (listenSrc === "vocab") {
-            const pool = DATA.vocab;
+            const pool = byLevel(DATA.vocab);
             items = shuffle(pool).slice(0, 12).map((o) => ({
               audio: o.k, answer: o.m, reveal: o.w + " (" + o.k + ")",
               choices: uniqueChoices(o.m, pool.map((x) => x.m), 4),
