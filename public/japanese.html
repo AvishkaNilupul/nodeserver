@@ -2739,6 +2739,9 @@
           };
           rec.onerror = (e) => h.error && h.error(e.error || "error");
           rec.onend = () => h.end && h.end();
+          rec.detach = () => {
+            rec.onresult = rec.onerror = rec.onend = null;
+          };
           try {
             rec.start();
           } catch (e) {
@@ -2857,7 +2860,7 @@
         }
         function pronounceItems() {
           if (speakSource === "vocab")
-            return shuffle(DATA.vocab).slice(0, 20).map((o) => ({ jp: o.w, sub: o.k + "  ·  " + o.r, en: o.m, targets: [o.w, o.k], speak: o.k }));
+            return shuffle(byLevel(DATA.vocab)).slice(0, 20).map((o) => ({ jp: o.w, sub: o.k + "  ·  " + o.r, en: o.m, targets: [o.w, o.k], speak: o.k }));
           if (speakSource === "mywords")
             return shuffle(words.slice()).slice(0, 20).map((o) => ({ jp: o.w || o.k, sub: o.k || "", en: o.m, targets: [o.w, o.k], speak: o.k || o.w }));
           if (speakSource === "sentences")
@@ -2876,6 +2879,7 @@
           function stop() {
             if (rec) {
               try {
+                if (rec.detach) rec.detach();
                 rec.stop();
               } catch (e) {}
               rec = null;
@@ -2924,9 +2928,10 @@
                 heard = "";
                 score = 0;
                 render();
-                let errored = null;
+                let errored = null, gotResult = false;
                 rec = listenOnce({
                   result: (alts) => {
+                    gotResult = true;
                     const r = scoreSpeech(alts, it.targets);
                     heard = r.heard;
                     score = r.score;
@@ -2934,7 +2939,7 @@
                   error: (e) => (errored = e),
                   end: () => {
                     rec = null;
-                    if (errored) {
+                    if (errored || !gotResult) {
                       phase = "idle";
                       toast(errored === "not-allowed" ? "Please allow mic access" : "Didn't catch that — try again");
                       render();
@@ -2966,6 +2971,7 @@
           function stop() {
             if (rec) {
               try {
+                if (rec.detach) rec.detach();
                 rec.stop();
               } catch (e) {}
               rec = null;
@@ -3037,9 +3043,10 @@
                 heard = "";
                 score = 0;
                 render();
-                let errored = null;
+                let errored = null, gotResult = false;
                 rec = listenOnce({
                   result: (alts) => {
+                    gotResult = true;
                     const r = scoreSpeech(alts, [turn.j]);
                     heard = r.heard;
                     score = r.score;
@@ -3047,7 +3054,7 @@
                   error: (e) => (errored = e),
                   end: () => {
                     rec = null;
-                    if (errored) {
+                    if (errored || !gotResult) {
                       phase = "idle";
                       toast(errored === "not-allowed" ? "Please allow mic access" : "Didn't catch that — try again");
                       render();
