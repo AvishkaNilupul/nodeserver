@@ -640,6 +640,25 @@
         color: var(--muted);
         margin-top: 2px;
       }
+      .item-row .chk {
+        display: block;
+        font-size: 11.5px;
+        margin-top: 3px;
+        cursor: pointer;
+      }
+      .item-row .chk.ok {
+        color: var(--green);
+      }
+      .item-row .chk.diff {
+        color: #d97706;
+      }
+      .item-row .chk.nf {
+        color: var(--red);
+      }
+      .item-row .chk.pending,
+      .item-row .chk.info {
+        color: var(--muted);
+      }
       .item-row .romaji {
         font-size: 12px;
         color: var(--muted);
@@ -2283,6 +2302,7 @@
             "</div></div>" +
             '<div id="myWordsList"></div>';
           paintCustom("myWordsList", words, "word");
+          words.filter((o) => !o.chk).forEach((o) => checkWord(o));
         };
         RENDER.sentences = function () {
           const v = $('[data-view="sentences"]');
@@ -2312,7 +2332,7 @@
             return (
               '<div class="item-row"><span class="word jp">' + escapeHtml(front) + "</span>" +
               (read ? '<span class="read jp">' + escapeHtml(read) + "</span>" : "") +
-              '<span class="mean">' + escapeHtml(mean) + (o.note ? '<span class="note">' + escapeHtml(o.note) + "</span>" : "") + "</span>" +
+              '<span class="mean">' + escapeHtml(mean) + (o.note ? '<span class="note">' + escapeHtml(o.note) + "</span>" : "") + (type === "word" ? chkBadge(o) : "") + "</span>" +
               '<span class="acts">' +
               '<button class="iconbtn" data-act="speak" data-id="' + o.id + '" title="Hear">' + spk + "</button>" +
               '<button class="iconbtn" data-act="edit" data-id="' + o.id + '" title="Edit">✎</button>' +
@@ -2328,6 +2348,12 @@
             if (!o) return;
             const act = btn.dataset.act;
             const id = type === "word" ? wordCardId(o) : sentCardId(o);
+            if (act === "chk") {
+              o.chk = null;
+              btn.outerHTML = chkBadge(o);
+              checkWord(o);
+              return;
+            }
             if (act === "speak") speak(type === "word" ? o.k || o.w : o.j);
             else if (act === "edit") type === "word" ? wordForm(o) : sentForm(o);
             else if (act === "del") deleteCustom(type, o.id);
@@ -2389,18 +2415,89 @@
         window.saveWord = function (id) {
           const w = val("w_w"), k = val("w_k"), m = val("w_m");
           if (!w && !k) return toast("Enter at least the word or reading");
-          const rec = { w, k, r: val("w_r"), m, note: val("w_note") };
+          const rec = { w, k, r: val("w_r"), m, note: val("w_note"), chk: null };
+          let target;
           if (id) {
             const o = words.find((x) => x.id === id);
             if (o) Object.assign(o, rec);
+            target = o;
           } else {
-            words.unshift(Object.assign({ id: uid("w"), createdAt: Date.now() }, rec));
+            target = Object.assign({ id: uid("w"), createdAt: Date.now() }, rec);
+            words.unshift(target);
           }
           touch();
           closeModal();
           RENDER.mywords();
+          if (target) checkWord(target);
           toast(id ? "Saved" : "Word added");
         };
+
+        // --- dictionary checking for My Words ---------------------------------
+        // A saved word is verified first against the built-in N5/N4 dataset
+        // (works offline), then against Jisho via the server proxy. The result
+        // is stored on the word (o.chk) so it syncs and persists:
+        //   {s:"ok"}            meaning matches the dictionary
+        //   {s:"diff", d}       word found but meaning differs — d = dict meaning
+        //   {s:"info", d}       no meaning entered — d shown as the meaning
+        //   {s:"nf", d?}        word not found (d = closest suggestion if any)
+        const CHK_STOP = new Set("a,an,the,to,of,in,on,at,for,and,or,is,are,be,it,its,i,my,your,you,he,she,we,they,do,does,thing,something,someone,etc".split(","));
+        function meaningTokens(s) {
+          return String(s || "").toLowerCase().split(/[^a-z']+/).filter((t) => t.length > 1 && !CHK_STOP.has(t));
+        }
+        function meaningsMatch(userM, defs) {
+          const ut = meaningTokens(userM);
+          if (!ut.length) return false;
+          const dict = new Set(defs.flatMap(meaningTokens));
+          return ut.some((t) => dict.has(t) || [...dict].some((d) => d.startsWith(t) || t.startsWith(d)));
+        }
+        function chkBadge(o) {
+          const c = o.chk;
+          const wrap = (cls, txt) => '<span class="chk ' + cls + '" data-act="chk" data-id="' + o.id + '" title="Tap to re-check">' + txt + "</span>";
+          if (!c) return wrap("pending", "⏳ checking…");
+          if (c.s === "ok") return wrap("ok", "✓ checked — meaning is right");
+          if (c.s === "diff") return wrap("diff", "📖 dictionary says: " + escapeHtml(c.d));
+          if (c.s === "info") return wrap("info", "📖 " + escapeHtml(c.d));
+          if (c.s === "err") return wrap("pending", "couldn't check — tap to retry");
+          return wrap("nf", "⚠ not in dictionary" + (c.d ? " — did you mean: " + escapeHtml(c.d) : " — check the spelling"));
+        }
+        const chkRunning = new Set();
+        async function checkWord(o) {
+          if (chkRunning.has(o.id)) return;
+          chkRunning.add(o.id);
+          let chk;
+          try {
+            const key = normJa(o.k || o.w);
+            const local = DATA.vocab.find((v) => (o.w && (v.w === o.w || v.k === o.w)) || (key && normJa(v.k) === key));
+            let defs = null, found = false;
+            if (local) {
+              found = true;
+              defs = [local.m];
+            } else {
+              const resp = await api("GET", "/japanese/lookup?q=" + encodeURIComponent(o.w || o.k));
+              const entries = resp.data || [];
+              const entry = entries.find((e) => (e.japanese || []).some((j) => (o.w && (j.word === o.w || j.reading === o.w)) || (key && normJa(j.reading) === key)));
+              if (entry) {
+                found = true;
+                defs = entry.senses.flat().slice(0, 6);
+              } else if (entries.length) {
+                const s = entries[0];
+                const jj = (s.japanese && s.japanese[0]) || {};
+                defs = [(jj.word || jj.reading || "") + " (" + (s.senses.flat().slice(0, 2).join(", ") || "?") + ")"];
+              }
+            }
+            if (!found) chk = { s: "nf", d: defs ? defs[0] : "" };
+            else if (!o.m) chk = { s: "info", d: defs.slice(0, 3).join("; ") };
+            else if (meaningsMatch(o.m, defs)) chk = { s: "ok" };
+            else chk = { s: "diff", d: defs.slice(0, 3).join("; ") };
+          } catch (e) {
+            chk = { s: "err" };
+          }
+          chkRunning.delete(o.id);
+          o.chk = chk;
+          if (chk.s !== "err") touch();
+          const badge = document.querySelector('.chk[data-id="' + o.id + '"]');
+          if (badge) badge.outerHTML = chkBadge(o);
+        }
         window.sentForm = function (existing) {
           const o = existing || {};
           openModal(
