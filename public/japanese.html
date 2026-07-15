@@ -1272,6 +1272,7 @@
       <section class="view" data-view="mywords"></section>
       <section class="view" data-view="sentences"></section>
       <section class="view" data-view="speak"></section>
+      <section class="view" data-view="listen"></section>
       <section class="view" data-view="grammar"></section>
       <section class="view" data-view="review"></section>
       <section class="view" data-view="quiz"></section>
@@ -1624,6 +1625,17 @@
         function dueIds() {
           return Object.keys(srs).filter((id) => isDue(id) && !!resolveCard(id));
         }
+        // Cards you keep getting wrong: any with lapses, or still in the early
+        // boxes after being reviewed — surfaced regardless of due date.
+        function weakIds() {
+          return Object.keys(srs)
+            .filter((id) => {
+              const c = srs[id];
+              return c && (c.lapses > 0 || (c.reps > 0 && (c.box || 0) <= 1)) && !!resolveCard(id);
+            })
+            .sort((a, b) => (srs[b].lapses || 0) - (srs[a].lapses || 0) || (srs[a].box || 0) - (srs[b].box || 0))
+            .slice(0, 20);
+        }
         function counts() {
           let kana = 0, kanji = 0, vocab = 0, word = 0, sent = 0;
           Object.keys(srs).forEach((id) => {
@@ -1689,6 +1701,7 @@
           ["mywords", "My Words"],
           ["sentences", "Sentences"],
           ["speak", "Speak"],
+          ["listen", "Listen"],
           ["grammar", "Grammar"],
           ["review", "Review"],
           ["quiz", "Quiz"],
@@ -1731,6 +1744,7 @@
         RENDER.dashboard = function () {
           const v = $('[data-view="dashboard"]');
           const c = counts();
+          const weakCount = weakIds().length;
           const kanaPct = Math.round((c.kana / KANA_FLAT.length) * 100);
           const kanjiPct = Math.round((c.kanji / DATA.kanji.length) * 100);
           const vocabPct = Math.round((c.vocab / DATA.vocab.length) * 100);
@@ -1764,6 +1778,7 @@
             '<div class="btnrow" style="margin-top:14px">' +
             '<button class="btn primary" onclick="go(\'review\')">Start review (' + c.due + ")</button>" +
             "<button class=\"btn\" onclick=\"go('kana')\">Practice kana</button>" +
+            (weakCount ? '<button class="btn" onclick="startWeak()">🎯 Weak cards (' + weakCount + ")</button>" : "") +
             "<button class=\"btn\" onclick=\"go('quiz')\">Quick quiz</button></div></div>" +
             '<div class="grid cols-3" style="margin-bottom:18px">' +
             statTile("🔥 Streak", stats.streak + '<small> day' + (stats.streak === 1 ? "" : "s") + "</small>", null) +
@@ -2331,17 +2346,33 @@
           const due = dueIds();
           const c = counts();
           if (!due.length) {
+            const weak = weakIds().length;
             v.innerHTML =
               '<div class="card study"><div class="empty-state"><div class="big">🎉</div>' +
               (c.deck === 0
                 ? "<b>Your review deck is empty.</b><div style='margin-top:8px'>Add cards from Kana, Kanji, Vocabulary or your own words, or jump-start below.</div>"
-                : "<b>All caught up!</b><div style='margin-top:8px'>No cards are due right now. Come back later, or learn ahead.</div>") +
+                : "<b>All caught up!</b><div style='margin-top:8px'>No cards are due right now. Drill your weak cards, or learn ahead.</div>") +
               '<div class="btnrow" style="justify-content:center;margin-top:18px">' +
+              (weak ? '<button class="btn jp" onclick="startWeak()">🎯 Weak cards (' + weak + ")</button>" : "") +
               '<button class="btn primary" onclick="seedNew(\'vocab\',10);go(\'review\')">+ 10 vocab & review</button>' +
               '<button class="btn" onclick="seedNew(\'kanji\',10);go(\'review\')">+ 10 kanji</button></div></div></div>';
             return;
           }
           runReviewSession(shuffle(due));
+        };
+        // Switch to the review view and run an explicit queue (used by the
+        // "weak cards" shortcut, which ignores due dates).
+        function openReviewSession(ids) {
+          document.querySelectorAll(".view").forEach((vw) => vw.classList.toggle("active", vw.dataset.view === "review"));
+          el("tabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.tab === "review"));
+          try { location.hash = "review"; } catch (e) {}
+          $(".page").scrollTop = 0;
+          runReviewSession(ids);
+        }
+        window.startWeak = function () {
+          const ids = weakIds();
+          if (!ids.length) return toast("No weak cards yet — the ones you miss in review will show up here.");
+          openReviewSession(shuffle(ids));
         };
         function runReviewSession(queue) {
           const v = $('[data-view="review"]');
@@ -3268,6 +3299,98 @@
           render();
         }
         window.RENDER_drills = RENDER.drills;
+
+        // ===============================================================
+        // Listening / dictation — audio prompt, pick what you heard
+        // ===============================================================
+        let listenSrc = "kana";
+        const listenLabel = () => (listenSrc === "kana" ? "kana" : listenSrc === "vocab" ? "vocabulary" : "phrases");
+        RENDER.listen = function () {
+          const v = $('[data-view="listen"]');
+          const ok = "speechSynthesis" in window;
+          v.innerHTML =
+            '<div class="card"><h2>Listening 🎧</h2><div class="hint">' +
+            (ok
+              ? "Tap ▶, listen to the Japanese, then pick what you heard. Perfect with earphones on the train."
+              : "This browser has no speech synthesis, so audio won't play. Try Chrome or Safari.") +
+            '</div><div class="chiprow" style="margin:14px 0 0">' +
+            [["kana", "Kana"], ["vocab", "Vocabulary"], ["phrases", "Phrases"]]
+              .map(([k, l]) => '<button class="chip ' + (listenSrc === k ? "active" : "") + '" onclick="setListen(\'' + k + "')\">" + l + "</button>").join("") +
+            "</div></div>" +
+            '<div class="card study" style="text-align:center"><div class="hint" style="margin-bottom:12px">Listen and choose what you heard — <b>' +
+            listenLabel() + "</b>.</div><button class=\"btn jp\" onclick=\"startListen()\">▶ Start listening drill</button></div>";
+        };
+        window.setListen = function (s) {
+          listenSrc = s;
+          RENDER.listen();
+        };
+        window.startListen = function () {
+          let items = [];
+          if (listenSrc === "kana") {
+            const key = settings.script === "katakana" ? "k" : "h";
+            const pool = KANA_FLAT;
+            items = shuffle(pool).slice(0, 12).map((c) => ({
+              audio: c[key], answer: c[key], jpOpt: true, reveal: c[key] + " = " + c.r,
+              choices: uniqueChoices(c[key], pool.map((x) => x[key]), 4),
+            }));
+          } else if (listenSrc === "vocab") {
+            const pool = DATA.vocab;
+            items = shuffle(pool).slice(0, 12).map((o) => ({
+              audio: o.k, answer: o.m, reveal: o.w + " (" + o.k + ")",
+              choices: uniqueChoices(o.m, pool.map((x) => x.m), 4),
+            }));
+          } else {
+            const pool = DATA.phrases;
+            items = shuffle(pool).slice(0, 10).map((p) => ({
+              audio: p.j, answer: p.e, reveal: p.j,
+              choices: uniqueChoices(p.e, pool.map((x) => x.e), 4),
+            }));
+          }
+          runListenSession({ title: listenLabel(), items });
+        };
+        function runListenSession(cfg) {
+          const v = $('[data-view="listen"]');
+          let idx = 0, score = 0, answered = false;
+          function render() {
+            if (idx >= cfg.items.length) {
+              markStudied(cfg.items.length);
+              const pct = Math.round((score / cfg.items.length) * 100);
+              v.innerHTML =
+                '<div class="card study"><div class="empty-state"><div class="big">' + (pct >= 80 ? "🏆" : pct >= 50 ? "👍" : "💪") + "</div><b>" +
+                score + " / " + cfg.items.length + ' correct</b><div class="btnrow" style="justify-content:center;margin-top:18px"><button class="btn primary" onclick="RENDER_listen()">Back</button></div></div></div>';
+              return;
+            }
+            const it = cfg.items[idx];
+            v.innerHTML =
+              '<div class="study"><div class="sess-top"><span>Listening · ' + escapeHtml(cfg.title) + "</span><span>" + (idx + 1) + " / " + cfg.items.length + " · ✅ " + score + "</span></div>" +
+              '<div class="flashcard" id="playCard" style="min-height:150px"><div style="font-size:52px">🔊</div><div class="tap" id="playTap">Tap to replay</div></div>' +
+              '<div class="opts">' + it.choices.map((c) => '<button class="opt ' + (it.jpOpt ? "jp" : "") + '" data-v="' + escapeAttr(c) + '">' + escapeHtml(c) + "</button>").join("") + "</div></div>";
+            speak(it.audio);
+            el("playCard").onclick = () => speak(it.audio);
+            v.querySelectorAll(".opt").forEach((b) =>
+              b.addEventListener("click", () => {
+                if (answered) return;
+                answered = true;
+                const good = b.dataset.v === it.answer;
+                if (good) score++;
+                v.querySelectorAll(".opt").forEach((x) => {
+                  if (x.dataset.v === it.answer) x.classList.add("correct");
+                  else if (x === b) x.classList.add("wrong");
+                  x.style.pointerEvents = "none";
+                });
+                const tap = el("playTap");
+                if (tap) tap.textContent = it.reveal || "";
+                setTimeout(() => {
+                  answered = false;
+                  idx++;
+                  render();
+                }, good ? 850 : 1500);
+              }),
+            );
+          }
+          render();
+        }
+        window.RENDER_listen = RENDER.listen;
 
         // ===============================================================
         // Modal
