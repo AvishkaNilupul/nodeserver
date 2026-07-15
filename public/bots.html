@@ -226,14 +226,25 @@
     <div style="padding:14px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line);">
       <b style="font-size:15px;">TwitchDropsBot version</b>
       <span class="chip" id="updChip">checking…</span>
+      <span class="chip on" id="healthChip" title="Containers with no new logs for a while — possibly a Twitch API change the bot can't handle" style="display:none;"></span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn-ghost btn-sm" id="updRefreshBtn">Check for updates</button>
+        <button class="btn-ghost btn-sm" id="updCombinedBtn" title="Alorf's latest release with our own reliability fixes merged on top">Roll out latest + our patches</button>
         <button class="btn-sm" id="updStartBtn" disabled>Roll out</button>
       </div>
     </div>
     <div style="padding:14px 18px;display:none;" id="updDetail">
       <div class="sub" id="updNote" style="white-space:pre-line;"></div>
       <div class="logwrap" id="updLog" style="display:none;height:220px;margin-top:12px;"></div>
+      <details style="margin-top:12px;">
+        <summary class="sub" style="cursor:pointer;">Emergency patch (custom fork/branch)</summary>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+          <input id="updCustomRepo" type="text" placeholder="owner/repo (default: Alorf/TwitchDropsBot)" style="flex:1;min-width:220px;" />
+          <input id="updCustomRef" type="text" placeholder="branch / tag / commit" style="flex:1;min-width:180px;" />
+          <button class="btn-ghost btn-sm" id="updCustomBtn">Roll out this ref</button>
+        </div>
+        <div class="sub" style="margin-top:4px;">Skips the upstream-release check and builds this exact ref. Still goes through the same sanity test + auto-rollback as a normal rollout.</div>
+      </details>
     </div>
   </div>
 
@@ -1181,11 +1192,18 @@
     renderUpdateLog(s);
     if (s.running) {
       _updWasRunning = true;
+      const src = s.targetRepo && s.targetRepo !== "Alorf/TwitchDropsBot" ? s.targetRepo + "@" : "";
       $("updStartBtn").disabled = true;
-      $("updStartBtn").textContent = "Rolling out " + s.targetTag + "…";
+      $("updStartBtn").textContent = "Rolling out " + src + s.targetTag + "…";
+      $("updCombinedBtn").disabled = true;
+      $("updCustomBtn").disabled = true;
       if (!_updTimer) _updTimer = setInterval(pollUpdateStatus, 2500);
       return;
     }
+    $("updCombinedBtn").disabled = false;
+    $("updCombinedBtn").textContent = "Roll out latest + our patches";
+    $("updCustomBtn").disabled = false;
+    $("updCustomBtn").textContent = "Roll out this ref";
     if (_updTimer) { clearInterval(_updTimer); _updTimer = null; }
     if (_updWasRunning) {
       _updWasRunning = false;
@@ -1202,7 +1220,12 @@
       const r = await api("/api/bot-update/latest");
       const rel = r.release || {};
       const applied = r.applied || {};
-      const versions = HOSTS.map((h) => (h.label || h.id) + ": " + ((applied[h.id] && applied[h.id].tag) || "unknown")).join("  ·  ");
+      const versions = HOSTS.map((h) => {
+        const a = applied[h.id];
+        const tag = (a && a.tag) || "unknown";
+        const src = a && a.repo && a.repo !== "Alorf/TwitchDropsBot" ? a.repo + "@" : "";
+        return (h.label || h.id) + ": " + src + tag;
+      }).join("  ·  ");
       $("updNote").textContent =
         "Latest release: " + (rel.name || rel.tag) + (rel.publishedAt ? " (" + new Date(rel.publishedAt).toLocaleDateString() + ")" : "") +
         "\nCurrently applied — " + versions;
@@ -1225,21 +1248,53 @@
       $("updDetail").style.display = "";
     }
     pollUpdateStatus();
+    loadHealthChip();
   }
 
-  async function startRollout() {
-    if (!confirm("Roll out the latest TwitchDropsBot release to every host, one bot at a time?\n\nA bot that fails its post-update health check is rolled back automatically and the whole rollout stops there — later bots are left untouched.")) return;
-    $("updStartBtn").disabled = true;
-    $("updStartBtn").textContent = "Starting…";
+  async function loadHealthChip() {
+    let s;
+    try { s = await api("/api/bot-health/status"); } catch (e) { return; }
+    const chip = $("healthChip");
+    const stuck = (s.containers || []).filter((c) => c.stuck);
+    if (!stuck.length) { chip.style.display = "none"; return; }
+    chip.style.display = "";
+    chip.className = "chip off";
+    chip.textContent = stuck.length === 1 ? "1 bot looks stuck" : (stuck.length + " bots look stuck");
+    chip.title = stuck.map((c) => c.key).join(", ") + " — no new logs for a while, possibly a Twitch API change the bot can't handle";
+  }
+
+  async function runRolloutRequest(body, confirmMsg, btnId) {
+    if (!confirm(confirmMsg)) return;
+    const btn = $(btnId || "updStartBtn");
+    const old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Starting…";
     try {
-      await api("/api/bot-update/start", { method: "POST" });
+      await api("/api/bot-update/start", { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
       toast("Rollout started");
       _updWasRunning = true;
       pollUpdateStatus();
     } catch (e) {
       toast("Couldn't start: " + e.message, true);
+      btn.textContent = old;
       loadUpdatePanel();
     }
+  }
+
+  async function startRollout() {
+    await runRolloutRequest({}, "Roll out the latest TwitchDropsBot release to every host, one bot at a time?\n\nA bot that fails its post-update health check is rolled back automatically and the whole rollout stops there — later bots are left untouched.", "updStartBtn");
+  }
+
+  async function startCombinedRollout() {
+    const body = { repo: "AvishkaNilupul/TwitchDropsBot", ref: "combined" };
+    await runRolloutRequest(body, "Roll out Alorf's latest release with our own reliability fixes merged on top (AvishkaNilupul/TwitchDropsBot@combined) to every host, one bot at a time?\n\nThe same sanity test + auto-rollback still applies.", "updCombinedBtn");
+  }
+
+  async function startCustomRollout() {
+    const repo = $("updCustomRepo").value.trim() || undefined;
+    const ref = $("updCustomRef").value.trim();
+    if (!ref) { toast("Enter a branch, tag, or commit to roll out", true); return; }
+    await runRolloutRequest({ repo, ref }, "Roll out " + (repo || "Alorf/TwitchDropsBot") + "@" + ref + " to every host, one bot at a time?\n\nThis skips the upstream-release check and builds this exact ref. The same sanity test + auto-rollback still applies.", "updCustomBtn");
   }
 
   // events
@@ -1251,6 +1306,8 @@
   $("allHead").addEventListener("click", () => $("allPanel").classList.toggle("collapsed"));
   $("updRefreshBtn").addEventListener("click", loadUpdatePanel);
   $("updStartBtn").addEventListener("click", startRollout);
+  $("updCombinedBtn").addEventListener("click", startCombinedRollout);
+  $("updCustomBtn").addEventListener("click", startCustomRollout);
 
   $("logoutBtn").addEventListener("click", async () => {
     try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}

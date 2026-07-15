@@ -9,8 +9,9 @@ const router = express.Router();
 // Bots page can show "you're on vX, latest is vY" before offering to roll out.
 router.get("/api/bot-update/latest", requireSuperadmin, async (req, res) => {
   try {
+    const repo = req.query.repo ? String(req.query.repo) : undefined;
     const [release, applied] = await Promise.all([
-      botUpdater.latestRelease(),
+      botUpdater.latestRelease(repo),
       botUpdater.appliedVersions(),
     ]);
     res.json({ success: true, release, applied });
@@ -21,10 +22,16 @@ router.get("/api/bot-update/latest", requireSuperadmin, async (req, res) => {
   }
 });
 
+// Body may include { repo, ref } to build from a fork branch/tag/commit
+// instead of the latest upstream release — the fast path for an emergency
+// patch pushed ahead of an upstream fix.
 router.post("/api/bot-update/start", requireSuperadmin, async (req, res) => {
   try {
-    const r = await botUpdater.start();
-    res.json({ success: true, tag: r.tag });
+    const body = req.body || {};
+    const repo = body.repo ? String(body.repo) : undefined;
+    const ref = body.ref ? String(body.ref) : undefined;
+    const r = await botUpdater.start({ repo, ref });
+    res.json({ success: true, repo: r.repo, tag: r.tag });
   } catch (err) {
     res.status(409).json({ success: false, message: err.message });
   }
