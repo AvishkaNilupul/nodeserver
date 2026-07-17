@@ -961,7 +961,7 @@
     return (
       '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
         '<input type="number" id="' + idPrefix + 'PoolAmount" min="1" max="' + n + '" value="' + Math.min(n, 5) + '" style="width:90px;">' +
-        '<button type="button" class="btn-ghost btn-sm" onclick="addFromPool(\'' + idPrefix + '\')">Add from pool</button>' +
+        '<button type="button" class="btn-ghost btn-sm" id="' + idPrefix + 'PoolBtn" onclick="addFromPool(\'' + idPrefix + '\')">Add from pool</button>' +
         '<span class="hint" id="' + idPrefix + 'PoolHint">' + n + ' available</span>' +
       '</div>'
     );
@@ -976,23 +976,55 @@
     if (!n) { toast("Enter how many to add", true); return; }
     const picks = poolAccountsCache.slice(0, n);
     const ta = $(idPrefix === "m" ? "mAccounts" : "bAccounts");
+    const btn = $(idPrefix + "PoolBtn");
+    const btnLabel = btn ? btn.textContent : "";
+
+    // Each pick needs its own reveal call for the decrypted ClientSecret. These
+    // used to run strictly one after another with the button left live and
+    // unlabelled, so any sizeable batch looked like a dead button for seconds.
+    // Fire them together — they're local DB reads, not Twitch calls, and the
+    // browser caps its own per-host concurrency — and report progress as they
+    // land. Results stay in pick order so the textarea order is stable.
+    let done = 0;
+    const paint = () => {
+      if (btn) btn.textContent = "Adding " + done + "/" + picks.length + "…";
+    };
+    if (btn) btn.disabled = true;
+    if (amountEl) amountEl.disabled = true;
+    paint();
+
+    let settled;
+    try {
+      settled = await Promise.all(
+        picks.map(async (a) => {
+          try {
+            return { a, r: await api("/account-pool/" + a.id + "/password") };
+          } catch (e) {
+            return { a, err: e };
+          } finally {
+            done++;
+            paint();
+          }
+        }),
+      );
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = btnLabel; }
+      if (amountEl) amountEl.disabled = false;
+    }
+
     const objs = [];
-    for (const a of picks) {
-      try {
-        const r = await api("/account-pool/" + a.id + "/password");
-        if (!r.clientSecret) { toast(a.username + " has no stored auth, skipped", true); continue; }
-        objs.push({
-          ClientSecret: r.clientSecret,
-          UniqueId: r.uniqueId || "",
-          Login: a.username,
-          Id: r.twitchId || "",
-          Enabled: true,
-          FavouriteGames: [],
-        });
-        poolPickedIds.set(a.id, a.username);
-      } catch (e) {
-        toast(a.username + ": " + e.message, true);
-      }
+    for (const { a, r, err } of settled) {
+      if (err) { toast(a.username + ": " + err.message, true); continue; }
+      if (!r.clientSecret) { toast(a.username + " has no stored auth, skipped", true); continue; }
+      objs.push({
+        ClientSecret: r.clientSecret,
+        UniqueId: r.uniqueId || "",
+        Login: a.username,
+        Id: r.twitchId || "",
+        Enabled: true,
+        FavouriteGames: [],
+      });
+      poolPickedIds.set(a.id, a.username);
     }
     // Drop the picks (successful or not — a failed one still shouldn't be
     // offered again in this same modal) so re-clicking "Add from pool"
