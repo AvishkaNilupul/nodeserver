@@ -1,6 +1,12 @@
 node_modules
 .env
 
+# macOS Finder metadata
+.DS_Store
+
+# Python virtualenv for the marketplace service — rebuilt locally, never committed
+marketplace/.venv
+
 # Admin credentials (bcrypt hashes) — never commit
 admins.json
 
