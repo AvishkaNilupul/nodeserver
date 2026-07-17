@@ -251,7 +251,9 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
     }
 
     if (ops.length) await AvailableAccount.bulkWrite(ops, { ordered: false });
-    if (toAutoCheck.length) accountPoolChecker.enqueue(toAutoCheck);
+    const autoChecking = toAutoCheck.length
+      ? accountPoolChecker.enqueue(toAutoCheck)
+      : 0;
 
     res.json({
       success: true,
@@ -259,7 +261,7 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
       merged,
       alreadyInUse,
       alreadyInUseCount: alreadyInUse.length,
-      autoChecking: toAutoCheck.length,
+      autoChecking,
       badLines,
       badLineCount: badLines.length,
     });
@@ -298,11 +300,21 @@ router.post(
       });
       const rows = await AvailableAccount.find(
         { clientSecret: { $ne: "" }, _id: { $nin: archivedIds } },
-        { _id: 1 },
+        { _id: 1, status: 1 },
       ).lean();
       const ids = rows.map((r) => r._id);
-      accountPoolChecker.enqueue(ids);
-      res.json({ success: true, queued: ids.length });
+      const queued = accountPoolChecker.enqueue(ids);
+      // This sweep is deliberately not limited to "available" — claimed
+      // accounts need their drops backfilled too — so report the split. The
+      // page lists available accounts only, and a queue total counting the
+      // whole pool otherwise reads as though it invented accounts.
+      res.json({
+        success: true,
+        queued,
+        targetedAvailable: rows.filter((r) => r.status === "available").length,
+        targetedClaimed: rows.filter((r) => r.status === "claimed").length,
+        alreadyQueued: ids.length - queued,
+      });
     } catch (err) {
       console.error("account-pool enqueue-unchecked error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });

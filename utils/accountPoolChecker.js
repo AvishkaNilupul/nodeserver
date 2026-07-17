@@ -11,6 +11,12 @@ const { fetchInventory } = require("./twitchInventory");
 const CHECK_DELAY_MS = Number(process.env.ACCOUNT_POOL_CHECK_DELAY_MS) || 1200;
 
 const queue = [];
+// Ids queued or currently in flight. Without this an id can be queued twice —
+// kicking off a sweep while one is already draining would re-check every
+// account and fire double the requests at Twitch. An id is only released once
+// its check finishes, so the one being checked right now can't be re-queued
+// underneath the drain either.
+const queued = new Set();
 const state = { running: false, checked: 0, total: 0 };
 let draining = false;
 
@@ -56,6 +62,8 @@ async function drain() {
         await checkOne(id);
       } catch (err) {
         console.error("accountPoolChecker: check failed for", id, err.message);
+      } finally {
+        queued.delete(id);
       }
       state.checked++;
       if (queue.length) await new Promise((r) => setTimeout(r, CHECK_DELAY_MS));
@@ -66,12 +74,22 @@ async function drain() {
   }
 }
 
-// Queues account ids for a background auth check. Starting a fresh batch
-// (queue was empty and idle) resets the progress counters so the UI's
-// "checked/total" reads as this batch's progress, not a lifetime tally.
+// Queues account ids for a background auth check, skipping any already queued
+// or in flight (deduped within the batch too, not just against the queue).
+// Starting a fresh batch (queue was empty and idle) resets the progress
+// counters so the UI's "checked/total" reads as this batch's progress, not a
+// lifetime tally. Returns how many were actually queued, so callers can report
+// the real number rather than what they asked for.
 function enqueue(ids) {
-  const fresh = (ids || []).filter(Boolean).map(String);
-  if (!fresh.length) return;
+  const fresh = [];
+  for (const raw of ids || []) {
+    if (!raw) continue;
+    const id = String(raw);
+    if (queued.has(id)) continue;
+    queued.add(id);
+    fresh.push(id);
+  }
+  if (!fresh.length) return 0;
   if (!queue.length && !draining) {
     state.checked = 0;
     state.total = 0;
@@ -79,6 +97,7 @@ function enqueue(ids) {
   queue.push(...fresh);
   state.total += fresh.length;
   drain().catch(() => {});
+  return fresh.length;
 }
 
 function status() {

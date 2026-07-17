@@ -471,8 +471,22 @@ or JSON:
     btn.disabled = true; btn.textContent = "Queuing…";
     try {
       const r = await api("/account-pool/check-queue/enqueue-unchecked", { method: "POST" });
-      toast(r.queued ? "Queued " + r.queued + " account(s) for auto-check" : "Nothing to check — everything with a token has already been checked");
-      if (r.queued) pollCheckQueue();
+      if (r.queued) {
+        // Spell out the available/claimed split — this sweep covers the whole
+        // pool, so the number is normally far bigger than the visible list.
+        const bits = [];
+        if (r.targetedAvailable) bits.push(r.targetedAvailable + " available");
+        if (r.targetedClaimed) bits.push(r.targetedClaimed + " claimed");
+        let msg = "Queued " + r.queued + " account(s) for auto-check";
+        if (bits.length) msg += " (" + bits.join(" + ") + ")";
+        if (r.alreadyQueued) msg += " · " + r.alreadyQueued + " already queued, skipped";
+        toast(msg);
+        pollCheckQueue();
+      } else if (r.alreadyQueued) {
+        toast("All " + r.alreadyQueued + " matching account(s) are already queued — nothing new added");
+      } else {
+        toast("Nothing to check — everything with a token has already been checked");
+      }
     } catch (err) {
       toast(err.message, true);
     } finally {
@@ -496,7 +510,10 @@ or JSON:
     const banner = $("checkQueueBanner");
     if (s.running || s.queued > 0) {
       banner.style.display = "";
-      banner.textContent = "Auto-checking accounts against Twitch: " + s.checked + " of " + s.total + " done" + (s.queued ? " (" + s.queued + " queued)" : "") + "…";
+      // The queue spans the whole pool regardless of which tab is showing, so
+      // say so — this total sitting above a list filtered to "available" reads
+      // as a contradiction otherwise ("62 accounts here, why is it checking 147?").
+      banner.textContent = "Auto-checking accounts against Twitch: " + s.checked + " of " + s.total + " done" + (s.queued ? " (" + s.queued + " queued)" : "") + "… — counts the whole pool, including claimed accounts, not just the rows listed below.";
       if (!_checkQueueTimer) _checkQueueTimer = setInterval(pollCheckQueue, 2000);
       load();
     } else {
