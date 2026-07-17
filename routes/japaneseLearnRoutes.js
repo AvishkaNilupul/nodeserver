@@ -26,7 +26,12 @@ function toState(doc) {
   };
 }
 
-const normCode = (c) => String(c || "").trim().toUpperCase().slice(0, 16);
+// Codes are stored as XXXX-XXXX; accept them typed with or without the dash,
+// with spaces, or lowercase.
+function normCode(c) {
+  const raw = String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+  return raw.length === 8 ? raw.slice(0, 4) + "-" + raw.slice(4) : raw;
+}
 
 // Simple in-memory rate limit so codes can't be brute-forced.
 // Only FAILED code checks count toward the limit, so an active studying

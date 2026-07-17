@@ -454,6 +454,11 @@ app.get("/", (req, res) => {
 // =========================
 // Routes
 // =========================
+// Guest learning API must come before the admin-guarded routers below:
+// app.use(requireAdmin, ...) runs its middleware on every request regardless
+// of whether that router matches the path, so anything mounted after it 401s
+// without an admin session.
+app.use(japaneseLearnRoutes);
 app.use(redeemRoutes);
 app.use(enforce2fa, chatRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
@@ -471,7 +476,6 @@ app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, japaneseRoutes);
-app.use(japaneseLearnRoutes);
 
 // =========================
 // Socket.IO
