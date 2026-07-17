@@ -190,6 +190,54 @@
         background: #fef2f2;
       }
 
+      /* ---- Guest mode (/learn): no admin sidebar — a slim top bar instead,
+         so the app gets the full width on phones. ---- */
+      body.jp-guest { flex-direction: column; }
+      body.jp-guest .nav { display: none; }
+      .gtop {
+        display: none;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 16px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--line);
+        flex-shrink: 0;
+      }
+      body.jp-guest .gtop { display: flex; }
+      .gtop .gmark {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+      .gtop .gwho {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13.5px;
+      }
+      .gtop .gwho b { font-size: 14px; }
+      .gtop button {
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--muted);
+        border-radius: 9px;
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        font-size: 15px;
+        flex-shrink: 0;
+      }
+
       /* ---- Page ---- */
       .page {
         flex: 1;
@@ -1269,6 +1317,12 @@
     </aside>
 
     <main class="page">
+      <div class="gtop" id="gtop">
+        <div class="gmark">語</div>
+        <div class="gwho"><b>日本語 Learning</b> · <span id="gName">Guest</span></div>
+        <button data-theme-toggle onclick="toggleTheme()" title="Theme">☼</button>
+        <button id="gLogout" title="Log out">↪</button>
+      </div>
       <div class="page-head">
         <div>
           <h1>日本語 <span class="badge-jp">N5</span></h1>
@@ -4822,15 +4876,13 @@
         document.getElementById("meAvatar").innerText = String(name).slice(0, 2).toUpperCase();
       }
       if (window.__jpGuest) {
-        document.querySelector(".nav .links").innerHTML = "";
-        document.querySelector(".nav .brand b").innerHTML = "日本語<span>Learning</span>";
-        document.getElementById("meRole").innerText = "Student";
+        document.body.classList.add("jp-guest");
         let gname = "Guest";
         try {
           gname = localStorage.getItem("jp_learn_name") || "Guest";
         } catch (e) {}
-        jpSetMe(gname);
-        document.getElementById("logoutBtn").addEventListener("click", () => {
+        document.getElementById("gName").innerText = gname;
+        document.getElementById("gLogout").addEventListener("click", () => {
           if (!confirm("Leave? Your progress is saved to your access code — enter it again to continue.")) return;
           try {
             localStorage.removeItem("jp_learn_code");
