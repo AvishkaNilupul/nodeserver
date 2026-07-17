@@ -241,11 +241,16 @@ or JSON:
       '<div class="stat"><b>' + ready + '</b><span>Ready (has creds)</span></div>';
   }
 
+  // Report the recorded verdict before falling back to hasAuth. hasAuth is
+  // false for any token Twitch refused, so testing it first collapsed
+  // "rejected" into a blank dash — which is why the ✗ chips below never
+  // rendered and a dead token looked the same as one nobody had checked.
   function verifiedChip(a) {
-    if (!a.hasAuth) return '<span class="chip">—</span>';
     if (a.lastCheckStatus === "ok") return '<span class="chip on" title="' + esc(a.lastCheckAt ? new Date(a.lastCheckAt).toLocaleString() : "") + '">✓ verified · ' + a.dropCount + ' drops</span>';
     if (a.lastCheckStatus === "token_invalid") return '<span class="chip off" title="' + esc(a.lastCheckError || "") + '">✗ invalid</span>';
+    if (a.lastCheckStatus === "integrity_failed") return '<span class="chip off" title="' + esc(a.lastCheckError || "Twitch accepts the token but refuses the integrity-gated drops query a bot runs. Needs re-running through device-auth — see Export needs-auth.") + '">✗ no device-auth</span>';
     if (a.lastCheckStatus === "error") return '<span class="chip warn" title="' + esc(a.lastCheckError || "") + '">check error</span>';
+    if (!a.hasAuth) return '<span class="chip">—</span>';
     return '<span class="chip">not checked</span>';
   }
 
@@ -368,6 +373,8 @@ or JSON:
         toast("Verified — " + r.dropCount + " drop(s) on Twitch right now");
       } else if (r.status === "token_invalid") {
         toast("Token invalid/expired — Twitch rejected it", true);
+      } else if (r.status === "integrity_failed") {
+        toast("Token works but no bot can use it — Twitch refuses the integrity-gated drops query. Re-run it through device-auth (Export needs-auth).", true);
       } else {
         toast("Check failed: " + (r.message || "unknown error"), true);
       }

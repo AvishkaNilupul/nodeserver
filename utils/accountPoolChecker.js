@@ -6,7 +6,7 @@
 // fire that many concurrent requests at Twitch.
 const AvailableAccount = require("../models/AvailableAccount");
 const dropScanner = require("./dropScanner");
-const { fetchInventory } = require("./twitchInventory");
+const { fetchInventory, fetchDropCampaigns } = require("./twitchInventory");
 
 const CHECK_DELAY_MS = Number(process.env.ACCOUNT_POOL_CHECK_DELAY_MS) || 1200;
 
@@ -20,6 +20,28 @@ const queued = new Set();
 const state = { running: false, checked: 0, total: 0 };
 let draining = false;
 
+// Inventory succeeding only proves the token authenticates. The bot's own drops
+// query (ViewerDropsDashboard) is integrity-gated, and a supplier token that
+// never went through device-auth passes Inventory and fails that gate — which
+// is how an account used to sit here badged "verified · 0 drops" while every
+// bot it was handed to logged "failed integrity check". So check the gate the
+// bot actually uses.
+//
+// Only a genuine integrity rejection downgrades the account: a network blip or
+// rate-limit here shouldn't mark an otherwise-good token unusable, so anything
+// else is treated as "still ok" and left for the next sweep to retry.
+async function checkIntegrity(token) {
+  try {
+    await fetchDropCampaigns(token);
+    return { ok: true, message: "" };
+  } catch (e) {
+    if (e.code === "integrity_failed") {
+      return { ok: false, message: (e.message || String(e)).slice(0, 300) };
+    }
+    return { ok: true, message: "" };
+  }
+}
+
 async function checkOne(id) {
   const acc = await AvailableAccount.findById(id);
   if (!acc || !acc.clientSecret) return;
@@ -28,9 +50,10 @@ async function checkOne(id) {
     const { twitchId, drops } = await fetchInventory(acc.clientSecret);
     if (twitchId) acc.twitchId = twitchId;
     acc.dropCount = drops.length;
+    const integrity = await checkIntegrity(acc.clientSecret);
     acc.lastCheckAt = now;
-    acc.lastCheckStatus = "ok";
-    acc.lastCheckError = "";
+    acc.lastCheckStatus = integrity.ok ? "ok" : "integrity_failed";
+    acc.lastCheckError = integrity.ok ? "" : integrity.message;
     // Best-effort — a drops-archive write hiccup shouldn't fail the check
     // itself (the account is still verified either way).
     await dropScanner
@@ -45,7 +68,11 @@ async function checkOne(id) {
   } catch (e) {
     acc.lastCheckAt = now;
     acc.lastCheckStatus =
-      e.code === "token_invalid" ? "token_invalid" : "error";
+      e.code === "token_invalid"
+        ? "token_invalid"
+        : e.code === "integrity_failed"
+          ? "integrity_failed"
+          : "error";
     acc.lastCheckError = (e.message || String(e)).slice(0, 300);
   }
   await acc.save();

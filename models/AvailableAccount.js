@@ -42,10 +42,17 @@ const availableAccountSchema = new mongoose.Schema(
     // one the drop archive scanner uses), so a stored clientSecret is
     // verified against Twitch itself rather than just assumed valid because
     // it's non-empty.
+    //
+    // "integrity_failed" is the awkward middle case: Twitch accepts the token
+    // but refuses the integrity-gated drops query a bot actually runs, so the
+    // account authenticates while being unusable. Only device-auth-issued
+    // tokens clear that gate — re-running the account through device-auth with
+    // its stored password is the fix, which is why these are surfaced by
+    // /account-pool/export-needs-auth alongside dead tokens.
     lastCheckAt: { type: Date, default: null },
     lastCheckStatus: {
       type: String,
-      enum: ["", "ok", "token_invalid", "error"],
+      enum: ["", "ok", "token_invalid", "integrity_failed", "error"],
       default: "",
     },
     lastCheckError: { type: String, default: "" },

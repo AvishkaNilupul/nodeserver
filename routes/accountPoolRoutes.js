@@ -20,7 +20,7 @@ const accountPoolChecker = require("../utils/accountPoolChecker");
 const dropScanner = require("../utils/dropScanner");
 const { parseAccountList } = require("../utils/parseAccountList");
 const { encrypt, decrypt } = require("../utils/secretBox");
-const { fetchInventory } = require("../utils/twitchInventory");
+const { fetchInventory, fetchDropCampaigns } = require("../utils/twitchInventory");
 
 const router = express.Router();
 
@@ -30,12 +30,16 @@ function publicAccount(a) {
     username: a.username,
     hasPassword: !!a.hasPassword,
     hasEmail: !!a.email,
-    // UniqueId isn't required for an account to be usable — /bot-configs/create
-    // auto-generates one if it's missing. ClientSecret alone is what makes an
-    // account droppable straight into a bot with no further steps — unless
-    // the Check button already confirmed Twitch rejects it, in which case
-    // it's not actually ready no matter what's stored.
-    hasAuth: !!a.clientSecret && a.lastCheckStatus !== "token_invalid",
+    // A ClientSecret alone is NOT enough, despite /bot-configs/create happily
+    // auto-generating a UniqueId when one is missing: the drops query a bot
+    // runs is integrity-gated, and that gate only accepts tokens issued
+    // through a real device-auth session. A supplier token authenticates fine
+    // and fails it, so anything the check has confirmed Twitch refuses — dead
+    // token or failed integrity — isn't "ready" no matter what's stored.
+    hasAuth:
+      !!a.clientSecret &&
+      a.lastCheckStatus !== "token_invalid" &&
+      a.lastCheckStatus !== "integrity_failed",
     twitchId: a.twitchId || "",
     status: a.status,
     claimedAt: a.claimedAt,
@@ -74,7 +78,14 @@ router.get("/account-pool/export-needs-auth", requireSuperadmin, async (req, res
     const status = String(req.query.status || "available");
     const filter = status === "all" ? {} : { status };
     filter.hasPassword = true;
-    filter.$or = [{ clientSecret: "" }, { lastCheckStatus: "token_invalid" }];
+    // integrity_failed belongs here alongside dead tokens: the token
+    // authenticates but no bot can use it, and re-running the account through
+    // device-auth (which is what this export feeds) is precisely the remedy.
+    filter.$or = [
+      { clientSecret: "" },
+      { lastCheckStatus: "token_invalid" },
+      { lastCheckStatus: "integrity_failed" },
+    ];
     const accounts = await AvailableAccount.find(filter).lean();
     const out = accounts.map((a) => ({
       username: a.username,
@@ -369,9 +380,22 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
       const { twitchId, login, drops } = await fetchInventory(acc.clientSecret);
       if (twitchId) acc.twitchId = twitchId;
       acc.dropCount = drops.length;
+      // Inventory passing only means the token authenticates. Verify the
+      // integrity-gated query a bot actually runs too, otherwise this button
+      // green-lights tokens no bot can use (see utils/accountPoolChecker.js).
+      let integrityOk = true;
+      let integrityError = "";
+      try {
+        await fetchDropCampaigns(acc.clientSecret);
+      } catch (e) {
+        if (e.code === "integrity_failed") {
+          integrityOk = false;
+          integrityError = (e.message || String(e)).slice(0, 300);
+        }
+      }
       acc.lastCheckAt = now;
-      acc.lastCheckStatus = "ok";
-      acc.lastCheckError = "";
+      acc.lastCheckStatus = integrityOk ? "ok" : "integrity_failed";
+      acc.lastCheckError = integrityOk ? "" : integrityError;
       await acc.save();
       // Best-effort — feeds the drops-archive "in pool" view; a write
       // hiccup here shouldn't fail the check itself.
@@ -382,7 +406,8 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
         );
       res.json({
         success: true,
-        status: "ok",
+        status: acc.lastCheckStatus,
+        message: acc.lastCheckError,
         twitchId: acc.twitchId,
         login: login || acc.username,
         dropCount: drops.length,
@@ -395,7 +420,12 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
       });
     } catch (e) {
       acc.lastCheckAt = now;
-      acc.lastCheckStatus = e.code === "token_invalid" ? "token_invalid" : "error";
+      acc.lastCheckStatus =
+        e.code === "token_invalid"
+          ? "token_invalid"
+          : e.code === "integrity_failed"
+            ? "integrity_failed"
+            : "error";
       acc.lastCheckError = (e.message || String(e)).slice(0, 300);
       await acc.save();
       res.json({

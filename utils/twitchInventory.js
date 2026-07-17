@@ -92,6 +92,19 @@ async function gqlRequest(token, clientId, body) {
   return { status: res.status, parsed };
 }
 
+// Twitch's anti-bot gate, which is separate from token validity. A token can
+// authenticate perfectly (Inventory returns the user) and still be refused
+// here: integrity is bound to a real device-auth session, so a supplier token
+// that never went through that flow passes Inventory and fails this. Tagged
+// with a code so callers can tell "no bot can use this" apart from "the token
+// is dead" — they need opposite remedies.
+function gqlError(errors) {
+  const msg = errors.map((e) => e.message).join("; ");
+  const err = new Error(msg);
+  if (/integrity/i.test(msg)) err.code = "integrity_failed";
+  return err;
+}
+
 // Normalised grouping key so the same reward on different accounts collapses
 // together in aggregate views (case/space-insensitive name + game).
 function itemKeyFor(name, game) {
@@ -209,7 +222,7 @@ async function fetchInventory(token, clientId) {
   }
 
   if (parsed?.errors?.length) {
-    throw new Error(parsed.errors.map((e) => e.message).join("; "));
+    throw gqlError(parsed.errors);
   }
 
   const user = parsed?.data?.currentUser;
@@ -247,7 +260,7 @@ async function fetchDropCampaigns(token, clientId) {
     },
   ]);
   if (parsed?.errors?.length) {
-    throw new Error(parsed.errors.map((e) => e.message).join("; "));
+    throw gqlError(parsed.errors);
   }
   const user = parsed?.data?.currentUser;
   if (!user) {
