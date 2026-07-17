@@ -18,6 +18,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const dropScanner = require("../utils/dropScanner");
+const { parseAccountList } = require("../utils/parseAccountList");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const { fetchInventory } = require("../utils/twitchInventory");
 
@@ -89,20 +90,34 @@ router.get("/account-pool/export-needs-auth", requireSuperadmin, async (req, res
 router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
   try {
     let list = req.body && req.body.accounts;
+    let badLines = [];
     if (typeof list === "string") {
       // Tolerate a loosely-pasted object sequence, same as the drops-archive
-      // credentials importer.
+      // credentials importer, then fall back to colon-delimited lines.
       const trimmed = list.trim().replace(/,\s*$/, "");
+      let parsed = null;
       try {
-        list = JSON.parse("[" + trimmed.replace(/^\[|\]$/g, "") + "]");
+        parsed = JSON.parse("[" + trimmed.replace(/^\[|\]$/g, "") + "]");
       } catch {
         try {
-          list = JSON.parse(trimmed);
+          parsed = JSON.parse(trimmed);
         } catch {
-          return res
-            .status(400)
-            .json({ success: false, message: "Could not parse JSON" });
+          parsed = null;
         }
+      }
+      if (parsed) {
+        list = parsed;
+      } else {
+        const fromLines = parseAccountList(trimmed);
+        if (!fromLines.accounts.length) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Could not parse this as JSON or as login:password:token lines",
+          });
+        }
+        list = fromLines.accounts;
+        badLines = fromLines.badLines;
       }
     }
     if (!Array.isArray(list)) {
@@ -155,6 +170,8 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
         merged: 0,
         alreadyInUse: [],
         alreadyInUseCount: 0,
+        badLines,
+        badLineCount: badLines.length,
       });
     }
 
@@ -243,6 +260,8 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
       alreadyInUse,
       alreadyInUseCount: alreadyInUse.length,
       autoChecking: toAutoCheck.length,
+      badLines,
+      badLineCount: badLines.length,
     });
   } catch (err) {
     console.error("account-pool import error:", err.message);

@@ -160,19 +160,26 @@
     <header><b>Import accounts</b><button class="x" id="importClose">&times;</button></header>
     <div class="mbody">
       <div>
-        <label class="lbl">Accounts JSON</label>
-        <textarea id="importInput" placeholder='[
+        <label class="lbl">Accounts — one per line, or JSON</label>
+        <textarea id="importInput" placeholder='login:password:token
+login:password:email
+login:password
+
+or JSON:
+
+[
   { "username": "puvig", "password": "cb7XEN...", "email": "..." }
 ]
-
-or
 
 [
   { "Login": "marol4uow39", "ClientSecret": "01r414...", "UniqueId": "25a7c8...", "Id": "1519257141", "Enabled": true }
 ]'></textarea>
         <div class="hint" style="margin-top:8px;">
-          Paste either shape — raw <code>{ username, password, email }</code> credentials, or a bot-config
-          <code>{ Login, ClientSecret, UniqueId, Id }</code> entry — or a mix of both. Matched by username;
+          Paste a supplier list one account per line — <code>login:password:token</code>, where the token is the
+          Twitch OAuth token (an <code>@</code> in that slot is read as an email instead). Anything imported with a
+          token is <b>checked against Twitch automatically</b>, so there's no need to click Check per row.
+          JSON still works too: raw <code>{ username, password, email }</code> credentials or a bot-config
+          <code>{ Login, ClientSecret, UniqueId, Id }</code> entry, or a mix. Matched by username;
           if the same account already exists here it's filled in rather than duplicated, and anything
           already running in a live bot is skipped automatically.
         </div>
@@ -443,6 +450,9 @@ or
       if (r.merged) parts.push(r.merged + " filled in on existing entries");
       if (r.alreadyInUseCount) parts.push(r.alreadyInUseCount + " already in use in a bot, skipped");
       if (r.autoChecking) parts.push("auto-checking " + r.autoChecking + " against Twitch");
+      // Unparseable lines are surfaced rather than dropped silently — otherwise
+      // a mistyped row just goes missing from a big paste with no explanation.
+      if (r.badLineCount) parts.push(r.badLineCount + " line(s) skipped — couldn't read: " + r.badLines.slice(0, 3).join(", "));
       toast(parts.length ? parts.join(" · ") : "Nothing new to import");
       $("importBg").classList.remove("show");
       CURRENT_STATUS = "available";
