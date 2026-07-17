@@ -284,7 +284,7 @@
   let _loadSeq = 0;       // guards against a slow load() overwriting a newer tab
   const HOST_CACHE = {};  // hostId -> last-seen { configs, states, health, cstats, usage }
   let poolAccountsCache = null; // account-pool entries with auth ready, cached per modal open
-  let poolPickedIds = new Set(); // pool account ids added to the textarea this modal session
+  let poolPickedIds = new Map(); // pool account id -> username, added to the textarea this modal session
 
   // Which managed host the page is currently showing (the local server by
   // default; remote hosts such as a Raspberry Pi appear as extra tabs).
@@ -989,7 +989,7 @@
           Enabled: true,
           FavouriteGames: [],
         });
-        poolPickedIds.add(a.id);
+        poolPickedIds.set(a.id, a.username);
       } catch (e) {
         toast(a.username + ": " + e.message, true);
       }
@@ -1007,23 +1007,33 @@
     toast(objs.length + " account" + (objs.length === 1 ? "" : "s") + " added from pool");
   };
 
-  // Mark whichever pool accounts fed this modal's textarea as claimed, once
-  // the bot they were added to was actually created/saved successfully.
-  // Best-effort and reversible (Unclaim on the Account Pool page) — if the
-  // operator deletes a pasted-in entry before submitting, it'll still get
-  // marked claimed here; not worth the complexity of diffing textarea content
-  // for a single-operator internal tool.
-  async function claimPoolPicks() {
+  // Marks whichever pool accounts fed this modal's textarea as claimed — but
+  // only the ones that actually ended up in the bot. r.accountCount === 0
+  // means nothing landed at all (don't claim any pick); r.skippedDuplicates
+  // lists logins that were dropped as duplicates (don't claim those either).
+  // Getting this wrong silently strands real, credentialed accounts in
+  // "claimed" limbo — checked into the pool, marked used, but wired to
+  // nothing — so this only ever claims what's provably deployed.
+  async function claimPoolPicks(r) {
     if (!poolPickedIds.size) return;
-    const ids = Array.from(poolPickedIds);
-    poolPickedIds = new Set();
+    const picks = Array.from(poolPickedIds.entries()); // [id, username][]
+    poolPickedIds = new Map();
+    if (!r || !r.accountCount) {
+      toast("Note: the picked pool account(s) weren't added to the bot, so they're still available in the pool.", true);
+      return;
+    }
+    const skipped = new Set((r.skippedDuplicates || []).map((s) => (s.login || "").toLowerCase()));
+    const landed = picks.filter(([, username]) => !skipped.has((username || "").toLowerCase()));
+    if (landed.length < picks.length) {
+      toast((picks.length - landed.length) + " picked account(s) were skipped as duplicates and are still available in the pool.", true);
+    }
     await Promise.allSettled(
-      ids.map((id) => api("/account-pool/" + id + "/claim", { method: "POST", body: JSON.stringify({ note: "assigned to a bot" }) })),
+      landed.map(([id]) => api("/account-pool/" + id + "/claim", { method: "POST", body: JSON.stringify({ note: "assigned to a bot" }) })),
     );
   }
 
   window.openCreateModal = async function () {
-    poolPickedIds = new Set();
+    poolPickedIds = new Map();
     const slot = nextSlot();
     const opts = Object.keys(CONFIGS)
       .filter((f) => CONFIGS[f] && CONFIGS[f].ok)
@@ -1087,7 +1097,7 @@
       if (r.warning) toast(r.warning, true);
       else toast("Created " + r.container + " with " + r.accountCount + " account" + (r.accountCount === 1 ? "" : "s") + (r.started ? " — running" : "") + (r.skippedDuplicates && r.skippedDuplicates.length ? " — " + r.skippedDuplicates.length + " duplicate" + (r.skippedDuplicates.length === 1 ? "" : "s") + " skipped" : ""));
       reportSkipped(r.skippedDuplicates);
-      await claimPoolPicks();
+      await claimPoolPicks(r);
       setTimeout(load, 1200);
     } catch (e) {
       btn.disabled = false; btn.textContent = old;
@@ -1097,7 +1107,7 @@
 
   window.openBulkModal = async function (file) {
     const c = CONFIGS[file]; if (!c) return;
-    poolPickedIds = new Set();
+    poolPickedIds = new Map();
     await loadPoolAccounts();
     $("modalBg").innerHTML =
       '<div class="modal" role="dialog" aria-modal="true">' +
@@ -1137,7 +1147,7 @@
       closeModal();
       toast("Added " + r.added + " account" + (r.added === 1 ? "" : "s") + " (now " + r.total + ")" + (r.restarted ? " — restarted" : "") + (r.skippedDuplicates && r.skippedDuplicates.length ? " — " + r.skippedDuplicates.length + " duplicate" + (r.skippedDuplicates.length === 1 ? "" : "s") + " skipped" : ""));
       reportSkipped(r.skippedDuplicates);
-      await claimPoolPicks();
+      await claimPoolPicks({ accountCount: r.added, skippedDuplicates: r.skippedDuplicates });
       setTimeout(load, restart ? 1500 : 300);
     } catch (e) {
       btn.disabled = false; btn.textContent = old;
