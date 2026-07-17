@@ -1301,6 +1301,7 @@
       <section class="view" data-view="exam"></section>
       <section class="view" data-view="drills"></section>
       <section class="view" data-view="phrases"></section>
+      <section class="view" data-view="students"></section>
     </main>
 
     <div class="toast" id="toast"></div>
@@ -1341,7 +1342,23 @@
         const stats = { streak: 0, lastStudy: null, history: {}, reviewsTotal: 0 };
         const settings = { script: "hiragana", showRomaji: true, level: "n5" };
         const state = { updatedAt: 0 };
-        const LS_KEY = "jp_state_v2";
+        // Guest mode: the same app served at /learn, unlocked by an access
+        // code instead of an admin session. Separate storage key so an admin
+        // trying a guest code on the same browser doesn't clobber their own
+        // progress.
+        const GUEST = /^\/learn\/?$/.test(location.pathname);
+        window.__jpGuest = GUEST;
+        const CODE_KEY = "jp_learn_code";
+        function learnCode() {
+          try {
+            return localStorage.getItem(CODE_KEY) || "";
+          } catch (e) {
+            return "";
+          }
+        }
+        const LS_KEY = GUEST ? "jp_state_learn_v1" : "jp_state_v2";
+        const STATE_URL = GUEST ? "/learn/state" : "/japanese/state";
+        const LOOKUP_URL = GUEST ? "/learn/lookup" : "/japanese/lookup";
 
         function snapshot() {
           return {
@@ -1414,12 +1431,17 @@
         // ---- Server sync ---------------------------------------------
         async function api(method, url, body) {
           const opts = { method, credentials: "same-origin", headers: {} };
+          if (GUEST) opts.headers["x-learn-code"] = learnCode();
           if (body !== undefined) {
             opts.headers["Content-Type"] = "application/json";
             opts.body = JSON.stringify(body);
           }
           const res = await fetch(url, opts);
-          if (!res.ok) throw new Error("HTTP " + res.status);
+          if (!res.ok) {
+            const err = new Error("HTTP " + res.status);
+            err.status = res.status;
+            throw err;
+          }
           return res.json();
         }
         let syncState = "local";
@@ -1455,10 +1477,11 @@
           pushing = true;
           setSync("saving");
           try {
-            await api("PUT", "/japanese/state", snapshot());
+            await api("PUT", STATE_URL, snapshot());
             setSync("saved");
           } catch (e) {
             setSync("off");
+            if (GUEST && e.status === 401) guestGate("This access code is no longer valid.");
           } finally {
             pushing = false;
             if (pushAgain) {
@@ -1471,7 +1494,7 @@
           // Load local first so the UI is instant and works offline.
           adopt(localLoad());
           try {
-            const r = await api("GET", "/japanese/state");
+            const r = await api("GET", STATE_URL);
             const server = r.state;
             if (server && (server.updatedAt || 0) >= (state.updatedAt || 0)) {
               adopt(server);
@@ -1491,7 +1514,57 @@
             }
           } catch (e) {
             setSync("off");
+            if (GUEST && e.status === 401) guestGate("This access code is no longer valid.");
           }
+        }
+        // Full-screen code entry for guests — shown before the app boots (no
+        // stored code) or when the stored code stops working (revoked).
+        function guestGate(msg) {
+          if (el("jpGate")) return;
+          try {
+            localStorage.removeItem(CODE_KEY);
+          } catch (e) {}
+          const d = document.createElement("div");
+          d.id = "jpGate";
+          d.style.cssText = "position:fixed;inset:0;z-index:10000;background:var(--bg,#f8fafc);display:flex;align-items:center;justify-content:center;padding:20px";
+          d.innerHTML =
+            '<div class="card" style="max-width:380px;width:100%;text-align:center">' +
+            '<div style="font-size:44px;margin-bottom:6px">🇯🇵</div>' +
+            '<h2 style="margin-bottom:6px">日本語 Learning</h2>' +
+            '<div class="hint" style="margin-bottom:14px">' + (msg ? escapeHtml(msg) + " " : "") + "Enter your access code to start learning. Your progress is saved to it — use the same code on any device.</div>" +
+            '<input id="gateCode" class="search" style="text-align:center;font-size:18px;letter-spacing:2px;text-transform:uppercase" placeholder="XXXX-XXXX" autocomplete="off">' +
+            '<div id="gateErr" style="color:var(--red);font-size:12.5px;min-height:18px;margin-top:8px"></div>' +
+            '<button class="btn primary" style="width:100%;margin-top:6px" id="gateGo">Start learning →</button></div>';
+          document.body.appendChild(d);
+          const input = d.querySelector("#gateCode");
+          const go2 = async () => {
+            const code = (input.value || "").trim().toUpperCase();
+            if (!code) return;
+            d.querySelector("#gateErr").textContent = "";
+            d.querySelector("#gateGo").textContent = "Checking…";
+            try {
+              const res = await fetch("/learn/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ code }),
+              });
+              const j = await res.json().catch(() => ({}));
+              if (!res.ok || !j.success) throw new Error(j.message || "That code isn't valid");
+              try {
+                localStorage.setItem(CODE_KEY, j.code);
+                localStorage.setItem("jp_learn_name", j.label || "Guest");
+              } catch (e) {}
+              location.reload();
+            } catch (e) {
+              d.querySelector("#gateErr").textContent = e.message || "Couldn't verify the code";
+              d.querySelector("#gateGo").textContent = "Start learning →";
+            }
+          };
+          d.querySelector("#gateGo").onclick = go2;
+          input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") go2();
+          });
+          setTimeout(() => input.focus(), 80);
         }
         // Flush when connectivity returns or the tab is hidden/closed.
         window.addEventListener("online", () => schedulePush(true));
@@ -1884,6 +1957,7 @@
           ["drills", "Drills"],
           ["phrases", "Phrases"],
         ];
+        if (!GUEST) TABS.push(["students", "Students 👥"]);
         function buildTabs() {
           el("tabs").innerHTML = TABS.map(
             ([k, label]) => '<button data-tab="' + k + '">' + label + "</button>",
@@ -2547,7 +2621,7 @@
               found = true;
               defs = [local.m];
             } else {
-              const resp = await api("GET", "/japanese/lookup?q=" + encodeURIComponent(o.w || o.k));
+              const resp = await api("GET", LOOKUP_URL + "?q=" + encodeURIComponent(o.w || o.k));
               const entries = resp.data || [];
               const entry = entries.find((e) => (e.japanese || []).some((j) => (o.w && (j.word === o.w || j.reading === o.w)) || (key && normJa(j.reading) === key)));
               if (entry) {
@@ -4524,6 +4598,151 @@
         }
 
         // ===============================================================
+        // Students (admin only) — generate guest access codes for /learn and
+        // watch each guest's progress.
+        // ===============================================================
+        let studentCodes = [];
+        RENDER.students = function () {
+          const v = $('[data-view="students"]');
+          v.innerHTML =
+            '<div class="card"><h2>Students 👥</h2><div class="hint">Give friends limited access: generate a code, send them <b>' + escapeHtml(location.origin + "/learn") + "</b> + the code. They only see the learning app (no admin console), their progress saves under the code, and you can watch it here.</div>" +
+            '<div class="btnrow" style="margin-top:14px"><button class="btn primary" onclick="genCode()">+ Generate access code</button></div></div>' +
+            '<div id="codesList"><div class="hint" style="padding:10px">Loading…</div></div>';
+          loadCodes();
+        };
+        async function loadCodes() {
+          const box = el("codesList");
+          try {
+            const r = await api("GET", "/japanese/codes");
+            studentCodes = r.codes || [];
+          } catch (e) {
+            if (box) box.innerHTML = '<div class="card"><div class="hint">Couldn\'t load codes — check your connection.</div></div>';
+            return;
+          }
+          if (!box) return;
+          if (!studentCodes.length) {
+            box.innerHTML = '<div class="empty-state"><div class="big">🎟️</div><b>No access codes yet.</b><div style="margin-top:6px">Generate one and share it with a friend.</div></div>';
+            return;
+          }
+          box.innerHTML = studentCodes.map((c, i) => {
+            const p = c.progress;
+            const last = c.lastActiveAt ? new Date(c.lastActiveAt).toLocaleString() : "never used";
+            return (
+              '<div class="card" style="' + (c.active ? "" : "opacity:.55") + '">' +
+              '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+              '<div style="flex:1;min-width:170px"><b style="font-size:15px">' + escapeHtml(c.label || "Student " + (i + 1)) + "</b>" +
+              '<div style="font-family:monospace;font-size:15px;letter-spacing:1px;margin-top:2px">' + escapeHtml(c.code) + "</div>" +
+              '<div class="hint" style="margin-top:2px">' + (c.active ? "Active" : "Revoked") + " · last seen: " + escapeHtml(last) + "</div></div>" +
+              '<span class="acts">' +
+              '<button class="iconbtn" title="Copy invite" onclick="copyInvite(' + i + ')">📋</button>' +
+              '<button class="iconbtn" title="Details" onclick="codeDetail(' + i + ')">📊</button>' +
+              '<button class="iconbtn" title="' + (c.active ? "Revoke access" : "Re-enable") + '" onclick="toggleCode(' + i + ')">' + (c.active ? "🚫" : "✅") + "</button>" +
+              '<button class="iconbtn" title="Delete code + progress" onclick="deleteCode(' + i + ')">🗑</button>' +
+              "</span></div>" +
+              (p
+                ? '<div class="chiprow" style="margin-top:10px">' +
+                  '<span class="chip">⭐ ' + (p.xp || 0) + " XP</span>" +
+                  '<span class="chip">🔥 ' + (p.streak || 0) + " day streak</span>" +
+                  '<span class="chip">🔁 ' + (p.reviewsTotal || 0) + " reviews</span>" +
+                  '<span class="chip">🗂 ' + (p.cards || 0) + " cards</span>" +
+                  '<span class="chip">📝 ' + (p.words || 0) + " words</span>" +
+                  '<span class="chip">' + String(p.level || "n5").toUpperCase() + "</span>" +
+                  (p.exams && p.exams.length ? '<span class="chip">🎓 last exam ' + p.exams[0].pct + "%</span>" : "") +
+                  "</div>"
+                : '<div class="hint" style="margin-top:10px">No study activity yet.</div>') +
+              "</div>"
+            );
+          }).join("");
+        }
+        window.genCode = function () {
+          openModal(
+            '<h2 style="font-size:16px;font-weight:700;margin-bottom:14px">New access code</h2>' +
+            field("code_label", "Who is it for?", "", "e.g. Kasun") +
+            '<div class="btnrow" style="justify-content:flex-end;margin-top:8px"><button class="btn" onclick="closeModal()">Cancel</button>' +
+            '<button class="btn primary" onclick="createCode()">Generate</button></div>',
+          );
+          setTimeout(() => el("code_label") && el("code_label").focus(), 60);
+        };
+        window.createCode = async function () {
+          try {
+            const r = await api("POST", "/japanese/codes", { label: val("code_label") });
+            closeModal();
+            openModal(
+              '<h2 style="font-size:16px;font-weight:700;margin-bottom:10px">Code ready 🎟️</h2>' +
+              '<div class="hint">Send them this — the page and the code:</div>' +
+              '<div style="font-family:monospace;font-size:22px;letter-spacing:2px;text-align:center;margin:16px 0">' + escapeHtml(r.code.code) + "</div>" +
+              '<div style="text-align:center" class="hint">' + escapeHtml(location.origin + "/learn") + "</div>" +
+              '<div class="btnrow" style="justify-content:center;margin-top:16px"><button class="btn primary" onclick="copyText(\'' + escapeAttr(location.origin + "/learn — access code: " + r.code.code) + '\')">📋 Copy invite</button></div>',
+            );
+            loadCodes();
+          } catch (e) {
+            toast("Couldn't create the code");
+          }
+        };
+        window.copyText = function (t) {
+          (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
+            .then(() => toast("Copied"))
+            .catch(() => toast("Couldn't copy — note it down"));
+        };
+        window.copyInvite = function (i) {
+          const c = studentCodes[i];
+          if (c) copyText(location.origin + "/learn — access code: " + c.code);
+        };
+        window.toggleCode = async function (i) {
+          const c = studentCodes[i];
+          if (!c) return;
+          try {
+            await api("PUT", "/japanese/codes/" + c.id, { active: !c.active });
+            toast(c.active ? "Access revoked" : "Access re-enabled");
+            loadCodes();
+          } catch (e) {
+            toast("Failed — try again");
+          }
+        };
+        window.deleteCode = async function (i) {
+          const c = studentCodes[i];
+          if (!c) return;
+          if (!confirm("Delete this code AND all its study progress? This can't be undone.")) return;
+          try {
+            await api("DELETE", "/japanese/codes/" + c.id);
+            toast("Deleted");
+            loadCodes();
+          } catch (e) {
+            toast("Failed — try again");
+          }
+        };
+        window.codeDetail = function (i) {
+          const c = studentCodes[i];
+          if (!c) return;
+          const p = c.progress;
+          if (!p) return openModal('<h2 style="font-size:16px;font-weight:700;margin-bottom:10px">' + escapeHtml(c.label || c.code) + '</h2><div class="hint">No study activity yet — they haven\'t started (or haven\'t synced).</div>');
+          const days = [];
+          for (let d = 13; d >= 0; d--) {
+            const dt = new Date(Date.now() - d * 86400000);
+            const key = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+            days.push({ key, n: (p.history || {})[key] || 0 });
+          }
+          const max = Math.max(1, ...days.map((d) => d.n));
+          const bars = days.map((d) =>
+            '<div title="' + d.key + ": " + d.n + ' reviews" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end"><div style="height:' + Math.round((d.n / max) * 60) + 'px;min-height:2px;background:var(--accent2);border-radius:3px"></div></div>',
+          ).join("");
+          const exams = (p.exams || []).map((e2) =>
+            "<tr><td>" + escapeHtml(e2.d || "") + "</td><td>" + escapeHtml(String(e2.level || "").toUpperCase()) + "</td><td>" + e2.score + "/" + e2.total + " (" + e2.pct + "%)</td></tr>",
+          ).join("");
+          openModal(
+            '<h2 style="font-size:16px;font-weight:700;margin-bottom:10px">' + escapeHtml(c.label || c.code) + " 📊</h2>" +
+            '<div class="chiprow">' +
+            '<span class="chip">⭐ ' + (p.xp || 0) + " XP</span><span class=\"chip\">🔥 " + (p.streak || 0) + " streak</span>" +
+            '<span class="chip">🔁 ' + (p.reviewsTotal || 0) + " reviews</span><span class=\"chip\">🗂 " + (p.cards || 0) + " cards</span>" +
+            '<span class="chip">📝 ' + (p.words || 0) + " words · " + (p.sentences || 0) + " sentences</span></div>" +
+            '<div style="margin:16px 0 4px;font-weight:700;font-size:13px">Last 14 days (reviews/day)</div>' +
+            '<div style="display:flex;gap:3px;align-items:flex-end;height:64px">' + bars + "</div>" +
+            (exams ? '<div style="margin:16px 0 4px;font-weight:700;font-size:13px">Exams</div><table class="ctable"><tr><td><b>Date</b></td><td><b>Level</b></td><td><b>Score</b></td></tr>' + exams + "</table>" : "") +
+            '<div class="hint" style="margin-top:12px">Last synced: ' + (p.updatedAt ? new Date(p.updatedAt).toLocaleString() : "never") + "</div>",
+          );
+        };
+
+        // ===============================================================
         // Modal
         // ===============================================================
         function openModal(html) {
@@ -4582,6 +4801,10 @@
         };
         buildTabs();
         (async function () {
+          if (GUEST && !learnCode()) {
+            guestGate();
+            return;
+          }
           await pullState();
           const start = (location.hash || "").replace("#", "");
           go(TABS.some((t) => t[0] === start) ? start : "dashboard");
@@ -4591,47 +4814,73 @@
 
     <script>
       // Admin shell boilerplate (identity + logout) — offline-tolerant so the
-      // installed PWA still opens with no connection.
-      document.getElementById("logoutBtn").addEventListener("click", async () => {
-        try {
-          await fetch("/admin-logout", { method: "POST", credentials: "same-origin" });
-        } catch (e) {}
-        window.location.href = "/admin-login.html";
-      });
+      // installed PWA still opens with no connection. In guest mode (/learn)
+      // the admin console chrome is stripped and no whoami/redirect happens —
+      // the access code gate inside the app is the only login.
       function jpSetMe(name) {
         document.getElementById("meName").innerText = name;
         document.getElementById("meAvatar").innerText = String(name).slice(0, 2).toUpperCase();
       }
-      (async () => {
+      if (window.__jpGuest) {
+        document.querySelector(".nav .links").innerHTML = "";
+        document.querySelector(".nav .brand b").innerHTML = "日本語<span>Learning</span>";
+        document.getElementById("meRole").innerText = "Student";
+        let gname = "Guest";
         try {
-          const r = await fetch("/whoami", { credentials: "same-origin" });
-          // Only a real "unauthorized" bounces to login. A network failure
-          // (offline) must NOT — the cached app should still open.
-          if (r.status === 401 || r.status === 403) {
-            window.location.href = "/admin-login.html";
-            return;
-          }
-          if (r.ok) {
-            const data = await r.json();
-            const name = ((data && data.admin) || {}).username || "Admin";
-            try {
-              localStorage.setItem("jp_me", name);
-            } catch (e) {}
-            jpSetMe(name);
-            return;
-          }
-        } catch (e) {
-          /* offline — fall through to the cached identity */
-        }
-        let cached = "Admin";
-        try {
-          cached = localStorage.getItem("jp_me") || "Admin";
+          gname = localStorage.getItem("jp_learn_name") || "Guest";
         } catch (e) {}
-        jpSetMe(cached);
-      })();
+        jpSetMe(gname);
+        document.getElementById("logoutBtn").addEventListener("click", () => {
+          if (!confirm("Leave? Your progress is saved to your access code — enter it again to continue.")) return;
+          try {
+            localStorage.removeItem("jp_learn_code");
+            localStorage.removeItem("jp_learn_name");
+          } catch (e) {}
+          window.location.reload();
+        });
+      } else {
+        document.getElementById("logoutBtn").addEventListener("click", async () => {
+          try {
+            await fetch("/admin-logout", { method: "POST", credentials: "same-origin" });
+          } catch (e) {}
+          window.location.href = "/admin-login.html";
+        });
+        (async () => {
+          try {
+            const r = await fetch("/whoami", { credentials: "same-origin" });
+            // Only a real "unauthorized" bounces to login. A network failure
+            // (offline) must NOT — the cached app should still open.
+            if (r.status === 401 || r.status === 403) {
+              window.location.href = "/admin-login.html";
+              return;
+            }
+            if (r.ok) {
+              const data = await r.json();
+              const name = ((data && data.admin) || {}).username || "Admin";
+              try {
+                localStorage.setItem("jp_me", name);
+              } catch (e) {}
+              jpSetMe(name);
+              return;
+            }
+          } catch (e) {
+            /* offline — fall through to the cached identity */
+          }
+          let cached = "Admin";
+          try {
+            cached = localStorage.getItem("jp_me") || "Admin";
+          } catch (e) {}
+          jpSetMe(cached);
+        })();
+        // Role-aware admin sidebar (redirects to login if unauthenticated),
+        // so it must not load for guests.
+        const nav = document.createElement("script");
+        nav.src = "/admin-nav.js";
+        document.body.appendChild(nav);
+      }
 
       // Register the offline service worker, scoped to just this page.
-      if ("serviceWorker" in navigator) {
+      if ("serviceWorker" in navigator && !window.__jpGuest) {
         window.addEventListener("load", function () {
           navigator.serviceWorker
             .register("/japanese-sw.js", { scope: "/japanese.html" })
@@ -4657,6 +4906,5 @@
       };
     </script>
     <script src="/theme.js"></script>
-    <script src="/admin-nav.js"></script>
   </body>
 </html>

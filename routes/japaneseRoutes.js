@@ -1,8 +1,10 @@
 const express = require("express");
-const https = require("https");
+const crypto = require("crypto");
 
 const { requireAdmin } = require("../middleware/auth");
 const JapaneseProgress = require("../models/JapaneseProgress");
+const JapaneseAccessCode = require("../models/JapaneseAccessCode");
+const jishoLookup = require("../utils/jishoLookup");
 
 const router = express.Router();
 
@@ -66,57 +68,112 @@ router.put("/japanese/state", requireAdmin, async (req, res) => {
   }
 });
 
-// Dictionary lookup proxy (Jisho.org). The browser can't call Jisho directly
-// (no CORS), so the server fetches and returns a trimmed-down result. Cached
-// in memory since dictionary entries don't change.
-const lookupCache = new Map();
-const LOOKUP_TTL = 24 * 60 * 60 * 1000;
-const LOOKUP_CACHE_MAX = 1000;
+router.get("/japanese/lookup", requireAdmin, jishoLookup);
 
-router.get("/japanese/lookup", requireAdmin, (req, res) => {
-  const q = String(req.query.q || "").trim().slice(0, 64);
-  if (!q) return res.status(400).json({ success: false, message: "Missing q" });
+// ---- Guest access codes (Students tab) -----------------------------------
+// Codes use an unambiguous alphabet (no 0/O/1/I/L) so they survive being read
+// out loud or typed from a phone.
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+function generateCode() {
+  const bytes = crypto.randomBytes(8);
+  let s = "";
+  for (let i = 0; i < 8; i++) s += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  return s.slice(0, 4) + "-" + s.slice(4);
+}
 
-  const hit = lookupCache.get(q);
-  if (hit && Date.now() - hit.t < LOOKUP_TTL) {
-    return res.json({ success: true, data: hit.data });
-  }
+// Compact progress summary the Students list shows per guest.
+function progressSummary(doc) {
+  if (!doc) return null;
+  const stats = doc.stats || {};
+  const exams = Array.isArray(stats.exams) ? stats.exams : [];
+  return {
+    xp: stats.xp || 0,
+    streak: stats.streak || 0,
+    reviewsTotal: stats.reviewsTotal || 0,
+    cards: Object.keys(doc.srs || {}).length,
+    words: Array.isArray(doc.words) ? doc.words.length : 0,
+    sentences: Array.isArray(doc.sentences) ? doc.sentences.length : 0,
+    level: (doc.settings || {}).level || "n5",
+    exams: exams.slice(0, 8),
+    history: stats.history || {},
+    updatedAt: doc.clientUpdatedAt || 0,
+  };
+}
 
-  const url =
-    "https://jisho.org/api/v1/search/words?keyword=" + encodeURIComponent(q);
-  https
-    .get(url, { headers: { "User-Agent": "nodeserver-japanese" } }, (r) => {
-      let body = "";
-      r.on("data", (c) => (body += c));
-      r.on("end", () => {
-        try {
-          const parsed = JSON.parse(body);
-          const data = (Array.isArray(parsed.data) ? parsed.data : [])
-            .slice(0, 5)
-            .map((e) => ({
-              japanese: (e.japanese || []).slice(0, 4).map((j) => ({
-                word: j.word || "",
-                reading: j.reading || "",
-              })),
-              senses: (e.senses || [])
-                .slice(0, 4)
-                .map((s) => (s.english_definitions || []).slice(0, 4)),
-              common: !!e.is_common,
-            }));
-          if (lookupCache.size >= LOOKUP_CACHE_MAX) lookupCache.clear();
-          lookupCache.set(q, { t: Date.now(), data });
-          res.json({ success: true, data });
-        } catch (err) {
-          console.error("japanese/lookup parse error:", err.message);
-          res
-            .status(502)
-            .json({ success: false, message: "Dictionary unavailable" });
-        }
-      });
-    })
-    .on("error", () => {
-      res.status(502).json({ success: false, message: "Dictionary unavailable" });
+router.get("/japanese/codes", requireAdmin, async (req, res) => {
+  try {
+    const codes = await JapaneseAccessCode.find({}).sort({ createdAt: -1 }).lean();
+    const progressDocs = await JapaneseProgress.find({
+      adminId: { $in: codes.map((c) => "learn:" + c.code) },
+    }).lean();
+    const byId = {};
+    progressDocs.forEach((d) => (byId[d.adminId] = d));
+    res.json({
+      success: true,
+      codes: codes.map((c) => ({
+        id: String(c._id),
+        code: c.code,
+        label: c.label,
+        active: c.active,
+        createdAt: c.createdAt,
+        lastActiveAt: c.lastActiveAt || 0,
+        progress: progressSummary(byId["learn:" + c.code]),
+      })),
     });
+  } catch (err) {
+    console.error("japanese/codes list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.post("/japanese/codes", requireAdmin, async (req, res) => {
+  try {
+    const label = String((req.body || {}).label || "").trim().slice(0, 60);
+    let code;
+    for (let i = 0; i < 5; i++) {
+      code = generateCode();
+      const clash = await JapaneseAccessCode.findOne({ code }).lean();
+      if (!clash) break;
+      code = null;
+    }
+    if (!code) return res.status(500).json({ success: false, message: "Could not generate code" });
+    const doc = await JapaneseAccessCode.create({
+      code,
+      label,
+      createdBy: (req.session.admin || {}).username || "",
+    });
+    res.json({ success: true, code: { id: String(doc._id), code: doc.code, label: doc.label, active: doc.active } });
+  } catch (err) {
+    console.error("japanese/codes create error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.put("/japanese/codes/:id", requireAdmin, async (req, res) => {
+  try {
+    const doc = await JapaneseAccessCode.findByIdAndUpdate(
+      req.params.id,
+      { $set: { active: !!(req.body || {}).active } },
+      { new: true },
+    ).lean();
+    if (!doc) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("japanese/codes update error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.delete("/japanese/codes/:id", requireAdmin, async (req, res) => {
+  try {
+    const doc = await JapaneseAccessCode.findByIdAndDelete(req.params.id).lean();
+    if (!doc) return res.status(404).json({ success: false, message: "Not found" });
+    await JapaneseProgress.deleteOne({ adminId: "learn:" + doc.code });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("japanese/codes delete error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
 module.exports = router;
