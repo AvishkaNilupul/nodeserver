@@ -106,7 +106,15 @@ prepare_botdir() {
 # "GC heap initialization failed 0x8007000E" (E_OUTOFMEMORY). An explicit
 # workstation GC + hard heap limit sidesteps the probe. GLOBALIZATION_INVARIANT
 # avoids needing ICU in the rootfs.
-BOT_ENV="INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_gcServer=0 DOTNET_GCHeapHardLimit=0x40000000"
+#
+# GCConserveMemory (0-9) trades CPU for a smaller heap — it makes the GC give
+# memory back to the OS more aggressively. On a memory-tight, mostly-idle host
+# (a phone farming drops) that's a good trade: it lets each bot pack more
+# accounts into the same RAM. Override per host with BOTCTL_GC_CONSERVE /
+# BOTCTL_GC_HEAP_LIMIT env if a beefier box wants different values.
+GC_CONSERVE="${BOTCTL_GC_CONSERVE:-5}"
+GC_HEAP_LIMIT="${BOTCTL_GC_HEAP_LIMIT:-0x40000000}"
+BOT_ENV="INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_gcServer=0 DOTNET_GCHeapHardLimit=$GC_HEAP_LIMIT DOTNET_GCConserveMemory=$GC_CONSERVE"
 run_bot() {
   bapp="$RUN/$1/app"
   if command -v proot-distro >/dev/null 2>&1; then
