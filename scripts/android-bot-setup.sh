@@ -59,14 +59,16 @@ sshd 2>/dev/null || true
 echo "==> Installing the Ubuntu rootfs (runs the glibc bot binary)..."
 proot-distro install ubuntu >/dev/null 2>&1 || echo "    (already installed)"
 
-# The bundled arm64 libmsquic.so needs libcrypto.so.3 (libssl3) and
-# libnuma.so.1 (libnuma1); the latter isn't in a base Ubuntu rootfs, and
-# without it .NET fails to load QUIC. Install them inside the rootfs so the
-# bot's networking comes up. libssl3 is usually already present.
-echo "==> Installing bot runtime deps inside the Ubuntu rootfs..."
+# Runtime deps inside the rootfs:
+#   - ca-certificates: a minimal Ubuntu rootfs ships NO CA bundle, so .NET
+#     can't verify Twitch's TLS cert and every request dies with "The SSL
+#     connection could not be established" — the bot then can't fetch drops.
+#   - libssl3 (libcrypto.so.3) + libnuma1 (libnuma.so.1): the bundled arm64
+#     libmsquic.so needs both; libnuma isn't in a base rootfs.
+echo "==> Installing bot runtime deps inside the Ubuntu rootfs (CA certs, ssl, numa)..."
 proot-distro login ubuntu -- sh -c \
-  'apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq libssl3 libnuma1 >/dev/null 2>&1' \
-  || echo "    (could not install rootfs deps automatically — QUIC may be unavailable)"
+  'apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates libssl3 libnuma1 >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1' \
+  || echo "    (could not install rootfs deps automatically — TLS to Twitch may fail)"
 
 echo "==> Downloading the latest TwitchDropsBot Console linux-arm64 build..."
 mkdir -p "$BOTDIR/logs" "$BOTDIR/run"
