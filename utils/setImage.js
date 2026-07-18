@@ -42,18 +42,67 @@ async function loadImage(image) {
   return null;
 }
 
-// Build the grid PNG for a set. Returns the temp file path, or "" if the set
-// has no usable images. Caller may delete the file when done.
-async function buildSetGridImage(set) {
-  const items = (set.items || []).slice(0, MAX_ITEMS);
-  const buffers = [];
-  for (const it of items) {
-    const buf = await loadImage(it.image);
-    if (buf) buffers.push(buf);
-  }
-  if (!buffers.length) return "";
+function escXml(s) {
+  return String(s == null ? "" : s).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+}
 
-  const n = buffers.length;
+// Item name as centred, word-wrapped <tspan> lines for a text tile (used when
+// an item has no image). Font size shrinks for longer names; wraps to a few
+// lines and ellipsises anything that still doesn't fit.
+function nameTspans(name, cx, cyMid) {
+  const nm = String(name || "Item").trim().toUpperCase();
+  const longest = Math.max(1, ...nm.split(/\s+/).map((w) => w.length));
+  const fs = longest > 12 ? 22 : longest > 9 ? 27 : 33;
+  const perLine = Math.max(6, Math.floor((TILE * 0.86) / (fs * 0.6)));
+  const maxLines = 3;
+  const words = nm.split(/\s+/);
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    if (!cur) cur = w;
+    else if ((cur + " " + w).length <= perLine) cur += " " + w;
+    else {
+      lines.push(cur);
+      cur = w;
+      if (lines.length >= maxLines) break;
+    }
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  if (lines.length === maxLines && cur !== lines[maxLines - 1]) {
+    lines[maxLines - 1] = lines[maxLines - 1].slice(0, perLine - 1) + "…";
+  }
+  const lineH = fs + 8;
+  const startY = cyMid - ((lines.length - 1) * lineH) / 2 + fs / 3;
+  const tspans = lines
+    .map(
+      (ln, i) =>
+        '<tspan x="' + cx + '" y="' + (startY + i * lineH) + '">' + escXml(ln) + "</tspan>",
+    )
+    .join("");
+  return { tspans, fs };
+}
+
+// Build the grid PNG for a set. Returns the temp file path, or "" if the set
+// has no items at all. Items with an image show it; items without one show
+// their name as a text tile, so a hand-entered set still gets a proper cover.
+// Caller may delete the file when done.
+async function buildSetGridImage(set) {
+  const rawItems = (set.items || [])
+    .slice(0, MAX_ITEMS)
+    .filter((it) => it && (it.name || it.image));
+  if (!rawItems.length) return "";
+  const cells = [];
+  for (const it of rawItems) {
+    cells.push({ name: String(it.name || "").trim(), buf: await loadImage(it.image) });
+  }
+
+  const n = cells.length;
   const cols = Math.ceil(Math.sqrt(n));
   const rows = Math.ceil(n / cols);
   const width = cols * CELL;
@@ -124,6 +173,18 @@ async function buildSetGridImage(set) {
       '" height="' +
       TILE +
       '" rx="24" fill="#ffffff"/>';
+    // No image for this item — render its name as a text tile so the grid still
+    // shows what's in the bundle instead of an empty white card.
+    if (!cells[i].buf) {
+      const { tspans, fs } = nameTspans(cells[i].name, x + TILE / 2, y + TILE / 2);
+      baseSvg +=
+        '<text font-family="Arial, sans-serif" font-weight="700"' +
+        ' fill="#1f2937" text-anchor="middle" font-size="' +
+        fs +
+        '">' +
+        tspans +
+        "</text>";
+    }
     badgeSvgStr +=
       '<rect x="' +
       (x + 12) +
@@ -145,10 +206,11 @@ async function buildSetGridImage(set) {
 
   const composites = [];
   for (let i = 0; i < n; i++) {
+    if (!cells[i].buf) continue; // text tile — nothing to composite
     const cx = (i % cols) * CELL;
     const cy = Math.floor(i / cols) * CELL;
     try {
-      const resized = await sharp(buffers[i])
+      const resized = await sharp(cells[i].buf)
         .resize(IMG, IMG, {
           fit: "contain",
           background: { r: 0, g: 0, b: 0, alpha: 0 },
@@ -164,7 +226,8 @@ async function buildSetGridImage(set) {
       // skip images sharp can't decode
     }
   }
-  if (!composites.length) return "";
+  // No guard on composites here: a set of only text tiles is still a valid,
+  // useful cover (the names show what's in the bundle).
 
   const out = path.join(
     os.tmpdir(),
