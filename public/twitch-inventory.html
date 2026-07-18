@@ -117,6 +117,15 @@
   .campaign-head .game { font-size: 13px; color: var(--accent); font-weight: 600; }
   .campaign-head .cname { font-size: 15px; font-weight: 700; }
   .campaign-head .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .btn-list {
+    flex: 0 0 auto; align-self: center; white-space: nowrap;
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent);
+    background: transparent; color: var(--accent); font-size: 12.5px;
+    font-weight: 600; cursor: pointer;
+  }
+  .btn-list:hover { background: var(--accent); color: #fff; }
+  .btn-list:disabled { opacity: .65; cursor: default; }
+  .btn-list.done { border-color: var(--green); color: var(--green); background: transparent; }
 
   .drops { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; padding: 16px; }
   .drop {
@@ -638,6 +647,7 @@ function campaignCardHTML(c) {
             <div class="sub">${dates ? dates + " · " : ""}${(c.timeBasedDrops||[]).length} drop(s)${c.detailsURL ? ` · <a class="link" href="${escapeAttr(c.detailsURL)}" target="_blank" rel="noopener">details</a>` : ""}</div>
             ${chip}
           </div>
+          <button class="btn-list" type="button" data-list-cid="${escapeAttr(c.id || "")}" title="Create a drop set / listing from this campaign's items (even before they're claimed)">Create listing</button>
         </div>
         <div class="drops">${drops || '<div class="pmeta">No time-based drops.</div>'}</div>
       </div>`;
@@ -647,6 +657,54 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+// "Create listing" — turn a fetched (possibly still-in-progress) campaign into a
+// DropSet without waiting for its drops to be claimed. Uses the benefit name
+// (the same field the bots log on claim) so the set's itemKey lines up and its
+// deliverable stock fills in as farming completes. The confirm() is the
+// "list it or not" step — cancel just backs out.
+resultsEl.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-list-cid]");
+  if (!btn) return;
+  const cid = btn.getAttribute("data-list-cid");
+  const c = lastCampaigns.find(x => String(x.id) === String(cid));
+  if (!c) return;
+  const game = (c.game && (c.game.displayName || c.game.name)) || "";
+  const seen = new Set();
+  const items = [];
+  (c.timeBasedDrops || []).forEach(d => {
+    const b = (d.benefitEdges && d.benefitEdges[0] && d.benefitEdges[0].benefit) || {};
+    const name = (b.name || d.name || "").trim();
+    if (!name) return;
+    const key = (name + "|" + game).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ name, game, image: (b.imageAssetURL || "").replace("{width}", "80").replace("{height}", "80"), qty: 1 });
+  });
+  if (!items.length) { alert("This campaign has no drops to list."); return; }
+  const defName = c.name || (game ? game + " drops" : "Drop set");
+  const name = prompt(`Create a listing from "${c.name}" — ${items.length} item(s).\n\nSet name:`, defName);
+  if (name === null) return; // cancelled = "not"
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "Creating…";
+  try {
+    const res = await fetch("/drops-archive/sets/from-items", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ name: (name.trim() || defName), items }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) throw new Error("Not signed in as admin — open this from the admin console.");
+    if (!res.ok || !j.success) throw new Error(j.message || ("HTTP " + res.status));
+    btn.textContent = "✓ Set created (" + items.length + ")";
+    btn.classList.add("done");
+    setStatus(`Created drop set "${j.set && j.set.name}" with ${items.length} item(s). Open the Listings/Shop page to price and publish it.`, "ok");
+  } catch (err) {
+    alert("Couldn't create the set: " + err.message);
+    btn.disabled = false; btn.textContent = old;
+  }
+});
 </script>
 </body>
 </html>

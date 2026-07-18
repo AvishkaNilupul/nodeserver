@@ -1357,6 +1357,60 @@ router.post("/drops-archive/sets", requireSuperadmin, async (req, res) => {
   }
 });
 
+// Create a set straight from item snapshots (name/game/image/qty) instead of
+// from claimed-archive itemKeys. This is the "list a campaign before it's
+// claimed" path: the Twitch-inventory page fetches a campaign live by token and
+// posts its drops here, so the items don't exist in DropLog yet and can't be
+// resolveItemsMeta'd. itemKey is name|game normalised — the exact key DropLog
+// records once the bots claim these — so the set's deliverable stock fills in
+// on its own as farming completes; nothing here touches the archive.
+router.post(
+  "/drops-archive/sets/from-items",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const name = String(body.name || "").trim();
+      if (!name) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Name required" });
+      }
+      const raw = Array.isArray(body.items) ? body.items : [];
+      const seen = new Set();
+      const items = [];
+      for (const it of raw) {
+        const iname = String((it && it.name) || "").trim();
+        if (!iname) continue;
+        const game = String((it && it.game) || "").trim();
+        // Same normalisation as utils/twitchInventory itemKeyFor + the archive's
+        // itemKeyExpr, so this key lines up with what the bots log on claim.
+        const itemKey = iname.toLowerCase() + "|" + game.toLowerCase();
+        if (seen.has(itemKey)) continue; // collapse duplicate rewards
+        seen.add(itemKey);
+        items.push({
+          itemKey,
+          name: iname,
+          game,
+          image: String((it && it.image) || "").trim(),
+          qty: Math.max(1, parseInt(it && it.qty, 10) || 1),
+        });
+      }
+      if (!items.length) {
+        return res
+          .status(400)
+          .json({ success: false, message: "No valid items to add" });
+      }
+      const doc = { name, note: String(body.note || "").trim(), items };
+      const set = await DropSet.create(doc);
+      res.json({ success: true, set: publicSet(set) });
+    } catch (err) {
+      console.error("drops-archive set from-items error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 // Update a set: rename, note, replace/add/remove items.
 router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
   try {
