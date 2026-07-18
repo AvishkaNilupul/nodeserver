@@ -11,6 +11,19 @@
         "port": 22,
         "options": []
       }
+    },
+    {
+      "_comment": "A 'native' runtime host runs bots as plain processes via the botctl script instead of Docker — for machines that can't run Docker, like an Android phone with Termux (set up with scripts/android-bot-setup.sh). Termux sshd listens on 8022 and ignores the username.",
+      "id": "phone",
+      "label": "Android Phone",
+      "runtime": "native",
+      "dir": "/data/data/com.termux/files/home/twitchbot",
+      "ssh": {
+        "target": "u0@phone-tailscale-name",
+        "identityFile": "/root/.ssh/id_bothost",
+        "port": 8022,
+        "options": []
+      }
     }
   ]
 }

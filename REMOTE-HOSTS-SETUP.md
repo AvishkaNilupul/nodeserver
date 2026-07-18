@@ -296,6 +296,67 @@ matter where the bot physically runs.
 
 ---
 
+## 6. Android phone as a bot host (native runtime, no Docker)
+
+An Android phone can also farm drops. Android can't run Docker, so a phone is
+configured as a **`"runtime": "native"`** host: bots run as plain processes
+managed by a small `botctl` script that speaks the same vocabulary as docker
+(ps / start / stop / restart / rm / logs / stats), so the Bots page tab works
+exactly the same — list, edit, restart, logs, stats, add bot, move bot.
+
+The bot binary is a glibc linux-arm64 build, which runs inside a
+[Termux](https://termux.dev) + proot-distro Ubuntu rootfs (no root needed).
+
+### On the phone (once)
+
+1. Install **Termux** and **Termux:Boot** from F-Droid (not the Play Store —
+   that build is outdated). Open Termux:Boot once so Android registers it.
+2. Android Settings → Apps → Termux → **Battery → Unrestricted** (otherwise
+   Android kills the bots when the screen is off).
+3. (Recommended) install **Tailscale** from the Play Store and log in with the
+   same account as the server, so the phone has a stable address — same
+   reasoning as the Pi in section 1.
+4. In Termux, run the one-shot setup script with the server's public key
+   (`cat /root/.ssh/id_bothost.pub` on the server):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AvishkaNilupul/nodeserver/main/scripts/android-bot-setup.sh -o setup.sh
+sh setup.sh 'ssh-ed25519 AAAA...redeemhub-bothost'
+```
+
+It installs sshd (port **8022**), the Ubuntu rootfs, the latest TwitchDropsBot
+Console linux-arm64 release, `botctl`, a starter `config.json`, and a boot
+script that re-acquires the wake lock and restarts sshd + all bots after a
+phone reboot. It prints the exact host entry to add on the server.
+
+### On the server
+
+Verify SSH works (Termux ignores the username; the port is 8022):
+
+```bash
+ssh -i /root/.ssh/id_bothost -p 8022 u0@<phone-tailscale-name> \
+  'sh /data/data/com.termux/files/home/twitchbot/botctl ps'
+```
+
+Then add the host to `config/botHosts.json` with `"runtime": "native"` (see
+`config/botHosts.example.json` for the full shape) and restart redeemhub. The
+phone appears as its own tab on the Bots page.
+
+### Phone-specific notes
+
+- Keep the phone **plugged in** and preferably on Wi-Fi. A phone idles at a
+  few watts — it's a fine 24/7 farmer with a built-in UPS (its battery).
+- "Restart policy" maps to a flag file: a bot stopped for having zero accounts
+  stays down across reboots until accounts are added again, same as Docker's
+  `--restart=no`.
+- Logs live in `~/twitchbot/logs/<bot>.log`, auto-rotated at 10 MB (same
+  runaway-logging protection as the Docker log cap).
+- If the phone is unreachable (dead battery, left the network), its tab shows
+  the same offline message as a powered-off Pi, and "move to server" works
+  from the last-known snapshot.
+
+---
+
 ## Notes & safety
 
 - The implicit `local` host is unchanged and always present; existing setups

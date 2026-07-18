@@ -12,6 +12,15 @@
 // or via the BOT_HOSTS env var (same JSON shape). Each remote host runs its
 // commands over SSH; the file/docker operations exposed here are otherwise
 // identical to the local ones, so the routes can stay host-agnostic.
+//
+// A host may also declare `"runtime": "native"` for machines that can't run
+// Docker (e.g. an Android phone with Termux). Native hosts run their bots as
+// plain processes managed by a `botctl` shell script that lives in the host's
+// bot directory (installed by scripts/android-bot-setup.sh). botctl speaks the
+// same vocabulary as docker — ps / start / stop / restart / rm / logs / stats /
+// policy — so every docker* function here simply dispatches to it and the
+// routes stay unchanged. Native hosts have no compose file (composeName
+// returns null); bots are discovered from the config_NN.json files directly.
 
 const fs = require("fs");
 const fsp = require("fs/promises");
@@ -95,10 +104,12 @@ function loadConfiguredHosts() {
       console.error("botHosts: ignoring host without ssh.target:", id);
       continue;
     }
+    const runtime = h.runtime === "native" ? "native" : "docker";
     out.push({
       id,
       label: String(h.label || id),
       transport: "ssh",
+      runtime,
       dir,
       ssh: {
         target: String(ssh.target),
@@ -115,6 +126,7 @@ const LOCAL_HOST = {
   id: "local",
   label: "Server",
   transport: "local",
+  runtime: "docker",
   dir: BOT_DIR,
 };
 
@@ -128,6 +140,7 @@ function listHosts() {
     id: h.id,
     label: h.label,
     transport: h.transport,
+    runtime: h.runtime || "docker",
     dir: h.dir,
   }));
 }
@@ -348,7 +361,9 @@ async function rename(host, from, to) {
 // ----------------------------------------------------------------------------
 
 // Name of the compose file present in the host dir, or null if none.
+// Native hosts have no compose file by design.
 async function composeName(host) {
+  if (isNative(host)) return null;
   for (const name of COMPOSE_NAMES) {
     if (await exists(host, name)) return name;
   }
@@ -364,11 +379,39 @@ async function composeWrite(host, name, text) {
 }
 
 // ----------------------------------------------------------------------------
+// Native runtime (botctl) plumbing
+// ----------------------------------------------------------------------------
+
+const isNative = (host) => host.runtime === "native";
+
+// Run `botctl <args>` in the host's bot directory. botctl is a plain sh
+// script, so this works on anything with a POSIX shell (Termux included).
+async function botctl(host, args, { timeout = EXEC_TIMEOUT } = {}) {
+  const script =
+    "sh " + shq(path.posix.join(host.dir, "botctl")) + " " + args.map(shq).join(" ");
+  const { stdout } = await runShell(host, script, { timeout });
+  return stdout;
+}
+
+// ----------------------------------------------------------------------------
 // Docker operations (host-aware)
 // ----------------------------------------------------------------------------
 
 // `docker ps -a`, parsed into { name: { state, status } }.
 async function dockerPs(host) {
+  if (isNative(host)) {
+    const stdout = await botctl(host, ["ps"], { timeout: SHORT_TIMEOUT });
+    const states = {};
+    stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .forEach((line) => {
+        const [name, state, status] = line.split("\t");
+        if (name) states[name] = { state, status };
+      });
+    return states;
+  }
   const fmt = "{{.Names}}\t{{.State}}\t{{.Status}}";
   let stdout;
   if (host.transport === "local") {
@@ -394,6 +437,9 @@ async function dockerPs(host) {
 
 // Run a single-container docker verb (restart/start/stop/rm -f).
 async function dockerContainer(host, action, container) {
+  if (isNative(host)) {
+    return (await botctl(host, [action, container])).trim();
+  }
   const args = action === "rm" ? ["rm", "-f", container] : [action, container];
   if (host.transport === "local") {
     const { stdout } = await localRun("docker", args);
@@ -443,6 +489,9 @@ function runShell(host, script, { timeout = SHORT_TIMEOUT } = {}) {
 // 2>&1. Returns the raw text (caller splits into lines).
 async function dockerLogs(host, container, { tail = 200 } = {}) {
   const n = Math.max(1, Math.min(2000, parseInt(tail, 10) || 200));
+  if (isNative(host)) {
+    return botctl(host, ["logs", container, String(n)], { timeout: 25000 });
+  }
   const script =
     "docker logs --tail " + n + " " + shq(container) + " 2>&1 | tail -n " + n;
   const { stdout } = await runShell(host, script, { timeout: 25000 });
@@ -505,9 +554,14 @@ async function hostStats(host) {
 
 // Per-container CPU/mem from `docker stats --no-stream`, keyed by container name.
 async function dockerStats(host) {
-  const fmt = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}";
-  const script = "docker stats --no-stream --format " + shq(fmt);
-  const { stdout } = await runShell(host, script, { timeout: 20000 });
+  let stdout;
+  if (isNative(host)) {
+    stdout = await botctl(host, ["stats"], { timeout: 20000 });
+  } else {
+    const fmt = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}";
+    const script = "docker stats --no-stream --format " + shq(fmt);
+    ({ stdout } = await runShell(host, script, { timeout: 20000 }));
+  }
   const out = {};
   stdout
     .trim()
@@ -521,6 +575,9 @@ async function dockerStats(host) {
 }
 
 async function composeUp(host, container) {
+  if (isNative(host)) {
+    return (await botctl(host, ["start", container], { timeout: 120000 })).trim();
+  }
   const c = await detectComposeCmd(host);
   const args = [...c.pre, "up", "-d", container];
   if (host.transport === "local") {
@@ -635,6 +692,10 @@ async function farmingStatus(host, container) {
 // plain `docker stop` — a `restart: always` container comes back on the next
 // daemon restart even if it was manually stopped beforehand).
 async function setRestartPolicy(host, container, policy) {
+  if (isNative(host)) {
+    await botctl(host, ["policy", container, policy]);
+    return;
+  }
   const args = ["update", "--restart=" + policy, container];
   if (host.transport === "local") {
     await localRun("docker", args);

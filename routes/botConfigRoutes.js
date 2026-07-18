@@ -862,8 +862,10 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
       });
     }
 
+    // Native (non-Docker) hosts have no compose file — botctl discovers bots
+    // straight from the config files, so there's nothing to register.
     const composeFile = await hosts.composeName(host);
-    if (!composeFile) {
+    if (!composeFile && host.runtime !== "native") {
       return res.status(500).json({
         success: false,
         message: "No docker compose file found in " + host.dir,
@@ -923,10 +925,12 @@ router.post("/bot-configs/create", requireSuperadmin, async (req, res) => {
 
     // Register the compose service (read -> edit YAML -> write back).
     try {
-      const raw = await hosts.composeRead(host, composeFile);
-      const edited = addServiceToComposeText(raw, slot.container, slot.file);
-      if (!edited.exists) {
-        await hosts.composeWrite(host, composeFile, edited.text);
+      if (composeFile) {
+        const raw = await hosts.composeRead(host, composeFile);
+        const edited = addServiceToComposeText(raw, slot.container, slot.file);
+        if (!edited.exists) {
+          await hosts.composeWrite(host, composeFile, edited.text);
+        }
       }
     } catch (e) {
       // Roll back the config file so a failed compose edit doesn't leave an
@@ -1112,7 +1116,7 @@ router.post("/bot-configs/move", requireSuperadmin, async (req, res) => {
     });
   }
   const composeFile = await hosts.composeName(toHost);
-  if (!composeFile) {
+  if (!composeFile && toHost.runtime !== "native") {
     return res.status(500).json({
       success: false,
       message: "No docker compose file found on " + toHost.label,
@@ -1131,10 +1135,12 @@ router.post("/bot-configs/move", requireSuperadmin, async (req, res) => {
   // 4. Write the config (accounts kept!) and register the compose service.
   try {
     await hosts.writeFileAtomic(toHost, slot.file, JSON.stringify(data, null, 2));
-    const rawc = await hosts.composeRead(toHost, composeFile);
-    const edited = addServiceToComposeText(rawc, slot.container, slot.file);
-    if (!edited.exists) {
-      await hosts.composeWrite(toHost, composeFile, edited.text);
+    if (composeFile) {
+      const rawc = await hosts.composeRead(toHost, composeFile);
+      const edited = addServiceToComposeText(rawc, slot.container, slot.file);
+      if (!edited.exists) {
+        await hosts.composeWrite(toHost, composeFile, edited.text);
+      }
     }
   } catch (e) {
     return res.status(e.unreachable ? 502 : 500).json({

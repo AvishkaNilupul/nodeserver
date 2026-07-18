@@ -1,0 +1,224 @@
+#!/bin/sh
+# botctl — manage TwitchDropsBot instances as plain processes on hosts that
+# can't run Docker (e.g. an Android phone with Termux). It lives inside the
+# host's bot directory and speaks the same vocabulary the Bots page uses for
+# docker: ps / start / stop / restart / rm / logs / stats / policy / autostart.
+#
+# Layout (all relative to this script's directory):
+#   config.json, config_02.json, ...   bot configs (same naming as the server)
+#   app/                               TwitchDropsBot self-contained build
+#                                      (contains the TwitchDropsBot.Console
+#                                      executable)
+#   run/<name>/app/                    per-bot hardlink copy of app/ with
+#                                      config.json symlinked to the bot's
+#                                      config (the app reads config.json from
+#                                      its own executable directory)
+#   run/<name>.spid                    supervisor PID
+#   run/<name>.norestart               "restart policy = no" flag
+#   logs/<name>.log                    bot output (rotated at ~10MB)
+#
+# The bot binary is a glibc linux build; on Android it runs inside a
+# proot-distro Ubuntu rootfs. On a regular Linux host it runs directly.
+
+set -u
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+RUN="$DIR/run"
+LOGS="$DIR/logs"
+APP="$DIR/app"
+BIN_NAME="TwitchDropsBot.Console"
+MAX_LOG_BYTES=10485760
+
+mkdir -p "$RUN" "$LOGS"
+
+# config.json -> twitchbot ; config_02.json -> twitchbotx2 (same mapping as
+# the server's containerForFile()).
+name_for_file() {
+  case "$1" in
+    config.json) echo twitchbot ;;
+    config_*.json)
+      n=${1#config_}; n=${n%.json}
+      n=$(echo "$n" | sed 's/^0*//'); [ -n "$n" ] || return 0
+      echo "twitchbotx$n" ;;
+  esac
+}
+
+file_for_name() {
+  if [ "$1" = twitchbot ]; then echo config.json; return; fi
+  case "$1" in
+    twitchbotx*)
+      n=${1#twitchbotx}
+      if [ "$n" -lt 10 ] 2>/dev/null; then echo "config_0$n.json"; else echo "config_$n.json"; fi ;;
+  esac
+}
+
+list_files() {
+  for f in "$DIR"/config.json "$DIR"/config_*.json; do
+    [ -f "$f" ] || continue
+    base=${f##*/}
+    case "$base" in config.json|config_[0-9]*.json) echo "$base" ;; esac
+  done
+}
+
+spid_file() { echo "$RUN/$1.spid"; }
+
+sup_running() {
+  sp=$(spid_file "$1")
+  [ -f "$sp" ] || return 1
+  pid=$(cat "$sp" 2>/dev/null)
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# PIDs of everything belonging to a bot (proot wrapper + the bot itself),
+# matched by the per-bot run path appearing in the command line.
+bot_pids() {
+  pgrep -f "run/$1/app" 2>/dev/null
+}
+
+# Build/refresh the per-bot app copy. Hardlinks where possible so N bots don't
+# cost N times the disk. config.json inside it is a symlink to the bot's real
+# config so the Bots page and the bot always see the same file.
+prepare_botdir() {
+  name=$1; file=$2
+  bapp="$RUN/$name/app"
+  if [ ! -x "$bapp/$BIN_NAME" ]; then
+    rm -rf "$RUN/$name"
+    mkdir -p "$RUN/$name"
+    cp -al "$APP" "$bapp" 2>/dev/null || cp -r "$APP" "$bapp"
+    chmod +x "$bapp/$BIN_NAME" 2>/dev/null
+  fi
+  rm -f "$bapp/config.json"
+  ln -s "$DIR/$file" "$bapp/config.json"
+}
+
+# Run one bot in the foreground (used by the supervisor). Inside Termux the
+# glibc binary needs the proot Ubuntu rootfs; elsewhere it runs directly.
+run_bot() {
+  bapp="$RUN/$1/app"
+  if command -v proot-distro >/dev/null 2>&1; then
+    proot-distro login ubuntu --bind "$DIR:$DIR" -- /bin/sh -c \
+      "cd '$bapp' && INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 exec '$bapp/$BIN_NAME'"
+  else
+    (cd "$bapp" && INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 exec "$bapp/$BIN_NAME")
+  fi
+}
+
+rotate_log() {
+  lf="$LOGS/$1.log"
+  [ -f "$lf" ] || return 0
+  sz=$(wc -c < "$lf" 2>/dev/null || echo 0)
+  if [ "$sz" -gt "$MAX_LOG_BYTES" ] 2>/dev/null; then
+    mv -f "$lf" "$lf.1"
+    : > "$lf"
+  fi
+}
+
+supervise() {
+  name=$1
+  while :; do
+    rotate_log "$name"
+    echo "[botctl] $(date '+%Y-%m-%d %H:%M:%S') starting $name" >> "$LOGS/$name.log"
+    run_bot "$name" >> "$LOGS/$name.log" 2>&1
+    rc=$?
+    echo "[botctl] $(date '+%Y-%m-%d %H:%M:%S') $name exited ($rc)" >> "$LOGS/$name.log"
+    [ -f "$RUN/$name.stop" ] && break
+    [ -f "$RUN/$name.norestart" ] && break
+    sleep 5
+  done
+  rm -f "$RUN/$name.stop" "$(spid_file "$name")"
+}
+
+do_start() {
+  name=$1
+  file=$(file_for_name "$name")
+  [ -n "$file" ] && [ -f "$DIR/$file" ] || { echo "no such bot: $name" >&2; exit 1; }
+  [ -x "$APP/$BIN_NAME" ] || { echo "bot app not installed in $APP" >&2; exit 1; }
+  if sup_running "$name"; then echo "$name already running"; return 0; fi
+  rm -f "$RUN/$name.stop" "$RUN/$name.norestart"
+  prepare_botdir "$name" "$file"
+  nohup sh "$DIR/botctl" _supervise "$name" >/dev/null 2>&1 &
+  echo $! > "$(spid_file "$name")"
+  echo "$name started"
+}
+
+do_stop() {
+  name=$1
+  touch "$RUN/$name.stop"
+  if sup_running "$name"; then
+    kill "$(cat "$(spid_file "$name")")" 2>/dev/null
+  fi
+  pids=$(bot_pids "$name")
+  [ -n "$pids" ] && kill $pids 2>/dev/null
+  sleep 1
+  pids=$(bot_pids "$name")
+  [ -n "$pids" ] && kill -9 $pids 2>/dev/null
+  rm -f "$(spid_file "$name")" "$RUN/$name.stop"
+  echo "$name stopped"
+}
+
+case "${1:-}" in
+  ps)
+    for f in $(list_files); do
+      name=$(name_for_file "$f")
+      [ -n "$name" ] || continue
+      if sup_running "$name"; then
+        printf '%s\trunning\tUp (pid %s)\n' "$name" "$(cat "$(spid_file "$name")")"
+      else
+        printf '%s\texited\tExited\n' "$name"
+      fi
+    done
+    ;;
+  start) do_start "$2" ;;
+  stop) do_stop "$2" ;;
+  restart) do_stop "$2" >/dev/null 2>&1; do_start "$2" ;;
+  rm)
+    do_stop "$2" >/dev/null 2>&1
+    rm -rf "$RUN/$2" "$RUN/$2.norestart"
+    echo "$2 removed"
+    ;;
+  logs)
+    n=${3:-200}
+    tail -n "$n" "$LOGS/$2.log" 2>/dev/null || true
+    ;;
+  policy)
+    # policy <name> always|no — mirrors docker's restart policy. "no" makes
+    # the supervisor exit instead of restarting (and autostart skip the bot).
+    if [ "${3:-}" = no ]; then touch "$RUN/$2.norestart"; else rm -f "$RUN/$2.norestart"; fi
+    echo ok
+    ;;
+  stats)
+    # name<TAB>cpu%<TAB>mem<TAB>mem% per running bot, same shape docker stats
+    # prints. CPU is sampled from two /proc reads 0.5s apart.
+    total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    for f in $(list_files); do
+      name=$(name_for_file "$f")
+      sup_running "$name" || continue
+      pids=$(bot_pids "$name")
+      [ -n "$pids" ] || continue
+      t1=$(for p in $pids; do awk '{print $14+$15}' "/proc/$p/stat" 2>/dev/null; done | awk '{s+=$1}END{print s+0}')
+      sleep 0.5
+      t2=$(for p in $pids; do awk '{print $14+$15}' "/proc/$p/stat" 2>/dev/null; done | awk '{s+=$1}END{print s+0}')
+      hz=$( (getconf CLK_TCK) 2>/dev/null || echo 100)
+      cpu=$(awk -v a="$t1" -v b="$t2" -v hz="$hz" 'BEGIN{printf "%.1f", (b-a)/(hz*0.5)*100}')
+      rss_kb=$(for p in $pids; do awk '/^VmRSS:/{print $2}' "/proc/$p/status" 2>/dev/null; done | awk '{s+=$1}END{print s+0}')
+      mem=$(awk -v r="$rss_kb" -v t="$total_kb" 'BEGIN{printf "%.1fMiB / %.1fGiB", r/1024, t/1048576}')
+      memp=$(awk -v r="$rss_kb" -v t="$total_kb" 'BEGIN{printf "%.1f", (t>0)?r/t*100:0}')
+      printf '%s\t%s%%\t%s\t%s%%\n' "$name" "$cpu" "$mem" "$memp"
+    done
+    ;;
+  autostart)
+    # Start every bot that has accounts-capable config and no "no" policy.
+    # Used by the Termux:Boot script so bots survive a phone reboot.
+    for f in $(list_files); do
+      name=$(name_for_file "$f")
+      [ -f "$RUN/$name.norestart" ] && continue
+      sup_running "$name" && continue
+      do_start "$name"
+    done
+    ;;
+  _supervise) supervise "$2" ;;
+  *)
+    echo "usage: botctl ps|start|stop|restart|rm|logs|stats|policy|autostart" >&2
+    exit 1
+    ;;
+esac

@@ -366,6 +366,12 @@ async function runRollout(tag, repo) {
   try {
     for (const h of hosts.listHosts()) {
       const host = hosts.resolveHost(h.id);
+      if (host.runtime === "native") {
+        // Native hosts don't run Docker; their bot build is updated by
+        // re-running the setup script on the device instead.
+        log(host.label, "skipped (native runtime — no Docker to roll out to)");
+        continue;
+      }
       log(host.label, "=== starting build + rollout ===");
       await buildAndRolloutHost(host, tag, sourceRepo);
       log(host.label, "=== done, now on " + sourceRepo + "@" + tag + " ===");
