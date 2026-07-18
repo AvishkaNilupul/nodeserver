@@ -44,7 +44,7 @@ function validRepo(repo) {
 // A git ref (branch, tag, or commit) — no shell metacharacters. Broader than
 // validRepo since refs can contain slashes (e.g. "hotfix/gql-progress").
 function validRef(ref) {
-  return /^[A-Za-z0-9._\/-]{1,200}$/.test(String(ref || ""));
+  return /^[A-Za-z0-9._/-]{1,200}$/.test(String(ref || ""));
 }
 
 function log(hostLabel, message) {
@@ -361,15 +361,172 @@ async function buildAndRolloutHost(host, tag, repo) {
   await setAppliedVersion(host.id, tag, sourceRepo);
 }
 
+// Resolve the linux-arm64 Console release asset for a repo's latest release.
+// Returns { tag, url } or null when the repo publishes no arm64 asset (upstream
+// ships x64 only) — the caller treats null as "nothing to install here" rather
+// than an error.
+async function latestArmAsset(repo) {
+  const r = await axios.get(
+    "https://api.github.com/repos/" +
+      (repo || DEFAULT_REPO) +
+      "/releases/latest",
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "redeemhub-bot-updater",
+      },
+      timeout: 15000,
+    },
+  );
+  const d = r.data || {};
+  const asset = (d.assets || []).find(
+    (a) =>
+      /console/i.test(a.name) &&
+      /linux-arm64/i.test(a.name) &&
+      /\.(tar\.gz|tgz)$/i.test(a.name),
+  );
+  return asset
+    ? { tag: d.tag_name || "", url: asset.browser_download_url }
+    : null;
+}
+
+// Native (non-Docker) host rollout — an Android/Termux phone. There's no image
+// to build; fetch the latest published arm64 Console release, swap it into the
+// host's app dir (keeping the old one for rollback), and restart each running
+// bot on it via botctl (through the host abstraction — dockerPs/composeUp/etc.
+// dispatch to botctl for native hosts). All bots on a native host share one
+// binary, so this is all-or-nothing: if any bot fails its post-update check,
+// the previous app dir is restored and every bot is put back on it.
+async function rolloutNativeHost(host, repo) {
+  const sourceRepo = repo || DEFAULT_REPO;
+  const shq = hosts.shq;
+  const dir = host.dir.replace(/\/+$/, "");
+
+  const asset = await latestArmAsset(sourceRepo);
+  if (!asset) {
+    log(
+      host.label,
+      "no linux-arm64 Console asset in " +
+        sourceRepo +
+        "'s latest release — leaving this host unchanged",
+    );
+    return;
+  }
+  log(host.label, "installing " + sourceRepo + "@" + asset.tag + " (arm64)");
+
+  // Download + extract + swap the app dir. Runs in the device shell (not proot)
+  // — plain file ops. The archive wraps files in a top-level dir, so flatten.
+  const swap =
+    "set -e; cd " +
+    shq(dir) +
+    "; curl -fsSL " +
+    shq(asset.url) +
+    " -o app.new.tar.gz; rm -rf app.new; mkdir app.new; " +
+    "tar xzf app.new.tar.gz -C app.new; " +
+    'if [ ! -f app.new/TwitchDropsBot.Console ]; then ' +
+    'inner=$(find app.new -name TwitchDropsBot.Console -type f | head -1); ' +
+    '[ -n "$inner" ] && mv "$(dirname "$inner")"/* app.new/; fi; ' +
+    '[ -f app.new/TwitchDropsBot.Console ] || { echo NO_BINARY; exit 1; }; ' +
+    "chmod +x app.new/TwitchDropsBot.Console; rm -rf app.old; " +
+    "[ -d app ] && mv app app.old; mv app.new app; rm -f app.new.tar.gz; echo SWAPPED";
+  await hosts.runShell(host, swap, { timeout: BUILD_TIMEOUT });
+
+  const states = await hosts.dockerPs(host).catch(() => ({}));
+  const running = Object.keys(states)
+    .filter(
+      (n) =>
+        (n === "twitchbot" || /^twitchbotx\d+$/.test(n)) &&
+        states[n].state === "running",
+    )
+    .sort((a, b) => natKey(a) - natKey(b));
+
+  if (!running.length) {
+    log(host.label, "app updated; no running bots to restart");
+    await setAppliedVersion(host.id, asset.tag, sourceRepo);
+    return;
+  }
+
+  // Stop each, clear its per-bot copy (botctl only re-copies the app when the
+  // binary is missing, so this forces it to pick up the new one), start each.
+  const restartAll = async () => {
+    for (const n of running) {
+      await hosts.dockerContainer(host, "stop", n).catch(() => {});
+    }
+    await hosts
+      .runShell(
+        host,
+        "cd " +
+          shq(dir) +
+          " && for n in " +
+          running.join(" ") +
+          "; do rm -rf run/$n; done",
+        { timeout: 30000 },
+      )
+      .catch(() => {});
+    for (const n of running) {
+      await hosts.composeUp(host, n).catch(() => {});
+    }
+  };
+  await restartAll();
+  await new Promise((r) => setTimeout(r, SETTLE_MS));
+
+  let bad = "";
+  for (const n of running) {
+    const after = await hosts.dockerPs(host).catch(() => ({}));
+    const up = after[n] && after[n].state === "running";
+    const logs = await hosts.dockerLogs(host, n, { tail: 150 }).catch(() => "");
+    if (!up || looksUnhealthy(logs)) {
+      bad = n + (up ? " (unhealthy logs)" : " (not running)");
+      break;
+    }
+  }
+
+  if (bad) {
+    log(
+      host.label,
+      bad + " failed post-update check — restoring the previous app",
+    );
+    await hosts
+      .runShell(
+        host,
+        "cd " + shq(dir) + " && rm -rf app && [ -d app.old ] && mv app.old app",
+        { timeout: 30000 },
+      )
+      .catch(() => {});
+    await restartAll().catch(() => {});
+    throw new Error(
+      host.label +
+        ": " +
+        bad +
+        " failed its post-update check on " +
+        asset.tag +
+        " — rolled back to the previous build.",
+    );
+  }
+
+  await setAppliedVersion(host.id, asset.tag, sourceRepo);
+  log(host.label, "all bots healthy on " + asset.tag);
+}
+
 async function runRollout(tag, repo) {
   const sourceRepo = repo || DEFAULT_REPO;
   try {
     for (const h of hosts.listHosts()) {
       const host = hosts.resolveHost(h.id);
       if (host.runtime === "native") {
-        // Native hosts don't run Docker; their bot build is updated by
-        // re-running the setup script on the device instead.
-        log(host.label, "skipped (native runtime — no Docker to roll out to)");
+        // No Docker image to build/swap — install the latest arm64 release
+        // instead. A phone is often offline, so a native failure is logged but
+        // doesn't abort a rollout that already updated the Docker hosts.
+        log(host.label, "=== native host: installing latest arm64 release ===");
+        try {
+          await rolloutNativeHost(host, sourceRepo);
+          log(host.label, "=== done ===");
+        } catch (e) {
+          log(
+            host.label,
+            "native rollout failed (non-fatal): " + (e.message || String(e)),
+          );
+        }
         continue;
       }
       log(host.label, "=== starting build + rollout ===");
@@ -451,4 +608,11 @@ async function start({ repo, ref } = {}) {
   return { repo: sourceRepo, tag };
 }
 
-module.exports = { latestRelease, appliedVersions, start, status };
+module.exports = {
+  latestRelease,
+  latestArmAsset,
+  rolloutNativeHost,
+  appliedVersions,
+  start,
+  status,
+};
