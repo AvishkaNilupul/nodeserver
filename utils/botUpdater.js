@@ -412,6 +412,20 @@ async function rolloutNativeHost(host, repo) {
     );
     return;
   }
+  // Which bots are running — fetched BEFORE the swap so it doubles as a
+  // reachability check. Deliberately not caught: an unreachable phone throws
+  // here, before anything on disk is touched, and runRollout treats that as a
+  // clean non-fatal skip. (Catching it would look like "no bots" and leave the
+  // app swapped but never restarted — bots stuck on the old binary.)
+  const states = await hosts.dockerPs(host);
+  const running = Object.keys(states)
+    .filter(
+      (n) =>
+        (n === "twitchbot" || /^twitchbotx\d+$/.test(n)) &&
+        states[n].state === "running",
+    )
+    .sort((a, b) => natKey(a) - natKey(b));
+
   log(host.label, "installing " + sourceRepo + "@" + asset.tag + " (arm64)");
 
   // Download + extract + swap the app dir. Runs in the device shell (not proot)
@@ -430,15 +444,6 @@ async function rolloutNativeHost(host, repo) {
     "chmod +x app.new/TwitchDropsBot.Console; rm -rf app.old; " +
     "[ -d app ] && mv app app.old; mv app.new app; rm -f app.new.tar.gz; echo SWAPPED";
   await hosts.runShell(host, swap, { timeout: BUILD_TIMEOUT });
-
-  const states = await hosts.dockerPs(host).catch(() => ({}));
-  const running = Object.keys(states)
-    .filter(
-      (n) =>
-        (n === "twitchbot" || /^twitchbotx\d+$/.test(n)) &&
-        states[n].state === "running",
-    )
-    .sort((a, b) => natKey(a) - natKey(b));
 
   if (!running.length) {
     log(host.label, "app updated; no running bots to restart");
