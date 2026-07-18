@@ -78,13 +78,20 @@ bot_pids() {
 # Build/refresh the per-bot app copy. Hardlinks where possible so N bots don't
 # cost N times the disk. config.json inside it is a symlink to the bot's real
 # config so the Bots page and the bot always see the same file.
+#
+# Android's /data doesn't support cross-file hardlinks, so `cp -al` fails — and
+# when it does, it has already created $bapp as a (partial/empty) directory, so
+# a naive `cp -r "$APP" "$bapp"` fallback would nest the source *inside* it
+# (run/<name>/app/app/TwitchDropsBot.Console) and the exec below can't find the
+# binary. Remove the partial dir before the real-copy fallback so $bapp ends up
+# a direct copy of $APP.
 prepare_botdir() {
   name=$1; file=$2
   bapp="$RUN/$name/app"
   if [ ! -x "$bapp/$BIN_NAME" ]; then
     rm -rf "$RUN/$name"
     mkdir -p "$RUN/$name"
-    cp -al "$APP" "$bapp" 2>/dev/null || cp -r "$APP" "$bapp"
+    cp -al "$APP" "$bapp" 2>/dev/null || { rm -rf "$bapp"; cp -r "$APP" "$bapp"; }
     chmod +x "$bapp/$BIN_NAME" 2>/dev/null
   fi
   rm -f "$bapp/config.json"
@@ -93,13 +100,20 @@ prepare_botdir() {
 
 # Run one bot in the foreground (used by the supervisor). Inside Termux the
 # glibc binary needs the proot Ubuntu rootfs; elsewhere it runs directly.
+#
+# GC env: under proot the .NET GC can't read the container/cgroup memory limit,
+# so its default heap reservation fails at startup with
+# "GC heap initialization failed 0x8007000E" (E_OUTOFMEMORY). An explicit
+# workstation GC + hard heap limit sidesteps the probe. GLOBALIZATION_INVARIANT
+# avoids needing ICU in the rootfs.
+BOT_ENV="INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_gcServer=0 DOTNET_GCHeapHardLimit=0x40000000"
 run_bot() {
   bapp="$RUN/$1/app"
   if command -v proot-distro >/dev/null 2>&1; then
     proot-distro login ubuntu --bind "$DIR:$DIR" -- /bin/sh -c \
-      "cd '$bapp' && INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 exec '$bapp/$BIN_NAME'"
+      "cd '$bapp' && exec env $BOT_ENV '$bapp/$BIN_NAME'"
   else
-    (cd "$bapp" && INSIDE_DOCKER=false DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 exec "$bapp/$BIN_NAME")
+    (cd "$bapp" && exec env $BOT_ENV "$bapp/$BIN_NAME")
   fi
 }
 
