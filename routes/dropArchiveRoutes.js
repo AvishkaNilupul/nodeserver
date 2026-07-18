@@ -1421,6 +1421,90 @@ router.post(
   },
 );
 
+// Collapse a reward name to its "core" so the same item matches across seasons
+// and campaign prefixes: drop "EAS10#1"/"EAS9 #2" campaign codes, "#3" suffixes,
+// and all spaces/punctuation. So "EAS10#1 4x Gold CoinPouch" and
+// "EAS9 #2 4x Gold Coin Pouch" both become "4xgoldcoinpouch".
+function coreItemName(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/eas\s*\d+\s*#?\s*\d*/g, "")
+    .replace(/#\d+/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+// Fill in missing item images on a set from the drop archive, matched by
+// game + core name. Lets a hand-entered set (typed names, no images) pick up the
+// real reward art the bots already cached, so its grid cover shows images
+// instead of text tiles. Only items without a local image are touched.
+router.post(
+  "/drops-archive/sets/:id/fill-images",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const set = await DropSet.findById(req.params.id);
+      if (!set) {
+        return res.status(404).json({ success: false, message: "Not found" });
+      }
+      const need = (set.items || []).filter(
+        (i) => i && !String(i.image || "").startsWith("/"),
+      );
+      if (!need.length) {
+        return res.json({
+          success: true,
+          filled: 0,
+          total: (set.items || []).length,
+          unmatched: [],
+          message: "Every item already has an image",
+        });
+      }
+      const games = [
+        ...new Set(need.map((i) => String(i.game || "").toLowerCase()).filter(Boolean)),
+      ];
+      const gameRes = games.map(
+        (g) => new RegExp("^" + g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i"),
+      );
+      const rows = gameRes.length
+        ? await DropLog.find(
+            { imageLocal: { $ne: "" }, game: { $in: gameRes } },
+            { name: 1, game: 1, imageLocal: 1 },
+          ).lean()
+        : [];
+      const map = new Map();
+      for (const r of rows) {
+        const k = String(r.game || "").toLowerCase() + "|" + coreItemName(r.name);
+        if (coreItemName(r.name) && !map.has(k)) map.set(k, r.imageLocal);
+      }
+      let filled = 0;
+      const unmatched = [];
+      for (const it of set.items) {
+        if (String(it.image || "").startsWith("/")) continue;
+        const k = String(it.game || "").toLowerCase() + "|" + coreItemName(it.name);
+        const img = map.get(k);
+        if (img) {
+          it.image = img;
+          filled++;
+        } else {
+          unmatched.push(it.name);
+        }
+      }
+      if (filled) {
+        set.markModified("items");
+        await set.save();
+      }
+      res.json({
+        success: true,
+        filled,
+        total: set.items.length,
+        unmatched,
+      });
+    } catch (err) {
+      console.error("drops-archive set fill-images error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 // Update a set: rename, note, replace/add/remove items.
 router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
   try {

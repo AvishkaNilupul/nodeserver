@@ -779,6 +779,14 @@
           <div class="actions">
             <button class="btn primary" id="publishBtn">Publish to shop</button>
             <button class="btn" id="draftBtn">Save as draft</button>
+            <button
+              class="btn"
+              id="fillImgBtn"
+              style="display: none"
+              title="Fill in missing item images from the drop archive, matched by name — so the cover shows real art instead of text tiles"
+            >
+              Fill images from archive
+            </button>
             <button class="btn ghost" id="cancelBtn" style="display: none">
               Cancel edit
             </button>
@@ -1537,6 +1545,7 @@
         $("formTitle").innerText = "Create a listing";
         $("publishBtn").innerText = "Publish to shop";
         $("cancelBtn").style.display = "none";
+        $("fillImgBtn").style.display = "none";
         $("formCard").classList.remove("editing");
         renderSelected();
       }
@@ -1644,10 +1653,48 @@
           ? "Save & keep listed"
           : "Save & publish";
         $("cancelBtn").style.display = "";
+        $("fillImgBtn").style.display = "";
         $("formCard").classList.add("editing");
         renderSelected();
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
+
+      // Fill missing item images on the set being edited from the drop archive
+      // (matched by name), so a hand-entered set's cover shows real art.
+      $("fillImgBtn").addEventListener("click", function () {
+        if (!editId) return;
+        var btn = $("fillImgBtn");
+        var old = btn.innerText;
+        btn.disabled = true;
+        btn.innerText = "Filling…";
+        api("/drops-archive/sets/" + editId + "/fill-images", {
+          method: "POST",
+          body: {},
+        })
+          .then(function (r) {
+            var msg = "Filled " + r.filled + " of " + r.total + " image(s)";
+            if (r.unmatched && r.unmatched.length) {
+              msg +=
+                " · not in archive: " + r.unmatched.slice(0, 3).join(", ") +
+                (r.unmatched.length > 3 ? "…" : "");
+            }
+            toast(msg);
+            // Re-open the set so the editor shows the newly-filled images.
+            return api("/drops-archive/sets").then(function (d) {
+              var s = (d.sets || []).find(function (x) {
+                return x.id === editId;
+              });
+              if (s) startEdit(s);
+            });
+          })
+          .catch(function (e) {
+            toast(e.message || "Failed to fill images");
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.innerText = old;
+          });
+      });
 
       // ---- existing listings ----
       function listingRow(set) {
