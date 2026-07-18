@@ -28,7 +28,10 @@ set -eu
 
 PUBKEY="${1:-}"
 BOTDIR="$HOME/twitchbot"
-REPO="Alorf/TwitchDropsBot"
+# The fork, not upstream Alorf: upstream publishes no linux-arm64 asset (x64
+# only), and this pulls the `combined` branch build so the phone runs the same
+# patched bot the rest of the fleet does. See project_twitchdropsbot_fork.
+REPO="AvishkaNilupul/TwitchDropsBot"
 
 if [ -z "$PUBKEY" ]; then
   echo "usage: sh android-bot-setup.sh '<server public key>'" >&2
@@ -36,9 +39,14 @@ if [ -z "$PUBKEY" ]; then
   exit 1
 fi
 
-echo "==> Installing packages (openssh, proot-distro, curl, unzip)..."
+echo "==> Installing packages (openssh, proot-distro, curl, unzip, tar)..."
 pkg update -y >/dev/null 2>&1 || true
-pkg install -y openssh proot-distro curl unzip termux-services >/dev/null
+# `pkg upgrade` first: a partial package set leaves curl unable to load
+# (libngtcp2/openssl symbol mismatch — "cannot locate symbol
+# SSL_set_quic_tls_transport_params"), which breaks every curl download below.
+# Left visible (not silenced) so it can't hang hidden on a prompt.
+pkg upgrade -y || true
+pkg install -y openssh proot-distro curl unzip tar termux-services >/dev/null
 
 echo "==> Setting up SSH access for the server..."
 mkdir -p "$HOME/.ssh"
@@ -50,6 +58,15 @@ sshd 2>/dev/null || true
 
 echo "==> Installing the Ubuntu rootfs (runs the glibc bot binary)..."
 proot-distro install ubuntu >/dev/null 2>&1 || echo "    (already installed)"
+
+# The bundled arm64 libmsquic.so needs libcrypto.so.3 (libssl3) and
+# libnuma.so.1 (libnuma1); the latter isn't in a base Ubuntu rootfs, and
+# without it .NET fails to load QUIC. Install them inside the rootfs so the
+# bot's networking comes up. libssl3 is usually already present.
+echo "==> Installing bot runtime deps inside the Ubuntu rootfs..."
+proot-distro login ubuntu -- sh -c \
+  'apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq libssl3 libnuma1 >/dev/null 2>&1' \
+  || echo "    (could not install rootfs deps automatically — QUIC may be unavailable)"
 
 echo "==> Downloading the latest TwitchDropsBot Console linux-arm64 build..."
 mkdir -p "$BOTDIR/logs" "$BOTDIR/run"
@@ -63,12 +80,22 @@ if [ -z "$ASSET_URL" ]; then
   echo "   contain the TwitchDropsBot.Console executable), then re-run this script." >&2
 else
   echo "    $ASSET_URL"
-  curl -fsSL "$ASSET_URL" -o "$BOTDIR/bot.zip"
+  # Linux release assets are .tar.gz (the arm64 Console build included); older
+  # notes assumed .zip, so pick the extractor by extension instead of guessing.
+  case "$ASSET_URL" in
+    *.tar.gz|*.tgz) ARCHIVE="$BOTDIR/bot.tar.gz" ;;
+    *) ARCHIVE="$BOTDIR/bot.zip" ;;
+  esac
+  curl -fsSL "$ASSET_URL" -o "$ARCHIVE"
   rm -rf "$BOTDIR/app"
   mkdir -p "$BOTDIR/app"
-  unzip -oq "$BOTDIR/bot.zip" -d "$BOTDIR/app"
-  rm -f "$BOTDIR/bot.zip"
-  # Some releases zip the files inside a folder — flatten it.
+  case "$ARCHIVE" in
+    *.tar.gz|*.tgz) tar xzf "$ARCHIVE" -C "$BOTDIR/app" ;;
+    *) unzip -oq "$ARCHIVE" -d "$BOTDIR/app" ;;
+  esac
+  rm -f "$ARCHIVE"
+  # The archive wraps everything in a top-level folder — flatten it so the
+  # executable ends up at $BOTDIR/app/TwitchDropsBot.Console.
   if [ ! -f "$BOTDIR/app/TwitchDropsBot.Console" ]; then
     inner=$(find "$BOTDIR/app" -name "TwitchDropsBot.Console" -type f | head -1)
     if [ -n "$inner" ]; then
