@@ -192,12 +192,22 @@ router.get(
 // Resolve a set's cover image (a locally-cached drop image) to a file path so
 // Gameflip gets a photo. Only serves files inside public/.
 function coverImagePath(set) {
-  const img = ((set.items || [])[0] || {}).image || "";
-  if (!img || !img.startsWith("/")) return "";
   const publicDir = path.join(__dirname, "..", "public");
-  const p = path.normalize(path.join(publicDir, img));
-  if (!p.startsWith(publicDir)) return "";
-  return p;
+  // First item that actually has a locally-cached image, not just items[0] —
+  // one item's image download may have failed while others succeeded.
+  const withImg = (set.items || []).find(
+    (i) => i && typeof i.image === "string" && i.image.startsWith("/"),
+  );
+  const img = withImg ? withImg.image : "";
+  if (img) {
+    const p = path.normalize(path.join(publicDir, img));
+    if (p.startsWith(publicDir) && fs.existsSync(p)) return p;
+  }
+  // No usable item image (e.g. a hand-entered set) — fall back to a bundled
+  // default cover so Gameflip still gets a cover_photo instead of rejecting the
+  // listing with "must have active cover_photo".
+  const def = path.join(publicDir, "listing-default-cover.png");
+  return fs.existsSync(def) ? def : "";
 }
 
 function buildDescription(set) {

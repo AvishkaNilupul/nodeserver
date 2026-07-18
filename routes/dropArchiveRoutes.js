@@ -6,6 +6,7 @@ const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
+const { cacheImage } = require("../utils/imageCache");
 const hosts = require("../utils/botHosts");
 
 const router = express.Router();
@@ -1388,11 +1389,20 @@ router.post(
         const itemKey = iname.toLowerCase() + "|" + game.toLowerCase();
         if (seen.has(itemKey)) continue; // collapse duplicate rewards
         seen.add(itemKey);
+        // Cache the reward image locally (Twitch URL -> /drop-images/<hash>),
+        // exactly like the archive does. coverImagePath() only accepts a file
+        // inside public/, so a bare remote URL would leave the set with no cover
+        // photo and Gameflip rejects the listing ("must have active
+        // cover_photo"). Falls back to "" if the download fails.
+        let image = String((it && it.image) || "").trim();
+        if (image && !image.startsWith("/")) {
+          image = (await cacheImage(image)) || "";
+        }
         items.push({
           itemKey,
           name: iname,
           game,
-          image: String((it && it.image) || "").trim(),
+          image,
           qty: Math.max(1, parseInt(it && it.qty, 10) || 1),
         });
       }

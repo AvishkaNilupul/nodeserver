@@ -679,7 +679,9 @@ resultsEl.addEventListener("click", async (e) => {
     const key = (name + "|" + game).toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    items.push({ name, game, image: (b.imageAssetURL || "").replace("{width}", "80").replace("{height}", "80"), qty: 1 });
+    // Send the raw URL (with any {width}/{height} template intact) — the server
+    // caches it locally at its own size so Gameflip gets a real cover photo.
+    items.push({ name, game, image: b.imageAssetURL || "", qty: 1 });
   });
   if (!items.length) { alert("This campaign has no drops to list."); return; }
   const defName = c.name || (game ? game + " drops" : "Drop set");
