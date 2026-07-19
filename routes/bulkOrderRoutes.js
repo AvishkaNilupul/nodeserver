@@ -134,18 +134,57 @@ async function credsForActiveUnits(order) {
   });
 }
 
-// Buyer-facing view. Includes credentials (the token IS the secret, same as the
-// redeem-code flow) but never the farming clientSecret.
+// Per-account item breakdown + minimal credentials for the buyer. Deliberately
+// excludes everything the buyer doesn't need and we don't want exposed: the
+// farming clientSecret, the account email, internal ids, the logins of
+// replaced-out accounts, and raw health-error text. The link token is the only
+// auth, so the exposed surface is kept as small as possible. Only the three
+// credential fields the buyer actually uses are projected out of BotAccount.
+async function buyerUnitsView(order) {
+  const active = (order.units || []).filter((u) => u.active);
+  const ids = active.map((u) => u.account);
+  const accs = await BotAccount.find(
+    { _id: { $in: ids } },
+    { login: 1, credUsername: 1, credPassword: 1 },
+  ).lean();
+  const byId = new Map(accs.map((a) => [String(a._id), a]));
+  const items = order.items || [];
+  return active.map((u) => {
+    const a = byId.get(String(u.account)) || {};
+    const counts = new Map((u.itemCounts || []).map((c) => [c.itemKey, c.count]));
+    return {
+      login: a.login || a.credUsername || u.accountLogin || "",
+      password: decrypt(a.credPassword) || "",
+      status: (u.health && u.health.status) || "unchecked",
+      wasReplaced: !!u.replacedFromLogin,
+      // What THIS account holds: every promised item + its copy count here.
+      items: items.map((i) => ({
+        name: i.name || "Reward",
+        image: i.image || "",
+        count: counts.get(i.itemKey) || i.qty || 1,
+      })),
+    };
+  });
+}
+
+// Buyer-facing view. The link token IS the auth (like the redeem-code flow),
+// and this still never exposes the farming clientSecret, the email, or any
+// internal identifier — see buyerUnitsView. Only safe aggregate counts and the
+// per-account credentials/items are returned.
 async function orderPortalView(order) {
-  const units = await credsForActiveUnits(order);
+  const units = await buyerUnitsView(order);
+  const sm = order.healthSummary || initialSummary(units);
   return {
     orderNo: order.orderNo,
     setName: order.setName,
-    items: order.items || [],
     guaranteeUntil: order.guaranteeUntil || null,
-    healthSummary: order.healthSummary || initialSummary(units),
+    healthSummary: {
+      total: sm.total || 0,
+      alive: sm.alive || 0,
+      bad: sm.bad || 0,
+      unchecked: sm.unchecked || 0,
+    },
     units,
-    createdAt: order.createdAt,
   };
 }
 

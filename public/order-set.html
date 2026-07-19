@@ -11,6 +11,10 @@
     </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The order token lives in this page's URL. no-referrer stops the browser
+         from leaking it in the Referer header when item images load from
+         Twitch's CDN (or anywhere off-site). -->
+    <meta name="referrer" content="no-referrer" />
     <title>Your account set</title>
     <style>
       :root {
@@ -304,6 +308,58 @@
         font-size: 11px;
         color: var(--muted);
       }
+      .viewbtn {
+        align-self: flex-start;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        border-radius: 9px;
+        padding: 7px 12px;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .viewbtn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .items {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .irow {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 6px 9px;
+        font-size: 12.5px;
+      }
+      .irow img,
+      .irow .ph {
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        object-fit: cover;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        display: grid;
+        place-items: center;
+        font-size: 9px;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+      .irow .inm {
+        flex: 1;
+      }
+      .irow .ict {
+        font-weight: 700;
+        color: var(--accent);
+      }
       .state {
         text-align: center;
         padding: 60px 20px;
@@ -432,30 +488,33 @@
         }
       };
 
-      function bundleHtml(items) {
-        if (!items || !items.length) return "";
+      // One row in an account's "View items" panel: thumbnail + name + count.
+      function itemRow(it) {
+        const img = it.image
+          ? '<img src="' + esc(it.image) + '" alt="" referrerpolicy="no-referrer" />'
+          : '<span class="ph">' + esc((it.name || "?").slice(0, 2)) + "</span>";
         return (
-          '<div class="bundle">' +
-          items
-            .map((i) => {
-              const img = i.image
-                ? '<img src="' + esc(i.image) + '" alt="" />'
-                : '<span class="ph">' +
-                  esc((i.name || "?").slice(0, 2)) +
-                  "</span>";
-              return (
-                '<span class="bitem">' +
-                img +
-                "<span>" +
-                esc(i.name || "Reward") +
-                (i.qty > 1 ? " ×" + i.qty : "") +
-                "</span></span>"
-              );
-            })
-            .join("") +
-          "</div>"
+          '<div class="irow">' +
+          img +
+          '<span class="inm">' +
+          esc(it.name || "Reward") +
+          "</span>" +
+          '<span class="ict">×' +
+          esc(it.count) +
+          "</span></div>"
         );
       }
+
+      // Expand/collapse an account's item list.
+      window.toggleItems = function (idx, btn) {
+        const el = document.getElementById("items-" + idx);
+        if (!el) return;
+        const show = el.style.display === "none";
+        el.style.display = show ? "" : "none";
+        if (btn)
+          btn.textContent =
+            (show ? "Hide items" : "View items") + " (" + el.children.length + ")";
+      };
 
       function healthBar(sm) {
         const total = Math.max(1, sm.total || 0);
@@ -507,8 +566,9 @@
       }
 
       function acctCard(u, idx) {
-        const s = (u.health && u.health.status) || "unchecked";
+        const s = u.status || "unchecked";
         const cls = badgeClass(s);
+        const items = u.items || [];
         return (
           '<div class="acct">' +
           '<div class="top"><span class="n">Account #' +
@@ -520,8 +580,17 @@
           "</span></div>" +
           field("Login", u.login, "Login") +
           field("Password", u.password, "Password") +
-          (u.email ? field("Email", u.email, "Email") : "") +
-          (u.replacedFromLogin
+          '<button class="viewbtn" type="button" onclick="toggleItems(' +
+          idx +
+          ',this)">View items (' +
+          items.length +
+          ")</button>" +
+          '<div class="items" id="items-' +
+          idx +
+          '" style="display:none">' +
+          items.map(itemRow).join("") +
+          "</div>" +
+          (u.wasReplaced
             ? '<div class="repnote">↺ Auto-replaced a faulty account for you</div>'
             : "") +
           "</div>"
@@ -559,7 +628,6 @@
             : "") +
           "</div>" +
           healthBar(sm) +
-          bundleHtml(order.items) +
           "</div>" +
           '<div class="grid">' +
           (order.units || []).map(acctCard).join("") +
