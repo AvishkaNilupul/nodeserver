@@ -294,6 +294,42 @@ Bots page health/drop counts are scoped per tab. Drop scanning itself is
 machine-independent (it calls Twitch with each account's token), so it works no
 matter where the bot physically runs.
 
+### Sharing the account-pool auto-scan across hosts
+
+The account pool's background auto-check (`utils/accountPoolChecker.js`, which
+verifies each imported account's token against Twitch) no longer runs entirely
+on the server. It runs **one worker on the server plus one worker per configured
+remote host**, all draining a single shared queue. Each remote worker makes the
+very same Twitch calls **from that host** over SSH + `curl` (see the host
+transport in `utils/twitchInventory.js`), so the scan traffic is spread across
+the server's IP and each host's IP instead of hammering everything from one
+address — and the pool clears roughly N× faster with N machines helping. Each
+worker keeps its own pacing (`ACCOUNT_POOL_CHECK_DELAY_MS`, default 1200 ms), so
+the per-IP request rate is unchanged; only the aggregate throughput rises.
+
+This is built to treat a host disappearing as normal, not an error — a Pi can be
+unplugged mid-sweep:
+
+- Each host is probed before it's given any account, and skipped for that pass
+  if it's offline.
+- A "couldn't reach Twitch through this host" failure **never** writes a status
+  onto the account. The account is put back on the queue and the server worker
+  finishes it; the host's worker retires for the rest of the run rather than
+  re-failing every remaining account against a dead host.
+- The server worker alone always drains the whole queue, so losing every remote
+  host only makes a sweep slower — never wrong, never stuck.
+
+By default **every** remote host in `config/botHosts.json` helps scan. To
+restrict or disable it, set `ACCOUNT_POOL_SCAN_HOSTS`:
+
+- a comma-separated list of host ids to use only those, e.g.
+  `ACCOUNT_POOL_SCAN_HOSTS=pi` (server + the Pi only);
+- `none` (or `off` / `local`) to keep all scanning on the server.
+
+The check-queue status endpoint (`GET /account-pool/check-queue/status`) reports
+a `scanHosts` array of the host ids currently helping, so you can see the split
+in action.
+
 ---
 
 ## 6. Android phone as a bot host (native runtime, no Docker)

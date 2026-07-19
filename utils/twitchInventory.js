@@ -76,7 +76,17 @@ function cleanToken(raw) {
     .replace(/^Bearer\s+/i, "");
 }
 
-async function gqlRequest(token, clientId, body) {
+// One GQL POST. By default it goes out from this server (axios). Pass a remote
+// `host` (a botHosts host object) and the same request is made *from that host*
+// instead — the server SSHes in and runs curl there, so the request egresses
+// from the host's IP (e.g. a Raspberry Pi's), which is how the account scanner
+// spreads its Twitch traffic across more than one address. Only the network hop
+// moves; parsing and all the token/integrity rules below stay here on the
+// server, so a scan is identical no matter which machine made the call.
+async function gqlRequest({ token, clientId, body, host }) {
+  if (host && host.transport && host.transport !== "local") {
+    return gqlViaHost({ token, clientId, body, host });
+  }
   const res = await axios.post(GQL_URL, body, {
     headers: {
       "Content-Type": "application/json",
@@ -90,6 +100,77 @@ async function gqlRequest(token, clientId, body) {
   const data = res.data;
   const parsed = Array.isArray(data) ? data[0] : data;
   return { status: res.status, parsed };
+}
+
+// A "the scan host let us down" error, distinct from any Twitch verdict. The
+// scanner must never downgrade an account because a Raspberry Pi went offline
+// mid-check, so anything that stops us actually reaching Twitch through the host
+// — SSH unreachable, curl missing/failed, a non-JSON body — is tagged with
+// .transportFailed so the caller retries the account elsewhere (the server
+// always has a worker) instead of writing a bogus status onto it.
+function transportError(message, cause) {
+  const err = new Error("scan host: " + message);
+  err.transportFailed = true;
+  if (cause && cause.unreachable) err.unreachable = true;
+  return err;
+}
+
+// Make the same GQL POST from a remote host over SSH + curl. The JSON body is
+// piped in over stdin (`--data-binary @-`) rather than passed as an argument,
+// and curl appends the HTTP status on its own final line (`-w '\n%{http_code}'`)
+// so we can still tell "Twitch answered" from "the request never happened".
+async function gqlViaHost({ token, clientId, body, host }) {
+  // Required lazily to avoid a require cycle (botHosts pulls in nothing from
+  // here, but keeping the dependency one-directional stays simplest).
+  const { runShell, shq } = require("./botHosts");
+  const cmd =
+    "curl -sS --max-time 20 -X POST " +
+    shq(GQL_URL) +
+    " -H " +
+    shq("Content-Type: application/json") +
+    " -H " +
+    shq("Client-Id: " + clientId) +
+    " -H " +
+    shq("Authorization: OAuth " + token) +
+    " --data-binary @- -w " +
+    shq("\\n%{http_code}");
+  let stdout;
+  try {
+    ({ stdout } = await runShell(host, cmd, {
+      timeout: 25000,
+      input: JSON.stringify(body),
+    }));
+  } catch (e) {
+    // Non-zero curl exit or an SSH transport failure both land here. Either way
+    // we didn't get a Twitch answer through this host.
+    throw transportError(
+      host.id + " unreachable (" + (e.message || e) + ")",
+      e,
+    );
+  }
+  const text = String(stdout || "");
+  const nl = text.lastIndexOf("\n");
+  const statusStr = (nl >= 0 ? text.slice(nl + 1) : "").trim();
+  const bodyStr = nl >= 0 ? text.slice(0, nl) : text;
+  const status = parseInt(statusStr, 10) || 0;
+  let data;
+  try {
+    data = JSON.parse(bodyStr);
+  } catch {
+    // An HTML error page, an empty body, a truncated response — not something
+    // Twitch's GQL API returns for a real auth verdict. Treat as transport.
+    throw transportError(host.id + " returned a non-JSON response");
+  }
+  const parsed = Array.isArray(data) ? data[0] : data;
+  return { status, parsed };
+}
+
+// Normalise the optional second argument, which is either a legacy client-id
+// string or an options object { clientId, host }.
+function scanOpts(arg) {
+  if (typeof arg === "string") return { clientId: arg || null, host: null };
+  const o = arg || {};
+  return { clientId: o.clientId || null, host: o.host || null };
 }
 
 // Twitch's anti-bot gate, which is separate from token validity. A token can
@@ -192,8 +273,14 @@ function buildDrops(inv) {
 
 // Fetch + parse one account's inventory.
 // Returns { twitchId, login, drops: [...] }.
-// Throws an Error with .code = "token_invalid" when Twitch rejects the token.
-async function fetchInventory(token, clientId) {
+// The optional second argument is either a client-id string (legacy) or an
+// options object { clientId, host } — pass `host` to make the request from a
+// remote scan host instead of this server (see gqlRequest).
+// Throws an Error with .code = "token_invalid" when Twitch rejects the token,
+// or .transportFailed = true when a remote scan host couldn't be reached (the
+// account is untouched in that case — retry it elsewhere).
+async function fetchInventory(token, arg) {
+  const { clientId, host } = scanOpts(arg);
   const tok = cleanToken(token);
   const cid = clientId || DEFAULT_CLIENT_ID;
   if (!tok) {
@@ -202,22 +289,32 @@ async function fetchInventory(token, clientId) {
     throw e;
   }
 
-  let { parsed } = await gqlRequest(tok, cid, [
-    { operationName: "Inventory", query: INVENTORY_QUERY, variables: {} },
-  ]);
+  let { parsed } = await gqlRequest({
+    token: tok,
+    clientId: cid,
+    host,
+    body: [
+      { operationName: "Inventory", query: INVENTORY_QUERY, variables: {} },
+    ],
+  });
 
   if (parsed?.errors?.length) {
     // Fall back to Twitch's persisted query (some tokens/clients reject ad-hoc
     // queries), matching the client page's behaviour.
-    const retry = await gqlRequest(tok, cid, [
-      {
-        operationName: "Inventory",
-        variables: { fetchRewardCampaigns: true },
-        extensions: {
-          persistedQuery: { sha256Hash: INVENTORY_HASH, version: 1 },
+    const retry = await gqlRequest({
+      token: tok,
+      clientId: cid,
+      host,
+      body: [
+        {
+          operationName: "Inventory",
+          variables: { fetchRewardCampaigns: true },
+          extensions: {
+            persistedQuery: { sha256Hash: INVENTORY_HASH, version: 1 },
+          },
         },
-      },
-    ]);
+      ],
+    });
     parsed = retry.parsed;
   }
 
@@ -243,8 +340,12 @@ async function fetchInventory(token, clientId) {
 }
 
 // Fetch the full drop-campaign dashboard with any valid account token.
-// Throws an Error with .code = "token_invalid" when Twitch rejects the token.
-async function fetchDropCampaigns(token, clientId) {
+// Second argument is a client-id string (legacy) or { clientId, host }; pass
+// `host` to run the request from a remote scan host (see gqlRequest).
+// Throws .code = "token_invalid" when Twitch rejects the token, or
+// .transportFailed = true when a remote scan host couldn't be reached.
+async function fetchDropCampaigns(token, arg) {
+  const { clientId, host } = scanOpts(arg);
   const tok = cleanToken(token);
   const cid = clientId || DEFAULT_CLIENT_ID;
   if (!tok) {
@@ -252,13 +353,18 @@ async function fetchDropCampaigns(token, clientId) {
     e.code = "token_invalid";
     throw e;
   }
-  const { parsed } = await gqlRequest(tok, cid, [
-    {
-      operationName: "ViewerDropsDashboard",
-      query: CAMPAIGNS_QUERY,
-      variables: {},
-    },
-  ]);
+  const { parsed } = await gqlRequest({
+    token: tok,
+    clientId: cid,
+    host,
+    body: [
+      {
+        operationName: "ViewerDropsDashboard",
+        query: CAMPAIGNS_QUERY,
+        variables: {},
+      },
+    ],
+  });
   if (parsed?.errors?.length) {
     throw gqlError(parsed.errors);
   }

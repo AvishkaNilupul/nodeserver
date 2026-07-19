@@ -388,7 +388,10 @@ const isNative = (host) => host.runtime === "native";
 // script, so this works on anything with a POSIX shell (Termux included).
 async function botctl(host, args, { timeout = EXEC_TIMEOUT } = {}) {
   const script =
-    "sh " + shq(path.posix.join(host.dir, "botctl")) + " " + args.map(shq).join(" ");
+    "sh " +
+    shq(path.posix.join(host.dir, "botctl")) +
+    " " +
+    args.map(shq).join(" ");
   const { stdout } = await runShell(host, script, { timeout });
   return stdout;
 }
@@ -477,12 +480,14 @@ async function detectComposeCmd(host) {
 
 // Run an arbitrary /bin/sh command string on a host regardless of transport.
 // Local runs go through `sh -c`, remote ones over SSH (same shell semantics),
-// so a single command string works for both.
-function runShell(host, script, { timeout = SHORT_TIMEOUT } = {}) {
+// so a single command string works for both. `input`, when given, is piped to
+// the command's stdin (locally or through SSH) — used e.g. to feed a request
+// body to a `curl --data-binary @-` running on a remote scan host.
+function runShell(host, script, { timeout = SHORT_TIMEOUT, input } = {}) {
   if (host.transport === "local") {
-    return localRun("/bin/sh", ["-c", script], { timeout });
+    return localRun("/bin/sh", ["-c", script], { timeout, input });
   }
-  return sshRun(host, script, { timeout });
+  return sshRun(host, script, { timeout, input });
 }
 
 // Tail a container's docker logs. docker writes logs to stderr, so we merge
@@ -514,7 +519,9 @@ function statsScript(dir) {
     "S2=$(awk '/^cpu /{t=0;for(i=2;i<=NF;i++)t+=$i;print t\" \"($5+$6)}' /proc/stat)",
     'echo "cpu $(awk -v a="$S1" -v b="$S2" \'BEGIN{split(a,x);split(b,y);dt=y[1]-x[1];di=y[2]-x[2];if(dt<=0){print 0}else{p=(1-di/dt)*100;if(p<0)p=0;printf "%.1f",p}}\')"',
     "awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{printf \"mem_total_kb %d\\nmem_avail_kb %d\\n\",t,a}' /proc/meminfo",
-    "df -P -k " + shq(dir) + " 2>/dev/null | awk 'NR==2{printf \"disk_total_kb %d\\ndisk_used_kb %d\\n\",$2,$3}'",
+    "df -P -k " +
+      shq(dir) +
+      " 2>/dev/null | awk 'NR==2{printf \"disk_total_kb %d\\ndisk_used_kb %d\\n\",$2,$3}'",
     "awk '{printf \"uptime %d\\n\",$1}' /proc/uptime",
     'echo "ncpu $(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)"',
   ].join("; ");
@@ -576,7 +583,9 @@ async function dockerStats(host) {
 
 async function composeUp(host, container) {
   if (isNative(host)) {
-    return (await botctl(host, ["start", container], { timeout: 120000 })).trim();
+    return (
+      await botctl(host, ["start", container], { timeout: 120000 })
+    ).trim();
   }
   const c = await detectComposeCmd(host);
   const args = [...c.pre, "up", "-d", container];
