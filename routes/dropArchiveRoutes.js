@@ -1,6 +1,7 @@
 const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
+const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
@@ -467,6 +468,43 @@ let syncState = {
 // own separate pass over every host. Null until a sync has run at least once.
 let lastDuplicates = null;
 
+// Bot configs only carry the ClientSecret (token), so a BotAccount synced from a
+// config has no credPassword — but selling an account hands the buyer its
+// login+password, and that password lives in the account pool (AvailableAccount).
+// Mirror it across for any BotAccount that lacks one, so farmed accounts holding
+// sellable drops are actually deliverable. Fill-only: never overwrites an
+// existing password. Returns how many were filled.
+async function fillBotPasswordsFromPool() {
+  const bots = await BotAccount.find(
+    { $or: [{ credPassword: "" }, { credPassword: { $exists: false } }] },
+    { login: 1 },
+  ).lean();
+  if (!bots.length) return 0;
+  const lowers = [
+    ...new Set(bots.map((b) => String(b.login || "").toLowerCase()).filter(Boolean)),
+  ];
+  const pool = await AvailableAccount.find(
+    { usernameLower: { $in: lowers }, password: { $ne: "" } },
+    { usernameLower: 1, password: 1 },
+  ).lean();
+  const poolMap = new Map(pool.map((a) => [a.usernameLower, a.password]));
+  const ops = [];
+  for (const b of bots) {
+    const enc = poolMap.get(String(b.login || "").toLowerCase());
+    if (!enc) continue;
+    const pw = decrypt(enc);
+    if (!pw) continue;
+    ops.push({
+      updateOne: {
+        filter: { _id: b._id },
+        update: { $set: { credPassword: encrypt(pw), hasPassword: true } },
+      },
+    });
+  }
+  if (ops.length) await BotAccount.bulkWrite(ops, { ordered: false });
+  return ops.length;
+}
+
 async function runSync() {
   let found = 0;
   let inserted = 0;
@@ -585,11 +623,16 @@ async function runSync() {
       occurrences: occ,
     }));
 
+  // Mirror pool passwords onto any newly-synced accounts that lack one, so
+  // farmed stock is sellable without a manual backfill.
+  const passwordsFilled = await fillBotPasswordsFromPool().catch(() => 0);
+
   return {
     filesRead,
     accountsFound: found,
     inserted,
     updated,
+    passwordsFilled,
     offlineHosts,
     duplicateAccounts: lastDuplicates.length,
   };
