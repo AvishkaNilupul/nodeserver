@@ -33,6 +33,9 @@
       '8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>' +
       '<polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>' +
       '<line x1="12" y1="22.08" x2="12" y2="12"></line>',
+    renters:
+      '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 ' +
+      '7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>',
     settings:
       '<circle cx="12" cy="12" r="3"></circle>' +
       '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83' +
@@ -198,6 +201,12 @@
           href: "/superadmin.html",
           label: "Admins",
           icon: ICONS.admins,
+          superOnly: true,
+        },
+        {
+          href: "/renters.html",
+          label: "Renters",
+          icon: ICONS.renters,
           superOnly: true,
         },
       ],

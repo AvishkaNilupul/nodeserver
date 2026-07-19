@@ -36,6 +36,11 @@ const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const bulkOrderRoutes = require("./routes/bulkOrderRoutes");
+const renterAuthRoutes = require("./routes/renterAuthRoutes");
+const renterRoutes = require("./routes/renterRoutes");
+const renterAdminRoutes = require("./routes/renterAdminRoutes");
+const { requireRenter } = require("./middleware/renterAuth");
+const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
@@ -404,6 +409,12 @@ app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bulk-orders.html"));
 });
 
+// Renters manager (superadmin only) — create renters, assign a bot slot, set
+// quota + access period, suspend, and approve their account submissions.
+app.get("/renters.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "renters.html"));
+});
+
 // =========================
 // Marketplace tab (all admins)
 // =========================
@@ -456,6 +467,13 @@ app.get("/set/:token", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "order-set.html"));
 });
 
+// Renter dashboard — its own auth realm. Gated by requireRenter (redirects to
+// the renter login when there's no renter session). The renter login page
+// itself is public static (/renter-login.html).
+app.get("/renter.html", requireRenter, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "renter.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -481,6 +499,13 @@ app.use(enforce2fa, chatRoutes);
 // this router. Operator routes self-guard with requireSuperadmin, so an early
 // mount does not expose them.
 app.use(enforce2fa, bulkOrderRoutes);
+// Renters — a separate auth realm. Mounted before the requireAdmin blanket so
+// the public /renter-login and the requireRenter-guarded dashboard routes are
+// reachable (a renter has no req.session.admin, so the blanket would 401 them).
+// The admin-side renter routes self-guard with requireSuperadmin (+ enforce2fa).
+app.use(renterAuthRoutes);
+app.use(renterRoutes);
+app.use(enforce2fa, renterAdminRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -548,6 +573,10 @@ mongoose
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();
+    // Renters: stop the bots of renters whose lease just expired (the
+    // requireRenter middleware already blocks their dashboard access, but this
+    // makes farming actually halt without waiting for a manual suspend).
+    renterExpiry.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

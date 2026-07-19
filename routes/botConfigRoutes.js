@@ -1451,4 +1451,62 @@ router.delete(
   },
 );
 
+// ------------------------------------------------------------------
+// Shared helpers reused by the renter system (routes/renterAdminRoutes.js).
+// Keeping the write path here means renter-approved accounts land through the
+// exact same parse/dedupe/write/index pipeline (and the same validFile /
+// TwitchUsers layout) the operator's own "add accounts" endpoint uses.
+// ------------------------------------------------------------------
+
+// Append already-parsed TwitchUsers entries to a config file: read → push →
+// atomic write → sync the BotAccount index. Enforces the FILE_RE boundary.
+// Returns { added, total }. Callers should dedupe first (dedupeAccounts).
+async function addAccountsToConfig(host, file, accounts) {
+  if (!validFile(file)) throw new Error("Invalid config file");
+  if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
+  const data = JSON.parse(await hosts.readFile(host, file));
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
+    data.TwitchSettings.TwitchUsers = [];
+  }
+  data.TwitchSettings.TwitchUsers.push(...accounts);
+  const total = data.TwitchSettings.TwitchUsers.length;
+  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+  await upsertBotAccounts(accounts, host, file);
+  return { added: accounts.length, total };
+}
+
+// How many accounts a config currently holds (for renter quota accounting).
+// Returns 0 for a missing/unreadable/absent config rather than throwing.
+async function countConfigAccounts(host, file) {
+  if (!validFile(file)) return 0;
+  try {
+    const data = JSON.parse(await hosts.readFile(host, file));
+    const users =
+      data && data.TwitchSettings && data.TwitchSettings.TwitchUsers;
+    return Array.isArray(users) ? users.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Stop the container backing a config file (used when a renter is suspended or
+// their lease ends). No-op-safe: unknown container or an offline host just
+// throws, which the caller can ignore.
+async function stopConfigContainer(host, file) {
+  const container = containerForFile(file);
+  if (!container) return { stopped: false };
+  await hosts.dockerContainer(host, "stop", container);
+  return { stopped: true, container };
+}
+
 module.exports = router;
+module.exports.parseAccounts = parseAccounts;
+module.exports.dedupeAccounts = dedupeAccounts;
+module.exports.validFile = validFile;
+module.exports.containerForFile = containerForFile;
+module.exports.addAccountsToConfig = addAccountsToConfig;
+module.exports.countConfigAccounts = countConfigAccounts;
+module.exports.stopConfigContainer = stopConfigContainer;

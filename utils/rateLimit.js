@@ -71,6 +71,14 @@ const portalCheckLimiter = jsonLimiter({
   message: "Too many health checks. Please wait a bit and try again.",
 });
 
+// Renter account submissions. Submissions queue for operator approval, so a
+// modest cap is plenty and blunts spam from a compromised renter account.
+const renterSubmitLimiter = jsonLimiter({
+  windowMs: 10 * 60 * 1000,
+  limit: 20,
+  message: "Too many submissions. Please wait a bit and try again.",
+});
+
 module.exports = {
   globalLimiter,
   loginLimiter,
@@ -79,4 +87,5 @@ module.exports = {
   submitLimiter,
   uploadLimiter,
   portalCheckLimiter,
+  renterSubmitLimiter,
 };
