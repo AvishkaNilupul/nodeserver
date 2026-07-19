@@ -1,0 +1,1103 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Twitch Token Fetcher — device auth</title>
+    <!--
+      Standalone, offline-capable device-authorization token fetcher.
+
+      WHY THIS EXISTS
+      ---------------
+      A Twitch drops bot's ClientSecret only passes Twitch's integrity gate (the
+      ViewerDropsDashboard query a bot actually runs) if the token was minted
+      through Twitch's *device-authorization* flow with the bot's own client-id.
+      Supplier tokens / web tokens authenticate but fail that gate — that's the
+      "wrong ClientSecret" problem. This tool runs the exact same flow the Alorf
+      TwitchDropsBot uses, so every token it produces is a correct one — and it
+      VERIFIES each token against the integrity gate before you export it.
+
+      HOW IT WORKS (per account, guided)
+      ----------------------------------
+      1. It asks Twitch for a device code (client-id + scopes below).
+      2. You open Twitch's activation page in an incognito window, log in as that
+         account (username/password shown to copy), and click Authorize.
+      3. The page polls Twitch until the token is issued, reads the account's
+         login/id, generates a device UniqueId, and checks the integrity gate.
+      4. Repeat for the next account, then Copy/Download the result JSON.
+
+      PRIVACY: everything runs in your browser. Requests go ONLY to Twitch
+      (id.twitch.tv / gql.twitch.tv). Nothing is uploaded anywhere; results are
+      cached in this browser's localStorage so a refresh won't lose your tokens.
+    -->
+    <style>
+      :root {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --accent: #6366f1;
+        --accent-ink: #fff;
+        --green: #34d399;
+        --red: #f87171;
+        --yellow: #fbbf24;
+      }
+      html[data-theme="light"] {
+        --bg: #f6f7fb;
+        --surface: #fff;
+        --surface-2: #f2f4f8;
+        --line: #e2e6ee;
+        --ink: #0f172a;
+        --muted: #64748b;
+        --green: #059669;
+        --red: #dc2626;
+        --yellow: #b45309;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          14px/1.5 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          system-ui,
+          sans-serif;
+      }
+      .wrap {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 26px 20px 80px;
+      }
+      h1 {
+        font-size: 21px;
+        margin: 0 0 4px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0 0 20px;
+        font-size: 13px;
+      }
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px;
+        margin-bottom: 16px;
+      }
+      .panel h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin: 0 0 12px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 140px;
+        resize: vertical;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--ink);
+        padding: 12px;
+        font:
+          12.5px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        border-radius: 9px;
+        padding: 8px 14px;
+        cursor: pointer;
+        transition: filter 0.12s;
+      }
+      button:hover {
+        filter: brightness(1.12);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--accent-ink);
+      }
+      button.ghost {
+        background: transparent;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .spacer {
+        flex: 1;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      .pill.pending {
+        color: var(--muted);
+      }
+      .pill.busy {
+        color: var(--yellow);
+        border-color: var(--yellow);
+      }
+      .pill.ok {
+        color: var(--green);
+        border-color: var(--green);
+      }
+      .pill.bad {
+        color: var(--red);
+        border-color: var(--red);
+      }
+      .summary {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .stat {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 16px;
+        min-width: 96px;
+      }
+      .stat b {
+        font-size: 20px;
+        display: block;
+      }
+      .stat span {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .stat.green b {
+        color: var(--green);
+      }
+      .stat.red b {
+        color: var(--red);
+      }
+      /* Active-account card */
+      .active {
+        border: 1px solid var(--accent);
+      }
+      .code {
+        font:
+          700 30px/1 ui-monospace,
+          Menlo,
+          monospace;
+        letter-spacing: 0.18em;
+        padding: 12px 16px;
+        background: var(--surface-2);
+        border: 1px dashed var(--line);
+        border-radius: 10px;
+        display: inline-block;
+        user-select: all;
+      }
+      .kv {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin: 6px 0;
+        flex-wrap: wrap;
+      }
+      .kv label {
+        color: var(--muted);
+        min-width: 74px;
+        font-size: 12px;
+      }
+      .field {
+        font:
+          13px ui-monospace,
+          Menlo,
+          monospace;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 5px 10px;
+        user-select: all;
+      }
+      .steps {
+        margin: 12px 0;
+        padding-left: 20px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .steps li {
+        margin: 4px 0;
+      }
+      .steps b {
+        color: var(--ink);
+      }
+      /* Queue list */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      tr.cur td {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+      .mono {
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px;
+      }
+      .note {
+        font-size: 12px;
+        color: var(--muted);
+        border-left: 3px solid var(--accent);
+        padding: 6px 12px;
+        background: var(--surface-2);
+        border-radius: 0 8px 8px 0;
+        margin: 10px 0;
+      }
+      .toast {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--ink);
+        color: var(--bg);
+        padding: 9px 16px;
+        border-radius: 999px;
+        font-weight: 600;
+        font-size: 13px;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+      }
+      .toast.show {
+        opacity: 1;
+      }
+      a {
+        color: var(--accent);
+      }
+      details summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .adv {
+        margin-top: 10px;
+      }
+      .adv .kv label {
+        min-width: 70px;
+      }
+      .adv input {
+        flex: 1;
+        min-width: 220px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        border-radius: 7px;
+        padding: 6px 9px;
+        font:
+          12px ui-monospace,
+          Menlo,
+          monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>🔑 Twitch Token Fetcher <span class="pill ok">device auth</span></h1>
+      <p class="sub">
+        Mints <b>integrity-valid</b> ClientSecrets the same way the drops bot
+        does, and verifies each one against Twitch's real drops gate before you
+        export. Runs entirely in this browser — tokens go only to Twitch.
+      </p>
+
+      <!-- 1. Input -->
+      <div class="panel">
+        <h2>1 · Load accounts</h2>
+        <p class="muted" style="margin: 0 0 10px; font-size: 12.5px">
+          Paste the JSON from
+          <span class="mono">/account-pool/export-needs-auth</span> — an array
+          of <span class="mono">{ "username": …, "password": … }</span>.
+          Bot-config JSON (<span class="mono">Login</span>/<span class="mono"
+            >ClientSecret</span
+          >) and <span class="mono">user:pass</span> lines also work.
+        </p>
+        <textarea
+          id="input"
+          placeholder='[{"username":"acct1","password":"pw1"},{"username":"acct2","password":"pw2"}]'
+        ></textarea>
+        <div class="row" style="margin-top: 12px">
+          <button class="primary" id="loadBtn">Load accounts</button>
+          <span class="muted mono" id="loadInfo"></span>
+          <span class="spacer"></span>
+          <button class="ghost" id="themeBtn" title="Toggle theme">◐</button>
+        </div>
+      </div>
+
+      <!-- Summary -->
+      <div class="summary" id="summary" hidden></div>
+
+      <!-- 2. Active account -->
+      <div class="panel active" id="activePanel" hidden>
+        <h2>2 · Authorize the current account</h2>
+        <div id="activeBody"></div>
+      </div>
+
+      <!-- Queue -->
+      <div class="panel" id="queuePanel" hidden>
+        <h2>Accounts</h2>
+        <div style="overflow-x: auto">
+          <table id="queueTable">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Username</th>
+                <th>Status</th>
+                <th>Login</th>
+                <th>Integrity</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="queueBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 3. Output -->
+      <div class="panel" id="outputPanel" hidden>
+        <h2>3 · Export</h2>
+        <p class="muted" style="margin: 0 0 10px; font-size: 12.5px">
+          Ready-to-import JSON (matches the account-pool importer:
+          <span class="mono">Login</span>,
+          <span class="mono">ClientSecret</span>, <span class="mono">Id</span>,
+          <span class="mono">UniqueId</span>). Only integrity-verified accounts
+          are included by default.
+        </p>
+        <div class="row" style="margin-bottom: 10px">
+          <label class="muted" style="font-size: 12.5px"
+            ><input type="checkbox" id="onlyOk" checked /> only
+            integrity-verified</label
+          >
+          <span class="spacer"></span>
+          <button id="copyBtn">Copy JSON</button>
+          <button id="downloadBtn">Download JSON</button>
+        </div>
+        <textarea id="output" readonly style="min-height: 120px"></textarea>
+      </div>
+
+      <div class="note" id="importNote" hidden>
+        <b>Heads-up on re-auth:</b> the account-pool importer fills a
+        <span class="mono">ClientSecret</span> onto a row only when that row
+        doesn't already have one — so importing a fresh token will
+        <b>not</b> overwrite an existing (bad) token on a pool account. For
+        brand-new accounts it just works. To <i>replace</i> a bad token on an
+        existing pool row, delete that row first (or ask for a "force re-auth"
+        import toggle). New tokens here are already integrity-checked, so
+        they're safe to trust.
+      </div>
+
+      <details class="panel">
+        <summary>
+          Advanced — client-id &amp; scopes (match the bot; change only if you
+          know why)
+        </summary>
+        <div class="adv">
+          <div class="kv">
+            <label>client_id</label>
+            <input id="cfgClientId" />
+          </div>
+          <div class="kv">
+            <label>scopes</label>
+            <input id="cfgScopes" />
+          </div>
+          <div class="row" style="margin-top: 8px">
+            <button class="ghost" id="clearBtn">Clear saved results</button>
+            <span class="muted" style="font-size: 12px"
+              >Results are cached in this browser only.</span
+            >
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+      "use strict";
+
+      // ---- Twitch endpoints + the bot's exact device identity ---------------
+      const DEVICE_URL = "https://id.twitch.tv/oauth2/device";
+      const TOKEN_URL = "https://id.twitch.tv/oauth2/token";
+      const VALIDATE_URL = "https://id.twitch.tv/oauth2/validate";
+      const GQL_URL = "https://gql.twitch.tv/gql";
+      const GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+      // ANDROID_APP client from TwitchDropsBot + its device-auth scopes.
+      const DEFAULT_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
+      const DEFAULT_SCOPES =
+        "channel_read chat:read user_blocks_edit user_blocks_read user_follows_edit user_read";
+      // The integrity-gated query a bot runs — used here purely to prove a token
+      // is genuinely usable, not just authenticated.
+      const CAMPAIGNS_QUERY = `query ViewerDropsDashboard {
+        currentUser { id dropCampaigns { id name status } } }`;
+
+      const LS_KEY = "twitch-token-fetcher-v1";
+      const $ = (id) => document.getElementById(id);
+      let clientId = DEFAULT_CLIENT_ID;
+      let scopes = DEFAULT_SCOPES;
+
+      // ---- state ------------------------------------------------------------
+      // accounts: [{ username, password, email, status, clientSecret, id,
+      //   login, uniqueId, integrity: {ok, message}, error, device, userCode,
+      //   verifyUrl, expiresAt }]
+      let accounts = [];
+      let activeIndex = -1;
+      let pollAbort = null; // function to stop the current poll loop
+
+      // ---- helpers ----------------------------------------------------------
+      function toast(msg) {
+        const t = $("toast");
+        t.textContent = msg;
+        t.classList.add("show");
+        clearTimeout(toast._t);
+        toast._t = setTimeout(() => t.classList.remove("show"), 1600);
+      }
+      const esc = (s) =>
+        String(s == null ? "" : s).replace(
+          /[&<>"]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+      function copy(text) {
+        navigator.clipboard.writeText(text).then(
+          () => toast("Copied"),
+          () => toast("Copy failed"),
+        );
+      }
+      function genUniqueId() {
+        const b = new Uint8Array(16);
+        crypto.getRandomValues(b);
+        return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+      }
+      function save() {
+        try {
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify(
+              accounts.map((a) => ({
+                username: a.username,
+                password: a.password,
+                email: a.email,
+                status: a.status,
+                clientSecret: a.clientSecret,
+                id: a.id,
+                login: a.login,
+                uniqueId: a.uniqueId,
+                integrity: a.integrity,
+                error: a.error,
+              })),
+            ),
+          );
+        } catch (e) {
+          /* storage full / disabled — non-fatal */
+        }
+      }
+      function restore() {
+        try {
+          const raw = localStorage.getItem(LS_KEY);
+          if (!raw) return false;
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr) && arr.length) {
+            accounts = arr.map((a) => ({ ...a }));
+            return true;
+          }
+        } catch (e) {}
+        return false;
+      }
+
+      // ---- input parsing ----------------------------------------------------
+      // Accepts: a JSON array of objects (export-needs-auth or bot-config
+      // shape), a loose sequence of objects, or user:pass[:extra] lines.
+      function parseInput(text) {
+        const trimmed = (text || "").trim();
+        if (!trimmed) return [];
+        let list = null;
+        try {
+          list = JSON.parse(trimmed);
+        } catch {
+          try {
+            list = JSON.parse("[" + trimmed.replace(/^\[|\]$/g, "") + "]");
+          } catch {
+            list = null;
+          }
+        }
+        const out = [];
+        const seen = new Set();
+        const push = (username, password, email) => {
+          username = String(username || "").trim();
+          if (!username) return;
+          const key = username.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          out.push({
+            username,
+            password: password == null ? "" : String(password),
+            email: email ? String(email).trim() : "",
+          });
+        };
+        if (Array.isArray(list)) {
+          for (const it of list) {
+            if (!it || typeof it !== "object") continue;
+            push(
+              it.username || it.Login || it.login,
+              it.password || it.Password,
+              it.email || it.Email,
+            );
+          }
+        } else {
+          // line-based user:pass
+          for (const line of trimmed.split(/\r?\n/)) {
+            const s = line.trim();
+            if (!s) continue;
+            const parts = s.split(":");
+            if (parts.length >= 2) push(parts[0], parts[1], parts[2]);
+          }
+        }
+        return out;
+      }
+
+      // ---- Twitch calls -----------------------------------------------------
+      async function requestDevice() {
+        const body = new URLSearchParams({ client_id: clientId, scopes });
+        const r = await fetch(DEVICE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.device_code)
+          throw new Error(
+            data.message || "device request failed (" + r.status + ")",
+          );
+        return data; // {device_code, user_code, verification_uri, expires_in, interval}
+      }
+
+      // One token poll. Returns {token}|{pending}|{slowDown}|{expired} or throws.
+      async function pollOnce(deviceCode) {
+        const body = new URLSearchParams({
+          client_id: clientId,
+          device_code: deviceCode,
+          grant_type: GRANT,
+        });
+        const r = await fetch(TOKEN_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data.access_token) return { token: data.access_token };
+        const msg = String(data.message || "").toLowerCase();
+        if (msg.includes("authorization_pending") || msg.includes("pending"))
+          return { pending: true };
+        if (msg.includes("slow")) return { slowDown: true };
+        if (msg.includes("expired") || msg.includes("invalid device code"))
+          return { expired: true, message: data.message };
+        throw new Error(data.message || "token poll failed (" + r.status + ")");
+      }
+
+      async function validateToken(token) {
+        const r = await fetch(VALIDATE_URL, {
+          headers: { Authorization: "OAuth " + token },
+        });
+        if (!r.ok) throw new Error("validate failed (" + r.status + ")");
+        return r.json(); // {client_id, login, user_id, scopes, expires_in}
+      }
+
+      // Confirm the token clears the integrity-gated drops query a bot runs.
+      async function integrityCheck(token) {
+        try {
+          const r = await fetch(GQL_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Client-Id": clientId,
+              Authorization: "OAuth " + token,
+            },
+            body: JSON.stringify([
+              {
+                operationName: "ViewerDropsDashboard",
+                query: CAMPAIGNS_QUERY,
+                variables: {},
+              },
+            ]),
+          });
+          const data = await r.json().catch(() => null);
+          const parsed = Array.isArray(data) ? data[0] : data;
+          if (parsed && parsed.errors && parsed.errors.length) {
+            const m = parsed.errors.map((e) => e.message).join("; ");
+            return { ok: false, message: m };
+          }
+          const user = parsed && parsed.data && parsed.data.currentUser;
+          if (!user)
+            return { ok: false, message: "token rejected (no currentUser)" };
+          return {
+            ok: true,
+            message: (user.dropCampaigns || []).length + " campaigns visible",
+          };
+        } catch (e) {
+          return { ok: false, message: e.message || String(e) };
+        }
+      }
+
+      // ---- per-account orchestration ---------------------------------------
+      async function startAccount(i) {
+        stopPoll();
+        activeIndex = i;
+        const a = accounts[i];
+        a.error = "";
+        a.status = "starting";
+        renderAll();
+        let dev;
+        try {
+          dev = await requestDevice();
+        } catch (e) {
+          a.status = "failed";
+          a.error = e.message || String(e);
+          renderAll();
+          save();
+          return;
+        }
+        a.device = dev.device_code;
+        a.userCode = dev.user_code;
+        a.verifyUrl =
+          dev.verification_uri ||
+          "https://www.twitch.tv/activate?device-code=" + dev.user_code;
+        a.expiresAt = Date.now() + (dev.expires_in || 1800) * 1000;
+        a.status = "authorize";
+        renderAll();
+        pollLoop(i, Math.max(2, dev.interval || 5) * 1000);
+      }
+
+      function stopPoll() {
+        if (pollAbort) {
+          pollAbort();
+          pollAbort = null;
+        }
+      }
+
+      function pollLoop(i, intervalMs) {
+        const a = accounts[i];
+        let stopped = false;
+        pollAbort = () => {
+          stopped = true;
+        };
+        const tick = async () => {
+          if (stopped || activeIndex !== i) return;
+          if (Date.now() > a.expiresAt) {
+            a.status = "expired";
+            renderAll();
+            save();
+            return;
+          }
+          let res;
+          try {
+            res = await pollOnce(a.device);
+          } catch (e) {
+            a.status = "failed";
+            a.error = e.message || String(e);
+            renderAll();
+            save();
+            return;
+          }
+          if (stopped || activeIndex !== i) return;
+          if (res.token) {
+            await finalize(i, res.token);
+            return;
+          }
+          if (res.expired) {
+            a.status = "expired";
+            renderAll();
+            save();
+            return;
+          }
+          if (res.slowDown) intervalMs += 3000;
+          setTimeout(tick, intervalMs);
+        };
+        setTimeout(tick, intervalMs);
+      }
+
+      async function finalize(i, token) {
+        const a = accounts[i];
+        a.clientSecret = token;
+        a.status = "verifying";
+        a.uniqueId = a.uniqueId || genUniqueId();
+        renderAll();
+        // login + user id (best-effort; token is already captured regardless)
+        try {
+          const v = await validateToken(token);
+          a.login = v.login || a.login || "";
+          a.id = v.user_id || a.id || "";
+        } catch (e) {
+          /* keep going — importer can re-derive login/id on its own check */
+        }
+        a.integrity = await integrityCheck(token);
+        a.status = "done";
+        activeIndex = -1;
+        renderAll();
+        save();
+        renderOutput();
+        toast(
+          a.integrity.ok
+            ? "✓ " + (a.login || a.username) + " — token verified"
+            : "Token captured, but integrity check failed",
+        );
+      }
+
+      // ---- rendering --------------------------------------------------------
+      const STATUS_PILL = {
+        pending: ["pending", "pending"],
+        starting: ["busy", "starting…"],
+        authorize: ["busy", "authorize"],
+        verifying: ["busy", "verifying…"],
+        done: ["ok", "done"],
+        expired: ["bad", "expired"],
+        failed: ["bad", "failed"],
+      };
+
+      function renderSummary() {
+        const done = accounts.filter((a) => a.status === "done").length;
+        const okI = accounts.filter(
+          (a) => a.status === "done" && a.integrity && a.integrity.ok,
+        ).length;
+        const bad = accounts.filter(
+          (a) => a.status === "failed" || a.status === "expired",
+        ).length;
+        const s = $("summary");
+        s.hidden = accounts.length === 0;
+        s.innerHTML =
+          '<div class="stat"><b>' +
+          accounts.length +
+          "</b><span>Accounts</span></div>" +
+          '<div class="stat green"><b>' +
+          okI +
+          "</b><span>Verified</span></div>" +
+          '<div class="stat"><b>' +
+          done +
+          "</b><span>Token got</span></div>" +
+          '<div class="stat red"><b>' +
+          bad +
+          "</b><span>Failed/expired</span></div>";
+      }
+
+      function renderActive() {
+        const p = $("activePanel");
+        if (activeIndex < 0) {
+          p.hidden = true;
+          return;
+        }
+        const a = accounts[activeIndex];
+        p.hidden = false;
+        const secsLeft = Math.max(
+          0,
+          Math.round((a.expiresAt - Date.now()) / 1000),
+        );
+        p.innerHTML =
+          '<h2>2 · Authorize: <span style="color:var(--ink)">' +
+          esc(a.username) +
+          "</span></h2>" +
+          '<ol class="steps">' +
+          "<li>Open a <b>fresh incognito window</b> (so you're not logged into another account).</li>" +
+          "<li>Log into Twitch as <b>" +
+          esc(a.username) +
+          "</b> — copy the credentials below.</li>" +
+          "<li>Click <b>Open Twitch activation</b>, confirm the code, and press <b>Authorize</b>.</li>" +
+          "</ol>" +
+          '<div class="kv"><label>Username</label><span class="field">' +
+          esc(a.username) +
+          "</span>" +
+          '<button class="ghost" data-copy="' +
+          esc(a.username) +
+          '">copy</button></div>' +
+          '<div class="kv"><label>Password</label><span class="field">' +
+          esc(a.password || "—") +
+          "</span>" +
+          (a.password
+            ? '<button class="ghost" data-copy="' +
+              esc(a.password) +
+              '">copy</button>'
+            : "") +
+          (a.email
+            ? '<span class="muted" style="font-size:12px">· ' +
+              esc(a.email) +
+              "</span>"
+            : "") +
+          "</div>" +
+          '<div class="row" style="margin:14px 0 8px;align-items:center">' +
+          '<div class="code">' +
+          esc(a.userCode || "…") +
+          "</div>" +
+          '<button class="primary" id="openActivate">Open Twitch activation ↗</button>' +
+          '<button class="ghost" data-copy="' +
+          esc(a.verifyUrl || "") +
+          '">copy link</button>' +
+          "</div>" +
+          '<p class="muted" style="font-size:12.5px">' +
+          (a.status === "authorize"
+            ? '<span class="pill busy">waiting for you to authorize…</span> polling Twitch · code expires in ' +
+              secsLeft +
+              "s"
+            : esc(a.status)) +
+          "</p>" +
+          '<div class="row" style="margin-top:6px">' +
+          '<button class="ghost" id="restartAcct">Restart this account</button>' +
+          '<button class="ghost" id="skipAcct">Skip</button>' +
+          "</div>";
+        const open = $("openActivate");
+        if (open)
+          open.onclick = () => window.open(a.verifyUrl, "_blank", "noopener");
+        const rs = $("restartAcct");
+        if (rs) rs.onclick = () => startAccount(activeIndex);
+        const sk = $("skipAcct");
+        if (sk) {
+          sk.onclick = () => {
+            stopPoll();
+            const a2 = accounts[activeIndex];
+            if (a2.status !== "done")
+              a2.status = a2.status === "expired" ? "expired" : "pending";
+            activeIndex = -1;
+            renderAll();
+          };
+        }
+      }
+
+      function renderQueue() {
+        const qp = $("queuePanel");
+        qp.hidden = accounts.length === 0;
+        $("queueBody").innerHTML = accounts
+          .map((a, i) => {
+            const [cls, label] = STATUS_PILL[a.status] || ["pending", a.status];
+            const integ =
+              a.status === "done"
+                ? a.integrity && a.integrity.ok
+                  ? '<span class="pill ok">✓ valid</span>'
+                  : '<span class="pill bad" title="' +
+                    esc(a.integrity && a.integrity.message) +
+                    '">✕ failed</span>'
+                : '<span class="muted">—</span>';
+            const canStart = a.status !== "done" && activeIndex < 0;
+            const btn = canStart
+              ? '<button class="' +
+                (i === firstPending() ? "primary" : "ghost") +
+                '" data-start="' +
+                i +
+                '">' +
+                (a.status === "pending" ? "Start" : "Retry") +
+                "</button>"
+              : a.status === "done"
+                ? '<button class="ghost" data-start="' +
+                  i +
+                  '">re-auth</button>'
+                : "";
+            return (
+              '<tr class="' +
+              (i === activeIndex ? "cur" : "") +
+              '">' +
+              "<td>" +
+              (i + 1) +
+              "</td>" +
+              '<td class="mono">' +
+              esc(a.username) +
+              "</td>" +
+              '<td><span class="pill ' +
+              cls +
+              '">' +
+              esc(label) +
+              "</span></td>" +
+              '<td class="mono">' +
+              esc(a.login || "") +
+              "</td>" +
+              "<td>" +
+              integ +
+              "</td>" +
+              '<td style="text-align:right">' +
+              btn +
+              "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+      }
+
+      function firstPending() {
+        return accounts.findIndex((a) => a.status === "pending");
+      }
+
+      function buildOutput() {
+        const onlyOk = $("onlyOk").checked;
+        return accounts
+          .filter(
+            (a) =>
+              a.status === "done" &&
+              a.clientSecret &&
+              (!onlyOk || (a.integrity && a.integrity.ok)),
+          )
+          .map((a) => ({
+            Login: a.login || a.username,
+            ClientSecret: a.clientSecret,
+            Id: a.id || "",
+            UniqueId: a.uniqueId || "",
+            Enabled: true,
+            FavouriteGames: [],
+          }));
+      }
+      function renderOutput() {
+        const out = buildOutput();
+        const op = $("outputPanel");
+        op.hidden = accounts.filter((a) => a.status === "done").length === 0;
+        $("importNote").hidden = op.hidden;
+        $("output").value = out.length ? JSON.stringify(out, null, 2) : "";
+      }
+
+      function renderAll() {
+        renderSummary();
+        renderActive();
+        renderQueue();
+      }
+
+      // ---- events -----------------------------------------------------------
+      $("loadBtn").onclick = () => {
+        const parsed = parseInput($("input").value);
+        if (!parsed.length) {
+          toast("No accounts found in that input");
+          return;
+        }
+        // Merge with any restored results: keep tokens already fetched.
+        const prev = new Map(
+          accounts.map((a) => [a.username.toLowerCase(), a]),
+        );
+        accounts = parsed.map((p) => {
+          const old = prev.get(p.username.toLowerCase());
+          if (old && old.status === "done")
+            return {
+              ...old,
+              password: p.password || old.password,
+              email: p.email || old.email,
+            };
+          return { ...p, status: "pending" };
+        });
+        activeIndex = -1;
+        $("loadInfo").textContent = accounts.length + " account(s) loaded";
+        renderAll();
+        renderOutput();
+        save();
+      };
+
+      document.addEventListener("click", (e) => {
+        const c = e.target.closest("[data-copy]");
+        if (c) {
+          copy(c.getAttribute("data-copy"));
+          return;
+        }
+        const s = e.target.closest("[data-start]");
+        if (s) {
+          startAccount(Number(s.getAttribute("data-start")));
+        }
+      });
+
+      $("copyBtn").onclick = () => copy($("output").value || "[]");
+      $("downloadBtn").onclick = () => {
+        const blob = new Blob([$("output").value || "[]"], {
+          type: "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "twitch-tokens.json";
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      $("onlyOk").onchange = renderOutput;
+      $("clearBtn").onclick = () => {
+        localStorage.removeItem(LS_KEY);
+        accounts = [];
+        activeIndex = -1;
+        stopPoll();
+        renderAll();
+        renderOutput();
+        $("loadInfo").textContent = "";
+        toast("Cleared");
+      };
+      $("themeBtn").onclick = () => {
+        const el = document.documentElement;
+        el.setAttribute(
+          "data-theme",
+          el.getAttribute("data-theme") === "dark" ? "light" : "dark",
+        );
+      };
+
+      // advanced config
+      $("cfgClientId").value = clientId;
+      $("cfgScopes").value = scopes;
+      $("cfgClientId").oninput = (e) =>
+        (clientId = e.target.value.trim() || DEFAULT_CLIENT_ID);
+      $("cfgScopes").oninput = (e) =>
+        (scopes = e.target.value.trim() || DEFAULT_SCOPES);
+
+      // Refresh the active-panel countdown once a second.
+      setInterval(() => {
+        if (
+          activeIndex >= 0 &&
+          accounts[activeIndex] &&
+          accounts[activeIndex].status === "authorize"
+        )
+          renderActive();
+      }, 1000);
+
+      // Restore prior session.
+      if (restore()) {
+        renderAll();
+        renderOutput();
+        $("loadInfo").textContent = accounts.length + " account(s) restored";
+      }
+    </script>
+  </body>
+</html>
