@@ -63,6 +63,14 @@ const uploadLimiter = jsonLimiter({
   message: "Too many uploads. Please try again later.",
 });
 
+// Buyer-portal health re-check (bulk orders). Each run fans out a Twitch call
+// per account, so cap how often a buyer can trigger one.
+const portalCheckLimiter = jsonLimiter({
+  windowMs: 10 * 60 * 1000,
+  limit: 6,
+  message: "Too many health checks. Please wait a bit and try again.",
+});
+
 module.exports = {
   globalLimiter,
   loginLimiter,
@@ -70,4 +78,5 @@ module.exports = {
   generateLimiter,
   submitLimiter,
   uploadLimiter,
+  portalCheckLimiter,
 };

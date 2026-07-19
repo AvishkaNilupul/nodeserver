@@ -603,5 +603,9 @@ router.get("/shop/purchases/:id", requireAdmin, async (req, res) => {
 
 module.exports = router;
 // Also used by the marketplace publisher to pick an account that can fulfil a
-// whole bundle (Gameflip auto-delivery).
+// whole bundle (Gameflip auto-delivery), and by the bulk-order system to
+// reserve N accounts for one buyer.
 module.exports.availableAccountsForSet = availableAccountsForSet;
+// Live stock across many sets in one aggregation — reused by the bulk-order set
+// picker so it can show how many units each set can currently fill.
+module.exports.stockForSets = stockForSets;

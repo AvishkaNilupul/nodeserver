@@ -35,6 +35,7 @@ const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
+const bulkOrderRoutes = require("./routes/bulkOrderRoutes");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
@@ -397,6 +398,12 @@ app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
 });
 
+// Bulk orders manager (superadmin only) — reserve N accounts for one buyer,
+// health-check + auto-replace, and mint the buyer's inventory link.
+app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "bulk-orders.html"));
+});
+
 // =========================
 // Marketplace tab (all admins)
 // =========================
@@ -442,6 +449,13 @@ app.get("/learn", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "japanese.html"));
 });
 
+// Public buyer portal for a bulk order. No login: the token in the path is the
+// secret, so it must be registered before the static handler and the 404. The
+// page reads the token from its own URL and calls /bulk-orders/portal/:token.
+app.get("/set/:token", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "order-set.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -461,6 +475,12 @@ app.get("/", (req, res) => {
 app.use(japaneseLearnRoutes);
 app.use(redeemRoutes);
 app.use(enforce2fa, chatRoutes);
+// Bulk orders must mount BEFORE the requireAdmin blanket guards below: the two
+// public /bulk-orders/portal/:token routes (the token is the buyer's secret)
+// would otherwise be 401'd by app.use(requireAdmin, ...) before ever reaching
+// this router. Operator routes self-guard with requireSuperadmin, so an early
+// mount does not expose them.
+app.use(enforce2fa, bulkOrderRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);

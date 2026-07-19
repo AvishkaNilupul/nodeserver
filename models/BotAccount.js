@@ -36,6 +36,10 @@ const botAccountSchema = new mongoose.Schema(
     soldToUsername: { type: String, default: "" },
     soldSetId: { type: String, default: "" },
     soldPurchaseId: { type: String, default: "" },
+    // Set instead of soldPurchaseId when the account is reserved as part of a
+    // bulk order rather than a single Shop purchase. The soldAt:null guard is
+    // shared, so a bulk reservation and a Shop sale can never collide.
+    soldBulkOrderId: { type: String, default: "" },
 
     // Scan bookkeeping. Indexed because the scanner picks the oldest-scanned
     // account each tick and the progress view sorts/filters on it.

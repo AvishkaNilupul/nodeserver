@@ -1,0 +1,1141 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bulk orders</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --accent2: #6366f1;
+        --green: #059669;
+        --red: #dc2626;
+        --yellow: #b45309;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        --yellow: #fbbf24;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      html[data-theme="dark"] .bal {
+        background: rgba(99, 102, 241, 0.16);
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        height: 100vh;
+        display: flex;
+        overflow: hidden;
+      }
+      .themebtn {
+        cursor: pointer;
+      }
+
+      /* Sidebar (shared look with other admin pages) */
+      .nav {
+        width: 236px;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        display: grid;
+        place-items: center;
+        box-shadow: 0 6px 14px rgba(79, 70, 229, 0.32);
+      }
+      .nav .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        overflow-y: auto;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: #eef2ff;
+        color: var(--accent);
+      }
+      .nav .me {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 16px;
+        border-top: 1px solid var(--line);
+      }
+      .nav .me .av {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #10b981, #059669);
+        color: #fff;
+        display: grid;
+        place-items: center;
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .nav .me .who {
+        flex: 1;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13px;
+        display: block;
+      }
+      .nav .me .who span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .nav .me .logout {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+      .nav .me .logout:hover {
+        color: var(--red);
+        border-color: var(--red);
+      }
+
+      /* Page */
+      .page {
+        flex: 1;
+        overflow-y: auto;
+        padding: 26px 30px 60px;
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 800;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin-top: 3px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px;
+      }
+      .card h2 {
+        font-size: 15px;
+        font-weight: 700;
+      }
+      label.fld {
+        display: block;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        margin-bottom: 5px;
+      }
+      input,
+      select {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-2);
+        color: var(--ink);
+        font-size: 14px;
+        font-family: inherit;
+      }
+      input:focus,
+      select:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .row {
+        display: grid;
+        gap: 12px;
+      }
+      .create-grid {
+        grid-template-columns: 2fr 1fr 1fr;
+      }
+      .create-grid2 {
+        grid-template-columns: 2fr 1fr 1fr;
+        margin-top: 12px;
+      }
+      .btn {
+        display: inline-block;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 16px;
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+        background: var(--accent);
+        color: #fff;
+        font-family: inherit;
+        text-decoration: none;
+        text-align: center;
+        line-height: 1.2;
+      }
+      .btn:hover {
+        filter: brightness(1.05);
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .btn.ghost {
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+      .btn.ghost:hover {
+        background: var(--surface-2);
+        filter: none;
+      }
+      .btn.danger {
+        background: var(--surface);
+        color: var(--red);
+        border: 1px solid var(--line);
+      }
+      .btn.danger:hover {
+        border-color: var(--red);
+        background: var(--surface-2);
+      }
+      .btn.sm {
+        padding: 7px 11px;
+        font-size: 12.5px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .banner {
+        margin-top: 14px;
+        padding: 13px 15px;
+        border-radius: 11px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        font-size: 13.5px;
+      }
+      .banner.warn {
+        border-color: var(--yellow);
+      }
+      .link-box {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 8px;
+      }
+      .link-box code {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12.5px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 10px;
+      }
+
+      /* Orders list */
+      .orders {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 16px;
+      }
+      .order {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 15px 17px;
+        display: grid;
+        grid-template-columns: 1.4fr 1.3fr auto;
+        gap: 14px;
+        align-items: center;
+      }
+      .order .no {
+        font-weight: 700;
+        font-size: 14px;
+      }
+      .order .set {
+        font-size: 12.5px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .order .acts {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .hbar {
+        height: 9px;
+        border-radius: 6px;
+        background: var(--line);
+        display: flex;
+        overflow: hidden;
+      }
+      .hbar i {
+        display: block;
+        height: 100%;
+      }
+      .hbar i.a {
+        background: var(--green);
+      }
+      .hbar i.b {
+        background: var(--red);
+      }
+      .hbar i.u {
+        background: #cbd5e1;
+      }
+      .hstat {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 6px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .hstat b {
+        color: var(--ink);
+      }
+      .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+
+      /* Modal */
+      .overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.5);
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 40px 16px;
+        z-index: 50;
+        overflow-y: auto;
+      }
+      .overlay.show {
+        display: flex;
+      }
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        width: 100%;
+        max-width: 860px;
+        padding: 22px;
+      }
+      .modal .head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .modal .acts {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+        margin: 14px 0;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      th {
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+      }
+      .tbl-wrap {
+        max-height: 46vh;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11.5px;
+        font-weight: 600;
+        padding: 3px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+      }
+      .badge.alive {
+        color: var(--green);
+        border-color: var(--green);
+      }
+      .badge.bad {
+        color: var(--red);
+        border-color: var(--red);
+      }
+      .badge.unchecked {
+        color: var(--muted);
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px;
+      }
+      .repl {
+        opacity: 0.55;
+      }
+      .toast {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--ink);
+        color: var(--bg);
+        padding: 10px 18px;
+        border-radius: 10px;
+        font-size: 13px;
+        opacity: 0;
+        transition: opacity 0.2s;
+        z-index: 100;
+        pointer-events: none;
+      }
+      .toast.show {
+        opacity: 0.95;
+      }
+      @media (max-width: 720px) {
+        .create-grid,
+        .create-grid2 {
+          grid-template-columns: 1fr;
+        }
+        .order {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html">Inbox</a>
+        <a href="/orders">Orders</a>
+        <a href="/inventory">Inventory</a>
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Superadmin</span>
+        </div>
+        <button
+          class="logout themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+        <button class="logout" id="logoutBtn" title="Log out">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="page">
+      <h1>Bulk orders</h1>
+      <p class="sub">
+        Reserve a batch of drop-bundle accounts for one buyer, hand them a private
+        inventory link, and health-check the set — dead accounts are auto-replaced
+        from the pool.
+      </p>
+
+      <div class="card" style="margin-top: 18px">
+        <h2>Create an order</h2>
+        <div class="row create-grid" style="margin-top: 12px">
+          <div>
+            <label class="fld" for="setSel">Bundle (set)</label>
+            <select id="setSel"></select>
+          </div>
+          <div>
+            <label class="fld" for="qtyInp">Quantity</label>
+            <input id="qtyInp" type="number" min="1" value="50" />
+          </div>
+          <div>
+            <label class="fld" for="guarInp">Guarantee (days)</label>
+            <input id="guarInp" type="number" min="0" value="3" />
+          </div>
+        </div>
+        <div class="row create-grid2">
+          <div>
+            <label class="fld" for="labelInp">Buyer label (optional)</label>
+            <input id="labelInp" placeholder="e.g. Gameflip order #4821" />
+          </div>
+          <div>
+            <label class="fld" for="priceInp">Price (optional)</label>
+            <input id="priceInp" type="number" min="0" step="0.01" placeholder="0.00" />
+          </div>
+          <div style="display: flex; align-items: flex-end">
+            <button class="btn" id="createBtn" style="width: 100%">
+              Create order
+            </button>
+          </div>
+        </div>
+        <div id="createResult"></div>
+      </div>
+
+      <div
+        style="
+          margin-top: 26px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        "
+      >
+        <h2 style="font-size: 16px; font-weight: 700">Orders</h2>
+        <button class="btn ghost sm" id="refreshBtn">Refresh</button>
+      </div>
+      <div class="orders" id="orders"></div>
+    </main>
+
+    <div class="overlay" id="overlay">
+      <div class="modal" id="modal"></div>
+    </div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let SETS = [];
+      let CURRENT = null; // open order detail
+
+      async function api(path, opts) {
+        const res = await fetch(path, {
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          ...opts,
+        });
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (e) {}
+        if (!res.ok || data.success === false) {
+          throw new Error(data.message || "Request failed (" + res.status + ")");
+        }
+        return data;
+      }
+
+      function toast(msg) {
+        const t = $("toast");
+        t.textContent = msg;
+        t.classList.add("show");
+        clearTimeout(t._t);
+        t._t = setTimeout(() => t.classList.remove("show"), 1900);
+      }
+
+      function esc(s) {
+        return String(s == null ? "" : s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      }
+
+      const HEALTH_LABEL = {
+        alive: "Alive",
+        token_dead: "Token dead",
+        integrity_failed: "Integrity fail",
+        missing_drops: "Missing drops",
+        error: "Error",
+        unchecked: "Unchecked",
+      };
+      const BAD = ["token_dead", "integrity_failed", "missing_drops", "error"];
+      function badgeClass(s) {
+        if (s === "alive") return "alive";
+        if (BAD.includes(s)) return "bad";
+        return "unchecked";
+      }
+
+      function healthBar(sm) {
+        const total = Math.max(1, sm.total || 0);
+        const a = ((sm.alive || 0) / total) * 100;
+        const b = ((sm.bad || 0) / total) * 100;
+        const u = ((sm.unchecked || 0) / total) * 100;
+        return (
+          '<div class="hbar">' +
+          '<i class="a" style="width:' +
+          a +
+          '%"></i>' +
+          '<i class="b" style="width:' +
+          b +
+          '%"></i>' +
+          '<i class="u" style="width:' +
+          u +
+          '%"></i>' +
+          "</div>" +
+          '<div class="hstat">' +
+          '<span><span class="dot" style="background:var(--green)"></span><b>' +
+          (sm.alive || 0) +
+          "</b> alive</span>" +
+          '<span><span class="dot" style="background:var(--red)"></span><b>' +
+          (sm.bad || 0) +
+          "</b> bad</span>" +
+          '<span><span class="dot" style="background:#cbd5e1"></span><b>' +
+          (sm.unchecked || 0) +
+          "</b> unchecked</span>" +
+          "</div>"
+        );
+      }
+
+      function fullLink(portalPath) {
+        return location.origin + portalPath;
+      }
+
+      // ---------------------------------------------------------------- sets
+      async function loadSets() {
+        try {
+          const d = await api("/bulk-orders/sets");
+          SETS = d.sets || [];
+        } catch (e) {
+          SETS = [];
+        }
+        const sel = $("setSel");
+        if (!SETS.length) {
+          sel.innerHTML = '<option value="">No sets found</option>';
+          return;
+        }
+        sel.innerHTML = SETS.map(
+          (s) =>
+            '<option value="' +
+            s.id +
+            '">' +
+            esc(s.name) +
+            " — " +
+            s.stock +
+            " in stock</option>",
+        ).join("");
+      }
+
+      // -------------------------------------------------------------- create
+      $("createBtn").addEventListener("click", async () => {
+        const setId = $("setSel").value;
+        const qty = parseInt($("qtyInp").value, 10);
+        if (!setId) return toast("Pick a set first");
+        if (!qty || qty < 1) return toast("Enter a quantity");
+        const btn = $("createBtn");
+        btn.disabled = true;
+        btn.textContent = "Reserving…";
+        try {
+          const d = await api("/bulk-orders/create", {
+            method: "POST",
+            body: JSON.stringify({
+              setId,
+              qty,
+              buyerLabel: $("labelInp").value,
+              price: parseFloat($("priceInp").value) || 0,
+              guaranteeDays: parseInt($("guarInp").value, 10) || 0,
+            }),
+          });
+          const link = d.buyerLink || fullLink(d.order.portalPath);
+          const warn = d.shortfall > 0;
+          $("createResult").innerHTML =
+            '<div class="banner ' +
+            (warn ? "warn" : "") +
+            '">' +
+            "<b>" +
+            esc(d.order.orderNo) +
+            "</b> created — reserved <b>" +
+            d.claimed +
+            "</b> of " +
+            qty +
+            " account(s)." +
+            (warn
+              ? " Only " +
+                d.available +
+                " were in stock — farm " +
+                d.shortfall +
+                " more, then use Top up."
+              : "") +
+            '<div class="link-box"><code id="newLink">' +
+            esc(link) +
+            "</code>" +
+            '<button class="btn sm" onclick="copyText(\'' +
+            esc(link) +
+            "')\">Copy link</button></div>" +
+            "</div>";
+          $("labelInp").value = "";
+          $("priceInp").value = "";
+          await loadOrders();
+          await loadSets();
+        } catch (e) {
+          toast(e.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Create order";
+        }
+      });
+
+      window.copyText = async (t) => {
+        try {
+          await navigator.clipboard.writeText(t);
+          toast("Copied");
+        } catch (e) {
+          toast("Copy failed");
+        }
+      };
+
+      // -------------------------------------------------------------- orders
+      async function loadOrders() {
+        const wrap = $("orders");
+        try {
+          const d = await api("/bulk-orders/list");
+          const orders = d.orders || [];
+          if (!orders.length) {
+            wrap.innerHTML =
+              '<div class="muted" style="padding:8px 2px">No orders yet.</div>';
+            return;
+          }
+          wrap.innerHTML = orders
+            .map((o) => {
+              const link = fullLink(o.portalPath);
+              const guar = o.guaranteeUntil
+                ? new Date(o.guaranteeUntil).toLocaleDateString()
+                : "—";
+              return (
+                '<div class="order">' +
+                "<div>" +
+                '<div class="no">' +
+                esc(o.orderNo) +
+                (o.buyerLabel
+                  ? ' <span class="muted" style="font-weight:500">· ' +
+                    esc(o.buyerLabel) +
+                    "</span>"
+                  : "") +
+                "</div>" +
+                '<div class="set">' +
+                esc(o.setName) +
+                " · " +
+                o.activeCount +
+                "/" +
+                o.qtyOrdered +
+                " active · guarantee " +
+                guar +
+                "</div>" +
+                "</div>" +
+                "<div>" +
+                healthBar(o.healthSummary || {}) +
+                "</div>" +
+                '<div class="acts">' +
+                '<button class="btn ghost sm" onclick="openOrder(\'' +
+                o.id +
+                "')\">Open</button>" +
+                '<button class="btn sm" onclick="checkOrder(\'' +
+                o.id +
+                "',this)\">Health check</button>" +
+                '<button class="btn ghost sm" onclick="copyText(\'' +
+                esc(link) +
+                "')\">Link</button>" +
+                "</div>" +
+                "</div>"
+              );
+            })
+            .join("");
+        } catch (e) {
+          wrap.innerHTML =
+            '<div class="muted" style="padding:8px 2px">' +
+            esc(e.message) +
+            "</div>";
+        }
+      }
+
+      window.checkOrder = async (id, btn) => {
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Checking…";
+        }
+        try {
+          const d = await api("/bulk-orders/" + id + "/health-check", {
+            method: "POST",
+          });
+          const r = d.report || {};
+          toast(
+            "Checked " +
+              r.checked +
+              " · replaced " +
+              r.replaced +
+              (r.unreplaced ? " · " + r.unreplaced + " unreplaceable" : ""),
+          );
+          await loadOrders();
+          if (CURRENT === id) renderModal(d.order);
+        } catch (e) {
+          toast(e.message);
+        } finally {
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = "Health check";
+          }
+        }
+      };
+
+      // --------------------------------------------------------- order modal
+      window.openOrder = async (id) => {
+        try {
+          const d = await api("/bulk-orders/" + id);
+          renderModal(d.order);
+          $("overlay").classList.add("show");
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+
+      function closeModal() {
+        $("overlay").classList.remove("show");
+        CURRENT = null;
+      }
+      $("overlay").addEventListener("click", (e) => {
+        if (e.target === $("overlay")) closeModal();
+      });
+
+      function unitRow(u) {
+        const s = (u.health && u.health.status) || "unchecked";
+        const cls = badgeClass(s);
+        const drops =
+          u.health && u.health.dropCount != null
+            ? " · " + u.health.dropCount + " drops"
+            : "";
+        let note = "";
+        if (!u.active && u.replacedByLogin)
+          note =
+            '<div class="muted" style="font-size:11.5px">→ replaced by ' +
+            esc(u.replacedByLogin) +
+            "</div>";
+        else if (u.replacedFromLogin)
+          note =
+            '<div class="muted" style="font-size:11.5px">↺ replaced ' +
+            esc(u.replacedFromLogin) +
+            "</div>";
+        return (
+          '<tr class="' +
+          (u.active ? "" : "repl") +
+          '">' +
+          '<td class="mono">' +
+          esc(u.login || "—") +
+          note +
+          "</td>" +
+          "<td>" +
+          '<span class="badge ' +
+          cls +
+          '">' +
+          (HEALTH_LABEL[s] || s) +
+          "</span>" +
+          '<span class="muted" style="font-size:11.5px">' +
+          drops +
+          "</span>" +
+          (u.health && u.health.error
+            ? '<div class="muted" style="font-size:11px">' +
+              esc(u.health.error) +
+              "</div>"
+            : "") +
+          "</td>" +
+          "<td>" +
+          (u.active ? "active" : '<span class="muted">retired</span>') +
+          "</td>" +
+          "</tr>"
+        );
+      }
+
+      function renderModal(order) {
+        CURRENT = order.id;
+        const link = fullLink(order.portalPath);
+        const active = (order.units || []).filter((u) => u.active);
+        const inactive = (order.units || []).filter((u) => !u.active);
+        const rows = active.concat(inactive).map(unitRow).join("");
+        $("modal").innerHTML =
+          '<div class="head">' +
+          "<div><h2 style='font-size:17px'>" +
+          esc(order.orderNo) +
+          "</h2>" +
+          '<div class="sub">' +
+          esc(order.setName) +
+          " · " +
+          active.length +
+          "/" +
+          order.qtyOrdered +
+          " active" +
+          (order.buyerLabel ? " · " + esc(order.buyerLabel) : "") +
+          "</div></div>" +
+          '<button class="btn ghost sm" onclick="closeModal()">Close</button>' +
+          "</div>" +
+          healthBar(order.healthSummary || {}) +
+          '<div class="link-box"><code>' +
+          esc(link) +
+          "</code>" +
+          '<button class="btn sm" onclick="copyText(\'' +
+          esc(link) +
+          "')\">Copy link</button></div>" +
+          '<div class="acts">' +
+          '<button class="btn" onclick="checkOrder(\'' +
+          order.id +
+          "',null).then(()=>reopen('" +
+          order.id +
+          "'))\">Run health check &amp; auto-replace</button>" +
+          '<button class="btn ghost" onclick="revealCreds(\'' +
+          order.id +
+          "')\">Reveal credentials</button>" +
+          '<a class="btn ghost" style="text-decoration:none" href="/bulk-orders/' +
+          order.id +
+          '/export">Export .txt</a>' +
+          '<button class="btn ghost" onclick="topup(\'' +
+          order.id +
+          "')\">Top up</button>" +
+          '<button class="btn danger" onclick="delOrder(\'' +
+          order.id +
+          "')\">Delete</button>" +
+          "</div>" +
+          '<div class="tbl-wrap"><table><thead><tr><th>Login</th><th>Health</th><th>State</th></tr></thead><tbody>' +
+          (rows ||
+            '<tr><td colspan="3" class="muted">No units reserved.</td></tr>') +
+          "</tbody></table></div>" +
+          '<div id="credArea"></div>';
+      }
+
+      window.reopen = (id) => openOrder(id);
+
+      window.revealCreds = async (id) => {
+        try {
+          const d = await api("/bulk-orders/" + id + "/creds");
+          const units = d.units || [];
+          $("credArea").innerHTML =
+            '<h2 style="font-size:14px;margin:16px 0 8px">Credentials (' +
+            units.length +
+            ")</h2>" +
+            '<div class="tbl-wrap"><table><thead><tr><th>Login</th><th>Password</th><th>Email</th></tr></thead><tbody>' +
+            units
+              .map(
+                (u) =>
+                  '<tr><td class="mono">' +
+                  esc(u.login) +
+                  '</td><td class="mono">' +
+                  esc(u.password) +
+                  '</td><td class="mono">' +
+                  esc(u.email) +
+                  "</td></tr>",
+              )
+              .join("") +
+            "</tbody></table></div>";
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+
+      window.topup = async (id) => {
+        const n = parseInt(prompt("How many more accounts to reserve?"), 10);
+        if (!n || n < 1) return;
+        try {
+          const d = await api("/bulk-orders/" + id + "/topup", {
+            method: "POST",
+            body: JSON.stringify({ qty: n }),
+          });
+          toast(
+            "Reserved " +
+              d.claimed +
+              (d.shortfall ? " (short " + d.shortfall + ")" : ""),
+          );
+          renderModal(d.order);
+          await loadOrders();
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+
+      window.delOrder = async (id) => {
+        if (
+          !confirm(
+            "Delete this order? Healthy reserved accounts return to the pool; dead ones stay retired.",
+          )
+        )
+          return;
+        try {
+          const d = await api("/bulk-orders/" + id, { method: "DELETE" });
+          toast("Deleted · released " + (d.released || 0) + " to pool");
+          closeModal();
+          await loadOrders();
+          await loadSets();
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+
+      // ------------------------------------------------------------- chrome
+      $("logoutBtn").addEventListener("click", async () => {
+        try {
+          await fetch("/admin-logout", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+        } catch {}
+        window.location.href = "/admin-login.html";
+      });
+      $("refreshBtn").addEventListener("click", () => {
+        loadOrders();
+        loadSets();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeModal();
+      });
+
+      (async function init() {
+        try {
+          const me = await api("/shop/me");
+          $("meName").textContent = me.username || "Admin";
+          $("meAvatar").textContent = (me.username || "A")
+            .slice(0, 2)
+            .toUpperCase();
+        } catch (e) {}
+        await loadSets();
+        await loadOrders();
+      })();
+    </script>
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+  </body>
+</html>

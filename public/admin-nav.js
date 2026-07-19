@@ -28,6 +28,11 @@
       '<path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>',
     listings:
       '<path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z"></path>',
+    bulkOrders:
+      '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 ' +
+      '8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>' +
+      '<polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>' +
+      '<line x1="12" y1="22.08" x2="12" y2="12"></line>',
     settings:
       '<circle cx="12" cy="12" r="3"></circle>' +
       '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83' +
@@ -137,6 +142,12 @@
           href: "/listings.html",
           label: "Listings",
           icon: ICONS.listings,
+          superOnly: true,
+        },
+        {
+          href: "/bulk-orders.html",
+          label: "Bulk orders",
+          icon: ICONS.bulkOrders,
           superOnly: true,
         },
         {
