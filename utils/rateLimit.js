@@ -79,6 +79,15 @@ const renterSubmitLimiter = jsonLimiter({
   message: "Too many submissions. Please wait a bit and try again.",
 });
 
+// Renter start/stop of their own bot. Each call SSHes to the host, so cap how
+// fast a renter can bounce their container (protects the host from start/stop
+// spam).
+const renterBotControlLimiter = jsonLimiter({
+  windowMs: 5 * 60 * 1000,
+  limit: 20,
+  message: "Too many start/stop actions. Please wait a moment.",
+});
+
 module.exports = {
   globalLimiter,
   loginLimiter,
@@ -88,4 +97,5 @@ module.exports = {
   uploadLimiter,
   portalCheckLimiter,
   renterSubmitLimiter,
+  renterBotControlLimiter,
 };

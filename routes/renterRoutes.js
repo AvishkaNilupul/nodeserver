@@ -1,33 +1,46 @@
 // Renter dashboard API. Every route is behind requireRenter, and every route
 // derives its scope from req.renter (loaded from the DB by the middleware) —
 // never from a path/param/body the client controls. A renter can therefore only
-// ever see their own bot, their own accounts, and their own submissions.
+// ever see and control their own bot, their own accounts, and their own
+// submissions. They can start/stop their bot and check drops; they can never
+// modify accounts, settings, or reach any other bot/renter/operator surface.
 const express = require("express");
 const bcrypt = require("bcrypt");
 
 const { requireRenter } = require("../middleware/renterAuth");
-const { renterSubmitLimiter } = require("../utils/rateLimit");
+const {
+  renterSubmitLimiter,
+  renterBotControlLimiter,
+} = require("../utils/rateLimit");
 const { isExpired, setPassword, MIN_PASSWORD } = require("../utils/renters");
+const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const RenterSubmission = require("../models/RenterSubmission");
-const AvailableAccount = require("../models/AvailableAccount");
 const hosts = require("../utils/botHosts");
 const { encrypt } = require("../utils/secretBox");
 const { parseAccountList } = require("../utils/parseAccountList");
-const { containerForFile } = require("./botConfigRoutes");
+const {
+  containerForFile,
+  countConfigAccounts,
+  startConfigContainer,
+  stopConfigContainer,
+} = require("./botConfigRoutes");
 
 const router = express.Router();
 
-// A renter's accounts live in the account pool tagged with their id. Raw
-// username:password credentials (what renters submit) can't farm until they're
-// device-authed, and the pool is exactly the staging area the operator's
-// device-auth + deploy tooling already works from — so approved renter accounts
-// land there, keyed by renterId.
-function renterAccountsQuery(renter) {
-  return { renterId: String(renter._id) };
+// The renter's accounts are the ones the operator deployed onto their dedicated
+// bot config. Scope is built from req.renter (host + configFile) — never client
+// input — so a renter can only ever see their own bot's accounts.
+function accountFilter(renter) {
+  if (!renter.botFile) return null;
+  return { host: renter.botHost || "local", configFile: renter.botFile };
 }
-function poolAccountCount(renter) {
-  return AvailableAccount.countDocuments(renterAccountsQuery(renter));
+
+// Normalise a BotAccount scan status into a renter-friendly bucket.
+function botStatus(s) {
+  if (s === "ok") return "active";
+  if (s === "token_invalid" || s === "error") return "issue";
+  return "pending"; // not scanned yet / just added
 }
 
 // Sum of accounts still waiting in pending submissions (counts against quota).
@@ -39,13 +52,14 @@ async function pendingAccountCount(renterId) {
   return rows.reduce((s, r) => s + (r.count || 0), 0);
 }
 
-// Renter-facing status for one pool account: honest about the device-auth step.
-function poolStatus(a) {
-  const s = a.lastCheckStatus;
-  if (s === "ok") return "active";
-  if (s === "token_invalid" || s === "integrity_failed" || s === "error")
-    return "issue";
-  return "pending"; // no valid token yet — awaiting activation
+// Resolve the renter's own bot host, or null. Used by the bot-control routes so
+// the target is always the renter's assigned bot — no host/file ever comes from
+// the request.
+function ownBot(renter) {
+  if (!renter.botFile) return null;
+  const host = hosts.resolveHost(renter.botHost);
+  if (!host) return null;
+  return { host, file: renter.botFile };
 }
 
 // GET /renter/me — their bot status, quota, lease.
@@ -53,8 +67,10 @@ router.get("/renter/me", requireRenter, async (req, res) => {
   try {
     const r = req.renter;
     const host = hosts.resolveHost(r.botHost);
+    let used = 0;
     let running = null; // null = unknown (host offline / not assigned)
     if (r.botFile && host) {
+      used = await countConfigAccounts(host, r.botFile);
       try {
         const states = await hosts.dockerPs(host);
         const st = states[containerForFile(r.botFile)];
@@ -63,7 +79,6 @@ router.get("/renter/me", requireRenter, async (req, res) => {
         running = null;
       }
     }
-    const used = await poolAccountCount(r);
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     res.json({
@@ -92,25 +107,27 @@ router.get("/renter/me", requireRenter, async (req, res) => {
   }
 });
 
-// GET /renter/accounts — their account list (login + status + drop count).
-// Sourced from the account pool by renterId. Never returns passwords or tokens.
+// GET /renter/accounts — their bot's accounts (login + status + drop count).
+// Never returns tokens or passwords.
 router.get("/renter/accounts", requireRenter, async (req, res) => {
   try {
-    const accs = await AvailableAccount.find(renterAccountsQuery(req.renter), {
-      username: 1,
-      lastCheckStatus: 1,
+    const filter = accountFilter(req.renter);
+    if (!filter) return res.json({ success: true, accounts: [] });
+    const accs = await BotAccount.find(filter, {
+      login: 1,
+      lastScanStatus: 1,
       dropCount: 1,
-      lastCheckAt: 1,
+      lastScanAt: 1,
     })
-      .sort({ username: 1 })
+      .sort({ login: 1 })
       .lean();
     res.json({
       success: true,
       accounts: accs.map((a) => ({
-        login: a.username || "",
-        status: poolStatus(a),
+        login: a.login || "",
+        status: botStatus(a.lastScanStatus),
         dropCount: a.dropCount || 0,
-        lastScanAt: a.lastCheckAt || null,
+        lastScanAt: a.lastScanAt || null,
       })),
     });
   } catch (err) {
@@ -119,17 +136,17 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
   }
 });
 
-// GET /renter/drops — drops their accounts have farmed, grouped by reward.
+// GET /renter/drops — drops their bot's accounts have farmed, grouped by reward.
 router.get("/renter/drops", requireRenter, async (req, res) => {
   try {
-    const ids = (
-      await AvailableAccount.find(renterAccountsQuery(req.renter), {
-        _id: 1,
-      }).lean()
-    ).map((a) => a._id);
+    const filter = accountFilter(req.renter);
+    if (!filter) return res.json({ success: true, drops: [], total: 0 });
+    const ids = (await BotAccount.find(filter, { _id: 1 }).lean()).map(
+      (a) => a._id,
+    );
     if (!ids.length) return res.json({ success: true, drops: [], total: 0 });
     const rows = await DropLog.aggregate([
-      { $match: { account: { $in: ids }, accountModel: "AvailableAccount" } },
+      { $match: { account: { $in: ids }, accountModel: "BotAccount" } },
       {
         $group: {
           _id: "$itemKey",
@@ -160,6 +177,52 @@ router.get("/renter/drops", requireRenter, async (req, res) => {
   }
 });
 
+// POST /renter/bot/start | /renter/bot/stop — control ONLY their own bot. The
+// container is derived from req.renter's assigned config (never from the
+// request), so a renter can never touch another bot. Rate-limited so start/stop
+// can't be spammed against the host.
+async function botControl(action, req, res) {
+  const bot = ownBot(req.renter);
+  if (!bot) {
+    return res
+      .status(400)
+      .json({ success: false, message: "No bot assigned yet." });
+  }
+  try {
+    if (action === "start") {
+      await startConfigContainer(bot.host, bot.file);
+    } else {
+      await stopConfigContainer(bot.host, bot.file);
+    }
+    res.json({ success: true, running: action === "start" });
+  } catch (e) {
+    if (e.code === "disabled") {
+      return res
+        .status(403)
+        .json({ success: false, message: "Bot control is disabled." });
+    }
+    if (e.code === "no_accounts") {
+      return res.status(400).json({
+        success: false,
+        message: "Your bot has no accounts yet — ask the operator to add them.",
+      });
+    }
+    if (e.unreachable) {
+      return res
+        .status(502)
+        .json({ success: false, message: "The bot host is offline right now." });
+    }
+    console.error("renter bot " + action + " error:", e.message);
+    res.status(500).json({ success: false, message: "Could not " + action + " the bot." });
+  }
+}
+router.post("/renter/bot/start", renterBotControlLimiter, requireRenter, (req, res) =>
+  botControl("start", req, res),
+);
+router.post("/renter/bot/stop", renterBotControlLimiter, requireRenter, (req, res) =>
+  botControl("stop", req, res),
+);
+
 // POST /renter/submit — queue a batch of accounts for operator approval. Never
 // touches a live bot; the parsed credentials are encrypted at rest. Accepts the
 // same colon-delimited format suppliers use (utils/parseAccountList):
@@ -184,8 +247,9 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
           (badLines.length ? " (" + badLines.length + " line(s) couldn't be read)." : "."),
       });
     }
-    // Quota: accounts already in the pool for this renter + pending + this batch.
-    const used = await poolAccountCount(r);
+    // Quota: accounts already on their bot + already-pending + this batch must fit.
+    const host = hosts.resolveHost(r.botHost);
+    const used = host ? await countConfigAccounts(host, r.botFile) : 0;
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     const remaining = max - used - pending;
@@ -228,7 +292,7 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
   }
 });
 
-// GET /renter/submissions — their own submission history (no tokens).
+// GET /renter/submissions — their own submission history (no tokens/passwords).
 router.get("/renter/submissions", requireRenter, async (req, res) => {
   try {
     const rows = await RenterSubmission.find(

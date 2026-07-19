@@ -1493,13 +1493,39 @@ async function countConfigAccounts(host, file) {
 }
 
 // Stop the container backing a config file (used when a renter is suspended or
-// their lease ends). No-op-safe: unknown container or an offline host just
-// throws, which the caller can ignore.
+// their lease ends, or when a renter stops their own bot). No-op-safe: unknown
+// container or an offline host just throws, which the caller can ignore.
 async function stopConfigContainer(host, file) {
   const container = containerForFile(file);
   if (!container) return { stopped: false };
   await hosts.dockerContainer(host, "stop", container);
   return { stopped: true, container };
+}
+
+// Start the container backing a config file, with the same guards the operator
+// start route uses: restart control must be enabled, the file name must be
+// valid, and the config must actually have accounts (an empty config makes
+// TwitchDropsBot spin in a tight login-retry loop — see hasAccounts). Errors
+// carry a `.code` ("disabled" / "no_accounts") so a caller (e.g. the renter
+// start route) can turn them into the right status. Used by the renter's own
+// start button — the host/file are always the renter's, never client input.
+async function startConfigContainer(host, file) {
+  if (!ALLOW_RESTART) {
+    const e = new Error("Container control is disabled on this server");
+    e.code = "disabled";
+    throw e;
+  }
+  if (!validFile(file)) throw new Error("Invalid config file");
+  const container = containerForFile(file);
+  if (!container) throw new Error("No container mapped to this file");
+  if (!(await hasAccounts(host, file))) {
+    const e = new Error(NO_ACCOUNTS_MESSAGE);
+    e.code = "no_accounts";
+    throw e;
+  }
+  const output = await hosts.dockerContainer(host, "start", container);
+  await hosts.restoreRestartPolicy(host, container);
+  return { started: true, container, output };
 }
 
 module.exports = router;
@@ -1510,3 +1536,4 @@ module.exports.containerForFile = containerForFile;
 module.exports.addAccountsToConfig = addAccountsToConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
 module.exports.stopConfigContainer = stopConfigContainer;
+module.exports.startConfigContainer = startConfigContainer;

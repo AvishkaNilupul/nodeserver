@@ -185,9 +185,13 @@
           : bot.running === true ? '<span class="pill on"><span class="dot" style="background:var(--green)"></span>Running</span>'
           : bot.running === false ? '<span class="pill off"><span class="dot" style="background:var(--red)"></span>Stopped</span>'
           : '<span class="pill unk">Unknown</span>';
+        const botBtn = !bot.assigned ? ""
+          : bot.running === true ? '<button class="btn ghost" onclick="botToggle(this)" data-act="stop" style="margin-top:11px;padding:7px 13px;font-size:12.5px">Stop bot</button>'
+          : bot.running === false ? '<button class="btn" onclick="botToggle(this)" data-act="start" style="margin-top:11px;padding:7px 13px;font-size:12.5px">Start bot</button>'
+          : '';
         const pct = q.max > 0 ? Math.min(100, Math.round((q.used/q.max)*100)) : 0;
         $("stats").innerHTML =
-          '<div class="stat"><div class="k">Bot</div><div class="v" style="font-size:15px;margin-top:9px">'+botPill+'</div></div>' +
+          '<div class="stat"><div class="k">Bot</div><div class="v" style="font-size:15px;margin-top:9px">'+botPill+'</div>'+botBtn+'</div>' +
           '<div class="stat"><div class="k">Accounts</div><div class="v">'+q.used+' <small>/ '+q.max+'</small>'+(q.pending?' <small style="color:var(--yellow)">('+q.pending+' pending)</small>':'')+'</div><div class="bar"><i style="width:'+pct+'%"></i></div></div>' +
           '<div class="stat"><div class="k">Access</div><div class="v" style="font-size:16px">'+esc(remaining(lease.end))+'</div><div class="hint" style="margin:6px 0 0">until '+fmtDate(lease.end)+'</div></div>';
         const rem = q.remaining;
@@ -225,6 +229,20 @@
           (x.status==="rejected"&&x.rejectReason?' · <span class="muted">'+esc(x.rejectReason)+'</span>':'')+
           '</div><span class="badge '+(SUB_CLS[x.status]||"wait")+'">'+(SUB_LABEL[x.status]||x.status)+'</span></div>').join("");
       }
+
+      // Start / stop their own bot.
+      window.botToggle = async (btn)=>{
+        const act = btn.dataset.act;
+        btn.disabled = true; btn.textContent = act==="start" ? "Starting…" : "Stopping…";
+        try {
+          await api("/renter/bot/"+act, { method:"POST" });
+          toast(act==="start" ? "Bot starting" : "Bot stopped");
+          await loadMe();
+        } catch(e){
+          if (e.message!=="auth") toast(e.message);
+          btn.disabled = false; btn.textContent = act==="start" ? "Start bot" : "Stop bot";
+        }
+      };
 
       // Tabs
       document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{

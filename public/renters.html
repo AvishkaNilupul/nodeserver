@@ -204,12 +204,24 @@
           if(!s.length){ $("approvals").innerHTML = '<div class="muted" style="padding:6px 2px">Nothing waiting for approval.</div>'; return; }
           $("approvals").innerHTML = s.map(x=>'<div class="approve-item"><div><div><b>'+ (x.renter?esc(x.renter.username):"?") +'</b> · '+x.count+' account(s) · <span class="muted">'+new Date(x.createdAt).toLocaleString()+'</span></div>'+
             (x.logins&&x.logins.length?'<div class="lg">'+esc(x.logins.slice(0,8).join(", "))+(x.logins.length>8?" …":"")+'</div>':'')+
-            '</div><div class="acts"><button class="btn sm" onclick="approve(\''+x.id+'\',this)">Approve</button><button class="btn danger sm" onclick="reject(\''+x.id+'\')">Reject</button></div></div>').join("");
+            '</div><div class="acts"><button class="btn ghost sm" onclick="reveal(\''+x.id+'\')">Show accounts</button><button class="btn sm" onclick="approve(\''+x.id+'\',this)">Approve &amp; start</button><button class="btn danger sm" onclick="reject(\''+x.id+'\')">Reject</button></div></div>').join("");
         } catch(e){ $("approvals").innerHTML = '<div class="muted">'+esc(e.message)+'</div>'; }
       }
+      // Reveal a submission's username:password so you can fetch tokens + add to the bot.
+      window.reveal = async (id)=>{
+        try {
+          const d = await api("/renter-submissions/"+id+"/creds");
+          const lines = (d.accounts||[]).map(a=>a.username+":"+a.password+(a.email?":"+a.email:"")).join("\n");
+          $("modal").innerHTML = '<div class="mh"><div><h2 style="font-size:17px">Submitted accounts</h2><div class="sub">Fetch the ClientSecrets, add them to the renter\'s bot, then Approve.</div></div><button class="btn ghost sm" onclick="closeModal()">Close</button></div>'+
+            '<textarea id="credOut" style="min-height:180px" readonly>'+esc(lines)+'</textarea>'+
+            '<div style="margin-top:12px"><button class="btn" onclick="copyCreds()">Copy all</button></div>';
+          $("overlay").classList.add("show");
+        } catch(e){ toast(e.message); }
+      };
+      window.copyCreds = async ()=>{ try{ await navigator.clipboard.writeText($("credOut").value); toast("Copied"); }catch(e){ toast("Copy failed"); } };
       window.approve = async (id, btn)=>{ if(btn){btn.disabled=true;btn.textContent="…";}
-        try { const d = await api("/renter-submissions/"+id+"/approve",{method:"POST"}); toast("Approved · "+d.added+" added"+(d.skipped?", "+d.skipped+" skipped":"")); await Promise.all([loadApprovals(),loadRenters()]); }
-        catch(e){ toast(e.message); if(btn){btn.disabled=false;btn.textContent="Approve";} } };
+        try { const d = await api("/renter-submissions/"+id+"/approve",{method:"POST"}); toast(d.note||"Approved"); await Promise.all([loadApprovals(),loadRenters()]); }
+        catch(e){ toast(e.message); if(btn){btn.disabled=false;btn.textContent="Approve & start";} } };
       window.reject = async (id)=>{ const reason=prompt("Reason (optional):")||""; try{ await api("/renter-submissions/"+id+"/reject",{method:"POST",body:JSON.stringify({reason})}); toast("Rejected"); loadApprovals(); }catch(e){ toast(e.message); } };
 
       // ---- renters list ----
