@@ -658,12 +658,27 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
+// Same auto-title format as the Listings editor's buildAutoTitle:
+// "<game> bundle — item1, item2 +N more (T items)" (T = total quantity).
+function buildAutoTitle(items) {
+  if (!items.length) return "";
+  const games = [...new Set(items.map(i => i.game || "Other rewards"))];
+  const total = items.reduce((n, i) => n + (Number(i.qty) || 1), 0);
+  const label = games.length === 1 ? games[0] : games.length + " games";
+  const names = items.map(i => i.name);
+  const head = names.slice(0, 2).join(", ");
+  const more = names.length > 2 ? " +" + (names.length - 2) + " more" : "";
+  return label + " bundle — " + head + more + " (" + total + " item" + (total === 1 ? "" : "s") + ")";
+}
+
 // Shared "Create listing" flow: POST item snapshots to the from-items endpoint,
 // which caches images and computes itemKeys. Raw image URLs (with any
 // {width}/{height} template) are sent as-is so the server caches them at full
-// size for a real Gameflip cover. The prompt is the "list it or not" step.
-async function createSetFromItems(defaultName, items, btn) {
+// size for a real Gameflip cover. The prompt is the "list it or not" step, and
+// pre-fills the same auto-generated title the manual Listings editor produces.
+async function createSetFromItems(items, btn) {
   if (!items.length) { alert("Nothing to list here."); return; }
+  const defaultName = buildAutoTitle(items);
   const name = prompt(`Create a listing — ${items.length} item(s).\n\nSet name:`, defaultName);
   if (name === null) return; // cancelled = "not"
   const old = btn.textContent;
@@ -707,7 +722,7 @@ resultsEl.addEventListener("click", (e) => {
       items.push({ name, game, image: b.imageAssetURL || "", qty: 1 });
     });
     if (!items.length) { alert("This campaign has no drops to list."); return; }
-    createSetFromItems(c.name || (game ? game + " drops" : "Drop set"), items, cBtn);
+    createSetFromItems(items, cBtn);
     return;
   }
   // Claimed rewards for a game -> list all of that game's already-awarded drops.
@@ -727,7 +742,7 @@ resultsEl.addEventListener("click", (e) => {
         items.push({ name, game: it.game || "", image: it.img || "", qty: Math.max(1, it.count || 1) });
       });
     if (!items.length) { alert("No claimed rewards to list for this game."); return; }
-    createSetFromItems(gname === "Other rewards" ? "Claimed rewards" : gname + " claimed rewards", items, gBtn);
+    createSetFromItems(items, gBtn);
     return;
   }
 });
