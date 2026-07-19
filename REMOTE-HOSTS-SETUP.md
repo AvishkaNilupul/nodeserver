@@ -294,12 +294,37 @@ Bots page health/drop counts are scoped per tab. Drop scanning itself is
 machine-independent (it calls Twitch with each account's token), so it works no
 matter where the bot physically runs.
 
+### Sharing the drops-archive scan across hosts
+
+The main continuous **Drops Archive scanner** (`utils/dropScanner.js`, the
+"Scanner on / Delay between scans" loop on `/drops-archive.html` that re-scans
+every account's drops on a rotation) is split the same way. It runs **one worker
+on the server plus one worker per configured remote host**, all sharing one due-
+account rotation and one priority queue. A shared in-flight set means the same
+account is never scanned on two machines at once; each remote worker makes the
+Twitch call **from that host** over SSH + `curl`, so ~2000 accounts are swept
+faster and the traffic is spread across the server's IP and each host's IP.
+
+Fault tolerance is the same "a Pi can be unplugged mid-scan" design: a
+`transportFailed` (host unreachable / curl gone) **leaves the account completely
+untouched** — it stays due and the server scans it next rotation, so no drop
+data is lost and no account is falsely marked errored/token-invalid. The worker
+whose host died marks it down and backs off (`DROP_SCAN_HOST_BACKOFF_MS`,
+default 60 s), re-probing on that slow timer and rejoining automatically when the
+host answers again. The server worker alone always drains the rotation.
+
+By default every remote host helps; restrict or disable with `DROP_SCAN_HOSTS`
+(same syntax as `ACCOUNT_POOL_SCAN_HOSTS` below — a comma-separated id list, or
+`none`/`off`/`local`). The Scan progress panel shows a per-machine card (Server /
+Raspberry Pi — scanning / idle / offline + per-run count) built from
+`getProgress().hosts`, so the split is visible live.
+
 ### Sharing the account-pool auto-scan across hosts
 
 The account pool's background auto-check (`utils/accountPoolChecker.js`, which
-verifies each imported account's token against Twitch) no longer runs entirely
-on the server. It runs **one worker on the server plus one worker per configured
-remote host**, all draining a single shared queue. Each remote worker makes the
+verifies each imported account's token against Twitch when you import) is split
+the same way — **one worker on the server plus one per configured remote host**,
+all draining a single shared queue. Each remote worker makes the
 very same Twitch calls **from that host** over SSH + `curl` (see the host
 transport in `utils/twitchInventory.js`), so the scan traffic is spread across
 the server's IP and each host's IP instead of hammering everything from one

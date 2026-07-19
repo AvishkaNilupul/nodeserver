@@ -394,6 +394,50 @@
         }
       }
 
+      /* Per-machine scan split (Server / Raspberry Pi / …) */
+      .hostsplit {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+      .hostcard {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 8px 14px;
+        font-size: 12.5px;
+      }
+      .hostcard .hdot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        flex: none;
+        background: var(--muted);
+      }
+      .hostcard.up .hdot {
+        background: var(--green);
+      }
+      .hostcard.busy .hdot {
+        animation: pulse 1.4s infinite;
+      }
+      .hostcard.down .hdot {
+        background: var(--red);
+      }
+      .hostcard .hname {
+        font-weight: 600;
+      }
+      .hostcard .hstate,
+      .hostcard .hcount {
+        color: var(--muted);
+      }
+      .hostcard .hcount {
+        font-variant-numeric: tabular-nums;
+      }
+
       .switch {
         display: inline-flex;
         align-items: center;
@@ -1298,6 +1342,7 @@
         <div class="pb">
           <div class="bar"><i id="bar"></i></div>
           <div class="pstats" id="pstats"></div>
+          <div class="hostsplit" id="hostSplit"></div>
           <div class="pctl">
             <label class="switch"
               ><input type="checkbox" id="schedToggle" /><span
@@ -1819,6 +1864,35 @@
           '<div class="stat red"><b>' +
           c.error +
           "</b><span>Errors</span></div>";
+        // Per-machine split — only shown when a remote host (e.g. the Pi) is
+        // actually helping, so a server-only setup looks exactly as before.
+        const hosts = p.hosts || [];
+        $("hostSplit").innerHTML =
+          hosts.length <= 1
+            ? ""
+            : hosts
+                .map((h) => {
+                  const isLocal = h.transport === "local";
+                  const down = !isLocal && h.up === false;
+                  const cls = down ? "down" : h.scanning ? "up busy" : "up";
+                  const st = down
+                    ? "offline"
+                    : h.scanning
+                      ? "scanning " + esc(h.currentLogin || "…")
+                      : "idle";
+                  return (
+                    '<div class="hostcard ' +
+                    cls +
+                    '"><span class="hdot"></span><span class="hname">' +
+                    esc(h.label) +
+                    '</span><span class="hstate">' +
+                    st +
+                    '</span><span class="hcount">· ' +
+                    (h.scanned || 0) +
+                    " this run</span></div>"
+                  );
+                })
+                .join("");
         const q = p.queue || {};
         $("scanState").innerHTML = p.scanning
           ? '<span class="pulse"></span> Scanning ' +
