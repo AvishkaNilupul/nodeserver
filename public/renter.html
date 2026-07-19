@@ -123,7 +123,7 @@
       <div class="panel" id="panel-submit">
         <div class="card">
           <div class="hint" id="quotaHint"></div>
-          <textarea id="acctInput" placeholder="Paste accounts — one per line:&#10;token&#10;login token&#10;or the JSON you copied from a config"></textarea>
+          <textarea id="acctInput" placeholder="Paste accounts — one per line:&#10;username:password&#10;username:password:email (email optional)"></textarea>
           <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
             <button class="btn" id="submitBtn">Submit for approval</button>
             <span class="hint" style="margin:0">Accounts go live once the operator approves them.</span>
@@ -161,8 +161,8 @@
         return d;
       }
 
-      const ACC_LABEL = { ok:"Working", pending:"Checking", token_invalid:"Token dead", error:"Error" };
-      function accBadge(s){ const cls = s==="ok"?"ok":(s==="pending"||!s)?"wait":"bad"; return '<span class="badge '+cls+'">'+(ACC_LABEL[s]||s)+"</span>"; }
+      const ACC_LABEL = { active:"Active", pending:"Awaiting activation", issue:"Needs fixing" };
+      function accBadge(s){ const cls = s==="active"?"ok":s==="issue"?"bad":"wait"; return '<span class="badge '+cls+'">'+(ACC_LABEL[s]||s)+"</span>"; }
 
       function fmtDate(d){ return d ? new Date(d).toLocaleDateString() : "—"; }
       function remaining(end){

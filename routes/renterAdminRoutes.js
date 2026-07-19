@@ -1,27 +1,84 @@
 // Superadmin management of renters + the account-submission approval queue.
-// Every route is requireSuperadmin. This is the ONLY place renter-submitted
-// accounts are ever written to a live config, and only on an explicit approve.
+// Every route is requireSuperadmin. Approving a submission imports the renter's
+// credentials into the account pool (tagged with their renterId) — the staging
+// area the operator's device-auth + deploy tooling already works from. Nothing
+// a renter does ever writes a live bot config.
 const express = require("express");
+const mongoose = require("mongoose");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const Renter = require("../models/Renter");
 const RenterSubmission = require("../models/RenterSubmission");
+const AvailableAccount = require("../models/AvailableAccount");
+const BotAccount = require("../models/BotAccount");
 const {
   createRenter,
   setPassword,
   sanitizeRenter,
 } = require("../utils/renters");
 const hosts = require("../utils/botHosts");
-const { decrypt } = require("../utils/secretBox");
-const {
-  dedupeAccounts,
-  addAccountsToConfig,
-  countConfigAccounts,
-  stopConfigContainer,
-  validFile,
-} = require("./botConfigRoutes");
+const { encrypt, decrypt } = require("../utils/secretBox");
+const { stopConfigContainer, validFile } = require("./botConfigRoutes");
 
 const router = express.Router();
+
+// How many pool accounts belong to a renter (their quota "used").
+function poolCount(renterId) {
+  return AvailableAccount.countDocuments({ renterId: String(renterId) });
+}
+
+// Import a renter's parsed credentials into the account pool, tagged with their
+// renterId. Skips any username already deployed on a bot or already in the pool
+// (so an approve never double-assigns). Returns { added, skipped }.
+async function importToPool(renter, parsed) {
+  const clean = (parsed || [])
+    .map((a) => ({
+      username: String((a && a.username) || "").trim(),
+      password: a && a.password != null ? String(a.password) : "",
+      email: a && a.email ? String(a.email).trim() : "",
+      clientSecret: a && a.clientSecret ? String(a.clientSecret).trim() : "",
+    }))
+    .filter((a) => a.username);
+  if (!clean.length) return { added: 0, skipped: 0, toInsert: [] };
+
+  const lowers = clean.map((a) => a.username.toLowerCase());
+  const [inUseRows, existRows] = await Promise.all([
+    BotAccount.find(
+      { login: { $in: clean.map((a) => a.username) } },
+      { login: 1 },
+    ).lean(),
+    AvailableAccount.find({ usernameLower: { $in: lowers } }, { usernameLower: 1 }).lean(),
+  ]);
+  const inUse = new Set(
+    inUseRows.map((x) => String(x.login || "").trim().toLowerCase()),
+  );
+  const already = new Set(existRows.map((x) => x.usernameLower));
+
+  const seen = new Set();
+  const toInsert = [];
+  let skipped = 0;
+  for (const a of clean) {
+    const lower = a.username.toLowerCase();
+    if (seen.has(lower) || inUse.has(lower) || already.has(lower)) {
+      skipped++;
+      continue;
+    }
+    seen.add(lower);
+    toInsert.push({
+      _id: new mongoose.Types.ObjectId(),
+      username: a.username,
+      usernameLower: lower,
+      password: a.password ? encrypt(a.password) : "",
+      hasPassword: !!a.password,
+      email: a.email ? encrypt(a.email) : "",
+      clientSecret: a.clientSecret || "",
+      status: "available",
+      source: "renter",
+      renterId: String(renter._id),
+    });
+  }
+  return { added: toInsert.length, skipped, toInsert };
+}
 
 // Pending-account totals per renter, for the list view.
 async function pendingByRenter() {
@@ -54,8 +111,7 @@ async function resolveAssignment(botHost, botFile, excludeRenterId) {
 }
 
 async function renterListView(r, pmap) {
-  const host = r.botFile ? hosts.resolveHost(r.botHost) : null;
-  const used = host ? await countConfigAccounts(host, r.botFile) : 0;
+  const used = await poolCount(r._id);
   const p = pmap.get(String(r._id)) || { batches: 0, accounts: 0 };
   return {
     ...sanitizeRenter(r),
@@ -304,8 +360,9 @@ router.get("/renter-submissions", requireSuperadmin, async (req, res) => {
   }
 });
 
-// APPROVE — decrypt, dedupe, and write into the renter's config (the one and
-// only path that touches a live config with renter-submitted accounts).
+// APPROVE — decrypt the batch and import it into the account pool, tagged with
+// the renter. This never touches a live bot; the operator then device-auths +
+// deploys the pool accounts with the existing account-pool tooling.
 router.post(
   "/renter-submissions/:id/approve",
   requireSuperadmin,
@@ -320,17 +377,10 @@ router.post(
           .json({ success: false, message: "Already " + sub.status });
       }
       const renter = await Renter.findById(sub.renter);
-      if (!renter || !renter.botFile) {
-        return res.status(400).json({
-          success: false,
-          message: "Renter has no bot assigned",
-        });
-      }
-      const host = hosts.resolveHost(renter.botHost);
-      if (!host) {
+      if (!renter) {
         return res
           .status(400)
-          .json({ success: false, message: "Renter's host is unknown" });
+          .json({ success: false, message: "Renter not found" });
       }
       let parsed;
       try {
@@ -340,44 +390,43 @@ router.post(
           .status(500)
           .json({ success: false, message: "Submission data is unreadable" });
       }
-      const { kept, skipped } = await dedupeAccounts(parsed);
-      // Re-check the quota at approval time (config may have grown since submit).
-      const used = await countConfigAccounts(host, renter.botFile);
-      if (used + kept.length > (Number(renter.maxAccounts) || 0)) {
+      const { added, skipped, toInsert } = await importToPool(renter, parsed);
+      // Re-check the quota at approval time (the pool may have grown since submit).
+      const used = await poolCount(renter._id);
+      if (used + added > (Number(renter.maxAccounts) || 0)) {
         return res.status(400).json({
           success: false,
           message:
             "Approving would exceed the renter's limit (" +
             renter.maxAccounts +
-            "); they have " +
+            "); they already have " +
             used +
-            " already.",
+            " in the pool.",
         });
       }
-      let result = { added: 0, total: used };
-      if (kept.length) {
+      if (toInsert.length) {
         try {
-          result = await addAccountsToConfig(host, renter.botFile, kept);
+          await AvailableAccount.insertMany(toInsert, { ordered: false });
         } catch (e) {
-          return res.status(e.unreachable ? 502 : 500).json({
-            success: false,
-            offline: !!e.unreachable,
-            message: "Could not write to the bot: " + (e.message || e),
-          });
+          // A concurrent insert of the same username can throw a dup-key error
+          // even with ordered:false; the non-conflicting docs still land.
+          if (!(e && e.code === 11000)) throw e;
         }
       }
       sub.status = "approved";
       sub.reviewedBy = req.session.admin.id;
       sub.reviewedAt = new Date();
-      sub.added = kept.length;
-      sub.accountsEnc = ""; // tokens no longer needed
+      sub.added = added;
+      sub.accountsEnc = ""; // credentials now live in the pool
       await sub.save();
       res.json({
         success: true,
-        added: kept.length,
-        skipped: skipped.length,
-        total: result.total,
-        note: "Accounts written to the config. Restart the bot to start farming them.",
+        added,
+        skipped,
+        note:
+          "Imported to the account pool (tagged to " +
+          renter.username +
+          "). Run them through device-auth, then deploy to their bot.",
       });
     } catch (err) {
       console.error("renter approve error:", err.message);

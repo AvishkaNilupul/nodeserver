@@ -59,6 +59,11 @@ const availableAccountSchema = new mongoose.Schema(
     dropCount: { type: Number, default: 0 },
 
     source: { type: String, default: "" },
+
+    // Set when this account was submitted by a renter (routes/renterRoutes.js)
+    // and approved into the pool. Scopes a renter's account list + quota, and
+    // tells the operator which renter (and their bot) an account belongs to.
+    renterId: { type: String, default: "", index: true },
   },
   { timestamps: true },
 );

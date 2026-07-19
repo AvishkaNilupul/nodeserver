@@ -8,18 +8,27 @@ const bcrypt = require("bcrypt");
 const { requireRenter } = require("../middleware/renterAuth");
 const { renterSubmitLimiter } = require("../utils/rateLimit");
 const { isExpired, setPassword, MIN_PASSWORD } = require("../utils/renters");
-const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const RenterSubmission = require("../models/RenterSubmission");
+const AvailableAccount = require("../models/AvailableAccount");
 const hosts = require("../utils/botHosts");
 const { encrypt } = require("../utils/secretBox");
-const {
-  parseAccounts,
-  countConfigAccounts,
-  containerForFile,
-} = require("./botConfigRoutes");
+const { parseAccountList } = require("../utils/parseAccountList");
+const { containerForFile } = require("./botConfigRoutes");
 
 const router = express.Router();
+
+// A renter's accounts live in the account pool tagged with their id. Raw
+// username:password credentials (what renters submit) can't farm until they're
+// device-authed, and the pool is exactly the staging area the operator's
+// device-auth + deploy tooling already works from — so approved renter accounts
+// land there, keyed by renterId.
+function renterAccountsQuery(renter) {
+  return { renterId: String(renter._id) };
+}
+function poolAccountCount(renter) {
+  return AvailableAccount.countDocuments(renterAccountsQuery(renter));
+}
 
 // Sum of accounts still waiting in pending submissions (counts against quota).
 async function pendingAccountCount(renterId) {
@@ -30,11 +39,13 @@ async function pendingAccountCount(renterId) {
   return rows.reduce((s, r) => s + (r.count || 0), 0);
 }
 
-// The renter's accounts: exactly the ones sitting in their assigned config,
-// resolved from req.renter (host + configFile), no client input.
-function accountFilter(renter) {
-  if (!renter.botFile) return null;
-  return { host: renter.botHost || "local", configFile: renter.botFile };
+// Renter-facing status for one pool account: honest about the device-auth step.
+function poolStatus(a) {
+  const s = a.lastCheckStatus;
+  if (s === "ok") return "active";
+  if (s === "token_invalid" || s === "integrity_failed" || s === "error")
+    return "issue";
+  return "pending"; // no valid token yet — awaiting activation
 }
 
 // GET /renter/me — their bot status, quota, lease.
@@ -42,10 +53,8 @@ router.get("/renter/me", requireRenter, async (req, res) => {
   try {
     const r = req.renter;
     const host = hosts.resolveHost(r.botHost);
-    let used = 0;
     let running = null; // null = unknown (host offline / not assigned)
     if (r.botFile && host) {
-      used = await countConfigAccounts(host, r.botFile);
       try {
         const states = await hosts.dockerPs(host);
         const st = states[containerForFile(r.botFile)];
@@ -54,6 +63,7 @@ router.get("/renter/me", requireRenter, async (req, res) => {
         running = null;
       }
     }
+    const used = await poolAccountCount(r);
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     res.json({
@@ -82,27 +92,25 @@ router.get("/renter/me", requireRenter, async (req, res) => {
   }
 });
 
-// GET /renter/accounts — their account list (login + scan status + drop count).
-// Never returns tokens.
+// GET /renter/accounts — their account list (login + status + drop count).
+// Sourced from the account pool by renterId. Never returns passwords or tokens.
 router.get("/renter/accounts", requireRenter, async (req, res) => {
   try {
-    const filter = accountFilter(req.renter);
-    if (!filter) return res.json({ success: true, accounts: [] });
-    const accs = await BotAccount.find(filter, {
-      login: 1,
-      lastScanStatus: 1,
+    const accs = await AvailableAccount.find(renterAccountsQuery(req.renter), {
+      username: 1,
+      lastCheckStatus: 1,
       dropCount: 1,
-      lastScanAt: 1,
+      lastCheckAt: 1,
     })
-      .sort({ login: 1 })
+      .sort({ username: 1 })
       .lean();
     res.json({
       success: true,
       accounts: accs.map((a) => ({
-        login: a.login || "",
-        status: a.lastScanStatus || "pending",
+        login: a.username || "",
+        status: poolStatus(a),
         dropCount: a.dropCount || 0,
-        lastScanAt: a.lastScanAt || null,
+        lastScanAt: a.lastCheckAt || null,
       })),
     });
   } catch (err) {
@@ -114,14 +122,14 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
 // GET /renter/drops — drops their accounts have farmed, grouped by reward.
 router.get("/renter/drops", requireRenter, async (req, res) => {
   try {
-    const filter = accountFilter(req.renter);
-    if (!filter) return res.json({ success: true, drops: [], total: 0 });
-    const ids = (await BotAccount.find(filter, { _id: 1 }).lean()).map(
-      (a) => a._id,
-    );
+    const ids = (
+      await AvailableAccount.find(renterAccountsQuery(req.renter), {
+        _id: 1,
+      }).lean()
+    ).map((a) => a._id);
     if (!ids.length) return res.json({ success: true, drops: [], total: 0 });
     const rows = await DropLog.aggregate([
-      { $match: { account: { $in: ids }, accountModel: "BotAccount" } },
+      { $match: { account: { $in: ids }, accountModel: "AvailableAccount" } },
       {
         $group: {
           _id: "$itemKey",
@@ -153,7 +161,9 @@ router.get("/renter/drops", requireRenter, async (req, res) => {
 });
 
 // POST /renter/submit — queue a batch of accounts for operator approval. Never
-// writes a live config; the parsed tokens are encrypted at rest.
+// touches a live bot; the parsed credentials are encrypted at rest. Accepts the
+// same colon-delimited format suppliers use (utils/parseAccountList):
+//   username:password  |  username:password:email  |  username:password:token
 router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, res) => {
   try {
     const r = req.renter;
@@ -163,16 +173,19 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
         message: "No bot assigned yet — contact the operator.",
       });
     }
-    const parsed = parseAccounts(req.body && req.body.accounts, []);
+    const { accounts: parsed, badLines } = parseAccountList(
+      (req.body && req.body.accounts) || "",
+    );
     if (!parsed.length) {
       return res.status(400).json({
         success: false,
-        message: "No valid accounts found. Paste tokens or login:token lines.",
+        message:
+          "No valid accounts found. Use username:password, one per line" +
+          (badLines.length ? " (" + badLines.length + " line(s) couldn't be read)." : "."),
       });
     }
-    // Quota: current config accounts + already-pending + this batch must fit.
-    const host = hosts.resolveHost(r.botHost);
-    const used = host ? await countConfigAccounts(host, r.botFile) : 0;
+    // Quota: accounts already in the pool for this renter + pending + this batch.
+    const used = await poolAccountCount(r);
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     const remaining = max - used - pending;
@@ -191,7 +204,7 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
           " pending).",
       });
     }
-    const logins = parsed.map((a) => a.Login || "").filter(Boolean).slice(0, 100);
+    const logins = parsed.map((a) => a.username || "").filter(Boolean).slice(0, 200);
     await RenterSubmission.create({
       renter: r._id,
       status: "pending",
@@ -202,10 +215,12 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
     res.json({
       success: true,
       submitted: parsed.length,
+      skipped: badLines.length,
       message:
         "Submitted " +
         parsed.length +
-        " account(s) for approval. They go live once the operator approves.",
+        " account(s) for approval." +
+        (badLines.length ? " " + badLines.length + " line(s) were skipped." : ""),
     });
   } catch (err) {
     console.error("renter/submit error:", err.message);
