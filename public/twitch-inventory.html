@@ -568,7 +568,7 @@ function renderClaimed(items) {
   const groups = groupByGame(items, it => it.game || "Other rewards");
   resultsEl.innerHTML = groups.map(([gname, its]) => `
     <div class="game-section">
-      <div class="game-header"><h2>${escapeHtml(gname)}</h2><span class="gcount">${its.length} reward${its.length > 1 ? "s" : ""}</span></div>
+      <div class="game-header"><h2>${escapeHtml(gname)}</h2><span class="gcount">${its.length} reward${its.length > 1 ? "s" : ""}</span><button class="btn-list" type="button" data-list-game="${escapeAttr(gname)}" style="margin-left:auto" title="Create a drop set / listing from this game's claimed rewards">Create listing</button></div>
       <div class="claimed-grid">${its.map(claimedCardHTML).join("")}</div>
     </div>`).join("");
 }
@@ -658,34 +658,13 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
-// "Create listing" — turn a fetched (possibly still-in-progress) campaign into a
-// DropSet without waiting for its drops to be claimed. Uses the benefit name
-// (the same field the bots log on claim) so the set's itemKey lines up and its
-// deliverable stock fills in as farming completes. The confirm() is the
-// "list it or not" step — cancel just backs out.
-resultsEl.addEventListener("click", async (e) => {
-  const btn = e.target.closest("[data-list-cid]");
-  if (!btn) return;
-  const cid = btn.getAttribute("data-list-cid");
-  const c = lastCampaigns.find(x => String(x.id) === String(cid));
-  if (!c) return;
-  const game = (c.game && (c.game.displayName || c.game.name)) || "";
-  const seen = new Set();
-  const items = [];
-  (c.timeBasedDrops || []).forEach(d => {
-    const b = (d.benefitEdges && d.benefitEdges[0] && d.benefitEdges[0].benefit) || {};
-    const name = (b.name || d.name || "").trim();
-    if (!name) return;
-    const key = (name + "|" + game).toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    // Send the raw URL (with any {width}/{height} template intact) — the server
-    // caches it locally at its own size so Gameflip gets a real cover photo.
-    items.push({ name, game, image: b.imageAssetURL || "", qty: 1 });
-  });
-  if (!items.length) { alert("This campaign has no drops to list."); return; }
-  const defName = c.name || (game ? game + " drops" : "Drop set");
-  const name = prompt(`Create a listing from "${c.name}" — ${items.length} item(s).\n\nSet name:`, defName);
+// Shared "Create listing" flow: POST item snapshots to the from-items endpoint,
+// which caches images and computes itemKeys. Raw image URLs (with any
+// {width}/{height} template) are sent as-is so the server caches them at full
+// size for a real Gameflip cover. The prompt is the "list it or not" step.
+async function createSetFromItems(defaultName, items, btn) {
+  if (!items.length) { alert("Nothing to list here."); return; }
+  const name = prompt(`Create a listing — ${items.length} item(s).\n\nSet name:`, defaultName);
   if (name === null) return; // cancelled = "not"
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "Creating…";
@@ -694,7 +673,7 @@ resultsEl.addEventListener("click", async (e) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ name: (name.trim() || defName), items }),
+      body: JSON.stringify({ name: (name.trim() || defaultName), items }),
     });
     const j = await res.json().catch(() => ({}));
     if (res.status === 401 || res.status === 403) throw new Error("Not signed in as admin — open this from the admin console.");
@@ -705,6 +684,51 @@ resultsEl.addEventListener("click", async (e) => {
   } catch (err) {
     alert("Couldn't create the set: " + err.message);
     btn.disabled = false; btn.textContent = old;
+  }
+}
+
+resultsEl.addEventListener("click", (e) => {
+  // In-progress campaign -> list its drops (benefit name = what the bots log on
+  // claim, so the itemKey lines up and stock fills in as farming completes).
+  const cBtn = e.target.closest("[data-list-cid]");
+  if (cBtn) {
+    const c = lastCampaigns.find(x => String(x.id) === String(cBtn.getAttribute("data-list-cid")));
+    if (!c) return;
+    const game = (c.game && (c.game.displayName || c.game.name)) || "";
+    const seen = new Set();
+    const items = [];
+    (c.timeBasedDrops || []).forEach(d => {
+      const b = (d.benefitEdges && d.benefitEdges[0] && d.benefitEdges[0].benefit) || {};
+      const name = (b.name || d.name || "").trim();
+      if (!name) return;
+      const key = (name + "|" + game).toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push({ name, game, image: b.imageAssetURL || "", qty: 1 });
+    });
+    if (!items.length) { alert("This campaign has no drops to list."); return; }
+    createSetFromItems(c.name || (game ? game + " drops" : "Drop set"), items, cBtn);
+    return;
+  }
+  // Claimed rewards for a game -> list all of that game's already-awarded drops.
+  const gBtn = e.target.closest("[data-list-game]");
+  if (gBtn) {
+    const gname = gBtn.getAttribute("data-list-game");
+    const seen = new Set();
+    const items = [];
+    lastClaimed
+      .filter(it => (it.game || "Other rewards") === gname)
+      .forEach(it => {
+        const name = (it.name || "").trim();
+        if (!name) return;
+        const key = (name + "|" + (it.game || "")).toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push({ name, game: it.game || "", image: it.img || "", qty: Math.max(1, it.count || 1) });
+      });
+    if (!items.length) { alert("No claimed rewards to list for this game."); return; }
+    createSetFromItems(gname === "Other rewards" ? "Claimed rewards" : gname + " claimed rewards", items, gBtn);
+    return;
   }
 });
 </script>
