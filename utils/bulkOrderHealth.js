@@ -186,7 +186,7 @@ async function reserveUnits({ order, setLike, qty, excludeIds = new Set() }) {
 
 // Verify every active unit and (optionally) auto-replace the ones we couldn't
 // confirm. Mutates `order` in place; the caller saves. Returns a report.
-async function runHealthCheck(order, { autoReplace = true, concurrency = 4 } = {}) {
+async function runHealthCheck(order, { autoReplace = false, concurrency = 4 } = {}) {
   const promisedKeys = promisedKeysOf(order);
 
   // --- Phase A: probe all currently-active units. ---

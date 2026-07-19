@@ -466,9 +466,9 @@
       }
       const HEALTH_LABEL = {
         alive: "Working",
-        token_dead: "Being replaced",
-        integrity_failed: "Being replaced",
-        missing_drops: "Being replaced",
+        token_dead: "Not working",
+        integrity_failed: "Not working",
+        missing_drops: "Not working",
         error: "Checking",
         unchecked: "Not checked",
       };
@@ -532,7 +532,7 @@
           (sm.alive || 0) + "</b> working</span>" +
           ((sm.bad || 0)
             ? '<span><span class="dot" style="background:var(--red)"></span><b>' +
-              sm.bad + "</b> replacing</span>"
+              sm.bad + "</b> not working</span>"
             : "") +
           ((sm.unchecked || 0)
             ? '<span><span class="dot" style="background:#cbd5e1"></span><b>' +
@@ -590,9 +590,6 @@
           '" style="display:none">' +
           items.map(itemRow).join("") +
           "</div>" +
-          (u.wasReplaced
-            ? '<div class="repnote">↺ Auto-replaced a faulty account for you</div>'
-            : "") +
           "</div>"
         );
       }
@@ -666,11 +663,9 @@
           const data = await res.json();
           if (!res.ok || !data.success)
             throw new Error(data.message || "Check failed");
-          const r = data.report || {};
+          const sm = (data.order && data.order.healthSummary) || {};
           toast(
-            "Checked " +
-              (r.checked || 0) +
-              (r.replaced ? " · replaced " + r.replaced : ""),
+            (sm.alive || 0) + " of " + (sm.total || 0) + " working",
           );
           render(data.order);
         } catch (e) {

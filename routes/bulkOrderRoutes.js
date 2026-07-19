@@ -369,7 +369,9 @@ router.post(
       if (!order) {
         return res.status(404).json({ success: false, message: "Order not found" });
       }
-      const report = await runHealthCheck(order, { autoReplace: true });
+      // Auto-replace is intentionally off: the check reports health but never
+      // swaps accounts (so a unit a buyer is actively using is never yanked).
+      const report = await runHealthCheck(order, { autoReplace: false });
       await order.save();
       res.json({
         success: true,
@@ -434,7 +436,7 @@ router.get("/bulk-orders/:id/export", requireSuperadmin, async (req, res) => {
     }
     const units = await credsForActiveUnits(order);
     const lines = units.map((u) =>
-      [u.login, u.password, u.email].filter((v) => v !== "").join(":"),
+      [u.login, u.password].filter((v) => v !== "").join(":"),
     );
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader(
@@ -528,7 +530,9 @@ router.post(
           .status(404)
           .json({ success: false, message: "Order not found" });
       }
-      const report = await runHealthCheck(order, { autoReplace: true });
+      // Auto-replace is intentionally off: the check reports health but never
+      // swaps accounts (so a unit a buyer is actively using is never yanked).
+      const report = await runHealthCheck(order, { autoReplace: false });
       await order.save();
       res.json({
         success: true,

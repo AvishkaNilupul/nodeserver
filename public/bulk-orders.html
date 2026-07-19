@@ -580,8 +580,8 @@
       <h1>Bulk orders</h1>
       <p class="sub">
         Reserve a batch of drop-bundle accounts for one buyer, hand them a private
-        inventory link, and health-check the set — dead accounts are auto-replaced
-        from the pool.
+        inventory link, and health-check the set to see which accounts are still
+        working.
       </p>
 
       <div class="card" style="margin-top: 18px">
@@ -897,12 +897,15 @@
             method: "POST",
           });
           const r = d.report || {};
+          const sm = (d.order && d.order.healthSummary) || {};
           toast(
             "Checked " +
               r.checked +
-              " · replaced " +
-              r.replaced +
-              (r.unreplaced ? " · " + r.unreplaced + " unreplaceable" : ""),
+              " · " +
+              (sm.alive || 0) +
+              " working · " +
+              (sm.bad || 0) +
+              " not working",
           );
           await loadOrders();
           if (CURRENT === id) renderModal(d.order);
@@ -1017,7 +1020,7 @@
           order.id +
           "',null).then(()=>reopen('" +
           order.id +
-          "'))\">Run health check &amp; auto-replace</button>" +
+          "'))\">Run health check</button>" +
           '<button class="btn ghost" onclick="revealCreds(\'' +
           order.id +
           "')\">Reveal credentials</button>" +
