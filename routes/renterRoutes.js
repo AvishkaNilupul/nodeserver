@@ -5,14 +5,13 @@
 // submissions. They can start/stop their bot and check drops; they can never
 // modify accounts, settings, or reach any other bot/renter/operator surface.
 const express = require("express");
-const bcrypt = require("bcrypt");
 
 const { requireRenter } = require("../middleware/renterAuth");
 const {
   renterSubmitLimiter,
   renterBotControlLimiter,
 } = require("../utils/rateLimit");
-const { isExpired, setPassword, MIN_PASSWORD } = require("../utils/renters");
+const { isExpired } = require("../utils/renters");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const RenterSubmission = require("../models/RenterSubmission");
@@ -321,31 +320,8 @@ router.get("/renter/submissions", requireRenter, async (req, res) => {
   }
 });
 
-// POST /renter/password — change their own password (must prove the current one).
-router.post("/renter/password", requireRenter, async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body || {};
-    const ok = await bcrypt.compare(
-      String(currentPassword || ""),
-      req.renter.passwordHash,
-    );
-    if (!ok) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Current password is incorrect" });
-    }
-    if (String(newPassword || "").length < MIN_PASSWORD) {
-      return res.status(400).json({
-        success: false,
-        message: "New password must be at least " + MIN_PASSWORD + " characters",
-      });
-    }
-    await setPassword(req.renter._id, newPassword);
-    res.json({ success: true });
-  } catch (err) {
-    console.error("renter/password error:", err.message);
-    res.status(400).json({ success: false, message: err.message });
-  }
-});
+// Renters cannot change their own password — it is set and viewable only by the
+// operator (see routes/renterAdminRoutes.js). There is deliberately no renter
+// password-change endpoint.
 
 module.exports = router;

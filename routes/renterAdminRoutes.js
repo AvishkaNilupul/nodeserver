@@ -13,6 +13,7 @@ const {
   createRenter,
   setPassword,
   sanitizeRenter,
+  revealPassword,
 } = require("../utils/renters");
 const hosts = require("../utils/botHosts");
 const { decrypt } = require("../utils/secretBox");
@@ -201,13 +202,26 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
   }
 });
 
-// RESET a renter's password.
+// RESET a renter's password (superadmin only). Renters cannot change it.
 router.post("/renters/:id/password", requireSuperadmin, async (req, res) => {
   try {
     await setPassword(req.params.id, (req.body || {}).password);
     res.json({ success: true });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
+  }
+});
+
+// REVEAL a renter's password (superadmin only). Returns "" for renters created
+// before viewable passwords existed — reset it to make it viewable.
+router.get("/renters/:id/password", requireSuperadmin, async (req, res) => {
+  try {
+    const r = await Renter.findById(req.params.id);
+    if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true, password: revealPassword(r) });
+  } catch (err) {
+    console.error("renter reveal password error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 

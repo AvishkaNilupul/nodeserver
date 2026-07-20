@@ -275,6 +275,9 @@
             (r.status==="suspended"?'<button class="btn sm" onclick="setSusp(\''+r.id+'\',false)">Unsuspend</button>':'<button class="btn warn sm" onclick="setSusp(\''+r.id+'\',true)">Suspend + stop bot</button>')+
             '<button class="btn danger sm" onclick="delRenter(\''+r.id+'\')">Delete renter</button>'+
           '</div>'+
+          '<div class="credbox" style="margin-top:12px">Login <code>'+esc(r.username)+'</code> &nbsp;·&nbsp; Password <code id="pwView">••••••••</code> '+
+            '<button class="btn ghost sm" style="margin-left:8px" onclick="showPw(\''+r.id+'\')">Show</button> '+
+            '<button class="btn ghost sm" onclick="copyLogin(\''+esc(r.username)+'\',\''+r.id+'\')">Copy login</button></div>'+
           '<h2 style="font-size:14px;margin:18px 0 8px">Submissions</h2>'+
           (subs.length? '<div class="rows">'+subs.map(s=>'<div class="approve-item"><div><b>'+s.count+'</b> account(s) · <span class="muted">'+new Date(s.createdAt).toLocaleString()+'</span>'+(s.status==="approved"?' · '+s.added+' added':'')+(s.status==="rejected"&&s.rejectReason?' · '+esc(s.rejectReason):'')+'</div><span class="badge '+(s.status==="approved"?"active":s.status==="rejected"?"suspended":"wait")+'">'+s.status+'</span></div>').join("")+'</div>' : '<div class="muted">No submissions.</div>');
         renderBotSelect($("eBot"), botCur);
@@ -288,7 +291,16 @@
         catch(e){ toast(e.message); }
       };
       window.resetPw = async (id)=>{ const password=prompt("New password (min 8 chars):"); if(!password) return;
-        try{ await api("/renters/"+id+"/password",{method:"POST",body:JSON.stringify({password})}); toast("Password reset"); }catch(e){ toast(e.message); } };
+        try{ await api("/renters/"+id+"/password",{method:"POST",body:JSON.stringify({password})}); toast("Password reset"); const el=$("pwView"); if(el) el.textContent=password; }catch(e){ toast(e.message); } };
+      window.showPw = async (id)=>{
+        try{ const d = await api("/renters/"+id+"/password"); const el=$("pwView");
+          el.textContent = d.password ? d.password : "(not set — reset it to view)"; }
+        catch(e){ toast(e.message); } };
+      window.copyLogin = async (username, id)=>{
+        try{ const d = await api("/renters/"+id+"/password");
+          const line = username + (d.password ? ":"+d.password : "");
+          await navigator.clipboard.writeText(line); toast("Login copied"); }
+        catch(e){ toast(e.message); } };
       window.delRenter = async (id)=>{ if(!confirm("Delete this renter? Their bot config and accounts stay in place.")) return;
         try{ await api("/renters/"+id,{method:"DELETE"}); toast("Deleted"); closeModal(); await Promise.all([loadRenters(),loadBots()]); }catch(e){ toast(e.message); } };
 

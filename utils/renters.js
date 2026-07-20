@@ -4,6 +4,7 @@
 const bcrypt = require("bcrypt");
 
 const Renter = require("../models/Renter");
+const { encrypt, decrypt } = require("./secretBox");
 
 const BCRYPT_ROUNDS = 10;
 const MIN_PASSWORD = 8;
@@ -87,6 +88,7 @@ async function createRenter({
     username,
     usernameLower,
     passwordHash,
+    passwordEnc: encrypt(password),
     displayName: String(displayName || "").slice(0, 80),
     botHost: String(botHost || ""),
     botFile: String(botFile || ""),
@@ -115,6 +117,8 @@ async function authenticate(username, password) {
   return renter && ok ? renter : null;
 }
 
+// Set (or reset) a renter's password — superadmin only, callers enforce that.
+// Updates both the bcrypt hash (login) and the encrypted copy (operator view).
 async function setPassword(id, password) {
   password = String(password || "");
   if (password.length < MIN_PASSWORD) {
@@ -123,11 +127,22 @@ async function setPassword(id, password) {
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   const renter = await Renter.findByIdAndUpdate(
     id,
-    { $set: { passwordHash } },
+    { $set: { passwordHash, passwordEnc: encrypt(password) } },
     { new: true },
   );
   if (!renter) throw new Error("Renter not found");
   return renter;
+}
+
+// Decrypt a renter's stored password for the operator to view. Returns "" for a
+// renter created before viewable passwords existed (reset it to make it viewable).
+function revealPassword(renter) {
+  if (!renter || !renter.passwordEnc) return "";
+  try {
+    return decrypt(renter.passwordEnc) || "";
+  } catch {
+    return "";
+  }
 }
 
 module.exports = {
@@ -139,4 +154,5 @@ module.exports = {
   createRenter,
   authenticate,
   setPassword,
+  revealPassword,
 };

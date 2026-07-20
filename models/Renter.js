@@ -14,7 +14,13 @@ const renterSchema = new mongoose.Schema(
     username: { type: String, required: true },
     // Lowercased mirror for case-insensitive uniqueness/lookup.
     usernameLower: { type: String, required: true, unique: true, index: true },
+    // bcrypt hash used for login verification.
     passwordHash: { type: String, required: true },
+    // The same password encrypted (secretBox / AES-GCM) so the operator can view
+    // it. Renters cannot change their own password — only a superadmin sets it,
+    // and only a superadmin can reveal it. Stored reversibly on purpose; matches
+    // how the app already keeps account passwords/tokens recoverable.
+    passwordEnc: { type: String, default: "" },
     displayName: { type: String, default: "" },
 
     // active = may log in (subject to lease); suspended = blocked + bot stopped.
