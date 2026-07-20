@@ -271,8 +271,47 @@ function buildDrops(inv) {
   return out;
 }
 
+// Parse the LIVE "farming now" view: every in-progress time-based drop with its
+// watch-time progress (currentMinutesWatched / requiredMinutesWatched). Unlike
+// buildDrops (which only records already-earned rewards), this is what the
+// account is actively working toward right now — the same thing the operator's
+// twitch-inventory.html progress bars show. Sorted so the closest-to-done,
+// still-unclaimed drops come first.
+function buildInProgress(inv) {
+  const out = [];
+  (inv.dropCampaignsInProgress || []).forEach((c) => {
+    const connected = !!(c.self && c.self.isAccountConnected);
+    (c.timeBasedDrops || []).forEach((d) => {
+      const self = d.self || {};
+      const edge = (d.benefitEdges && d.benefitEdges[0]) || {};
+      const b = edge.benefit || {};
+      const bg = b.game || c.game || null;
+      const cur = self.currentMinutesWatched || 0;
+      const req = d.requiredMinutesWatched || 0;
+      const claimed = !!self.isClaimed;
+      out.push({
+        name: b.name || d.name || "Reward",
+        game: bg ? bg.displayName || bg.name : "",
+        campaign: c.name || "",
+        imageURL: b.imageAssetURL || "",
+        current: cur,
+        required: req,
+        percent: claimed
+          ? 100
+          : req > 0
+            ? Math.min(100, Math.round((cur / req) * 100))
+            : 0,
+        claimed,
+        connected,
+      });
+    });
+  });
+  out.sort((a, b) => a.claimed - b.claimed || b.percent - a.percent);
+  return out;
+}
+
 // Fetch + parse one account's inventory.
-// Returns { twitchId, login, drops: [...] }.
+// Returns { twitchId, login, drops: [...], inProgress: [...] }.
 // The optional second argument is either a client-id string (legacy) or an
 // options object { clientId, host } — pass `host` to make the request from a
 // remote scan host instead of this server (see gqlRequest).
@@ -330,12 +369,18 @@ async function fetchInventory(token, arg) {
   }
   const inv = user.inventory;
   if (!inv) {
-    return { twitchId: user.id || "", login: user.login || "", drops: [] };
+    return {
+      twitchId: user.id || "",
+      login: user.login || "",
+      drops: [],
+      inProgress: [],
+    };
   }
   return {
     twitchId: user.id || "",
     login: user.login || "",
     drops: buildDrops(inv),
+    inProgress: buildInProgress(inv),
   };
 }
 

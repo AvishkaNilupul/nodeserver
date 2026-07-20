@@ -9,6 +9,8 @@ const express = require("express");
 const { requireSuperadmin } = require("../middleware/auth");
 const Renter = require("../models/Renter");
 const RenterSubmission = require("../models/RenterSubmission");
+const RenterAccount = require("../models/RenterAccount");
+const RenterDrop = require("../models/RenterDrop");
 const {
   createRenter,
   setPassword,
@@ -18,7 +20,6 @@ const {
 const hosts = require("../utils/botHosts");
 const { decrypt } = require("../utils/secretBox");
 const {
-  countConfigAccounts,
   startConfigContainer,
   stopConfigContainer,
   restartConfigContainer,
@@ -26,7 +27,8 @@ const {
   validFile,
   parseAccounts,
   dedupeAccounts,
-  addAccountsToConfig,
+  addRenterAccountsToConfig,
+  provisionEmptyConfig,
   getConfigGames,
 } = require("./botConfigRoutes");
 
@@ -63,8 +65,7 @@ async function resolveAssignment(botHost, botFile, excludeRenterId) {
 }
 
 async function renterListView(r, pmap) {
-  const host = r.botFile ? hosts.resolveHost(r.botHost) : null;
-  const used = host ? await countConfigAccounts(host, r.botFile) : 0;
+  const used = await RenterAccount.countDocuments({ renter: r._id });
   const p = pmap.get(String(r._id)) || { batches: 0, accounts: 0 };
   return {
     ...sanitizeRenter(r),
@@ -277,15 +278,70 @@ router.post("/renters/:id/unsuspend", requireSuperadmin, async (req, res) => {
   }
 });
 
+// CREATE a fresh, empty bot for a renter — provisioned entirely within the
+// Renting section (not borrowed from the operator's Bots page). Allocates the
+// next config slot on the chosen host, clones a template's settings with NO
+// accounts, and registers the compose service. The bot is left stopped; it
+// starts on the first approved submission (an empty bot must never be started —
+// see startConfigContainer's no-accounts guard). One bot per renter: refuses if
+// they already have one assigned.
+router.post("/renters/:id/create-bot", requireSuperadmin, async (req, res) => {
+  try {
+    const r = await Renter.findById(req.params.id);
+    if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    if (r.botFile) {
+      return res.status(409).json({
+        success: false,
+        message: "This renter already has a bot (" + r.botFile + ").",
+      });
+    }
+    const host = hosts.resolveHost((req.body && req.body.host) || "local");
+    if (!host) {
+      return res.status(400).json({ success: false, message: "Unknown host" });
+    }
+    let slot;
+    try {
+      slot = await provisionEmptyConfig(host);
+    } catch (e) {
+      return res.status(e.unreachable ? 502 : 500).json({
+        success: false,
+        offline: !!e.unreachable,
+        message: e.message || "Could not create the bot",
+      });
+    }
+    r.botHost = host.id;
+    r.botFile = slot.file;
+    r.botStoppedAt = null;
+    await r.save();
+    res.status(201).json({
+      success: true,
+      renter: sanitizeRenter(r),
+      bot: {
+        assigned: true,
+        running: false,
+        accounts: 0,
+        hostLabel: host.label,
+        file: slot.file,
+      },
+    });
+  } catch (err) {
+    console.error("renter create-bot error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // ------------------------------------------------------------------
 // Renter bot — status + control from the Renting section (so the operator
 // manages a renter's bot here, not mixed into their own Bots page).
 // ------------------------------------------------------------------
 async function renterBotStatus(renter) {
-  if (!renter.botFile) return { assigned: false, running: null, accounts: 0 };
+  // Account count is the renter's own inventory (correct even if the host is
+  // offline), independent of the live config on the host.
+  const accounts = await RenterAccount.countDocuments({ renter: renter._id });
+  if (!renter.botFile) return { assigned: false, running: null, accounts };
   const host = hosts.resolveHost(renter.botHost);
-  if (!host) return { assigned: true, running: null, accounts: 0, host: renter.botHost };
-  const accounts = await countConfigAccounts(host, renter.botFile);
+  if (!host)
+    return { assigned: true, running: null, accounts, host: renter.botHost };
   let running = null;
   try {
     const states = await hosts.dockerPs(host);
@@ -368,7 +424,13 @@ router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
   try {
     const r = await Renter.findByIdAndDelete(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
-    await RenterSubmission.deleteMany({ renter: r._id });
+    // Tear down the renter's standalone inventory too (their tenant boundary).
+    // The bot config file itself is left on the host for the operator to reuse.
+    await Promise.all([
+      RenterSubmission.deleteMany({ renter: r._id }),
+      RenterAccount.deleteMany({ renter: r._id }),
+      RenterDrop.deleteMany({ renter: r._id }),
+    ]);
     res.json({ success: true });
   } catch (err) {
     console.error("renter delete error:", err.message);
@@ -501,21 +563,26 @@ router.post(
         const { kept, skipped: sk } = await dedupeAccounts(parsed);
         skipped = sk.length;
         if (sk.length) skipReason = sk[0].reason || "";
-        const used = await countConfigAccounts(host, renter.botFile);
+        const used = await RenterAccount.countDocuments({ renter: renter._id });
         if (used + kept.length > (Number(renter.maxAccounts) || 0)) {
           return res.status(400).json({
             success: false,
             message:
               "That would exceed the renter's limit (" +
               renter.maxAccounts +
-              "); their bot already has " +
+              "); their inventory already has " +
               used +
               ".",
           });
         }
         if (kept.length) {
           try {
-            const r = await addAccountsToConfig(host, renter.botFile, kept);
+            const r = await addRenterAccountsToConfig(
+              host,
+              renter.botFile,
+              kept,
+              renter._id,
+            );
             added = r.added;
           } catch (e) {
             return res.status(e.unreachable ? 502 : 500).json({

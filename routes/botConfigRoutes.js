@@ -5,6 +5,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const Renter = require("../models/Renter");
+const RenterAccount = require("../models/RenterAccount");
 const hosts = require("../utils/botHosts");
 
 const router = express.Router();
@@ -219,14 +220,29 @@ async function dedupeAccounts(accounts) {
   // the bad-tokens purge, or un-claimed when its bot was deleted (see the
   // DELETE /bot-configs/file/:file route) — so only a non-empty configFile
   // counts as "still assigned to a bot," not merely "known to the index."
-  const existing = await BotAccount.find(
-    {
-      clientSecret: { $in: unique.map((a) => a.ClientSecret) },
-      configFile: { $nin: ["", null] },
-    },
-    { clientSecret: 1, host: 1, configFile: 1, login: 1 },
-  ).lean();
+  const secrets = unique.map((a) => a.ClientSecret);
+  // Cross-check BOTH inventories: an operator paste must not grab a token that
+  // is already live on a renter's bot (RenterAccount), and vice-versa the
+  // renter approve path (which calls this same helper) must not grab one that
+  // is already on an operator bot — so no Twitch account is ever double-farmed.
+  const [existing, existingRenter] = await Promise.all([
+    BotAccount.find(
+      { clientSecret: { $in: secrets }, configFile: { $nin: ["", null] } },
+      { clientSecret: 1, host: 1, configFile: 1, login: 1 },
+    ).lean(),
+    RenterAccount.find(
+      { clientSecret: { $in: secrets }, configFile: { $nin: ["", null] } },
+      { clientSecret: 1, host: 1, configFile: 1, login: 1 },
+    ).lean(),
+  ]);
   const bySecret = new Map(existing.map((e) => [e.clientSecret, e]));
+  // BotAccount matches win the "assigned to" message if a token somehow appears
+  // in both; either way the token is blocked.
+  for (const e of existingRenter) {
+    if (!bySecret.has(e.clientSecret)) {
+      bySecret.set(e.clientSecret, { ...e, rented: true });
+    }
+  }
 
   const kept = [];
   for (const a of unique) {
@@ -240,7 +256,8 @@ async function dedupeAccounts(accounts) {
           " in " +
           ex.configFile +
           " on " +
-          ex.host,
+          ex.host +
+          (ex.rented ? " (a rented bot)" : ""),
       });
     } else {
       kept.push(a);
@@ -1508,6 +1525,55 @@ async function addAccountsToConfig(host, file, accounts) {
   return { added: accounts.length, total };
 }
 
+// Renter counterpart of upsertBotAccounts: keep the renter's OWN account
+// inventory (RenterAccount) in sync the moment tokens are written to their bot
+// config — never touching BotAccount, so renter tokens stay out of the
+// operator's cross-host index and the Drops Archive. Stamped with the owning
+// renter so the inventory is scoped to them.
+async function upsertRenterAccounts(accounts, host, file, renterId) {
+  if (!accounts.length) return;
+  const ops = accounts.map((u) => ({
+    updateOne: {
+      filter: { clientSecret: u.ClientSecret },
+      update: {
+        $set: {
+          renter: renterId,
+          login: u.Login || "",
+          twitchId: u.Id == null ? "" : String(u.Id),
+          uniqueId: u.UniqueId || "",
+          configFile: file,
+          container: containerForFile(file),
+          host: host.id,
+          enabled: u.Enabled !== false,
+        },
+      },
+      upsert: true,
+    },
+  }));
+  await RenterAccount.bulkWrite(ops, { ordered: false }).catch(() => {});
+}
+
+// Renter counterpart of addAccountsToConfig: append already-parsed TwitchUsers
+// entries to a renter's bot config (same read → push → atomic write path the
+// operator uses) but sync the RenterAccount inventory instead of BotAccount.
+// Callers should dedupe first (dedupeAccounts, which cross-checks both indexes).
+async function addRenterAccountsToConfig(host, file, accounts, renterId) {
+  if (!validFile(file)) throw new Error("Invalid config file");
+  if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
+  const data = JSON.parse(await hosts.readFile(host, file));
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
+    data.TwitchSettings.TwitchUsers = [];
+  }
+  data.TwitchSettings.TwitchUsers.push(...accounts);
+  const total = data.TwitchSettings.TwitchUsers.length;
+  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+  await upsertRenterAccounts(accounts, host, file, renterId);
+  return { added: accounts.length, total };
+}
+
 // How many accounts a config currently holds (for renter quota accounting).
 // Returns 0 for a missing/unreadable/absent config rather than throwing.
 async function countConfigAccounts(host, file) {
@@ -1557,6 +1623,48 @@ async function setConfigGames(host, file, games) {
       if (u && typeof u === "object") u.FavouriteGames = list.slice();
     }
   }
+  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+  return list;
+}
+
+// Read ONE account's FavouriteGames from a config, matched by ClientSecret.
+// Returns [] for a missing/unreadable config or an account not found. Used by
+// the renter's per-account "games to farm" control.
+async function getAccountGames(host, file, clientSecret) {
+  if (!validFile(file)) return [];
+  try {
+    const data = JSON.parse(await hosts.readFile(host, file));
+    const users =
+      (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
+    const u = users.find((x) => x && x.ClientSecret === clientSecret);
+    return u && Array.isArray(u.FavouriteGames)
+      ? u.FavouriteGames.filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+// Set ONE account's FavouriteGames in a config, matched by ClientSecret (so a
+// renter can tune a single account without touching the others). When a
+// non-empty list is given, OnlyFavouriteGames is switched on so the favourites
+// are actually honoured. Returns the saved list, or null when the account
+// wasn't found in the config.
+async function setAccountGames(host, file, clientSecret, games) {
+  if (!validFile(file)) throw new Error("Invalid config file");
+  const list = parseGamesList(games)
+    .slice(0, 50)
+    .map((g) => g.slice(0, 100));
+  const data = JSON.parse(await hosts.readFile(host, file));
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  const users = data.TwitchSettings.TwitchUsers;
+  if (!Array.isArray(users)) return null;
+  const u = users.find((x) => x && x.ClientSecret === clientSecret);
+  if (!u) return null;
+  u.FavouriteGames = list.slice();
+  if (list.length) data.TwitchSettings.OnlyFavouriteGames = true;
   await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
   return list;
 }
@@ -1630,6 +1738,69 @@ async function startConfigContainer(host, file) {
   return { started: true, container, output };
 }
 
+// Provision a brand-new EMPTY bot config slot on a host for the renter system:
+// allocate the next slot, clone a template's settings (WITHOUT its accounts),
+// and register a compose service — but do NOT start it (a renter bot starts on
+// approval, once it actually has accounts). Returns { host, file, container }.
+// Mirrors the operator create route's core so renter bots are provisioned the
+// exact same way; kept as a shared helper so routes/renterAdminRoutes.js can
+// create bots from within the Renting section instead of borrowing an operator
+// config. Throws on failure (host offline, no compose file, no template).
+async function provisionEmptyConfig(host) {
+  try {
+    require("js-yaml");
+  } catch {
+    throw new Error(
+      "js-yaml is not installed. Run `npm install` in the nodeserver directory and restart.",
+    );
+  }
+  const files = await hosts.readdir(host);
+  const composeFile = await hosts.composeName(host);
+  if (!composeFile && host.runtime !== "native") {
+    throw new Error("No docker compose file found in " + host.dir);
+  }
+  const slot = findNextSlot(files);
+  if (await hosts.exists(host, slot.file)) {
+    throw new Error("Target config already exists: " + slot.file);
+  }
+  const templateName = pickDefaultTemplate(files);
+  if (!templateName) {
+    throw new Error("No template config available to clone from");
+  }
+  let data;
+  try {
+    data = JSON.parse(await hosts.readFile(host, templateName));
+  } catch {
+    throw new Error("Template config is not valid JSON");
+  }
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  data.TwitchSettings.TwitchUsers = [];
+  if (data.KickSettings && typeof data.KickSettings === "object") {
+    data.KickSettings.KickUsers = [];
+  }
+  await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
+  try {
+    if (composeFile) {
+      const raw = await hosts.composeRead(host, composeFile);
+      const edited = addServiceToComposeText(raw, slot.container, slot.file);
+      if (!edited.exists) {
+        await hosts.composeWrite(host, composeFile, edited.text);
+      }
+    }
+  } catch (e) {
+    // Roll back the config so a failed compose edit doesn't orphan a config.
+    try {
+      await hosts.rename(host, slot.file, slot.file + ".rollback-" + Date.now());
+    } catch {
+      /* ignore */
+    }
+    throw new Error("Failed to update compose file: " + e.message);
+  }
+  return { host: host.id, file: slot.file, container: slot.container };
+}
+
 module.exports = router;
 module.exports.parseAccounts = parseAccounts;
 module.exports.parseGamesList = parseGamesList;
@@ -1637,9 +1808,13 @@ module.exports.dedupeAccounts = dedupeAccounts;
 module.exports.validFile = validFile;
 module.exports.containerForFile = containerForFile;
 module.exports.addAccountsToConfig = addAccountsToConfig;
+module.exports.addRenterAccountsToConfig = addRenterAccountsToConfig;
+module.exports.provisionEmptyConfig = provisionEmptyConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
 module.exports.getConfigGames = getConfigGames;
 module.exports.setConfigGames = setConfigGames;
+module.exports.getAccountGames = getAccountGames;
+module.exports.setAccountGames = setAccountGames;
 module.exports.stopConfigContainer = stopConfigContainer;
 module.exports.startConfigContainer = startConfigContainer;
 module.exports.restartConfigContainer = restartConfigContainer;

@@ -49,6 +49,7 @@ const settingsRoutes = require("./routes/settingsRoutes");
 const japaneseRoutes = require("./routes/japaneseRoutes");
 const japaneseLearnRoutes = require("./routes/japaneseLearnRoutes");
 const dropScanner = require("./utils/dropScanner");
+const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
@@ -547,6 +548,9 @@ mongoose
     // Begin the background drop-archive scanner (gentle, one account at a
     // time). Safe no-op until accounts are synced from the bot configs.
     dropScanner.start();
+    // The standalone renter drops scanner (RenterAccount -> RenterDrop). Kept
+    // separate from the operator archive so renter drops are never mixed in.
+    renterDropScanner.start();
     // Watches running bot containers for a silent stall (Twitch changed
     // something the bot can't handle) and pings Telegram — see
     // utils/botHealthMonitor.js.

@@ -5,37 +5,41 @@
 // submissions. They can start/stop their bot and check drops; they can never
 // modify accounts, settings, or reach any other bot/renter/operator surface.
 const express = require("express");
+const mongoose = require("mongoose");
 
 const { requireRenter } = require("../middleware/renterAuth");
 const {
   renterSubmitLimiter,
   renterBotControlLimiter,
+  renterLiveLimiter,
 } = require("../utils/rateLimit");
 const { isExpired } = require("../utils/renters");
-const BotAccount = require("../models/BotAccount");
-const DropLog = require("../models/DropLog");
+const RenterAccount = require("../models/RenterAccount");
+const RenterDrop = require("../models/RenterDrop");
 const RenterSubmission = require("../models/RenterSubmission");
 const hosts = require("../utils/botHosts");
 const { encrypt } = require("../utils/secretBox");
 const { parseAccountList } = require("../utils/parseAccountList");
+const { fetchInventory } = require("../utils/twitchInventory");
 const {
   containerForFile,
-  countConfigAccounts,
   startConfigContainer,
   stopConfigContainer,
   getConfigGames,
   setConfigGames,
+  getAccountGames,
+  setAccountGames,
   restartConfigContainer,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
 
-// The renter's accounts are the ones the operator deployed onto their dedicated
-// bot config. Scope is built from req.renter (host + configFile) — never client
-// input — so a renter can only ever see their own bot's accounts.
+// The renter's accounts are their OWN standalone inventory (RenterAccount),
+// scoped by the renter's id from req.renter — never client input — so a renter
+// can only ever see their own accounts. Their tokens live in RenterAccount, not
+// the operator's BotAccount index, so they're isolated from the Drops Archive.
 function accountFilter(renter) {
-  if (!renter.botFile) return null;
-  return { host: renter.botHost || "local", configFile: renter.botFile };
+  return { renter: renter._id };
 }
 
 // Normalise a BotAccount scan status into a renter-friendly bucket.
@@ -69,11 +73,12 @@ router.get("/renter/me", requireRenter, async (req, res) => {
   try {
     const r = req.renter;
     const host = hosts.resolveHost(r.botHost);
-    let used = 0;
+    // Quota "used" comes from the renter's OWN inventory, so it's correct even
+    // when the bot host is offline.
+    const used = await RenterAccount.countDocuments({ renter: r._id });
     let running = null; // null = unknown (host offline / not assigned)
     let games = [];
     if (r.botFile && host) {
-      used = await countConfigAccounts(host, r.botFile);
       games = await getConfigGames(host, r.botFile);
       try {
         const states = await hosts.dockerPs(host);
@@ -117,8 +122,7 @@ router.get("/renter/me", requireRenter, async (req, res) => {
 router.get("/renter/accounts", requireRenter, async (req, res) => {
   try {
     const filter = accountFilter(req.renter);
-    if (!filter) return res.json({ success: true, accounts: [] });
-    const accs = await BotAccount.find(filter, {
+    const accs = await RenterAccount.find(filter, {
       login: 1,
       lastScanStatus: 1,
       dropCount: 1,
@@ -129,6 +133,7 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
     res.json({
       success: true,
       accounts: accs.map((a) => ({
+        id: String(a._id),
         login: a.login || "",
         status: botStatus(a.lastScanStatus),
         dropCount: a.dropCount || 0,
@@ -144,14 +149,8 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
 // GET /renter/drops — drops their bot's accounts have farmed, grouped by reward.
 router.get("/renter/drops", requireRenter, async (req, res) => {
   try {
-    const filter = accountFilter(req.renter);
-    if (!filter) return res.json({ success: true, drops: [], total: 0 });
-    const ids = (await BotAccount.find(filter, { _id: 1 }).lean()).map(
-      (a) => a._id,
-    );
-    if (!ids.length) return res.json({ success: true, drops: [], total: 0 });
-    const rows = await DropLog.aggregate([
-      { $match: { account: { $in: ids }, accountModel: "BotAccount" } },
+    const rows = await RenterDrop.aggregate([
+      { $match: { renter: req.renter._id } },
       {
         $group: {
           _id: "$itemKey",
@@ -181,6 +180,154 @@ router.get("/renter/drops", requireRenter, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// Resolve one of the renter's OWN accounts by id (scoped to req.renter). Returns
+// the full doc (clientSecret included) or null — never trusts a client id to
+// reach another renter's account.
+async function ownAccount(renter, id) {
+  if (!mongoose.isValidObjectId(id)) return null;
+  return RenterAccount.findOne({ _id: id, renter: renter._id });
+}
+
+// GET /renter/accounts/:id/live — the live "farming now" view for ONE of the
+// renter's accounts: current in-progress drops with watch-time progress, fetched
+// live from Twitch server-side. The renter never sees the token — the server
+// holds it and returns only the progress. Rate-limited (hits Twitch's API).
+router.get(
+  "/renter/accounts/:id/live",
+  renterLiveLimiter,
+  requireRenter,
+  async (req, res) => {
+    try {
+      const acc = await ownAccount(req.renter, req.params.id);
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      let inv;
+      try {
+        inv = await fetchInventory(acc.clientSecret, { host: null });
+      } catch (e) {
+        if (e.code === "token_invalid") {
+          return res.status(400).json({
+            success: false,
+            message: "This account's Twitch token is no longer valid.",
+          });
+        }
+        return res.status(502).json({
+          success: false,
+          message: "Couldn't reach Twitch right now — try again in a moment.",
+        });
+      }
+      res.json({
+        success: true,
+        login: inv.login || acc.login || "",
+        inProgress: inv.inProgress || [],
+        owned: (inv.drops || []).length,
+      });
+    } catch (err) {
+      console.error("renter live error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// GET /renter/accounts/:id/games — that one account's current farming games.
+router.get(
+  "/renter/accounts/:id/games",
+  requireRenter,
+  async (req, res) => {
+    try {
+      const acc = await ownAccount(req.renter, req.params.id);
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      const host = hosts.resolveHost(req.renter.botHost);
+      if (!host || !req.renter.botFile) {
+        return res.json({ success: true, games: [] });
+      }
+      const games = await getAccountGames(host, req.renter.botFile, acc.clientSecret);
+      res.json({ success: true, games, login: acc.login || "" });
+    } catch (err) {
+      console.error("renter account games get error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// POST /renter/accounts/:id/games — set the games for JUST this one account
+// (not the whole bot). Scoped to the renter's own account + bot. If the bot is
+// running it's restarted so the change takes effect. Rate-limited (writes config
+// + SSH), same as the bot-wide games control.
+router.post(
+  "/renter/accounts/:id/games",
+  renterBotControlLimiter,
+  requireRenter,
+  async (req, res) => {
+    try {
+      const acc = await ownAccount(req.renter, req.params.id);
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      const bot = ownBot(req.renter);
+      if (!bot) {
+        return res
+          .status(400)
+          .json({ success: false, message: "No bot assigned yet." });
+      }
+      let games;
+      try {
+        games = await setAccountGames(
+          bot.host,
+          bot.file,
+          acc.clientSecret,
+          req.body && req.body.games,
+        );
+      } catch (e) {
+        if (e.unreachable) {
+          return res.status(502).json({
+            success: false,
+            message: "The bot host is offline right now.",
+          });
+        }
+        throw e;
+      }
+      if (games === null) {
+        return res.status(404).json({
+          success: false,
+          message: "This account isn't on the bot config yet.",
+        });
+      }
+      let restarted = false;
+      try {
+        const states = await hosts.dockerPs(bot.host);
+        const st = states[containerForFile(bot.file)];
+        if (st && /^running/i.test(st.state || "")) {
+          await restartConfigContainer(bot.host, bot.file);
+          restarted = true;
+        }
+      } catch {
+        /* best effort — the change is saved regardless */
+      }
+      res.json({
+        success: true,
+        games,
+        restarted,
+        message: restarted
+          ? "Saved — your bot is restarting to apply it."
+          : "Saved. Start your bot to apply it.",
+      });
+    } catch (err) {
+      console.error("renter account games set error:", err.message);
+      res.status(500).json({ success: false, message: "Could not update games." });
+    }
+  },
+);
 
 // POST /renter/bot/start | /renter/bot/stop — control ONLY their own bot. The
 // container is derived from req.renter's assigned config (never from the
@@ -294,9 +441,9 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
           (badLines.length ? " (" + badLines.length + " line(s) couldn't be read)." : "."),
       });
     }
-    // Quota: accounts already on their bot + already-pending + this batch must fit.
-    const host = hosts.resolveHost(r.botHost);
-    const used = host ? await countConfigAccounts(host, r.botFile) : 0;
+    // Quota: accounts already in their inventory + already-pending + this batch
+    // must fit. Counted from RenterAccount (their own inventory), not the config.
+    const used = await RenterAccount.countDocuments({ renter: r._id });
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     const remaining = max - used - pending;

@@ -88,6 +88,15 @@ const renterBotControlLimiter = jsonLimiter({
   message: "Too many start/stop actions. Please wait a moment.",
 });
 
+// Renter "watch live farming" — each call hits Twitch's API for one account, so
+// cap how often the dashboard can poll it (still generous enough to refresh a
+// couple of accounts every few seconds).
+const renterLiveLimiter = jsonLimiter({
+  windowMs: 60 * 1000,
+  limit: 40,
+  message: "Checking too fast — give it a few seconds.",
+});
+
 module.exports = {
   globalLimiter,
   loginLimiter,
@@ -98,4 +107,5 @@ module.exports = {
   portalCheckLimiter,
   renterSubmitLimiter,
   renterBotControlLimiter,
+  renterLiveLimiter,
 };

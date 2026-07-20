@@ -113,14 +113,14 @@
 
     <main class="page">
       <h1>Renters</h1>
-      <p class="sub">Rent a bot slot to an outside seller: assign one bot, cap how many accounts they can add, and set an access period. Their account submissions land in the approval queue below — nothing goes live until you approve it.</p>
+      <p class="sub">Rent a standalone bot to an outside seller: create their own bot, cap how many accounts they can add, and set an access period. Their accounts and drops are a separate inventory — never mixed into your Drops Archive. Account submissions land in the approval queue below; nothing goes live until you approve it.</p>
 
       <div class="card" style="margin-top:18px">
         <h2>Add a renter</h2>
         <div class="grid3" style="margin-top:12px">
           <div><label class="fld">Username</label><input id="cU" autocapitalize="none" spellcheck="false" /></div>
           <div><label class="fld">Password</label><input id="cP" /></div>
-          <div><label class="fld">Bot slot</label><select id="cBot"></select></div>
+          <div style="display:flex;align-items:flex-end"><div class="muted" style="font-size:12px;line-height:1.4">Create the renter, then add their bot from <b>Manage → Create bot</b>.</div></div>
         </div>
         <div class="grid4" style="margin-top:12px">
           <div><label class="fld">Account limit</label><input id="cMax" type="number" min="0" value="50" /></div>
@@ -147,7 +147,7 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
-      let BOTS = [], CURRENT = null;
+      let HOSTS = [], CURRENT = null;
       function toast(m){ const t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"), Math.min(8000, 2200 + String(m).length*45)); }
       function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
       async function api(path, opts){
@@ -160,36 +160,30 @@
       function remaining(end){ if(!end) return "no expiry"; const ms=new Date(end)-Date.now(); if(ms<=0) return "expired"; const dd=Math.floor(ms/864e5); return dd>=1?dd+"d left":Math.max(1,Math.floor(ms/36e5))+"h left"; }
       function statusBadge(r){ if(r.status==="suspended") return '<span class="badge suspended">Suspended</span>'; if(r.expired) return '<span class="badge expired">Expired</span>'; return '<span class="badge active">Active</span>'; }
 
-      // ---- bots picker ----
-      async function loadBots(){
-        try { const d = await api("/renters/bots"); BOTS = d.bots || []; } catch(e){ BOTS = []; }
-        renderBotSelect($("cBot"), "");
+      // ---- hosts picker (for provisioning a renter's own bot) ----
+      async function loadHosts(){
+        try { const d = await api("/bot-configs/hosts"); HOSTS = d.hosts || []; } catch(e){ HOSTS = []; }
       }
-      function renderBotSelect(sel, current){
-        const opts = ['<option value="">— pick a bot —</option>'];
-        for (const b of BOTS){
-          const val = b.host + "|" + b.file;
-          const taken = b.assignedTo && val !== current;
-          opts.push('<option value="'+esc(val)+'"'+(taken?' disabled':'')+(val===current?' selected':'')+'>'+esc(b.hostLabel)+' · '+esc(b.file)+(taken?' (rented: '+esc(b.assignedTo)+')':'')+'</option>');
-        }
-        sel.innerHTML = opts.join("");
+      function hostSelectHtml(id){
+        const opts = HOSTS.map(h=>'<option value="'+esc(h.id)+'">'+esc(h.label||h.id)+'</option>');
+        if(!opts.length) opts.push('<option value="local">Server</option>');
+        return '<select id="'+id+'" style="width:auto;min-width:120px">'+opts.join("")+'</select>';
       }
 
       // ---- create ----
       $("cBtn").addEventListener("click", async ()=>{
         const username=$("cU").value.trim(), password=$("cP").value;
-        const botVal=$("cBot").value; const [botHost,botFile]=botVal?botVal.split("|"):["",""];
         if(!username||!password) return toast("Username and password required");
         $("cBtn").disabled=true;
         try {
           const d = await api("/renters", { method:"POST", body: JSON.stringify({
-            username, password, botHost, botFile,
+            username, password,
             maxAccounts: parseInt($("cMax").value,10)||0,
             accessStart: $("cStart").value||null, accessEnd: $("cEnd").value||null,
           })});
-          $("cResult").innerHTML = '<div class="credbox">Renter <b>'+esc(d.renter.username)+'</b> created. Share the login: <code>'+location.origin+'/renter-login.html</code> — username <code>'+esc(d.renter.username)+'</code>, and the password you set.</div>';
+          $("cResult").innerHTML = '<div class="credbox">Renter <b>'+esc(d.renter.username)+'</b> created. Open <b>Manage → Create bot</b> to give them a bot. Share the login: <code>'+location.origin+'/renter-login.html</code> — username <code>'+esc(d.renter.username)+'</code>, and the password you set.</div>';
           $("cU").value=""; $("cP").value="";
-          await Promise.all([loadRenters(), loadBots()]);
+          await loadRenters();
         } catch(e){ toast(e.message); }
         $("cBtn").disabled=false;
       });
@@ -275,13 +269,12 @@
         catch(e){ toast(e.message); }
       };
       function renderModal(r, subs, bot){
-        const botCur = r.botFile ? (r.botHost+"|"+r.botFile) : "";
         $("modal").innerHTML =
           '<div class="mh"><div><h2 style="font-size:18px">'+esc(r.username)+' '+statusBadge(r)+'</h2><div class="sub">'+r.used+'/'+r.maxAccounts+' accounts · '+esc(remaining(r.accessEnd))+'</div></div><button class="btn ghost sm" onclick="closeModal()">Close</button></div>'+
           '<div class="grid3" style="margin-top:6px">'+
-            '<div><label class="fld">Bot slot</label><select id="eBot"></select></div>'+
             '<div><label class="fld">Account limit</label><input id="eMax" type="number" min="0" value="'+r.maxAccounts+'"/></div>'+
             '<div><label class="fld">Display name</label><input id="eName" value="'+esc(r.displayName||"")+'"/></div>'+
+            '<div></div>'+
           '</div>'+
           '<div class="grid3" style="margin-top:12px">'+
             '<div><label class="fld">Access start</label><input id="eStart" type="date" value="'+(r.accessStart?new Date(r.accessStart).toISOString().slice(0,10):"")+'"/></div>'+
@@ -290,13 +283,17 @@
           '</div>'+
           '<div class="credbox" style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
             '<b>Bot</b> '+botStatusHtml(bot)+
-            '<span class="muted">'+(bot&&bot.assigned?esc((bot.hostLabel||"")+" · "+(bot.file||"")+" · "+(bot.accounts||0)+" account(s)"):"not assigned")+'</span>'+
+            '<span class="muted">'+(bot&&bot.assigned?esc((bot.hostLabel||"")+" · "+(bot.file||"")+" · "+(bot.accounts||0)+" account(s)"):"no bot yet")+'</span>'+
             (bot&&bot.assigned?
               '<span style="flex:1"></span>'+
               '<button class="btn sm" onclick="renterBot(\''+r.id+'\',\'start\')">Start</button>'+
               '<button class="btn ghost sm" onclick="renterBot(\''+r.id+'\',\'restart\')">Restart</button>'+
               '<button class="btn warn sm" onclick="renterBot(\''+r.id+'\',\'stop\')">Stop</button>'
-              :'')+
+              :
+              '<span style="flex:1"></span>'+
+              '<span class="muted" style="font-size:12px">Host</span>'+hostSelectHtml("eBotHost")+
+              '<button class="btn sm" onclick="createRenterBot(\''+r.id+'\')">Create bot</button>'
+            )+
           '</div>'+
           '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'+
             '<button class="btn ghost sm" onclick="resetPw(\''+r.id+'\')">Reset password</button>'+
@@ -308,14 +305,19 @@
             '<button class="btn ghost sm" onclick="copyLogin(\''+esc(r.username)+'\',\''+r.id+'\')">Copy login</button></div>'+
           '<h2 style="font-size:14px;margin:18px 0 8px">Submissions</h2>'+
           (subs.length? '<div class="rows">'+subs.map(s=>'<div class="approve-item"><div><b>'+s.count+'</b> account(s) · <span class="muted">'+new Date(s.createdAt).toLocaleString()+'</span>'+(s.status==="approved"?' · '+s.added+' added':'')+(s.status==="rejected"&&s.rejectReason?' · '+esc(s.rejectReason):'')+'</div><span class="badge '+(s.status==="approved"?"active":s.status==="rejected"?"suspended":"wait")+'">'+s.status+'</span></div>').join("")+'</div>' : '<div class="muted">No submissions.</div>');
-        renderBotSelect($("eBot"), botCur);
       }
+      window.createRenterBot = async (id)=>{
+        const host = ($("eBotHost") && $("eBotHost").value) || "local";
+        if(!confirm("Create a new bot for this renter on "+host+"? It provisions a fresh config slot and starts once accounts are approved.")) return;
+        try { await api("/renters/"+id+"/create-bot",{method:"POST",body:JSON.stringify({host})});
+          toast("Bot created"); await loadRenters(); openRenter(id); }
+        catch(e){ toast(e.message); }
+      };
       window.saveRenter = async (id)=>{
-        const botVal=$("eBot").value; const [botHost,botFile]=botVal?botVal.split("|"):["",""];
         try { await api("/renters/"+id, { method:"PUT", body: JSON.stringify({
-          botHost, botFile, maxAccounts: parseInt($("eMax").value,10)||0, displayName: $("eName").value,
+          maxAccounts: parseInt($("eMax").value,10)||0, displayName: $("eName").value,
           accessStart: $("eStart").value||null, accessEnd: $("eEnd").value||null,
-        })}); toast("Saved"); await Promise.all([loadRenters(),loadBots()]); openRenter(id); }
+        })}); toast("Saved"); await loadRenters(); openRenter(id); }
         catch(e){ toast(e.message); }
       };
       window.resetPw = async (id)=>{ const password=prompt("New password (min 8 chars):"); if(!password) return;
@@ -329,8 +331,8 @@
           const line = username + (d.password ? ":"+d.password : "");
           await navigator.clipboard.writeText(line); toast("Login copied"); }
         catch(e){ toast(e.message); } };
-      window.delRenter = async (id)=>{ if(!confirm("Delete this renter? Their bot config and accounts stay in place.")) return;
-        try{ await api("/renters/"+id,{method:"DELETE"}); toast("Deleted"); closeModal(); await Promise.all([loadRenters(),loadBots()]); }catch(e){ toast(e.message); } };
+      window.delRenter = async (id)=>{ if(!confirm("Delete this renter? Their accounts and drops inventory are removed; the bot config file is left on the host.")) return;
+        try{ await api("/renters/"+id,{method:"DELETE"}); toast("Deleted"); closeModal(); await loadRenters(); }catch(e){ toast(e.message); } };
 
       // chrome
       $("logoutBtn").addEventListener("click", async ()=>{ try{ await fetch("/admin-logout",{method:"POST",credentials:"same-origin"}); }catch(e){} location.href="/admin-login.html"; });
@@ -339,7 +341,7 @@
 
       (async function init(){
         try { const me = await api("/shop/me"); $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); } catch(e){}
-        await loadBots(); await loadApprovals(); await loadRenters();
+        await loadHosts(); await loadApprovals(); await loadRenters();
       })();
     </script>
     <script src="/theme.js"></script>
