@@ -291,7 +291,9 @@
   let CURRENT_HOST = "local";
   let HOSTS = [{ id: "local", label: "Server" }];
   const ALL_TAB = "__all__";   // synthetic tab aggregating every host
+  const RENTED_TAB = "__rented__"; // synthetic tab: only bots rented to renters
   let _allLoading = false;     // guards overlapping All-bots refreshes
+  let _rentedLoading = false;  // guards overlapping Rented refreshes
   // Append the active host to a bot-configs URL so every read/write/restart
   // targets the host whose tab is selected.
   function hq(url) { return url + (url.includes("?") ? "&" : "?") + "host=" + encodeURIComponent(CURRENT_HOST); }
@@ -394,7 +396,7 @@
     const el = $("hostTabs"); if (!el) return;
     if (HOSTS.length <= 1) { el.innerHTML = ""; el.style.display = "none"; return; }
     el.style.display = "flex";
-    const tabs = HOSTS.concat([{ id: ALL_TAB, label: "All bots" }]);
+    const tabs = HOSTS.concat([{ id: ALL_TAB, label: "All bots" }, { id: RENTED_TAB, label: "Rented 🔑" }]);
     el.innerHTML = tabs.map((h) =>
       '<button type="button" class="hosttab' + (h.id === CURRENT_HOST ? " active" : "") + '" onclick="switchHost(\'' + esc(h.id) + '\')">' + esc(h.label) + "</button>"
     ).join("");
@@ -416,6 +418,12 @@
       setAllMode(true);
       $("bots").innerHTML = '<div class="empty">Loading all bots…</div>';
       loadAllBots();
+      return;
+    }
+    if (id === RENTED_TAB) {
+      setAllMode(true);
+      $("bots").innerHTML = '<div class="empty">Loading rented bots…</div>';
+      loadRentedBots();
       return;
     }
     setAllMode(false);
@@ -500,6 +508,7 @@
     if (_statsTimer) clearInterval(_statsTimer);
     _statsTimer = setInterval(function () {
       if (CURRENT_HOST === ALL_TAB) { loadAllBots(); return; }
+      if (CURRENT_HOST === RENTED_TAB) { loadRentedBots(); return; }
       loadHostStats();
     }, 7000);
   }
@@ -577,6 +586,92 @@
       "</div>" +
     "</div>";
   }
+
+  // ---- Rented bots (only configs assigned to a renter, shown like normal
+  // bots but in their own tab; controls are host-aware so a bot on any host
+  // can be run from here). ----
+  async function loadRentedBots() {
+    if (CURRENT_HOST !== RENTED_TAB || _rentedLoading) return;
+    _rentedLoading = true;
+    try {
+      const r = await api("/bot-configs/rented");
+      if (CURRENT_HOST !== RENTED_TAB) return; // tab changed mid-flight
+      renderRentedBots((r && r.hosts) || []);
+    } catch (e) {
+      if (CURRENT_HOST === RENTED_TAB) $("bots").innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + "</div>";
+    } finally { _rentedLoading = false; }
+  }
+
+  function renderRentedBots(list) {
+    const totalBots = list.reduce((n, h) => n + h.bots.length, 0);
+    if (!totalBots) {
+      $("bots").innerHTML = '<div class="muted" style="padding:8px 2px;font-size:12.5px">🔑 No rented bots yet. Create one from the <a href="/renters.html" style="color:var(--accent)">Renting</a> section.</div>';
+      return;
+    }
+    const html = list.filter((h) => h.bots.length).map(function (h) {
+      const head =
+        '<div class="allhost-h">' +
+          '<span class="hdot ' + (h.online ? "on" : "off") + '"></span>' +
+          '<b>' + esc(h.label) + '</b>' +
+          '<span class="hbadge ' + (h.online ? "on" : "off") + '">' + (h.online ? "online" : "offline") + '</span>' +
+          '<span class="muted">' + h.bots.length + ' rented bot' + (h.bots.length === 1 ? "" : "s") + '</span>' +
+        '</div>';
+      const rows = h.bots.map((b) => rentedBotRow(h, b)).join("");
+      return '<section class="allhost">' + head + rows + "</section>";
+    }).join("");
+    $("bots").innerHTML = html;
+  }
+
+  function rentedBotRow(host, b) {
+    const running = b.running;
+    const statusTxt = b.source === "snapshot"
+      ? "saved copy (host offline)"
+      : (running ? "running" : (b.status || b.state || "stopped"));
+    const games = (b.favouriteGames && b.favouriteGames.length) ? b.favouriteGames.join(", ") : "any game";
+    let farm;
+    if (b.farming && b.farming.detail) farm = '<div class="ab-farm">▶ farming: ' + esc(b.farming.detail) + "</div>";
+    else if (running) farm = '<div class="ab-farm muted">▶ farming: (parsing…) · favourites: ' + esc(games) + "</div>";
+    else farm = '<div class="ab-farm muted">favourites: ' + esc(games) + "</div>";
+    const rentedBy = b.rentedBy
+      ? '<span class="hbadge on" style="border-color:var(--accent);color:var(--accent)">🔑 ' + esc(b.rentedBy) + "</span>"
+      : "";
+    const ctrls = host.online
+      ? ((running
+          ? '<button class="btn-sm btn-danger" onclick="rentedAction(\'' + esc(host.id) + '\',\'' + esc(b.file) + '\',\'stop\',this)">Stop</button>'
+          : '<button class="btn-sm" onclick="rentedAction(\'' + esc(host.id) + '\',\'' + esc(b.file) + '\',\'start\',this)">Start</button>') +
+        '<button class="btn-sm btn-ghost" onclick="rentedAction(\'' + esc(host.id) + '\',\'' + esc(b.file) + '\',\'restart\',this)">Restart</button>' +
+        '<button class="btn-sm btn-ghost" onclick="openLogs(\'' + esc(b.file) + '\',\'' + esc(b.container || "") + '\',\'' + esc(host.id) + '\')">Logs</button>')
+      : "";
+    return '<div class="allbot">' +
+      '<div class="ab-main">' +
+        '<div class="ab-ttl"><span class="sdot ' + (running ? "run" : "stop") + '"></span>' + esc(b.container || b.file) +
+          ' <span class="ab-file">' + esc(b.file) + '</span> ' + rentedBy + '</div>' +
+        '<div class="ab-sub">' + b.accountCount + ' account' + (b.accountCount === 1 ? "" : "s") +
+          ' · <span class="' + (running ? "ok" : "off") + '">' + esc(statusTxt) + "</span></div>" +
+        farm +
+      "</div>" +
+      '<div class="ab-actions">' +
+        '<button class="btn-sm btn-ghost" onclick="viewAccounts(\'' + esc(host.id) + '\',\'' + esc(b.file) + '\')">Accounts</button>' +
+        ctrls +
+      "</div>" +
+    "</div>";
+  }
+
+  // Start / stop / restart a rented bot on its own host (host is explicit, since
+  // the Rented tab spans hosts — not the CURRENT_HOST synthetic tab id).
+  window.rentedAction = async function (hostId, file, action, btn) {
+    if (action === "stop" && !confirm("Stop this rented bot? Its renter won't be farming until it's started again.")) return;
+    const old = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    try {
+      const r = await api("/bot-configs/" + action + "/" + encodeURIComponent(file) + "?host=" + encodeURIComponent(hostId), { method: "POST" });
+      toast(action.charAt(0).toUpperCase() + action.slice(1) + "ed" + (r.container ? " " + r.container : ""));
+      setTimeout(loadRentedBots, 1200);
+    } catch (e) {
+      toast(action + " failed: " + e.message, true);
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+  };
 
   // Read-only accounts/passwords view (so you can confirm what's stored, incl.
   // from the server-side saved copy of an offline host).

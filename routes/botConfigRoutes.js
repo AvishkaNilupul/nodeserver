@@ -518,6 +518,99 @@ router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
   res.json({ success: true, hosts: out, rentedCount });
 });
 
+// AGGREGATE only the RENTED bots across every host (the "Rented" tab). Mirror of
+// /bot-configs/all but the inverse filter — it INCLUDES only configs assigned to
+// a renter, and tags each with `rentedBy` (the renter's username) so the Bots
+// page can show them like normal bots in their own tab. Always 200; offline
+// hosts fall back to the last-known snapshot.
+router.get("/bot-configs/rented", requireSuperadmin, async (req, res) => {
+  const out = [];
+  const rented = await getRentedConfigSet();
+  const renters = await Renter.find(
+    { botFile: { $gt: "" } },
+    { botHost: 1, botFile: 1, username: 1 },
+  ).lean();
+  const byKey = new Map(
+    renters.map((r) => [(r.botHost || "") + "|" + r.botFile, r.username]),
+  );
+  for (const meta of hosts.listHosts()) {
+    const host = hosts.resolveHost(meta.id);
+    const entry = {
+      id: meta.id,
+      label: meta.label,
+      transport: meta.transport,
+      online: true,
+      bots: [],
+    };
+    let states = {};
+    try {
+      states = await hosts.dockerPs(host);
+    } catch (e) {
+      if (e.unreachable) entry.online = false;
+    }
+    let files = null;
+    try {
+      files = (await hosts.readdir(host)).filter((f) => FILE_RE.test(f)).sort();
+    } catch {
+      entry.online = false;
+    }
+
+    if (files) {
+      for (const file of files) {
+        if (!rented.has(meta.id + "|" + file)) continue; // ONLY rented
+        try {
+          const raw = await hosts.readFile(host, file);
+          hosts.saveSnapshot(meta.id, file, raw).catch(() => {});
+          const data = JSON.parse(raw);
+          const sum = summarize(file, data);
+          const st = states[sum.container];
+          const running = !!(st && /^running/i.test(st.state || ""));
+          let farming = null;
+          if (running) {
+            try {
+              farming = await hosts.farmingStatus(host, sum.container);
+            } catch {
+              /* best effort */
+            }
+          }
+          entry.bots.push({
+            ...sum,
+            source: "live",
+            state: st ? st.state : null,
+            status: st ? st.status : null,
+            running,
+            farming,
+            rentedBy: byKey.get(meta.id + "|" + file) || null,
+          });
+        } catch {
+          /* skip unreadable file */
+        }
+      }
+    } else {
+      const snaps = (await hosts.listSnapshot(meta.id).catch(() => []))
+        .filter((f) => FILE_RE.test(f))
+        .sort();
+      for (const file of snaps) {
+        if (!rented.has(meta.id + "|" + file)) continue;
+        try {
+          const data = JSON.parse(await hosts.readSnapshot(meta.id, file));
+          entry.bots.push({
+            ...summarize(file, data),
+            source: "snapshot",
+            running: false,
+            farming: null,
+            rentedBy: byKey.get(meta.id + "|" + file) || null,
+          });
+        } catch {
+          /* skip */
+        }
+      }
+    }
+    out.push(entry);
+  }
+  res.json({ success: true, hosts: out });
+});
+
 // LIST all config files on a host with a parsed summary.
 router.get("/bot-configs", requireSuperadmin, async (req, res) => {
   const host = hostFromReq(req);
