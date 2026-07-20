@@ -86,6 +86,14 @@
       .toast.show { opacity: .95; }
       .credbox { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--accent); border-radius: 11px; font-size: 13px; }
       .credbox code { font-family: ui-monospace, Menlo, monospace; }
+      .dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+      .drop { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 11px; padding: 9px 11px; }
+      .drop img, .drop .ph { width: 36px; height: 36px; border-radius: 8px; object-fit: cover; background: var(--surface); border: 1px solid var(--line); display: grid; place-items: center; font-size: 10px; color: var(--muted); flex-shrink: 0; }
+      .drop .nm { flex: 1; min-width: 0; }
+      .drop .nm b { font-size: 13px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .drop .nm span { font-size: 11px; color: var(--muted); }
+      .drop .ct { font-weight: 800; color: var(--accent); }
+      .selin { width: auto; min-width: 150px; display: inline-block; }
       @media (max-width: 760px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } .row { grid-template-columns: 1fr; } }
     </style>
   </head>
@@ -139,6 +147,17 @@
       <div class="sect">
         <div class="shdr"><h2>Rented bots</h2><button class="btn ghost sm" id="refreshBots">Refresh</button></div>
         <div class="rows" id="rentBots"></div>
+      </div>
+
+      <div class="sect">
+        <div class="shdr">
+          <h2>Rented drops archive <span class="muted" id="dropTotal" style="font-size:13px;font-weight:600"></span></h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="dropFilter" class="selin"><option value="all">All renters</option></select>
+            <button class="btn ghost sm" id="refreshDrops">Refresh</button>
+          </div>
+        </div>
+        <div class="card"><div id="rentDrops"></div></div>
       </div>
 
       <div class="sect">
@@ -273,6 +292,27 @@
         } catch(e){ $("rentBots").innerHTML = '<div class="muted">'+esc(e.message)+'</div>'; }
       }
 
+      // ---- rented drops archive ----
+      async function loadRentedDrops(){
+        const sel = $("dropFilter");
+        const chosen = sel ? sel.value : "all";
+        try {
+          const d = await api("/renter-drops" + (chosen && chosen!=="all" ? "?renter="+encodeURIComponent(chosen) : ""));
+          if (sel){
+            const opts = ['<option value="all">All renters</option>'].concat((d.renters||[]).map(r=>'<option value="'+esc(r.id)+'">'+esc(r.username)+' ('+r.drops+')</option>'));
+            sel.innerHTML = opts.join("");
+            sel.value = [...sel.options].some(o=>o.value===chosen) ? chosen : "all";
+          }
+          $("dropTotal").textContent = d.total ? ("· "+d.total+" drop"+(d.total===1?"":"s")) : "";
+          const items = d.items || [];
+          if(!items.length){ $("rentDrops").innerHTML = '<div class="muted" style="padding:6px 2px">No drops farmed by rented bots yet.</div>'; return; }
+          $("rentDrops").innerHTML = '<div class="dgrid">' + items.map(x=>{
+            const img = x.image ? '<img src="'+esc(x.image)+'" alt="" referrerpolicy="no-referrer"/>' : '<span class="ph">'+esc((x.name||"?").slice(0,2))+'</span>';
+            return '<div class="drop">'+img+'<div class="nm"><b>'+esc(x.name)+'</b><span>'+esc(x.game||"")+'</span></div><span class="ct">×'+x.count+'</span></div>';
+          }).join("") + '</div>';
+        } catch(e){ $("rentDrops").innerHTML = '<div class="muted">'+esc(e.message)+'</div>'; }
+      }
+
       window.setSusp = async (id, suspend)=>{
         if(suspend && !confirm("Suspend this renter? Their access is blocked and their bot is stopped.")) return;
         try { const d = await api("/renters/"+id+"/"+(suspend?"suspend":"unsuspend"),{method:"POST"});
@@ -367,13 +407,15 @@
 
       // chrome
       $("logoutBtn").addEventListener("click", async ()=>{ try{ await fetch("/admin-logout",{method:"POST",credentials:"same-origin"}); }catch(e){} location.href="/admin-login.html"; });
-      $("refreshBtn").addEventListener("click", ()=>{ loadApprovals(); loadRenters(); loadRentBots(); });
+      $("refreshBtn").addEventListener("click", ()=>{ loadApprovals(); loadRenters(); loadRentBots(); loadRentedDrops(); });
       $("refreshBots").addEventListener("click", ()=> loadRentBots());
+      $("refreshDrops").addEventListener("click", ()=> loadRentedDrops());
+      $("dropFilter").addEventListener("change", ()=> loadRentedDrops());
       document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeModal(); });
 
       (async function init(){
         try { const me = await api("/shop/me"); $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); } catch(e){}
-        await loadHosts(); await loadApprovals(); await loadRenters(); await loadRentBots();
+        await loadHosts(); await loadApprovals(); await loadRenters(); await loadRentBots(); await loadRentedDrops();
       })();
     </script>
     <script src="/theme.js"></script>

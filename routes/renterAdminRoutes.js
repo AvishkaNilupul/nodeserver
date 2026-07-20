@@ -5,6 +5,7 @@
 // batch approved and starts the renter's bot. Nothing here is driven by renter
 // input, and renter-submitted credentials are only ever revealed to a superadmin.
 const express = require("express");
+const mongoose = require("mongoose");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const Renter = require("../models/Renter");
@@ -192,6 +193,68 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     res.json({ success: true, bots });
   } catch (err) {
     console.error("renter-bots list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// RENTED DROPS ARCHIVE — the operator's view of everything the renter bots have
+// farmed, aggregated from the standalone RenterDrop inventory (never the
+// operator's own DropLog / Drops Archive). Grouped by reward (itemKey) with a
+// total; optional ?renter=<id> narrows it to one renter. Also returns a per-
+// renter roster (with drop totals) so the UI can offer a filter dropdown.
+router.get("/renter-drops", requireSuperadmin, async (req, res) => {
+  try {
+    const rid = req.query.renter;
+    const match = {};
+    if (rid && rid !== "all" && mongoose.isValidObjectId(rid)) {
+      match.renter = new mongoose.Types.ObjectId(rid);
+    }
+    const rows = await RenterDrop.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: "$itemKey",
+          name: { $first: "$name" },
+          game: { $first: "$game" },
+          image: { $first: "$imageLocal" },
+          imageURL: { $first: "$imageURL" },
+          count: { $sum: "$count" },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 1000 },
+    ]);
+    const items = rows.map((d) => ({
+      name: d.name || "Reward",
+      game: d.game || "",
+      image: d.image || d.imageURL || "",
+      count: d.count || 0,
+    }));
+    const total = items.reduce((s, d) => s + d.count, 0);
+
+    // Per-renter drop totals (for the filter dropdown), joined to usernames.
+    const perRenter = await RenterDrop.aggregate([
+      { $group: { _id: "$renter", drops: { $sum: "$count" } } },
+    ]);
+    const names = new Map(
+      (
+        await Renter.find(
+          { _id: { $in: perRenter.map((p) => p._id) } },
+          { username: 1 },
+        ).lean()
+      ).map((r) => [String(r._id), r.username]),
+    );
+    const renters = perRenter
+      .map((p) => ({
+        id: String(p._id),
+        username: names.get(String(p._id)) || "(unknown)",
+        drops: p.drops || 0,
+      }))
+      .sort((a, b) => b.drops - a.drops);
+
+    res.json({ success: true, total, items, renters });
+  } catch (err) {
+    console.error("renter-drops archive error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
