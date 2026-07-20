@@ -396,6 +396,7 @@ router.post(
       // Add the pasted account tokens to the renter's bot (optional).
       let added = 0;
       let skipped = 0;
+      let skipReason = "";
       const tokensText = String((req.body && req.body.tokens) || "");
       if (tokensText.trim()) {
         const games = await getConfigGames(host, renter.botFile);
@@ -409,6 +410,7 @@ router.post(
         }
         const { kept, skipped: sk } = await dedupeAccounts(parsed);
         skipped = sk.length;
+        if (sk.length) skipReason = sk[0].reason || "";
         const used = await countConfigAccounts(host, renter.botFile);
         if (used + kept.length > (Number(renter.maxAccounts) || 0)) {
           return res.status(400).json({
@@ -459,14 +461,29 @@ router.post(
                 ? "Host is offline — start the bot when it's back."
                 : e.message || "Could not start the bot.";
       }
+      const parts = [];
+      if (added) parts.push("Added " + added + " account(s).");
+      if (skipped) {
+        parts.push(
+          skipped +
+            " skipped — " +
+            (skipReason || "already assigned to another bot") +
+            ".",
+        );
+      }
+      if (botStarted) parts.push("Bot is starting.");
+      else if (!added && skipped)
+        parts.push(
+          "Nothing new to add, so the bot wasn't started. Use accounts that aren't already on another bot, or free them first.",
+        );
+      else if (startNote) parts.push(startNote);
       res.json({
         success: true,
         added,
         skipped,
+        skipReason,
         botStarted,
-        note:
-          (added ? "Added " + added + " account(s). " : "") +
-          (botStarted ? "Bot is starting." : "Approved. " + startNote),
+        note: parts.join(" ") || "Approved.",
       });
     } catch (err) {
       console.error("renter approve error:", err.message);
