@@ -112,11 +112,22 @@
       <div class="tabs">
         <button class="tab active" data-tab="accounts">Accounts</button>
         <button class="tab" data-tab="drops">Farmed drops</button>
+        <button class="tab" data-tab="games">Games</button>
         <button class="tab" data-tab="submit">Add accounts</button>
       </div>
 
       <div class="panel active" id="panel-accounts"><div class="card"><div id="accounts"></div></div></div>
       <div class="panel" id="panel-drops"><div class="card"><div id="drops"></div></div></div>
+      <div class="panel" id="panel-games">
+        <div class="card">
+          <div class="hint">Games your bot farms drops for. Leave empty to farm every available campaign.</div>
+          <input id="gamesInput" placeholder="e.g. Escape from Tarkov, Rust, VALORANT" style="width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);color:var(--ink);font-size:14px;font-family:inherit" />
+          <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+            <button class="btn" id="gamesBtn">Save games</button>
+            <span class="hint" style="margin:0">Comma-separated. Your bot restarts to apply changes.</span>
+          </div>
+        </div>
+      </div>
       <div class="panel" id="panel-submit">
         <div class="card">
           <div class="hint" id="quotaHint"></div>
@@ -183,6 +194,8 @@
         const rem = q.remaining;
         $("quotaHint").textContent = rem > 0 ? "You can submit up to " + rem + " more account(s)." : "You've reached your account limit.";
         $("submitBtn").disabled = rem <= 0 || !bot.assigned;
+        if (document.activeElement !== $("gamesInput")) $("gamesInput").value = (ME.games || []).join(", ");
+        $("gamesBtn").disabled = !bot.assigned;
       }
 
       async function loadAccounts(){
@@ -229,6 +242,18 @@
           btn.disabled = false; btn.textContent = act==="start" ? "Start bot" : "Stop bot";
         }
       };
+
+      // Save which games the bot farms.
+      $("gamesBtn").addEventListener("click", async ()=>{
+        const games = $("gamesInput").value;
+        $("gamesBtn").disabled = true; $("gamesBtn").textContent = "Saving…";
+        try {
+          const d = await api("/renter/games", { method:"POST", body: JSON.stringify({ games }) });
+          toast(d.message || "Games saved");
+          await loadMe();
+        } catch(e){ if(e.message!=="auth") toast(e.message); }
+        $("gamesBtn").disabled = false; $("gamesBtn").textContent = "Save games";
+      });
 
       // Tabs
       document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{

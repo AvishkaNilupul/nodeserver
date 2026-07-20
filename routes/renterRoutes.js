@@ -23,6 +23,9 @@ const {
   countConfigAccounts,
   startConfigContainer,
   stopConfigContainer,
+  getConfigGames,
+  setConfigGames,
+  restartConfigContainer,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
@@ -68,8 +71,10 @@ router.get("/renter/me", requireRenter, async (req, res) => {
     const host = hosts.resolveHost(r.botHost);
     let used = 0;
     let running = null; // null = unknown (host offline / not assigned)
+    let games = [];
     if (r.botFile && host) {
       used = await countConfigAccounts(host, r.botFile);
+      games = await getConfigGames(host, r.botFile);
       try {
         const states = await hosts.dockerPs(host);
         const st = states[containerForFile(r.botFile)];
@@ -87,6 +92,7 @@ router.get("/renter/me", requireRenter, async (req, res) => {
         displayName: r.displayName || "",
         status: r.status,
         bot: { assigned: !!r.botFile, running },
+        games,
         quota: {
           used,
           pending,
@@ -221,6 +227,48 @@ router.post("/renter/bot/start", renterBotControlLimiter, requireRenter, (req, r
 router.post("/renter/bot/stop", renterBotControlLimiter, requireRenter, (req, res) =>
   botControl("stop", req, res),
 );
+
+// POST /renter/games — set which games their bot farms. Scoped to their own bot
+// (host/file from req.renter, never the request). If the bot is running it is
+// restarted so the change takes effect. Rate-limited (writes config + SSH).
+router.post("/renter/games", renterBotControlLimiter, requireRenter, async (req, res) => {
+  const bot = ownBot(req.renter);
+  if (!bot) {
+    return res
+      .status(400)
+      .json({ success: false, message: "No bot assigned yet." });
+  }
+  try {
+    const games = await setConfigGames(bot.host, bot.file, req.body && req.body.games);
+    let restarted = false;
+    try {
+      const states = await hosts.dockerPs(bot.host);
+      const st = states[containerForFile(bot.file)];
+      if (st && /^running/i.test(st.state || "")) {
+        await restartConfigContainer(bot.host, bot.file);
+        restarted = true;
+      }
+    } catch {
+      /* best effort — the change is saved regardless */
+    }
+    res.json({
+      success: true,
+      games,
+      restarted,
+      message: restarted
+        ? "Games updated — your bot is restarting to apply them."
+        : "Games saved. Start your bot to apply them.",
+    });
+  } catch (e) {
+    if (e.unreachable) {
+      return res
+        .status(502)
+        .json({ success: false, message: "The bot host is offline right now." });
+    }
+    console.error("renter/games error:", e.message);
+    res.status(500).json({ success: false, message: "Could not update games." });
+  }
+});
 
 // POST /renter/submit — queue a batch of accounts for operator approval. Never
 // touches a live bot; the parsed credentials are encrypted at rest. Accepts the

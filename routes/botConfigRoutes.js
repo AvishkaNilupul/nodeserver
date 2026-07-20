@@ -1492,6 +1492,57 @@ async function countConfigAccounts(host, file) {
   }
 }
 
+// The config's "farming" game list (root FavouriteGames). Returns [] for a
+// missing/unreadable config.
+async function getConfigGames(host, file) {
+  if (!validFile(file)) return [];
+  try {
+    const data = JSON.parse(await hosts.readFile(host, file));
+    return Array.isArray(data.FavouriteGames)
+      ? data.FavouriteGames.filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+// Set the config's farming games. Writes the root FavouriteGames (what the Bots
+// UI shows as "Farming"), flips TwitchSettings.OnlyFavouriteGames on when a list
+// is given (so ONLY those games are farmed), and mirrors the list onto every
+// account's FavouriteGames so a per-account override can't silently ignore the
+// change. Used by the renter's own "games to farm" control — the host/file are
+// always the renter's, never client input.
+async function setConfigGames(host, file, games) {
+  if (!validFile(file)) throw new Error("Invalid config file");
+  const list = parseGamesList(games).slice(0, 50).map((g) => g.slice(0, 100));
+  const data = JSON.parse(await hosts.readFile(host, file));
+  data.FavouriteGames = list;
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  data.TwitchSettings.OnlyFavouriteGames = list.length > 0;
+  const users = data.TwitchSettings.TwitchUsers;
+  if (Array.isArray(users)) {
+    for (const u of users) {
+      if (u && typeof u === "object") u.FavouriteGames = list.slice();
+    }
+  }
+  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+  return list;
+}
+
+// Restart the container backing a config (so a games change takes effect on a
+// running bot). Best-effort; honours ALLOW_RESTART. No-op when the file has no
+// container mapping.
+async function restartConfigContainer(host, file) {
+  if (!ALLOW_RESTART) return { restarted: false };
+  const container = containerForFile(file);
+  if (!container) return { restarted: false };
+  await hosts.dockerContainer(host, "restart", container);
+  await hosts.restoreRestartPolicy(host, container);
+  return { restarted: true, container };
+}
+
 // Stop the container backing a config file (used when a renter is suspended or
 // their lease ends, or when a renter stops their own bot). No-op-safe: unknown
 // container or an offline host just throws, which the caller can ignore.
@@ -1530,10 +1581,14 @@ async function startConfigContainer(host, file) {
 
 module.exports = router;
 module.exports.parseAccounts = parseAccounts;
+module.exports.parseGamesList = parseGamesList;
 module.exports.dedupeAccounts = dedupeAccounts;
 module.exports.validFile = validFile;
 module.exports.containerForFile = containerForFile;
 module.exports.addAccountsToConfig = addAccountsToConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
+module.exports.getConfigGames = getConfigGames;
+module.exports.setConfigGames = setConfigGames;
 module.exports.stopConfigContainer = stopConfigContainer;
 module.exports.startConfigContainer = startConfigContainer;
+module.exports.restartConfigContainer = restartConfigContainer;

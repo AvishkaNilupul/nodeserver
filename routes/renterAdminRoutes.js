@@ -22,6 +22,10 @@ const {
   startConfigContainer,
   stopConfigContainer,
   validFile,
+  parseAccounts,
+  dedupeAccounts,
+  addAccountsToConfig,
+  getConfigGames,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
@@ -357,11 +361,12 @@ router.get(
   },
 );
 
-// APPROVE — mark the batch approved and start the renter's bot. By this point
-// the operator has revealed the credentials, fetched the tokens, and added the
-// accounts to the renter's bot; approving is the "go live" switch. The
-// encrypted credentials are kept (never wiped on approve) so the operator can
-// re-reveal them later to re-auth a dead token.
+// APPROVE — the operator pastes the account tokens (the ClientSecrets they
+// fetched from the renter's username:password, in the normal bot-add format),
+// those get written into the renter's bot, and the bot starts. `tokens` is
+// optional: if the operator already added the accounts elsewhere, approve just
+// starts the bot. The encrypted submission credentials are kept so a dead token
+// can be re-fetched later.
 router.post(
   "/renter-submissions/:id/approve",
   requireSuperadmin,
@@ -376,49 +381,92 @@ router.post(
           .json({ success: false, message: "Already " + sub.status });
       }
       const renter = await Renter.findById(sub.renter);
-      if (!renter) {
+      if (!renter || !renter.botFile) {
         return res
           .status(400)
-          .json({ success: false, message: "Renter not found" });
+          .json({ success: false, message: "Renter has no bot assigned" });
       }
+      const host = hosts.resolveHost(renter.botHost);
+      if (!host) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter's host is unknown" });
+      }
+
+      // Add the pasted account tokens to the renter's bot (optional).
+      let added = 0;
+      let skipped = 0;
+      const tokensText = String((req.body && req.body.tokens) || "");
+      if (tokensText.trim()) {
+        const games = await getConfigGames(host, renter.botFile);
+        const parsed = parseAccounts(tokensText, games);
+        if (!parsed.length) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "No valid account tokens found. Paste tokens (one per line), or login token, or the JSON from a config.",
+          });
+        }
+        const { kept, skipped: sk } = await dedupeAccounts(parsed);
+        skipped = sk.length;
+        const used = await countConfigAccounts(host, renter.botFile);
+        if (used + kept.length > (Number(renter.maxAccounts) || 0)) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "That would exceed the renter's limit (" +
+              renter.maxAccounts +
+              "); their bot already has " +
+              used +
+              ".",
+          });
+        }
+        if (kept.length) {
+          try {
+            const r = await addAccountsToConfig(host, renter.botFile, kept);
+            added = r.added;
+          } catch (e) {
+            return res.status(e.unreachable ? 502 : 500).json({
+              success: false,
+              offline: !!e.unreachable,
+              message: "Could not write the accounts to the bot: " + (e.message || e),
+            });
+          }
+        }
+      }
+
       sub.status = "approved";
       sub.reviewedBy = req.session.admin.id;
       sub.reviewedAt = new Date();
-      sub.added = sub.count;
+      sub.added = added || sub.count;
       await sub.save();
 
-      // Start the renter's bot (best-effort). Report clearly if it couldn't —
-      // e.g. the operator hasn't added the accounts to the bot yet.
+      // Start the renter's bot.
       let botStarted = false;
       let startNote = "";
-      if (renter.botFile) {
-        const host = hosts.resolveHost(renter.botHost);
-        if (host) {
-          try {
-            await startConfigContainer(host, renter.botFile);
-            botStarted = true;
-            renter.botStoppedAt = null;
-            await renter.save();
-          } catch (e) {
-            startNote =
-              e.code === "no_accounts"
-                ? "Add the accounts to the bot first, then start it."
-                : e.code === "disabled"
-                  ? "Bot control is disabled on this server."
-                  : e.unreachable
-                    ? "Host is offline — start the bot when it's back."
-                    : e.message || "Could not start the bot.";
-          }
-        }
-      } else {
-        startNote = "No bot assigned to this renter.";
+      try {
+        await startConfigContainer(host, renter.botFile);
+        botStarted = true;
+        renter.botStoppedAt = null;
+        await renter.save();
+      } catch (e) {
+        startNote =
+          e.code === "no_accounts"
+            ? "No accounts on the bot yet — paste the tokens, then approve."
+            : e.code === "disabled"
+              ? "Bot control is disabled on this server."
+              : e.unreachable
+                ? "Host is offline — start the bot when it's back."
+                : e.message || "Could not start the bot.";
       }
       res.json({
         success: true,
+        added,
+        skipped,
         botStarted,
-        note: botStarted
-          ? "Approved — the bot is starting."
-          : "Approved. " + startNote,
+        note:
+          (added ? "Added " + added + " account(s). " : "") +
+          (botStarted ? "Bot is starting." : "Approved. " + startNote),
       });
     } catch (err) {
       console.error("renter approve error:", err.message);
