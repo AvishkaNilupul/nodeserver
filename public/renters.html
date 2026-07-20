@@ -257,12 +257,24 @@
 
       // ---- renter detail modal ----
       window.openRenter = async (id)=>{
-        try { const d = await api("/renters/"+id); renderModal(d.renter, d.submissions||[]); $("overlay").classList.add("show"); CURRENT=id; }
+        try { const d = await api("/renters/"+id); renderModal(d.renter, d.submissions||[], d.bot||{}); $("overlay").classList.add("show"); CURRENT=id; }
         catch(e){ toast(e.message); }
       };
       function closeModal(){ $("overlay").classList.remove("show"); CURRENT=null; }
       $("overlay").addEventListener("click",(e)=>{ if(e.target===$("overlay")) closeModal(); });
-      function renderModal(r, subs){
+      function botStatusHtml(bot){
+        if(!bot || !bot.assigned) return '<span class="badge wait">No bot</span>';
+        if(bot.running===true) return '<span class="badge active">Running</span>';
+        if(bot.running===false) return '<span class="badge suspended">Stopped</span>';
+        return '<span class="badge wait">Unknown</span>';
+      }
+      window.renterBot = async (id, action)=>{
+        try { const d = await api("/renters/"+id+"/bot/"+action,{method:"POST"});
+          toast(action==="start"?"Bot started":action==="stop"?"Bot stopped":"Bot restarting");
+          await loadRenters(); if(CURRENT===id) openRenter(id); }
+        catch(e){ toast(e.message); }
+      };
+      function renderModal(r, subs, bot){
         const botCur = r.botFile ? (r.botHost+"|"+r.botFile) : "";
         $("modal").innerHTML =
           '<div class="mh"><div><h2 style="font-size:18px">'+esc(r.username)+' '+statusBadge(r)+'</h2><div class="sub">'+r.used+'/'+r.maxAccounts+' accounts · '+esc(remaining(r.accessEnd))+'</div></div><button class="btn ghost sm" onclick="closeModal()">Close</button></div>'+
@@ -276,7 +288,17 @@
             '<div><label class="fld">Access end</label><input id="eEnd" type="date" value="'+(r.accessEnd?new Date(r.accessEnd).toISOString().slice(0,10):"")+'"/></div>'+
             '<div style="display:flex;align-items:flex-end"><button class="btn" style="width:100%" onclick="saveRenter(\''+r.id+'\')">Save changes</button></div>'+
           '</div>'+
-          '<div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">'+
+          '<div class="credbox" style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+            '<b>Bot</b> '+botStatusHtml(bot)+
+            '<span class="muted">'+(bot&&bot.assigned?esc((bot.hostLabel||"")+" · "+(bot.file||"")+" · "+(bot.accounts||0)+" account(s)"):"not assigned")+'</span>'+
+            (bot&&bot.assigned?
+              '<span style="flex:1"></span>'+
+              '<button class="btn sm" onclick="renterBot(\''+r.id+'\',\'start\')">Start</button>'+
+              '<button class="btn ghost sm" onclick="renterBot(\''+r.id+'\',\'restart\')">Restart</button>'+
+              '<button class="btn warn sm" onclick="renterBot(\''+r.id+'\',\'stop\')">Stop</button>'
+              :'')+
+          '</div>'+
+          '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'+
             '<button class="btn ghost sm" onclick="resetPw(\''+r.id+'\')">Reset password</button>'+
             (r.status==="suspended"?'<button class="btn sm" onclick="setSusp(\''+r.id+'\',false)">Unsuspend</button>':'<button class="btn warn sm" onclick="setSusp(\''+r.id+'\',true)">Suspend + stop bot</button>')+
             '<button class="btn danger sm" onclick="delRenter(\''+r.id+'\')">Delete renter</button>'+

@@ -21,6 +21,8 @@ const {
   countConfigAccounts,
   startConfigContainer,
   stopConfigContainer,
+  restartConfigContainer,
+  containerForFile,
   validFile,
   parseAccounts,
   dedupeAccounts,
@@ -149,6 +151,7 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     const pmap = await pendingByRenter();
     const view = await renterListView(r, pmap);
+    const bot = await renterBotStatus(r);
     const submissions = await RenterSubmission.find(
       { renter: r._id },
       { accountsEnc: 0 },
@@ -159,6 +162,7 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
     res.json({
       success: true,
       renter: view,
+      bot,
       submissions: submissions.map((s) => ({
         id: String(s._id),
         status: s.status,
@@ -258,7 +262,7 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
 });
 
 // UNSUSPEND — restore access. Does NOT auto-start the bot (operator starts it
-// from the Bots page when ready).
+// from the Renting section when ready).
 router.post("/renters/:id/unsuspend", requireSuperadmin, async (req, res) => {
   try {
     const r = await Renter.findByIdAndUpdate(
@@ -270,6 +274,92 @@ router.post("/renters/:id/unsuspend", requireSuperadmin, async (req, res) => {
     res.json({ success: true, renter: sanitizeRenter(r) });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+// Renter bot — status + control from the Renting section (so the operator
+// manages a renter's bot here, not mixed into their own Bots page).
+// ------------------------------------------------------------------
+async function renterBotStatus(renter) {
+  if (!renter.botFile) return { assigned: false, running: null, accounts: 0 };
+  const host = hosts.resolveHost(renter.botHost);
+  if (!host) return { assigned: true, running: null, accounts: 0, host: renter.botHost };
+  const accounts = await countConfigAccounts(host, renter.botFile);
+  let running = null;
+  try {
+    const states = await hosts.dockerPs(host);
+    const st = states[containerForFile(renter.botFile)];
+    running = !!(st && /^running/i.test(st.state || ""));
+  } catch {
+    running = null;
+  }
+  return {
+    assigned: true,
+    running,
+    accounts,
+    hostLabel: host.label,
+    file: renter.botFile,
+  };
+}
+
+router.get("/renters/:id/bot", requireSuperadmin, async (req, res) => {
+  try {
+    const r = await Renter.findById(req.params.id);
+    if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true, bot: await renterBotStatus(r) });
+  } catch (err) {
+    console.error("renter bot status error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Start / stop / restart a renter's bot (operator). Target is always the
+// renter's own assigned config — never anything from the request body.
+router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
+  const action = req.params.action;
+  if (!["start", "stop", "restart"].includes(action)) {
+    return res.status(400).json({ success: false, message: "Unknown action" });
+  }
+  try {
+    const r = await Renter.findById(req.params.id);
+    if (!r || !r.botFile) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Renter has no bot assigned" });
+    }
+    const host = hosts.resolveHost(r.botHost);
+    if (!host) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Renter's host is unknown" });
+    }
+    if (action === "start") {
+      await startConfigContainer(host, r.botFile);
+      r.botStoppedAt = null;
+      await r.save();
+    } else if (action === "stop") {
+      await stopConfigContainer(host, r.botFile);
+      r.botStoppedAt = new Date();
+      await r.save();
+    } else {
+      await restartConfigContainer(host, r.botFile);
+    }
+    res.json({ success: true, running: action !== "stop" });
+  } catch (e) {
+    const msg =
+      e.code === "no_accounts"
+        ? "The bot has no accounts yet — add some first."
+        : e.code === "disabled"
+          ? "Bot control is disabled on this server."
+          : e.unreachable
+            ? "The bot host is offline right now."
+            : e.message || "Could not " + action + " the bot.";
+    const status = e.unreachable ? 502 : e.code ? 400 : 500;
+    if (!e.code && !e.unreachable) {
+      console.error("renter bot " + action + " error:", e.message);
+    }
+    res.status(status).json({ success: false, message: msg });
   }
 });
 

@@ -4,9 +4,25 @@ const crypto = require("crypto");
 const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const Renter = require("../models/Renter");
 const hosts = require("../utils/botHosts");
 
 const router = express.Router();
+
+// Config files that are rented out to a renter (managed in the Renting section,
+// not on the operator's Bots page). Returned as a Set of "<hostId>|<file>" so
+// the bot-list endpoints can keep renter bots out of the operator's own view.
+async function getRentedConfigSet() {
+  try {
+    const rows = await Renter.find(
+      { botFile: { $gt: "" } },
+      { botHost: 1, botFile: 1 },
+    ).lean();
+    return new Set(rows.map((r) => (r.botHost || "") + "|" + r.botFile));
+  } catch {
+    return new Set();
+  }
+}
 
 // Default image used when a new bot can't inherit one from an existing service.
 const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
@@ -397,6 +413,8 @@ router.get("/bot-configs/hosts", requireSuperadmin, (req, res) => {
 // even if the Pi is down). Always 200: per-host errors are reported inline.
 router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
   const out = [];
+  const rented = await getRentedConfigSet();
+  let rentedCount = 0;
   for (const meta of hosts.listHosts()) {
     const host = hosts.resolveHost(meta.id);
     const entry = {
@@ -421,6 +439,11 @@ router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
 
     if (files) {
       for (const file of files) {
+        // Renter bots live in the Renting section, not the operator's Bots page.
+        if (rented.has(meta.id + "|" + file)) {
+          rentedCount++;
+          continue;
+        }
         try {
           const raw = await hosts.readFile(host, file);
           // Keep a server-side copy so an offline host (or emergency move)
@@ -456,6 +479,10 @@ router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
         .filter((f) => FILE_RE.test(f))
         .sort();
       for (const file of snaps) {
+        if (rented.has(meta.id + "|" + file)) {
+          rentedCount++;
+          continue;
+        }
         try {
           const data = JSON.parse(await hosts.readSnapshot(meta.id, file));
           entry.bots.push({
@@ -471,7 +498,7 @@ router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
     }
     out.push(entry);
   }
-  res.json({ success: true, hosts: out });
+  res.json({ success: true, hosts: out, rentedCount });
 });
 
 // LIST all config files on a host with a parsed summary.
@@ -500,7 +527,10 @@ router.get("/bot-configs", requireSuperadmin, async (req, res) => {
           ").",
       });
     }
-    const configs = files.filter((f) => FILE_RE.test(f)).sort();
+    const rented = await getRentedConfigSet();
+    const configs = files
+      .filter((f) => FILE_RE.test(f) && !rented.has(host.id + "|" + f))
+      .sort();
     const out = [];
     for (const file of configs) {
       try {

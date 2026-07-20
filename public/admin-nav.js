@@ -203,6 +203,13 @@
           icon: ICONS.admins,
           superOnly: true,
         },
+      ],
+    },
+    {
+      key: "renting",
+      label: "Renting",
+      icon: ICONS.renters,
+      items: [
         {
           href: "/renters.html",
           label: "Renters",

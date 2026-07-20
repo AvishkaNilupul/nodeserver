@@ -513,15 +513,18 @@
     try {
       const r = await api("/bot-configs/all");
       if (CURRENT_HOST !== ALL_TAB) return; // tab changed mid-flight
-      renderAllBots((r && r.hosts) || []);
+      renderAllBots((r && r.hosts) || [], (r && r.rentedCount) || 0);
     } catch (e) {
       if (CURRENT_HOST === ALL_TAB) $("bots").innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + "</div>";
     } finally { _allLoading = false; }
   }
 
-  function renderAllBots(list) {
+  function renderAllBots(list, rentedCount) {
     const totalBots = list.reduce((n, h) => n + h.bots.length, 0);
-    if (!totalBots) { $("bots").innerHTML = '<div class="empty">No bots found on any host.</div>'; return; }
+    const rentedNote = rentedCount
+      ? '<div class="muted" style="padding:6px 2px 12px;font-size:12.5px">🔑 ' + rentedCount + ' bot' + (rentedCount === 1 ? "" : "s") + ' rented out — managed in the Renting section.</div>'
+      : "";
+    if (!totalBots) { $("bots").innerHTML = rentedNote + '<div class="empty">No bots found on any host.</div>'; return; }
     const html = list.map(function (h) {
       const head =
         '<div class="allhost-h">' +
@@ -535,7 +538,7 @@
         : '<div class="muted" style="padding:8px 2px;">No bots' + (h.online ? "" : " (host offline, no saved copy yet)") + '.</div>';
       return '<section class="allhost">' + head + rows + "</section>";
     }).join("");
-    $("bots").innerHTML = html;
+    $("bots").innerHTML = rentedNote + html;
   }
 
   function allBotRow(host, b) {
