@@ -26,6 +26,17 @@ const dropSetSchema = new mongoose.Schema(
     // the bundle buyable by regular admins from the Shop tab.
     price: { type: Number, default: 0, min: 0 },
     listed: { type: Boolean, default: false, index: true },
+    // Custom listings (game-based promo covers pushed to marketplaces) are kept
+    // out of the regular Shop listings view via this flag. They still use the
+    // same DropSet shape so marketplace publishing/auto-delivery is unchanged.
+    custom: { type: Boolean, default: false, index: true },
+    // Promo-cover settings remembered for a custom listing so its cover can be
+    // regenerated identically (e.g. on relist) without re-entering them.
+    coverStyle: { type: String, default: "grid" },
+    coverGame: { type: String, default: "" },
+    coverServiceText: { type: String, default: "" },
+    coverBullets: { type: [String], default: [] },
+    coverImages: { type: [String], default: [] },
   },
   { timestamps: true },
 );

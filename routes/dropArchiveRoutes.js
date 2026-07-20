@@ -481,7 +481,9 @@ async function fillBotPasswordsFromPool() {
   ).lean();
   if (!bots.length) return 0;
   const lowers = [
-    ...new Set(bots.map((b) => String(b.login || "").toLowerCase()).filter(Boolean)),
+    ...new Set(
+      bots.map((b) => String(b.login || "").toLowerCase()).filter(Boolean),
+    ),
   ];
   const pool = await AvailableAccount.find(
     { usernameLower: { $in: lowers }, password: { $ne: "" } },
@@ -1239,7 +1241,10 @@ router.get(
             accountId: "$account",
             inPool: { $eq: ["$accountModel", "AvailableAccount"] },
             login: {
-              $ifNull: ["$acc.login", { $ifNull: ["$poolAcc.username", "$login"] }],
+              $ifNull: [
+                "$acc.login",
+                { $ifNull: ["$poolAcc.username", "$login"] },
+              ],
             },
             container: "$acc.container",
             configFile: "$acc.configFile",
@@ -1335,15 +1340,27 @@ function publicSet(s) {
     itemCount: (s.items || []).length,
     price: Number(s.price) || 0,
     listed: !!s.listed,
+    custom: !!s.custom,
+    coverStyle: s.coverStyle || "grid",
+    coverGame: s.coverGame || "",
+    coverServiceText: s.coverServiceText || "",
+    coverBullets: Array.isArray(s.coverBullets) ? s.coverBullets : [],
+    coverImages: Array.isArray(s.coverImages) ? s.coverImages : [],
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
 }
 
-// List all sets (lightweight).
+// List sets (lightweight). Regular Shop listings and custom listings are kept
+// separate: ?custom=1 returns only custom listings, otherwise only non-custom.
 router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
   try {
-    const sets = await DropSet.find({}).sort({ updatedAt: -1 }).lean();
+    const wantCustom = req.query.custom === "1" || req.query.custom === "true";
+    const sets = await DropSet.find({
+      custom: wantCustom ? true : { $ne: true },
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
     res.json({
       success: true,
       sets: sets.map((s) => ({
@@ -1354,6 +1371,9 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
         itemCount: (s.items || []).length,
         price: Number(s.price) || 0,
         listed: !!s.listed,
+        custom: !!s.custom,
+        coverStyle: s.coverStyle || "grid",
+        coverGame: s.coverGame || "",
         updatedAt: s.updatedAt,
       })),
     });
@@ -1393,6 +1413,24 @@ router.post("/drops-archive/sets", requireSuperadmin, async (req, res) => {
       doc.price = Math.round(price * 100) / 100;
     }
     if (body.listed !== undefined) doc.listed = !!body.listed;
+    if (body.custom !== undefined) doc.custom = !!body.custom;
+    if (body.coverStyle !== undefined) {
+      doc.coverStyle = String(body.coverStyle) === "promo" ? "promo" : "grid";
+    }
+    if (body.coverGame !== undefined) doc.coverGame = String(body.coverGame);
+    if (body.coverServiceText !== undefined) {
+      doc.coverServiceText = String(body.coverServiceText);
+    }
+    if (Array.isArray(body.coverBullets)) {
+      doc.coverBullets = body.coverBullets
+        .map((b) => String(b || ""))
+        .slice(0, 4);
+    }
+    if (Array.isArray(body.coverImages)) {
+      doc.coverImages = body.coverImages
+        .map((i) => String(i || ""))
+        .slice(0, 30);
+    }
     const set = await DropSet.create(doc);
     res.json({ success: true, set: publicSet(set) });
   } catch (err) {
@@ -1502,10 +1540,13 @@ router.post(
         });
       }
       const games = [
-        ...new Set(need.map((i) => String(i.game || "").toLowerCase()).filter(Boolean)),
+        ...new Set(
+          need.map((i) => String(i.game || "").toLowerCase()).filter(Boolean),
+        ),
       ];
       const gameRes = games.map(
-        (g) => new RegExp("^" + g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i"),
+        (g) =>
+          new RegExp("^" + g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i"),
       );
       const rows = gameRes.length
         ? await DropLog.find(
@@ -1515,14 +1556,16 @@ router.post(
         : [];
       const map = new Map();
       for (const r of rows) {
-        const k = String(r.game || "").toLowerCase() + "|" + coreItemName(r.name);
+        const k =
+          String(r.game || "").toLowerCase() + "|" + coreItemName(r.name);
         if (coreItemName(r.name) && !map.has(k)) map.set(k, r.imageLocal);
       }
       let filled = 0;
       const unmatched = [];
       for (const it of set.items) {
         if (String(it.image || "").startsWith("/")) continue;
-        const k = String(it.game || "").toLowerCase() + "|" + coreItemName(it.name);
+        const k =
+          String(it.game || "").toLowerCase() + "|" + coreItemName(it.name);
         const img = map.get(k);
         if (img) {
           it.image = img;

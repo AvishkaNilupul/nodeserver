@@ -6,6 +6,7 @@ const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const AuditFinding = require("../models/AuditFinding");
+const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const dsFulfiller = require("../utils/digisellerFulfiller");
@@ -13,9 +14,64 @@ const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
-const { buildSetGridImage } = require("../utils/setImage");
+const {
+  buildSetGridImage,
+  buildPromoCoverImage,
+} = require("../utils/setImage");
 
 const router = express.Router();
+
+const PROMO_BULLETS_DEFAULT = [
+  "Fully Automated Farming",
+  "Account-Safe and Undetectable",
+  "Reliable Daily Rewards",
+];
+const PROMO_SERVICE_DEFAULT = "180 Days Service";
+
+// The most-cached-first drop images for a game, for a promo cover's grid.
+async function gameDropImages(game, limit) {
+  const g = String(game || "").trim();
+  if (!g) return [];
+  const re = new RegExp(
+    "^" + g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+    "i",
+  );
+  const rows = await DropLog.aggregate([
+    { $match: { game: re, imageLocal: { $ne: "" } } },
+    { $group: { _id: "$imageLocal", accounts: { $sum: 1 } } },
+    { $sort: { accounts: -1 } },
+    { $limit: Math.max(1, Math.min(60, limit || 30)) },
+  ]);
+  return rows.map((r) => r._id).filter(Boolean);
+}
+
+// Resolve the tile images for a promo cover: caller-supplied custom images win,
+// otherwise the selected game's cached drop images.
+async function promoTileImages(opts) {
+  const custom = (Array.isArray(opts.coverImages) ? opts.coverImages : [])
+    .map((i) => String(i || "").trim())
+    .filter(Boolean);
+  if (custom.length) return custom;
+  return gameDropImages(opts.coverGame, 30);
+}
+
+function promoOptsFromBody(body, fallbackTitle) {
+  const bullets = Array.isArray(body.coverBullets)
+    ? body.coverBullets.map((b) => String(b || "").trim()).filter(Boolean)
+    : PROMO_BULLETS_DEFAULT;
+  return {
+    title: String(body.coverTitle || fallbackTitle || "").trim(),
+    serviceText: String(
+      body.coverServiceText != null
+        ? body.coverServiceText
+        : PROMO_SERVICE_DEFAULT,
+    ).trim(),
+    bullets: bullets.length ? bullets : PROMO_BULLETS_DEFAULT,
+    coverGame: String(body.coverGame || "").trim(),
+    coverImages: body.coverImages,
+    twitchTiles: body.twitchTiles !== false,
+  };
+}
 
 // ------------------------------------------------------------------
 // API keys (stored encrypted; only masked values ever leave the server)
@@ -222,6 +278,40 @@ function buildDescription(set) {
   return lines.join("\n").trim();
 }
 
+// Render a promo cover for the custom-listing form and return it inline as a
+// data URL. Nothing is persisted; the temp file is removed after encoding.
+router.post(
+  "/marketplaces/custom/preview",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const promo = promoOptsFromBody(body, "");
+      if (!promo.title) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Title required" });
+      }
+      const file = await buildPromoCoverImage({
+        title: promo.title,
+        serviceText: promo.serviceText,
+        bullets: promo.bullets,
+        itemImages: await promoTileImages(promo),
+        twitchTiles: promo.twitchTiles,
+      });
+      const buf = await fsp.readFile(file);
+      await fsp.unlink(file).catch(() => {});
+      res.json({
+        success: true,
+        dataUrl: "data:image/png;base64," + buf.toString("base64"),
+      });
+    } catch (err) {
+      console.error("custom cover preview error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
   try {
     const body = req.body || {};
@@ -240,6 +330,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     const priceUsd = Number(body.price != null ? body.price : set.price);
     // A numbered grid collage of every item in the set makes a much better
     // cover photo than a single item's icon; fall back to the first item.
+    // Custom listings use the promo-template cover instead (game drop images
+    // or the user's custom images, Twitch accents, title/service/bullets).
+    const wantPromo =
+      String(body.coverStyle || set.coverStyle || "") === "promo";
     let gridImage = "";
     if (
       targets.includes("gameflip") ||
@@ -247,7 +341,37 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
       targets.includes("digiseller")
     ) {
       try {
-        gridImage = await buildSetGridImage(set);
+        if (wantPromo) {
+          const promo = promoOptsFromBody(
+            {
+              coverTitle: body.coverTitle,
+              coverServiceText:
+                body.coverServiceText != null
+                  ? body.coverServiceText
+                  : set.coverServiceText || undefined,
+              coverBullets: Array.isArray(body.coverBullets)
+                ? body.coverBullets
+                : (set.coverBullets || []).length
+                  ? set.coverBullets
+                  : undefined,
+              coverGame: body.coverGame || set.coverGame,
+              coverImages: Array.isArray(body.coverImages)
+                ? body.coverImages
+                : set.coverImages,
+              twitchTiles: body.twitchTiles,
+            },
+            title,
+          );
+          gridImage = await buildPromoCoverImage({
+            title: promo.title,
+            serviceText: promo.serviceText,
+            bullets: promo.bullets,
+            itemImages: await promoTileImages(promo),
+            twitchTiles: promo.twitchTiles,
+          });
+        } else {
+          gridImage = await buildSetGridImage(set);
+        }
       } catch (err) {
         console.error("set grid image failed:", err.message);
       }

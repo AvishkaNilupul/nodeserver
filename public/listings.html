@@ -736,99 +736,264 @@
         in the listing.
       </div>
 
-      <div class="grid">
-        <!-- Create / edit -->
-        <section class="card" id="formCard">
-          <h2 id="formTitle">Create a listing</h2>
-          <div class="field">
-            <label for="fName">Title</label>
-            <input
-              type="text"
-              id="fName"
-              placeholder="e.g. RLCS 2025 Exotic Drop bundle"
-              maxlength="120"
-            />
-          </div>
-          <div class="field">
-            <label for="fNote">Description</label>
-            <textarea
-              id="fNote"
-              placeholder="What's included, condition, anything buyers should know…"
-              maxlength="2000"
-            ></textarea>
-          </div>
-          <div class="row2 field">
-            <div>
-              <label for="fPrice">Price (balance)</label>
-              <input type="number" id="fPrice" min="0" step="0.01" value="0" />
+      <style>
+        .tabbar {
+          display: flex;
+          gap: 8px;
+          margin: 0 0 18px;
+        }
+        .tabbar .tbtn.active {
+          background: var(--accent, #7c3aed);
+          border-color: transparent;
+          color: #fff;
+        }
+        .cthumb {
+          position: relative;
+          width: 64px;
+          height: 64px;
+          border-radius: 10px;
+          overflow: hidden;
+          border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        .cthumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        .cthumb .x {
+          position: absolute;
+          top: 2px;
+          right: 2px;
+          border: 0;
+          border-radius: 6px;
+          background: rgba(0, 0, 0, 0.6);
+          color: #fff;
+          cursor: pointer;
+          line-height: 1;
+          padding: 2px 6px;
+        }
+      </style>
+      <div class="tabbar">
+        <button class="btn tbtn active" id="tabBtnShop">Shop listings</button>
+        <button class="btn tbtn" id="tabBtnCustom">Custom listings</button>
+      </div>
+
+      <div id="tabShop">
+        <div class="grid">
+          <!-- Create / edit -->
+          <section class="card" id="formCard">
+            <h2 id="formTitle">Create a listing</h2>
+            <div class="field">
+              <label for="fName">Title</label>
+              <input
+                type="text"
+                id="fName"
+                placeholder="e.g. RLCS 2025 Exotic Drop bundle"
+                maxlength="120"
+              />
             </div>
-            <div style="display: flex; align-items: flex-end">
-              <span class="sub" style="margin: 0; font-size: 12px"
-                >1 balance = your top-up unit</span
+            <div class="field">
+              <label for="fNote">Description</label>
+              <textarea
+                id="fNote"
+                placeholder="What's included, condition, anything buyers should know…"
+                maxlength="2000"
+              ></textarea>
+            </div>
+            <div class="row2 field">
+              <div>
+                <label for="fPrice">Price (balance)</label>
+                <input
+                  type="number"
+                  id="fPrice"
+                  min="0"
+                  step="0.01"
+                  value="0"
+                />
+              </div>
+              <div style="display: flex; align-items: flex-end">
+                <span class="sub" style="margin: 0; font-size: 12px"
+                  >1 balance = your top-up unit</span
+                >
+              </div>
+            </div>
+
+            <label>Items in this listing (<span id="selCount">0</span>)</label>
+            <div class="sel" id="selList">
+              <div class="empty">
+                No items yet — pick from the list on the right.
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="btn primary" id="publishBtn">
+                Publish to shop
+              </button>
+              <button class="btn" id="draftBtn">Save as draft</button>
+              <button
+                class="btn"
+                id="fillImgBtn"
+                style="display: none"
+                title="Fill in missing item images from the drop archive, matched by name — so the cover shows real art instead of text tiles"
               >
+                Fill images from archive
+              </button>
+              <button class="btn ghost" id="cancelBtn" style="display: none">
+                Cancel edit
+              </button>
             </div>
-          </div>
+          </section>
 
-          <label>Items in this listing (<span id="selCount">0</span>)</label>
-          <div class="sel" id="selList">
-            <div class="empty">
-              No items yet — pick from the list on the right.
+          <!-- Picker -->
+          <section class="card">
+            <h2>Pick items from scanned drops</h2>
+            <div class="pickbar">
+              <select id="fGame" title="Filter items by game">
+                <option value="">All games</option>
+              </select>
+              <input
+                type="text"
+                id="pickSearch"
+                placeholder="Search items by name…"
+              />
             </div>
-          </div>
+            <div class="pick" id="pickGrid">
+              <div class="empty">Loading items…</div>
+            </div>
+          </section>
+        </div>
 
-          <div class="actions">
-            <button class="btn primary" id="publishBtn">Publish to shop</button>
-            <button class="btn" id="draftBtn">Save as draft</button>
-            <button
-              class="btn"
-              id="fillImgBtn"
-              style="display: none"
-              title="Fill in missing item images from the drop archive, matched by name — so the cover shows real art instead of text tiles"
-            >
-              Fill images from archive
-            </button>
-            <button class="btn ghost" id="cancelBtn" style="display: none">
-              Cancel edit
-            </button>
+        <!-- Existing listings -->
+        <section class="card" style="margin-top: 22px">
+          <div
+            style="
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 10px;
+            "
+          >
+            <h2 style="margin: 0">Existing listings</h2>
+            <button class="btn" id="mpKeysBtn">Marketplace keys</button>
           </div>
-        </section>
-
-        <!-- Picker -->
-        <section class="card">
-          <h2>Pick items from scanned drops</h2>
-          <div class="pickbar">
-            <select id="fGame" title="Filter items by game">
-              <option value="">All games</option>
-            </select>
-            <input
-              type="text"
-              id="pickSearch"
-              placeholder="Search items by name…"
-            />
-          </div>
-          <div class="pick" id="pickGrid">
-            <div class="empty">Loading items…</div>
+          <div id="listings" style="margin-top: 12px">
+            <div class="empty">Loading…</div>
           </div>
         </section>
       </div>
 
-      <!-- Existing listings -->
-      <section class="card" style="margin-top: 22px">
-        <div
-          style="
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-          "
-        >
-          <h2 style="margin: 0">Existing listings</h2>
-          <button class="btn" id="mpKeysBtn">Marketplace keys</button>
+      <!-- Custom listings: game-based marketplace listings with a generated
+           promo cover (drop-image collage). Kept separate from Shop listings. -->
+      <div id="tabCustom" style="display: none">
+        <div class="grid">
+          <section class="card">
+            <h2>Create a custom listing</h2>
+            <div class="field">
+              <label for="cGame">Game (from your drops archive)</label>
+              <select id="cGame">
+                <option value="">Pick a game…</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="cTitle">Title</label>
+              <input
+                type="text"
+                id="cTitle"
+                maxlength="200"
+                placeholder="e.g. Overwatch Twitch Drops Automatic Farming"
+              />
+            </div>
+            <div class="row2 field">
+              <div>
+                <label for="cService">Cover subtitle</label>
+                <input
+                  type="text"
+                  id="cService"
+                  maxlength="60"
+                  value="180 Days Service"
+                />
+              </div>
+              <div>
+                <label for="cPrice">Price (USD)</label>
+                <input
+                  type="number"
+                  id="cPrice"
+                  min="0"
+                  step="0.01"
+                  value="0"
+                />
+              </div>
+            </div>
+            <div class="field">
+              <label for="cBullets"
+                >Cover bullet lines (one per line, max 4)</label
+              >
+              <textarea id="cBullets" rows="3">
+Fully Automated Farming
+Account-Safe and Undetectable
+Reliable Daily Rewards</textarea
+              >
+            </div>
+            <div class="field">
+              <label for="cNote">Description</label>
+              <textarea
+                id="cNote"
+                maxlength="2000"
+                placeholder="Auto-generated from the selected items if left empty…"
+              ></textarea>
+            </div>
+            <div class="field">
+              <label
+                >Custom cover images (optional — used in the grid instead of the
+                game's drop images)</label
+              >
+              <input type="file" id="cUpload" accept="image/*" multiple />
+              <div
+                id="cUploads"
+                style="
+                  display: flex;
+                  gap: 8px;
+                  flex-wrap: wrap;
+                  margin-top: 8px;
+                "
+              ></div>
+            </div>
+            <div class="actions">
+              <button class="btn" id="cPreviewBtn">Preview cover</button>
+              <button class="btn primary" id="cCreateBtn">
+                Create &amp; sell on…
+              </button>
+            </div>
+            <div id="cPreviewBox" style="margin-top: 12px; display: none">
+              <img
+                id="cPreviewImg"
+                alt="Cover preview"
+                style="width: 100%; border-radius: 12px"
+              />
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>Game items (<span id="cSelCount">0</span> selected)</h2>
+            <div class="sub" style="margin: 0 0 10px">
+              Items included in the listing — they drive auto-delivery stock and
+              the description. Everything is selected by default.
+            </div>
+            <div class="pickbar">
+              <button class="btn" id="cAllBtn">Select all</button>
+              <button class="btn" id="cNoneBtn">Clear</button>
+            </div>
+            <div class="pick" id="cPickGrid">
+              <div class="empty">Pick a game first.</div>
+            </div>
+          </section>
         </div>
-        <div id="listings" style="margin-top: 12px">
-          <div class="empty">Loading…</div>
-        </div>
-      </section>
+
+        <section class="card" style="margin-top: 22px">
+          <h2 style="margin: 0 0 10px">Custom listings</h2>
+          <div id="cListings"><div class="empty">Loading…</div></div>
+        </section>
+      </div>
     </main>
 
     <!-- Marketplace modals -->
@@ -1675,7 +1840,8 @@
             var msg = "Filled " + r.filled + " of " + r.total + " image(s)";
             if (r.unmatched && r.unmatched.length) {
               msg +=
-                " · not in archive: " + r.unmatched.slice(0, 3).join(", ") +
+                " · not in archive: " +
+                r.unmatched.slice(0, 3).join(", ") +
                 (r.unmatched.length > 3 ? "…" : "");
             }
             toast(msg);
@@ -2882,12 +3048,374 @@
           });
       });
 
+      // ================= Custom listings =================
+      // Game-based marketplace listings with a generated promo cover. They are
+      // regular DropSets flagged custom:true (so auto-delivery/stock works the
+      // same) but stay out of the Shop listings view.
+      var cCatalog = []; // by-item rows for the chosen game
+      var cSelectedKeys = {}; // itemKey -> true
+      var cImages = []; // uploaded /uploads/... paths (optional cover tiles)
+      var cSets = []; // cached custom sets for the list below
+      var cTitleEdited = false;
+
+      function switchTab(which) {
+        var shop = which === "shop";
+        $("tabShop").style.display = shop ? "" : "none";
+        $("tabCustom").style.display = shop ? "none" : "";
+        $("tabBtnShop").classList.toggle("active", shop);
+        $("tabBtnCustom").classList.toggle("active", !shop);
+      }
+      $("tabBtnShop").addEventListener("click", function () {
+        switchTab("shop");
+      });
+      $("tabBtnCustom").addEventListener("click", function () {
+        switchTab("custom");
+      });
+
+      function cLoadGames() {
+        return api("/drops-archive/by-game")
+          .then(function (j) {
+            var games = (j.games || [])
+              .map(function (g) {
+                return g.game || "";
+              })
+              .filter(Boolean);
+            $("cGame").innerHTML =
+              '<option value="">Pick a game…</option>' +
+              games
+                .map(function (g) {
+                  return (
+                    '<option value="' + attr(g) + '">' + esc(g) + "</option>"
+                  );
+                })
+                .join("");
+          })
+          .catch(function () {});
+      }
+
+      function cSelCount() {
+        return Object.keys(cSelectedKeys).length;
+      }
+      function cRenderPick() {
+        $("cSelCount").innerText = cSelCount();
+        var box = $("cPickGrid");
+        if (!cCatalog.length) {
+          box.innerHTML = '<div class="empty">Pick a game first.</div>';
+          return;
+        }
+        box.innerHTML = cCatalog
+          .map(function (it) {
+            return (
+              '<div class="it' +
+              (cSelectedKeys[it.itemKey] ? " on" : "") +
+              '" data-ckey="' +
+              attr(it.itemKey) +
+              '">' +
+              imgTag(it.image) +
+              '<div class="meta">' +
+              '<div class="nm">' +
+              esc(it.name || "Reward") +
+              "</div>" +
+              '<div class="gm">' +
+              (it.accounts || 0) +
+              " acct" +
+              (it.accounts === 1 ? "" : "s") +
+              "</div></div>" +
+              '<div class="tick">&#10003;</div>' +
+              "</div>"
+            );
+          })
+          .join("");
+      }
+      $("cPickGrid").addEventListener("click", function (e) {
+        var el = e.target.closest("[data-ckey]");
+        if (!el) return;
+        var key = el.dataset.ckey;
+        if (cSelectedKeys[key]) delete cSelectedKeys[key];
+        else cSelectedKeys[key] = true;
+        el.classList.toggle("on", !!cSelectedKeys[key]);
+        $("cSelCount").innerText = cSelCount();
+      });
+      $("cAllBtn").addEventListener("click", function () {
+        cSelectedKeys = {};
+        cCatalog.forEach(function (it) {
+          cSelectedKeys[it.itemKey] = true;
+        });
+        cRenderPick();
+      });
+      $("cNoneBtn").addEventListener("click", function () {
+        cSelectedKeys = {};
+        cRenderPick();
+      });
+
+      function cLoadItems() {
+        var g = $("cGame").value;
+        cCatalog = [];
+        cSelectedKeys = {};
+        if (!g) {
+          cRenderPick();
+          return;
+        }
+        $("cPickGrid").innerHTML = '<div class="empty">Loading…</div>';
+        api("/drops-archive/by-item?game=" + encodeURIComponent(g))
+          .then(function (j) {
+            cCatalog = j.items || [];
+            // everything selected by default — the usual case is "the whole
+            // game's drops"
+            cCatalog.forEach(function (it) {
+              cSelectedKeys[it.itemKey] = true;
+            });
+            cRenderPick();
+          })
+          .catch(function (e) {
+            $("cPickGrid").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+      $("cGame").addEventListener("change", function () {
+        if (!cTitleEdited) {
+          $("cTitle").value = this.value
+            ? this.value + " Twitch Drops Automatic Farming"
+            : "";
+        }
+        cLoadItems();
+      });
+      $("cTitle").addEventListener("input", function () {
+        cTitleEdited = true;
+      });
+
+      // -- optional custom cover images (reuses the /upload-image endpoint) --
+      function cRenderUploads() {
+        $("cUploads").innerHTML = cImages
+          .map(function (u, i) {
+            return (
+              '<div class="cthumb"><img src="' +
+              attr(u) +
+              '" alt="" /><button class="x" data-cimg="' +
+              i +
+              '" title="Remove">&times;</button></div>'
+            );
+          })
+          .join("");
+      }
+      $("cUploads").addEventListener("click", function (e) {
+        var b = e.target.closest("[data-cimg]");
+        if (!b) return;
+        cImages.splice(Number(b.dataset.cimg), 1);
+        cRenderUploads();
+      });
+      $("cUpload").addEventListener("change", function () {
+        var files = Array.prototype.slice.call(this.files || []);
+        this.value = "";
+        files.forEach(function (f) {
+          var fd = new FormData();
+          fd.append("image", f);
+          fetch("/upload-image", {
+            method: "POST",
+            credentials: "same-origin",
+            body: fd,
+          })
+            .then(function (r) {
+              return r.json();
+            })
+            .then(function (j) {
+              if (j && j.success && j.url) {
+                cImages.push(j.url);
+                cRenderUploads();
+              } else {
+                toast((j && j.message) || "Upload failed");
+              }
+            })
+            .catch(function () {
+              toast("Upload failed");
+            });
+        });
+      });
+
+      function cBullets() {
+        return $("cBullets")
+          .value.split("\n")
+          .map(function (s) {
+            return s.trim();
+          })
+          .filter(Boolean)
+          .slice(0, 4);
+      }
+      function cCoverBody() {
+        return {
+          coverTitle: $("cTitle").value.trim(),
+          coverServiceText: $("cService").value.trim(),
+          coverBullets: cBullets(),
+          coverGame: $("cGame").value,
+          coverImages: cImages,
+        };
+      }
+
+      $("cPreviewBtn").addEventListener("click", function () {
+        if (!$("cTitle").value.trim()) {
+          toast("Enter a title");
+          return;
+        }
+        if (!$("cGame").value && !cImages.length) {
+          toast("Pick a game (or upload custom images)");
+          return;
+        }
+        var btn = $("cPreviewBtn");
+        btn.disabled = true;
+        btn.textContent = "Rendering…";
+        api("/marketplaces/custom/preview", {
+          method: "POST",
+          body: cCoverBody(),
+        })
+          .then(function (j) {
+            $("cPreviewImg").src = j.dataUrl;
+            $("cPreviewBox").style.display = "";
+          })
+          .catch(function (e) {
+            toast(e.message || "Preview failed");
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = "Preview cover";
+          });
+      });
+
+      $("cCreateBtn").addEventListener("click", function () {
+        var title = $("cTitle").value.trim();
+        if (!title) {
+          toast("Enter a title");
+          return;
+        }
+        if (!$("cGame").value) {
+          toast("Pick a game");
+          return;
+        }
+        var keys = Object.keys(cSelectedKeys);
+        if (!keys.length) {
+          toast("Select at least one item");
+          return;
+        }
+        var price = Number($("cPrice").value);
+        if (!isFinite(price) || price < 0) {
+          toast("Enter a valid price");
+          return;
+        }
+        var cover = cCoverBody();
+        var body = {
+          name: title,
+          note: $("cNote").value.trim(),
+          price: price,
+          listed: false,
+          itemKeys: keys,
+          custom: true,
+          coverStyle: "promo",
+          coverGame: cover.coverGame,
+          coverServiceText: cover.coverServiceText,
+          coverBullets: cover.coverBullets,
+          coverImages: cover.coverImages,
+        };
+        var btn = $("cCreateBtn");
+        btn.disabled = true;
+        api("/drops-archive/sets", { method: "POST", body: body })
+          .then(function (j) {
+            toast("Custom listing created");
+            cLoadCustomListings();
+            openPublishModal(j.set);
+          })
+          .catch(function (e) {
+            toast(e.message || "Create failed");
+          })
+          .finally(function () {
+            btn.disabled = false;
+          });
+      });
+
+      function cListingRow(set) {
+        var imgs = (set.items || [])
+          .slice(0, 4)
+          .map(function (i) {
+            return imgTag(i.image);
+          })
+          .join("");
+        return (
+          '<div class="listing" data-id="' +
+          attr(set.id) +
+          '">' +
+          '<div class="thumbs">' +
+          (imgs || '<div class="noimg"></div>') +
+          "</div>" +
+          '<div class="info">' +
+          '<div class="t">' +
+          esc(set.name) +
+          "</div>" +
+          '<div class="meta">' +
+          '<span class="badge live">Custom</span>' +
+          "<span>" +
+          esc(set.coverGame || "") +
+          "</span>" +
+          "<span>" +
+          set.itemCount +
+          " item" +
+          (set.itemCount === 1 ? "" : "s") +
+          "</span>" +
+          "</div></div>" +
+          '<div class="price">' +
+          (Number(set.price) || 0) +
+          "</div>" +
+          '<div class="ops">' +
+          '<button class="btn" data-cmp="' +
+          attr(set.id) +
+          '">Sell on…</button>' +
+          '<button class="btn danger" data-cdel="' +
+          attr(set.id) +
+          '">Delete</button>' +
+          "</div></div>"
+        );
+      }
+      function cLoadCustomListings() {
+        return api("/drops-archive/sets?custom=1")
+          .then(function (j) {
+            cSets = j.sets || [];
+            $("cListings").innerHTML = cSets.length
+              ? cSets.map(cListingRow).join("")
+              : '<div class="empty">No custom listings yet.</div>';
+          })
+          .catch(function (e) {
+            $("cListings").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+      $("cListings").addEventListener("click", function (e) {
+        var mpB = e.target.closest("[data-cmp]");
+        var delB = e.target.closest("[data-cdel]");
+        if (mpB) {
+          var s = cSets.find(function (x) {
+            return x.id === mpB.dataset.cmp;
+          });
+          if (s) openPublishModal(s);
+        } else if (delB) {
+          if (!confirm("Delete this custom listing?")) return;
+          api("/drops-archive/sets/" + delB.dataset.cdel, {
+            method: "DELETE",
+          })
+            .then(function () {
+              toast("Deleted");
+              cLoadCustomListings();
+            })
+            .catch(function (err) {
+              toast(err.message || "Delete failed");
+            });
+        }
+      });
+
       // ---- init ----
       resetForm();
       loadMe();
       loadGames();
       loadCatalog("");
       loadListings();
+      cLoadGames();
+      cLoadCustomListings();
     </script>
     <script src="/admin-nav.js"></script>
   </body>
