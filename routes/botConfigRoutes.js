@@ -1574,6 +1574,27 @@ async function startConfigContainer(host, file) {
     e.code = "no_accounts";
     throw e;
   }
+  // On a docker host, make sure the container actually EXISTS before starting:
+  // register the compose service if it's missing (cloning an existing service's
+  // image, exactly like the create flow) and bring it up with compose — which
+  // creates+starts it. This lets a renter be assigned a config slot that was
+  // never provisioned and still have "start" work, instead of failing with
+  // "No such container: twitchbotxNN". Only the missing service is ever added,
+  // so running bots are untouched. Native hosts (botctl) discover configs on
+  // their own, so they just start.
+  if (host.runtime !== "native") {
+    const composeFile = await hosts.composeName(host);
+    if (composeFile) {
+      const raw = await hosts.composeRead(host, composeFile);
+      const edited = addServiceToComposeText(raw, container, file);
+      if (!edited.exists) {
+        await hosts.composeWrite(host, composeFile, edited.text);
+      }
+    }
+    const output = await hosts.composeUp(host, container);
+    await hosts.restoreRestartPolicy(host, container);
+    return { started: true, container, output };
+  }
   const output = await hosts.dockerContainer(host, "start", container);
   await hosts.restoreRestartPolicy(host, container);
   return { started: true, container, output };
