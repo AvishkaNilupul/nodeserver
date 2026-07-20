@@ -122,6 +122,80 @@ router.get("/renters/bots", requireSuperadmin, async (req, res) => {
   }
 });
 
+// LIST every RENTED bot with live status — the "Rented bots" overview in the
+// Renting section (an operator-wide view of the fleet, so a bot doesn't have to
+// be opened renter-by-renter). Account/drop counts come from the standalone
+// renter inventory; running state from one dockerPs per host (cached, so hosts
+// aren't probed once per bot).
+router.get("/renter-bots", requireSuperadmin, async (req, res) => {
+  try {
+    const renters = await Renter.find({ botFile: { $gt: "" } })
+      .sort({ createdAt: -1 })
+      .lean();
+    const ids = renters.map((r) => r._id);
+    const [accAgg, dropAgg] = await Promise.all([
+      RenterAccount.aggregate([
+        { $match: { renter: { $in: ids } } },
+        { $group: { _id: "$renter", n: { $sum: 1 } } },
+      ]),
+      RenterDrop.aggregate([
+        { $match: { renter: { $in: ids } } },
+        { $group: { _id: "$renter", n: { $sum: 1 } } },
+      ]),
+    ]);
+    const accMap = new Map(accAgg.map((a) => [String(a._id), a.n]));
+    const dropMap = new Map(dropAgg.map((a) => [String(a._id), a.n]));
+
+    // One dockerPs per host, reused across every bot on that host.
+    const psCache = new Map();
+    async function getPs(host) {
+      if (psCache.has(host.id)) return psCache.get(host.id);
+      let states = null;
+      try {
+        states = await hosts.dockerPs(host);
+      } catch {
+        states = null; // host offline / unreachable
+      }
+      psCache.set(host.id, states);
+      return states;
+    }
+
+    const bots = [];
+    for (const r of renters) {
+      const host = hosts.resolveHost(r.botHost);
+      let running = null;
+      let online = false;
+      let hostLabel = r.botHost;
+      if (host) {
+        hostLabel = host.label;
+        const states = await getPs(host);
+        if (states) {
+          online = true;
+          const st = states[containerForFile(r.botFile)];
+          running = !!(st && /^running/i.test(st.state || ""));
+        }
+      }
+      bots.push({
+        renterId: String(r._id),
+        username: r.username,
+        status: r.status,
+        host: r.botHost,
+        hostLabel,
+        file: r.botFile,
+        container: containerForFile(r.botFile),
+        online,
+        running,
+        accounts: accMap.get(String(r._id)) || 0,
+        drops: dropMap.get(String(r._id)) || 0,
+      });
+    }
+    res.json({ success: true, bots });
+  } catch (err) {
+    console.error("renter-bots list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // CREATE a renter.
 router.post("/renters", requireSuperadmin, async (req, res) => {
   try {

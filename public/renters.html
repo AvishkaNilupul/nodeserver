@@ -137,6 +137,11 @@
       </div>
 
       <div class="sect">
+        <div class="shdr"><h2>Rented bots</h2><button class="btn ghost sm" id="refreshBots">Refresh</button></div>
+        <div class="rows" id="rentBots"></div>
+      </div>
+
+      <div class="sect">
         <div class="shdr"><h2>Renters</h2></div>
         <div class="rows" id="renters"></div>
       </div>
@@ -242,10 +247,36 @@
         } catch(e){ $("renters").innerHTML = '<div class="muted">'+esc(e.message)+'</div>'; }
       }
 
+      // ---- rented bots overview ----
+      async function loadRentBots(){
+        try {
+          const d = await api("/renter-bots");
+          const bots = d.bots || [];
+          if(!bots.length){ $("rentBots").innerHTML = '<div class="muted" style="padding:6px 2px">No rented bots yet. Create one from a renter’s <b>Manage</b> panel.</div>'; return; }
+          $("rentBots").innerHTML = bots.map(b=>{
+            const runPill = !b.online ? '<span class="badge wait">Host offline</span>'
+              : b.running===true ? '<span class="badge active">Running</span>'
+              : b.running===false ? '<span class="badge suspended">Stopped</span>'
+              : '<span class="badge wait">Unknown</span>';
+            return '<div class="row">'+
+              '<div><div class="nm">'+esc(b.username)+' '+(b.status==="suspended"?'<span class="badge suspended">Suspended</span>':'')+'</div>'+
+                '<div class="meta">'+esc(b.hostLabel||b.host)+' · '+esc(b.file)+' · '+b.accounts+' account(s) · '+b.drops+' drop(s)</div></div>'+
+              '<div class="meta">'+runPill+'</div>'+
+              '<div class="meta mono">'+esc(b.container||"")+'</div>'+
+              '<div class="acts">'+
+                '<button class="btn sm" onclick="renterBot(\''+b.renterId+'\',\'start\')">Start</button>'+
+                '<button class="btn ghost sm" onclick="renterBot(\''+b.renterId+'\',\'restart\')">Restart</button>'+
+                '<button class="btn warn sm" onclick="renterBot(\''+b.renterId+'\',\'stop\')">Stop</button>'+
+                '<button class="btn ghost sm" onclick="openRenter(\''+b.renterId+'\')">Manage</button>'+
+              '</div></div>';
+          }).join("");
+        } catch(e){ $("rentBots").innerHTML = '<div class="muted">'+esc(e.message)+'</div>'; }
+      }
+
       window.setSusp = async (id, suspend)=>{
         if(suspend && !confirm("Suspend this renter? Their access is blocked and their bot is stopped.")) return;
         try { const d = await api("/renters/"+id+"/"+(suspend?"suspend":"unsuspend"),{method:"POST"});
-          toast(suspend?("Suspended"+(d.botStopped?" · bot stopped":"")):"Unsuspended"); await loadRenters(); if(CURRENT===id) openRenter(id); }
+          toast(suspend?("Suspended"+(d.botStopped?" · bot stopped":"")):"Unsuspended"); await Promise.all([loadRenters(), loadRentBots()]); if(CURRENT===id) openRenter(id); }
         catch(e){ toast(e.message); }
       };
 
@@ -265,7 +296,7 @@
       window.renterBot = async (id, action)=>{
         try { const d = await api("/renters/"+id+"/bot/"+action,{method:"POST"});
           toast(action==="start"?"Bot started":action==="stop"?"Bot stopped":"Bot restarting");
-          await loadRenters(); if(CURRENT===id) openRenter(id); }
+          await Promise.all([loadRenters(), loadRentBots()]); if(CURRENT===id) openRenter(id); }
         catch(e){ toast(e.message); }
       };
       function renderModal(r, subs, bot){
@@ -310,7 +341,7 @@
         const host = ($("eBotHost") && $("eBotHost").value) || "local";
         if(!confirm("Create a new bot for this renter on "+host+"? It provisions a fresh config slot and starts once accounts are approved.")) return;
         try { await api("/renters/"+id+"/create-bot",{method:"POST",body:JSON.stringify({host})});
-          toast("Bot created"); await loadRenters(); openRenter(id); }
+          toast("Bot created"); await Promise.all([loadRenters(), loadRentBots()]); openRenter(id); }
         catch(e){ toast(e.message); }
       };
       window.saveRenter = async (id)=>{
@@ -332,16 +363,17 @@
           await navigator.clipboard.writeText(line); toast("Login copied"); }
         catch(e){ toast(e.message); } };
       window.delRenter = async (id)=>{ if(!confirm("Delete this renter? Their accounts and drops inventory are removed; the bot config file is left on the host.")) return;
-        try{ await api("/renters/"+id,{method:"DELETE"}); toast("Deleted"); closeModal(); await loadRenters(); }catch(e){ toast(e.message); } };
+        try{ await api("/renters/"+id,{method:"DELETE"}); toast("Deleted"); closeModal(); await Promise.all([loadRenters(), loadRentBots()]); }catch(e){ toast(e.message); } };
 
       // chrome
       $("logoutBtn").addEventListener("click", async ()=>{ try{ await fetch("/admin-logout",{method:"POST",credentials:"same-origin"}); }catch(e){} location.href="/admin-login.html"; });
-      $("refreshBtn").addEventListener("click", ()=>{ loadApprovals(); loadRenters(); });
+      $("refreshBtn").addEventListener("click", ()=>{ loadApprovals(); loadRenters(); loadRentBots(); });
+      $("refreshBots").addEventListener("click", ()=> loadRentBots());
       document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeModal(); });
 
       (async function init(){
         try { const me = await api("/shop/me"); $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); } catch(e){}
-        await loadHosts(); await loadApprovals(); await loadRenters();
+        await loadHosts(); await loadApprovals(); await loadRenters(); await loadRentBots();
       })();
     </script>
     <script src="/theme.js"></script>
