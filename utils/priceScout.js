@@ -55,11 +55,11 @@ function priceStats(listings) {
   };
 }
 
-async function gameflipScout(term) {
+async function gameflipSearch(term, status, limit) {
   const r = await axios.get(
     "https://production-gameflip.fingershock.com/api/v1/listing",
     {
-      params: { term, status: "onsale", limit: MAX_ROWS },
+      params: { term, status, limit: limit || MAX_ROWS },
       timeout: TIMEOUT,
       headers: { "User-Agent": UA },
     },
@@ -71,8 +71,18 @@ async function gameflipScout(term) {
       title: String(x.name),
       price: round2(Number(x.price) / 100),
       url: "https://gameflip.com/item/" + x.id,
+      updated: x.updated || null,
       sold: undefined,
     }));
+}
+
+function gameflipScout(term) {
+  return gameflipSearch(term, "onsale");
+}
+
+// Recently sold Gameflip listings: real demand, with sale dates + prices.
+function gameflipSoldScout(term, limit) {
+  return gameflipSearch(term, "sold", limit);
 }
 
 async function platiScout(term) {
@@ -88,7 +98,7 @@ async function platiScout(term) {
       title: String(x.name_eng || x.name || ""),
       price: round2(Number(x.price_usd)),
       url: String(x.url || "https://plati.market/itm/" + x.id),
-      sold: undefined,
+      sold: Number(x.numsold) || 0,
     }));
 }
 
@@ -228,4 +238,10 @@ async function competitorPrices({ term, g2g }) {
   return out;
 }
 
-module.exports = { competitorPrices };
+module.exports = {
+  competitorPrices,
+  gameflipScout,
+  gameflipSoldScout,
+  platiScout,
+  ggselScout,
+};

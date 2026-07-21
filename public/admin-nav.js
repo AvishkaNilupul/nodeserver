@@ -28,6 +28,14 @@
       '<path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>',
     listings:
       '<path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z"></path>',
+    bulkOrders:
+      '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 ' +
+      '8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>' +
+      '<polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>' +
+      '<line x1="12" y1="22.08" x2="12" y2="12"></line>',
+    renters:
+      '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 ' +
+      '7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>',
     settings:
       '<circle cx="12" cy="12" r="3"></circle>' +
       '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83' +
@@ -42,6 +50,8 @@
     integrity:
       '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 ' +
       '10 8 10z"></path><path d="M9 12l2 2 4-4"></path>',
+    research:
+      '<path d="M3 3v18h18"></path>' + '<path d="M7 13l4-4 3 3 5-6"></path>',
     prime:
       '<polyline points="20 12 20 22 4 22 4 12"></polyline>' +
       '<rect x="2" y="7" width="20" height="5"></rect>' +
@@ -140,9 +150,21 @@
           superOnly: true,
         },
         {
+          href: "/bulk-orders.html",
+          label: "Bulk orders",
+          icon: ICONS.bulkOrders,
+          superOnly: true,
+        },
+        {
           href: "/integrity.html",
           label: "Integrity",
           icon: ICONS.integrity,
+          superOnly: true,
+        },
+        {
+          href: "/research.html",
+          label: "Market research",
+          icon: ICONS.research,
           superOnly: true,
         },
       ],
@@ -187,6 +209,19 @@
           href: "/superadmin.html",
           label: "Admins",
           icon: ICONS.admins,
+          superOnly: true,
+        },
+      ],
+    },
+    {
+      key: "renting",
+      label: "Renting",
+      icon: ICONS.renters,
+      items: [
+        {
+          href: "/renters.html",
+          label: "Renters",
+          icon: ICONS.renters,
           superOnly: true,
         },
       ],

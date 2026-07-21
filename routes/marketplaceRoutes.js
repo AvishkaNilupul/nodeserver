@@ -15,6 +15,8 @@ const ggFulfiller = require("../utils/ggselFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
 const { competitorPrices } = require("../utils/priceScout");
+const marketResearch = require("../utils/marketResearch");
+const MarketResearch = require("../models/MarketResearch");
 const { buildG2gBulkFile } = require("../utils/g2gBulk");
 const {
   buildSetGridImage,
@@ -363,6 +365,41 @@ router.post(
       });
     } catch (err) {
       console.error("custom cover preview error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
+// Market research: which games' twitch drops actually sell
+// ------------------------------------------------------------------
+router.get("/marketplaces/research", requireSuperadmin, async (req, res) => {
+  try {
+    const rows = await MarketResearch.find({})
+      .sort({ opportunityScore: -1 })
+      .limit(300)
+      .lean();
+    res.json({ success: true, rows, status: marketResearch.status() });
+  } catch (err) {
+    console.error("research list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.post(
+  "/marketplaces/research/refresh",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const r = await Promise.race([
+        marketResearch.runScan(),
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ started: true, background: true }), 500),
+        ),
+      ]);
+      res.json({ success: true, ...r, status: marketResearch.status() });
+    } catch (err) {
+      console.error("research refresh error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },
@@ -966,5 +1003,9 @@ router.post(
     }
   },
 );
+
+// Kick off the periodic market-research scanner (first pass ~1 min after
+// boot, then every 12h). Started here so server.js needs no changes.
+marketResearch.start();
 
 module.exports = router;
