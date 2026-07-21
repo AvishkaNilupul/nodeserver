@@ -16,6 +16,7 @@ const fpFulfiller = require("../utils/funpayFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
 const { buildG2gBulkFile } = require("../utils/g2gBulk");
+const { competitorPrices } = require("../utils/priceScout");
 const {
   buildSetGridImage,
   buildPromoCoverImage,
@@ -400,6 +401,37 @@ router.post(
       });
     } catch (err) {
       console.error("custom cover preview error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Competitor price research: searches other sellers' live listings on
+// Gameflip / Plati / GGSel (and G2G when a service+brand is picked) and
+// returns per-market stats plus a recommended undercut price.
+router.post(
+  "/marketplaces/price-check",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const term = String(body.term || "").trim();
+      if (!term) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Search term required" });
+      }
+      const g2g =
+        body.g2g && body.g2g.serviceId && body.g2g.brandId
+          ? {
+              serviceId: String(body.g2g.serviceId),
+              brandId: String(body.g2g.brandId),
+            }
+          : null;
+      const results = await competitorPrices({ term, g2g });
+      res.json({ success: true, term, results });
+    } catch (err) {
+      console.error("price-check error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },
