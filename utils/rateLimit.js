@@ -25,7 +25,13 @@ const globalLimiter = jsonLimiter({
   windowMs: 15 * 60 * 1000,
   limit: 1000,
   message: "Too many requests. Please slow down and try again later.",
-  skip: (req) => req.path.startsWith("/socket.io"),
+  // Skip Socket.IO (its polling makes many background requests) AND logged-in
+  // admins — an authenticated operator bulk-posting listings to stores fires a
+  // lot of requests in a short window and shouldn't hit the blanket per-IP
+  // ceiling. Anonymous IPs are still capped. (Relies on this limiter being
+  // mounted after the session middleware in server.js, so req.session exists.)
+  skip: (req) =>
+    req.path.startsWith("/socket.io") || !!(req.session && req.session.admin),
 });
 
 // Admin login: slow brute-force of passwords.

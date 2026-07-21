@@ -108,11 +108,6 @@ app.disable("x-powered-by");
 // header any client can spoof.
 app.set("trust proxy", 1);
 
-// Site-wide rate limit: a blanket per-IP ceiling across every route, in front
-// of the stricter per-endpoint limiters. Skips Socket.IO so live chat isn't
-// throttled.
-app.use(globalLimiter);
-
 // =========================
 // Core middleware (must come before any route)
 // =========================
@@ -171,6 +166,14 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 // Share the session with Socket.IO so admin sockets are authenticated.
 io.engine.use(sessionMiddleware);
+
+// Site-wide rate limit: a blanket per-IP ceiling across every route, in front
+// of the stricter per-endpoint limiters. Mounted AFTER the session middleware
+// (not before) so it can read req.session and exempt logged-in admins — an
+// operator bulk-posting many listings to stores legitimately fires a burst of
+// requests and shouldn't hit this ceiling. Anonymous IPs are still capped, and
+// Socket.IO is skipped so live chat isn't throttled.
+app.use(globalLimiter);
 
 // =========================
 // Image upload (image types only)
