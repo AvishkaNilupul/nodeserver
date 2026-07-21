@@ -1226,8 +1226,6 @@ async function g2gListOffers({ pageSize = 100, maxPages = 30 } = {}) {
 }
 
 module.exports = {
-
-
   MARKETPLACES,
   FIELDS,
   setKeys,
