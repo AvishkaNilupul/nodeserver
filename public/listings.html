@@ -1145,7 +1145,9 @@ Reliable Daily Rewards</textarea
         <div class="mp-ext" style="border-top: 0; margin-top: 8px">
           <b style="font-size: 13px">G2G product</b>
           <label>Service</label>
-          <select id="gbService"><option value="">Loading…</option></select>
+          <select id="gbService">
+            <option value="">Loading…</option>
+          </select>
           <label>Category</label>
           <select id="gbCategory">
             <option value="">Pick a service first</option>
@@ -1193,9 +1195,7 @@ Reliable Daily Rewards</textarea
           </div>
           <div class="mp-row" style="margin-top: 8px">
             <div style="flex: 1">
-              <label style="margin-top: 0"
-                >Delivery speed qty (optional)</label
-              >
+              <label style="margin-top: 0">Delivery speed qty (optional)</label>
               <input type="text" id="gbSpeedQty" placeholder="e.g. 1-10|20" />
             </div>
             <div style="flex: 1">
@@ -1235,8 +1235,8 @@ Reliable Daily Rewards</textarea
             </div>
           </div>
           <div class="mp-hint">
-            One row per ticked listing. Title/price come from the set; edit price
-            here if needed.
+            One row per ticked listing. Title/price come from the set; edit
+            price here if needed.
           </div>
           <div id="gbSets" style="max-height: 260px; overflow-y: auto">
             <div class="empty">Loading…</div>
@@ -1272,7 +1272,10 @@ Reliable Daily Rewards</textarea
               Refresh
             </button>
           </div>
-          <div class="mp-row" style="align-items: center; gap: 8px; margin-top: 8px">
+          <div
+            class="mp-row"
+            style="align-items: center; gap: 8px; margin-top: 8px"
+          >
             <span style="font-size: 12px; opacity: 0.85">All shown:</span>
             <input
               type="number"
@@ -1309,7 +1312,10 @@ Reliable Daily Rewards</textarea
         </div>
 
         <div class="mp-actions">
-          <span id="gpStatus" style="flex: 1; font-size: 12px; opacity: 0.85"></span>
+          <span
+            id="gpStatus"
+            style="flex: 1; font-size: 12px; opacity: 0.85"
+          ></span>
           <button class="btn ghost" id="gpCancel">Close</button>
           <button class="btn primary" id="gpSave">
             Save changes (<span id="gpChangedCount">0</span>)
@@ -2134,16 +2140,11 @@ Reliable Daily Rewards</textarea
               return;
             }
             box.innerHTML = sets.map(listingRow).join("");
-            // fetch live stock per set (parallel) and patch the badges/meta
-            sets.forEach(function (set) {
-              api("/drops-archive/sets/" + set.id + "/fulfillment")
-                .then(function (f) {
-                  set.stock =
-                    f.bundlesAvailable != null ? f.bundlesAvailable : 0;
-                  patchRow(set);
-                })
-                .catch(function () {});
-            });
+            // Fetch live stock per set and patch the badges/meta. Each
+            // fulfillment call runs heavy DB aggregations, so cap concurrency
+            // instead of firing all N at once (a burst that grew slower as
+            // both the listing count and the drops archive grew).
+            fanoutStock(sets);
           })
           .catch(function (e) {
             $("listings").innerHTML =
@@ -2154,6 +2155,27 @@ Reliable Daily Rewards</textarea
         var el = document.querySelector('.listing[data-id="' + set.id + '"]');
         if (!el) return;
         el.outerHTML = listingRow(set);
+      }
+      // Load live stock for many sets with a small concurrency cap so a page
+      // with lots of listings doesn't fire a burst of heavy aggregations.
+      function fanoutStock(sets) {
+        var i = 0;
+        var MAX = 4;
+        function next() {
+          if (i >= sets.length) return Promise.resolve();
+          var set = sets[i++];
+          return api("/drops-archive/sets/" + set.id + "/fulfillment")
+            .then(function (f) {
+              set.stock = f.bundlesAvailable != null ? f.bundlesAvailable : 0;
+              patchRow(set);
+            })
+            .catch(function () {})
+            .then(next);
+        }
+        var runners = [];
+        for (var k = 0; k < Math.min(MAX, sets.length); k++)
+          runners.push(next());
+        return Promise.all(runners);
       }
 
       $("listings").addEventListener("click", function (e) {
@@ -2184,7 +2206,15 @@ Reliable Daily Rewards</textarea
           })
             .then(function () {
               toast(next ? "Published to shop" : "Unlisted");
-              loadListings();
+              // Listing/unlisting never changes stock, so just flip the flag
+              // and re-render this one row — no need to re-fetch (and
+              // re-aggregate) every listing's stock on each toggle.
+              if (set) {
+                set.listed = next;
+                patchRow(set);
+              } else {
+                loadListings();
+              }
             })
             .catch(function (err) {
               toast(err.message || "Failed");
@@ -2199,7 +2229,19 @@ Reliable Daily Rewards</textarea
             .then(function () {
               toast("Listing deleted");
               if (editId === did) resetForm();
-              loadListings();
+              // Removing one set doesn't affect the others' stock — drop it
+              // locally instead of re-fetching every remaining listing.
+              listingsCache = listingsCache.filter(function (x) {
+                return x.id !== did;
+              });
+              var node = document.querySelector(
+                '.listing[data-id="' + did + '"]',
+              );
+              if (node) node.remove();
+              if (!listingsCache.length) {
+                $("listings").innerHTML =
+                  '<div class="empty">No listings yet. Create one above.</div>';
+              }
             })
             .catch(function (err) {
               toast(err.message || "Delete failed");
@@ -3648,13 +3690,11 @@ Reliable Daily Rewards</textarea
           .then(function (res) {
             var seen = {};
             gbSets = [];
-            (res[0].sets || [])
-              .concat(res[1].sets || [])
-              .forEach(function (s) {
-                if (seen[s.id]) return;
-                seen[s.id] = 1;
-                gbSets.push(s);
-              });
+            (res[0].sets || []).concat(res[1].sets || []).forEach(function (s) {
+              if (seen[s.id]) return;
+              seen[s.id] = 1;
+              gbSets.push(s);
+            });
             gbRenderSets();
           })
           .catch(function (e) {
@@ -3693,7 +3733,7 @@ Reliable Daily Rewards</textarea
 
       function gbUpdateCount() {
         var n = document.querySelectorAll(
-          '#gbSets [data-gbset]:checked',
+          "#gbSets [data-gbset]:checked",
         ).length;
         $("gbSelCount").innerText = n;
       }
@@ -3711,13 +3751,13 @@ Reliable Daily Rewards</textarea
       // reference sheet joins group values.
       function gbAttributeValue() {
         var parts = [];
-        document.querySelectorAll("#gbAttrs [data-gbattr]").forEach(function (
-          sel,
-        ) {
-          if (sel.value) {
-            parts.push(sel.options[sel.selectedIndex].text.trim());
-          }
-        });
+        document
+          .querySelectorAll("#gbAttrs [data-gbattr]")
+          .forEach(function (sel) {
+            if (sel.value) {
+              parts.push(sel.options[sel.selectedIndex].text.trim());
+            }
+          });
         return parts.join(" > ");
       }
 
@@ -3727,19 +3767,15 @@ Reliable Daily Rewards</textarea
         if (e.target === this) gbClose();
       });
       $("gbAll").addEventListener("click", function () {
-        document
-          .querySelectorAll('#gbSets [data-gbset]')
-          .forEach(function (c) {
-            c.checked = true;
-          });
+        document.querySelectorAll("#gbSets [data-gbset]").forEach(function (c) {
+          c.checked = true;
+        });
         gbUpdateCount();
       });
       $("gbNone").addEventListener("click", function () {
-        document
-          .querySelectorAll('#gbSets [data-gbset]')
-          .forEach(function (c) {
-            c.checked = false;
-          });
+        document.querySelectorAll("#gbSets [data-gbset]").forEach(function (c) {
+          c.checked = false;
+        });
         gbUpdateCount();
       });
       $("gbSets").addEventListener("change", function (e) {
@@ -3793,7 +3829,9 @@ Reliable Daily Rewards</textarea
         fillSelect(
           $("gbBrand"),
           rows,
-          rows.length ? "Pick a brand… (" + rows.length + ")" : "No games match",
+          rows.length
+            ? "Pick a brand… (" + rows.length + ")"
+            : "No games match",
         );
         if (q && rows.length === 1) {
           $("gbBrand").value = rows[0].id;
@@ -3882,16 +3920,14 @@ Reliable Daily Rewards</textarea
         var attrValue = gbAttributeValue();
         var offers = [];
         document
-          .querySelectorAll('#gbSets [data-gbset]:checked')
+          .querySelectorAll("#gbSets [data-gbset]:checked")
           .forEach(function (c) {
             var id = c.dataset.gbset;
             var set = gbSets.find(function (s) {
               return s.id === id;
             });
             if (!set) return;
-            var priceEl = document.querySelector(
-              '[data-gbprice="' + id + '"]',
-            );
+            var priceEl = document.querySelector('[data-gbprice="' + id + '"]');
             offers.push({
               attributeValue: attrValue,
               title: set.name,
@@ -3904,9 +3940,8 @@ Reliable Daily Rewards</textarea
           toast("Tick at least one listing");
           return;
         }
-        var productName = $("gbProduct").options[
-          $("gbProduct").selectedIndex
-        ].text.trim();
+        var productName =
+          $("gbProduct").options[$("gbProduct").selectedIndex].text.trim();
         var body = {
           productId: productId,
           productName: productName,
@@ -4093,7 +4128,14 @@ Reliable Daily Rewards</textarea
                 );
               })
               .join("");
-            return '<div class="gp-game" data-brand="' + attr(bid) + '">' + head + body + "</div>";
+            return (
+              '<div class="gp-game" data-brand="' +
+              attr(bid) +
+              '">' +
+              head +
+              body +
+              "</div>"
+            );
           })
           .join("");
         $("gpBody").innerHTML = html;
@@ -4194,9 +4236,7 @@ Reliable Daily Rewards</textarea
             gpUpdateChanged();
             $("gpStatus").innerText =
               "Saved " + ok + " · " + (fail ? fail + " failed" : "no failures");
-            toast(
-              "G2G: updated " + ok + (fail ? ", " + fail + " failed" : ""),
-            );
+            toast("G2G: updated " + ok + (fail ? ", " + fail + " failed" : ""));
             return;
           }
           var c = changed[i++];
@@ -4257,8 +4297,12 @@ Reliable Daily Rewards</textarea
         }
       });
       function gpGameInputs(bid) {
-        var g = document.querySelector('#gpBody .gp-game[data-brand="' + bid + '"]');
-        return g ? Array.prototype.slice.call(g.querySelectorAll("[data-gpprice]")) : [];
+        var g = document.querySelector(
+          '#gpBody .gp-game[data-brand="' + bid + '"]',
+        );
+        return g
+          ? Array.prototype.slice.call(g.querySelectorAll("[data-gpprice]"))
+          : [];
       }
 
       // ---- init ----
