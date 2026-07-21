@@ -1532,15 +1532,19 @@ async function funpayPublish({
   }
 
   const editor = await fpLoadEditor(goldenKey, node);
-  const t = String(title || "").slice(0, 250);
-  const d = String(description || "");
+  // FunPay caps offer fields; over the limit it rejects the whole save with a
+  // generic "Please fill out every field." A 51-item bundle description runs
+  // ~1800 chars, so trim to a safe length (verified: 1500 saves, 1800 fails).
+  const t = String(title || "").slice(0, 200);
+  let d = String(description || "").slice(0, 1000);
+  if (String(description || "").length > 1000) d = d.slice(0, 997) + "…";
   const lines = (
     Array.isArray(secrets) ? secrets : String(secrets || "").split("\n")
   )
     .map((s) => String(s || "").trim())
     .filter(Boolean);
   const auto = !!autoDelivery && lines.length > 0;
-  const msg = paymentMsg ? String(paymentMsg) : "";
+  const msg = (paymentMsg ? String(paymentMsg) : "").slice(0, 1500);
 
   const body = {
     csrf_token: editor.csrf,
