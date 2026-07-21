@@ -1806,6 +1806,14 @@ router.get(
       const bundlesAvailable = fullAccounts.filter(
         (a) => a.hasPassword && !a.sold,
       ).length;
+      // Complete accounts that could deliver this bundle but are already
+      // reserved/sold — e.g. committed as auto-delivery stock to another
+      // marketplace listing, since one "everything" account can fill many
+      // bundles. Surfaced so a bundle whose whole stock is committed reads as
+      // "held by other listings" instead of a baffling plain 0.
+      const bundlesHeld = fullAccounts.filter(
+        (a) => a.hasPassword && a.sold,
+      ).length;
 
       res.json({
         success: true,
@@ -1820,6 +1828,7 @@ router.get(
         accounts,
         fullAccounts: fullAccounts.length,
         bundlesAvailable,
+        bundlesHeld,
       });
     } catch (err) {
       console.error("drops-archive fulfillment error:", err.message);

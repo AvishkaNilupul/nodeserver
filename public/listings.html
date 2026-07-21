@@ -2189,7 +2189,14 @@ Reliable Daily Rewards</textarea
         var stockTxt =
           set.stock === null || set.stock === undefined
             ? ""
-            : set.stock + " in stock";
+            : set.stock +
+              " in stock" +
+              // These accounts hold the whole bundle but are already committed
+              // as stock to other listings, so a reserved-out set reads as
+              // "held" rather than an unexplained 0.
+              (set.stockHeld > 0
+                ? " · " + set.stockHeld + " held by other listings"
+                : "");
         return (
           '<div class="listing" data-id="' +
           attr(set.id) +
@@ -2273,6 +2280,7 @@ Reliable Daily Rewards</textarea
           return api("/drops-archive/sets/" + set.id + "/fulfillment")
             .then(function (f) {
               set.stock = f.bundlesAvailable != null ? f.bundlesAvailable : 0;
+              set.stockHeld = f.bundlesHeld != null ? f.bundlesHeld : 0;
               patchRow(set);
             })
             .catch(function () {})
