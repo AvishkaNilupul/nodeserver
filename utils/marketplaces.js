@@ -1310,9 +1310,13 @@ function fpFieldValue(html, name) {
 
 function fpOfferIds(html) {
   const ids = new Set();
-  const re = /[?&]offer=(\d+)/gi;
+  // FunPay's trade page lists each offer as <a class="tc-item"
+  // data-offer="123…">; the edit URL is just offerEdit?node=N (no offer param),
+  // so the id lives in the data-offer attribute. Match that first, and keep the
+  // ?offer= URL form as a fallback for any other page shape.
+  const re = /data-offer="(\d+)"|[?&]offer=(\d+)/gi;
   let m;
-  while ((m = re.exec(html))) ids.add(m[1]);
+  while ((m = re.exec(html))) ids.add(m[1] || m[2]);
   return ids;
 }
 
