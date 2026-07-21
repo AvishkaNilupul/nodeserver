@@ -874,7 +874,10 @@
             "
           >
             <h2 style="margin: 0">Existing listings</h2>
-            <button class="btn" id="mpKeysBtn">Marketplace keys</button>
+            <div class="mp-row">
+              <button class="btn" id="g2gPriceBtn">Update G2G prices</button>
+              <button class="btn" id="mpKeysBtn">Marketplace keys</button>
+            </div>
           </div>
           <div id="listings" style="margin-top: 12px">
             <div class="empty">Loading…</div>
@@ -1243,6 +1246,74 @@ Reliable Daily Rewards</textarea
         <div class="mp-actions">
           <button class="btn ghost" id="gbCancel">Cancel</button>
           <button class="btn primary" id="gbDownload">Download .xlsx</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="mp-overlay" id="g2gPriceOverlay">
+      <div class="mp-modal" style="max-width: 720px">
+        <h3>Update G2G prices</h3>
+        <div class="mp-hint">
+          Your live G2G offers, grouped by game. Edit a price inline, or use a
+          game’s bulk control to raise/lower every offer in it. Changed prices
+          are highlighted; “Save changes” pushes them to G2G via the API.
+        </div>
+
+        <div class="mp-ext" style="border-top: 0; margin-top: 8px">
+          <div class="mp-row" style="align-items: center; gap: 8px">
+            <input
+              type="text"
+              id="gpFilter"
+              placeholder="Filter by game or title…"
+              autocomplete="off"
+              style="flex: 1"
+            />
+            <button class="btn" id="gpReload" style="padding: 4px 10px">
+              Refresh
+            </button>
+          </div>
+          <div class="mp-row" style="align-items: center; gap: 8px; margin-top: 8px">
+            <span style="font-size: 12px; opacity: 0.85">All shown:</span>
+            <input
+              type="number"
+              id="gpBulkPct"
+              step="0.1"
+              placeholder="±%"
+              style="width: 80px"
+            />
+            <button class="btn" id="gpApplyPct" style="padding: 4px 10px">
+              Adjust %
+            </button>
+            <input
+              type="number"
+              id="gpBulkSet"
+              step="0.01"
+              min="0"
+              placeholder="set $"
+              style="width: 90px"
+            />
+            <button class="btn" id="gpApplySet" style="padding: 4px 10px">
+              Set all
+            </button>
+            <button class="btn ghost" id="gpReset" style="padding: 4px 10px">
+              Reset
+            </button>
+          </div>
+        </div>
+
+        <div
+          id="gpBody"
+          style="max-height: 52vh; overflow-y: auto; margin-top: 8px"
+        >
+          <div class="empty">Click “Refresh” to load your G2G offers.</div>
+        </div>
+
+        <div class="mp-actions">
+          <span id="gpStatus" style="flex: 1; font-size: 12px; opacity: 0.85"></span>
+          <button class="btn ghost" id="gpCancel">Close</button>
+          <button class="btn primary" id="gpSave">
+            Save changes (<span id="gpChangedCount">0</span>)
+          </button>
         </div>
       </div>
     </div>
@@ -3887,6 +3958,308 @@ Reliable Daily Rewards</textarea
             btn.innerText = "Download .xlsx";
           });
       });
+
+      // ---- G2G price updater ----
+      // Lists the seller's live G2G offers grouped by game and lets prices be
+      // edited inline or in bulk; Save pushes each changed price to G2G via the
+      // API (PATCH /v2/offers/{id}). Only price is updatable for these offers.
+      var gpOffers = [];
+      var gpBrandNames = {};
+      var gpLoaded = false;
+
+      function gpRound2(v) {
+        var n = Number(v);
+        return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+      }
+
+      function gpOpen() {
+        $("g2gPriceOverlay").classList.add("open");
+        if (!gpLoaded) gpLoad();
+      }
+      function gpClose() {
+        $("g2gPriceOverlay").classList.remove("open");
+      }
+
+      function gpLoad() {
+        $("gpStatus").innerText = "Loading offers…";
+        $("gpBody").innerHTML = '<div class="empty">Loading…</div>';
+        api("/marketplaces/g2g/offers")
+          .then(function (j) {
+            gpOffers = j.offers || [];
+            // Resolve game names for each distinct service the offers span.
+            var serviceIds = {};
+            gpOffers.forEach(function (o) {
+              if (o.serviceId) serviceIds[o.serviceId] = 1;
+            });
+            var jobs = Object.keys(serviceIds).map(function (sid) {
+              return api(
+                "/marketplaces/g2g/brands?serviceId=" + encodeURIComponent(sid),
+              )
+                .then(function (r) {
+                  g2gRows(r.data).forEach(function (row) {
+                    if (row.id) gpBrandNames[row.id] = row.label;
+                  });
+                })
+                .catch(function () {});
+            });
+            return Promise.all(jobs);
+          })
+          .then(function () {
+            gpLoaded = true;
+            gpRender();
+            $("gpStatus").innerText = gpOffers.length + " offers loaded";
+          })
+          .catch(function (e) {
+            $("gpBody").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+            $("gpStatus").innerText = "";
+          });
+      }
+
+      function gpGameName(brandId) {
+        return gpBrandNames[brandId] || "Game " + (brandId || "?");
+      }
+
+      function gpRender() {
+        if (!gpOffers.length) {
+          $("gpBody").innerHTML =
+            '<div class="empty">No live G2G offers.</div>';
+          gpUpdateChanged();
+          return;
+        }
+        // Group by brand (game).
+        var groups = {};
+        gpOffers.forEach(function (o) {
+          (groups[o.brandId] = groups[o.brandId] || []).push(o);
+        });
+        var brandIds = Object.keys(groups).sort(function (a, b) {
+          return gpGameName(a).localeCompare(gpGameName(b));
+        });
+        var html = brandIds
+          .map(function (bid) {
+            var rows = groups[bid].sort(function (a, b) {
+              return String(a.title).localeCompare(String(b.title));
+            });
+            var head =
+              '<div class="gp-game-head" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 4px">' +
+              "<b>" +
+              esc(gpGameName(bid)) +
+              ' <span style="opacity:.55;font-weight:400">(' +
+              rows.length +
+              ")</span></b>" +
+              '<span class="mp-row" style="gap:6px">' +
+              '<input type="number" step="0.1" data-gpgamepct="' +
+              attr(bid) +
+              '" placeholder="±%" style="width:60px" />' +
+              '<button class="btn" data-gpgameapct="' +
+              attr(bid) +
+              '" style="padding:2px 8px">%</button>' +
+              '<input type="number" step="0.01" min="0" data-gpgameset="' +
+              attr(bid) +
+              '" placeholder="$" style="width:70px" />' +
+              '<button class="btn" data-gpgameaset="' +
+              attr(bid) +
+              '" style="padding:2px 8px">set</button>' +
+              "</span></div>";
+            var body = rows
+              .map(function (o) {
+                var p = gpRound2(o.unitPrice);
+                return (
+                  '<div class="gp-row" data-offerid="' +
+                  attr(o.offerId) +
+                  '" data-game="' +
+                  attr(gpGameName(bid).toLowerCase()) +
+                  '" data-title="' +
+                  attr(String(o.title).toLowerCase()) +
+                  '" style="display:flex;align-items:center;gap:8px;padding:3px 0">' +
+                  '<div style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' +
+                  attr(o.title) +
+                  '">' +
+                  esc(o.title) +
+                  "</div>" +
+                  '<span style="font-size:11px;opacity:.55;white-space:nowrap">was ' +
+                  esc(o.currency || "USD") +
+                  " " +
+                  p +
+                  "</span>" +
+                  '<input type="number" step="0.01" min="0" data-gpprice data-offerid="' +
+                  attr(o.offerId) +
+                  '" data-orig="' +
+                  attr(p) +
+                  '" value="' +
+                  attr(p) +
+                  '" style="width:92px" />' +
+                  "</div>"
+                );
+              })
+              .join("");
+            return '<div class="gp-game" data-brand="' + attr(bid) + '">' + head + body + "</div>";
+          })
+          .join("");
+        $("gpBody").innerHTML = html;
+        gpApplyFilter();
+        gpUpdateChanged();
+      }
+
+      function gpApplyFilter() {
+        var q = $("gpFilter").value.trim().toLowerCase();
+        document.querySelectorAll("#gpBody .gp-game").forEach(function (g) {
+          var any = false;
+          g.querySelectorAll(".gp-row").forEach(function (row) {
+            var match =
+              !q ||
+              (row.dataset.game || "").indexOf(q) !== -1 ||
+              (row.dataset.title || "").indexOf(q) !== -1;
+            row.style.display = match ? "" : "none";
+            if (match) any = true;
+          });
+          g.style.display = any ? "" : "none";
+        });
+      }
+
+      // Price inputs currently visible (respecting the filter).
+      function gpVisibleInputs() {
+        return Array.prototype.filter.call(
+          document.querySelectorAll("#gpBody [data-gpprice]"),
+          function (inp) {
+            var row = inp.closest(".gp-row");
+            var game = inp.closest(".gp-game");
+            return (
+              row &&
+              game &&
+              row.style.display !== "none" &&
+              game.style.display !== "none"
+            );
+          },
+        );
+      }
+
+      function gpUpdateChanged() {
+        var n = 0;
+        document
+          .querySelectorAll("#gpBody [data-gpprice]")
+          .forEach(function (inp) {
+            var changed =
+              gpRound2(inp.value) !== gpRound2(inp.dataset.orig) &&
+              inp.value !== "";
+            inp.closest(".gp-row").style.background = changed
+              ? "rgba(124,58,237,.12)"
+              : "";
+            if (changed) n++;
+          });
+        $("gpChangedCount").innerText = n;
+      }
+
+      // Bulk helpers over a set of inputs.
+      function gpAdjustPct(inputs, pct) {
+        if (!Number.isFinite(pct)) return;
+        inputs.forEach(function (inp) {
+          var base = Number(inp.value);
+          if (!Number.isFinite(base)) return;
+          var v = gpRound2(base * (1 + pct / 100));
+          inp.value = v > 0 ? v : 0.01;
+        });
+        gpUpdateChanged();
+      }
+      function gpSetAll(inputs, val) {
+        if (!Number.isFinite(val) || val <= 0) return;
+        inputs.forEach(function (inp) {
+          inp.value = gpRound2(val);
+        });
+        gpUpdateChanged();
+      }
+
+      function gpSave() {
+        var changed = [];
+        document
+          .querySelectorAll("#gpBody [data-gpprice]")
+          .forEach(function (inp) {
+            var v = gpRound2(inp.value);
+            if (v !== gpRound2(inp.dataset.orig) && inp.value !== "" && v > 0) {
+              changed.push({ el: inp, offerId: inp.dataset.offerid, price: v });
+            }
+          });
+        if (!changed.length) {
+          toast("No price changes to save");
+          return;
+        }
+        var btn = $("gpSave");
+        btn.disabled = true;
+        var ok = 0;
+        var fail = 0;
+        var i = 0;
+        function next() {
+          if (i >= changed.length) {
+            btn.disabled = false;
+            gpUpdateChanged();
+            $("gpStatus").innerText =
+              "Saved " + ok + " · " + (fail ? fail + " failed" : "no failures");
+            toast(
+              "G2G: updated " + ok + (fail ? ", " + fail + " failed" : ""),
+            );
+            return;
+          }
+          var c = changed[i++];
+          $("gpStatus").innerText = "Saving " + i + "/" + changed.length + "…";
+          api("/marketplaces/g2g/offers/" + encodeURIComponent(c.offerId), {
+            method: "PUT",
+            body: { unitPrice: c.price },
+          })
+            .then(function () {
+              ok++;
+              c.el.dataset.orig = String(c.price); // now the baseline
+            })
+            .catch(function (e) {
+              fail++;
+              c.el.style.outline = "2px solid #ef4444";
+              c.el.title = e.message;
+            })
+            .finally(next);
+        }
+        next();
+      }
+
+      $("g2gPriceBtn").addEventListener("click", gpOpen);
+      $("gpCancel").addEventListener("click", gpClose);
+      $("g2gPriceOverlay").addEventListener("click", function (e) {
+        if (e.target === this) gpClose();
+      });
+      $("gpReload").addEventListener("click", gpLoad);
+      $("gpFilter").addEventListener("input", gpApplyFilter);
+      $("gpSave").addEventListener("click", gpSave);
+      $("gpBody").addEventListener("input", function (e) {
+        if (e.target.matches("[data-gpprice]")) gpUpdateChanged();
+      });
+      $("gpApplyPct").addEventListener("click", function () {
+        gpAdjustPct(gpVisibleInputs(), parseFloat($("gpBulkPct").value));
+      });
+      $("gpApplySet").addEventListener("click", function () {
+        gpSetAll(gpVisibleInputs(), parseFloat($("gpBulkSet").value));
+      });
+      $("gpReset").addEventListener("click", function () {
+        document
+          .querySelectorAll("#gpBody [data-gpprice]")
+          .forEach(function (inp) {
+            inp.value = inp.dataset.orig;
+            inp.style.outline = "";
+          });
+        gpUpdateChanged();
+      });
+      // Per-game bulk controls (event-delegated).
+      $("gpBody").addEventListener("click", function (e) {
+        var bid;
+        if ((bid = e.target.getAttribute("data-gpgameapct"))) {
+          var pctEl = document.querySelector('[data-gpgamepct="' + bid + '"]');
+          gpAdjustPct(gpGameInputs(bid), parseFloat(pctEl && pctEl.value));
+        } else if ((bid = e.target.getAttribute("data-gpgameaset"))) {
+          var setEl = document.querySelector('[data-gpgameset="' + bid + '"]');
+          gpSetAll(gpGameInputs(bid), parseFloat(setEl && setEl.value));
+        }
+      });
+      function gpGameInputs(bid) {
+        var g = document.querySelector('#gpBody .gp-game[data-brand="' + bid + '"]');
+        return g ? Array.prototype.slice.call(g.querySelectorAll("[data-gpprice]")) : [];
+      }
 
       // ---- init ----
       resetForm();

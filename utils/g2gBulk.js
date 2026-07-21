@@ -10,8 +10,12 @@
 // Attributes reference sheet are game-specific, and those come from the API.
 const { buildXlsx } = require("./xlsxWriter");
 
-// The 18 Offers-tab columns, in the exact order G2G's template uses them.
+// The 19 Offers-tab columns, in the exact order G2G's current template uses
+// them. Column A is "Offer ID": blank creates a new offer, a real G2G offer id
+// updates that offer. G2G's importer rejects the file ("download the latest
+// excel format") unless this column is present and the layout matches.
 const OFFER_HEADERS = [
+  "Offer ID",
   "Offer Attributes",
   "Title",
   "Description",
@@ -150,19 +154,22 @@ function buildG2gBulkFile({
     ["Product Name", String(productName || ""), "(Do not modify)"],
     [],
   ];
-  // Row 4: the optional/conditional hint row (columns match the real template).
+  // Row 4: the optional/conditional hint row (columns match the real template;
+  // all shifted one column right by the leading "Offer ID" column).
   const hint = [];
-  hint[0] = "Please refer to Offer Attributes";
-  hint[11] = "Optional"; // L: Wholesale Quantity
-  hint[12] = "Optional"; // M: Wholesale Price
-  hint[13] = IMAGE_NOTE; // N: Offer Images
-  hint[14] = "Optional"; // O: Offer Images Title
-  hint[16] = "Conditional"; // Q: Sales Country
+  hint[0] = "Do not modify"; // A: Offer ID
+  hint[1] = "Please refer to Offer Attributes"; // B: Offer Attributes
+  hint[12] = "Optional"; // M: Wholesale Quantity
+  hint[13] = "Optional"; // N: Wholesale Price
+  hint[14] = IMAGE_NOTE; // O: Offer Images
+  hint[15] = "Optional"; // P: Offer Images Title
+  hint[17] = "Conditional"; // R: Sales Country
   offersRows.push(hint);
   offersRows.push(OFFER_HEADERS.slice());
 
   for (const o of offers || []) {
     offersRows.push([
+      o.offerId || "", // A: Offer ID — blank creates a new offer
       o.attributeValue || "",
       o.title || "",
       o.description || "",

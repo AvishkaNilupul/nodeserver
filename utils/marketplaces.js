@@ -1140,7 +1140,94 @@ async function g2gDelist(offerId) {
   await g2gRequest("delete", "/v2/offers/" + encodeURIComponent(offerId));
 }
 
+// Update mutable fields (price / stock / status) of an offer that already
+// exists on G2G. Unlike creating, updating an existing offer is allowed even
+// for delivery types the API won't let you *create* — so this is the supported
+// way to manage price and stock of offers listed on g2g.com from here.
+//
+// Verified against G2G's Open API (2026-07-21): PATCH /v2/offers/{id} with a
+// partial body — only the fields you send are changed. Price updates work on
+// any offer. `stock` maps to api_qty (the API-managed stock); note that
+// manual/gifting offers keep api_qty=0 and manage their real stock
+// (available_qty, which the API rejects as "no attributes to be updated") on
+// g2g.com — so stock updates here only apply to API-delivery offers.
+async function g2gUpdateOffer(offerId, fields) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  const f = fields || {};
+  const body = {};
+  if (f.unitPrice != null && f.unitPrice !== "") {
+    const price = Number(f.unitPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error("G2G needs a price above 0");
+    }
+    body.unit_price = price;
+  }
+  if (f.stock != null && f.stock !== "") {
+    const qty = Number(f.stock);
+    if (!Number.isFinite(qty) || qty < 0) {
+      throw new Error("G2G needs a stock of 0 or more");
+    }
+    body.api_qty = Math.round(qty);
+  }
+  if (f.title != null) body.title = String(f.title).slice(0, 128);
+  if (f.description != null) body.description = String(f.description);
+  if (f.status != null) body.offer_status = String(f.status);
+  if (!Object.keys(body).length) {
+    throw new Error("G2G update: nothing to change");
+  }
+  const d = await g2gRequest(
+    "patch",
+    "/v2/offers/" + encodeURIComponent(offerId),
+    body,
+  );
+  const payload = d.payload || d.data || d;
+  return { externalId: String(payload.offer_id || payload.id || offerId) };
+}
+
+// Fetch one existing offer (current price/stock/status/etc.). Used by the bulk
+// updater to show what's live before changing it, and to safely diff after.
+async function g2gGetOffer(offerId) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  const d = await g2gRequest(
+    "get",
+    "/v2/offers/" + encodeURIComponent(offerId),
+  );
+  return d.payload || d.data || d;
+}
+
+// List the seller's own offers so the price updater can show them grouped by
+// game. G2G exposes this only as a POST search (there is no GET /v2/offers
+// list), so page through and return them all. brandId/serviceId let the UI
+// group per game; there's no working server-side product filter.
+async function g2gListOffers({ pageSize = 100, maxPages = 30 } = {}) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const d = await g2gRequest("post", "/v2/offers/search", {
+      page,
+      page_size: pageSize,
+    });
+    const p = d.payload || d.data || d;
+    const rows = p.results || p.offers || [];
+    for (const o of rows) {
+      out.push({
+        offerId: o.offer_id,
+        title: o.title,
+        status: o.status,
+        currency: o.currency,
+        unitPrice: o.unit_price,
+        availableQty: o.available_qty,
+        serviceId: o.service_id,
+        brandId: o.brand_id,
+      });
+    }
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
 module.exports = {
+
+
   MARKETPLACES,
   FIELDS,
   setKeys,
@@ -1163,6 +1250,9 @@ module.exports = {
   g2gProducts,
   g2gAttributes,
   g2gPublish,
+  g2gUpdateOffer,
+  g2gGetOffer,
+  g2gListOffers,
   g2gDelist,
   ggselTest,
   ggselCategories,

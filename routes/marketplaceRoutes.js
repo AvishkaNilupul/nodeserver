@@ -296,6 +296,42 @@ router.post(
   },
 );
 
+// List the seller's live G2G offers (id, title, price, game) so the price
+// updater can show them grouped by game and update prices in bulk.
+router.get("/marketplaces/g2g/offers", requireSuperadmin, async (req, res) => {
+  try {
+    const offers = await mp.g2gListOffers();
+    res.json({ success: true, offers });
+  } catch (err) {
+    console.error("g2g list offers error:", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Update price/stock (etc.) of an existing G2G offer by its offer id. This is
+// the "bulk update" path: G2G's file importer and Open API both refuse to
+// *create* non-instant item offers, but updating an offer that already exists
+// is allowed. Body: { unitPrice?, stock?, status?, title?, description? }.
+router.put(
+  "/marketplaces/g2g/offers/:offerId",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const offerId = String(req.params.offerId || "").trim();
+      if (!offerId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "offerId required" });
+      }
+      const result = await mp.g2gUpdateOffer(offerId, req.body || {});
+      res.json({ success: true, result });
+    } catch (err) {
+      console.error("g2g update offer error:", err.message);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
 // ------------------------------------------------------------------
 // Publish / list / delist
 // ------------------------------------------------------------------
