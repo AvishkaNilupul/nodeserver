@@ -414,22 +414,27 @@ const GGSEL_AD_MIN_BID = 0.4;
 const GGSEL_AD_MAIN_BLOCK_BID = 1;
 const GGSEL_FEE_RATE = 0.15;
 
-function adVerdict({ demand, campaignLive, competitive, hasResearch }) {
+// Campaign status is only a bonus signal — drops keep selling long after a
+// campaign ends, so verdicts are driven by demand evidence (sale counters,
+// recent sold volume) and price competitiveness.
+function adVerdict({
+  demand,
+  ggselSold,
+  campaignLive,
+  competitive,
+  hasResearch,
+}) {
   if (!hasResearch)
     return {
       verdict: "No data",
       reason: "Game not scanned yet — run a research scan",
     };
-  if (demand < 80)
+  const strongDemand = demand >= 150 || ggselSold >= 50;
+  const someDemand = demand >= 80 || ggselSold >= 10;
+  if (!someDemand)
     return {
       verdict: "Skip",
       reason: "Low demand — ads can't create searches that don't happen",
-    };
-  if (!campaignLive)
-    return {
-      verdict: demand >= 150 ? "Wait for campaign" : "Skip",
-      reason:
-        "No active/upcoming Twitch campaign — search traffic is low right now",
     };
   if (!competitive)
     return {
@@ -437,10 +442,12 @@ function adVerdict({ demand, campaignLive, competitive, hasResearch }) {
       reason:
         "Priced far above the cheapest competitor — extra views won't convert",
     };
-  if (demand >= 150)
+  if (strongDemand)
     return {
       verdict: "Advertise",
-      reason: "High demand + live campaign + competitive price",
+      reason:
+        "Proven demand + competitive price" +
+        (campaignLive ? " (live campaign is a bonus)" : ""),
     };
   return {
     verdict: "Maybe",
@@ -477,6 +484,7 @@ router.get("/marketplaces/ads-advisor", requireSuperadmin, async (req, res) => {
         !gg || !gg.lowest || Number(l.price || 0) <= gg.lowest * 1.6;
       const v = adVerdict({
         demand: r ? r.demandScore : 0,
+        ggselSold: gg ? gg.totalSold || 0 : 0,
         campaignLive,
         competitive,
         hasResearch: !!r,
@@ -504,9 +512,8 @@ router.get("/marketplaces/ads-advisor", requireSuperadmin, async (req, res) => {
       Advertise: 0,
       "Reprice first": 1,
       Maybe: 2,
-      "Wait for campaign": 3,
-      Skip: 4,
-      "No data": 5,
+      Skip: 3,
+      "No data": 4,
     };
     rows.sort(
       (a, b) =>
