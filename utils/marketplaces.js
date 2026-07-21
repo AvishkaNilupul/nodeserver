@@ -1246,19 +1246,20 @@ function fpCookie(goldenKey, extra) {
   return parts.join("; ");
 }
 
-// FunPay sets a PHPSESSID on any authenticated GET; the CSRF token is bound to
-// that session, so the follow-up POST must reuse it.
+// Forward EVERY cookie FunPay sets on the authenticated GET (PHPSESSID and any
+// others), not just PHPSESSID: offerSave rejects the POST with HTTP 428
+// (precondition required) unless the full cookie set from the page load is
+// present. The CSRF token is bound to this session, so the POST must reuse it.
 function fpSessionCookie(setCookie) {
   const arr = Array.isArray(setCookie)
     ? setCookie
     : setCookie
       ? [setCookie]
       : [];
-  for (const c of arr) {
-    const m = /(PHPSESSID=[^;]+)/.exec(c);
-    if (m) return m[1];
-  }
-  return "";
+  return arr
+    .map((c) => String(c).split(";")[0].trim())
+    .filter(Boolean)
+    .join("; ");
 }
 
 function fpUnescape(s) {
@@ -1352,10 +1353,27 @@ async function fpPostOfferSave(goldenKey, session, body) {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
       Accept: "application/json, text/javascript, */*; q=0.01",
+      // FunPay's precondition check needs a same-origin Referer/Origin.
+      Origin: "https://funpay.com",
+      Referer:
+        FP_BASE +
+        "/lots/offerEdit?node=" +
+        encodeURIComponent(body.node_id || ""),
     },
     timeout: 30000,
-    validateStatus: (s) => s >= 200 && s < 500,
+    validateStatus: () => true,
   });
+  // A non-2xx (notably 428 "precondition required" — missing cookies/headers)
+  // means the offer was NOT saved; never treat it as success.
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error(
+      "FunPay offerSave returned HTTP " +
+        r.status +
+        (r.status === 428
+          ? " — session precondition failed (paste a fresh golden_key and retry)"
+          : ""),
+    );
+  }
   let data = r.data;
   if (typeof data === "string") {
     try {
