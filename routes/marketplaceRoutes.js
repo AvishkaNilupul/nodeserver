@@ -14,6 +14,7 @@ const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
+const { buildG2gBulkFile } = require("../utils/g2gBulk");
 const {
   buildSetGridImage,
   buildPromoCoverImage,
@@ -237,6 +238,60 @@ router.get(
       res.json({ success: true, data: await mp.g2gAttributes(productId) });
     } catch (err) {
       res.json({ success: false, message: err.message });
+    }
+  },
+);
+
+// Generate a G2G "Bulk Upload for Items" .xlsx for offers G2G's API can't
+// create (non-instant item delivery). The Offer Attributes reference sheet is
+// pulled live from the product's attributes, so no blank template download is
+// needed — the seller just uploads this file on g2g.com. Returns the file as a
+// download, or JSON on error.
+router.post(
+  "/marketplaces/g2g/bulk-file",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const productId = String(body.productId || "").trim();
+      if (!productId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "productId required" });
+      }
+      const offers = Array.isArray(body.offers) ? body.offers : [];
+      if (!offers.length) {
+        return res
+          .status(400)
+          .json({ success: false, message: "No offers to export" });
+      }
+      // Best-effort: the Offers tab is still valid without the reference sheet,
+      // so a failed attributes lookup shouldn't block the export.
+      let attributesApi = null;
+      try {
+        attributesApi = await mp.g2gAttributes(productId);
+      } catch (e) {
+        console.error("g2g bulk: attributes fetch failed:", e.message);
+      }
+      const buf = buildG2gBulkFile({
+        productId,
+        productName: String(body.productName || ""),
+        attributesApi,
+        offers,
+        defaults: body.defaults || {},
+      });
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        'attachment; filename="' + productId + '.xlsx"',
+      );
+      res.send(buf);
+    } catch (err) {
+      console.error("g2g bulk-file error:", err.message);
+      res.status(500).json({ success: false, message: err.message });
     }
   },
 );
