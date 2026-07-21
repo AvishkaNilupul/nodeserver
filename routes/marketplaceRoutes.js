@@ -106,6 +106,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "digiseller") r = await mp.digisellerTest();
     else if (name === "g2g") r = await mp.g2gTest();
     else if (name === "ggsel") r = await mp.ggselTest();
+    else if (name === "funpay") r = await mp.funpayTest();
     else {
       return res
         .status(400)
@@ -687,6 +688,26 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             instructions: gg.instructions,
             coverImagePath: ggCover,
           });
+        } else if (name === "funpay") {
+          const fp = body.funpay || {};
+          if (!fp.nodeId) {
+            results[name] = {
+              success: false,
+              message: "Pick a FunPay category (node id) first",
+            };
+            continue;
+          }
+          r = await mp.funpayPublish({
+            nodeId: fp.nodeId,
+            title,
+            description,
+            priceUsd,
+            amount: fp.amount,
+            active: fp.active !== false,
+            autoDelivery: fp.delivery === "auto",
+            secrets: fp.secrets,
+            paymentMsg: fp.paymentMsg,
+          });
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -695,6 +716,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           set: set._id,
           marketplace: name,
           externalId: r.externalId,
+          externalNode: r.externalNode || "",
           url: r.url || "",
           title,
           description,
@@ -777,6 +799,8 @@ router.delete(
           await mp.g2gDelist(row.externalId);
         } else if (row.marketplace === "ggsel") {
           await mp.ggselDelist(row.externalId);
+        } else if (row.marketplace === "funpay") {
+          await mp.funpayDelist(row.externalId, row.externalNode);
         }
       } catch (err) {
         row.lastError = err.message.slice(0, 400);

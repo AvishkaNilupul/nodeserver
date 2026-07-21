@@ -22,6 +22,8 @@ const FIELDS = {
   digiseller: ["sellerId", "apiKey"],
   g2g: ["userId", "apiKey", "apiSecret"],
   ggsel: ["apiKey"],
+  // FunPay has no API — the single credential is the account's session token.
+  funpay: ["golden_key"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -1225,6 +1227,327 @@ async function g2gListOffers({ pageSize = 100, maxPages = 30 } = {}) {
   return out;
 }
 
+// ------------------------------------------------------------------
+// FunPay — no public API, so the seller's own account is driven through
+// funpay.com using a stored session token. The `golden_key` cookie is
+// FunPay's persistent auth token; paste it from a signed-in FunPay browser
+// session (DevTools → Application → Cookies → funpay.com → golden_key). A lot
+// is created by scraping a fresh CSRF token from the offer editor, then
+// POSTing the very form the site itself submits (/lots/offerSave).
+// ------------------------------------------------------------------
+const FP_BASE = "https://funpay.com/en";
+const FP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+function fpCookie(goldenKey, extra) {
+  const parts = ["golden_key=" + goldenKey];
+  if (extra) parts.push(extra);
+  return parts.join("; ");
+}
+
+// FunPay sets a PHPSESSID on any authenticated GET; the CSRF token is bound to
+// that session, so the follow-up POST must reuse it.
+function fpSessionCookie(setCookie) {
+  const arr = Array.isArray(setCookie)
+    ? setCookie
+    : setCookie
+      ? [setCookie]
+      : [];
+  for (const c of arr) {
+    const m = /(PHPSESSID=[^;]+)/.exec(c);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+function fpUnescape(s) {
+  return String(s)
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?34;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+// A FunPay page carries its per-session CSRF token (and the logged-in user) in
+// <body data-app-data='{"csrf-token":"…","userId":…}'>. Parse it out.
+function fpParseApp(html) {
+  const out = { csrf: "", userId: "", username: "" };
+  const app =
+    /data-app-data="([^"]+)"/.exec(html) ||
+    /data-app-data='([^']+)'/.exec(html);
+  if (app) {
+    try {
+      const data = JSON.parse(fpUnescape(app[1]));
+      out.csrf = data["csrf-token"] || "";
+      out.userId = data.userId != null ? String(data.userId) : "";
+    } catch {
+      const m = /csrf-token[^a-f0-9]{0,12}([a-f0-9]{16,})/i.exec(app[1]);
+      if (m) out.csrf = m[1];
+    }
+  }
+  const uname = /class="user-link-name"[^>]*>([^<]+)</.exec(html);
+  if (uname) out.username = uname[1].trim();
+  return out;
+}
+
+// Read a single form field's current value out of raw editor HTML (handles
+// both <input value="…"> and <textarea>…</textarea>).
+function fpFieldValue(html, name) {
+  const esc = name.replace(/[[\]]/g, "\\$&");
+  const inp = new RegExp('name="' + esc + '"[^>]*\\bvalue="([^"]*)"', "i").exec(
+    html,
+  );
+  if (inp) return fpUnescape(inp[1]);
+  const ta = new RegExp(
+    'name="' + esc + '"[^>]*>([\\s\\S]*?)</textarea>',
+    "i",
+  ).exec(html);
+  return ta ? fpUnescape(ta[1]) : "";
+}
+
+function fpOfferIds(html) {
+  const ids = new Set();
+  const re = /[?&]offer=(\d+)/gi;
+  let m;
+  while ((m = re.exec(html))) ids.add(m[1]);
+  return ids;
+}
+
+async function fpGet(pathOrUrl, goldenKey, session) {
+  const url = pathOrUrl.startsWith("http") ? pathOrUrl : FP_BASE + pathOrUrl;
+  const r = await axios.get(url, {
+    headers: {
+      Cookie: fpCookie(goldenKey, session),
+      "User-Agent": FP_UA,
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    timeout: 30000,
+    maxRedirects: 5,
+    validateStatus: (s) => s >= 200 && s < 400,
+  });
+  return { html: String(r.data || ""), setCookie: r.headers["set-cookie"] };
+}
+
+function fpEncode(map) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(map)) {
+    if (v === undefined || v === null) continue;
+    p.append(k, String(v));
+  }
+  return p.toString();
+}
+
+async function fpPostOfferSave(goldenKey, session, body) {
+  const r = await axios.post(FP_BASE + "/lots/offerSave", fpEncode(body), {
+    headers: {
+      Cookie: fpCookie(goldenKey, session),
+      "User-Agent": FP_UA,
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+      Accept: "application/json, text/javascript, */*; q=0.01",
+    },
+    timeout: 30000,
+    validateStatus: (s) => s >= 200 && s < 500,
+  });
+  let data = r.data;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      data = { raw: data.slice(0, 400) };
+    }
+  }
+  // FunPay reports validation problems as { error: "<html…>" } or
+  // { errors: {...} }; a plain { done: true } (or a url) means success.
+  const errRaw = data && (data.error || data.msg);
+  const hasErr =
+    (errRaw && !data.done && !data.url) ||
+    (data && data.errors && Object.keys(data.errors).length && !data.done);
+  if (hasErr) {
+    const msg = String(errRaw || JSON.stringify(data.errors))
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 300);
+    throw new Error(msg || "FunPay rejected the offer");
+  }
+  return data;
+}
+
+// Load the offer editor for a category (optionally an existing offer) and
+// return the session + nonces needed to (re)save it.
+async function fpLoadEditor(goldenKey, nodeId, offerId) {
+  let p = "/lots/offerEdit?node=" + encodeURIComponent(nodeId || "");
+  if (offerId) p += "&offer=" + encodeURIComponent(offerId);
+  const { html, setCookie } = await fpGet(p, goldenKey);
+  const app = fpParseApp(html);
+  const csrf = app.csrf || fpFieldValue(html, "csrf_token");
+  if (!csrf) {
+    throw new Error(
+      "could not read FunPay CSRF token — the golden_key is likely expired",
+    );
+  }
+  return {
+    session: fpSessionCookie(setCookie),
+    csrf,
+    formCreatedAt: fpFieldValue(html, "form_created_at"),
+    nodeId: fpFieldValue(html, "node_id") || String(nodeId || ""),
+    html,
+  };
+}
+
+async function funpayTest() {
+  const keys = requireKeys("funpay");
+  try {
+    const { html } = await fpGet("/", keys.golden_key);
+    const app = fpParseApp(html);
+    if (!app.userId && !app.username) {
+      throw new Error(
+        "golden_key not accepted — copy a fresh one from a signed-in FunPay " +
+          "session (Cookies → funpay.com → golden_key)",
+      );
+    }
+    return {
+      ok: true,
+      detail: "Connected as " + (app.username || "user " + app.userId),
+    };
+  } catch (e) {
+    if (e.response) throw apiError("FunPay test", e);
+    throw new Error("FunPay test: " + e.message);
+  }
+}
+
+// Create a lot in a FunPay category (node). Returns { externalId, externalNode,
+// url, note }. The offer id isn't in the save response, so it's recovered by
+// diffing the category's offer ids before and after the create.
+async function funpayPublish({
+  nodeId,
+  title,
+  description,
+  priceUsd,
+  amount,
+  active,
+  autoDelivery,
+  secrets,
+  paymentMsg,
+}) {
+  const keys = requireKeys("funpay");
+  const node = String(nodeId || "").trim();
+  if (!/^\d+$/.test(node)) {
+    throw new Error("FunPay category node id must be numeric (e.g. 2430)");
+  }
+  const price = Number(priceUsd);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("FunPay needs a price above 0");
+  }
+  const goldenKey = keys.golden_key;
+
+  let before = new Set();
+  try {
+    const { html } = await fpGet("/lots/" + node + "/trade", goldenKey);
+    before = fpOfferIds(html);
+  } catch {
+    /* non-fatal — we just won't be able to diff for the new id */
+  }
+
+  const editor = await fpLoadEditor(goldenKey, node);
+  const t = String(title || "").slice(0, 250);
+  const d = String(description || "");
+  const lines = (
+    Array.isArray(secrets) ? secrets : String(secrets || "").split("\n")
+  )
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  const auto = !!autoDelivery && lines.length > 0;
+  const msg = paymentMsg ? String(paymentMsg) : "";
+
+  const body = {
+    csrf_token: editor.csrf,
+    form_created_at: editor.formCreatedAt,
+    offer_id: "0",
+    node_id: node,
+    location: "",
+    deleted: "",
+    "fields[summary][en]": t,
+    "fields[summary][ru]": t,
+    "fields[desc][en]": d,
+    "fields[desc][ru]": d,
+    "fields[payment_msg][en]": msg,
+    "fields[payment_msg][ru]": msg,
+    price: String(price),
+    amount: String(Math.max(1, parseInt(amount, 10) || 1)),
+  };
+  if (auto) {
+    body.auto_delivery = "on";
+    body.secrets = lines.join("\n");
+  }
+  // An unchecked "active" box is simply omitted (HTML form semantics), which
+  // saves the offer off-sale.
+  if (active !== false) body.active = "on";
+
+  await fpPostOfferSave(goldenKey, editor.session, body);
+
+  let offerId = "";
+  try {
+    const { html } = await fpGet("/lots/" + node + "/trade", goldenKey);
+    const after = fpOfferIds(html);
+    for (const id of after) {
+      if (!before.has(id)) {
+        offerId = id;
+        break;
+      }
+    }
+  } catch {
+    /* leave blank; the row still records, delist just needs the id */
+  }
+
+  return {
+    externalId: offerId || "node" + node + "-" + Date.now(),
+    externalNode: node,
+    url: offerId
+      ? "https://funpay.com/en/lots/offer?id=" + offerId
+      : "https://funpay.com/en/lots/" + node + "/trade",
+    note:
+      (auto ? "auto-delivery: " + lines.length + " item(s). " : "") +
+      (offerId
+        ? ""
+        : "Couldn't auto-detect the new offer id — delist it on FunPay manually."),
+  };
+}
+
+// FunPay has no per-field update, so taking an offer off sale means reloading
+// its editor and re-saving every current value with the `active` box dropped.
+async function funpayDelist(offerId, nodeId) {
+  const keys = requireKeys("funpay");
+  if (!offerId || /^node\d+-/.test(String(offerId))) {
+    throw new Error("no FunPay offer id on record — delist it on FunPay");
+  }
+  const goldenKey = keys.golden_key;
+  const editor = await fpLoadEditor(goldenKey, nodeId, offerId);
+  const h = editor.html;
+  const body = {
+    csrf_token: editor.csrf,
+    form_created_at: editor.formCreatedAt,
+    offer_id: String(offerId),
+    node_id: editor.nodeId,
+    location: fpFieldValue(h, "location"),
+    deleted: "",
+    "fields[summary][en]": fpFieldValue(h, "fields[summary][en]"),
+    "fields[summary][ru]": fpFieldValue(h, "fields[summary][ru]"),
+    "fields[desc][en]": fpFieldValue(h, "fields[desc][en]"),
+    "fields[desc][ru]": fpFieldValue(h, "fields[desc][ru]"),
+    "fields[payment_msg][en]": fpFieldValue(h, "fields[payment_msg][en]"),
+    "fields[payment_msg][ru]": fpFieldValue(h, "fields[payment_msg][ru]"),
+    price: fpFieldValue(h, "price"),
+    amount: fpFieldValue(h, "amount") || "1",
+    // `active` intentionally omitted → off sale.
+  };
+  await fpPostOfferSave(goldenKey, editor.session, body);
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -1258,4 +1581,7 @@ module.exports = {
   ggselAddProducts,
   ggselOfferStock,
   ggselDelist,
+  funpayTest,
+  funpayPublish,
+  funpayDelist,
 };

@@ -1504,6 +1504,57 @@ Reliable Daily Rewards</textarea
           </div>
         </div>
 
+        <div id="mpFpBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">FunPay placement</b>
+            <div class="mp-hint">
+              FunPay has no API — the offer is created on your account using the
+              stored session token (set it under “Marketplace keys → FunPay”).
+              Enter the category's <b>node id</b>: it's the number in the
+              category URL, e.g. funpay.com/en/lots/<b>2430</b>/ for “Overwatch
+              2 Twitch Drops”.
+            </div>
+            <label>Category node id</label>
+            <input
+              type="text"
+              id="mpFpNode"
+              inputmode="numeric"
+              placeholder="e.g. 2430"
+              autocomplete="off"
+            />
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Amount (stock)</label>
+                <input type="number" id="mpFpAmount" min="1" value="1" />
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Delivery</label>
+                <select id="mpFpDelivery">
+                  <option value="manual">Manual (deliver via chat)</option>
+                  <option value="auto">Auto (paste stock below)</option>
+                </select>
+              </div>
+            </div>
+            <label style="margin-top: 6px"
+              >Auto-delivery stock (one item per line)</label
+            >
+            <textarea
+              id="mpFpSecrets"
+              rows="3"
+              placeholder="One line per buyer, e.g. login:password — only used when Delivery is Auto"
+            ></textarea>
+            <div class="mp-hint">
+              The USD price above is sent to FunPay as-is, in whatever currency
+              your FunPay account is set to. The offer goes live immediately
+              unless you untick “List as active”.
+            </div>
+            <label class="mp-check" style="margin-top: 6px">
+              <input type="checkbox" id="mpFpActive" checked /> List as active
+              (on sale) now
+            </label>
+          </div>
+        </div>
+
         <div class="mp-ext">
           <b style="font-size: 13px">Published on marketplaces</b>
           <div id="mpExtList"><div class="empty">None yet.</div></div>
@@ -2256,12 +2307,14 @@ Reliable Daily Rewards</textarea
         digiseller: "Plati.Market (Digiseller)",
         g2g: "G2G",
         ggsel: "GGSel",
+        funpay: "FunPay",
       };
       var MP_KEY_LABELS = {
         gameflip: { apiKey: "API key", apiSecret: "API secret (TOTP secret)" },
         digiseller: { sellerId: "Seller ID", apiKey: "API key" },
         g2g: { userId: "User ID", apiKey: "API key", apiSecret: "API secret" },
         ggsel: { apiKey: "API key" },
+        funpay: { golden_key: "golden_key (session cookie)" },
       };
       var mpStatus = null;
 
@@ -2489,6 +2542,7 @@ Reliable Daily Rewards</textarea
         $("mpDsBox").style.display = "none";
         $("mpGfBox").style.display = "none";
         $("mpGgselBox").style.display = "none";
+        $("mpFpBox").style.display = "none";
         $("mpDsAttrs").innerHTML = "";
         $("mpG2gAttrs").innerHTML = "";
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
@@ -2539,6 +2593,10 @@ Reliable Daily Rewards</textarea
             ggSelected = null;
             loadGgCategories("");
           }
+        }
+        var fp = e.target.closest('[data-mptarget="funpay"]');
+        if (fp) {
+          $("mpFpBox").style.display = fp.checked ? "block" : "none";
         }
       });
 
@@ -3166,6 +3224,20 @@ Reliable Daily Rewards</textarea
             quantity: parseInt($("mpGgQty").value, 10) || 1,
             delivery: $("mpGgDelivery").value,
             priceRub: ggRub > 0 ? ggRub : undefined,
+          };
+        }
+        if (targets.indexOf("funpay") !== -1) {
+          var fpNode = $("mpFpNode").value.trim();
+          if (!/^\d+$/.test(fpNode)) {
+            toast("Enter the FunPay category node id (a number, e.g. 2430)");
+            return;
+          }
+          body.funpay = {
+            nodeId: fpNode,
+            amount: parseInt($("mpFpAmount").value, 10) || 1,
+            delivery: $("mpFpDelivery").value,
+            active: $("mpFpActive").checked,
+            secrets: $("mpFpSecrets").value,
           };
         }
         var btn = $("mpPubGo");

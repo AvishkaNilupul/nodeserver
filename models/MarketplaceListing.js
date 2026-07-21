@@ -12,11 +12,14 @@ const marketplaceListingSchema = new mongoose.Schema(
     },
     marketplace: {
       type: String,
-      enum: ["gameflip", "digiseller", "g2g", "ggsel"],
+      enum: ["gameflip", "digiseller", "g2g", "ggsel", "funpay"],
       required: true,
       index: true,
     },
     externalId: { type: String, required: true },
+    // FunPay has no per-offer API: delisting re-saves the offer's editor form,
+    // which needs the category node id. Stored here at publish time.
+    externalNode: { type: String, default: "" },
     url: { type: String, default: "" },
     title: { type: String, default: "" },
     // Kept so a sold auto-delivery listing can be relisted identically.
