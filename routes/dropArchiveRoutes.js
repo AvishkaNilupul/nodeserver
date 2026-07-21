@@ -1702,9 +1702,18 @@ router.get(
             _id: { account: "$account", k: "$itemKey" },
             count: { $sum: "$count" },
             // Copies still free to sell (reservation is per drop now): only
-            // unreserved rows count toward availability.
+            // unreserved rows count toward availability. $ifNull so legacy docs
+            // that predate the soldAt field (where it's MISSING, not null) are
+            // treated as free — an aggregation $eq to null is false for a
+            // missing field, unlike a {soldAt: null} query match.
             availCount: {
-              $sum: { $cond: [{ $eq: ["$soldAt", null] }, "$count", 0] },
+              $sum: {
+                $cond: [
+                  { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                  "$count",
+                  0,
+                ],
+              },
             },
             state: { $first: "$state" },
           },
