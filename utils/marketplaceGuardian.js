@@ -26,12 +26,14 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const dsFulfiller = require("./digisellerFulfiller");
 const ggFulfiller = require("./ggselFulfiller");
+const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
 
 const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
   digiseller: dsFulfiller.DS_CLAIM_TAG,
   gameflip: "gameflip",
+  funpay: fpFulfiller.FP_CLAIM_TAG,
 };
 
 // Last pass summary for the UI ("checking… found N").

@@ -1420,14 +1420,48 @@ async function funpayTest() {
   }
 }
 
+// USD -> arbitrary currency, cached ~6h. FunPay offers are priced in whatever
+// currency the seller's account uses, but the rest of the site works in USD, so
+// convert at publish time when needed. USD is a 1:1 no-op; any other currency
+// uses the live rate, falling back to a static estimate if the FX lookup fails.
+let fxCache = { rates: null, until: 0 };
+const FX_FALLBACK = { RUB: 90, EUR: 0.92 };
+async function usdRate(currency) {
+  const cur = String(currency || "USD").toUpperCase();
+  if (cur === "USD") return 1;
+  const now = Date.now();
+  if (fxCache.rates && now < fxCache.until && Number(fxCache.rates[cur]) > 0) {
+    return Number(fxCache.rates[cur]);
+  }
+  try {
+    const r = await axios.get("https://open.er-api.com/v6/latest/USD", {
+      timeout: 15000,
+    });
+    const rates = r.data && r.data.rates;
+    if (rates && Number(rates[cur]) > 0) {
+      fxCache = { rates, until: now + 6 * 60 * 60 * 1000 };
+      return Number(rates[cur]);
+    }
+  } catch {
+    /* fall through to fallback */
+  }
+  return (fxCache.rates && Number(fxCache.rates[cur])) || FX_FALLBACK[cur] || 1;
+}
+
 // Create a lot in a FunPay category (node). Returns { externalId, externalNode,
 // url, note }. The offer id isn't in the save response, so it's recovered by
 // diffing the category's offer ids before and after the create.
+//
+// The offer's price is in the FunPay account's own currency: pass `currency`
+// (USD/EUR/RUB) to convert the site's USD price at the live rate, or
+// `priceOverride` to set the amount in that currency directly (no conversion).
 async function funpayPublish({
   nodeId,
   title,
   description,
   priceUsd,
+  currency,
+  priceOverride,
   amount,
   active,
   autoDelivery,
@@ -1439,7 +1473,29 @@ async function funpayPublish({
   if (!/^\d+$/.test(node)) {
     throw new Error("FunPay category node id must be numeric (e.g. 2430)");
   }
-  const price = Number(priceUsd);
+  const cur = String(currency || "USD").toUpperCase();
+  let price = Number(priceOverride);
+  let fxNote = "";
+  if (!Number.isFinite(price) || price <= 0) {
+    if (cur === "USD") {
+      price = Number(priceUsd);
+    } else {
+      const rate = await usdRate(cur);
+      price = Math.round(Number(priceUsd) * rate * 100) / 100;
+      fxNote =
+        "Priced at " +
+        price +
+        " " +
+        cur +
+        " (~$" +
+        Number(priceUsd) +
+        " @ " +
+        rate.toFixed(4) +
+        " " +
+        cur +
+        "/$). ";
+    }
+  }
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("FunPay needs a price above 0");
   }
@@ -1511,6 +1567,7 @@ async function funpayPublish({
       ? "https://funpay.com/en/lots/offer?id=" + offerId
       : "https://funpay.com/en/lots/" + node + "/trade",
     note:
+      fxNote +
       (auto ? "auto-delivery: " + lines.length + " item(s). " : "") +
       (offerId
         ? ""

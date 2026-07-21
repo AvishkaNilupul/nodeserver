@@ -1531,22 +1531,37 @@ Reliable Daily Rewards</textarea
                 <label style="margin-top: 0">Delivery</label>
                 <select id="mpFpDelivery">
                   <option value="manual">Manual (deliver via chat)</option>
-                  <option value="auto">Auto (paste stock below)</option>
+                  <option value="auto">Auto (reserve farmed accounts)</option>
                 </select>
               </div>
             </div>
-            <label style="margin-top: 6px"
-              >Auto-delivery stock (one item per line)</label
-            >
-            <textarea
-              id="mpFpSecrets"
-              rows="3"
-              placeholder="One line per buyer, e.g. login:password — only used when Delivery is Auto"
-            ></textarea>
             <div class="mp-hint">
-              The USD price above is sent to FunPay as-is, in whatever currency
-              your FunPay account is set to. The offer goes live immediately
-              unless you untick “List as active”.
+              Auto reserves up to <em>Amount</em> in-stock accounts holding this
+              whole bundle and attaches each as one FunPay auto-delivery line
+              (login:password), so buyers are handed one automatically; the
+              connect guide is sent as the after-purchase message. Manual lists
+              with the given stock — you deliver via FunPay chat.
+            </div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Account currency</label>
+                <select id="mpFpCurrency">
+                  <option value="USD">USD ($) — send as-is</option>
+                  <option value="EUR">EUR (€) — convert</option>
+                  <option value="RUB">RUB (₽) — convert</option>
+                </select>
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Price override (optional)</label>
+                <input type="number" id="mpFpPrice" min="0" step="0.01" />
+              </div>
+            </div>
+            <div class="mp-hint">
+              The offer price is in your FunPay account's currency. Leave
+              currency on USD to send the price above unchanged; pick EUR/RUB to
+              convert it at the live rate. A price override sets the amount in
+              that currency directly (no conversion). The offer goes live
+              immediately unless you untick “List as active”.
             </div>
             <label class="mp-check" style="margin-top: 6px">
               <input type="checkbox" id="mpFpActive" checked /> List as active
@@ -3232,12 +3247,14 @@ Reliable Daily Rewards</textarea
             toast("Enter the FunPay category node id (a number, e.g. 2430)");
             return;
           }
+          var fpOverride = parseFloat($("mpFpPrice").value);
           body.funpay = {
             nodeId: fpNode,
             amount: parseInt($("mpFpAmount").value, 10) || 1,
             delivery: $("mpFpDelivery").value,
+            currency: $("mpFpCurrency").value,
+            priceOverride: fpOverride > 0 ? fpOverride : undefined,
             active: $("mpFpActive").checked,
-            secrets: $("mpFpSecrets").value,
           };
         }
         var btn = $("mpPubGo");

@@ -12,6 +12,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const dsFulfiller = require("../utils/digisellerFulfiller");
 const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
+const fpFulfiller = require("../utils/funpayFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
 const { buildG2gBulkFile } = require("../utils/g2gBulk");
@@ -697,15 +698,83 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             };
             continue;
           }
+          if (fp.delivery === "auto") {
+            // Real auto-delivery: reserve up to `amount` farmed accounts that
+            // hold the whole bundle, attach each as one FunPay secret line
+            // (login:password), and let FunPay hand one to each buyer. The
+            // connect guide is sent as the offer's after-payment message.
+            const qtyWanted = Math.max(1, parseInt(fp.amount, 10) || 1);
+            const claimed = await fpFulfiller.claimAccountsForSet(
+              set,
+              qtyWanted,
+            );
+            if (!claimed.length) {
+              results[name] = {
+                success: false,
+                message:
+                  "Out of stock — no unsold account holds this whole " +
+                  "bundle, so there is nothing to auto-deliver",
+              };
+              continue;
+            }
+            try {
+              r = await mp.funpayPublish({
+                nodeId: fp.nodeId,
+                title,
+                description,
+                priceUsd,
+                currency: fp.currency,
+                priceOverride: fp.priceOverride,
+                amount: claimed.length,
+                active: fp.active !== false,
+                autoDelivery: true,
+                secrets: claimed.map((c) => c.line),
+                paymentMsg: fpFulfiller.funpayPaymentGuide(),
+              });
+            } catch (err) {
+              await fpFulfiller.releaseAccounts(
+                claimed.map((c) => c.accountId),
+              );
+              throw err;
+            }
+            const doc = await MarketplaceListing.create({
+              set: set._id,
+              marketplace: "funpay",
+              externalId: r.externalId,
+              externalNode: r.externalNode || "",
+              url: r.url || "",
+              title,
+              description,
+              price: priceUsd,
+              status: "active",
+              note:
+                (r.note ? r.note + " " : "") +
+                "auto-delivery: " +
+                claimed.length +
+                " account(s)",
+              autoDeliver: true,
+              accountId: claimed.map((c) => c.accountId).join(","),
+              accountLogin: claimed.map((c) => c.login).join(", "),
+            });
+            results[name] = {
+              success: true,
+              id: String(doc._id),
+              externalId: r.externalId,
+              url: r.url || "",
+              note: doc.note,
+            };
+            continue;
+          }
           r = await mp.funpayPublish({
             nodeId: fp.nodeId,
             title,
             description,
             priceUsd,
+            currency: fp.currency,
+            priceOverride: fp.priceOverride,
             amount: fp.amount,
             active: fp.active !== false,
-            autoDelivery: fp.delivery === "auto",
-            secrets: fp.secrets,
+            autoDelivery: false,
             paymentMsg: fp.paymentMsg,
           });
         } else {
@@ -816,6 +885,8 @@ router.delete(
           await ggFulfiller.releaseAccounts(row.accountId.split(","));
         } else if (row.marketplace === "digiseller") {
           await dsFulfiller.releaseAccounts(row.accountId.split(","));
+        } else if (row.marketplace === "funpay") {
+          await fpFulfiller.releaseAccounts(row.accountId.split(","));
         } else {
           await gfFulfiller.releaseAccount(row.accountId);
         }
