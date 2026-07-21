@@ -1701,6 +1701,11 @@ router.get(
           $group: {
             _id: { account: "$account", k: "$itemKey" },
             count: { $sum: "$count" },
+            // Copies still free to sell (reservation is per drop now): only
+            // unreserved rows count toward availability.
+            availCount: {
+              $sum: { $cond: [{ $eq: ["$soldAt", null] }, "$count", 0] },
+            },
             state: { $first: "$state" },
           },
         },
@@ -1708,7 +1713,12 @@ router.get(
           $group: {
             _id: "$_id.account",
             items: {
-              $push: { itemKey: "$_id.k", count: "$count", state: "$state" },
+              $push: {
+                itemKey: "$_id.k",
+                count: "$count",
+                availCount: "$availCount",
+                state: "$state",
+              },
             },
           },
         },
@@ -1751,6 +1761,14 @@ router.get(
             r.items.every(
               (i) => (i.count || 0) >= (needByKey.get(i.itemKey) || 1),
             );
+          // "available" = holds the whole bundle with every item still
+          // UNRESERVED for this set; "held" = holds it but this set's drops are
+          // reserved (sold for this game, on another listing).
+          const available =
+            have === total &&
+            r.items.every(
+              (i) => (i.availCount || 0) >= (needByKey.get(i.itemKey) || 1),
+            );
           const minCount = complete
             ? Math.min(...r.items.map((i) => i.count || 0))
             : 0;
@@ -1760,10 +1778,12 @@ router.get(
             container: r.container || "",
             configFile: r.configFile || "",
             hasPassword: !!r.hasPassword,
-            sold: !!r.soldAt,
+            // Per-game: this set's drops on the account are (partly) reserved.
+            sold: complete && !available,
             have,
             total,
             complete,
+            available,
             minCount,
             haveKeys: r.items.map((i) => i.itemKey),
           };
@@ -1799,20 +1819,18 @@ router.get(
       });
 
       const fullAccounts = accounts.filter((a) => a.complete);
-      // One deliverable bundle per account that holds the whole set and is
-      // actually sellable (has a stored password and hasn't been sold). This
-      // matches the Shop's "in stock" exactly — a buyer receives the whole
-      // account, so duplicate copies on one account are not counted twice.
-      const bundlesAvailable = fullAccounts.filter(
-        (a) => a.hasPassword && !a.sold,
+      // One deliverable bundle per account that holds the whole set with this
+      // set's drops still free (unreserved) and a stored password. Matches the
+      // Shop's "in stock" exactly. Reservation is per game, so an account sold
+      // for another game still counts here as long as THIS set's drops are free.
+      const bundlesAvailable = accounts.filter(
+        (a) => a.available && a.hasPassword,
       ).length;
-      // Complete accounts that could deliver this bundle but are already
-      // reserved/sold — e.g. committed as auto-delivery stock to another
-      // marketplace listing, since one "everything" account can fill many
-      // bundles. Surfaced so a bundle whose whole stock is committed reads as
-      // "held by other listings" instead of a baffling plain 0.
+      // Complete accounts whose drops for THIS set are already reserved (this
+      // game sold on another listing). Surfaced so a reserved-out bundle reads
+      // as "held by other listings" instead of a baffling plain 0.
       const bundlesHeld = fullAccounts.filter(
-        (a) => a.hasPassword && a.sold,
+        (a) => a.hasPassword && !a.available,
       ).length;
 
       res.json({

@@ -159,12 +159,28 @@ async function runChecks(rows, seenKeys) {
         "one of them or replace the account.",
     });
   };
+  // Per-game reservation means the SAME account on two listings for DIFFERENT
+  // sets (games) is fine — only two listings of the SAME set on one account is
+  // a real double-sell. So group an account's listings by set before flagging.
+  const bySet = (listings) => {
+    const m = new Map();
+    for (const l of listings) {
+      const k = String(l.set || "");
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(l);
+    }
+    return m;
+  };
   for (const [id, listings] of byAccount) {
     const login = (listings[0].accountLogin || "").split(",")[0].trim();
-    await dupCheck(id, listings, login);
+    for (const [setId, ls] of bySet(listings)) {
+      await dupCheck(id + "|" + setId, ls, login);
+    }
   }
   for (const [login, listings] of byLogin) {
-    await dupCheck("login:" + login, listings, login);
+    for (const [setId, ls] of bySet(listings)) {
+      await dupCheck("login:" + login + "|" + setId, ls, login);
+    }
   }
 
   // Load every referenced account once.
@@ -181,31 +197,6 @@ async function runChecks(rows, seenKeys) {
     const acc = accMap.get(id);
     if (!acc) continue;
     for (const row of listings) {
-      const tag = CLAIM_TAGS[row.marketplace] || row.marketplace;
-      // 2. Reservation no longer matches the platform holding the listing.
-      if (!acc.soldAt || (acc.soldToUsername && acc.soldToUsername !== tag)) {
-        await flag({
-          type: "claim-mismatch",
-          severity: "high",
-          marketplace: row.marketplace,
-          listing: row._id,
-          accountId: id,
-          accountLogin: acc.login || "",
-          dedupeKey: "claim:" + id + ":" + row._id,
-          message:
-            "Account " +
-            (acc.login || id) +
-            " is attached to a live " +
-            row.marketplace +
-            " listing but is " +
-            (!acc.soldAt
-              ? "not reserved at all (it could be sold again elsewhere)."
-              : 'reserved/sold as "' +
-                acc.soldToUsername +
-                '" — a buyer may receive an account someone else already ' +
-                "owns."),
-        });
-      }
       // 4. Dead token — credentials likely changed; delivery may not work.
       if (acc.lastScanStatus === "token_invalid") {
         await flag({
@@ -241,6 +232,50 @@ async function runChecks(rows, seenKeys) {
     const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
     const ids = accountIdsOf(row);
     if (!keys.length || !ids.length) continue;
+
+    // 2. Per-game reservation: every one of this set's drops on each attached
+    // account should be reserved by THIS listing's tag. If a key isn't reserved
+    // (could be sold again) or is reserved by another platform (a real
+    // conflict on the same drops), flag it.
+    const tag = CLAIM_TAGS[row.marketplace] || row.marketplace;
+    const resv = await DropLog.find(
+      { account: { $in: ids }, itemKey: { $in: keys }, soldAt: { $ne: null } },
+      { account: 1, itemKey: 1, soldToUsername: 1 },
+    ).lean();
+    const resByAcc = new Map();
+    for (const d of resv) {
+      const k = String(d.account);
+      if (!resByAcc.has(k)) resByAcc.set(k, new Map());
+      resByAcc.get(k).set(d.itemKey, d.soldToUsername || "");
+    }
+    for (const accId of ids) {
+      const km = resByAcc.get(accId) || new Map();
+      const mine = keys.filter((k) => km.get(k) === tag).length;
+      if (mine === keys.length) continue; // fully reserved for this game
+      const acc = accMap.get(accId);
+      const otherTag = keys.map((k) => km.get(k)).find((t) => t && t !== tag);
+      await flag({
+        type: "claim-mismatch",
+        severity: "high",
+        marketplace: row.marketplace,
+        listing: row._id,
+        accountId: accId,
+        accountLogin: (acc && acc.login) || "",
+        dedupeKey: "claim:" + accId + ":" + row._id,
+        message:
+          "Account " +
+          ((acc && acc.login) || accId) +
+          " on a live " +
+          row.marketplace +
+          " listing: this game's drops are " +
+          (otherTag
+            ? 'reserved as "' +
+              otherTag +
+              '" — another listing grabbed the same drops.'
+            : "not fully reserved, so they could be sold again elsewhere."),
+      });
+    }
+
     const redeemed = await DropLog.find(
       { account: { $in: ids }, itemKey: { $in: keys }, connected: true },
       { account: 1, name: 1 },

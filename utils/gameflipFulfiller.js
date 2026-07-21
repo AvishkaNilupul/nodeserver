@@ -16,47 +16,35 @@ const { availableAccountsForSet } = require("../routes/shopRoutes");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
+const {
+  reserveSetOnAccount,
+  releaseAccountsForTag,
+} = require("./dropReservation");
 
 const GF_CLAIM_TAG = "gameflip";
 
-// Atomically reserve an unsold account that holds the whole bundle (same
-// claim pattern as the internal Shop, so a Shop buyer and a Gameflip listing
-// can never get the same account).
+// Reserve this set's drops (per game) on an account that holds the whole
+// bundle, so a Shop buyer and a Gameflip listing can never get the same drops
+// while the account's other games stay sellable. Returns the account doc.
 async function claimAccountForSet(set) {
   const candidates = await availableAccountsForSet(set);
   for (const c of candidates) {
-    const claimed = await BotAccount.findOneAndUpdate(
-      { _id: c.accountId, soldAt: null },
-      {
-        $set: {
-          soldAt: new Date(),
-          soldToAdminId: "",
-          soldToUsername: GF_CLAIM_TAG,
-          soldSetId: String(set._id),
-        },
-      },
-      { new: true },
-    );
-    if (claimed) return claimed;
+    const ok = await reserveSetOnAccount(c.accountId, set, {
+      soldToUsername: GF_CLAIM_TAG,
+      soldSetId: String(set._id),
+    });
+    if (!ok) continue;
+    const account = await BotAccount.findById(c.accountId);
+    if (account) return account;
   }
   return null;
 }
 
-// Put a reserved account back in the sellable pool (only if it is still just
-// reserved for Gameflip — never touches accounts sold through the Shop).
+// Put a reserved set's drops back in the sellable pool (only ones still
+// reserved for Gameflip — never touches drops sold through the Shop).
 async function releaseAccount(accountId) {
   if (!accountId) return;
-  await BotAccount.updateOne(
-    { _id: accountId, soldToUsername: GF_CLAIM_TAG },
-    {
-      $set: {
-        soldAt: null,
-        soldToAdminId: "",
-        soldToUsername: "",
-        soldSetId: "",
-      },
-    },
-  ).catch(() => {});
+  await releaseAccountsForTag([accountId], GF_CLAIM_TAG);
 }
 
 function gameflipDeliveryCode(login, password) {

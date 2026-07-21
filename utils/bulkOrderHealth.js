@@ -13,12 +13,17 @@
 const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { fetchInventory } = require("./twitchInventory");
+const { reserveSetOnAccount } = require("./dropReservation");
 
 // Statuses that mean "we could not verify this unit holds a usable bundle" and
 // so are eligible for auto-replacement. `error` (e.g. no token stored) and
 // `unchecked` (a transient scan-host failure) are deliberately NOT swapped —
 // they aren't a Twitch verdict that the account is dead.
-const REPLACEABLE = new Set(["token_dead", "integrity_failed", "missing_drops"]);
+const REPLACEABLE = new Set([
+  "token_dead",
+  "integrity_failed",
+  "missing_drops",
+]);
 // Statuses that count against health in the summary (everything but alive and
 // the not-yet-known `unchecked`).
 const BAD_FOR_SUMMARY = new Set([
@@ -35,7 +40,10 @@ function setLikeOf(order) {
   return {
     items: (order.items || [])
       .filter((i) => i.itemKey)
-      .map((i) => ({ itemKey: i.itemKey, qty: Math.max(1, Number(i.qty) || 1) })),
+      .map((i) => ({
+        itemKey: i.itemKey,
+        qty: Math.max(1, Number(i.qty) || 1),
+      })),
   };
 }
 
@@ -50,7 +58,8 @@ function promisedKeysOf(order) {
 function unitFromCandidate(candidate, account) {
   return {
     account: account._id,
-    accountLogin: account.login || account.credUsername || candidate.login || "",
+    accountLogin:
+      account.login || account.credUsername || candidate.login || "",
     itemCounts: (candidate.items || []).map((it) => ({
       itemKey: it.k,
       count: it.count || 0,
@@ -72,10 +81,20 @@ function unitFromCandidate(candidate, account) {
 async function checkAccountHealth(account, promisedKeys) {
   const now = new Date();
   if (!account) {
-    return { status: "error", dropCount: 0, checkedAt: now, error: "account not found" };
+    return {
+      status: "error",
+      dropCount: 0,
+      checkedAt: now,
+      error: "account not found",
+    };
   }
   if (!account.clientSecret) {
-    return { status: "error", dropCount: 0, checkedAt: now, error: "no auth token stored" };
+    return {
+      status: "error",
+      dropCount: 0,
+      checkedAt: now,
+      error: "no auth token stored",
+    };
   }
   try {
     const { drops } = await fetchInventory(account.clientSecret);
@@ -92,20 +111,45 @@ async function checkAccountHealth(account, promisedKeys) {
         error: "missing: " + missing.slice(0, 3).join(", "),
       };
     }
-    return { status: "alive", dropCount: (drops || []).length, checkedAt: now, error: "" };
+    return {
+      status: "alive",
+      dropCount: (drops || []).length,
+      checkedAt: now,
+      error: "",
+    };
   } catch (e) {
     // A scan host went down mid-check — not a Twitch verdict. Leave the unit
     // as-is (unchecked) so it's re-probed later rather than falsely condemned.
     if (e.transportFailed) {
-      return { status: "unchecked", dropCount: 0, checkedAt: now, error: "scan host unreachable" };
+      return {
+        status: "unchecked",
+        dropCount: 0,
+        checkedAt: now,
+        error: "scan host unreachable",
+      };
     }
     if (e.code === "token_invalid") {
-      return { status: "token_dead", dropCount: 0, checkedAt: now, error: (e.message || "").slice(0, 200) };
+      return {
+        status: "token_dead",
+        dropCount: 0,
+        checkedAt: now,
+        error: (e.message || "").slice(0, 200),
+      };
     }
     if (e.code === "integrity_failed") {
-      return { status: "integrity_failed", dropCount: 0, checkedAt: now, error: (e.message || "").slice(0, 200) };
+      return {
+        status: "integrity_failed",
+        dropCount: 0,
+        checkedAt: now,
+        error: (e.message || "").slice(0, 200),
+      };
     }
-    return { status: "error", dropCount: 0, checkedAt: now, error: (e.message || String(e)).slice(0, 200) };
+    return {
+      status: "error",
+      dropCount: 0,
+      checkedAt: now,
+      error: (e.message || String(e)).slice(0, 200),
+    };
   }
 }
 
@@ -147,18 +191,15 @@ async function mapLimit(items, limit, fn) {
 
 // Atomically claim one BotAccount for a bulk order (same guard the Shop uses).
 async function claimAccount(candidate, order) {
-  return BotAccount.findOneAndUpdate(
-    { _id: candidate.accountId, soldAt: null },
-    {
-      $set: {
-        soldAt: new Date(),
-        soldToUsername: "bulk:" + order.orderNo,
-        soldSetId: order.setId || "",
-        soldBulkOrderId: order.orderNo,
-      },
-    },
-    { new: true },
-  );
+  // Per-game reservation: commit only this order's set's drops on the account
+  // so its other games stay sellable.
+  const ok = await reserveSetOnAccount(candidate.accountId, setLikeOf(order), {
+    soldToUsername: "bulk:" + order.orderNo,
+    soldSetId: order.setId || "",
+    soldBulkOrderId: order.orderNo,
+  });
+  if (!ok) return null;
+  return BotAccount.findById(candidate.accountId).lean();
 }
 
 // Reserve up to `qty` accounts for a set and return built units. Used by the
@@ -186,7 +227,10 @@ async function reserveUnits({ order, setLike, qty, excludeIds = new Set() }) {
 
 // Verify every active unit and (optionally) auto-replace the ones we couldn't
 // confirm. Mutates `order` in place; the caller saves. Returns a report.
-async function runHealthCheck(order, { autoReplace = false, concurrency = 4 } = {}) {
+async function runHealthCheck(
+  order,
+  { autoReplace = false, concurrency = 4 } = {},
+) {
   const promisedKeys = promisedKeysOf(order);
 
   // --- Phase A: probe all currently-active units. ---
@@ -199,7 +243,12 @@ async function runHealthCheck(order, { autoReplace = false, concurrency = 4 } = 
     unit.health = await checkAccountHealth(acc, promisedKeys);
   });
 
-  const report = { checked: activeUnits.length, replaced: 0, unreplaced: 0, burned: 0 };
+  const report = {
+    checked: activeUnits.length,
+    replaced: 0,
+    unreplaced: 0,
+    burned: 0,
+  };
 
   // --- Phase B: swap out units we couldn't verify, from fresh pool stock. ---
   if (autoReplace) {

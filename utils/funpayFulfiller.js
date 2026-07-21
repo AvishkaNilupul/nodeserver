@@ -15,6 +15,10 @@
 const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { decrypt } = require("./secretBox");
+const {
+  reserveSetOnAccount,
+  releaseAccountsForTag,
+} = require("./dropReservation");
 
 // Distinct claim owner so a FunPay-reserved account is never also handed to a
 // Shop buyer, a Gameflip listing, a GGSel offer or a Plati product.
@@ -50,27 +54,25 @@ async function claimAccountsForSet(set, max) {
   const claimed = [];
   for (const c of candidates) {
     if (claimed.length >= want) break;
-    const account = await BotAccount.findOneAndUpdate(
-      { _id: c.accountId, soldAt: null },
-      {
-        $set: {
-          soldAt: new Date(),
-          soldToAdminId: "",
-          soldToUsername: FP_CLAIM_TAG,
-          soldSetId: String(set._id),
-        },
-      },
-      { new: true },
-    );
-    if (!account) continue;
-    const login = account.login || account.credUsername || "";
-    const password = decrypt(account.credPassword);
+    // Per-game reservation: commit only this set's drops on the account.
+    const ok = await reserveSetOnAccount(c.accountId, set, {
+      soldToUsername: FP_CLAIM_TAG,
+      soldSetId: String(set._id),
+    });
+    if (!ok) continue;
+    const account = await BotAccount.findById(c.accountId, {
+      login: 1,
+      credUsername: 1,
+      credPassword: 1,
+    }).lean();
+    const login = account ? account.login || account.credUsername || "" : "";
+    const password = account ? decrypt(account.credPassword) : "";
     if (!password) {
-      await releaseAccounts([account._id]);
+      await releaseAccounts([c.accountId]);
       continue;
     }
     claimed.push({
-      accountId: String(account._id),
+      accountId: String(c.accountId),
       login,
       line: funpayDeliveryLine(login, password),
     });
@@ -78,24 +80,10 @@ async function claimAccountsForSet(set, max) {
   return claimed;
 }
 
-// Put reserved accounts back in the sellable pool (only ones still reserved for
-// FunPay — never touches accounts sold through the Shop or another marketplace).
+// Put reserved drops back in the sellable pool (only ones still reserved for
+// FunPay — never touches drops sold through the Shop or another marketplace).
 async function releaseAccounts(accountIds) {
-  const ids = (Array.isArray(accountIds) ? accountIds : [accountIds])
-    .map((x) => String(x || "").trim())
-    .filter(Boolean);
-  if (!ids.length) return;
-  await BotAccount.updateMany(
-    { _id: { $in: ids }, soldToUsername: FP_CLAIM_TAG },
-    {
-      $set: {
-        soldAt: null,
-        soldToAdminId: "",
-        soldToUsername: "",
-        soldSetId: "",
-      },
-    },
-  ).catch(() => {});
+  await releaseAccountsForTag(accountIds, FP_CLAIM_TAG);
 }
 
 module.exports = {

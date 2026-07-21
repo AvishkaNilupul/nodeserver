@@ -8,6 +8,12 @@ const Purchase = require("../models/Purchase");
 const { decrypt } = require("../utils/secretBox");
 const { getBalance, adjustBalance } = require("../utils/admins");
 const BalanceLog = require("../models/BalanceLog");
+const {
+  AVAILABLE_DROP,
+  reserveSetOnAccount,
+  releaseAccountsForTag,
+  releaseSetForAccounts,
+} = require("../utils/dropReservation");
 
 const router = express.Router();
 
@@ -28,10 +34,10 @@ function isSuper(req) {
 async function holdingsForKeys(keys) {
   if (!keys.length) return [];
   const total = keys.length;
-  // Drops already connected/redeemed on a game account cannot be delivered
-  // again, so they never count as sellable stock.
+  // Drops already connected/redeemed OR reserved for a set (per-game sold)
+  // cannot be delivered again, so they never count as sellable stock.
   return DropLog.aggregate([
-    { $match: { itemKey: { $in: keys }, connected: { $ne: true } } },
+    { $match: { itemKey: { $in: keys }, ...AVAILABLE_DROP } },
     {
       $group: {
         _id: { account: "$account", k: "$itemKey" },
@@ -50,12 +56,15 @@ async function holdingsForKeys(keys) {
   ]);
 }
 
-// Of a list of candidate account ids, return the subset that is still sellable
-// (not sold AND has a stored password). One indexed query on _id.
+// Of a list of candidate account ids, return the subset that is deliverable
+// (has a stored password). One indexed query on _id. NOTE: reservation is now
+// per drop (DropLog.soldAt), applied in the holdings aggregations above — an
+// account is NOT gated here by BotAccount.soldAt, so its other games stay
+// sellable while one game is reserved.
 async function sellableAccountMap(ids) {
   if (!ids.length) return new Map();
   const accs = await BotAccount.find(
-    { _id: { $in: ids }, soldAt: null },
+    { _id: { $in: ids } },
     { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1 },
   ).lean();
   const map = new Map();
@@ -132,7 +141,7 @@ async function stockForSets(sets) {
   }
   // account -> [{k,count}] across the union of keys (accounts holding ANY key).
   const rows = await DropLog.aggregate([
-    { $match: { itemKey: { $in: allKeys }, connected: { $ne: true } } },
+    { $match: { itemKey: { $in: allKeys }, ...AVAILABLE_DROP } },
     {
       $group: {
         _id: { account: "$account", k: "$itemKey" },
@@ -351,26 +360,21 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
     }
 
     // Atomically claim the first account that still holds the whole bundle.
-    // The conditional update (soldAt: null) guarantees two buyers can never
-    // be handed the same account.
+    // Reservation is per drop now: this commits only THIS set's drops on the
+    // account (leaving its other games sellable) and guarantees two buyers can
+    // never be handed the same drops.
     const candidates = await availableAccountsForSet(set);
     let account = null;
     let claimedCounts = null;
     for (const c of candidates) {
-      const claimed = await BotAccount.findOneAndUpdate(
-        { _id: c.accountId, soldAt: null },
-        {
-          $set: {
-            soldAt: new Date(),
-            soldToAdminId: buyerId,
-            soldToUsername: buyerUsername,
-            soldSetId: String(set._id),
-          },
-        },
-        { new: true },
-      );
-      if (claimed) {
-        account = claimed;
+      const ok = await reserveSetOnAccount(c.accountId, set, {
+        soldToAdminId: buyerId,
+        soldToUsername: buyerUsername,
+        soldSetId: String(set._id),
+      });
+      if (ok) {
+        account = await BotAccount.findById(c.accountId);
+        if (!account) continue;
         claimedCounts = countsFromRow(c);
         break;
       }
@@ -383,22 +387,12 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
     }
 
     // Debit the buyer. If this fails (e.g. a concurrent purchase drained the
-    // balance), release the account so it stays sellable.
+    // balance), release this set's drops so they stay sellable.
     let balanceAfter;
     try {
       balanceAfter = await adjustBalance(buyerId, -price);
     } catch (e) {
-      await BotAccount.updateOne(
-        { _id: account._id },
-        {
-          $set: {
-            soldAt: null,
-            soldToAdminId: "",
-            soldToUsername: "",
-            soldSetId: "",
-          },
-        },
-      );
+      await releaseAccountsForTag([account._id], buyerUsername);
       return res
         .status(402)
         .json({ success: false, message: e.message || "Payment failed" });
@@ -426,17 +420,7 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
       });
     } catch (e) {
       await adjustBalance(buyerId, price, { allowNegative: true });
-      await BotAccount.updateOne(
-        { _id: account._id },
-        {
-          $set: {
-            soldAt: null,
-            soldToAdminId: "",
-            soldToUsername: "",
-            soldSetId: "",
-          },
-        },
-      );
+      await releaseAccountsForTag([account._id], buyerUsername);
       console.error("shop purchase record error:", e.message);
       return res
         .status(500)
@@ -528,19 +512,9 @@ router.post(
           .status(409)
           .json({ success: false, message: "Already refunded" });
       }
-      // Release the account back to the pool.
-      await BotAccount.updateOne(
-        { _id: p.account },
-        {
-          $set: {
-            soldAt: null,
-            soldToAdminId: "",
-            soldToUsername: "",
-            soldSetId: "",
-            soldPurchaseId: "",
-          },
-        },
-      );
+      // Release this set's drops back to the pool (leaving any other games the
+      // buyer holds on the same account reserved).
+      await releaseSetForAccounts([p.account], p.setId);
       // Credit the buyer back (allowNegative is irrelevant for a credit).
       let balanceAfter = null;
       try {

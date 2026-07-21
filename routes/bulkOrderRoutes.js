@@ -14,6 +14,10 @@ const BotAccount = require("../models/BotAccount");
 const DropSet = require("../models/DropSet");
 const { stockForSets } = require("./shopRoutes");
 const {
+  releaseAccountsForTag,
+  releaseByBulkOrder,
+} = require("../utils/dropReservation");
+const {
   runHealthCheck,
   reserveUnits,
   recomputeSummary,
@@ -151,7 +155,9 @@ async function buyerUnitsView(order) {
   const items = order.items || [];
   return active.map((u) => {
     const a = byId.get(String(u.account)) || {};
-    const counts = new Map((u.itemCounts || []).map((c) => [c.itemKey, c.count]));
+    const counts = new Map(
+      (u.itemCounts || []).map((c) => [c.itemKey, c.count]),
+    );
     return {
       login: a.login || a.credUsername || u.accountLogin || "",
       password: decrypt(a.credPassword) || "",
@@ -226,7 +232,9 @@ router.post("/bulk-orders/create", requireSuperadmin, async (req, res) => {
     const { setId, buyerLabel, price, guaranteeDays } = req.body || {};
     const qty = Math.floor(Number(req.body && req.body.qty));
     if (!setId) {
-      return res.status(400).json({ success: false, message: "Set is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Set is required" });
     }
     if (!Number.isFinite(qty) || qty < 1) {
       return res
@@ -288,18 +296,8 @@ router.post("/bulk-orders/create", requireSuperadmin, async (req, res) => {
         createdBy: req.session.admin.id,
       });
     } catch (e) {
-      // Roll back the reservations so the accounts stay sellable.
-      await BotAccount.updateMany(
-        { soldBulkOrderId: orderNo },
-        {
-          $set: {
-            soldAt: null,
-            soldToUsername: "",
-            soldSetId: "",
-            soldBulkOrderId: "",
-          },
-        },
-      );
+      // Roll back the reservations so the drops stay sellable.
+      await releaseByBulkOrder(orderNo);
       throw e;
     }
 
@@ -331,7 +329,9 @@ router.get("/bulk-orders/:id", requireSuperadmin, async (req, res) => {
   try {
     const order = await BulkOrder.findById(req.params.id).lean();
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
     res.json({
       success: true,
@@ -349,7 +349,9 @@ router.get("/bulk-orders/:id/creds", requireSuperadmin, async (req, res) => {
   try {
     const order = await BulkOrder.findById(req.params.id).lean();
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
     const units = await credsForActiveUnits(order);
     res.json({ success: true, orderNo: order.orderNo, units });
@@ -367,7 +369,9 @@ router.post(
     try {
       const order = await BulkOrder.findById(req.params.id);
       if (!order) {
-        return res.status(404).json({ success: false, message: "Order not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Order not found" });
       }
       // Auto-replace is intentionally off: the check reports health but never
       // swaps accounts (so a unit a buyer is actively using is never yanked).
@@ -401,9 +405,13 @@ router.post("/bulk-orders/:id/topup", requireSuperadmin, async (req, res) => {
     }
     const order = await BulkOrder.findById(req.params.id);
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
-    const excludeIds = new Set((order.units || []).map((u) => String(u.account)));
+    const excludeIds = new Set(
+      (order.units || []).map((u) => String(u.account)),
+    );
     const { units, claimed, available } = await reserveUnits({
       order,
       setLike: setLikeOf(order),
@@ -432,7 +440,9 @@ router.get("/bulk-orders/:id/export", requireSuperadmin, async (req, res) => {
   try {
     const order = await BulkOrder.findById(req.params.id).lean();
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
     const units = await credsForActiveUnits(order);
     const lines = units.map((u) =>
@@ -456,27 +466,24 @@ router.delete("/bulk-orders/:id", requireSuperadmin, async (req, res) => {
   try {
     const order = await BulkOrder.findById(req.params.id);
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
     // Only release accounts we can't tell are broken (alive or never-checked);
     // an account confirmed dead should not go back on the shelf.
     const releaseIds = (order.units || [])
-      .filter((u) => !BAD_FOR_SUMMARY.has((u.health && u.health.status) || "unchecked"))
+      .filter(
+        (u) =>
+          !BAD_FOR_SUMMARY.has((u.health && u.health.status) || "unchecked"),
+      )
       .map((u) => u.account);
     let released = 0;
     if (releaseIds.length) {
-      const r = await BotAccount.updateMany(
-        { _id: { $in: releaseIds }, soldBulkOrderId: order.orderNo },
-        {
-          $set: {
-            soldAt: null,
-            soldToUsername: "",
-            soldSetId: "",
-            soldBulkOrderId: "",
-          },
-        },
-      );
-      released = r.modifiedCount || 0;
+      // Release only this order's set's drops on the still-good accounts (their
+      // other games, and confirmed-dead units, are left as-is).
+      await releaseAccountsForTag(releaseIds, "bulk:" + order.orderNo);
+      released = releaseIds.length;
     }
     await BulkOrder.deleteOne({ _id: order._id });
     res.json({ success: true, released });
@@ -490,34 +497,30 @@ router.delete("/bulk-orders/:id", requireSuperadmin, async (req, res) => {
 // Buyer portal (public — the token is the secret; no login)
 // =========================================================================
 
-router.get(
-  "/bulk-orders/portal/:token",
-  validateLimiter,
-  async (req, res) => {
-    try {
-      const order = await BulkOrder.findOne({ accessToken: req.params.token });
-      if (!order) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Order not found" });
-      }
-      // Stamp first-reveal on any active unit the buyer hasn't seen yet.
-      let touched = false;
-      const now = new Date();
-      for (const u of order.units) {
-        if (u.active && !u.revealedAt) {
-          u.revealedAt = now;
-          touched = true;
-        }
-      }
-      if (touched) await order.save();
-      res.json({ success: true, order: await orderPortalView(order) });
-    } catch (err) {
-      console.error("bulk-orders portal error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
+router.get("/bulk-orders/portal/:token", validateLimiter, async (req, res) => {
+  try {
+    const order = await BulkOrder.findOne({ accessToken: req.params.token });
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
-  },
-);
+    // Stamp first-reveal on any active unit the buyer hasn't seen yet.
+    let touched = false;
+    const now = new Date();
+    for (const u of order.units) {
+      if (u.active && !u.revealedAt) {
+        u.revealedAt = now;
+        touched = true;
+      }
+    }
+    if (touched) await order.save();
+    res.json({ success: true, order: await orderPortalView(order) });
+  } catch (err) {
+    console.error("bulk-orders portal error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 router.post(
   "/bulk-orders/portal/:token/health-check",

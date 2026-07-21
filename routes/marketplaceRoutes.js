@@ -991,11 +991,14 @@ router.post(
       // platforms.
       let retired = 0;
       if (body.accounts != null) {
+        // Reserve the listing's set's drops (per game) on the matched accounts.
+        const manualSet = await DropSet.findById(row.set).lean();
         retired = await dsFulfiller.retireManualAccounts(
           String(body.accounts)
             .split(/\r?\n/)
             .map((s) => s.trim())
             .filter(Boolean),
+          manualSet,
         );
       }
       res.json({ success: true, added: r.added, retired });

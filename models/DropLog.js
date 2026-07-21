@@ -54,6 +54,18 @@ const dropLogSchema = new mongoose.Schema(
     // gameEventDrop | inProgressClaimed
     source: { type: String, default: "gameEventDrop" },
 
+    // Per-drop reservation. A single "everything" account holds drops for many
+    // games and is sold once PER GAME (its Overwatch drops to one buyer, its
+    // Rainbow Six drops to another), so a sale reserves only the sold set's
+    // drops on the account — not the whole account. A drop is unavailable when
+    // connected === true (redeemed) OR soldAt !== null (reserved/sold). The
+    // matching BotAccount.sold* fields are kept as a display/rollback shadow.
+    soldAt: { type: Date, default: null, index: true },
+    soldToUsername: { type: String, default: "" },
+    soldToAdminId: { type: String, default: "" },
+    soldSetId: { type: String, default: "", index: true },
+    soldBulkOrderId: { type: String, default: "", index: true },
+
     firstSeenAt: { type: Date, default: Date.now },
     lastSeenAt: { type: Date, default: Date.now },
   },
@@ -62,5 +74,8 @@ const dropLogSchema = new mongoose.Schema(
 
 // A reward is unique per account; this both dedupes and powers fast upserts.
 dropLogSchema.index({ account: 1, benefitId: 1 }, { unique: true });
+// Stock/availability aggregations match itemKey + exclude connected/reserved
+// drops; this keeps them index-backed as the archive grows.
+dropLogSchema.index({ itemKey: 1, connected: 1, soldAt: 1 });
 
 module.exports = mongoose.model("DropLog", dropLogSchema);

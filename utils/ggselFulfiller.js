@@ -10,9 +10,13 @@
 const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { decrypt } = require("./secretBox");
+const {
+  reserveSetOnAccount,
+  releaseAccountsForTag,
+} = require("./dropReservation");
 
 // Distinct from the Gameflip tag so a Shop buyer, a Gameflip listing and a
-// GGSel listing can never be handed the same account.
+// GGSel listing can never be handed the same account's drops for one game.
 const GG_CLAIM_TAG = "ggsel";
 
 function ggselDeliveryCode(login, password) {
@@ -43,27 +47,26 @@ async function claimAccountsForSet(set, max) {
   const claimed = [];
   for (const c of candidates) {
     if (claimed.length >= want) break;
-    const account = await BotAccount.findOneAndUpdate(
-      { _id: c.accountId, soldAt: null },
-      {
-        $set: {
-          soldAt: new Date(),
-          soldToAdminId: "",
-          soldToUsername: GG_CLAIM_TAG,
-          soldSetId: String(set._id),
-        },
-      },
-      { new: true },
-    );
-    if (!account) continue;
-    const login = account.login || account.credUsername || "";
-    const password = decrypt(account.credPassword);
+    // Reserve only this set's drops on the account (per game), not the whole
+    // account — its other games stay sellable.
+    const ok = await reserveSetOnAccount(c.accountId, set, {
+      soldToUsername: GG_CLAIM_TAG,
+      soldSetId: String(set._id),
+    });
+    if (!ok) continue;
+    const account = await BotAccount.findById(c.accountId, {
+      login: 1,
+      credUsername: 1,
+      credPassword: 1,
+    }).lean();
+    const login = account ? account.login || account.credUsername || "" : "";
+    const password = account ? decrypt(account.credPassword) : "";
     if (!password) {
-      await releaseAccounts([account._id]);
+      await releaseAccounts([c.accountId]);
       continue;
     }
     claimed.push({
-      accountId: String(account._id),
+      accountId: String(c.accountId),
       login,
       code: ggselDeliveryCode(login, password),
     });
@@ -71,24 +74,10 @@ async function claimAccountsForSet(set, max) {
   return claimed;
 }
 
-// Put reserved accounts back in the sellable pool (only ones still reserved
-// for GGSel — never touches accounts sold through the Shop or Gameflip).
+// Put reserved drops back in the sellable pool (only ones still reserved for
+// GGSel — never touches drops sold through the Shop or another marketplace).
 async function releaseAccounts(accountIds) {
-  const ids = (Array.isArray(accountIds) ? accountIds : [accountIds])
-    .map((x) => String(x || "").trim())
-    .filter(Boolean);
-  if (!ids.length) return;
-  await BotAccount.updateMany(
-    { _id: { $in: ids }, soldToUsername: GG_CLAIM_TAG },
-    {
-      $set: {
-        soldAt: null,
-        soldToAdminId: "",
-        soldToUsername: "",
-        soldSetId: "",
-      },
-    },
-  ).catch(() => {});
+  await releaseAccountsForTag(accountIds, GG_CLAIM_TAG);
 }
 
 module.exports = {

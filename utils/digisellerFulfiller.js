@@ -10,6 +10,10 @@
 const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { decrypt } = require("./secretBox");
+const {
+  reserveSetOnAccount,
+  releaseAccountsForTag,
+} = require("./dropReservation");
 
 // Distinct from the Shop / Gameflip / GGSel tags so the same account can
 // never be handed out twice across platforms.
@@ -46,27 +50,25 @@ async function claimAccountsForSet(set, max) {
   const claimed = [];
   for (const c of candidates) {
     if (claimed.length >= want) break;
-    const account = await BotAccount.findOneAndUpdate(
-      { _id: c.accountId, soldAt: null },
-      {
-        $set: {
-          soldAt: new Date(),
-          soldToAdminId: "",
-          soldToUsername: DS_CLAIM_TAG,
-          soldSetId: String(set._id),
-        },
-      },
-      { new: true },
-    );
-    if (!account) continue;
-    const login = account.login || account.credUsername || "";
-    const password = decrypt(account.credPassword);
+    // Per-game reservation: commit only this set's drops on the account.
+    const ok = await reserveSetOnAccount(c.accountId, set, {
+      soldToUsername: DS_CLAIM_TAG,
+      soldSetId: String(set._id),
+    });
+    if (!ok) continue;
+    const account = await BotAccount.findById(c.accountId, {
+      login: 1,
+      credUsername: 1,
+      credPassword: 1,
+    }).lean();
+    const login = account ? account.login || account.credUsername || "" : "";
+    const password = account ? decrypt(account.credPassword) : "";
     if (!password) {
-      await releaseAccounts([account._id]);
+      await releaseAccounts([c.accountId]);
       continue;
     }
     claimed.push({
-      accountId: String(account._id),
+      accountId: String(c.accountId),
       login,
       code: digisellerDeliveryCode(login, password),
     });
@@ -74,30 +76,17 @@ async function claimAccountsForSet(set, max) {
   return claimed;
 }
 
-// Put reserved accounts back in the sellable pool (only ones still reserved
-// for Digiseller — never touches accounts sold elsewhere).
+// Put reserved drops back in the sellable pool (only ones still reserved for
+// Digiseller — never touches drops sold elsewhere).
 async function releaseAccounts(accountIds) {
-  const ids = (Array.isArray(accountIds) ? accountIds : [accountIds])
-    .map((x) => String(x || "").trim())
-    .filter(Boolean);
-  if (!ids.length) return;
-  await BotAccount.updateMany(
-    { _id: { $in: ids }, soldToUsername: DS_CLAIM_TAG },
-    {
-      $set: {
-        soldAt: null,
-        soldToAdminId: "",
-        soldToUsername: "",
-        soldSetId: "",
-      },
-    },
-  ).catch(() => {});
+  await releaseAccountsForTag(accountIds, DS_CLAIM_TAG);
 }
 
 // Manually-added stock lines ("user:pass") may correspond to server-tracked
-// accounts; retire those from the sellable pool so they cannot also be sold
-// on another platform or through the Shop. Unknown logins are ignored.
-async function retireManualAccounts(accountLines) {
+// accounts; retire the listing's set's drops on those accounts so this game
+// can't also be sold through the Shop or another platform. Unknown logins are
+// ignored. Needs the listing's `set` (for the per-game itemKeys).
+async function retireManualAccounts(accountLines, set) {
   const logins = (Array.isArray(accountLines) ? accountLines : [])
     .map((l) =>
       String(l || "")
@@ -105,19 +94,20 @@ async function retireManualAccounts(accountLines) {
         .trim(),
     )
     .filter(Boolean);
-  if (!logins.length) return 0;
-  const r = await BotAccount.updateMany(
-    { login: { $in: logins }, soldAt: null },
-    {
-      $set: {
-        soldAt: new Date(),
-        soldToAdminId: "",
-        soldToUsername: DS_MANUAL_TAG,
-        soldSetId: "",
-      },
-    },
-  ).catch(() => null);
-  return (r && r.modifiedCount) || 0;
+  if (!logins.length || !set || !(set.items || []).length) return 0;
+  const accts = await BotAccount.find(
+    { login: { $in: logins } },
+    { _id: 1 },
+  ).lean();
+  let n = 0;
+  for (const a of accts) {
+    const ok = await reserveSetOnAccount(a._id, set, {
+      soldToUsername: DS_MANUAL_TAG,
+      soldSetId: String(set._id),
+    });
+    if (ok) n++;
+  }
+  return n;
 }
 
 module.exports = {
