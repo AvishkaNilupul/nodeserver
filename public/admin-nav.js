@@ -50,6 +50,8 @@
     integrity:
       '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 ' +
       '10 8 10z"></path><path d="M9 12l2 2 4-4"></path>',
+    research:
+      '<path d="M3 3v18h18"></path>' + '<path d="M7 13l4-4 3 3 5-6"></path>',
     prime:
       '<polyline points="20 12 20 22 4 22 4 12"></polyline>' +
       '<rect x="2" y="7" width="20" height="5"></rect>' +
@@ -157,6 +159,12 @@
           href: "/integrity.html",
           label: "Integrity",
           icon: ICONS.integrity,
+          superOnly: true,
+        },
+        {
+          href: "/research.html",
+          label: "Market research",
+          icon: ICONS.research,
           superOnly: true,
         },
       ],

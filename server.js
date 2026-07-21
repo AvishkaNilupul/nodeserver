@@ -407,6 +407,11 @@ app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
 });
 
+// Market research (superadmin only) — rank games by real twitch-drop demand.
+app.get("/research.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "research.html"));
+});
+
 // Bulk orders manager (superadmin only) — reserve N accounts for one buyer,
 // health-check + auto-replace, and mint the buyer's inventory link.
 app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
