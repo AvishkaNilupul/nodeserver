@@ -990,7 +990,18 @@ Reliable Daily Rewards</textarea
         </div>
 
         <section class="card" style="margin-top: 22px">
-          <h2 style="margin: 0 0 10px">Custom listings</h2>
+          <div
+            style="
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 10px;
+              margin: 0 0 10px;
+            "
+          >
+            <h2 style="margin: 0">Custom listings</h2>
+            <button class="btn" id="g2gBulkBtn">Export G2G bulk file</button>
+          </div>
           <div id="cListings"><div class="empty">Loading…</div></div>
         </section>
       </div>
@@ -1068,6 +1079,27 @@ Reliable Daily Rewards</textarea
         margin-top: 12px;
         padding-top: 10px;
       }
+      .mp-adv {
+        font-size: 13px;
+        padding: 8px 10px;
+        margin-top: 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .mp-adv .btn {
+        padding: 2px 8px;
+        font-size: 12px;
+        margin-left: 6px;
+      }
+      .mp-adv-row {
+        font-size: 12px;
+        opacity: 0.85;
+        margin-top: 4px;
+      }
+      .mp-adv-row a {
+        color: #c4b5fd;
+      }
       .mp-ext .mp-item {
         display: flex;
         gap: 8px;
@@ -1117,6 +1149,125 @@ Reliable Daily Rewards</textarea
       </div>
     </div>
 
+    <div class="mp-overlay" id="g2gBulkOverlay">
+      <div class="mp-modal">
+        <h3>Export G2G bulk file</h3>
+        <div class="mp-hint">
+          Builds a G2G “Bulk Upload for Items” .xlsx for offers the API can’t
+          create (non-instant item delivery). Pick the catalog product — its
+          Product ID and Offer Attributes come straight from G2G, so no blank
+          template download is needed. Then tick the listings to include and
+          upload the file on g2g.com → Create Offer → Bulk Upload.
+        </div>
+
+        <div class="mp-ext" style="border-top: 0; margin-top: 8px">
+          <b style="font-size: 13px">G2G product</b>
+          <label>Service</label>
+          <select id="gbService">
+            <option value="">Loading…</option>
+          </select>
+          <label>Category</label>
+          <select id="gbCategory">
+            <option value="">Pick a service first</option>
+          </select>
+          <label>Brand / game</label>
+          <input
+            type="text"
+            id="gbBrandFilter"
+            placeholder="Type to search games…"
+            autocomplete="off"
+            style="margin-bottom: 6px"
+          />
+          <select id="gbBrand">
+            <option value="">Pick a service first</option>
+          </select>
+          <label>Product</label>
+          <select id="gbProduct">
+            <option value="">Pick a brand first</option>
+          </select>
+          <div id="gbAttrs"></div>
+        </div>
+
+        <div class="mp-ext">
+          <b style="font-size: 13px">Offer defaults</b>
+          <div class="mp-hint">Applied to every row in the file.</div>
+          <label>Delivery methods (names, separated by |)</label>
+          <input
+            type="text"
+            id="gbDelivery"
+            placeholder="Face to face trade|Mail"
+          />
+          <div class="mp-row" style="margin-top: 8px">
+            <div style="flex: 1">
+              <label style="margin-top: 0">Stock per offer</label>
+              <input type="number" id="gbStock" min="1" value="1" />
+            </div>
+            <div style="flex: 1">
+              <label style="margin-top: 0">Min qty per order</label>
+              <input type="number" id="gbMinQty" min="1" value="1" />
+            </div>
+            <div style="flex: 1">
+              <label style="margin-top: 0">Low stock alert</label>
+              <input type="number" id="gbLowStock" min="0" value="1" />
+            </div>
+          </div>
+          <div class="mp-row" style="margin-top: 8px">
+            <div style="flex: 1">
+              <label style="margin-top: 0">Delivery speed qty (optional)</label>
+              <input type="text" id="gbSpeedQty" placeholder="e.g. 1-10|20" />
+            </div>
+            <div style="flex: 1">
+              <label style="margin-top: 0"
+                >Delivery speed time (optional)</label
+              >
+              <input type="text" id="gbSpeedTime" placeholder="e.g. 10|20" />
+            </div>
+          </div>
+          <label>Sales country</label>
+          <select id="gbSalesCountry">
+            <option value="Global">Global</option>
+            <option value="By Country">By Country</option>
+            <option value="Exclusion">Exclusion</option>
+          </select>
+        </div>
+
+        <div class="mp-ext">
+          <div
+            style="
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 8px;
+            "
+          >
+            <b style="font-size: 13px"
+              >Listings (<span id="gbSelCount">0</span> selected)</b
+            >
+            <div class="mp-row">
+              <button class="btn" id="gbAll" style="padding: 2px 8px">
+                All
+              </button>
+              <button class="btn" id="gbNone" style="padding: 2px 8px">
+                None
+              </button>
+            </div>
+          </div>
+          <div class="mp-hint">
+            One row per ticked listing. Title/price come from the set; edit
+            price here if needed.
+          </div>
+          <div id="gbSets" style="max-height: 260px; overflow-y: auto">
+            <div class="empty">Loading…</div>
+          </div>
+        </div>
+
+        <div class="mp-actions">
+          <button class="btn ghost" id="gbCancel">Cancel</button>
+          <button class="btn primary" id="gbDownload">Download .xlsx</button>
+        </div>
+      </div>
+    </div>
+
     <div class="mp-overlay" id="mpPubOverlay">
       <div class="mp-modal">
         <h3 id="mpPubTitle">Sell on marketplaces</h3>
@@ -1127,6 +1278,25 @@ Reliable Daily Rewards</textarea
         <textarea id="mpPubDesc" rows="4"></textarea>
         <label for="mpPubPrice">Price (USD)</label>
         <input type="number" id="mpPubPrice" min="0" step="0.01" />
+
+        <label for="mpPriceTerm">Competitor price check</label>
+        <div class="mp-row">
+          <input
+            type="text"
+            id="mpPriceTerm"
+            placeholder="Search term, e.g. rainbow six twitch"
+            style="flex: 1; min-width: 200px"
+          />
+          <button class="btn" id="mpPriceBtn" type="button">
+            Check prices
+          </button>
+        </div>
+        <div class="mp-hint">
+          Searches what other sellers charge for similar listings on each
+          marketplace and suggests a price that undercuts the lowest credible
+          competitor by ~5%. Tick G2G and pick its game first to include G2G.
+        </div>
+        <div id="mpPriceResults"></div>
 
         <div id="mpGfBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
@@ -2242,6 +2412,12 @@ Reliable Daily Rewards</textarea
         $("mpPubName").value = set.name || "";
         $("mpPubDesc").value = mpBuildDescription(set);
         $("mpPubPrice").value = Number(set.price) || "";
+        var pcGame =
+          set.coverGame ||
+          (set.items && set.items[0] && set.items[0].game) ||
+          "";
+        $("mpPriceTerm").value = pcGame ? pcGame + " twitch" : set.name || "";
+        $("mpPriceResults").innerHTML = "";
         $("mpG2gBox").style.display = "none";
         $("mpDsBox").style.display = "none";
         $("mpGfBox").style.display = "none";
@@ -2264,6 +2440,95 @@ Reliable Daily Rewards</textarea
 
       $("mpPubClose").addEventListener("click", function () {
         $("mpPubOverlay").classList.remove("open");
+      });
+
+      function renderPriceAdvice(results) {
+        var html = Object.keys(results)
+          .map(function (mpName) {
+            var r = results[mpName] || {};
+            var label = MP_LABELS[mpName] || mpName;
+            if (!r.count) {
+              return (
+                '<div class="mp-adv"><b>' +
+                esc(label) +
+                "</b> — no competitor listings found" +
+                (r.error ? " (" + esc(r.error) + ")" : "") +
+                "</div>"
+              );
+            }
+            var top = (r.listings || [])
+              .slice(0, 3)
+              .map(function (l) {
+                return (
+                  '<div class="mp-adv-row">$' +
+                  Number(l.price).toFixed(2) +
+                  ' — <a href="' +
+                  attr(l.url) +
+                  '" target="_blank" rel="noopener">' +
+                  esc(String(l.title || "").slice(0, 70)) +
+                  "</a>" +
+                  (l.sold ? " · " + l.sold + " sold" : "") +
+                  "</div>"
+                );
+              })
+              .join("");
+            return (
+              '<div class="mp-adv"><b>' +
+              esc(label) +
+              "</b> — " +
+              r.count +
+              " found · lowest $" +
+              Number(r.lowest).toFixed(2) +
+              " · median $" +
+              Number(r.median).toFixed(2) +
+              ' <button type="button" class="btn" data-useprice="' +
+              attr(String(r.recommended)) +
+              '">Use $' +
+              Number(r.recommended).toFixed(2) +
+              "</button>" +
+              top +
+              "</div>"
+            );
+          })
+          .join("");
+        $("mpPriceResults").innerHTML =
+          html || '<div class="empty">No data</div>';
+      }
+
+      $("mpPriceBtn").addEventListener("click", function () {
+        var term = $("mpPriceTerm").value.trim();
+        if (!term) {
+          toast("Enter a search term first");
+          return;
+        }
+        var body = { term: term };
+        var sid = $("mpG2gService").value;
+        var bid = $("mpG2gBrand").value;
+        if (sid && bid) body.g2g = { serviceId: sid, brandId: bid };
+        $("mpPriceResults").innerHTML =
+          '<div class="empty">Checking competitor prices…</div>';
+        $("mpPriceBtn").disabled = true;
+        api("/marketplaces/price-check", { method: "POST", body: body })
+          .then(function (j) {
+            renderPriceAdvice(j.results || {});
+          })
+          .catch(function (e) {
+            $("mpPriceResults").innerHTML =
+              '<div class="empty">Price check failed: ' +
+              esc(e.message || "error") +
+              "</div>";
+          })
+          .then(function () {
+            $("mpPriceBtn").disabled = false;
+          });
+      });
+
+      $("mpPriceResults").addEventListener("click", function (e) {
+        var b = e.target.closest("[data-useprice]");
+        if (!b) return;
+        var v = b.getAttribute("data-useprice");
+        $("mpPubPrice").value = v;
+        toast("Price set to $" + Number(v).toFixed(2));
       });
 
       // Show G2G / Plati pickers only when those marketplaces are ticked.
@@ -3406,6 +3671,349 @@ Reliable Daily Rewards</textarea
               toast(err.message || "Delete failed");
             });
         }
+      });
+
+      // ---- G2G bulk file export ----
+      // Reuses the same catalog endpoints as the publish modal; the picked
+      // product's id/name/attributes come from G2G, so the generated .xlsx is a
+      // real bulk template with no manual download needed.
+      var gbSets = [];
+      var gbServiceRows = [];
+      var gbBrandRows = [];
+
+      function gbOpen() {
+        $("g2gBulkOverlay").classList.add("open");
+        if (!gbServiceRows.length) {
+          api("/marketplaces/g2g/services")
+            .then(function (j) {
+              gbServiceRows = g2gRows(j.data);
+              fillSelect($("gbService"), gbServiceRows, "Pick a service…");
+            })
+            .catch(function (e) {
+              toast("G2G: " + e.message);
+            });
+        }
+        gbLoadSets();
+      }
+      function gbClose() {
+        $("g2gBulkOverlay").classList.remove("open");
+      }
+
+      function gbLoadSets() {
+        $("gbSets").innerHTML = '<div class="empty">Loading…</div>';
+        Promise.all([
+          api("/drops-archive/sets?custom=1").catch(function () {
+            return { sets: [] };
+          }),
+          api("/drops-archive/sets").catch(function () {
+            return { sets: [] };
+          }),
+        ])
+          .then(function (res) {
+            var seen = {};
+            gbSets = [];
+            (res[0].sets || []).concat(res[1].sets || []).forEach(function (s) {
+              if (seen[s.id]) return;
+              seen[s.id] = 1;
+              gbSets.push(s);
+            });
+            gbRenderSets();
+          })
+          .catch(function (e) {
+            $("gbSets").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+
+      function gbRenderSets() {
+        if (!gbSets.length) {
+          $("gbSets").innerHTML = '<div class="empty">No listings yet.</div>';
+          gbUpdateCount();
+          return;
+        }
+        $("gbSets").innerHTML = gbSets
+          .map(function (s) {
+            return (
+              '<div class="mp-item">' +
+              '<label class="mp-check" style="flex:1;min-width:180px">' +
+              '<input type="checkbox" data-gbset="' +
+              attr(s.id) +
+              '" checked /> ' +
+              esc(s.name) +
+              "</label>" +
+              '<input type="number" min="0" step="0.01" data-gbprice="' +
+              attr(s.id) +
+              '" value="' +
+              attr(Number(s.price) || 0) +
+              '" style="width:90px" title="Unit price (USD)" />' +
+              "</div>"
+            );
+          })
+          .join("");
+        gbUpdateCount();
+      }
+
+      function gbUpdateCount() {
+        var n = document.querySelectorAll(
+          "#gbSets [data-gbset]:checked",
+        ).length;
+        $("gbSelCount").innerText = n;
+      }
+
+      function gbBuildDescription(s) {
+        var lines = [s.note || "", "", "Includes:"];
+        (s.items || []).forEach(function (i) {
+          lines.push("- " + i.name + (i.game ? " (" + i.game + ")" : ""));
+        });
+        return lines.join("\n").trim();
+      }
+
+      // Attribute value string for the Offers "Offer Attributes" column, built
+      // from the picked option labels (e.g. "Weapons > PC"), matching how G2G's
+      // reference sheet joins group values.
+      function gbAttributeValue() {
+        var parts = [];
+        document
+          .querySelectorAll("#gbAttrs [data-gbattr]")
+          .forEach(function (sel) {
+            if (sel.value) {
+              parts.push(sel.options[sel.selectedIndex].text.trim());
+            }
+          });
+        return parts.join(" > ");
+      }
+
+      $("g2gBulkBtn").addEventListener("click", gbOpen);
+      $("gbCancel").addEventListener("click", gbClose);
+      $("g2gBulkOverlay").addEventListener("click", function (e) {
+        if (e.target === this) gbClose();
+      });
+      $("gbAll").addEventListener("click", function () {
+        document.querySelectorAll("#gbSets [data-gbset]").forEach(function (c) {
+          c.checked = true;
+        });
+        gbUpdateCount();
+      });
+      $("gbNone").addEventListener("click", function () {
+        document.querySelectorAll("#gbSets [data-gbset]").forEach(function (c) {
+          c.checked = false;
+        });
+        gbUpdateCount();
+      });
+      $("gbSets").addEventListener("change", function (e) {
+        if (e.target.matches("[data-gbset]")) gbUpdateCount();
+      });
+
+      $("gbService").addEventListener("change", function () {
+        var sid = this.value;
+        $("gbCategory").innerHTML =
+          '<option value="">Pick a service first</option>';
+        $("gbBrand").innerHTML = '<option value="">Loading…</option>';
+        $("gbProduct").innerHTML =
+          '<option value="">Pick a brand first</option>';
+        $("gbAttrs").innerHTML = "";
+        if (!sid) return;
+        var row = gbServiceRows.filter(function (r) {
+          return String(r.id) === String(sid);
+        })[0];
+        var cats = ((row && row.raw && row.raw.categories) || []).map(
+          function (c) {
+            return {
+              id: c.category_id || c.id || "",
+              label: c.category_name || c.name || String(c.category_id || ""),
+            };
+          },
+        );
+        fillSelect(
+          $("gbCategory"),
+          cats,
+          cats.length ? "Pick a category…" : "(no categories)",
+        );
+        gbBrandRows = [];
+        $("gbBrandFilter").value = "";
+        api("/marketplaces/g2g/brands?serviceId=" + encodeURIComponent(sid))
+          .then(function (j) {
+            gbBrandRows = g2gRows(j.data);
+            gbRenderBrands();
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      });
+
+      function gbRenderBrands() {
+        var q = $("gbBrandFilter").value.trim().toLowerCase();
+        var rows = q
+          ? gbBrandRows.filter(function (r) {
+              return String(r.label).toLowerCase().indexOf(q) !== -1;
+            })
+          : gbBrandRows;
+        fillSelect(
+          $("gbBrand"),
+          rows,
+          rows.length
+            ? "Pick a brand… (" + rows.length + ")"
+            : "No games match",
+        );
+        if (q && rows.length === 1) {
+          $("gbBrand").value = rows[0].id;
+          $("gbBrand").dispatchEvent(new Event("change"));
+        }
+      }
+      $("gbBrandFilter").addEventListener("input", gbRenderBrands);
+
+      $("gbBrand").addEventListener("change", function () {
+        var sid = $("gbService").value;
+        var bid = this.value;
+        var cid = $("gbCategory").value;
+        $("gbProduct").innerHTML = '<option value="">Loading…</option>';
+        $("gbAttrs").innerHTML = "";
+        if (!sid || !bid) return;
+        api(
+          "/marketplaces/g2g/products?serviceId=" +
+            encodeURIComponent(sid) +
+            "&brandId=" +
+            encodeURIComponent(bid) +
+            (cid ? "&categoryId=" + encodeURIComponent(cid) : ""),
+        )
+          .then(function (j) {
+            fillSelect($("gbProduct"), g2gRows(j.data), "Pick a product…");
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      });
+
+      $("gbProduct").addEventListener("change", function () {
+        var pid = this.value;
+        $("gbAttrs").innerHTML = "";
+        if (!pid) return;
+        api("/marketplaces/g2g/attributes?productId=" + encodeURIComponent(pid))
+          .then(function (j) {
+            var payload = (j.data && (j.data.payload || j.data.data)) || {};
+            var groups = payload.attribute_groups || g2gFirstArray(payload);
+            if (!Array.isArray(groups) || !groups.length) return;
+            $("gbAttrs").innerHTML = groups
+              .map(function (g) {
+                var gname =
+                  g.attribute_group_name ||
+                  g.group_name ||
+                  g.name ||
+                  "Attribute";
+                if (g.is_required) gname += " *";
+                var opts = (
+                  g.attributes ||
+                  g.attribute_list ||
+                  g.children ||
+                  []
+                )
+                  .map(function (a) {
+                    return (
+                      '<option value="' +
+                      attr(a.attribute_id || a.id || "") +
+                      '">' +
+                      esc(a.attribute_name || a.name || a.value || "") +
+                      "</option>"
+                    );
+                  })
+                  .join("");
+                return (
+                  "<label>" +
+                  esc(gname) +
+                  "</label>" +
+                  '<select data-gbattr><option value="">(skip)</option>' +
+                  opts +
+                  "</select>"
+                );
+              })
+              .join("");
+          })
+          .catch(function (e) {
+            toast("G2G: " + e.message);
+          });
+      });
+
+      $("gbDownload").addEventListener("click", function () {
+        var productId = $("gbProduct").value;
+        if (!productId) {
+          toast("Pick a G2G product first");
+          return;
+        }
+        var attrValue = gbAttributeValue();
+        var offers = [];
+        document
+          .querySelectorAll("#gbSets [data-gbset]:checked")
+          .forEach(function (c) {
+            var id = c.dataset.gbset;
+            var set = gbSets.find(function (s) {
+              return s.id === id;
+            });
+            if (!set) return;
+            var priceEl = document.querySelector('[data-gbprice="' + id + '"]');
+            offers.push({
+              attributeValue: attrValue,
+              title: set.name,
+              description: gbBuildDescription(set),
+              stock: parseInt($("gbStock").value, 10) || 1,
+              unitPrice: parseFloat(priceEl && priceEl.value) || 0,
+            });
+          });
+        if (!offers.length) {
+          toast("Tick at least one listing");
+          return;
+        }
+        var productName =
+          $("gbProduct").options[$("gbProduct").selectedIndex].text.trim();
+        var body = {
+          productId: productId,
+          productName: productName,
+          offers: offers,
+          defaults: {
+            currency: "USD",
+            deliveryMethods: $("gbDelivery").value.trim(),
+            minQty: parseInt($("gbMinQty").value, 10) || 1,
+            lowStock: parseInt($("gbLowStock").value, 10) || 0,
+            deliverySpeedQty: $("gbSpeedQty").value.trim(),
+            deliverySpeedTime: $("gbSpeedTime").value.trim(),
+            salesCountrySettings: $("gbSalesCountry").value,
+            status: "live",
+          },
+        };
+        var btn = $("gbDownload");
+        btn.disabled = true;
+        btn.innerText = "Building…";
+        fetch("/marketplaces/g2g/bulk-file", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+          .then(function (r) {
+            if (!r.ok) {
+              return r.json().then(function (j) {
+                throw new Error((j && j.message) || "Export failed");
+              });
+            }
+            return r.blob();
+          })
+          .then(function (blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = productId + ".xlsx";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            toast("File ready — upload it on g2g.com → Bulk Upload");
+          })
+          .catch(function (e) {
+            toast(e.message || "Export failed");
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.innerText = "Download .xlsx";
+          });
       });
 
       // ---- init ----

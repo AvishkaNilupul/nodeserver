@@ -14,6 +14,8 @@ const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const mp = require("../utils/marketplaces");
+const { competitorPrices } = require("../utils/priceScout");
+const { buildG2gBulkFile } = require("../utils/g2gBulk");
 const {
   buildSetGridImage,
   buildPromoCoverImage,
@@ -241,6 +243,60 @@ router.get(
   },
 );
 
+// Generate a G2G "Bulk Upload for Items" .xlsx for offers G2G's API can't
+// create (non-instant item delivery). The Offer Attributes reference sheet is
+// pulled live from the product's attributes, so no blank template download is
+// needed — the seller just uploads this file on g2g.com. Returns the file as a
+// download, or JSON on error.
+router.post(
+  "/marketplaces/g2g/bulk-file",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const productId = String(body.productId || "").trim();
+      if (!productId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "productId required" });
+      }
+      const offers = Array.isArray(body.offers) ? body.offers : [];
+      if (!offers.length) {
+        return res
+          .status(400)
+          .json({ success: false, message: "No offers to export" });
+      }
+      // Best-effort: the Offers tab is still valid without the reference sheet,
+      // so a failed attributes lookup shouldn't block the export.
+      let attributesApi = null;
+      try {
+        attributesApi = await mp.g2gAttributes(productId);
+      } catch (e) {
+        console.error("g2g bulk: attributes fetch failed:", e.message);
+      }
+      const buf = buildG2gBulkFile({
+        productId,
+        productName: String(body.productName || ""),
+        attributesApi,
+        offers,
+        defaults: body.defaults || {},
+      });
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        'attachment; filename="' + productId + '.xlsx"',
+      );
+      res.send(buf);
+    } catch (err) {
+      console.error("g2g bulk-file error:", err.message);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
 // ------------------------------------------------------------------
 // Publish / list / delist
 // ------------------------------------------------------------------
@@ -307,6 +363,37 @@ router.post(
       });
     } catch (err) {
       console.error("custom cover preview error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Competitor price research: searches other sellers' live listings on
+// Gameflip / Plati / GGSel (and G2G when a service+brand is picked) and
+// returns per-market stats plus a recommended undercut price.
+router.post(
+  "/marketplaces/price-check",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const term = String(body.term || "").trim();
+      if (!term) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Search term required" });
+      }
+      const g2g =
+        body.g2g && body.g2g.serviceId && body.g2g.brandId
+          ? {
+              serviceId: String(body.g2g.serviceId),
+              brandId: String(body.g2g.brandId),
+            }
+          : null;
+      const results = await competitorPrices({ term, g2g });
+      res.json({ success: true, term, results });
+    } catch (err) {
+      console.error("price-check error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },
