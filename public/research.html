@@ -511,6 +511,28 @@
           <div class="muted">Loading…</div>
         </div>
       </div>
+
+      <div class="card">
+        <h2>GGSel ads advisor</h2>
+        <p class="hint" id="adsModelLine">
+          GGSel promotion is a per-day bid per product: the minimum bid ranks
+          the product above all non-advertised ones in its category and search;
+          $1+/day competes for the category's main block. Verdicts below join
+          your live GGSel listings with the research data — place bids in the
+          <a
+            href="https://seller.ggsel.com/ads/management"
+            target="_blank"
+            rel="noopener"
+            >GGSel ad panel</a
+          >.
+        </p>
+        <div class="row" style="margin-bottom: 8px">
+          <button class="btn" id="btnAdsRefresh">Refresh</button>
+        </div>
+        <div id="adsWrap" style="overflow-x: auto">
+          <div class="muted">Loading…</div>
+        </div>
+      </div>
     </main>
 
     <div class="toast" id="toast"></div>
@@ -813,6 +835,107 @@
             $("btnScan").disabled = false;
           });
       });
+      function adsVerdictBadge(v) {
+        var color = "var(--muted)";
+        if (v === "Advertise") color = "var(--green)";
+        else if (v === "Reprice first") color = "var(--red)";
+        else if (v === "Maybe" || v === "Wait for campaign")
+          color = "var(--accent)";
+        return (
+          '<span style="color:' +
+          color +
+          ';font-weight:600">' +
+          esc(v) +
+          "</span>"
+        );
+      }
+
+      function renderAds(j) {
+        var rows = j.rows || [];
+        var model = j.model || {};
+        if (model.minBidPerDay) {
+          $("adsModelLine").firstChild.textContent =
+            "GGSel promotion is a per-day bid per product: $" +
+            model.minBidPerDay.toFixed(2) +
+            "/day minimum ranks the product above all non-advertised ones in " +
+            "its category and search; $" +
+            model.mainBlockBidPerDay.toFixed(2) +
+            "+/day competes for the category's main block. Verdicts below " +
+            "join your live GGSel listings with the research data — place " +
+            "bids in the ";
+        }
+        if (!rows.length) {
+          $("adsWrap").innerHTML =
+            '<div class="muted">No active GGSel listings.</div>';
+          return;
+        }
+        var html =
+          "<table><thead><tr>" +
+          "<th>Listing</th><th>Price</th><th>Game</th><th>Demand</th>" +
+          "<th>Campaign</th><th>GG competitors</th><th>GG sales</th>" +
+          "<th>Break-even</th><th>Verdict</th>" +
+          "</tr></thead><tbody>";
+        rows.forEach(function (r) {
+          html +=
+            "<tr><td style='max-width:280px'>" +
+            (r.url
+              ? '<a href="' +
+                esc(r.url) +
+                '" target="_blank" rel="noopener">' +
+                esc(r.title) +
+                "</a>"
+              : esc(r.title)) +
+            "</td>" +
+            "<td>" +
+            money(r.price) +
+            "</td>" +
+            "<td>" +
+            esc(r.game || "—") +
+            "</td>" +
+            "<td>" +
+            (r.demandScore || 0) +
+            "</td>" +
+            "<td>" +
+            campCell(r.campaign) +
+            "</td>" +
+            "<td>" +
+            (r.ggselCompetitors || 0) +
+            (r.ggselLowest > 0 ? " from " + money(r.ggselLowest) : "") +
+            "</td>" +
+            "<td>" +
+            (r.ggselTotalSold || 0) +
+            "</td>" +
+            "<td>" +
+            (r.breakEvenWeeklySales != null
+              ? r.breakEvenWeeklySales +
+                ' sales/wk<div class="muted">$' +
+                r.weeklyAdCost.toFixed(2) +
+                "/wk ads</div>"
+              : "—") +
+            "</td>" +
+            "<td>" +
+            adsVerdictBadge(r.verdict) +
+            '<div class="muted" style="max-width:220px">' +
+            esc(r.reason) +
+            "</div></td></tr>";
+        });
+        html += "</tbody></table>";
+        $("adsWrap").innerHTML = html;
+      }
+
+      function loadAds() {
+        return api("/marketplaces/ads-advisor")
+          .then(renderAds)
+          .catch(function (e) {
+            $("adsWrap").innerHTML =
+              '<div class="muted">' +
+              esc(e.message || "Load failed") +
+              "</div>";
+          });
+      }
+      $("btnAdsRefresh").addEventListener("click", loadAds);
+      loadAds();
+
       $("btnRefresh").addEventListener("click", load);
       $("fltCamp").addEventListener("change", renderTable);
       $("fltSort").addEventListener("change", renderTable);

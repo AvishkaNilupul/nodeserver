@@ -405,6 +405,130 @@ router.post(
   },
 );
 
+// GGSel ads advisor: joins your active GGSel listings with the market
+// research data and says which ones are worth paying GGSel's per-day
+// advertising bid for. GGSel's ad model: a bid of $/day per product,
+// $0.40/day minimum ranks the product above non-advertised ones in its
+// category and search; $1+/day competes for the category's main block.
+const GGSEL_AD_MIN_BID = 0.4;
+const GGSEL_AD_MAIN_BLOCK_BID = 1;
+const GGSEL_FEE_RATE = 0.15;
+
+function adVerdict({ demand, campaignLive, competitive, hasResearch }) {
+  if (!hasResearch)
+    return {
+      verdict: "No data",
+      reason: "Game not scanned yet — run a research scan",
+    };
+  if (demand < 80)
+    return {
+      verdict: "Skip",
+      reason: "Low demand — ads can't create searches that don't happen",
+    };
+  if (!campaignLive)
+    return {
+      verdict: demand >= 150 ? "Wait for campaign" : "Skip",
+      reason:
+        "No active/upcoming Twitch campaign — search traffic is low right now",
+    };
+  if (!competitive)
+    return {
+      verdict: "Reprice first",
+      reason:
+        "Priced far above the cheapest competitor — extra views won't convert",
+    };
+  if (demand >= 150)
+    return {
+      verdict: "Advertise",
+      reason: "High demand + live campaign + competitive price",
+    };
+  return {
+    verdict: "Maybe",
+    reason: "Moderate demand — try only if budget allows",
+  };
+}
+
+router.get("/marketplaces/ads-advisor", requireSuperadmin, async (req, res) => {
+  try {
+    const [listings, research] = await Promise.all([
+      MarketplaceListing.find({ marketplace: "ggsel", status: "active" })
+        .select("title price url externalId")
+        .lean(),
+      MarketResearch.find({}).lean(),
+    ]);
+    const rows = listings.map((l) => {
+      const title = String(l.title || "");
+      const tl = title.toLowerCase();
+      const r =
+        research.find((x) => tl.startsWith(x.game.toLowerCase())) ||
+        research
+          .filter((x) => tl.includes(x.game.toLowerCase()))
+          .sort((a, b) => b.game.length - a.game.length)[0] ||
+        null;
+      const gg = r ? r.markets.ggsel : null;
+      const margin =
+        Math.round(Number(l.price || 0) * (1 - GGSEL_FEE_RATE) * 100) / 100;
+      const weeklyAdCost = Math.round(GGSEL_AD_MIN_BID * 7 * 100) / 100;
+      const breakEvenWeeklySales = margin
+        ? Math.round((weeklyAdCost / margin) * 10) / 10
+        : null;
+      const campaignLive = !!(r && (r.campaign.active || r.campaign.upcoming));
+      const competitive =
+        !gg || !gg.lowest || Number(l.price || 0) <= gg.lowest * 1.6;
+      const v = adVerdict({
+        demand: r ? r.demandScore : 0,
+        campaignLive,
+        competitive,
+        hasResearch: !!r,
+      });
+      return {
+        listingId: l._id,
+        externalId: l.externalId,
+        title,
+        url: l.url,
+        price: l.price,
+        game: r ? r.game : "",
+        demandScore: r ? r.demandScore : 0,
+        campaign: r ? r.campaign : null,
+        ggselCompetitors: gg ? gg.active : 0,
+        ggselLowest: gg ? gg.lowest : 0,
+        ggselTotalSold: gg ? gg.totalSold : 0,
+        margin,
+        weeklyAdCost,
+        breakEvenWeeklySales,
+        verdict: v.verdict,
+        reason: v.reason,
+      };
+    });
+    const order = {
+      Advertise: 0,
+      "Reprice first": 1,
+      Maybe: 2,
+      "Wait for campaign": 3,
+      Skip: 4,
+      "No data": 5,
+    };
+    rows.sort(
+      (a, b) =>
+        (order[a.verdict] ?? 9) - (order[b.verdict] ?? 9) ||
+        b.demandScore - a.demandScore,
+    );
+    res.json({
+      success: true,
+      rows,
+      model: {
+        minBidPerDay: GGSEL_AD_MIN_BID,
+        mainBlockBidPerDay: GGSEL_AD_MAIN_BLOCK_BID,
+        feeRate: GGSEL_FEE_RATE,
+        manageUrl: "https://seller.ggsel.com/ads/management",
+      },
+    });
+  } catch (err) {
+    console.error("ads advisor error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // Competitor price research: searches other sellers' live listings on
 // Gameflip / Plati / GGSel (and G2G when a service+brand is picked) and
 // returns per-market stats plus a recommended undercut price.
