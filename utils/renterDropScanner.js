@@ -107,6 +107,15 @@ async function scanAccount(acc) {
   );
   if (twitchId) acc.twitchId = twitchId;
   if (login && !acc.login) acc.login = login;
+  // NOTE (rent program): renter accounts DELIBERATELY keep farming a game even
+  // after its drops show as connected/redeemed on Twitch. That is the whole
+  // point of the rental business — an account is rented for a fixed term and
+  // must keep farming for the renter regardless of connection state. This is the
+  // intentional counterpart to utils/dropScanner.js's sold-account block (its
+  // `if (acc.soldAt)` -> stopFarmingGame call): the "connected => stop farming"
+  // law applies ONLY to the operator's SOLD BotAccounts, never to renters.
+  // Do NOT port that block here (no farmControl / stopFarmingGame on the renter
+  // path) or rented accounts would stop farming the instant they're connected.
   acc.dropCount = await RenterDrop.countDocuments({ account: acc._id });
   acc.lastScanAt = now;
   acc.lastScanStatus = "ok";
