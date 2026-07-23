@@ -366,10 +366,11 @@ function dsErrorText(d) {
   return msg;
 }
 
-function dsLocales(value) {
-  // Digiseller wants ru-RU and en-US variants; we use the same text for both.
+function dsLocales(value, ruValue) {
+  // Digiseller wants ru-RU and en-US variants. Titles keep the same text for
+  // both (product names); descriptions pass a translated ruValue.
   return [
-    { locale: "ru-RU", value },
+    { locale: "ru-RU", value: ruValue != null ? ruValue : value },
     { locale: "en-US", value },
   ];
 }
@@ -496,6 +497,8 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
   if (!cats.length) {
     throw new Error("Pick a Plati catalog category first");
   }
+  const desc = String(description || "").slice(0, 5000);
+  const descRu = (await translateEnToRu(desc)).slice(0, 5000);
   try {
     const r = await axios.post(
       DS_API + "/product/create/uniquefixed?token=" + encodeURIComponent(token),
@@ -503,7 +506,7 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
         content_type: "text",
         name: dsLocales(String(title).slice(0, 200)),
         price: { price, currency: "USD" },
-        description: dsLocales(String(description || "").slice(0, 5000)),
+        description: dsLocales(desc, descRu),
         categories: cats,
         address_required: false,
         guarantee: { enabled: true, value: 3 },
@@ -682,6 +685,48 @@ async function usdToRub() {
   return rubRate.value || RUB_FALLBACK;
 }
 
+// EN -> RU for the Russian-language fields GGSel/Digiseller/FunPay listings
+// carry alongside the English ones (we used to submit the same English text
+// into both). Uses Google's keyless gtx endpoint, translating line-by-line so
+// bullet-list descriptions keep their structure. Best-effort: on any failure
+// the English text is returned so publishing never breaks on translation.
+async function translateEnToRu(text) {
+  const src = String(text || "");
+  // Already (partly) Russian — hand-written RU text, leave it alone.
+  if (!src.trim() || /[а-яё]/i.test(src)) return src;
+  const lines = src.split("\n");
+  const idx = []; // positions of the non-empty lines we send
+  const params = new URLSearchParams();
+  lines.forEach((line, i) => {
+    if (line.trim()) {
+      idx.push(i);
+      params.append("q", line);
+    }
+  });
+  if (!idx.length) return src;
+  try {
+    const r = await axios.post(
+      "https://translate.googleapis.com/translate_a/t?client=gtx&sl=en&tl=ru&format=text",
+      params.toString(),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 15000,
+      },
+    );
+    const out = Array.isArray(r.data) ? r.data : [r.data];
+    if (out.length !== idx.length) return src;
+    const result = lines.slice();
+    idx.forEach((lineNo, i) => {
+      const v = out[i];
+      if (typeof v === "string" && v.trim()) result[lineNo] = v;
+    });
+    return result.join("\n");
+  } catch (e) {
+    console.error("EN->RU translate failed (using English):", e.message);
+    return src;
+  }
+}
+
 async function ggselTest() {
   const keys = requireKeys("ggsel");
   try {
@@ -857,6 +902,9 @@ async function ggselPublish({
     : Math.max(1, parseInt(quantity, 10) || 1);
   const t = String(title || "").slice(0, 200);
   const d = String(description || "").slice(0, 5000);
+  const dRu = (await translateEnToRu(d)).slice(0, 5000);
+  const instrEn = instructions ? String(instructions) : "";
+  const instrRu = instrEn ? await translateEnToRu(instrEn) : "";
   const cover = ggselImageDataUri(coverImagePath);
   let created;
   try {
@@ -866,10 +914,10 @@ async function ggselPublish({
         category_id: Number(categoryId),
         title_ru: t,
         title_en: t,
-        description_ru: d,
+        description_ru: dRu,
         description_en: d,
-        instructions_ru: instructions ? String(instructions) : undefined,
-        instructions_en: instructions ? String(instructions) : undefined,
+        instructions_ru: instrRu || undefined,
+        instructions_en: instrEn || undefined,
         cover_image_ru: cover || undefined,
         cover_image_en: cover || undefined,
         price,
@@ -1538,6 +1586,9 @@ async function funpayPublish({
   const t = String(title || "").slice(0, 200);
   let d = String(description || "").slice(0, 1000);
   if (String(description || "").length > 1000) d = d.slice(0, 997) + "…";
+  // Russian runs longer than English, so re-apply the cap after translating.
+  let dRu = await translateEnToRu(d);
+  if (dRu.length > 1000) dRu = dRu.slice(0, 997) + "…";
   const lines = (
     Array.isArray(secrets) ? secrets : String(secrets || "").split("\n")
   )
@@ -1556,7 +1607,7 @@ async function funpayPublish({
     "fields[summary][en]": t,
     "fields[summary][ru]": t,
     "fields[desc][en]": d,
-    "fields[desc][ru]": d,
+    "fields[desc][ru]": dRu,
     "fields[payment_msg][en]": msg,
     "fields[payment_msg][ru]": msg,
     price: String(price),
