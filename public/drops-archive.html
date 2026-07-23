@@ -2384,8 +2384,16 @@
         const status = encodeURIComponent($("statusFilter").value);
         let data;
         try {
+          // limit=5000 (server max) — the default 1000 silently truncated the
+          // list once the archive passed 1000 live accounts, which undercounted
+          // every set in the Scan-set picker (rows sort by login, so whole
+          // chunks of later-sorting sets fell off).
           data = await api(
-            "/drops-archive/accounts?search=" + search + "&status=" + status,
+            "/drops-archive/accounts?search=" +
+              search +
+              "&status=" +
+              status +
+              "&limit=5000",
           );
         } catch (e) {
           $("rows").innerHTML =
