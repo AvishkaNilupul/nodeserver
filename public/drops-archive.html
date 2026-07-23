@@ -2616,23 +2616,35 @@
         }
       });
 
-      // Distinct bot sets (container/config file) from the loaded accounts,
-      // for the on-demand "Scan set" picker.
+      // Distinct bot sets (container/config file, per host) from the loaded
+      // accounts, for the on-demand "Scan set" picker. Keyed by host too —
+      // config file names repeat across hosts (config_02.json exists on both
+      // the server and the Pi), so without the host the Pi's sets would merge
+      // invisibly into the same-named local ones.
+      function setLabel(key) {
+        const at = key.lastIndexOf("|");
+        const name = key.slice(2, at);
+        const host = key.slice(at + 1);
+        return name + (host !== "local" ? " [" + host + "]" : "");
+      }
       function renderSetSelect() {
         const sel = $("setSelect");
         const prev = sel.value;
         const counts = new Map();
         for (const a of accounts) {
-          const key = a.container
+          const set = a.container
             ? "c:" + a.container
             : a.configFile
               ? "f:" + a.configFile
               : "";
-          if (!key) continue;
+          if (!set) continue;
+          const key = set + "|" + (a.host || "local");
           counts.set(key, (counts.get(key) || 0) + 1);
         }
         const opts = [...counts.entries()].sort((x, y) =>
-          x[0].localeCompare(y[0], undefined, { numeric: true }),
+          setLabel(x[0]).localeCompare(setLabel(y[0]), undefined, {
+            numeric: true,
+          }),
         );
         sel.innerHTML =
           '<option value="">Pick a set to scan…</option>' +
@@ -2642,7 +2654,7 @@
                 '<option value="' +
                 attr(key) +
                 '">' +
-                esc(key.slice(2)) +
+                esc(setLabel(key)) +
                 " (" +
                 n +
                 " accounts)</option>",
@@ -2657,9 +2669,12 @@
         const btn = e.currentTarget;
         btn.disabled = true;
         try {
+          const at = key.lastIndexOf("|");
+          const name = key.slice(2, at);
+          const host = key.slice(at + 1);
           const body = key.startsWith("c:")
-            ? { container: key.slice(2) }
-            : { configFile: key.slice(2) };
+            ? { container: name, host }
+            : { configFile: name, host };
           const d = await api("/drops-archive/scan-set", {
             method: "POST",
             body: JSON.stringify(body),
@@ -2669,7 +2684,7 @@
               ? "Queued " +
                   d.queued +
                   " account(s) from " +
-                  key.slice(2) +
+                  setLabel(key) +
                   " — they'll scan back-to-back now (watch the progress bar)."
               : "Those accounts are already queued.",
             "ok",
@@ -2706,7 +2721,12 @@
           pw +
           "</td>" +
           '<td class="hide-sm mono">' +
-          esc(a.container || a.configFile || "—") +
+          esc(
+            (a.container || a.configFile || "—") +
+              ((a.container || a.configFile) && a.host && a.host !== "local"
+                ? " [" + a.host + "]"
+                : ""),
+          ) +
           "</td>" +
           "<td><b>" +
           (a.dropCount || 0) +

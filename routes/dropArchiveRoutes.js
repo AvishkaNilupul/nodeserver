@@ -46,6 +46,7 @@ function publicAccount(a) {
     twitchId: a.twitchId,
     configFile: a.configFile,
     container: a.container,
+    host: a.host || "local",
     enabled: a.enabled,
     dropCount: a.dropCount,
     lastScanAt: a.lastScanAt,
@@ -416,13 +417,18 @@ router.post("/drops-archive/scan-set", requireSuperadmin, async (req, res) => {
     const filter = {};
     if (container) filter.container = container;
     if (configFile) filter.configFile = configFile;
-    if (host) filter.host = host;
-    if (!Object.keys(filter).length) {
+    // "local" also matches pre-multi-host rows where the field is absent
+    // (Mongoose defaults don't backfill existing documents).
+    if (host === "local") filter.host = { $in: ["local", "", null] };
+    else if (host) filter.host = host;
+    if (!container && !configFile) {
       return res
         .status(400)
         .json({ success: false, message: "container or configFile required" });
     }
-    const label = container || configFile;
+    const label =
+      (container || configFile) +
+      (host && host !== "local" ? " [" + host + "]" : "");
     const r = await scanner.queueSetScan(filter, label);
     res.json({ success: true, ...r });
   } catch (err) {
