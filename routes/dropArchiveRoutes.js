@@ -8,7 +8,10 @@ const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
 const { cacheImage } = require("../utils/imageCache");
 const hosts = require("../utils/botHosts");
-const { fillBotPasswordsFromPool } = require("../utils/poolPasswords");
+const {
+  fillBotPasswordsFromPool,
+  markDeployedPoolAccountsClaimed,
+} = require("../utils/poolPasswords");
 
 const router = express.Router();
 
@@ -599,6 +602,10 @@ async function runSync() {
   // Mirror pool passwords onto any newly-synced accounts that lack one, so
   // farmed stock is sellable without a manual backfill.
   const passwordsFilled = await fillBotPasswordsFromPool().catch(() => 0);
+  // Sweep: any pool row still "available" whose account is deployed in a
+  // config gets marked claimed, healing drift from deploys that predate the
+  // auto-marking (or any path that bypassed it).
+  const poolClaimed = await markDeployedPoolAccountsClaimed().catch(() => 0);
 
   return {
     filesRead,
@@ -606,6 +613,7 @@ async function runSync() {
     inserted,
     updated,
     passwordsFilled,
+    poolClaimed,
     offlineHosts,
     duplicateAccounts: lastDuplicates.length,
   };

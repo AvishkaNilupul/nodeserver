@@ -7,7 +7,10 @@ const DropLog = require("../models/DropLog");
 const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const hosts = require("../utils/botHosts");
-const { fillBotPasswordsFromPool } = require("../utils/poolPasswords");
+const {
+  fillBotPasswordsFromPool,
+  markDeployedPoolAccountsClaimed,
+} = require("../utils/poolPasswords");
 
 const router = express.Router();
 
@@ -294,6 +297,12 @@ async function upsertBotAccounts(accounts, host, file) {
   // password, so without this the accounts sit undeliverable (0 stock on
   // every listing that needs them) until the next manual "Sync from bots".
   await fillBotPasswordsFromPool(accounts.map((u) => u.Login)).catch(() => {});
+  // And flip their pool rows to claimed — deployed accounts must drop out of
+  // the pool's "available" count, or it reads 50 too high after every deploy.
+  await markDeployedPoolAccountsClaimed(
+    accounts.map((u) => u.Login),
+    "deployed to " + containerForFile(file) + " [" + host.id + "]",
+  ).catch(() => {});
 }
 
 // Refuse to start a bot with no accounts — see stopIfNoAccounts in
