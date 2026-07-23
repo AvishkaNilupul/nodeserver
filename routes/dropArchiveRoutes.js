@@ -1270,8 +1270,10 @@ router.get(
 // ------------------------------------------------------------------
 
 // Resolve display metadata (name/game/image) for a list of itemKeys from the
-// logged drops, so a set always shows accurate names/images.
-async function resolveItemsMeta(keys) {
+// logged drops, so a set always shows accurate names/images. Pass the set's
+// current items as `prevItems` on edits so archive-unknown items keep their
+// stored metadata instead of degrading to bare key fragments.
+async function resolveItemsMeta(keys, prevItems) {
   const uniq = [
     ...new Set(keys.map((k) => String(k || "").trim()).filter(Boolean)),
   ];
@@ -1289,13 +1291,24 @@ async function resolveItemsMeta(keys) {
     },
   ]);
   const byKey = new Map(rows.map((r) => [r._id, r]));
+  // `prevItems` (the set's items before an edit) outranks the raw itemKey
+  // fallback: a campaign listed before its drops are farmed has proper-cased
+  // names and cached Twitch images stored by from-items, and the archive knows
+  // nothing yet — without this, every editor save wiped that data down to
+  // lowercase key fragments with no image (the Shop then showed letter tiles).
+  const prevByKey = new Map(
+    (Array.isArray(prevItems) ? prevItems : [])
+      .filter((i) => i && i.itemKey)
+      .map((i) => [i.itemKey, i]),
+  );
   return uniq.map((k) => {
     const m = byKey.get(k) || {};
+    const prev = prevByKey.get(k) || {};
     return {
       itemKey: k,
-      name: m.name || k.split("|")[0] || "Reward",
-      game: m.game || k.split("|")[1] || "",
-      image: m.imageLocal || m.imageURL || "",
+      name: m.name || prev.name || k.split("|")[0] || "Reward",
+      game: m.game || prev.game || k.split("|")[1] || "",
+      image: m.imageLocal || m.imageURL || prev.image || "",
     };
   });
 }
@@ -1418,6 +1431,36 @@ router.post("/drops-archive/sets", requireSuperadmin, async (req, res) => {
   }
 });
 
+// Buyer-facing default note (the Shop card's description) built from a set's
+// items — same shape the Listings editor auto-fills. Used when a set is
+// created without a note (the quick "Create listing" paths), which previously
+// left the Shop card with no included-items list at all.
+function buildSetNote(items) {
+  const games = [...new Set(items.map((i) => i.game).filter(Boolean))];
+  const total = items.reduce((n, i) => n + (i.qty || 1), 0);
+  const lines = [
+    "This account includes " +
+      total +
+      " item" +
+      (total === 1 ? "" : "s") +
+      (games.length === 1 ? " from " + games[0] : "") +
+      ":",
+  ];
+  for (const i of items) {
+    lines.push(
+      "• " +
+        ((i.qty || 1) > 1 ? i.qty + "× " : "") +
+        i.name +
+        (i.game ? " (" + i.game + ")" : ""),
+    );
+  }
+  lines.push("");
+  lines.push(
+    "Buyer receives one in-stock account holding every item listed above.",
+  );
+  return lines.join("\n");
+}
+
 // Create a set straight from item snapshots (name/game/image/qty) instead of
 // from claimed-archive itemKeys. This is the "list a campaign before it's
 // claimed" path: the Twitch-inventory page fetches a campaign live by token and
@@ -1479,7 +1522,11 @@ router.post(
           .status(400)
           .json({ success: false, message: "No valid items to add" });
       }
-      const doc = { name, note: String(body.note || "").trim(), items };
+      const doc = {
+        name,
+        note: String(body.note || "").trim() || buildSetNote(items),
+        items,
+      };
       const set = await DropSet.create(doc);
       res.json({ success: true, set: publicSet(set) });
     } catch (err) {
@@ -1616,7 +1663,7 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
     const prevQty = {};
     for (const i of set.items) prevQty[i.itemKey] = i.qty || 1;
     set.items = applyItemQuantities(
-      await resolveItemsMeta(keys),
+      await resolveItemsMeta(keys, set.items),
       body.itemQuantities !== undefined ? body.itemQuantities : prevQty,
     );
     await set.save();
