@@ -678,8 +678,12 @@ function buildAutoTitle(items) {
 // pre-fills the same auto-generated title the manual Listings editor produces.
 async function createSetFromItems(items, btn) {
   if (!items.length) { alert("Nothing to list here."); return; }
+  // Total counts copies (qty), so a campaign with four Supply Crate tiers
+  // reads as 5 items / 2 distinct — matching the auto-title's "(5 items)".
+  const total = items.reduce((n, i) => n + (Number(i.qty) || 1), 0);
+  const countLabel = total + " item(s)" + (total !== items.length ? ` (${items.length} distinct)` : "");
   const defaultName = buildAutoTitle(items);
-  const name = prompt(`Create a listing — ${items.length} item(s).\n\nSet name:`, defaultName);
+  const name = prompt(`Create a listing — ${countLabel}.\n\nSet name:`, defaultName);
   if (name === null) return; // cancelled = "not"
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "Creating…";
@@ -693,9 +697,9 @@ async function createSetFromItems(items, btn) {
     const j = await res.json().catch(() => ({}));
     if (res.status === 401 || res.status === 403) throw new Error("Not signed in as admin — open this from the admin console.");
     if (!res.ok || !j.success) throw new Error(j.message || ("HTTP " + res.status));
-    btn.textContent = "✓ Set created (" + items.length + ")";
+    btn.textContent = "✓ Set created (" + total + ")";
     btn.classList.add("done");
-    setStatus(`Created drop set "${j.set && j.set.name}" with ${items.length} item(s). Open the Listings/Shop page to price and publish it.`, "ok");
+    setStatus(`Created drop set "${j.set && j.set.name}" with ${countLabel}. Open the Listings/Shop page to price and publish it.`, "ok");
   } catch (err) {
     alert("Couldn't create the set: " + err.message);
     btn.disabled = false; btn.textContent = old;
@@ -710,17 +714,26 @@ resultsEl.addEventListener("click", (e) => {
     const c = lastCampaigns.find(x => String(x.id) === String(cBtn.getAttribute("data-list-cid")));
     if (!c) return;
     const game = (c.game && (c.game.displayName || c.game.name)) || "";
-    const seen = new Set();
-    const items = [];
+    // Campaigns often award the same reward at several watch-time tiers (e.g.
+    // Hunt 1896: four "Supply Crate" drops + one "Random Charm" = 5 drops but
+    // 2 distinct rewards). Fold duplicates into qty instead of dropping them,
+    // so the listing promises the real copy count (title total, description
+    // ×N, stock math, cover badge all read from qty).
+    const byKey = new Map();
     (c.timeBasedDrops || []).forEach(d => {
       const b = (d.benefitEdges && d.benefitEdges[0] && d.benefitEdges[0].benefit) || {};
       const name = (b.name || d.name || "").trim();
       if (!name) return;
       const key = (name + "|" + game).toLowerCase();
-      if (seen.has(key)) return;
-      seen.add(key);
-      items.push({ name, game, image: b.imageAssetURL || "", qty: 1 });
+      const cur = byKey.get(key);
+      if (cur) {
+        cur.qty += 1;
+        if (!cur.image && b.imageAssetURL) cur.image = b.imageAssetURL;
+        return;
+      }
+      byKey.set(key, { name, game, image: b.imageAssetURL || "", qty: 1 });
     });
+    const items = [...byKey.values()];
     if (!items.length) { alert("This campaign has no drops to list."); return; }
     createSetFromItems(items, cBtn);
     return;

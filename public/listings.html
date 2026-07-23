@@ -2519,7 +2519,12 @@ Reliable Daily Rewards</textarea
       function mpBuildDescription(set) {
         var lines = [set.note || "", "", "Includes:"];
         (set.items || []).forEach(function (i) {
-          lines.push("- " + i.name + (i.game ? " (" + i.game + ")" : ""));
+          lines.push(
+            "- " +
+              ((i.qty || 1) > 1 ? i.qty + "× " : "") +
+              i.name +
+              (i.game ? " (" + i.game + ")" : ""),
+          );
         });
         return lines.join("\n").trim();
       }
@@ -3981,7 +3986,12 @@ Reliable Daily Rewards</textarea
       function gbBuildDescription(s) {
         var lines = [s.note || "", "", "Includes:"];
         (s.items || []).forEach(function (i) {
-          lines.push("- " + i.name + (i.game ? " (" + i.game + ")" : ""));
+          lines.push(
+            "- " +
+              ((i.qty || 1) > 1 ? i.qty + "× " : "") +
+              i.name +
+              (i.game ? " (" + i.game + ")" : ""),
+          );
         });
         return lines.join("\n").trim();
       }

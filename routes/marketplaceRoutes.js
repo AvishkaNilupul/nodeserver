@@ -367,8 +367,14 @@ function buildDescription(set) {
     set.note || "",
     "",
     "Includes:",
+    // qty > 1 = the same reward at several watch-time tiers (buyer gets N
+    // copies), so say "4× Supply Crate" instead of hiding the count.
     ...(set.items || []).map(
-      (i) => "- " + i.name + (i.game ? " (" + i.game + ")" : ""),
+      (i) =>
+        "- " +
+        ((i.qty || 1) > 1 ? i.qty + "× " : "") +
+        i.name +
+        (i.game ? " (" + i.game + ")" : ""),
     ),
   ];
   return lines.join("\n").trim();

@@ -1438,7 +1438,7 @@ router.post(
           .json({ success: false, message: "Name required" });
       }
       const raw = Array.isArray(body.items) ? body.items : [];
-      const seen = new Set();
+      const byKey = new Map();
       const items = [];
       for (const it of raw) {
         const iname = String((it && it.name) || "").trim();
@@ -1447,8 +1447,14 @@ router.post(
         // Same normalisation as utils/twitchInventory itemKeyFor + the archive's
         // itemKeyExpr, so this key lines up with what the bots log on claim.
         const itemKey = iname.toLowerCase() + "|" + game.toLowerCase();
-        if (seen.has(itemKey)) continue; // collapse duplicate rewards
-        seen.add(itemKey);
+        // Duplicate reward (same item at several watch-time tiers): fold the
+        // copies into qty rather than dropping them, so a 5-drop campaign with
+        // 4× the same crate still promises 5 items.
+        const dup = byKey.get(itemKey);
+        if (dup) {
+          dup.qty += Math.max(1, parseInt(it && it.qty, 10) || 1);
+          continue;
+        }
         // Cache the reward image locally (Twitch URL -> /drop-images/<hash>),
         // exactly like the archive does. coverImagePath() only accepts a file
         // inside public/, so a bare remote URL would leave the set with no cover
@@ -1458,13 +1464,15 @@ router.post(
         if (image && !image.startsWith("/")) {
           image = (await cacheImage(image)) || "";
         }
-        items.push({
+        const entry = {
           itemKey,
           name: iname,
           game,
           image,
           qty: Math.max(1, parseInt(it && it.qty, 10) || 1),
-        });
+        };
+        byKey.set(itemKey, entry);
+        items.push(entry);
       }
       if (!items.length) {
         return res

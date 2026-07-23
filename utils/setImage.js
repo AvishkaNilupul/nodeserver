@@ -110,6 +110,7 @@ async function buildSetGridImage(set) {
     cells.push({
       name: String(it.name || "").trim(),
       buf: await loadImage(it.image),
+      qty: Math.max(1, Number(it.qty) || 1),
     });
   }
 
@@ -215,6 +216,23 @@ async function buildSetGridImage(set) {
       '" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">' +
       (i + 1) +
       "</text>";
+    // Multi-copy reward (same item at several watch-time tiers): a "×N"
+    // badge at the tile's top-right so the cover shows the real copy count.
+    if (cells[i].qty > 1) {
+      badgeSvgStr +=
+        '<rect x="' +
+        (x + TILE - 58) +
+        '" y="' +
+        (y + 12) +
+        '" width="58" height="32" rx="16" fill="#16a34a"/>' +
+        '<text x="' +
+        (x + TILE - 29) +
+        '" y="' +
+        (y + 35) +
+        '" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">×' +
+        cells[i].qty +
+        "</text>";
+    }
   }
   baseSvg += "</svg>";
   badgeSvgStr += "</svg>";
