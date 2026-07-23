@@ -187,14 +187,22 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
     }
 
     // Accounts already deployed in a live bot config are "in use", not
-    // available — importing them is a no-op, reported back rather than
-    // silently added.
-    const inUseAccounts = await BotAccount.find({}, { login: 1 }).lean();
-    const inUseSet = new Set(
+    // available — they aren't added to the pool, reported back rather than
+    // silently added. But a paste that carries a password for an in-use
+    // account whose BotAccount lacks one fills that password in (fill-only),
+    // instead of dropping it on the floor — otherwise the account stays
+    // undeliverable (0 stock) with no way to fix it short of the credentials
+    // importer.
+    const inUseAccounts = await BotAccount.find(
+      {},
+      { login: 1, credPassword: 1 },
+    ).lean();
+    const inUseByLower = new Map(
       inUseAccounts
-        .map((a) => String(a.login || "").trim().toLowerCase())
-        .filter(Boolean),
+        .filter((a) => String(a.login || "").trim())
+        .map((a) => [String(a.login).trim().toLowerCase(), a]),
     );
+    const inUseSet = new Set(inUseByLower.keys());
 
     const lowers = normalized.map((n) => n.username.toLowerCase());
     const existing = await AvailableAccount.find({
@@ -211,10 +219,29 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
     // an automatic Twitch check instead of waiting on a manual click.
     const toAutoCheck = [];
 
+    const botPwOps = [];
     for (const item of normalized) {
       const lower = item.username.toLowerCase();
       if (inUseSet.has(lower)) {
         alreadyInUse.push(item.username);
+        const bot = inUseByLower.get(lower);
+        if (
+          item.password &&
+          bot &&
+          (!bot.credPassword || !String(bot.credPassword).length)
+        ) {
+          botPwOps.push({
+            updateOne: {
+              filter: { _id: bot._id },
+              update: {
+                $set: {
+                  credPassword: encrypt(item.password),
+                  hasPassword: true,
+                },
+              },
+            },
+          });
+        }
         continue;
       }
 
@@ -262,6 +289,8 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
     }
 
     if (ops.length) await AvailableAccount.bulkWrite(ops, { ordered: false });
+    if (botPwOps.length)
+      await BotAccount.bulkWrite(botPwOps, { ordered: false }).catch(() => {});
     const autoChecking = toAutoCheck.length
       ? accountPoolChecker.enqueue(toAutoCheck)
       : 0;
@@ -272,6 +301,7 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
       merged,
       alreadyInUse,
       alreadyInUseCount: alreadyInUse.length,
+      botPasswordsFilled: botPwOps.length,
       autoChecking,
       badLines,
       badLineCount: badLines.length,

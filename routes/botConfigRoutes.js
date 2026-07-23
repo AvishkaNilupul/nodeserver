@@ -7,6 +7,7 @@ const DropLog = require("../models/DropLog");
 const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const hosts = require("../utils/botHosts");
+const { fillBotPasswordsFromPool } = require("../utils/poolPasswords");
 
 const router = express.Router();
 
@@ -289,6 +290,10 @@ async function upsertBotAccounts(accounts, host, file) {
     },
   }));
   await BotAccount.bulkWrite(ops, { ordered: false }).catch(() => {});
+  // Mirror pool passwords onto the rows we just wrote. Configs carry no
+  // password, so without this the accounts sit undeliverable (0 stock on
+  // every listing that needs them) until the next manual "Sync from bots".
+  await fillBotPasswordsFromPool(accounts.map((u) => u.Login)).catch(() => {});
 }
 
 // Refuse to start a bot with no accounts — see stopIfNoAccounts in

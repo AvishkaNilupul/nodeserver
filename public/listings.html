@@ -2196,6 +2196,12 @@ Reliable Daily Rewards</textarea
               // "held" rather than an unexplained 0.
               (set.stockHeld > 0
                 ? " · " + set.stockHeld + " held by other listings"
+                : "") +
+              // Accounts that would be stock but have no stored password (no
+              // account-pool match), so the operator sees WHY it's out of
+              // stock and what to fix instead of a bare 0.
+              (set.stockNoPw > 0
+                ? " · " + set.stockNoPw + " ready but missing password"
                 : "");
         return (
           '<div class="listing" data-id="' +
@@ -2281,6 +2287,8 @@ Reliable Daily Rewards</textarea
             .then(function (f) {
               set.stock = f.bundlesAvailable != null ? f.bundlesAvailable : 0;
               set.stockHeld = f.bundlesHeld != null ? f.bundlesHeld : 0;
+              set.stockNoPw =
+                f.bundlesMissingPassword != null ? f.bundlesMissingPassword : 0;
               patchRow(set);
             })
             .catch(function () {})

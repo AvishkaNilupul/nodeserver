@@ -1,7 +1,6 @@
 const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
-const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
@@ -9,6 +8,7 @@ const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
 const { cacheImage } = require("../utils/imageCache");
 const hosts = require("../utils/botHosts");
+const { fillBotPasswordsFromPool } = require("../utils/poolPasswords");
 
 const router = express.Router();
 
@@ -474,44 +474,9 @@ let syncState = {
 // own separate pass over every host. Null until a sync has run at least once.
 let lastDuplicates = null;
 
-// Bot configs only carry the ClientSecret (token), so a BotAccount synced from a
-// config has no credPassword — but selling an account hands the buyer its
-// login+password, and that password lives in the account pool (AvailableAccount).
-// Mirror it across for any BotAccount that lacks one, so farmed accounts holding
-// sellable drops are actually deliverable. Fill-only: never overwrites an
-// existing password. Returns how many were filled.
-async function fillBotPasswordsFromPool() {
-  const bots = await BotAccount.find(
-    { $or: [{ credPassword: "" }, { credPassword: { $exists: false } }] },
-    { login: 1 },
-  ).lean();
-  if (!bots.length) return 0;
-  const lowers = [
-    ...new Set(
-      bots.map((b) => String(b.login || "").toLowerCase()).filter(Boolean),
-    ),
-  ];
-  const pool = await AvailableAccount.find(
-    { usernameLower: { $in: lowers }, password: { $ne: "" } },
-    { usernameLower: 1, password: 1 },
-  ).lean();
-  const poolMap = new Map(pool.map((a) => [a.usernameLower, a.password]));
-  const ops = [];
-  for (const b of bots) {
-    const enc = poolMap.get(String(b.login || "").toLowerCase());
-    if (!enc) continue;
-    const pw = decrypt(enc);
-    if (!pw) continue;
-    ops.push({
-      updateOne: {
-        filter: { _id: b._id },
-        update: { $set: { credPassword: encrypt(pw), hasPassword: true } },
-      },
-    });
-  }
-  if (ops.length) await BotAccount.bulkWrite(ops, { ordered: false });
-  return ops.length;
-}
+// Password mirroring from the account pool lives in utils/poolPasswords so
+// the deploy paste (botConfigRoutes) and the pool import mirror too, not just
+// this manual sync.
 
 async function runSync() {
   let found = 0;
@@ -1833,6 +1798,31 @@ router.get(
         return { ...it, totalCount: s.totalCount, accounts: s.accounts };
       });
 
+      // Self-heal: a complete-but-passwordless account is usually a missed
+      // pool mirror (the pool row appeared after the account was deployed, and
+      // no sync ran since — the twitchbotx16 incident). Run the targeted
+      // mirror right here so merely viewing a listing repairs it, and reflect
+      // any fills in this response instead of reporting stale zeros.
+      const missingPw = accounts.filter((a) => a.complete && !a.hasPassword);
+      if (missingPw.length) {
+        const filled = await fillBotPasswordsFromPool(
+          missingPw.map((a) => a.login),
+        ).catch(() => 0);
+        if (filled) {
+          const fixed = await BotAccount.find(
+            {
+              _id: { $in: missingPw.map((a) => a.accountId) },
+              credPassword: { $gt: "" },
+            },
+            { _id: 1 },
+          ).lean();
+          const ok = new Set(fixed.map((f) => String(f._id)));
+          for (const a of accounts) {
+            if (ok.has(String(a.accountId))) a.hasPassword = true;
+          }
+        }
+      }
+
       const fullAccounts = accounts.filter((a) => a.complete);
       // One deliverable bundle per account that holds the whole set with this
       // set's drops still free (unreserved) and a stored password. Matches the
@@ -1846,6 +1836,12 @@ router.get(
       // as "held by other listings" instead of a baffling plain 0.
       const bundlesHeld = fullAccounts.filter(
         (a) => a.hasPassword && !a.available,
+      ).length;
+      // Would-be stock blocked only by a missing password (no pool match even
+      // after the self-heal above). Surfaced so the listing row can say WHY
+      // it's out of stock instead of a bare 0.
+      const bundlesMissingPassword = accounts.filter(
+        (a) => a.available && !a.hasPassword,
       ).length;
 
       res.json({
@@ -1862,6 +1858,7 @@ router.get(
         fullAccounts: fullAccounts.length,
         bundlesAvailable,
         bundlesHeld,
+        bundlesMissingPassword,
       });
     } catch (err) {
       console.error("drops-archive fulfillment error:", err.message);
