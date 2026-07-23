@@ -435,6 +435,34 @@ async function feedListing(row, seenKeys) {
     });
     return 0;
   }
+  // A GGSel offer published before any stock existed sits with
+  // is_autoselling:false (Manual) — attaching products alone doesn't flip it,
+  // so the codes would never be handed out. Sync the flag + sellable quantity
+  // to the attached stock after every successful feed (idempotent).
+  if (row.marketplace === "ggsel") {
+    try {
+      const sync = await mp.ggselSyncAutoselling(row.externalId);
+      if (sync.enabledAutoselling) {
+        console.log(
+          "guardian: enabled autoselling on ggsel offer " + row.externalId,
+        );
+      }
+    } catch (e) {
+      await upsertFinding({
+        type: "restock-failed",
+        severity: "high",
+        marketplace: row.marketplace,
+        listing: row._id,
+        dedupeKey: "autosell-sync:" + row._id,
+        message:
+          "GGSel listing " +
+          row.externalId +
+          " was fed products but autoselling could not be enabled/synced: " +
+          e.message +
+          " — buyers may not receive codes automatically; check the offer.",
+      });
+    }
+  }
   await MarketplaceListing.updateOne(
     { _id: row._id },
     {

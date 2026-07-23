@@ -1006,6 +1006,44 @@ async function ggselOfferStock(offerId) {
   }
 }
 
+// Make an offer actually auto-deliver once products are attached. An offer
+// published with delivery "auto" but no content is created with
+// is_autoselling:false (GGSel shows it as Manual), and attaching products
+// later does NOT flip the flag by itself — so the guardian's auto-feed used
+// to stack codes on an offer that still wouldn't hand them out. Verified live
+// (2026-07-24): PATCH /offers/{id} is accepted. Mirrors ggselPublish's
+// quantity semantics: sellable quantity tracks the attached product count so
+// stock isn't artificially capped.
+async function ggselSyncAutoselling(offerId) {
+  const keys = requireKeys("ggsel");
+  let offer;
+  try {
+    const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    });
+    offer = (r.data && r.data.data) || r.data || {};
+  } catch (e) {
+    throw apiError("GGSel offer read", e);
+  }
+  const stock = Number(offer.in_stock_products_count) || 0;
+  if (!stock) return { changed: false, stock };
+  const body = { quantity: stock, max_quantity: stock };
+  if (!offer.is_autoselling) {
+    body.is_autoselling = true;
+    body.delivery = "auto";
+  }
+  try {
+    await axios.patch(GG_API + "/offers/" + Number(offerId), body, {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    });
+  } catch (e) {
+    throw apiError("GGSel autoselling sync", e);
+  }
+  return { changed: true, stock, enabledAutoselling: !offer.is_autoselling };
+}
+
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).
 async function ggselDelist(offerId) {
   const keys = requireKeys("ggsel");
@@ -1714,6 +1752,7 @@ module.exports = {
   ggselPublish,
   ggselAddProducts,
   ggselOfferStock,
+  ggselSyncAutoselling,
   ggselDelist,
   funpayTest,
   funpayPublish,
