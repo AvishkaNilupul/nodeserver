@@ -1075,10 +1075,11 @@ async function ggselFinalizeStock(offerId) {
   } catch {
     quantitySynced = false;
   }
-  // Re-activate: enabling autoselling on a then-empty offer paused it, so a
-  // stocked offer left paused is off sale. This is the critical step.
+  // Activate: enabling autoselling on a then-empty offer paused it, and an
+  // offer published but never activated sits as "draft" — either way a
+  // stocked offer that isn't "active" is off sale. This is the critical step.
   let reactivated = false;
-  if (offer.status === "paused") {
+  if (offer.status === "paused" || offer.status === "draft") {
     try {
       await axios.post(
         GG_API + "/offers/batch_activate",
