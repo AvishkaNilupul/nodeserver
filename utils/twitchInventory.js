@@ -328,7 +328,7 @@ async function fetchInventory(token, arg) {
     throw e;
   }
 
-  let { parsed } = await gqlRequest({
+  let { status, parsed } = await gqlRequest({
     token: tok,
     clientId: cid,
     host,
@@ -354,6 +354,7 @@ async function fetchInventory(token, arg) {
         },
       ],
     });
+    status = retry.status;
     parsed = retry.parsed;
   }
 
@@ -363,8 +364,27 @@ async function fetchInventory(token, arg) {
 
   const user = parsed?.data?.currentUser;
   if (user === null || user === undefined) {
-    const e = new Error("Token invalid/expired or client-id mismatch");
-    e.code = "token_invalid";
+    // A missing currentUser has two very different causes and only one of them
+    // means the token is dead. A genuinely invalid/expired token gets a hard
+    // HTTP 401/403 with Twitch's "Unauthorized" body. A 200 carrying a null
+    // currentUser — or a 429 / 5xx — is a transient Twitch hiccup that a
+    // perfectly valid token also hits (rate limits, integrity gating, the
+    // PersistedQueryNotFound waves). Flagging the latter as token_invalid is
+    // what paints false "bad token" badges on the Bots page, so only the real
+    // auth rejection gets that code; everything else throws a generic,
+    // self-healing error the scanner records as "error" (never "bad token").
+    const authFailed =
+      status === 401 ||
+      status === 403 ||
+      /unauthor/i.test(parsed?.error || "") ||
+      /unauthor/i.test(parsed?.message || "");
+    const e = new Error(
+      authFailed
+        ? "Token invalid/expired or client-id mismatch"
+        : "Twitch returned no user (transient; token not confirmed dead)" +
+          (status ? " [HTTP " + status + "]" : ""),
+    );
+    e.code = authFailed ? "token_invalid" : "no_user";
     throw e;
   }
   const inv = user.inventory;
@@ -398,7 +418,7 @@ async function fetchDropCampaigns(token, arg) {
     e.code = "token_invalid";
     throw e;
   }
-  const { parsed } = await gqlRequest({
+  const { status, parsed } = await gqlRequest({
     token: tok,
     clientId: cid,
     host,
@@ -415,8 +435,21 @@ async function fetchDropCampaigns(token, arg) {
   }
   const user = parsed?.data?.currentUser;
   if (!user) {
-    const e = new Error("Token invalid/expired or client-id mismatch");
-    e.code = "token_invalid";
+    // Same split as fetchInventory: only a hard auth rejection is a dead token;
+    // a 200 with a null user (or 429/5xx) is transient, so don't brand it
+    // token_invalid.
+    const authFailed =
+      status === 401 ||
+      status === 403 ||
+      /unauthor/i.test(parsed?.error || "") ||
+      /unauthor/i.test(parsed?.message || "");
+    const e = new Error(
+      authFailed
+        ? "Token invalid/expired or client-id mismatch"
+        : "Twitch returned no user (transient; token not confirmed dead)" +
+          (status ? " [HTTP " + status + "]" : ""),
+    );
+    e.code = authFailed ? "token_invalid" : "no_user";
     throw e;
   }
   return user.dropCampaigns || [];
