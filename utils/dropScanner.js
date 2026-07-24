@@ -64,6 +64,19 @@ const DROP_UPSERT_CONCURRENCY = Math.max(
   Number(process.env.DROP_SCAN_UPSERT_CONCURRENCY) || 8,
   1,
 );
+// How many accounts each host scans in parallel. The work is I/O-bound (each
+// scan is mostly waiting on Twitch), so running a few per host at once
+// multiplies throughput without more machines. Every lane still paces itself at
+// intervalMs, so a host of concurrency K makes at most K requests per interval
+// from its one IP (K=3 ≈ one request every ~7s at the 20s default — still
+// gentle). Now that a scan can't pin a lane (withDeadline) and heavy scans are
+// fast (parallel upserts), extra lanes translate straight into throughput.
+// Clamped so a fat-fingered env can't burst Twitch; raise cautiously, watch
+// for 429s (which log as transient errors, never false "bad token" flags).
+const SCAN_CONCURRENCY = Math.min(
+  Math.max(Math.round(Number(process.env.DROP_SCAN_CONCURRENCY) || 3), 1),
+  10,
+);
 
 // Reject with a tagged error if `promise` doesn't settle within `ms`. The
 // underlying work keeps running (JS can't cancel a promise), but the caller
@@ -120,11 +133,14 @@ const inFlight = new Set();
 
 const LOCAL_HOST = { id: "local", label: "Server", transport: "local" };
 
-// One worker per machine. Built in start(); each has its own timer + counters.
+// Workers are the scan lanes. Built in start(): SCAN_CONCURRENCY lanes per
+// machine, each with its own timer + counters, all sharing the one inFlight set
+// so lanes (same host or across hosts) never grab the same account.
 let workers = [];
-function makeWorker(host) {
+function makeWorker(host, lane = 0) {
   return {
     host,
+    lane,
     timer: null,
     scanning: false,
     currentLogin: null,
@@ -367,46 +383,31 @@ async function scanAccount(acc, worker) {
   return { ok: true, newDrops, total: acc.dropCount };
 }
 
-// The always-present server worker, so manual "Scan now" has a home.
-function localWorker() {
-  return workers.find((w) => w.host.transport === "local");
-}
-
 // Force-scan one account immediately (used by the "Scan now" button), on the
-// server. Runs outside the pacing loop but still serialised against the server
-// worker and guarded by the in-flight set so it can't race a background scan of
-// the same account.
+// server. Runs on a dedicated ephemeral server lane so it neither blocks nor is
+// blocked by the rotation lanes; the in-flight set is what actually stops it
+// racing a background scan of the same account.
 async function scanAccountNow(id) {
   const sid = String(id);
-  const w = localWorker();
-  if (w && w.scanning) {
-    return { ok: false, error: "A scan is already in progress" };
-  }
   if (inFlight.has(sid)) {
     return { ok: false, error: "This account is already being scanned" };
   }
   const acc = await BotAccount.findById(id);
   if (!acc) return { ok: false, error: "Account not found" };
   inFlight.add(sid);
-  if (w) {
-    w.scanning = true;
-    w.currentLogin = maskedLogin(acc);
-  }
+  const w = makeWorker(LOCAL_HOST);
+  w.scanning = true;
+  w.currentLogin = maskedLogin(acc);
   try {
     const res = await withDeadline(
-      scanAccount(acc, w || makeWorker(LOCAL_HOST)),
+      scanAccount(acc, w),
       SCAN_DEADLINE_MS,
       "scan of " + maskedLogin(acc),
     );
     state.sessionScanned++;
-    if (w) w.scanned++;
     return res;
   } finally {
     inFlight.delete(sid);
-    if (w) {
-      w.scanning = false;
-      w.currentLogin = null;
-    }
   }
 }
 
@@ -544,11 +545,18 @@ function start() {
   if (started) return;
   started = true;
   backfillItemKeys();
-  workers = [makeWorker(LOCAL_HOST), ...resolveScanHosts().map(makeWorker)];
-  // Stagger startups so the workers don't tick in lockstep (which would make
-  // them race for the same "most stale" account every time). Small delay so it
+  // SCAN_CONCURRENCY lanes per host (server + each remote scan host).
+  const hosts = [LOCAL_HOST, ...resolveScanHosts()];
+  workers = [];
+  for (const host of hosts) {
+    for (let lane = 0; lane < SCAN_CONCURRENCY; lane++) {
+      workers.push(makeWorker(host, lane));
+    }
+  }
+  // Stagger startups so lanes don't tick in lockstep (which would make them
+  // race for the same "most stale" account every time). Small delays so this
   // doesn't compete with boot.
-  workers.forEach((w, i) => scheduleWorker(w, 5000 + i * 2500));
+  workers.forEach((w, i) => scheduleWorker(w, 3000 + i * 1200));
 }
 
 // Live snapshot for the UI progress bar.
@@ -569,12 +577,44 @@ async function getProgress() {
     ]);
   const anyScanning = workers.some((w) => w.scanning);
   const firstScanning = workers.find((w) => w.scanning);
+  // Roll the per-lane workers up to one entry per machine for the UI.
+  const hostMap = new Map();
+  for (const w of workers) {
+    let h = hostMap.get(w.host.id);
+    if (!h) {
+      h = {
+        id: w.host.id,
+        label: w.host.label,
+        transport: w.host.transport,
+        scanning: false,
+        currentLogin: null,
+        up: false,
+        scanned: 0,
+        newDrops: 0,
+        errors: 0,
+        lanes: 0,
+        lanesBusy: 0,
+      };
+      hostMap.set(w.host.id, h);
+    }
+    h.lanes++;
+    if (w.scanning) {
+      h.scanning = true;
+      h.lanesBusy++;
+      if (!h.currentLogin) h.currentLogin = w.currentLogin;
+    }
+    if (w.up) h.up = true;
+    h.scanned += w.scanned;
+    h.newDrops += w.newDrops;
+    h.errors += w.errors;
+  }
   return {
     enabled: state.enabled,
     scanning: anyScanning,
     // Kept for backward compat with the old single-worker UI; the per-host
     // breakdown below is what shows the split.
     currentLogin: firstScanning ? firstScanning.currentLogin : null,
+    concurrency: SCAN_CONCURRENCY,
     intervalMs: state.intervalMs,
     perAccountMs: state.perAccountMs,
     lastTickAt: state.lastTickAt,
@@ -600,17 +640,7 @@ async function getProgress() {
       label: priorityLabel,
     },
     // Per-machine split, so the UI can show what each host is doing.
-    hosts: workers.map((w) => ({
-      id: w.host.id,
-      label: w.host.label,
-      transport: w.host.transport,
-      scanning: w.scanning,
-      currentLogin: w.currentLogin,
-      up: w.up,
-      scanned: w.scanned,
-      newDrops: w.newDrops,
-      errors: w.errors,
-    })),
+    hosts: [...hostMap.values()],
   };
 }
 
