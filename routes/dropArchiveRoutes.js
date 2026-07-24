@@ -35,6 +35,67 @@ async function badAccountIds() {
   return rows.map((r) => r._id);
 }
 
+// _ids of "shadow" duplicate accounts: an account with no bot placement whose
+// login ALSO has a live (deployed) sibling. These are stale old-token copies
+// left behind when an account's token was re-minted and redeployed — identity
+// is the ClientSecret, so a redeploy creates a fresh record and the sync strips
+// this one's container. Login is the (unique) Twitch username, so a shadow is
+// the SAME Twitch account as its live sibling and scans the same inventory;
+// counting it again double-counts held stock and shows the account twice in the
+// item drill-down. We exclude it from every stock/count view alongside the
+// bad-token accounts. Kept deliberately: a shadow that's already been sold
+// (never hide a sale) and any login whose only records are all deployed (the
+// rare same-account-in-two-bots case — a config problem, not a phantom row).
+// Computed live from botaccounts (one small collection) — no data is modified,
+// so turning this off later fully restores the old numbers.
+async function shadowDuplicateIds() {
+  const groups = await BotAccount.aggregate([
+    { $match: { login: { $nin: ["", null] } } },
+    {
+      $group: {
+        _id: { $toLower: "$login" },
+        docs: {
+          $push: {
+            id: "$_id",
+            deployed: {
+              $gt: [
+                {
+                  $strLenCP: {
+                    $concat: [
+                      { $ifNull: ["$container", ""] },
+                      { $ifNull: ["$configFile", ""] },
+                    ],
+                  },
+                },
+                0,
+              ],
+            },
+            sold: { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+          },
+        },
+      },
+    },
+    { $match: { "docs.1": { $exists: true } } }, // only logins with 2+ records
+  ]);
+  const ids = [];
+  for (const g of groups) {
+    if (!g.docs.some((d) => d.deployed)) continue; // no live sibling to defer to
+    for (const d of g.docs) if (!d.deployed && !d.sold) ids.push(d.id);
+  }
+  return ids;
+}
+
+// The full set of account _ids excluded from stock/count/inventory views:
+// dead tokens plus shadow duplicates. Used everywhere a $nin filter guards an
+// aggregation, so every view agrees on what counts as real, sellable stock.
+async function excludedAccountIds() {
+  const [bad, shadow] = await Promise.all([
+    badAccountIds(),
+    shadowDuplicateIds(),
+  ]);
+  return bad.concat(shadow);
+}
+
 function containerForFile(file) {
   const m = file.match(/^config_0*(\d+)\.json$/);
   if (m) return "twitchbotx" + parseInt(m[1], 10);
@@ -886,25 +947,35 @@ router.post(
         {},
         { login: 1, credUsername: 1 },
       ).lean();
-      const byKey = new Map();
+      // A login can map to MORE THAN ONE account record (identity is the
+      // ClientSecret, and a re-minted+redeployed token leaves a duplicate that
+      // shares the login). Map each key to every matching _id so the creds land
+      // on ALL of them — otherwise the live/deployed copy can be left without a
+      // password and show as "no pw" (unsellable) while a stale duplicate holds
+      // the creds. Dedup by id string so an account whose login == credUsername
+      // isn't listed twice.
+      const byKey = new Map(); // key -> Map(idString -> _id)
       for (const a of accounts) {
         for (const k of [a.login, a.credUsername]) {
           const key = String(k || "")
             .trim()
             .toLowerCase();
-          if (key && !byKey.has(key)) byKey.set(key, a._id);
+          if (!key) continue;
+          if (!byKey.has(key)) byKey.set(key, new Map());
+          byKey.get(key).set(String(a._id), a._id);
         }
       }
 
       let matched = 0;
+      let recordsUpdated = 0;
       const unmatched = [];
       const ops = [];
       for (const item of list) {
         if (!item || typeof item !== "object") continue;
         const username = String(item.username || "").trim();
         if (!username) continue;
-        const id = byKey.get(username.toLowerCase());
-        if (!id) {
+        const ids = byKey.get(username.toLowerCase());
+        if (!ids || !ids.size) {
           unmatched.push(username);
           continue;
         }
@@ -915,13 +986,19 @@ router.post(
           set.credPassword = encrypt(String(item.password));
           set.hasPassword = !!String(item.password);
         }
-        ops.push({ updateOne: { filter: { _id: id }, update: { $set: set } } });
+        for (const id of ids.values()) {
+          ops.push({
+            updateOne: { filter: { _id: id }, update: { $set: set } },
+          });
+          recordsUpdated++;
+        }
         matched++;
       }
       if (ops.length) await BotAccount.bulkWrite(ops, { ordered: false });
       res.json({
         success: true,
         matched,
+        recordsUpdated,
         unmatched,
         unmatchedCount: unmatched.length,
       });
@@ -972,7 +1049,7 @@ const itemKeyExpr = {
 // reported separately as poolItems/poolDrops instead of inflating them.
 router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
   try {
-    const badIds = await badAccountIds();
+    const badIds = await excludedAccountIds();
     const dropMatch = {
       account: { $nin: badIds },
       accountModel: { $ne: "AvailableAccount" },
@@ -1031,7 +1108,7 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
 // not wired into a bot yet) rather than merging them into one number.
 router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
   try {
-    const badIds = await badAccountIds();
+    const badIds = await excludedAccountIds();
     const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
     const rows = await DropLog.aggregate([
       { $match: { account: { $nin: badIds } } },
@@ -1078,7 +1155,7 @@ router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
 // the inventory view for selling: name, game, image, total held, # accounts.
 router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
   try {
-    const badIds = await badAccountIds();
+    const badIds = await excludedAccountIds();
     const match = { account: { $nin: badIds } };
     const game = String(req.query.game || "").trim();
     if (game) match.game = game === "Other rewards" ? "" : game;
@@ -1086,54 +1163,66 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
     if (search) match.name = searchRegex(search);
 
     const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
-    const rows = await DropLog.aggregate([
+    const notPool = { $not: isPool };
+
+    // Two lean aggregations instead of one. Prod Mongo is an Atlas shared tier
+    // where allowDiskUse is disabled, so a single pipeline that pre-groups by
+    // (item, account) while carrying name/game/campaign/image strings blows
+    // past MongoDB's 100MB in-memory $group limit as the archive grows (150k+
+    // drops). Keeping the heavy per-account pre-group numeric-only, and pulling
+    // everything else from a group keyed by item alone (far fewer buckets),
+    // holds both well under the limit. Verified byte-identical to the old
+    // single-pipeline output.
+
+    // Item-level rollup: metadata, count/state tallies, distinct-account
+    // counts. Grouped by item only, so each string field costs one copy per
+    // item rather than one per (item, account) pair.
+    const mainP = DropLog.aggregate([
       { $match: match },
       // Fall back to a computed name|game key for any row whose itemKey
       // wasn't backfilled yet, so items never merge into one bucket.
       { $addFields: { _k: itemKeyExpr } },
-      // First collapse per (item, account) so min/max copies per holding
-      // account are exact — accounts holding e.g. 4x vs 5x of a drop differ.
       {
         $group: {
-          _id: { k: "$_k", acct: "$account" },
-          name: { $first: "$name" },
-          game: { $first: "$game" },
-          imageLocal: { $max: "$imageLocal" },
-          imageURL: { $first: "$imageURL" },
-          campaign: { $first: "$campaign" },
-          pool: { $first: isPool },
-          cnt: { $sum: "$count" },
-          claimed: {
-            $sum: { $cond: [{ $eq: ["$state", "claimed"] }, 1, 0] },
-          },
-          connect: {
-            $sum: { $cond: [{ $eq: ["$state", "connect"] }, 1, 0] },
-          },
-          connected: {
-            $sum: { $cond: [{ $eq: ["$state", "connected"] }, 1, 0] },
-          },
-        },
-      },
-      {
-        $group: {
-          _id: "$_id.k",
+          _id: "$_k",
           name: { $first: "$name" },
           game: { $first: "$game" },
           imageLocal: { $max: "$imageLocal" },
           imageURL: { $first: "$imageURL" },
           campaign: { $first: "$campaign" },
           // "Deployed" numbers — accounts actually wired into a bot, the
-          // sellable stock this view has always meant.
-          totalCount: { $sum: { $cond: ["$pool", 0, "$cnt"] } },
-          accounts: { $sum: { $cond: ["$pool", 0, 1] } },
-          minPerAcct: { $min: { $cond: ["$pool", "$$REMOVE", "$cnt"] } },
-          maxPerAcct: { $max: { $cond: ["$pool", "$$REMOVE", "$cnt"] } },
-          claimed: { $sum: { $cond: ["$pool", 0, "$claimed"] } },
-          connect: { $sum: { $cond: ["$pool", 0, "$connect"] } },
-          connected: { $sum: { $cond: ["$pool", 0, "$connected"] } },
-          // "In pool" numbers — checked, not yet wired into any bot.
-          poolCount: { $sum: { $cond: ["$pool", "$cnt", 0] } },
-          poolAccounts: { $sum: { $cond: ["$pool", 1, 0] } },
+          // sellable stock this view has always meant. Pool accounts
+          // (accountModel: "AvailableAccount") are excluded per row, matching
+          // the old $first(isPool)-then-exclude two-stage exactly.
+          totalCount: { $sum: { $cond: [isPool, 0, "$count"] } },
+          claimed: {
+            $sum: {
+              $cond: [{ $and: [notPool, { $eq: ["$state", "claimed"] }] }, 1, 0],
+            },
+          },
+          connect: {
+            $sum: {
+              $cond: [{ $and: [notPool, { $eq: ["$state", "connect"] }] }, 1, 0],
+            },
+          },
+          connected: {
+            $sum: {
+              $cond: [
+                { $and: [notPool, { $eq: ["$state", "connected"] }] },
+                1,
+                0,
+              ],
+            },
+          },
+          // Distinct accounts. $addToSet keyed by item alone stays small: the
+          // union across all items is bounded by the drop count, not by
+          // (items × accounts).
+          acctSet: { $addToSet: { $cond: [isPool, "$$REMOVE", "$account"] } },
+          poolAcctSet: {
+            $addToSet: { $cond: [isPool, "$account", "$$REMOVE"] },
+          },
+          // "In pool" count — checked, not yet wired into any bot.
+          poolCount: { $sum: { $cond: [isPool, "$count", 0] } },
         },
       },
       {
@@ -1154,19 +1243,54 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
           imageURL: 1,
           campaign: 1,
           totalCount: 1,
-          accounts: 1,
-          minPerAcct: 1,
-          maxPerAcct: 1,
+          accounts: { $size: "$acctSet" },
           claimed: 1,
           connect: 1,
           connected: 1,
           poolCount: 1,
-          poolAccounts: 1,
+          poolAccounts: { $size: "$poolAcctSet" },
         },
       },
-      { $sort: { accounts: -1, totalCount: -1 } },
-      { $limit: 2000 },
     ]);
+
+    // The one thing that genuinely needs a per-(item, account) pre-group: exact
+    // min/max copies held per deployed account (an account with 4x vs 5x of a
+    // drop differs). Numeric-only and non-pool, so it stays tiny. Pool rows are
+    // dropped up front, matching the old $$REMOVE-on-pool for these two fields
+    // (an item held only in the pool yields no row here → null min/max below).
+    const minMaxP = DropLog.aggregate([
+      { $match: { ...match, accountModel: { $ne: "AvailableAccount" } } },
+      { $addFields: { _k: itemKeyExpr } },
+      {
+        $group: {
+          _id: { k: "$_k", acct: "$account" },
+          cnt: { $sum: "$count" },
+        },
+      },
+      {
+        $group: {
+          _id: "$_id.k",
+          minPerAcct: { $min: "$cnt" },
+          maxPerAcct: { $max: "$cnt" },
+        },
+      },
+    ]);
+
+    const [mainRows, minMaxRows] = await Promise.all([mainP, minMaxP]);
+    const mmByKey = new Map(minMaxRows.map((r) => [r._id, r]));
+    const rows = mainRows
+      .map((r) => {
+        const mm = mmByKey.get(r.itemKey);
+        return {
+          ...r,
+          minPerAcct: mm ? mm.minPerAcct : null,
+          maxPerAcct: mm ? mm.maxPerAcct : null,
+        };
+      })
+      // Same order the old { $sort: { accounts: -1, totalCount: -1 } } gave.
+      // There are ~1.3k items, so the 2000 cap never actually clips.
+      .sort((a, b) => b.accounts - a.accounts || b.totalCount - a.totalCount)
+      .slice(0, 2000);
     res.json({ success: true, items: rows });
   } catch (err) {
     console.error("drops-archive by-item error:", err.message);
@@ -1186,7 +1310,7 @@ router.get(
           .status(400)
           .json({ success: false, message: "itemKey required" });
       }
-      const badIds = await badAccountIds();
+      const badIds = await excludedAccountIds();
       const rows = await DropLog.aggregate([
         // Match the indexed itemKey directly so this uses the index instead of
         // scanning every drop (legacy rows are backfilled on startup). Dead
@@ -1717,7 +1841,7 @@ router.get(
         });
       }
 
-      const badIds = await badAccountIds();
+      const badIds = await excludedAccountIds();
 
       // Per account: which of the set's items they hold and the count of each.
       // Connected/redeemed drops can't be delivered again, so they don't count
