@@ -355,7 +355,28 @@ async function feedListing(row, seenKeys) {
     return 0;
   }
   const need = target - remaining;
-  if (need <= 0) return 0;
+  if (need <= 0) {
+    // Self-heal: a GGSel offer can be fully stocked yet still paused if a
+    // prior feed's async product-add settled after finalize ran (so activate
+    // was skipped). Re-finalize is idempotent and re-activates a paused,
+    // stocked offer — so a stuck-paused listing recovers on the next tick
+    // without needing a fresh feed.
+    if (row.marketplace === "ggsel") {
+      try {
+        const fin = await mp.ggselFinalizeStock(row.externalId);
+        if (fin.reactivated) {
+          console.log(
+            "guardian: re-activated stuck-paused ggsel offer " + row.externalId,
+          );
+        }
+      } catch (e) {
+        console.error(
+          "guardian ggsel reconcile error " + row.externalId + ": " + e.message,
+        );
+      }
+    }
+    return 0;
+  }
   const set = await DropSet.findById(row.set).lean();
   if (!set) return 0;
   const fulfiller = row.marketplace === "ggsel" ? ggFulfiller : dsFulfiller;

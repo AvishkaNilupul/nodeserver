@@ -1057,19 +1057,28 @@ async function ggselFinalizeStock(offerId) {
     throw apiError("GGSel offer read", e);
   }
   const stock = Number(offer.in_stock_products_count) || 0;
-  if (stock > 0) {
-    try {
-      await axios.patch(
-        GG_API + "/offers/" + Number(offerId),
-        { quantity: stock, max_quantity: stock },
-        { headers: ggHeaders(keys), timeout: 20000 },
-      );
-    } catch (e) {
-      throw apiError("GGSel quantity sync", e);
-    }
+  // Nothing settled yet — GGSel attaches products through an async job, so
+  // right after an add the count can still read 0. Not an error; the next
+  // guardian tick re-runs this once the job lands.
+  if (stock <= 0) return { stock: 0, reactivated: false, pending: true };
+  // Sync the sellable quantity — best-effort. GGSel occasionally 500s here,
+  // and it must NOT block the activate below (going live is what matters; a
+  // stale quantity just caps sellable count, it doesn't take money without
+  // delivering).
+  let quantitySynced = true;
+  try {
+    await axios.patch(
+      GG_API + "/offers/" + Number(offerId),
+      { quantity: stock, max_quantity: stock },
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
+  } catch {
+    quantitySynced = false;
   }
+  // Re-activate: enabling autoselling on a then-empty offer paused it, so a
+  // stocked offer left paused is off sale. This is the critical step.
   let reactivated = false;
-  if (offer.status === "paused" && stock > 0) {
+  if (offer.status === "paused") {
     try {
       await axios.post(
         GG_API + "/offers/batch_activate",
@@ -1081,7 +1090,7 @@ async function ggselFinalizeStock(offerId) {
       throw apiError("GGSel reactivate", e);
     }
   }
-  return { stock, reactivated };
+  return { stock, reactivated, quantitySynced };
 }
 
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).
