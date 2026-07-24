@@ -12,7 +12,7 @@ const marketplaceListingSchema = new mongoose.Schema(
     },
     marketplace: {
       type: String,
-      enum: ["gameflip", "digiseller", "g2g", "ggsel", "funpay"],
+      enum: ["gameflip", "digiseller", "g2g", "ggsel", "funpay", "epicnpc"],
       required: true,
       index: true,
     },

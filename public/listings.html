@@ -1610,6 +1610,43 @@ Reliable Daily Rewards</textarea
           </div>
         </div>
 
+        <div id="mpEpicBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">EpicNPC placement (browser bridge)</b>
+            <div class="mp-hint">
+              EpicNPC has no API and blocks servers, so listings are posted from
+              <b>your own logged-in EpicNPC tab</b>. On Publish, a new tab opens
+              on the correct game forum pre-loaded with this listing; click the
+              <b>EpicNPC Filler</b> bookmarklet (one-time setup below) to fill
+              the form, then review and hit <b>Post thread</b>. Trade Guardian is
+              turned on with the free (TG Free) escrow tier, you're set as the
+              original owner, and the price and quality tier fill automatically.
+            </div>
+            <div class="mp-hint">
+              Target forum for this set: <b id="mpEpicGame">—</b>. A game with no
+              EpicNPC forum is rejected before the tab opens.
+            </div>
+            <label style="margin-top: 6px"
+              >One-time setup — drag this to your bookmarks bar:</label
+            >
+            <div style="margin: 6px 0">
+              <a
+                id="mpEpicBookmarklet"
+                href="#"
+                class="btn"
+                style="text-decoration: none; display: inline-block"
+                onclick="return false"
+                title="Drag me to your bookmarks bar"
+                >▶ EpicNPC Filler</a
+              >
+            </div>
+            <div class="mp-hint">
+              Clicking it here does nothing — drag it up to your bookmarks bar.
+              Then, on the EpicNPC compose tab, click that bookmark to auto-fill.
+            </div>
+          </div>
+        </div>
+
         <div class="mp-ext">
           <b style="font-size: 13px">Published on marketplaces</b>
           <div id="mpExtList"><div class="empty">None yet.</div></div>
@@ -2379,7 +2416,146 @@ Reliable Daily Rewards</textarea
         g2g: "G2G",
         ggsel: "GGSel",
         funpay: "FunPay",
+        epicnpc: "EpicNPC (browser bridge)",
       };
+      // EpicNPC bridge bookmarklet. Self-contained (runs on epicnpc.com, can't
+      // reference this page), it reads the listing payload from the compose
+      // URL's #epfill hash and fills the XenForo "Post thread" form. It never
+      // submits — the seller reviews and clicks Post thread. Serialized into a
+      // javascript: URL via toString() so it can be dragged to the bookmarks
+      // bar. Field names/flow verified live on the Overwatch compose form.
+      function __epicBridgeRun() {
+        try {
+          var m = (location.hash || "").match(/epfill=([^&]+)/);
+          if (!m) {
+            alert(
+              "No EpicNPC listing data in this page's URL. Open the tab from " +
+                "your site's 'Sell on EpicNPC' button, then click this bookmark.",
+            );
+            return;
+          }
+          var b = m[1].replace(/-/g, "+").replace(/_/g, "/");
+          while (b.length % 4) b += "=";
+          var p = JSON.parse(decodeURIComponent(escape(atob(b))));
+          var set = function (el, val) {
+            var pr =
+              el.tagName === "TEXTAREA"
+                ? HTMLTextAreaElement.prototype
+                : HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(pr, "value").set.call(el, val);
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+          var tier = function (price, t) {
+            if (t && /service|boost/i.test(t)) return "Service";
+            var n = Number(price) || 0;
+            return n >= 50 ? "HighEnd" : n >= 15 ? "Average" : "LowEnd";
+          };
+          var title = document.querySelector(
+            'textarea[name="title"],input[name="title"]',
+          );
+          if (title) set(title, p.title || "");
+          // Tag the thread "Selling" on forums that offer that prefix.
+          var pfx = document.querySelector('select[name="prefix_id"]');
+          if (pfx)
+            for (var pi = 0; pi < pfx.options.length; pi++)
+              if (/^\s*selling\s*$/i.test(pfx.options[pi].text)) {
+                pfx.value = pfx.options[pi].value;
+                pfx.dispatchEvent(new Event("change", { bubbles: true }));
+                break;
+              }
+          // Prefer the server-built rich HTML body (house style); fall back to
+          // plain text with paragraph breaks. descHtml is our own trusted markup
+          // (dynamic bits are escaped server-side) so it's injected as-is.
+          var html = p.descHtml
+            ? p.descHtml
+            : "<p>" +
+              String(p.description || "")
+                .replace(/</g, "&lt;")
+                .replace(/\n/g, "</p><p>") +
+              "</p>";
+          var fr = document.querySelector('.fr-element[contenteditable="true"]');
+          var hid = document.querySelector('textarea[name="message_html"]');
+          if (fr) {
+            fr.innerHTML = html;
+            fr.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          if (hid) set(hid, html);
+          var want = tier(p.priceUsd, p.tier);
+          var sels = document.querySelectorAll("select"),
+            typeSel = null;
+          for (var i = 0; i < sels.length && !typeSel; i++)
+            for (var j = 0; j < sels[i].options.length; j++)
+              if (/High End|Low End/i.test(sels[i].options[j].text)) {
+                typeSel = sels[i];
+                break;
+              }
+          if (typeSel)
+            for (var k = 0; k < typeSel.options.length; k++) {
+              var o = typeSel.options[k];
+              if (
+                o.value === want ||
+                o.text.replace(/\s/g, "").toLowerCase().indexOf(
+                  want.toLowerCase(),
+                ) >= 0
+              ) {
+                typeSel.value = o.value;
+                typeSel.dispatchEvent(new Event("change", { bubbles: true }));
+                break;
+              }
+            }
+          var yes = document.querySelector(
+            'input[name="custom_fields[Original_Owner]"][value="Yes"]',
+          );
+          if (yes) {
+            yes.checked = true;
+            yes.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          var tg = document.querySelector('input[name="tg_enabled"]');
+          if (tg && !tg.checked) tg.click();
+          var tries = 0;
+          (function afterTG() {
+            var price = document.querySelector('#tg_price,input[name="tg_price"]');
+            var svc = null,
+              boxes = document.querySelectorAll('input[name="tg_services[]"]');
+            for (var i = 0; i < boxes.length; i++)
+              if (boxes[i].value === (p.service || "free")) svc = boxes[i];
+            if (price && p.priceUsd != null && price.value !== String(p.priceUsd))
+              set(price, String(p.priceUsd));
+            if (svc && !svc.checked) svc.click();
+            // Keep retrying until the values actually stick — the Trade Guardian
+            // fields render (and re-render) a beat after the toggle, so a single
+            // click/set can silently no-op.
+            var priceOk =
+              !!price &&
+              (p.priceUsd == null || price.value === String(p.priceUsd));
+            var svcOk = !!svc && svc.checked;
+            if ((!priceOk || !svcOk) && tries++ < 40) {
+              setTimeout(afterTG, 120);
+              return;
+            }
+            var tags = document.querySelector('input[name="tags"]');
+            if (tags && p.tags) set(tags, p.tags);
+            var btns = document.querySelectorAll("button"),
+              sb = null;
+            for (var b2 = 0; b2 < btns.length && !sb; b2++)
+              if (/post thread/i.test(btns[b2].innerText || "")) sb = btns[b2];
+            if (sb) {
+              sb.style.outline = "3px solid #35c37d";
+              sb.scrollIntoView({ block: "center" });
+            }
+          })();
+        } catch (e) {
+          alert("EpicNPC Filler error: " + e.message);
+        }
+      }
+      var EPIC_BOOKMARKLET =
+        "javascript:(" + __epicBridgeRun.toString() + ")();void 0;";
+      (function () {
+        var a = document.getElementById("mpEpicBookmarklet");
+        if (a) a.href = EPIC_BOOKMARKLET;
+      })();
+
       var MP_KEY_LABELS = {
         gameflip: { apiKey: "API key", apiSecret: "API secret (TOTP secret)" },
         digiseller: { sellerId: "Seller ID", apiKey: "API key" },
@@ -2404,6 +2580,10 @@ Reliable Daily Rewards</textarea
           return;
         }
         box.innerHTML = Object.keys(MP_LABELS)
+          .filter(function (mp) {
+            // EpicNPC is a keyless browser bridge — nothing to configure here.
+            return MP_KEY_LABELS[mp];
+          })
           .map(function (mp) {
             var st = mpStatus[mp] || { fields: {} };
             var fields = Object.keys(MP_KEY_LABELS[mp])
@@ -2532,7 +2712,11 @@ Reliable Daily Rewards</textarea
       function renderPubTargets() {
         $("mpPubTargets").innerHTML = Object.keys(MP_LABELS)
           .map(function (mp) {
-            var ok = mpStatus && mpStatus[mp] && mpStatus[mp].configured;
+            // EpicNPC needs no API keys (it posts through your own browser
+            // session), so it's always available.
+            var keyless = mp === "epicnpc";
+            var ok =
+              keyless || (mpStatus && mpStatus[mp] && mpStatus[mp].configured);
             return (
               '<label class="mp-check" title="' +
               (ok ? "" : "Set API keys first (Marketplace keys button)") +
@@ -2769,7 +2953,28 @@ Reliable Daily Rewards</textarea
         if (fp) {
           $("mpFpBox").style.display = fp.checked ? "block" : "none";
         }
+        var ep = e.target.closest('[data-mptarget="epicnpc"]');
+        if (ep) {
+          $("mpEpicBox").style.display = ep.checked ? "block" : "none";
+          if (ep.checked) updateEpicNote();
+        }
       });
+
+      // Show which EpicNPC forum this set's game maps to. The authoritative
+      // node lookup happens server-side on publish; this is just a heads-up so
+      // the seller knows an unsupported game will be rejected before they click.
+      function epicGameForSet() {
+        if (!mpSet) return "";
+        return (
+          mpSet.coverGame ||
+          (mpSet.items && mpSet.items[0] && mpSet.items[0].game) ||
+          ""
+        );
+      }
+      function updateEpicNote() {
+        var g = epicGameForSet();
+        $("mpEpicGame").textContent = g || "(no game on this set)";
+      }
 
       // GGSel category drill-down: mirrors the Plati picker but against the
       // GGSel v2 category tree (one level per request, parentId to descend).
@@ -3313,9 +3518,14 @@ Reliable Daily Rewards</textarea
           toast("Tick at least one marketplace");
           return;
         }
+        // EpicNPC has no server-side publish — it's a browser bridge — so it
+        // rides a separate path and is kept out of the /publish body.
+        var epicWanted = targets.indexOf("epicnpc") !== -1;
         var body = {
           setId: mpSet.id,
-          marketplaces: targets,
+          marketplaces: targets.filter(function (t) {
+            return t !== "epicnpc";
+          }),
           title: $("mpPubName").value.trim(),
           description: $("mpPubDesc").value,
           price: parseFloat($("mpPubPrice").value),
@@ -3416,6 +3626,15 @@ Reliable Daily Rewards</textarea
         var btn = $("mpPubGo");
         btn.disabled = true;
         btn.textContent = "Publishing…";
+        // Open the EpicNPC tab synchronously inside this click so the popup
+        // isn't blocked; it's navigated to the compose URL once prepared.
+        if (epicWanted) openEpicBridge(body);
+        if (!body.marketplaces.length) {
+          // EpicNPC-only: no server publish to run.
+          btn.disabled = false;
+          btn.textContent = "Publish";
+          return;
+        }
         api("/marketplaces/publish", { method: "POST", body: body })
           .then(function (j) {
             var res = j.results || {};
@@ -3438,6 +3657,42 @@ Reliable Daily Rewards</textarea
             btn.textContent = "Publish";
           });
       });
+
+      // EpicNPC browser bridge: ask the server to resolve the game's forum node
+      // and build the compose deep-link (listing payload in the URL hash), then
+      // send the pre-opened tab there. The seller clicks the one-time "EpicNPC
+      // Filler" bookmarklet on that tab to fill the form, reviews, and posts.
+      function openEpicBridge(body) {
+        var g = epicGameForSet();
+        var win = window.open("about:blank", "_blank");
+        api("/marketplaces/epicnpc/prepare", {
+          method: "POST",
+          body: {
+            setId: mpSet.id,
+            game: g,
+            title: body.title,
+            description: body.description,
+            price: body.price,
+            service: "free",
+            tags: g,
+            record: true,
+          },
+        })
+          .then(function (j) {
+            if (win) win.location.href = j.url;
+            else window.open(j.url, "_blank");
+            toast(
+              "EpicNPC tab opened for " +
+                j.epicName +
+                " — click your ‘EpicNPC Filler’ bookmarklet there, review, then Post thread.",
+            );
+            if (mpSet) loadExtListings(mpSet.id);
+          })
+          .catch(function (err) {
+            if (win) win.close();
+            toast("EpicNPC: " + (err.message || "couldn't prepare"));
+          });
+      }
 
       $("mpExtList").addEventListener("click", function (e) {
         var dl = e.target.closest("[data-mpdelist]");

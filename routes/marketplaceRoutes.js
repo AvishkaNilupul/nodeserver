@@ -17,6 +17,7 @@ const fpFulfiller = require("../utils/funpayFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const marketResearch = require("../utils/marketResearch");
 const mp = require("../utils/marketplaces");
+const epicnpc = require("../utils/epicnpcCatalog");
 const { buildG2gBulkFile } = require("../utils/g2gBulk");
 const { competitorPrices } = require("../utils/priceScout");
 const {
@@ -378,6 +379,60 @@ function buildDescription(set) {
     ),
   ];
   return lines.join("\n").trim();
+}
+
+// EpicNPC listings follow a house style (verified against the seller's own
+// live listings): a "<Game> Twitch Drops Account | N+ Unclaimed Rewards" title
+// and a body with Featured/Full reward lists, an Information checklist and a
+// Payment section. Built as HTML because the bridge drops it straight into the
+// XenForo (Froala) editor, which converts it to BBCode on submit. Returns
+// { title, descHtml }.
+function buildEpicListing(set, game) {
+  const escHtml = (s) =>
+    String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  const items = (set.items || []).filter((i) => i && i.name);
+  const count = items.length;
+  const label = (i) => ((i.qty || 1) > 1 ? i.qty + "× " : "") + i.name;
+  const li = (arr) =>
+    "<ul>" + arr.map((t) => "<li>" + escHtml(t) + "</li>").join("") + "</ul>";
+
+  const gameLabel = game || set.name || "Twitch Drops";
+  const title =
+    gameLabel + " Twitch Drops Account | " + count + "+ Unclaimed Rewards";
+
+  const parts = [];
+  if (set.note) parts.push("<p>" + escHtml(set.note) + "</p>");
+  // A short "Featured" teaser (first items) only when the full list is long
+  // enough to warrant it, mirroring the seller's own listings.
+  if (count > 10) {
+    parts.push("<b>Featured Rewards</b>");
+    parts.push(li(items.slice(0, 8).map(label)));
+  }
+  parts.push("<b>Full Reward List (" + count + ")</b>");
+  parts.push(li(items.map(label)));
+  parts.push("<b>Information</b>");
+  parts.push(
+    li([
+      "✔ Instant delivery",
+      "✔ Original Twitch account included",
+      "✔ Rewards are unclaimed — simply connect your own linked account",
+      "✔ Change the account details after purchase if you wish",
+      "✔ Safe and easy redemption",
+    ]),
+  );
+  parts.push("<b>Payment</b>");
+  parts.push(
+    "<p>PayPal Friends &amp; Family / Crypto (USDT, LTC, etc.)<br>" +
+      "Middleman accepted (buyer covers MM fees if requested)</p>",
+  );
+  parts.push(
+    "<p>Feel free to message me if you have any questions or would like " +
+      "screenshots before purchasing.</p>",
+  );
+  return { title, descHtml: parts.join("") };
 }
 
 // Render a promo cover for the custom-listing form and return it inline as a
@@ -886,6 +941,84 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// EpicNPC bridge: EpicNPC has no seller API and is bot-protected, so the server
+// can't post the listing. Instead it resolves the game's forum node and builds
+// the compose deep-link with the listing payload in the URL hash; the frontend
+// opens it in a new tab and the one-time bookmarklet fills the form in the
+// seller's own logged-in EpicNPC session. Optionally records the listing so it
+// shows in the "published on marketplaces" list.
+router.post(
+  "/marketplaces/epicnpc/prepare",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const set = await DropSet.findById(body.setId).lean();
+      if (!set) {
+        return res.status(404).json({ success: false, message: "Set not found" });
+      }
+      const game = String(body.game || set.game || "").trim();
+      const hit = epicnpc.nodeForGame(game);
+      if (!hit) {
+        return res.status(422).json({
+          success: false,
+          message: game
+            ? '"' + game + '" has no EpicNPC forum — pick another game or skip EpicNPC for this listing.'
+            : "No game given for this listing, so EpicNPC has nowhere to post it.",
+        });
+      }
+      const priceUsd = Number(body.price != null ? body.price : set.price) || 0;
+      const service = body.service === "mm" ? "mm" : "free"; // default TG Free
+      // EpicNPC gets its own house-style title + rich (HTML) body rather than
+      // the generic set title/description.
+      const epic = buildEpicListing(set, game);
+      const title = epic.title;
+      const payload = {
+        title,
+        priceUsd,
+        descHtml: epic.descHtml,
+        description: buildDescription(set), // plain-text fallback
+        tier: String(body.tier || "account"),
+        tags: String(body.tags || game).slice(0, 200),
+        service,
+        owner: "Yes",
+      };
+      const url = epicnpc.buildComposeUrl(hit.node, payload);
+
+      let listingId = "";
+      if (body.record) {
+        // Bridge posts are manual, so there's no real external id yet; record a
+        // placeholder so the row is trackable and dedupable by set+game+node.
+        const doc = await MarketplaceListing.create({
+          set: set._id,
+          marketplace: "epicnpc",
+          externalId: "epicnpc:" + hit.node + ":" + Date.now(),
+          externalNode: String(hit.node),
+          url: "https://www.epicnpc.com/forums/x." + hit.node + "/",
+          title,
+          description: payload.description,
+          price: priceUsd,
+          status: "active",
+          note: "bridge post to " + hit.name + " (node " + hit.node + ") — posted manually via bookmarklet",
+        });
+        listingId = String(doc._id);
+      }
+
+      res.json({
+        success: true,
+        node: hit.node,
+        epicName: hit.name,
+        game,
+        url,
+        listingId,
+      });
+    } catch (err) {
+      console.error("epicnpc prepare error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 // External listings, optionally for one set.
 router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
