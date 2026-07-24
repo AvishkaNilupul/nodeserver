@@ -43,6 +43,58 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // How long a worker whose host just went unreachable waits before re-probing.
 const HOST_DOWN_BACKOFF_MS =
   Number(process.env.DROP_SCAN_HOST_BACKOFF_MS) || 60000;
+// Hard ceiling on how long a single account's scan may take. fetchInventory and
+// cacheImage each have their own network timeouts, but a heavy account (100+
+// drops with several new/slow images) could still stack many of them and pin a
+// worker for minutes. If a scan blows past this deadline we abandon it: the
+// account is left due (its lastScanAt is only stamped on success, so it's just
+// retried later — any images/drops it did cache persist, so the retry is
+// faster) and the lane is freed. A safety net; with parallel image caching
+// below, real scans finish in a few seconds and this rarely fires.
+const SCAN_DEADLINE_MS = Math.max(
+  Number(process.env.DROP_SCAN_DEADLINE_MS) || 60000,
+  10000,
+);
+// How many of an account's drops to cache-and-upsert at once. Serial was the
+// dominant cost of a heavy scan (image download + Atlas upsert, per drop); a
+// small pool cuts a 150-drop scan from minutes to seconds. The images are
+// static CDN assets, not the rate-limited GQL API, so this doesn't affect
+// Twitch throttling.
+const DROP_UPSERT_CONCURRENCY = Math.max(
+  Number(process.env.DROP_SCAN_UPSERT_CONCURRENCY) || 8,
+  1,
+);
+
+// Reject with a tagged error if `promise` doesn't settle within `ms`. The
+// underlying work keeps running (JS can't cancel a promise), but the caller
+// stops waiting — used to guarantee a scan can never pin a worker forever.
+function withDeadline(promise, ms, label) {
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => {
+      const e = new Error((label || "operation") + " exceeded " + ms + "ms");
+      e.scanDeadline = true;
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
+// Run `fn` over `items` with at most `concurrency` in flight, preserving
+// per-item results by index.
+async function mapPool(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function lane() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const lanes = Math.min(Math.max(concurrency, 1), items.length || 1);
+  await Promise.all(Array.from({ length: lanes }, lane));
+  return results;
+}
 
 const state = {
   enabled: process.env.DROP_SCAN_DISABLED !== "1",
@@ -211,8 +263,11 @@ async function claimNext() {
 // still shows up there as a distinct, clearly-labelled "in pool" entry.
 async function upsertDrops(accountId, accountModel, login, drops) {
   const now = new Date();
-  let newDrops = 0;
-  for (const d of drops) {
+  // Cache-and-upsert drops in a small concurrency pool rather than one at a
+  // time — each drop's image download + Atlas upsert is independent, and a
+  // drop's key (account, benefitId) is unique within the account so concurrent
+  // upserts can't collide.
+  const flags = await mapPool(drops, DROP_UPSERT_CONCURRENCY, async (d) => {
     // Cache the image locally (deduped on disk; a no-op once downloaded) so
     // the archive doesn't depend on Twitch's CDN long-term.
     const imageLocal = d.imageURL ? await cacheImage(d.imageURL) : "";
@@ -240,9 +295,9 @@ async function upsertDrops(accountId, accountModel, login, drops) {
       { $set: set, $setOnInsert: { firstSeenAt: now } },
       { upsert: true },
     );
-    if (r.upsertedCount) newDrops++;
-  }
-  return newDrops;
+    return r.upsertedCount ? 1 : 0;
+  });
+  return flags.reduce((a, b) => a + b, 0);
 }
 
 // Scan a single account doc: fetch inventory (optionally through `worker`'s
@@ -338,7 +393,11 @@ async function scanAccountNow(id) {
     w.currentLogin = maskedLogin(acc);
   }
   try {
-    const res = await scanAccount(acc, w || makeWorker(LOCAL_HOST));
+    const res = await withDeadline(
+      scanAccount(acc, w || makeWorker(LOCAL_HOST)),
+      SCAN_DEADLINE_MS,
+      "scan of " + maskedLogin(acc),
+    );
     state.sessionScanned++;
     if (w) w.scanned++;
     return res;
@@ -393,7 +452,11 @@ async function tickWorker(worker) {
   state.lastTickAt = new Date();
   let transportDied = false;
   try {
-    await scanAccount(acc, worker);
+    await withDeadline(
+      scanAccount(acc, worker),
+      SCAN_DEADLINE_MS,
+      "scan of " + maskedLogin(acc),
+    );
     worker.scanned++;
     state.sessionScanned++;
   } catch (e) {
@@ -408,6 +471,14 @@ async function tickWorker(worker) {
           (worker.host.label || worker.host.id) +
           " unreachable, backing off; account stays due for the server",
       );
+    } else if (e && e.scanDeadline) {
+      // A scan that ran too long. Abandon it so the lane is freed immediately;
+      // the account keeps its old lastScanAt (still due) and is retried later.
+      worker.errors++;
+      state.sessionErrors++;
+      worker.lastError = e.message || String(e);
+      state.lastError = worker.lastError;
+      console.warn("dropScanner: " + worker.lastError + ", abandoning lane");
     } else {
       state.lastError = e.message || String(e);
     }
