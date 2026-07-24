@@ -383,6 +383,10 @@ async function feedListing(row, seenKeys) {
   }
   try {
     if (row.marketplace === "ggsel") {
+      // GGSel rejects /products unless the offer is already autoselling, so
+      // enable it BEFORE the add (a no-op once on). An offer published empty
+      // starts non-autoselling; this is what makes the first feed stick.
+      await mp.ggselEnableAutoselling(row.externalId);
       await mp.ggselAddProducts(
         row.externalId,
         claimed.map((c) => c.code),
@@ -435,16 +439,20 @@ async function feedListing(row, seenKeys) {
     });
     return 0;
   }
-  // A GGSel offer published before any stock existed sits with
-  // is_autoselling:false (Manual) — attaching products alone doesn't flip it,
-  // so the codes would never be handed out. Sync the flag + sellable quantity
-  // to the attached stock after every successful feed (idempotent).
+  // Enabling autoselling on an empty offer (above) also pauses it, so after
+  // the products are attached, sync the sellable quantity to the real stock
+  // and re-activate. Without this a freshly-fed offer sits paused — stocked
+  // but off sale.
   if (row.marketplace === "ggsel") {
     try {
-      const sync = await mp.ggselSyncAutoselling(row.externalId);
-      if (sync.enabledAutoselling) {
+      const fin = await mp.ggselFinalizeStock(row.externalId);
+      if (fin.reactivated) {
         console.log(
-          "guardian: enabled autoselling on ggsel offer " + row.externalId,
+          "guardian: re-activated ggsel offer " +
+            row.externalId +
+            " with " +
+            fin.stock +
+            " in stock",
         );
       }
     } catch (e) {
@@ -457,9 +465,9 @@ async function feedListing(row, seenKeys) {
         message:
           "GGSel listing " +
           row.externalId +
-          " was fed products but autoselling could not be enabled/synced: " +
+          " was fed products but could not be finalized (quantity/activate): " +
           e.message +
-          " — buyers may not receive codes automatically; check the offer.",
+          " — the offer may be paused with stock; check it.",
       });
     }
   }

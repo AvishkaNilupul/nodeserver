@@ -1006,15 +1006,45 @@ async function ggselOfferStock(offerId) {
   }
 }
 
-// Make an offer actually auto-deliver once products are attached. An offer
-// published with delivery "auto" but no content is created with
-// is_autoselling:false (GGSel shows it as Manual), and attaching products
-// later does NOT flip the flag by itself — so the guardian's auto-feed used
-// to stack codes on an offer that still wouldn't hand them out. Verified live
-// (2026-07-24): PATCH /offers/{id} is accepted. Mirrors ggselPublish's
-// quantity semantics: sellable quantity tracks the attached product count so
-// stock isn't artificially capped.
-async function ggselSyncAutoselling(offerId) {
+// Products can only be attached to an autoselling offer — GGSel rejects
+// /products on a non-autoselling offer with 422 "Autoselling is required for
+// products" (verified live 2026-07-24). An offer published with delivery
+// "auto" but no initial stock is created with is_autoselling:false, so this
+// MUST run BEFORE the first ggselAddProducts. Enabling autoselling on an
+// offer with 0 stock also pauses it (an autoselling offer with nothing to
+// sell can't be on sale), which ggselFinalizeStock undoes after the add.
+// Idempotent: a no-op when autoselling is already on. Returns whether it
+// flipped the flag.
+async function ggselEnableAutoselling(offerId) {
+  const keys = requireKeys("ggsel");
+  let offer;
+  try {
+    const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    });
+    offer = (r.data && r.data.data) || r.data || {};
+  } catch (e) {
+    throw apiError("GGSel offer read", e);
+  }
+  if (offer.is_autoselling) return { changed: false };
+  try {
+    await axios.patch(
+      GG_API + "/offers/" + Number(offerId),
+      { is_autoselling: true, delivery: "auto" },
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
+  } catch (e) {
+    throw apiError("GGSel enable autoselling", e);
+  }
+  return { changed: true };
+}
+
+// After products are attached, sync the sellable quantity to the real stock
+// and re-activate the offer if enabling autoselling (above) left it paused.
+// Called AFTER ggselAddProducts. Without the re-activate, a freshly-fed offer
+// would sit paused with stock but off sale.
+async function ggselFinalizeStock(offerId) {
   const keys = requireKeys("ggsel");
   let offer;
   try {
@@ -1027,21 +1057,31 @@ async function ggselSyncAutoselling(offerId) {
     throw apiError("GGSel offer read", e);
   }
   const stock = Number(offer.in_stock_products_count) || 0;
-  if (!stock) return { changed: false, stock };
-  const body = { quantity: stock, max_quantity: stock };
-  if (!offer.is_autoselling) {
-    body.is_autoselling = true;
-    body.delivery = "auto";
+  if (stock > 0) {
+    try {
+      await axios.patch(
+        GG_API + "/offers/" + Number(offerId),
+        { quantity: stock, max_quantity: stock },
+        { headers: ggHeaders(keys), timeout: 20000 },
+      );
+    } catch (e) {
+      throw apiError("GGSel quantity sync", e);
+    }
   }
-  try {
-    await axios.patch(GG_API + "/offers/" + Number(offerId), body, {
-      headers: ggHeaders(keys),
-      timeout: 20000,
-    });
-  } catch (e) {
-    throw apiError("GGSel autoselling sync", e);
+  let reactivated = false;
+  if (offer.status === "paused" && stock > 0) {
+    try {
+      await axios.post(
+        GG_API + "/offers/batch_activate",
+        { offer_ids: [Number(offerId)] },
+        { headers: ggHeaders(keys), timeout: 20000 },
+      );
+      reactivated = true;
+    } catch (e) {
+      throw apiError("GGSel reactivate", e);
+    }
   }
-  return { changed: true, stock, enabledAutoselling: !offer.is_autoselling };
+  return { stock, reactivated };
 }
 
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).
@@ -1752,7 +1792,8 @@ module.exports = {
   ggselPublish,
   ggselAddProducts,
   ggselOfferStock,
-  ggselSyncAutoselling,
+  ggselEnableAutoselling,
+  ggselFinalizeStock,
   ggselDelist,
   funpayTest,
   funpayPublish,
