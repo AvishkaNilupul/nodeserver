@@ -32,6 +32,7 @@ const botHealthRoutes = require("./routes/botHealthRoutes");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
+const stashRoutes = require("./routes/stashRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
@@ -381,6 +382,10 @@ app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
 });
 
+app.get("/account-stash.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "account-stash.html"));
+});
+
 // Marketplace integrity guard (superadmin only) — review queue for the
 // background checker's findings.
 app.get("/integrity.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -523,6 +528,7 @@ app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
+app.use(enforce2fa, stashRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);

@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Account Stash</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .themebtn{cursor:pointer;}
+
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .backlink { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:13px; font-weight:600; background:none; border:none; padding:0; cursor:pointer; margin-bottom:10px; }
+  .backlink:hover { color: var(--ink); opacity:1; }
+
+  button { padding: 9px 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 13.5px; }
+  button:hover { opacity: 0.94; }
+  button:disabled { opacity:.5; cursor: default; }
+  .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
+  .btn-ghost:hover { background: var(--surface-2); opacity:1; }
+  .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
+  .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
+  .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
+
+  .setgrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
+  .setcard { background: var(--surface); border:1px solid var(--line); border-radius: 16px; padding: 18px; display:flex; flex-direction:column; gap:14px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
+  .setcard h3 { font-size: 16px; font-weight: 700; display:flex; align-items:center; gap:8px; }
+  .setcard .note { color: var(--muted); font-size: 12.5px; line-height:1.5; min-height: 18px; }
+  .setcard .metrics { display:flex; gap:8px; flex-wrap:wrap; }
+  .metric { background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:6px 10px; text-align:center; flex:1; min-width:56px; }
+  .metric b { font-size:16px; display:block; }
+  .metric span { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .metric.live b { color: var(--green); }
+  .metric.dead b { color: var(--red); }
+  .setcard .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .setcard .actions .spacer { flex:1; }
+
+  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 20px 0 14px; }
+  .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
+  .search input { width:100%; padding: 11px 13px 11px 38px; border-radius: 11px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline:none; font-family:inherit; }
+  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color: var(--muted); }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; }
+  .stat b { font-size: 18px; display:block; }
+  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  .scanbar { display:none; align-items:center; gap:12px; background: var(--surface-2); border:1px solid var(--line); border-radius:12px; padding:10px 16px; margin:14px 0; font-size:13px; color:var(--muted); }
+  .scanbar.show { display:flex; }
+  .bar { flex:1; height:8px; background:var(--line); border-radius:999px; overflow:hidden; max-width:320px; }
+  .bar > i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width .3s; }
+
+  .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 20px; overflow:hidden; }
+  table { width:100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align:left; padding: 10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  td.mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
+  input[type="checkbox"] { width:16px; height:16px; cursor:pointer; accent-color: var(--accent); }
+
+  .chip { display:inline-flex; align-items:center; gap:5px; padding: 3px 9px; border-radius: 999px; font-size:11.5px; font-weight:600; background: var(--surface-2); color: var(--muted); }
+  .chip.on { background:#ecfdf5; color: var(--green); }
+  .chip.off { background:#fef2f2; color: var(--red); }
+  .chip.warn { background:#fffbeb; color: var(--yellow); }
+
+  .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px); background:#0f172a; color:#fff; padding: 11px 18px; border-radius: 11px; font-size: 13.5px; opacity:0; pointer-events:none; transition: all .2s; z-index:220; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+  .toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
+  .toast.err { background:#b91c1c; }
+  .empty { padding: 40px; text-align:center; color: var(--muted); }
+
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:56px 16px; overflow-y:auto; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:560px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
+  .modal > header { display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal > header b { font-size:16px; }
+  .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
+  .modal > header .x:hover { background:var(--surface-2); opacity:1; }
+  .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
+  .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
+  .mbody textarea, .mbody input[type="text"] { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody textarea { min-height:200px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
+  .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
+  .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
+  .revealbox { font-family: ui-monospace, monospace; font-size: 13px; background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; line-height:1.7; word-break:break-all; }
+  .revealbox .k { color: var(--muted); }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links"></nav>
+  <div class="me">
+    <div class="av" id="meAvatar">--</div>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <!-- ============ SETS VIEW ============ -->
+  <section id="setsView">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+      <div>
+        <h1>Account Stash</h1>
+        <div class="sub">Hold accounts in sets, live-check them over time, then move a set into the Account Pool when you're ready to use them. Fully separate from the pool &mdash; nothing here touches a bot.</div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn-ghost btn-sm" id="refreshSetsBtn">Refresh</button>
+        <button class="btn-sm" id="newSetBtn">New set</button>
+      </div>
+    </div>
+    <div class="setgrid" id="setGrid"><div class="empty">Loading&hellip;</div></div>
+  </section>
+
+  <!-- ============ SET DETAIL VIEW ============ -->
+  <section id="detailView" style="display:none;">
+    <button class="backlink" id="backBtn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 12H5M12 19l-7-7 7-7"></path></svg>
+      All sets
+    </button>
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+      <div>
+        <h1 id="detailName">Set</h1>
+        <div class="sub" id="detailNote"></div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn-ghost btn-sm" id="scanBtn" title="Check every account in this set against Twitch">Scan (check live)</button>
+        <button class="btn-ghost btn-sm" id="moveSelBtn" disabled title="Move only the checked accounts into the Account Pool">Move selected &rarr; pool</button>
+        <button class="btn-sm" id="moveAllBtn" title="Move the whole set into the Account Pool">Move set &rarr; pool</button>
+        <button class="btn-sm" id="importSetBtn">Import into set</button>
+      </div>
+    </div>
+
+    <div class="scanbar" id="scanBar">
+      <span id="scanText">Scanning&hellip;</span>
+      <div class="bar"><i id="scanFill"></i></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+        <input id="search" type="text" placeholder="Search by username&hellip;" />
+      </div>
+      <div class="stats" id="detailStats"></div>
+    </div>
+
+    <div class="panel">
+      <div style="overflow-x:auto;">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th style="width:36px;"><input type="checkbox" id="selAll" title="Select all" /></th>
+              <th>Username</th><th>Ready</th><th>Live check</th><th>Drops</th><th>Added</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="tbody"><tr><td colspan="7" class="empty">Loading&hellip;</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- new/edit set modal -->
+<div class="modal-bg" id="setBg">
+  <div class="modal" style="max-width:460px;">
+    <header><b id="setModalTitle">New set</b><button class="x" id="setClose">&times;</button></header>
+    <div class="mbody">
+      <div>
+        <label class="lbl">Set name</label>
+        <input type="text" id="setName" placeholder="e.g. Prime batch — March" />
+      </div>
+      <div>
+        <label class="lbl">Note (optional)</label>
+        <input type="text" id="setNote" placeholder="Anything to remember about this batch" />
+      </div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="setCancel">Cancel</button>
+      <button id="setSubmit">Save</button>
+    </footer>
+  </div>
+</div>
+
+<!-- import into set modal -->
+<div class="modal-bg" id="importBg">
+  <div class="modal" style="max-width:640px;">
+    <header><b>Import into set</b><button class="x" id="importClose">&times;</button></header>
+    <div class="mbody">
+      <div>
+        <label class="lbl">Accounts — one per line, or JSON</label>
+        <textarea id="importInput" placeholder='login:password:token
+login:password:email
+login:password
+
+or JSON:
+
+[
+  { "username": "puvig", "password": "cb7XEN...", "email": "..." }
+]
+
+[
+  { "Login": "marol4uow39", "ClientSecret": "01r414...", "UniqueId": "25a7c8...", "Id": "1519257141" }
+]'></textarea>
+        <div class="hint" style="margin-top:8px;">
+          Same formats as the Account Pool importer. Matched by username within this set; an account already in the set is filled in rather than duplicated. Accounts land here as-is &mdash; they are <b>not</b> checked automatically. Use <b>Scan</b> to live-check them, and <b>Move set &rarr; pool</b> when you're ready to use them.
+        </div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="importCancel">Cancel</button>
+      <button id="importSubmit">Import</button>
+    </footer>
+  </div>
+</div>
+
+<!-- reveal modal -->
+<div class="modal-bg" id="revealBg">
+  <div class="modal">
+    <header><b id="revealTitle">Account details</b><button class="x" id="revealClose">&times;</button></header>
+    <div class="mbody">
+      <div class="revealbox" id="revealBox"></div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="revealDone">Close</button>
+    </footer>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/admin-nav.js"></script>
+<script>
+  var toastEl = document.getElementById("toast");
+  var toastTimer = null;
+  function toast(msg, isErr) {
+    toastEl.textContent = msg;
+    toastEl.className = "toast show" + (isErr ? " err" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ toastEl.className = "toast"; }, 3200);
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
+      return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c];
+    });
+  }
+  function fmtDate(d) {
+    if (!d) return "—";
+    try { return new Date(d).toLocaleDateString(undefined,{month:"short",day:"numeric"}); } catch(e){ return "—"; }
+  }
+  async function api(url, opts) {
+    var r = await fetch(url, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts || {}));
+    var data = await r.json().catch(function(){ return {}; });
+    if (!r.ok || data.success === false) throw new Error(data.message || ("HTTP " + r.status));
+    return data;
+  }
+
+  document.getElementById("logoutBtn").addEventListener("click", function(){
+    fetch("/logout", { method:"POST", credentials:"same-origin" }).finally(function(){ window.location.href = "/admin-login.html"; });
+  });
+
+  // -------------------------------------------------- state
+  var sets = [];
+  var current = null;      // current set object (detail view)
+  var accounts = [];       // accounts of current set
+  var selection = {};      // id -> true
+  var searchTerm = "";
+
+  var setsView = document.getElementById("setsView");
+  var detailView = document.getElementById("detailView");
+
+  // -------------------------------------------------- sets view
+  async function loadSets() {
+    try {
+      var data = await api("/account-stash/sets");
+      sets = data.sets || [];
+      renderSets();
+    } catch (e) { toast(e.message, true); }
+  }
+  function renderSets() {
+    var grid = document.getElementById("setGrid");
+    if (!sets.length) {
+      grid.innerHTML = '<div class="empty">No sets yet. Create one to start stashing accounts.</div>';
+      return;
+    }
+    grid.innerHTML = sets.map(function(s){
+      return '' +
+        '<div class="setcard">' +
+          '<h3>' + esc(s.name) + (s.scanning ? ' <span class="chip warn">scanning</span>' : '') + '</h3>' +
+          '<div class="note">' + (s.note ? esc(s.note) : '<i style="opacity:.6">No note</i>') + '</div>' +
+          '<div class="metrics">' +
+            '<div class="metric"><b>' + s.total + '</b><span>Total</span></div>' +
+            '<div class="metric live"><b>' + s.live + '</b><span>Live</span></div>' +
+            '<div class="metric dead"><b>' + s.dead + '</b><span>Dead</span></div>' +
+            '<div class="metric"><b>' + s.unchecked + '</b><span>New</span></div>' +
+          '</div>' +
+          '<div class="actions">' +
+            '<button class="btn-sm" data-open="' + s.id + '">Open</button>' +
+            '<button class="btn-ghost btn-sm" data-move="' + s.id + '" title="Move whole set into the Account Pool">Move &rarr; pool</button>' +
+            '<span class="spacer"></span>' +
+            '<button class="btn-ghost btn-sm" data-edit="' + s.id + '" title="Rename / note">Edit</button>' +
+            '<button class="btn-danger btn-sm" data-del="' + s.id + '" title="Delete set and its accounts">Delete</button>' +
+          '</div>' +
+        '</div>';
+    }).join("");
+  }
+
+  document.getElementById("setGrid").addEventListener("click", function(e){
+    var b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.open) return openSet(b.dataset.open);
+    if (b.dataset.move) return moveWholeSet(b.dataset.move);
+    if (b.dataset.edit) return editSet(b.dataset.edit);
+    if (b.dataset.del) return deleteSet(b.dataset.del);
+  });
+  document.getElementById("refreshSetsBtn").addEventListener("click", loadSets);
+
+  // -------------------------------------------------- set modal (create/edit)
+  var editingSetId = null;
+  function openSetModal(set) {
+    editingSetId = set ? set.id : null;
+    document.getElementById("setModalTitle").textContent = set ? "Edit set" : "New set";
+    document.getElementById("setName").value = set ? set.name : "";
+    document.getElementById("setNote").value = set ? (set.note || "") : "";
+    document.getElementById("setBg").classList.add("show");
+    setTimeout(function(){ document.getElementById("setName").focus(); }, 50);
+  }
+  function closeSetModal(){ document.getElementById("setBg").classList.remove("show"); }
+  document.getElementById("newSetBtn").addEventListener("click", function(){ openSetModal(null); });
+  document.getElementById("setClose").addEventListener("click", closeSetModal);
+  document.getElementById("setCancel").addEventListener("click", closeSetModal);
+  function editSet(id){ var s = sets.find(function(x){ return x.id === id; }); if (s) openSetModal(s); }
+  document.getElementById("setSubmit").addEventListener("click", async function(){
+    var name = document.getElementById("setName").value.trim();
+    var note = document.getElementById("setNote").value.trim();
+    if (!name) return toast("Set name required", true);
+    try {
+      if (editingSetId) {
+        await api("/account-stash/sets/" + editingSetId, { method:"PATCH", body: JSON.stringify({ name: name, note: note }) });
+        toast("Set updated");
+      } else {
+        await api("/account-stash/sets", { method:"POST", body: JSON.stringify({ name: name, note: note }) });
+        toast("Set created");
+      }
+      closeSetModal();
+      loadSets();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  async function deleteSet(id){
+    var s = sets.find(function(x){ return x.id === id; });
+    if (!s) return;
+    if (!confirm('Delete set "' + s.name + '" and its ' + s.total + ' account(s)? This cannot be undone.')) return;
+    try { await api("/account-stash/sets/" + id, { method:"DELETE" }); toast("Set deleted"); loadSets(); }
+    catch (e) { toast(e.message, true); }
+  }
+
+  // -------------------------------------------------- detail view
+  async function openSet(id) {
+    try {
+      var data = await api("/account-stash/sets/" + id + "/accounts");
+      current = data.set;
+      accounts = data.accounts || [];
+      selection = {};
+      searchTerm = "";
+      document.getElementById("search").value = "";
+      setsView.style.display = "none";
+      detailView.style.display = "";
+      document.getElementById("detailName").textContent = current.name;
+      document.getElementById("detailNote").textContent = current.note || "";
+      renderAccounts();
+      startScanPollingIfNeeded();
+    } catch (e) { toast(e.message, true); }
+  }
+  function backToSets() {
+    stopScanPolling();
+    current = null;
+    detailView.style.display = "none";
+    setsView.style.display = "";
+    loadSets();
+  }
+  document.getElementById("backBtn").addEventListener("click", backToSets);
+
+  function statusChip(a) {
+    if (!a.lastCheckStatus) return '<span class="chip">Not checked</span>';
+    if (a.lastCheckStatus === "ok") return '<span class="chip on">Live</span>';
+    if (a.lastCheckStatus === "token_invalid") return '<span class="chip off">Dead token</span>';
+    if (a.lastCheckStatus === "integrity_failed") return '<span class="chip off">Integrity</span>';
+    return '<span class="chip warn">Error</span>';
+  }
+  function filteredAccounts() {
+    if (!searchTerm) return accounts;
+    var t = searchTerm.toLowerCase();
+    return accounts.filter(function(a){ return a.username.toLowerCase().indexOf(t) !== -1; });
+  }
+  function renderAccounts() {
+    var rows = filteredAccounts();
+    var tbody = document.getElementById("tbody");
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">' + (accounts.length ? "No matches." : "No accounts in this set yet. Use Import into set.") + '</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(function(a){
+        return '<tr>' +
+          '<td><input type="checkbox" data-sel="' + a.id + '"' + (selection[a.id] ? " checked" : "") + ' /></td>' +
+          '<td><b>' + esc(a.username) + '</b></td>' +
+          '<td>' + (a.hasAuth ? '<span class="chip on">Ready</span>' : (a.hasPassword ? '<span class="chip warn">Needs auth</span>' : '<span class="chip">No token</span>')) + '</td>' +
+          '<td>' + statusChip(a) + (a.lastCheckError ? ' <span title="' + esc(a.lastCheckError) + '" style="cursor:help;color:var(--muted)">&#9432;</span>' : '') + '</td>' +
+          '<td class="mono">' + (a.dropCount || 0) + '</td>' +
+          '<td>' + fmtDate(a.createdAt) + '</td>' +
+          '<td style="text-align:right;"><button class="btn-ghost btn-sm" data-reveal="' + a.id + '">View</button> <button class="btn-danger btn-sm" data-delacc="' + a.id + '">Delete</button></td>' +
+        '</tr>';
+      }).join("");
+    }
+    renderDetailStats();
+    updateMoveSelBtn();
+    syncSelAll();
+  }
+  function renderDetailStats() {
+    var live = accounts.filter(function(a){ return a.lastCheckStatus === "ok"; }).length;
+    var dead = accounts.filter(function(a){ return ["token_invalid","integrity_failed","error"].indexOf(a.lastCheckStatus) !== -1; }).length;
+    var neu = accounts.filter(function(a){ return !a.lastCheckStatus; }).length;
+    document.getElementById("detailStats").innerHTML =
+      '<div class="stat"><b>' + accounts.length + '</b><span>Total</span></div>' +
+      '<div class="stat"><b style="color:var(--green)">' + live + '</b><span>Live</span></div>' +
+      '<div class="stat"><b style="color:var(--red)">' + dead + '</b><span>Dead</span></div>' +
+      '<div class="stat"><b>' + neu + '</b><span>New</span></div>';
+  }
+
+  document.getElementById("search").addEventListener("input", function(e){ searchTerm = e.target.value; renderAccounts(); });
+
+  document.getElementById("tbody").addEventListener("click", function(e){
+    var sel = e.target.closest("input[data-sel]");
+    if (sel) { if (sel.checked) selection[sel.dataset.sel] = true; else delete selection[sel.dataset.sel]; updateMoveSelBtn(); syncSelAll(); return; }
+    var b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.reveal) return revealAccount(b.dataset.reveal);
+    if (b.dataset.delacc) return deleteAccount(b.dataset.delacc);
+  });
+  document.getElementById("selAll").addEventListener("change", function(e){
+    var rows = filteredAccounts();
+    if (e.target.checked) rows.forEach(function(a){ selection[a.id] = true; });
+    else rows.forEach(function(a){ delete selection[a.id]; });
+    renderAccounts();
+  });
+  function syncSelAll() {
+    var rows = filteredAccounts();
+    var all = rows.length > 0 && rows.every(function(a){ return selection[a.id]; });
+    document.getElementById("selAll").checked = all;
+  }
+  function selectedIds(){ return Object.keys(selection); }
+  function updateMoveSelBtn() {
+    var n = selectedIds().length;
+    var btn = document.getElementById("moveSelBtn");
+    btn.disabled = n === 0;
+    btn.textContent = n ? ("Move " + n + " selected → pool") : "Move selected → pool";
+  }
+
+  // -------------------------------------------------- import into set
+  function openImport(){ document.getElementById("importInput").value = ""; document.getElementById("importBg").classList.add("show"); }
+  function closeImport(){ document.getElementById("importBg").classList.remove("show"); }
+  document.getElementById("importSetBtn").addEventListener("click", openImport);
+  document.getElementById("importClose").addEventListener("click", closeImport);
+  document.getElementById("importCancel").addEventListener("click", closeImport);
+  document.getElementById("importSubmit").addEventListener("click", async function(){
+    var text = document.getElementById("importInput").value.trim();
+    if (!text) return toast("Paste some accounts first", true);
+    if (!current) return;
+    var btn = this; btn.disabled = true;
+    try {
+      var data = await api("/account-stash/sets/" + current.id + "/import", { method:"POST", body: JSON.stringify({ accounts: text }) });
+      var msg = "Added " + data.added + (data.merged ? (", merged " + data.merged) : "");
+      if (data.badLineCount) msg += ", " + data.badLineCount + " unparsable line(s)";
+      toast(msg);
+      closeImport();
+      await refreshCurrent();
+    } catch (e) { toast(e.message, true); }
+    finally { btn.disabled = false; }
+  });
+
+  async function refreshCurrent() {
+    if (!current) return;
+    var data = await api("/account-stash/sets/" + current.id + "/accounts");
+    current = data.set;
+    accounts = data.accounts || [];
+    // Drop selections for accounts that no longer exist.
+    Object.keys(selection).forEach(function(id){ if (!accounts.some(function(a){ return a.id === id; })) delete selection[id]; });
+    renderAccounts();
+  }
+
+  // -------------------------------------------------- scanning (visibility-aware poll)
+  var scanTimer = null;
+  document.getElementById("scanBtn").addEventListener("click", async function(){
+    if (!current) return;
+    try {
+      var data = await api("/account-stash/sets/" + current.id + "/scan", { method:"POST" });
+      if (data.already) toast("Already scanning this set");
+      else toast("Scanning " + (data.total || 0) + " account(s)…");
+      startScanPolling();
+    } catch (e) { toast(e.message, true); }
+  });
+  async function pollScan() {
+    if (!current) return;
+    try {
+      var s = await api("/account-stash/sets/" + current.id + "/scan/status");
+      var bar = document.getElementById("scanBar");
+      if (s.running || (s.total && s.checked < s.total)) {
+        bar.classList.add("show");
+        var pct = s.total ? Math.round((s.checked / s.total) * 100) : 0;
+        document.getElementById("scanFill").style.width = pct + "%";
+        document.getElementById("scanText").textContent = "Scanning " + s.checked + " / " + s.total + " · " + s.live + " live, " + s.dead + " dead";
+      }
+      if (!s.running) {
+        // Finished (or nothing running): refresh data and hide bar shortly after.
+        if (bar.classList.contains("show")) {
+          document.getElementById("scanFill").style.width = "100%";
+          document.getElementById("scanText").textContent = "Done · " + s.live + " live, " + s.dead + " dead";
+          setTimeout(function(){ bar.classList.remove("show"); }, 1500);
+          await refreshCurrent();
+        }
+        stopScanPolling();
+      }
+    } catch (e) { stopScanPolling(); }
+  }
+  function startScanPolling() {
+    if (scanTimer || document.hidden) { pollScan(); return; }
+    pollScan();
+    scanTimer = setInterval(pollScan, 2500);
+  }
+  function stopScanPolling() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } }
+  async function startScanPollingIfNeeded() {
+    // On opening a set, resume the progress bar if a scan is already running.
+    if (current && current.scanning) startScanPolling();
+  }
+  document.addEventListener("visibilitychange", function(){
+    if (!current) return;
+    if (document.hidden) stopScanPolling();
+    else startScanPolling();
+  });
+
+  // -------------------------------------------------- move to pool
+  async function doMove(ids, label) {
+    if (!current) return;
+    try {
+      var body = ids && ids.length ? { ids: ids } : {};
+      var data = await api("/account-stash/sets/" + current.id + "/move-to-pool", { method:"POST", body: JSON.stringify(body) });
+      var parts = [];
+      if (data.added) parts.push(data.added + " added");
+      if (data.merged) parts.push(data.merged + " merged");
+      if (data.alreadyInUseCount) parts.push(data.alreadyInUseCount + " already in use");
+      toast("Moved to pool: " + (parts.join(", ") || "nothing new") + " · " + data.removedFromStash + " removed from stash");
+      selection = {};
+      await refreshCurrent();
+    } catch (e) { toast(e.message, true); }
+  }
+  document.getElementById("moveAllBtn").addEventListener("click", function(){
+    if (!current) return;
+    if (!accounts.length) return toast("This set is empty", true);
+    if (!confirm("Move all " + accounts.length + " account(s) in this set into the Account Pool? They'll be removed from the stash.")) return;
+    doMove(null, "all");
+  });
+  document.getElementById("moveSelBtn").addEventListener("click", function(){
+    var ids = selectedIds();
+    if (!ids.length) return;
+    if (!confirm("Move " + ids.length + " selected account(s) into the Account Pool? They'll be removed from the stash.")) return;
+    doMove(ids, "selected");
+  });
+  async function moveWholeSet(id) {
+    var s = sets.find(function(x){ return x.id === id; });
+    if (!s) return;
+    if (!s.total) return toast("That set is empty", true);
+    if (!confirm('Move all ' + s.total + ' account(s) from "' + s.name + '" into the Account Pool?')) return;
+    try {
+      var data = await api("/account-stash/sets/" + id + "/move-to-pool", { method:"POST", body: JSON.stringify({}) });
+      var parts = [];
+      if (data.added) parts.push(data.added + " added");
+      if (data.merged) parts.push(data.merged + " merged");
+      if (data.alreadyInUseCount) parts.push(data.alreadyInUseCount + " already in use");
+      toast("Moved: " + (parts.join(", ") || "nothing new"));
+      loadSets();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  // -------------------------------------------------- reveal / delete account
+  async function revealAccount(id) {
+    try {
+      var d = await api("/account-stash/" + id + "/password");
+      var box = document.getElementById("revealBox");
+      box.innerHTML =
+        '<div><span class="k">password:</span> ' + esc(d.password || "—") + '</div>' +
+        '<div><span class="k">email:</span> ' + esc(d.email || "—") + '</div>' +
+        '<div><span class="k">clientSecret:</span> ' + esc(d.clientSecret || "—") + '</div>' +
+        '<div><span class="k">uniqueId:</span> ' + esc(d.uniqueId || "—") + '</div>' +
+        '<div><span class="k">twitchId:</span> ' + esc(d.twitchId || "—") + '</div>';
+      document.getElementById("revealBg").classList.add("show");
+    } catch (e) { toast(e.message, true); }
+  }
+  document.getElementById("revealClose").addEventListener("click", function(){ document.getElementById("revealBg").classList.remove("show"); });
+  document.getElementById("revealDone").addEventListener("click", function(){ document.getElementById("revealBg").classList.remove("show"); });
+  async function deleteAccount(id) {
+    if (!confirm("Delete this account from the stash?")) return;
+    try { await api("/account-stash/" + id, { method:"DELETE" }); toast("Deleted"); await refreshCurrent(); }
+    catch (e) { toast(e.message, true); }
+  }
+
+  // close modals on backdrop click
+  ["setBg","importBg","revealBg"].forEach(function(id){
+    document.getElementById(id).addEventListener("click", function(e){ if (e.target === this) this.classList.remove("show"); });
+  });
+
+  loadSets();
+</script>
+</body>
+</html>
