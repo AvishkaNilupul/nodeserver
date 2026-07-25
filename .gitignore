@@ -21,11 +21,32 @@ inventory.json
 
 # Uploaded chat images
 public/uploads
-# Deploy snapshots created on the server during manual zip deploys
-_deploy_backup_*/
 
-# Ad-hoc backup copies and one-off diagnostic scripts (never part of the app)
-_bk_*.js
+# ---- Server-side clutter from manual zip deploys (keep git status clean) ----
+
+# Deploy snapshots (dirs AND stray files like _deploy_backup_marketplaces_*.js)
+_deploy_backup_*
+
+# Ad-hoc backups & one-off diagnostic/temp scripts (never part of the app)
+_bk_*
+_cred_backfill_backup_*
 *_TEMP.js
 *.bak
-server.js.bak-*
+*.bak-*
+*.bak_*
+server.js.bak*
+
+# macOS AppleDouble metadata files (._something)
+._*
+.DS_Store
+
+# Python bytecode cache from the marketplace service
+__pycache__/
+*.pyc
+
+# Runtime-generated assets & local host/settings config (live-only, not in git)
+public/drop-images/
+config/botHosts.json
+config/botHosts.json.bak*
+utils/settings.json
+.env.bak*
