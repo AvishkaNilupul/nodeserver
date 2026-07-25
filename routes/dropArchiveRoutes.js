@@ -15,6 +15,41 @@ const {
 
 const router = express.Router();
 
+// ------------------------------------------------------------------
+// Short-lived read cache for the heavy archive aggregations
+// (overview / by-game / by-item). Each re-scans 150k+ drops, and the page
+// fires all three on load and again on every tab switch, so without a cache a
+// single superadmin flipping tabs re-runs the full pipelines constantly.
+// Entries live for DROP_CACHE_TTL; any successful write to a /drops-archive/*
+// endpoint clears the cache, so the owner's own scans/sells/edits show up at
+// once. Worst-case staleness for passive viewing is one TTL window.
+// ------------------------------------------------------------------
+const DROP_CACHE_TTL = 15000;
+const dropCache = new Map(); // key -> { exp, data }
+
+function dropCacheGet(key) {
+  const hit = dropCache.get(key);
+  if (hit && hit.exp > Date.now()) return hit.data;
+  if (hit) dropCache.delete(key);
+  return null;
+}
+function dropCacheSet(key, data) {
+  dropCache.set(key, { exp: Date.now() + DROP_CACHE_TTL, data });
+}
+function bustDropCache() {
+  dropCache.clear();
+  _exclCache = null;
+}
+
+// Invalidate on any successful mutation so writes are reflected immediately.
+router.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD") return next();
+  res.on("finish", () => {
+    if (res.statusCode < 400) bustDropCache();
+  });
+  next();
+});
+
 // Same filename rules as the bot manager.
 const FILE_RE = /^config(_\d{1,3})?\.json$/;
 
@@ -94,6 +129,17 @@ async function excludedAccountIds() {
     shadowDuplicateIds(),
   ]);
   return bad.concat(shadow);
+}
+
+// Cached wrapper: excludedAccountIds() runs two aggregations and is called by
+// every heavy read endpoint, so one page load would otherwise recompute the
+// same set three times. Memoized for DROP_CACHE_TTL; cleared by bustDropCache.
+let _exclCache = null; // { exp, ids }
+async function excludedAccountIdsCached() {
+  if (_exclCache && _exclCache.exp > Date.now()) return _exclCache.ids;
+  const ids = await excludedAccountIds();
+  _exclCache = { exp: Date.now() + DROP_CACHE_TTL, ids };
+  return ids;
 }
 
 function containerForFile(file) {
@@ -1049,7 +1095,9 @@ const itemKeyExpr = {
 // reported separately as poolItems/poolDrops instead of inflating them.
 router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
   try {
-    const badIds = await excludedAccountIds();
+    const cached = dropCacheGet("overview");
+    if (cached) return res.json(cached);
+    const badIds = await excludedAccountIdsCached();
     const dropMatch = {
       account: { $nin: badIds },
       accountModel: { $ne: "AvailableAccount" },
@@ -1085,7 +1133,7 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         { $count: "n" },
       ]),
     ]);
-    res.json({
+    const payload = {
       success: true,
       overview: {
         accounts,
@@ -1096,7 +1144,9 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         poolDrops,
         poolItems: (poolItems[0] && poolItems[0].n) || 0,
       },
-    });
+    };
+    dropCacheSet("overview", payload);
+    res.json(payload);
   } catch (err) {
     console.error("drops-archive overview error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -1108,7 +1158,9 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
 // not wired into a bot yet) rather than merging them into one number.
 router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
   try {
-    const badIds = await excludedAccountIds();
+    const cached = dropCacheGet("by-game");
+    if (cached) return res.json(cached);
+    const badIds = await excludedAccountIdsCached();
     const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
     const rows = await DropLog.aggregate([
       { $match: { account: { $nin: badIds } } },
@@ -1144,7 +1196,9 @@ router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
       },
       { $sort: { totalCount: -1 } },
     ]);
-    res.json({ success: true, games: rows });
+    const payload = { success: true, games: rows };
+    dropCacheSet("by-game", payload);
+    res.json(payload);
   } catch (err) {
     console.error("drops-archive by-game error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -1155,11 +1209,15 @@ router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
 // the inventory view for selling: name, game, image, total held, # accounts.
 router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
   try {
-    const badIds = await excludedAccountIds();
-    const match = { account: { $nin: badIds } };
     const game = String(req.query.game || "").trim();
-    if (game) match.game = game === "Other rewards" ? "" : game;
     const search = String(req.query.search || "").trim();
+    const cacheKey = "by-item:" + game + "\u0000" + search;
+    const cached = dropCacheGet(cacheKey);
+    if (cached) return res.json(cached);
+
+    const badIds = await excludedAccountIdsCached();
+    const match = { account: { $nin: badIds } };
+    if (game) match.game = game === "Other rewards" ? "" : game;
     if (search) match.name = searchRegex(search);
 
     const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
@@ -1289,9 +1347,13 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
       })
       // Same order the old { $sort: { accounts: -1, totalCount: -1 } } gave.
       // There are ~1.3k items, so the 2000 cap never actually clips.
-      .sort((a, b) => b.accounts - a.accounts || b.totalCount - a.totalCount)
-      .slice(0, 2000);
-    res.json({ success: true, items: rows });
+      .sort((a, b) => b.accounts - a.accounts || b.totalCount - a.totalCount);
+    // ~1.3k items today; expose hasMore so the UI can flag if the cap ever bites.
+    const LIMIT = 2000;
+    const hasMore = rows.length > LIMIT;
+    const payload = { success: true, items: rows.slice(0, LIMIT), hasMore };
+    dropCacheSet(cacheKey, payload);
+    res.json(payload);
   } catch (err) {
     console.error("drops-archive by-item error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });

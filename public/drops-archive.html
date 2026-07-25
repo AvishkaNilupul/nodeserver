@@ -3091,7 +3091,29 @@
       loadOverview();
       loadProgress();
       loadItems();
-      setInterval(loadProgress, 8000);
+
+      // Poll the scan progress every 8s, but only while the tab is visible.
+      // A left-open background tab used to hammer /progress 24/7; now it pauses
+      // when hidden and refreshes immediately on return.
+      let _progressTimer = null;
+      function startProgressPolling() {
+        if (_progressTimer) return;
+        _progressTimer = setInterval(loadProgress, 8000);
+      }
+      function stopProgressPolling() {
+        if (!_progressTimer) return;
+        clearInterval(_progressTimer);
+        _progressTimer = null;
+      }
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          stopProgressPolling();
+        } else {
+          loadProgress();
+          startProgressPolling();
+        }
+      });
+      if (!document.hidden) startProgressPolling();
     </script>
     <script src="/admin-nav.js"></script>
   </body>
