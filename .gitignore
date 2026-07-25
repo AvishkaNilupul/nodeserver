@@ -21,3 +21,11 @@ inventory.json
 
 # Uploaded chat images
 public/uploads
+# Deploy snapshots created on the server during manual zip deploys
+_deploy_backup_*/
+
+# Ad-hoc backup copies and one-off diagnostic scripts (never part of the app)
+_bk_*.js
+*_TEMP.js
+*.bak
+server.js.bak-*
