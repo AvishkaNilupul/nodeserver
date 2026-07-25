@@ -72,6 +72,13 @@ async function getOrdersBySeller(sellerId) {
   return orders.map(({ _id, ...rest }) => ({ id: _id.toString(), ...rest }));
 }
 
+// Every order across all sellers, newest first. Used by the superadmin orders
+// view so the site owner can see (and copy) every seller's credentials.
+async function getAllOrders() {
+  const orders = await Order.find({}).sort({ createdAt: -1 }).lean();
+  return orders.map(({ _id, ...rest }) => ({ id: _id.toString(), ...rest }));
+}
+
 function addOrder({ sellerId, sellerName, orderId, username, password, accounts }) {
   const list = Array.isArray(accounts)
     ? accounts
@@ -118,6 +125,12 @@ function deleteOrder(id, sellerId) {
   return Order.deleteOne({ _id: id, sellerId });
 }
 
+// Superadmin delete: not scoped to a seller, so the site owner can remove any
+// seller's order from the combined view.
+function deleteAnyOrder(id) {
+  return Order.deleteOne({ _id: id });
+}
+
 module.exports = {
   getOrderByOrderId,
   getOrderByGamerTag,
@@ -126,7 +139,9 @@ module.exports = {
   authorizeBuyer,
   authorizeBuyerByOrder,
   getOrdersBySeller,
+  getAllOrders,
   addOrder,
   orderAccounts,
   deleteOrder,
+  deleteAnyOrder,
 };
