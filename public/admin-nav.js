@@ -83,6 +83,9 @@
     accountPool:
       '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>' +
       '<path d="M7 11V7a5 5 0 0 1 10 0v4"></path>',
+    accountStash:
+      '<path d="M3 7l1.5 12a2 2 0 0 0 2 1.8h11a2 2 0 0 0 2-1.8L21 7"></path>' +
+      '<path d="M2 7h20M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
     japanese:
       '<path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 ' +
@@ -122,6 +125,12 @@
           href: "/account-pool.html",
           label: "Account pool",
           icon: ICONS.accountPool,
+          superOnly: true,
+        },
+        {
+          href: "/account-stash.html",
+          label: "Account stash",
+          icon: ICONS.accountStash,
           superOnly: true,
         },
       ],
