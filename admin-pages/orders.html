@@ -77,6 +77,8 @@
     .icon-btn.danger:hover { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
     .icon-btn:hover { color: var(--accent); border-color: #c7d2fe; }
     .empty { text-align: center; color: var(--muted); padding: 50px 0; font-size: 14px; }
+    .s-only { display: none; }
+    body.is-super .s-only { display: table-cell; }
 
     .modal-bg { position: fixed; inset: 0; background: rgba(15,23,42,0.45); backdrop-filter: blur(3px); display: none; place-items: center; z-index: 50; }
     .modal-bg.show { display: grid; }
@@ -163,7 +165,7 @@
 
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Order ID</th><th>Username</th><th>Password</th><th>Status</th><th>Buyer</th><th></th></tr></thead>
+          <thead><tr><th>Order ID</th><th class="s-only">Seller</th><th>Username</th><th>Password</th><th>Status</th><th>Buyer</th><th></th></tr></thead>
           <tbody id="ordersBody"></tbody>
         </table>
       </div>
@@ -199,6 +201,7 @@
   <script>
     let allOrders = [];
     let activeFilter = "all";
+    let isSuper = false;
 
     const ICON_LINK =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"></path><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"></path></svg>';
@@ -296,6 +299,38 @@
       render();
     }
 
+    // Password cell: regular sellers see a mask; the superadmin sees the real
+    // credential(s) plus a copy button.
+    function passwordCell(o) {
+      const accts = orderAccounts(o);
+      const hasPass = accts.some((a) => a.password);
+      if (!hasPass) return "&mdash;";
+      if (!isSuper) return "&bull;&bull;&bull;&bull;&bull;&bull;";
+      let out = '<span class="mono">' + (esc(accts[0].password) || "&mdash;") + "</span>";
+      if (accts.length > 1) {
+        const rest = accts
+          .slice(1)
+          .map((a) => esc(a.password))
+          .filter(Boolean)
+          .join(", ");
+        out +=
+          '<span class="acct-more" title="' +
+          rest +
+          '">+' +
+          (accts.length - 1) +
+          " more</span>";
+      }
+      out += '<button class="copy j-copypass" title="Copy password">' + ICON_COPY + "</button>";
+      return out;
+    }
+
+    function allPasswords(o) {
+      return orderAccounts(o)
+        .map((a) => a.password)
+        .filter(Boolean)
+        .join("\n");
+    }
+
     function render() {
       const q = document.getElementById("searchInput").value.toLowerCase();
       const body = document.getElementById("ordersBody");
@@ -310,7 +345,8 @@
           orderAccounts(o).some((a) =>
             String(a.username || "").toLowerCase().includes(q)
           ) ||
-          String(o.gamerTag || "").toLowerCase().includes(q)
+          String(o.gamerTag || "").toLowerCase().includes(q) ||
+          String(o.sellerName || "").toLowerCase().includes(q)
         );
       });
 
@@ -323,16 +359,17 @@
         tr.innerHTML =
           '<td><span class="mono">' +
           esc(o.orderId) +
-          '</span><button class="copy" title="Copy order ID">' +
+          '</span><button class="copy j-copyid" title="Copy order ID">' +
           ICON_COPY +
           "</button></td>" +
+          '<td class="cred s-only">' +
+          (esc(o.sellerName || o.sellerId) || "&mdash;") +
+          "</td>" +
           '<td class="cred">' +
           usernameCell(o) +
           "</td>" +
           '<td class="cred">' +
-          (orderAccounts(o).some((a) => a.password)
-            ? "&bull;&bull;&bull;&bull;&bull;&bull;"
-            : "&mdash;") +
+          passwordCell(o) +
           "</td>" +
           "<td>" +
           (o.used
@@ -343,17 +380,18 @@
           (esc(o.gamerTag) || "&mdash;") +
           "</td>" +
           '<td><div class="row-actions">' +
-          '<button class="icon-btn" title="Copy redeem link">' +
+          '<button class="icon-btn j-link" title="Copy redeem link">' +
           ICON_LINK +
           "</button>" +
-          '<button class="icon-btn danger" title="Delete order">' +
+          '<button class="icon-btn danger j-del" title="Delete order">' +
           ICON_TRASH +
           "</button></div></td>";
 
-        const buttons = tr.querySelectorAll("button");
-        buttons[0].onclick = () => copyText(o.orderId, "Order ID");
-        buttons[1].onclick = () => copyLink(o.orderId);
-        buttons[2].onclick = () => deleteOrder(o.id);
+        tr.querySelector(".j-copyid").onclick = () => copyText(o.orderId, "Order ID");
+        const pc = tr.querySelector(".j-copypass");
+        if (pc) pc.onclick = () => copyText(allPasswords(o), "Password");
+        tr.querySelector(".j-link").onclick = () => copyLink(o.orderId);
+        tr.querySelector(".j-del").onclick = () => deleteOrder(o.id);
         body.appendChild(tr);
       });
     }
@@ -492,12 +530,22 @@
           const data = await r.json();
           const admin = data && data.admin ? data.admin : {};
           const name = admin.username || "Admin";
+          isSuper = admin.role === "superadmin";
+          document.body.classList.toggle("is-super", isSuper);
           document.getElementById("meName").innerText = name;
           document.getElementById("meRole").innerText =
-            "Seller" + (admin.id ? " \u00b7 " + admin.id : "");
+            (isSuper ? "Superadmin" : "Seller") +
+            (admin.id ? " \u00b7 " + admin.id : "");
           document.getElementById("meAvatar").innerText = name
             .slice(0, 2)
             .toUpperCase();
+          if (isSuper) {
+            const sub = document.querySelector(".topbar .sub");
+            if (sub) sub.innerText = "All sellers' orders \u2014 credentials visible";
+          }
+          // whoami may resolve after the first (masked) render, so redraw once
+          // we know the role to reveal passwords / the seller column.
+          render();
         }
       } catch (e) {
         /* non-fatal */
