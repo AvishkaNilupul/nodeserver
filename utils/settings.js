@@ -26,6 +26,13 @@ const AUTO_FARM_DEFAULTS = {
   // GGSel picks per game automatically; this is only a manual override.
   platiCategoryId: "203508",
   ggselCategoryId: "",
+  // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
+  // running auto-bots (per-account FavouriteGames) before creating another
+  // container, and delete a bot's container+compose service once its campaign
+  // ends and no other task shares it (config is renamed, never deleted, so
+  // tokens survive; accounts return to the pool for the next event).
+  consolidate: true,
+  deleteFinishedBots: true,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
