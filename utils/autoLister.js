@@ -239,6 +239,196 @@ async function pickDeliveryAccounts(task, max) {
   return out;
 }
 
+// ---- Secondary-market publishers, shared by the initial listing and the
+// sweep retry. Each returns { externalId, url, qty } on success and throws
+// on failure; the caller records the error without touching other markets.
+async function publishPlatiShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  categoryId,
+}) {
+  const r = await mp.digisellerPublish({
+    title,
+    description,
+    priceUsd: price,
+    categories: [{ owner: 1, categoryId }],
+  });
+  try {
+    await mp.digisellerAddContent(
+      r.externalId,
+      accounts.map((a) => digisellerDeliveryCode(a.login, a.password)),
+    );
+  } catch (err) {
+    await mp.digisellerDelist(r.externalId).catch(() => {});
+    throw err;
+  }
+  if (img) {
+    await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
+  }
+  await MarketplaceListing.create({
+    set: set._id,
+    marketplace: "digiseller",
+    externalId: r.externalId,
+    url: r.url || "",
+    title,
+    description,
+    price,
+    status: "active",
+    note: "auto-farm: " + accounts.length + " account(s)",
+    autoDeliver: true,
+    accountLogin: accounts.map((a) => a.login).join(", "),
+    qtyTarget: accounts.length,
+  });
+  return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
+}
+
+async function publishGgselShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  categoryId,
+}) {
+  const r = await mp.ggselPublish({
+    title,
+    description,
+    priceUsd: price,
+    categoryId,
+    delivery: "auto",
+    coverImagePath: img,
+    products: accounts.map((a) => ggselDeliveryCode(a.login, a.password)),
+  });
+  await MarketplaceListing.create({
+    set: set._id,
+    marketplace: "ggsel",
+    externalId: r.externalId,
+    url: r.url || "",
+    title,
+    description,
+    price,
+    status: "active",
+    note:
+      (r.note ? r.note + " " : "") +
+      "auto-farm: " +
+      accounts.length +
+      " account(s)",
+    autoDeliver: true,
+    accountLogin: accounts.map((a) => a.login).join(", "),
+    qtyTarget: accounts.length,
+  });
+  return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
+}
+
+// A transient failure (e.g. a Digiseller login timeout) must not permanently
+// cost a market. On every sweep tick where the Gameflip listing is alive,
+// try to publish any secondary market that has no externalId yet, using
+// accounts not attached to any active listing. Title/description/price come
+// from the stored Gameflip listing row so all markets stay identical.
+async function retryMissingSecondaries(task) {
+  const L = task.listing || {};
+  const platiMissing = !(L.plati && L.plati.externalId);
+  const ggselMissing = !(L.ggsel && L.ggsel.externalId);
+  if (!platiMissing && !ggselMissing) return null;
+
+  const spare = await pickDeliveryAccounts(task, 6);
+  if (!spare.length) return null;
+
+  const gfRow = await MarketplaceListing.findOne({
+    marketplace: "gameflip",
+    externalId: L.externalId,
+  }).lean();
+  const set = L.setId ? await DropSet.findById(L.setId) : null;
+  if (!gfRow || !set) return null;
+
+  const af = settings.getAutoFarm();
+  const targets = [];
+  if (platiMissing && af.platiCategoryId) targets.push("plati");
+  if (ggselMissing) {
+    let cat = "";
+    try {
+      cat = await mp.ggselResolveCategoryId(task.game);
+    } catch {
+      cat = "";
+    }
+    if (!cat) cat = String(af.ggselCategoryId || "");
+    if (cat) targets.push("ggsel:" + cat);
+  }
+  if (!targets.length) return null;
+
+  const shares = {};
+  spare.forEach((acc, i) => {
+    const t = targets[i % targets.length];
+    (shares[t] = shares[t] || []).push(acc);
+  });
+
+  let img = "";
+  try {
+    img = await buildSetGridImage(set);
+  } catch {
+    img = "";
+  }
+  const base = {
+    set,
+    title: gfRow.title,
+    description: gfRow.description,
+    price: gfRow.price,
+    img,
+  };
+  const retried = [];
+  try {
+    for (const t of targets) {
+      const accounts = shares[t] || [];
+      if (!accounts.length) continue;
+      if (t === "plati") {
+        try {
+          const r = await publishPlatiShare({
+            ...base,
+            accounts,
+            categoryId: af.platiCategoryId,
+          });
+          task.listing.plati = { ...r, error: "" };
+          retried.push("plati");
+        } catch (err) {
+          task.listing.plati = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
+      } else {
+        try {
+          const r = await publishGgselShare({
+            ...base,
+            accounts,
+            categoryId: t.slice("ggsel:".length),
+          });
+          task.listing.ggsel = { ...r, error: "" };
+          retried.push("ggsel");
+        } catch (err) {
+          task.listing.ggsel = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
+      }
+    }
+  } finally {
+    if (img) await fsp.unlink(img).catch(() => {});
+  }
+  task.markModified("listing");
+  await task.save();
+  return retried.length ? retried : null;
+}
+
 // Main entry: called by the auto-farmer right after a task's bots start (and
 // re-tried on later ticks while no listing exists). Dry-run stores a preview.
 async function listActivatedTask(taskId, { dryRun = false } = {}) {
@@ -250,6 +440,17 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     try {
       const status = await mp.gameflipListingStatus(task.listing.externalId);
       if (status && status !== "expired") {
+        // Gameflip is alive — use this tick to fill in any secondary market
+        // that failed transiently on the original attempt (e.g. Digiseller
+        // login timeout).
+        if (!dryRun) {
+          try {
+            const retried = await retryMissingSecondaries(task);
+            if (retried) return { skipped: "already listed", retried };
+          } catch {
+            /* never let a retry error break the sweep */
+          }
+        }
         return { skipped: "already listed" };
       }
     } catch (e) {
@@ -382,43 +583,18 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     // the Gameflip listing; it is recorded and retried by hand if needed.
     if (platiEnabled && shares.plati.length) {
       try {
-        const r = await mp.digisellerPublish({
-          title,
-          description,
-          priceUsd: price,
-          categories: [{ owner: 1, categoryId: af.platiCategoryId }],
-        });
-        try {
-          await mp.digisellerAddContent(
-            r.externalId,
-            shares.plati.map((a) =>
-              digisellerDeliveryCode(a.login, a.password),
-            ),
-          );
-        } catch (err) {
-          await mp.digisellerDelist(r.externalId).catch(() => {});
-          throw err;
-        }
-        if (img) {
-          await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
-        }
-        await MarketplaceListing.create({
-          set: set._id,
-          marketplace: "digiseller",
-          externalId: r.externalId,
-          url: r.url || "",
+        const r = await publishPlatiShare({
+          set,
           title,
           description,
           price,
-          status: "active",
-          note: "auto-farm: " + shares.plati.length + " account(s)",
-          autoDeliver: true,
-          accountLogin: shares.plati.map((a) => a.login).join(", "),
-          qtyTarget: shares.plati.length,
+          img,
+          accounts: shares.plati,
+          categoryId: af.platiCategoryId,
         });
         plati.externalId = r.externalId;
-        plati.url = r.url || "";
-        plati.qty = shares.plati.length;
+        plati.url = r.url;
+        plati.qty = r.qty;
       } catch (err) {
         plati.error = err.message;
       }
@@ -433,38 +609,18 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     // offer). Same isolation: failures are recorded, not fatal.
     if (ggselCategoryId && shares.ggsel.length) {
       try {
-        const r = await mp.ggselPublish({
-          title,
-          description,
-          priceUsd: price,
-          categoryId: ggselCategoryId,
-          delivery: "auto",
-          coverImagePath: img,
-          products: shares.ggsel.map((a) =>
-            ggselDeliveryCode(a.login, a.password),
-          ),
-        });
-        await MarketplaceListing.create({
-          set: set._id,
-          marketplace: "ggsel",
-          externalId: r.externalId,
-          url: r.url || "",
+        const r = await publishGgselShare({
+          set,
           title,
           description,
           price,
-          status: "active",
-          note:
-            (r.note ? r.note + " " : "") +
-            "auto-farm: " +
-            shares.ggsel.length +
-            " account(s)",
-          autoDeliver: true,
-          accountLogin: shares.ggsel.map((a) => a.login).join(", "),
-          qtyTarget: shares.ggsel.length,
+          img,
+          accounts: shares.ggsel,
+          categoryId: ggselCategoryId,
         });
         ggsel.externalId = r.externalId;
-        ggsel.url = r.url || "";
-        ggsel.qty = shares.ggsel.length;
+        ggsel.url = r.url;
+        ggsel.qty = r.qty;
       } catch (err) {
         ggsel.error = err.message;
       }
