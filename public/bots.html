@@ -826,6 +826,7 @@
           (t.listing && t.listing.externalId
             ? '<div class="ab-farm">listed: <a href="' + esc(t.listing.url) + '" target="_blank" rel="noopener">' + esc(t.listing.title) + "</a> · $" + t.listing.price +
               (t.listing.heldBack > 0 ? " · " + t.listing.heldBack + " held for post-event" : "") +
+              ' · <a href="#" onclick="afDelist(event, \'' + t._id + '\')" style="color:var(--red)">delist</a>' +
               (t.listing.postEvent ? ' · <span class="chip" style="background:#ecfdf5;color:#047857">post-event +50%</span>' : "") + "</div>"
             : (t.wouldList && t.wouldList.title
               ? '<div class="ab-farm muted">would list: ' + esc(t.wouldList.title) + " · $" + t.wouldList.price + " [dry-run]</div>"
@@ -847,6 +848,15 @@
       afPollProgress();
     } catch (e) { toast("Scan failed: " + e.message, true); }
     finally { if (btn) { btn.disabled = false; btn.textContent = "Scan now"; } }
+  };
+  window.afDelist = async function (ev, id) {
+    ev.preventDefault();
+    if (!confirm("Remove this listing from Gameflip and clear it here? The next scan can re-list it fresh.")) return;
+    try {
+      const r = await api("/auto-farm/tasks/" + id + "/delist", { method: "POST" });
+      toast("Delisted (" + (r.remote || "removed") + ")");
+    } catch (e) { toast("Delist failed: " + e.message, true); }
+    loadAutoFarm();
   };
   window.afRescan = async function (btn) {
     if (!confirm("Fresh rescan: forget all prior skip/failed/completed decisions for live campaigns and re-decide everything from scratch (fresh market research)?")) return;
