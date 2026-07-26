@@ -712,6 +712,10 @@
             <label>Probe batch size</label>
             <input type="number" id="afProbeSize" min="1" max="30" />
           </div>
+          <div>
+            <label>Stock per market (floor)</label>
+            <input type="number" id="afPerMarketStock" min="1" max="10" />
+          </div>
           <div class="field" style="max-width: 150px">
             <label>Max auto bots</label>
             <input type="number" id="afMaxAutoBots" min="1" max="20" />
@@ -1392,6 +1396,7 @@
           $("afAccountsPerBot").value = st.accountsPerBot;
           $("afPoolReserve").value = st.poolReserve;
           $("afProbeSize").value = st.probeSize;
+          $("afPerMarketStock").value = st.perMarketStock || 3;
           $("afMaxAutoBots").value = st.maxAutoBots;
           $("afMinHoursLeft").value = st.minHoursLeft;
           $("afPlatiCategoryId").value = st.platiCategoryId || "";
@@ -1423,6 +1428,7 @@
             accountsPerBot: $("afAccountsPerBot").value,
             poolReserve: $("afPoolReserve").value,
             probeSize: $("afProbeSize").value,
+            perMarketStock: $("afPerMarketStock").value,
             maxAutoBots: $("afMaxAutoBots").value,
             minHoursLeft: $("afMinHoursLeft").value,
             platiCategoryId: $("afPlatiCategoryId").value,

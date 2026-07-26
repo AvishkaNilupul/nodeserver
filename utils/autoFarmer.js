@@ -20,6 +20,7 @@ const DropLog = require("../models/DropLog");
 const marketResearch = require("./marketResearch");
 const hosts = require("./botHosts");
 const botFactory = require("./botFactory");
+const mp = require("./marketplaces");
 const settings = require("./settings");
 const { sendTelegram } = require("./telegram");
 
@@ -241,6 +242,27 @@ function hoursLeft(endAt) {
 // log-damped demand points. A game our own data proves sells never gets
 // skipped just because external scouts are quiet.
 // Returns { target, tierNote, skip, effective } — skip=true means proven low demand.
+// Minimum accounts a campaign needs so EVERY enabled marketplace (gameflip +
+// plati + ggsel) can hold perMarketStock sellable accounts, doubled to keep
+// the 50% post-event holdback intact. With 3 markets x 3 x 2 = 18 the pool
+// (180+ ready) stops starving plati/ggsel ("no spare account for this
+// market yet") while maxPerGame still caps runaway allocation.
+function marketStockFloor(af) {
+  // Same enablement signals the auto-lister uses to decide which markets get
+  // a share: plati needs platiCategoryId, ggsel rides along when its key is
+  // configured (category can come from the drop or ggselCategoryId).
+  let markets = 1; // gameflip is the primary and always listed
+  if (af.platiCategoryId) markets++;
+  try {
+    const ks = mp.keyStatus();
+    if (ks && ks.ggsel && ks.ggsel.configured) markets++;
+  } catch {
+    /* marketplaces module unavailable — floor covers fewer markets */
+  }
+  const per = Math.max(1, Number(af.perMarketStock) || 3);
+  return Math.min(markets * per * 2, af.maxPerGame);
+}
+
 function demandAllocation(research, af, internalSales = 0) {
   const salesBoost =
     internalSales > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(internalSales) : 0;
@@ -648,7 +670,9 @@ async function processCampaign(c, ctx) {
     farmMap.wildcard.size;
   const archiveHolders = await archiveHoldersForCampaign(c);
   const covered = manualFarmers + archiveHolders;
-  const wanted = Math.min(alloc.target, af.maxPerGame);
+  // Non-probe campaigns must at least fill every enabled market's shelf.
+  const floor = alloc.probe ? 0 : marketStockFloor(af);
+  const wanted = Math.min(Math.max(alloc.target, floor), af.maxPerGame);
   const uncovered = Math.max(0, wanted - covered);
   if (uncovered < 1) {
     await record({
@@ -936,6 +960,103 @@ async function executeTask(task, ctx) {
 //   scanner sells from).
 // - This task's accounts are recycled back to the ready pool (unless the
 //   account itself was sold) so the next event reuses them in fresh bots.
+// Retro-reaper: tasks that completed BEFORE bot retirement shipped left
+// their containers behind (stopped or even still running). Apply the same
+// delete process to them: shared-with-active containers are spared, the
+// rest get container removed + compose service dropped + config renamed.
+// Idempotent by construction — a reaped bot's config no longer exists under
+// its old name, so it's skipped on every later pass. Manual bots are never
+// touched (only bots recorded on auto-farm tasks are considered).
+async function reapRetiredBots(af, host, progress) {
+  if (af.deleteFinishedBots === false || !host) return 0;
+  const done = await AutoFarmTask.find(
+    { status: "completed", "bots.0": { $exists: true } },
+    { bots: 1, game: 1, assignedAccounts: 1 },
+  ).lean();
+  if (!done.length) return 0;
+  const active = await AutoFarmTask.find(
+    { status: "active" },
+    { bots: 1 },
+  ).lean();
+  const activeKeys = new Set();
+  for (const t of active) {
+    for (const b of t.bots || []) activeKeys.add(b.host + "|" + b.container);
+  }
+  let reaped = 0;
+  const seen = new Set();
+  for (const t of done) {
+    for (const b of t.bots || []) {
+      const key = b.host + "|" + b.container;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (activeKeys.has(key)) continue; // an active campaign shares it
+      const h = hosts.resolveHost(b.host);
+      if (!h || h.id !== host.id) continue;
+      try {
+        if (!(await hosts.exists(h, b.file))) continue; // already reaped
+      } catch {
+        continue;
+      }
+      try {
+        await botFactory.stopContainer(h, b.container).catch(() => {});
+        await botFactory.deleteBot(h, b.file, b.container);
+        reaped++;
+        progress("Reaped leftover bot " + b.container + " (" + t.game + ")");
+      } catch {
+        /* best-effort — retried next tick while the config exists */
+      }
+    }
+  }
+  // Retro-recycle: accounts of pre-retirement completed tasks were left
+  // "claimed" in the pool forever. Return them (minus sold ones) so the
+  // next event can reuse them — same rules as the live retirement path.
+  let recycled = 0;
+  try {
+    const BotAccount = require("../models/BotAccount");
+    const logins = [];
+    for (const t of done) {
+      for (const u of t.assignedAccounts || []) logins.push(String(u));
+    }
+    if (logins.length) {
+      const soldRows = await BotAccount.find(
+        { login: { $in: logins }, soldAt: { $ne: null } },
+        { login: 1 },
+      ).lean();
+      const sold = new Set(soldRows.map((r) => String(r.login).toLowerCase()));
+      const back = logins.filter((u) => !sold.has(u.toLowerCase()));
+      if (back.length) {
+        const r = await AvailableAccount.updateMany(
+          {
+            usernameLower: { $in: back.map((u) => u.toLowerCase()) },
+            status: "claimed",
+          },
+          {
+            $set: {
+              status: "available",
+              claimedAt: null,
+              claimedNote: "recycled by retro-reaper",
+            },
+          },
+        );
+        recycled = (r && r.modifiedCount) || 0;
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+  if (recycled)
+    progress("Retro-recycled " + recycled + " account(s) to the pool.");
+  if (reaped) {
+    await tg(
+      "\ud83e\uddf9 Auto-farm cleanup \u2014 reaped " +
+        reaped +
+        " leftover bot container(s) from campaigns that ended before " +
+        "bot retirement shipped.",
+    );
+  }
+  return reaped;
+}
+
 async function completeEndedTasks() {
   const active = await AutoFarmTask.find({ status: "active" });
   let completed = 0;
@@ -1248,7 +1369,10 @@ async function runOnce() {
       } else {
         requests.push({
           key: c.campaignId,
-          want: Math.min(alloc.target, af.maxPerGame),
+          want: Math.min(
+            Math.max(alloc.target, alloc.probe ? 0 : marketStockFloor(af)),
+            af.maxPerGame,
+          ),
           weight: Math.max(1, Number(alloc.effective || 0) || 5),
         });
       }
@@ -1285,6 +1409,43 @@ async function runOnce() {
         if (topped) progress("Backfill added " + topped + " account(s) total.");
       } catch (e) {
         progress("Backfill failed: " + e.message, "warn");
+      }
+      // Retro-reaper: delete leftover containers from campaigns that ended
+      // before bot retirement shipped (idempotent, skips shared bots).
+      try {
+        const reaped = await reapRetiredBots(af, host, progress);
+        if (reaped) progress("Reaped " + reaped + " leftover bot(s).");
+      } catch (e) {
+        progress("Reaper failed: " + e.message, "warn");
+      }
+    }
+
+    // Refill sweep: every LISTED active task gets its markets topped up —
+    // sold-out (or shorted) gameflip/plati/ggsel stock is refilled from
+    // spare accounts, then the post-event holdback, no delist/relist.
+    if (!af.dryRun) {
+      const autoListerR = require("./autoLister");
+      const listed = await AutoFarmTask.find({
+        status: "active",
+        "listing.externalId": { $nin: ["", null] },
+      });
+      for (const t of listed) {
+        try {
+          const acts = await autoListerR.refillMarkets(t, {
+            perMarketStock: af.perMarketStock,
+          });
+          if (acts) {
+            progress("Refilled " + t.game + ": " + acts.join(", "));
+            await tg(
+              "\ud83d\udd04 Auto-refill \u2014 " +
+                t.game +
+                "\n" +
+                acts.join(", "),
+            );
+          }
+        } catch (e) {
+          progress("Refill " + t.game + " failed: " + e.message, "warn");
+        }
       }
     }
 
@@ -1385,7 +1546,10 @@ async function backfillActiveTasks(af, host, progress) {
   let added = 0;
   for (const task of tasks) {
     const target = Math.min(
-      Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
+      Math.max(
+        Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
+        marketStockFloor(af),
+      ),
       af.maxPerGame,
     );
     const have = (task.assignedAccounts || []).length;
@@ -1566,6 +1730,7 @@ module.exports = {
   status,
   executeTask,
   completeEndedTasks,
+  reapRetiredBots,
   // exported for tests
   fairShare,
   demandAllocation,

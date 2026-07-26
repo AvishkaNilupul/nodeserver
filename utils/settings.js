@@ -33,6 +33,11 @@ const AUTO_FARM_DEFAULTS = {
   // tokens survive; accounts return to the pool for the next event).
   consolidate: true,
   deleteFinishedBots: true,
+  // Stock floor: keep at least this many sellable accounts per ENABLED market
+  // (gameflip + plati + ggsel). The planner doubles it so the 50% post-event
+  // holdback stays intact. 3 markets x 3 x 2 = 18 accounts on a full-market
+  // game - the pool (180+ ready) supports this comfortably.
+  perMarketStock: 3,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
