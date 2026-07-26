@@ -93,6 +93,20 @@ const autoFarmTaskSchema = new mongoose.Schema(
       price: { type: Number, default: 0 },
       qty: { type: Number, default: 0 },
       heldBack: { type: Number, default: 0 },
+      // Secondary markets (Plati / GGSel) created alongside the Gameflip
+      // listing. Each holds its own external id + share of the accounts.
+      plati: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
+      ggsel: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
       listedAt: { type: Date, default: null },
       repricedAt: { type: Date, default: null },
       postEvent: { type: Boolean, default: false },
