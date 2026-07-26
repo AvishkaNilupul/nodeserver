@@ -189,11 +189,33 @@ router.delete("/auto-farm/tasks/:id", requireSuperadmin, async (req, res) => {
 
 // RUN the brain once on demand (the "Scan now" button).
 router.post("/auto-farm/tick", requireSuperadmin, async (req, res) => {
+  // Fire-and-forget: the scan can take a while (research + SSH), so return
+  // immediately and let the UI follow along via the progress log in /status.
+  const st = autoFarmer.status();
+  if (st.running) {
+    return res.status(202).json({ ok: true, alreadyRunning: true });
+  }
+  autoFarmer.runOnce().catch((err) => {
+    console.error("auto-farm tick error:", err.message);
+  });
+  res.status(202).json({ ok: true, started: true });
+});
+
+// Fresh full rescan: clear terminal decisions for every live campaign, then
+// re-run the scan so everything is decided from scratch with fresh research.
+router.post("/auto-farm/rescan", requireSuperadmin, async (req, res) => {
   try {
-    const summary = await autoFarmer.runOnce();
-    res.json({ success: true, summary });
+    const st = autoFarmer.status();
+    if (st.running) {
+      return res.status(202).json({ ok: true, alreadyRunning: true });
+    }
+    const cleared = await autoFarmer.rescanAll();
+    autoFarmer.runOnce().catch((err) => {
+      console.error("auto-farm rescan error:", err.message);
+    });
+    res.status(202).json({ ok: true, started: true, ...cleared });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 

@@ -3,6 +3,7 @@
 // competitorPrices() runs them in parallel and adds per-market stats plus a
 // recommended price (undercut the lowest credible competitor by ~5%).
 const axios = require("axios");
+const remoteHttp = require("./remoteHttp");
 
 const TIMEOUT = 12000;
 const CACHE_MS = 10 * 60 * 1000;
@@ -56,12 +57,13 @@ function priceStats(listings) {
 }
 
 async function gameflipSearch(term, status, limit) {
-  const r = await axios.get(
+  // Offloaded to the Raspberry Pi when online (idle CPU + a second IP for
+  // marketplace rate limits); transparent server fallback inside remoteHttp.
+  const r = await remoteHttp.fetchJson(
     "https://production-gameflip.fingershock.com/api/v1/listing",
     {
       params: { term, status, limit: limit || MAX_ROWS },
       timeout: TIMEOUT,
-      headers: { "User-Agent": UA },
     },
   );
   const rows = (r.data && r.data.data) || [];
@@ -86,10 +88,9 @@ function gameflipSoldScout(term, limit) {
 }
 
 async function platiScout(term) {
-  const r = await axios.get("https://plati.io/api/search.ashx", {
+  const r = await remoteHttp.fetchJson("https://plati.io/api/search.ashx", {
     params: { query: term, response: "json", pagesize: MAX_ROWS },
     timeout: TIMEOUT,
-    headers: { "User-Agent": UA },
   });
   const rows = (r.data && r.data.items) || [];
   return rows
@@ -143,16 +144,11 @@ function extractJsonObjects(html, marker) {
 }
 
 async function ggselScout(term) {
-  const r = await axios.get(
+  const r = await remoteHttp.fetchText(
     "https://ggsel.net/en/search/" + encodeURIComponent(term),
-    {
-      timeout: TIMEOUT,
-      headers: { "User-Agent": UA, Accept: "text/html" },
-      maxContentLength: 20 * 1024 * 1024,
-      responseType: "text",
-    },
+    { timeout: TIMEOUT },
   );
-  const objs = extractJsonObjects(String(r.data || ""), '{"id_goods"');
+  const objs = extractJsonObjects(String(r.text || ""), '{"id_goods"');
   const seen = new Set();
   const rows = [];
   for (const o of objs) {

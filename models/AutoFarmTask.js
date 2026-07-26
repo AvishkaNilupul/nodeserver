@@ -79,6 +79,27 @@ const autoFarmTaskSchema = new mongoose.Schema(
 
     executedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
+
+    // Gameflip auto-listing created for this task (published the moment the
+    // bots started, mirroring the owner's manual early-bird flow).
+    listing: {
+      setId: { type: String, default: "" },
+      externalId: { type: String, default: "" },
+      url: { type: String, default: "" },
+      title: { type: String, default: "" },
+      price: { type: Number, default: 0 },
+      qty: { type: Number, default: 0 },
+      listedAt: { type: Date, default: null },
+      repricedAt: { type: Date, default: null },
+      postEvent: { type: Boolean, default: false },
+      error: { type: String, default: "" },
+    },
+    // Dry-run preview: what WOULD have been listed (no real listing made).
+    wouldList: {
+      title: { type: String, default: "" },
+      price: { type: Number, default: 0 },
+      qty: { type: Number, default: 0 },
+    },
   },
   { timestamps: true },
 );
