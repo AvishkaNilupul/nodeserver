@@ -53,13 +53,12 @@ test("description lists every item and the house sections", () => {
     game: "Black Desert",
     items,
     campaignName: "Heidel Ball",
-    endAt: new Date("2026-07-29"),
   });
   for (const i of items) assert.ok(d.includes(i.name));
   assert.ok(d.includes("Includes:"));
   assert.ok(d.includes("check the item list carefully"));
   assert.ok(d.includes("within the first hour"));
-  assert.ok(d.includes("Event ends 2026-07-29"));
+  assert.ok(!d.includes("unobtainable"));
   assert.ok(!d.includes("EVENT IS OVER"));
 });
 
@@ -71,8 +70,9 @@ test("post-event description leads with scarcity and drops the countdown", () =>
     postEvent: true,
   });
   assert.ok(d.startsWith("THE Twitch Rivals DROP EVENT IS OVER"));
-  assert.ok(d.includes("no longer be obtained"));
-  assert.ok(!d.includes("Event ends"));
+  assert.ok(d.includes("no longer be earned"));
+  assert.ok(d.includes("still redeem"));
+  assert.ok(!d.includes("unobtainable"));
 });
 
 test("price anchors on sold prices and undercuts live competition", () => {

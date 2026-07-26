@@ -13,7 +13,6 @@ const BotAccount = require("../models/BotAccount");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const MarketResearch = require("../models/MarketResearch");
-const TwitchCampaign = require("../models/TwitchCampaign");
 const { gameflipDeliveryCode } = require("./gameflipFulfiller");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
@@ -58,7 +57,9 @@ async function campaignItems(campaignId, game) {
             itemKey: key,
             name: String(b.name),
             game: g,
-            image: "",
+            // Real Twitch item artwork — setImage downloads it for the cover
+            // grid, exactly like the manually created listings.
+            image: String(b.imageAssetURL || ""),
             qty: 1,
             requiredMinutes: Number(d.requiredMinutesWatched) || 0,
           });
@@ -105,14 +106,16 @@ function buildTitle({ game, items, campaignName, postEvent }) {
 
 // House description: item list first, then the seller's standard sections
 // (check before buying / multi-purchase warning / activation window / pitch).
-function buildDescription({ game, items, campaignName, endAt, postEvent }) {
+function buildDescription({ game, items, campaignName, postEvent }) {
   const lines = [];
   if (postEvent) {
     lines.push(
       "THE " +
         (campaignName || game) +
-        " DROP EVENT IS OVER — these items can no longer be obtained by " +
-        "watching streams. Limited stock from accounts farmed during the event.",
+        " DROP EVENT IS OVER — these items can no longer be earned by " +
+        "watching streams. Accounts farmed during the event are the only " +
+        "remaining supply, and the drops still redeem instantly when you " +
+        "connect the account.",
       "",
     );
   } else if (campaignName) {
@@ -147,14 +150,6 @@ function buildDescription({ game, items, campaignName, endAt, postEvent }) {
     "\ud83d\udcac Any issue or question — message me here on Gameflip " +
       "before opening a dispute. I reply fast and always make it right.",
   );
-  if (!postEvent && endAt) {
-    lines.push(
-      "",
-      "\u23f3 Event ends " +
-        new Date(endAt).toISOString().slice(0, 10) +
-        " — after that these drops become unobtainable.",
-    );
-  }
   return lines.join("\n").slice(0, 5000);
 }
 
@@ -242,10 +237,6 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   if (task.listing && task.listing.externalId) {
     return { skipped: "already listed" };
   }
-  const campaign = await TwitchCampaign.findOne({
-    campaignId: task.campaignId,
-  }).lean();
-
   const items = await campaignItems(task.campaignId, task.game);
   const research = await MarketResearch.findOne({ game: task.game }).lean();
   const price = derivePrice(research);
@@ -261,7 +252,6 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     game: task.game,
     items,
     campaignName: task.campaignName,
-    endAt: campaign ? campaign.endAt : task.campaignEndAt,
     postEvent: false,
   });
 
@@ -355,7 +345,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
 
 /* --------------------------- campaign end flow --------------------------- */
 
-// Once the drop event ends the items become unobtainable — supply is fixed.
+// Once the drop event ends the items can no longer be earned — supply is fixed.
 // Two things happen to this task's listing:
 //   1. +50% scarcity markup (the user-approved post-event repricing), with the
 //      title/description rewritten to lead with "EVENT ENDED".
@@ -426,7 +416,6 @@ async function onCampaignEnded(taskId) {
     game: task.game,
     items,
     campaignName: task.campaignName,
-    endAt: null,
     postEvent: true,
   });
 
