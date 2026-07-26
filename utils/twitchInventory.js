@@ -494,4 +494,7 @@ module.exports = {
   fetchDropCampaigns,
   fetchCampaignDetails,
   DEFAULT_CLIENT_ID,
+  // Shared so every writer stores the same normalised key — the archive's
+  // aggregations group on the stored field and can't afford to recompute it.
+  itemKeyFor,
 };
