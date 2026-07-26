@@ -476,7 +476,13 @@ async function feedListing(row, seenKeys) {
       severity: partial ? "high" : "medium",
       marketplace: row.marketplace,
       listing: row._id,
-      dedupeKey: "restock-err:" + row._id + ":" + Date.now(),
+      // One finding per listing, NOT one per pass. Date.now() made this key
+      // unique every time, so the dedupe above never matched: each pass
+      // inserted a brand-new row and, because an insert counts as isNew, sent
+      // another Telegram. A permanently-failing listing therefore re-alerted
+      // forever — one archived GGSel offer produced 38 identical open findings.
+      // Keyed on the listing, a repeat now just refreshes lastSeenAt.
+      dedupeKey: "restock-err:" + row._id,
       message:
         "Auto-feed of " +
         row.marketplace +
@@ -549,6 +555,22 @@ async function feedListing(row, seenKeys) {
     remaining,
     target,
   });
+  // A successful feed clears any standing failure for this listing. Now that
+  // the failure finding is keyed on the listing rather than the moment, it
+  // would otherwise stay open forever once a listing had failed even once:
+  // "restock-err:" is not one of the CONDITION_TYPES autoResolveStale sweeps,
+  // so nothing else would ever close it. Resolving it here also lets the
+  // reopen-on-return path treat a recurrence as genuinely new.
+  await AuditFinding.updateMany(
+    { dedupeKey: "restock-err:" + row._id, status: "open" },
+    {
+      $set: {
+        status: "resolved",
+        resolution: "auto-resolved: a later restock succeeded",
+        resolvedAt: new Date(),
+      },
+    },
+  );
   // Log the restock as an already-resolved finding so it shows as activity.
   await AuditFinding.create({
     type: "restocked",
