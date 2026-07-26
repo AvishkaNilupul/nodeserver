@@ -32,6 +32,7 @@ const botHealthRoutes = require("./routes/botHealthRoutes");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
+const autoFarmRoutes = require("./routes/autoFarmRoutes");
 const stashRoutes = require("./routes/stashRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
@@ -56,6 +57,7 @@ const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
+const autoFarmer = require("./utils/autoFarmer");
 const epicWatcher = require("./utils/epicWatcher");
 const epicClaimer = require("./utils/epicClaimer");
 const telegramBot = require("./utils/telegramBot");
@@ -528,6 +530,7 @@ app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
+app.use(enforce2fa, autoFarmRoutes);
 app.use(enforce2fa, stashRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
@@ -588,6 +591,10 @@ mongoose
     // and Epic free-games watcher, both alerting via Telegram + the tab.
     campaignWatcher.start();
     epicWatcher.start();
+    // Auto-farmer: turns new drop campaigns into running bots on the farm
+    // host (or dry-run plans) - fully gated by the superadmin settings
+    // switch, so starting it here is a no-op until it's enabled.
+    autoFarmer.start();
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();

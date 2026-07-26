@@ -292,6 +292,9 @@
   let HOSTS = [{ id: "local", label: "Server" }];
   const ALL_TAB = "__all__";   // synthetic tab aggregating every host
   const RENTED_TAB = "__rented__"; // synthetic tab: only bots rented to renters
+  const AUTOFARM_TAB = "__autofarm__"; // synthetic tab: auto-farmer bots + decision log
+  let AUTO_KEYS = new Set(); // "host|file" of every auto-created bot (kept out of host tabs)
+  let _afLoading = false;    // guards overlapping Auto-farm refreshes
   let _allLoading = false;     // guards overlapping All-bots refreshes
   let _rentedLoading = false;  // guards overlapping Rented refreshes
   // Append the active host to a bot-configs URL so every read/write/restart
@@ -370,6 +373,8 @@
     if (seq !== _loadSeq) return;
     $("dirLabel").textContent = list.dir || "/root/twitchbot";
 
+    // Auto-farmer bots live in their own tab — keep them out of host tabs.
+    list.configs = list.configs.filter((c) => !AUTO_KEYS.has(host + "|" + c.file));
     const files = list.configs.map((c) => c.file);
     const newConfigs = {};
     await Promise.all(list.configs.map(async (c) => {
@@ -390,13 +395,17 @@
   // local server exists, so single-host setups look unchanged).
   async function loadHosts() {
     try { const r = await api("/bot-configs/hosts"); if (Array.isArray(r.hosts) && r.hosts.length) HOSTS = r.hosts; } catch (e) {}
+    await refreshAutoKeys();
     renderHostTabs();
   }
   function renderHostTabs() {
     const el = $("hostTabs"); if (!el) return;
-    if (HOSTS.length <= 1) { el.innerHTML = ""; el.style.display = "none"; return; }
     el.style.display = "flex";
-    const tabs = HOSTS.concat([{ id: ALL_TAB, label: "All bots" }, { id: RENTED_TAB, label: "Rented 🔑" }]);
+    const tabs = (HOSTS.length > 1 ? HOSTS : HOSTS.slice()).concat([
+      { id: ALL_TAB, label: "All bots" },
+      { id: RENTED_TAB, label: "Rented 🔑" },
+      { id: AUTOFARM_TAB, label: "Auto farm 🤖" },
+    ]);
     el.innerHTML = tabs.map((h) =>
       '<button type="button" class="hosttab' + (h.id === CURRENT_HOST ? " active" : "") + '" onclick="switchHost(\'' + esc(h.id) + '\')">' + esc(h.label) + "</button>"
     ).join("");
@@ -424,6 +433,12 @@
       setAllMode(true);
       $("bots").innerHTML = '<div class="empty">Loading rented bots…</div>';
       loadRentedBots();
+      return;
+    }
+    if (id === AUTOFARM_TAB) {
+      setAllMode(true);
+      $("bots").innerHTML = '<div class="empty">Loading auto farm…</div>';
+      loadAutoFarm();
       return;
     }
     setAllMode(false);
@@ -509,6 +524,7 @@
     _statsTimer = setInterval(function () {
       if (CURRENT_HOST === ALL_TAB) { loadAllBots(); return; }
       if (CURRENT_HOST === RENTED_TAB) { loadRentedBots(); return; }
+      if (CURRENT_HOST === AUTOFARM_TAB) { loadAutoFarm(); return; }
       loadHostStats();
     }, 7000);
   }
@@ -522,7 +538,10 @@
     try {
       const r = await api("/bot-configs/all");
       if (CURRENT_HOST !== ALL_TAB) return; // tab changed mid-flight
-      renderAllBots((r && r.hosts) || [], (r && r.rentedCount) || 0);
+      const hostsList = ((r && r.hosts) || []).map((h) => Object.assign({}, h, {
+        bots: (h.bots || []).filter((b) => !AUTO_KEYS.has(h.id + "|" + b.file)),
+      }));
+      renderAllBots(hostsList, (r && r.rentedCount) || 0);
     } catch (e) {
       if (CURRENT_HOST === ALL_TAB) $("bots").innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + "</div>";
     } finally { _allLoading = false; }
@@ -671,6 +690,127 @@
       toast(action + " failed: " + e.message, true);
       if (btn) { btn.disabled = false; btn.textContent = old; }
     }
+  };
+
+  // ---- Auto farm (autonomous drop farmer: status, decision log, controls) ----
+  async function refreshAutoKeys() {
+    try {
+      const r = await api("/auto-farm/tasks");
+      const keys = new Set();
+      for (const t of (r.tasks || [])) {
+        for (const b of (t.bots || [])) if (b && b.host && b.file) keys.add(b.host + "|" + b.file);
+      }
+      AUTO_KEYS = keys;
+    } catch (e) { /* endpoint may 403 for non-superadmin; auto tab just stays empty */ }
+  }
+
+  async function loadAutoFarm() {
+    if (CURRENT_HOST !== AUTOFARM_TAB || _afLoading) return;
+    _afLoading = true;
+    try {
+      const [st, tk] = await Promise.all([api("/auto-farm/status"), api("/auto-farm/tasks")]);
+      if (CURRENT_HOST !== AUTOFARM_TAB) return; // tab changed mid-flight
+      renderAutoFarm(st, (tk && tk.tasks) || []);
+    } catch (e) {
+      if (CURRENT_HOST === AUTOFARM_TAB) $("bots").innerHTML = '<div class="empty">Failed to load auto farm: ' + esc(e.message) + "</div>";
+    } finally { _afLoading = false; }
+  }
+
+  function afDecisionChip(t) {
+    const map = {
+      farm: ["FARM", "on"], probe: ["PROBE", "on"], reuse_existing: ["REUSE", "on"],
+      skip_low_demand: ["SKIP · low demand", "off"], skip_ends_soon: ["SKIP · ends soon", "off"],
+      skip_no_accounts: ["SKIP · no accounts", "off"], skip_no_capacity: ["SKIP · no capacity", "off"],
+      skip_host_offline: ["SKIP · host offline", "off"],
+    };
+    const m = map[t.decision] || [t.decision, ""];
+    return '<span class="chip ' + m[1] + '">' + esc(m[0]) + "</span>";
+  }
+
+  function afStatusChip(st) {
+    const map = { planned: "", active: "on", completed: "", stopped: "", skipped: "", failed: "off" };
+    return '<span class="chip ' + (map[st] || "") + '">' + esc(st) + "</span>";
+  }
+
+  function renderAutoFarm(st, tasks) {
+    const s = (st && st.settings) || {};
+    const pool = (st && st.pool) || {};
+    const eng = (st && st.engine) || {};
+    const hostTxt = st && st.host ? st.host.label : "none (no SSH host found)";
+    const mode = !s.enabled ? '<span class="chip off">OFF</span>'
+      : (s.dryRun ? '<span class="chip" style="background:#fffbeb;color:#b45309">DRY-RUN</span>' : '<span class="chip on">LIVE</span>');
+    const head =
+      '<div class="panel" style="padding:14px 18px;margin-bottom:16px">' +
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+          "<b>Auto farmer</b> " + mode +
+          '<span class="muted" style="font-size:12.5px">host: ' + esc(hostTxt) +
+          " · pool: " + (pool.ready == null ? "?" : pool.ready) + " ready / " + (pool.spendable == null ? "?" : pool.spendable) + " spendable (reserve " + (pool.reserve == null ? "?" : pool.reserve) + ")" +
+          " · cap " + (s.maxPerGame || "?") + "/game, " + (s.accountsPerBot || "?") + "/bot, " + (s.maxAutoBots || "?") + " bots max</span>" +
+          '<span style="margin-left:auto;display:flex;gap:8px">' +
+            '<button class="btn-sm btn-ghost" onclick="afTick(this)">Scan now</button>' +
+            '<a class="btn-sm btn-ghost" href="/superadmin.html" style="text-decoration:none;display:inline-flex;align-items:center">Settings</a>' +
+          "</span>" +
+        "</div>" +
+        (eng.lastRun ? '<div class="muted" style="font-size:12px;margin-top:6px">Last scan: ' + esc(new Date(eng.lastRun).toLocaleString()) + (eng.lastError ? ' · <span style="color:var(--red)">' + esc(eng.lastError) + "</span>" : "") + "</div>" : "") +
+      "</div>";
+
+    if (!tasks.length) {
+      $("bots").innerHTML = head + '<div class="empty">No auto-farm decisions yet. ' +
+        (s.enabled ? "The farmer scans every " + (eng.intervalMinutes || 30) + " minutes — or hit Scan now." : "Turn it on in Superadmin settings.") + "</div>";
+      return;
+    }
+
+    const rows = tasks.map(function (t) {
+      const bots = (t.bots || []).map(function (b) { return b.container + " @ " + labelFor(b.host) + (b.reused ? " (reused)" : ""); }).join(", ");
+      const accts = (t.assignedAccounts || []).length;
+      const ctrls = [];
+      if (t.status === "planned") ctrls.push('<button class="btn-sm" onclick="afApprove(\'' + t._id + '\',this)">Approve &amp; run</button>');
+      if (t.status === "active") ctrls.push('<button class="btn-sm btn-danger" onclick="afStop(\'' + t._id + '\',this)">Stop</button>');
+      if (t.status !== "active") ctrls.push('<button class="btn-sm btn-ghost" onclick="afDelete(\'' + t._id + '\',this)">Delete</button>');
+      return '<div class="allbot">' +
+        '<div class="ab-main">' +
+          '<div class="ab-ttl">' + esc(t.game) + " " + afDecisionChip(t) + " " + afStatusChip(t.status) +
+            (t.dryRun && t.status === "planned" ? ' <span class="chip" style="background:#fffbeb;color:#b45309">awaiting approval</span>' : "") + "</div>" +
+          '<div class="ab-sub">' + esc(t.campaignName || t.campaignId) +
+            (t.campaignEndAt ? " · ends " + esc(new Date(t.campaignEndAt).toLocaleString()) : "") +
+            (t.demandScore != null ? " · demand " + t.demandScore : " · no market data") + "</div>" +
+          '<div class="ab-farm muted">' + esc(t.reason || "") + "</div>" +
+          (bots ? '<div class="ab-farm">bots: ' + esc(bots) + (accts ? " · " + accts + " accounts" : "") + "</div>"
+                : (t.plannedAccounts ? '<div class="ab-farm muted">planned: ' + t.plannedAccounts + " accounts</div>" : "")) +
+          (t.error ? '<div class="ab-farm" style="color:var(--red)">' + esc(t.error) + "</div>" : "") +
+        "</div>" +
+        '<div class="ab-actions">' + ctrls.join("") + "</div>" +
+      "</div>";
+    }).join("");
+    $("bots").innerHTML = head + rows;
+  }
+
+  window.afTick = async function (btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
+    try { await api("/auto-farm/tick", { method: "POST" }); toast("Scan complete"); }
+    catch (e) { toast("Scan failed: " + e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "Scan now"; } await refreshAutoKeys(); loadAutoFarm(); }
+  };
+  window.afApprove = async function (id, btn) {
+    if (!confirm("Execute this plan for real? Pool accounts will be claimed and bots created on the farm host.")) return;
+    if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
+    try { await api("/auto-farm/tasks/" + id + "/approve", { method: "POST" }); toast("Plan executed"); }
+    catch (e) { toast("Approve failed: " + e.message, true); }
+    finally { await refreshAutoKeys(); loadAutoFarm(); }
+  };
+  window.afStop = async function (id, btn) {
+    if (!confirm("Stop this auto-farm task's bots? Farmed accounts stay as inventory.")) return;
+    if (btn) btn.disabled = true;
+    try { await api("/auto-farm/tasks/" + id + "/stop", { method: "POST" }); toast("Stopped"); }
+    catch (e) { toast("Stop failed: " + e.message, true); }
+    finally { await refreshAutoKeys(); loadAutoFarm(); }
+  };
+  window.afDelete = async function (id, btn) {
+    if (!confirm("Delete this decision from the log? A live campaign may be re-decided on the next scan.")) return;
+    if (btn) btn.disabled = true;
+    try { await api("/auto-farm/tasks/" + id, { method: "DELETE" }); toast("Deleted"); }
+    catch (e) { toast("Delete failed: " + e.message, true); }
+    finally { await refreshAutoKeys(); loadAutoFarm(); }
   };
 
   // Read-only accounts/passwords view (so you can confirm what's stored, incl.
