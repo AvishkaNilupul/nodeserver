@@ -625,6 +625,56 @@
       </div>
 
       <div class="card">
+        <h2>Auto farming</h2>
+        <div class="switch">
+          <input type="checkbox" id="afEnabled" />
+          <label for="afEnabled" style="margin:0;text-transform:none;font-size:13.5px;color:var(--ink)">
+            Enable the auto farmer &mdash; when a new Twitch drop campaign appears it decides
+            (by market demand) whether to farm it, claims accounts from the pool, and creates
+            bots on the farm host automatically.
+          </label>
+        </div>
+        <div class="switch" style="margin-top:10px">
+          <input type="checkbox" id="afDryRun" />
+          <label for="afDryRun" style="margin:0;text-transform:none;font-size:13.5px;color:var(--ink)">
+            Dry-run mode &mdash; the farmer only plans and sends Telegram alerts; nothing is
+            created until you approve each plan from the Bots &rarr; Auto farm tab.
+          </label>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:14px">
+          <div class="field" style="max-width:150px">
+            <label>Max accounts / game (&le;30)</label>
+            <input type="number" id="afMaxPerGame" min="1" max="30" />
+          </div>
+          <div class="field" style="max-width:150px">
+            <label>Accounts / bot</label>
+            <input type="number" id="afAccountsPerBot" min="1" max="30" />
+          </div>
+          <div class="field" style="max-width:150px">
+            <label>Pool reserve floor</label>
+            <input type="number" id="afPoolReserve" min="0" max="500" />
+          </div>
+          <div class="field" style="max-width:150px">
+            <label>Probe batch size</label>
+            <input type="number" id="afProbeSize" min="1" max="30" />
+          </div>
+          <div class="field" style="max-width:150px">
+            <label>Max auto bots</label>
+            <input type="number" id="afMaxAutoBots" min="1" max="20" />
+          </div>
+          <div class="field" style="max-width:150px">
+            <label>Min hours left</label>
+            <input type="number" id="afMinHoursLeft" min="0" max="168" />
+          </div>
+          <div class="field" style="max-width:220px">
+            <label>Farm host</label>
+            <select id="afHostId"><option value="">Auto (first SSH host)</option></select>
+          </div>
+        </div>
+        <button class="btn" type="button" id="afSave" style="margin-top:12px">Save auto-farm settings</button>
+      </div>
+
+      <div class="card">
         <h2>Existing admins</h2>
         <table>
           <thead>
@@ -1256,6 +1306,52 @@
         }
       }
 
+      async function loadAutoFarmSettings() {
+        try {
+          const data = await api("GET", "/auto-farm/status");
+          const st = data.settings || {};
+          $("afEnabled").checked = !!st.enabled;
+          $("afDryRun").checked = !!st.dryRun;
+          $("afMaxPerGame").value = st.maxPerGame;
+          $("afAccountsPerBot").value = st.accountsPerBot;
+          $("afPoolReserve").value = st.poolReserve;
+          $("afProbeSize").value = st.probeSize;
+          $("afMaxAutoBots").value = st.maxAutoBots;
+          $("afMinHoursLeft").value = st.minHoursLeft;
+          const sel = $("afHostId");
+          sel.innerHTML = '<option value="">Auto (first SSH host)</option>';
+          for (const h of data.hosts || []) {
+            const o = document.createElement("option");
+            o.value = h.id;
+            o.textContent = h.label + (h.transport === "ssh" ? " (remote)" : " (local)");
+            sel.appendChild(o);
+          }
+          sel.value = st.hostId || "";
+        } catch (e) {
+          /* non-superadmin or engine not mounted */
+        }
+      }
+
+      $("afSave").addEventListener("click", async () => {
+        try {
+          await api("POST", "/auto-farm/settings", {
+            enabled: $("afEnabled").checked,
+            dryRun: $("afDryRun").checked,
+            hostId: $("afHostId").value,
+            maxPerGame: $("afMaxPerGame").value,
+            accountsPerBot: $("afAccountsPerBot").value,
+            poolReserve: $("afPoolReserve").value,
+            probeSize: $("afProbeSize").value,
+            maxAutoBots: $("afMaxAutoBots").value,
+            minHoursLeft: $("afMinHoursLeft").value,
+          });
+          showMsg("Auto-farm settings saved.", "ok");
+          loadAutoFarmSettings();
+        } catch (err) {
+          showMsg(err.message, "err");
+        }
+      });
+
       $("require2fa").addEventListener("change", async (e) => {
         const value = e.target.checked;
         try {
@@ -1300,6 +1396,7 @@
         }
         loadAdmins();
         loadRequire2fa();
+          loadAutoFarmSettings();
         loadBuyers();
         loadLedger();
       })();
