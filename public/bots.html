@@ -825,6 +825,7 @@
                 : (t.plannedAccounts ? '<div class="ab-farm muted">planned: ' + t.plannedAccounts + " accounts</div>" : "")) +
           (t.listing && t.listing.externalId
             ? '<div class="ab-farm">listed: <a href="' + esc(t.listing.url) + '" target="_blank" rel="noopener">' + esc(t.listing.title) + "</a> · $" + t.listing.price +
+              (t.listing.heldBack > 0 ? " · " + t.listing.heldBack + " held for post-event" : "") +
               (t.listing.postEvent ? ' · <span class="chip" style="background:#ecfdf5;color:#047857">post-event +50%</span>' : "") + "</div>"
             : (t.wouldList && t.wouldList.title
               ? '<div class="ab-farm muted">would list: ' + esc(t.wouldList.title) + " · $" + t.wouldList.price + " [dry-run]</div>"

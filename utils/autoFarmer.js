@@ -688,6 +688,7 @@ async function processCampaign(c, ctx) {
     internalSales,
     coverage: { manualFarmers, archiveHolders },
     plannedAccounts: accounts,
+    targetAccounts: wanted,
   });
   return executeTask(task, ctx);
 }
@@ -1032,6 +1033,16 @@ async function runOnce() {
         results.push({ game: c.game, error: e.message });
       }
     }
+    // Backfill sweep: top up under-target tasks from whatever the pool has.
+    if (!af.dryRun && hostOnline) {
+      try {
+        const topped = await backfillActiveTasks(af, host, progress);
+        if (topped) progress("Backfill added " + topped + " account(s) total.");
+      } catch (e) {
+        progress("Backfill failed: " + e.message, "warn");
+      }
+    }
+
     // Auto-listing sweep: every active task that has no Gameflip listing yet
     // gets one NOW — bots that started this very tick are listed in the same
     // pass (early-bird flow). Failures retry automatically next tick.
@@ -1113,6 +1124,124 @@ async function runOnce() {
     state.running = false;
     progressEnd();
   }
+}
+
+// Backfill: active tasks whose account count is below their tier target get
+// topped up as the pool refills — "the more accounts I add to the pool, the
+// more it fetches to fill the gaps". Respects the reserve floor and container
+// slots; new accounts go into NEW bots (existing containers keep running
+// untouched). The Gameflip listing grows too, keeping the half-now /
+// half-post-event split.
+async function backfillActiveTasks(af, host, progress) {
+  if (af.dryRun || !host) return 0;
+  const tasks = await AutoFarmTask.find({ status: "active" }).sort({
+    executedAt: 1,
+  });
+  let added = 0;
+  for (const task of tasks) {
+    const target = Math.min(
+      Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
+      af.maxPerGame,
+    );
+    const have = (task.assignedAccounts || []).length;
+    const missing = target - have;
+    if (missing < 1) continue;
+
+    const ready = await countReadyPool();
+    const spendable = Math.max(0, ready - af.poolReserve);
+    if (spendable < 1) break; // pool exhausted — later tasks can't get any either
+
+    const activeBots = await activeAutoBotCount();
+    const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
+    if (slotsFree < 1) break;
+
+    const n = Math.min(missing, spendable, slotsFree * af.accountsPerBot);
+    if (n < 1) continue;
+    progress(
+      "Backfilling " +
+        task.game +
+        ": +" +
+        n +
+        " account(s) toward target " +
+        target +
+        " (have " +
+        have +
+        ")\u2026",
+    );
+    const claimed = await claimPoolAccounts(
+      n,
+      "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",
+    );
+    if (!claimed.length) continue;
+
+    const deployed = [];
+    let error = "";
+    try {
+      for (let i = 0; i < claimed.length; i += af.accountsPerBot) {
+        const batch = claimed.slice(i, i + af.accountsPerBot);
+        const bot = await botFactory.createBot(host, batch, task.game, {
+          startRunning: true,
+        });
+        task.bots.push({
+          host: bot.host,
+          file: bot.file,
+          container: bot.container,
+          reused: false,
+        });
+        for (const b of batch) deployed.push(b);
+        if (bot.startError)
+          error += bot.container + ": " + bot.startError + "; ";
+      }
+    } catch (e) {
+      error += e.message;
+      const leftover = claimed.filter((c) => !deployed.includes(c));
+      await releasePoolAccounts(leftover);
+    }
+    if (!deployed.length) continue;
+    task.assignedAccounts.push(...deployed.map((d) => d.username));
+    if (error)
+      task.error = (task.error ? task.error + "; " : "") + error.trim();
+
+    // Grow the live listing while keeping the half/half split for the new
+    // accounts: half sell now, half wait for the post-event markup.
+    if (task.listing && task.listing.externalId && !task.listing.postEvent) {
+      const addNow = Math.ceil(deployed.length / 2);
+      const addHold = deployed.length - addNow;
+      const MarketplaceListing = require("../models/MarketplaceListing");
+      await MarketplaceListing.updateOne(
+        {
+          set: task.listing.setId,
+          marketplace: "gameflip",
+          status: "active",
+        },
+        { $inc: { qtyRemaining: addNow } },
+      );
+      task.listing.qty = (Number(task.listing.qty) || 0) + addNow;
+      task.listing.heldBack = (Number(task.listing.heldBack) || 0) + addHold;
+    }
+    await task.save();
+    added += deployed.length;
+    progress(
+      task.game +
+        " backfilled: now " +
+        task.assignedAccounts.length +
+        "/" +
+        target +
+        " account(s).",
+    );
+    await tg(
+      "\ud83e\udd16 Auto-farm BACKFILL \u2014 " +
+        task.game +
+        "\n+" +
+        deployed.length +
+        " account(s), now " +
+        task.assignedAccounts.length +
+        "/" +
+        target +
+        ".",
+    );
+  }
+  return added;
 }
 
 // Fresh full rescan: forget prior terminal decisions for LIVE campaigns so the
