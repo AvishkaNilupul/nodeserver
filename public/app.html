@@ -1,0 +1,1110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="manifest" href="/app-manifest.json" />
+<link rel="icon" href="/app-icon-192.png" />
+<link rel="apple-touch-icon" href="/app-icon-192.png" />
+<title>RedeemHub Seller</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --surface: #131826;
+    --surface2: #1b2233;
+    --line: #232c42;
+    --text: #e8ecf6;
+    --muted: #8b95ad;
+    --accent: #9146ff;
+    --accent2: #00c2a8;
+    --good: #2fd67b;
+    --warn: #f5b83d;
+    --bad: #ff5d6c;
+    --tabbar-h: 58px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overscroll-behavior-y: none;
+  }
+  #app { display: none; min-height: 100%; }
+
+  /* ---------- Views / tabs ---------- */
+  .view {
+    display: none;
+    padding: 14px 14px calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 18px);
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .view.active { display: block; }
+  #view-inbox { padding: 0 0 calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); max-width: none; }
+  #inboxFrame {
+    width: 100%;
+    height: calc(100vh - var(--tabbar-h) - env(safe-area-inset-bottom, 0px));
+    height: calc(100dvh - var(--tabbar-h) - env(safe-area-inset-bottom, 0px));
+    border: 0; display: block; background: var(--bg);
+  }
+
+  /* ---------- Tab bar ---------- */
+  #tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: none;
+    background: rgba(15, 19, 30, 0.96);
+    backdrop-filter: blur(14px);
+    border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  #tabbar .tabs { display: flex; max-width: 640px; margin: 0 auto; }
+  .tab {
+    flex: 1; height: var(--tabbar-h);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    color: var(--muted); font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+    cursor: pointer; user-select: none; border: 0; background: none;
+  }
+  .tab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .tab.active { color: var(--accent); }
+
+  /* ---------- Shared bits ---------- */
+  .h1 { font-size: 22px; font-weight: 800; margin: 6px 2px 14px; letter-spacing: -.01em; display: flex; align-items: center; gap: 10px; }
+  .h1 .spacer { flex: 1; }
+  .iconbtn {
+    width: 38px; height: 38px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--muted);
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .iconbtn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .iconbtn:active { transform: scale(.94); }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 16px; padding: 14px; margin-bottom: 12px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    padding: 3px 9px; border-radius: 999px; text-transform: uppercase;
+  }
+  .chip.good { background: rgba(47,214,123,.12); color: var(--good); }
+  .chip.warn { background: rgba(245,184,61,.14); color: var(--warn); }
+  .chip.bad  { background: rgba(255,93,108,.13); color: var(--bad); }
+  .chip.role { background: rgba(145,70,255,.16); color: #c9a6ff; }
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 13px 16px; border-radius: 14px; border: 0;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+    cursor: pointer; transition: transform .06s ease, opacity .2s;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn[disabled] { opacity: .5; pointer-events: none; }
+  .btn.ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--line); }
+  .btn.danger { background: rgba(255,93,108,.14); color: var(--bad); }
+  .btn.sm { width: auto; padding: 9px 14px; font-size: 13.5px; border-radius: 11px; }
+  input, textarea {
+    width: 100%; padding: 13px 14px; border-radius: 13px;
+    border: 1px solid var(--line); background: var(--surface2); color: var(--text);
+    font-size: 15px; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  label.f { display: block; margin: 0 0 12px; }
+  label.f span { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin: 0 2px 6px; text-transform: uppercase; letter-spacing: .06em; }
+  .empty { text-align: center; color: var(--muted); padding: 38px 16px; }
+  .empty .big { font-size: 34px; margin-bottom: 8px; }
+  .skel { border-radius: 14px; background: linear-gradient(100deg, var(--surface) 40%, var(--surface2) 50%, var(--surface) 60%); background-size: 200% 100%; animation: sk 1.2s infinite linear; }
+  @keyframes sk { to { background-position: -200% 0; } }
+
+  /* ---------- Login ---------- */
+  #login {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    background: radial-gradient(1200px 500px at 50% -10%, rgba(145,70,255,.16), transparent 60%), var(--bg);
+    overflow-y: auto;
+  }
+  #login.show { display: block; }
+  #login .wrap { max-width: 380px; margin: 0 auto; padding: 12vh 24px 40px; }
+  #login .logo { width: 74px; height: 74px; border-radius: 22px; margin: 0 auto 18px; display: block; }
+  #login h1 { text-align: center; font-size: 22px; margin: 0 0 4px; }
+  #login .sub { text-align: center; color: var(--muted); font-size: 13.5px; margin-bottom: 26px; }
+  .formerr { display: none; background: rgba(255,93,108,.12); color: var(--bad); border-radius: 12px; padding: 10px 13px; font-size: 13.5px; margin-bottom: 12px; }
+  .formerr.show { display: block; }
+
+  /* ---------- Home ---------- */
+  .hero { display: flex; align-items: center; gap: 12px; margin: 4px 2px 16px; }
+  .avatar {
+    width: 46px; height: 46px; border-radius: 15px; flex: none;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 19px; color: #fff;
+  }
+  .balance-card {
+    background: linear-gradient(135deg, rgba(145,70,255,.28), rgba(0,194,168,.16)), var(--surface);
+    border: 1px solid rgba(145,70,255,.35);
+  }
+  .balance-card .amount { font-size: 32px; font-weight: 800; letter-spacing: -.02em; margin: 2px 0; }
+  .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; padding: 12px; }
+  .stat .v { font-size: 21px; font-weight: 800; }
+  .stat .l { font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+  .listrow { display: flex; align-items: center; gap: 11px; padding: 11px 2px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .listrow:last-child { border-bottom: 0; }
+
+  /* ---------- Shop ---------- */
+  .seg { display: flex; background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 4px; margin-bottom: 14px; }
+  .seg button { flex: 1; border: 0; background: none; color: var(--muted); font-weight: 700; font-size: 13.5px; padding: 9px; border-radius: 10px; cursor: pointer; }
+  .seg button.on { background: var(--surface2); color: var(--text); }
+  .shop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+  .prod { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; cursor: pointer; }
+  .prod:active { transform: scale(.98); }
+  .prod .imgs { position: relative; aspect-ratio: 1.35; background: var(--surface2); display: grid; grid-template-columns: 1fr; }
+  /* Old WebViews (pre-Chrome 88) lack aspect-ratio: keep the media box open
+     so the stock chip never overlaps the title. */
+  @supports not (aspect-ratio: 1) {
+    .prod .imgs { min-height: 128px; }
+  }
+  .prod .imgs.two { grid-template-columns: 1fr 1fr; }
+  .prod .imgs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .prod .imgs .stock { position: absolute; top: 8px; right: 8px; }
+  .prod .body { padding: 10px 11px 12px; }
+  .prod .name { font-weight: 700; font-size: 13.5px; line-height: 1.3; max-height: 2.6em; overflow: hidden; }
+  .prod .price { margin-top: 6px; font-weight: 800; font-size: 15px; color: var(--accent2); }
+
+  /* ---------- Sheets & overlays ---------- */
+  .sheet-back {
+    position: fixed; inset: 0; z-index: 60; background: rgba(4,6,10,.62);
+    display: none; align-items: flex-end; justify-content: center;
+  }
+  .sheet-back.show { display: flex; }
+  .sheet {
+    background: var(--surface); border: 1px solid var(--line); border-bottom: 0;
+    border-radius: 22px 22px 0 0; width: 100%; max-width: 640px;
+    max-height: 88vh; max-height: 88dvh; overflow-y: auto;
+    padding: 10px 16px calc(20px + env(safe-area-inset-bottom, 0px));
+    animation: up .22s ease;
+  }
+  @keyframes up { from { transform: translateY(40px); opacity: .4; } }
+  .sheet .grab { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 4px auto 14px; }
+  .sheet h2 { font-size: 18px; margin: 0 0 12px; }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .kv:last-child { border-bottom: 0; }
+  .kv .k { color: var(--muted); flex: none; }
+  .kv .v { text-align: right; word-break: break-word; font-weight: 600; }
+
+  .cred { background: var(--surface2); border: 1px solid var(--line); border-radius: 13px; padding: 11px 12px; margin-bottom: 9px; }
+  .cred .lbl { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .cred .val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14.5px; word-break: break-all; margin-top: 3px; }
+  .cred .row button { flex: none; }
+
+  .item-line { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .item-line:last-child { border-bottom: 0; }
+  .item-line img { width: 38px; height: 38px; border-radius: 9px; object-fit: cover; background: var(--surface2); flex: none; }
+
+  /* ---------- Toast ---------- */
+  #toast {
+    position: fixed; left: 50%; bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 16px);
+    transform: translateX(-50%) translateY(20px); z-index: 120;
+    background: #21283c; color: var(--text); border: 1px solid var(--line);
+    padding: 11px 18px; border-radius: 13px; font-size: 14px; font-weight: 600;
+    opacity: 0; pointer-events: none; transition: all .25s ease; max-width: 88vw; text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .spin { width: 20px; height: 20px; border: 2.5px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%; animation: rot .7s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  .center { display: flex; align-items: center; justify-content: center; }
+  .mt8 { margin-top: 8px; } .mt12 { margin-top: 12px; } .mt16 { margin-top: 16px; }
+  .link-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .link-grid a {
+    display: block; text-decoration: none; color: var(--text); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 13px; padding: 13px 12px; font-weight: 700; font-size: 13.5px;
+  }
+  .link-grid a span { display: block; color: var(--muted); font-weight: 500; font-size: 11.5px; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ================= LOGIN ================= -->
+<div id="login">
+  <div class="wrap">
+    <img class="logo" src="/app-icon-192.png" alt="" />
+    <h1>RedeemHub Seller</h1>
+    <div class="sub">Sign in with your admin account</div>
+    <div class="formerr" id="loginErr"></div>
+
+    <form id="loginForm" autocomplete="on">
+      <label class="f"><span>Username</span>
+        <input id="lUser" name="username" autocapitalize="none" autocorrect="off" autocomplete="username" required />
+      </label>
+      <label class="f"><span>Password</span>
+        <input id="lPass" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="btn" id="loginBtn" type="submit">Sign in</button>
+    </form>
+
+    <form id="tfaForm" style="display:none" autocomplete="off">
+      <label class="f"><span>2FA code</span>
+        <input id="lCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit or backup code" required />
+      </label>
+      <button class="btn" id="tfaBtn" type="submit">Verify</button>
+      <button class="btn ghost mt8" type="button" id="tfaBack">Back</button>
+    </form>
+  </div>
+</div>
+
+<!-- ================= APP ================= -->
+<div id="app">
+
+  <!-- HOME -->
+  <div class="view" id="view-home">
+    <div class="hero">
+      <div class="avatar" id="homeAvatar">?</div>
+      <div class="grow">
+        <div style="font-weight:800;font-size:17px" id="homeName">&nbsp;</div>
+        <span class="chip role" id="homeRole">admin</span>
+      </div>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+
+    <div class="card balance-card" onclick="go('shop');setShopSeg('purchases')">
+      <h3 style="color:#c9a6ff">Balance</h3>
+      <div class="amount" id="homeBalance">–</div>
+      <div class="small" style="color:#cdd6ea">Tap to view your purchases</div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="v" id="stOpen">–</div><div class="l">Open orders</div></div>
+      <div class="stat"><div class="v" id="stDelivered">–</div><div class="l">Delivered</div></div>
+      <div class="stat"><div class="v" id="stPurchases">–</div><div class="l">Purchases</div></div>
+    </div>
+
+    <div class="card" id="recentCard">
+      <h3>Recent purchases</h3>
+      <div id="recentList"><div class="empty small">Nothing yet</div></div>
+    </div>
+
+    <!-- superadmin farm cards -->
+    <div id="saHome" style="display:none">
+      <div class="stat-grid">
+        <div class="stat"><div class="v" id="saAccounts">–</div><div class="l">Farm accts</div></div>
+        <div class="stat"><div class="v" id="saDrops">–</div><div class="l">Drops</div></div>
+        <div class="stat"><div class="v" id="saGames">–</div><div class="l">Games</div></div>
+      </div>
+      <div class="card">
+        <h3>Farm health</h3>
+        <div class="kv"><div class="k">Scanner backlog</div><div class="v" id="saBacklog">–</div></div>
+        <div class="kv"><div class="k">Bot containers</div><div class="v" id="saBots">–</div></div>
+        <div class="kv"><div class="k">Bad tokens</div><div class="v" id="saBadTokens">–</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHOP -->
+  <div class="view" id="view-shop">
+    <div class="h1">Shop <div class="spacer"></div>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+    <div class="seg">
+      <button id="segStore" class="on" onclick="setShopSeg('store')">Store</button>
+      <button id="segPurchases" onclick="setShopSeg('purchases')">My purchases</button>
+    </div>
+    <div id="shopStore">
+      <div class="shop-grid" id="shopGrid"></div>
+      <div class="empty" id="shopEmpty" style="display:none"><div class="big">🛒</div>No bundles listed right now</div>
+    </div>
+    <div id="shopPurchases" style="display:none">
+      <div id="purchaseList"></div>
+      <div class="empty" id="purchEmpty" style="display:none"><div class="big">🧾</div>No purchases yet</div>
+      <button class="btn ghost" id="purchMore" style="display:none" onclick="loadPurchases(false)">Load more</button>
+    </div>
+  </div>
+
+  <!-- ORDERS -->
+  <div class="view" id="view-orders">
+    <div class="h1">Orders <div class="spacer"></div>
+      <button class="iconbtn" onclick="openOrderCreate()" aria-label="New order">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+    <input id="orderSearch" placeholder="Search order ID / gamertag…" oninput="renderOrders()" style="margin-bottom:12px" />
+    <div id="orderList"></div>
+    <div class="empty" id="orderEmpty" style="display:none"><div class="big">📦</div>No orders yet<br /><span class="small">Create one when you make a sale</span></div>
+  </div>
+
+  <!-- INBOX -->
+  <div class="view" id="view-inbox">
+    <iframe id="inboxFrame" src="about:blank" title="Inbox"></iframe>
+  </div>
+
+  <!-- MORE -->
+  <div class="view" id="view-more">
+    <div class="h1">More</div>
+
+    <div class="card">
+      <div class="row">
+        <div class="avatar" id="moreAvatar">?</div>
+        <div class="grow">
+          <div style="font-weight:800" id="moreName">&nbsp;</div>
+          <div class="small muted" id="moreRole"></div>
+        </div>
+        <button class="btn danger sm" onclick="logout()">Log out</button>
+      </div>
+    </div>
+
+    <div class="card" id="tgCard">
+      <h3>Telegram alerts</h3>
+      <div id="tgBody" class="small muted">Loading…</div>
+    </div>
+
+    <div class="card">
+      <h3>Tools</h3>
+      <div class="link-grid" id="moreLinks"></div>
+    </div>
+
+    <div class="small muted" style="text-align:center;margin-top:18px" id="verLine">RedeemHub Seller</div>
+  </div>
+</div>
+
+<!-- Tab bar -->
+<nav id="tabbar"><div class="tabs">
+  <button class="tab active" data-tab="home" onclick="go('home')">
+    <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5M5 9.5V21h14V9.5"/></svg>Home</button>
+  <button class="tab" data-tab="shop" onclick="go('shop')">
+    <svg viewBox="0 0 24 24"><path d="M6 7h12l1.5 14h-15L6 7ZM8.5 9V6a3.5 3.5 0 0 1 7 0v3"/></svg>Shop</button>
+  <button class="tab" data-tab="orders" onclick="go('orders')">
+    <svg viewBox="0 0 24 24"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9ZM12 12l8-4.5M12 12 4 7.5M12 12v9"/></svg>Orders</button>
+  <button class="tab" data-tab="inbox" onclick="go('inbox')">
+    <svg viewBox="0 0 24 24"><path d="M21 14a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9Z"/></svg>Inbox</button>
+  <button class="tab" data-tab="more" onclick="go('more')">
+    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>More</button>
+</div></nav>
+
+<!-- Generic sheet -->
+<div class="sheet-back" id="sheetBack" onclick="if(event.target===this)closeSheet()">
+  <div class="sheet" id="sheetBody"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   RedeemHub Seller — mobile app shell
+   Single-file SPA over the existing session-auth APIs.
+   ============================================================ */
+
+const $ = (id) => document.getElementById(id);
+const S = {
+  admin: null,          // {id, username, role, tfa}
+  me: null,             // {balance, role, username}
+  listings: [],
+  purchases: [], purchPage: 0, purchHasMore: false,
+  orders: [],
+  tab: "home",
+  shopSeg: "store",
+  inboxLoaded: false,
+  lastLoad: {},         // tab -> ts
+};
+const IS_APP = !!window.AppBridge; // native Android shell present
+
+/* ---------------- fetch wrapper ---------------- */
+class ApiErr extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+async function api(path, opts = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opts.method || "GET",
+      headers: { "Accept": "application/json", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+      credentials: "same-origin",
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch {
+    throw new ApiErr("Network error — check your connection", 0);
+  }
+  let data = null;
+  try { data = await res.json(); } catch { /* non-JSON */ }
+  if (res.status === 401) {
+    if (!opts.noKick) showLogin(true);
+    throw new ApiErr((data && data.message) || "Unauthorized", 401);
+  }
+  if (res.status === 403 && data && data.code === "enroll_2fa") {
+    toast("2FA setup is required — opening Settings");
+    setTimeout(() => { location.href = "/settings.html"; }, 900);
+    throw new ApiErr("2FA required", 403);
+  }
+  if (!res.ok) throw new ApiErr((data && data.message) || ("Error " + res.status), res.status);
+  return data;
+}
+
+/* ---------------- tiny UI helpers ---------------- */
+let toastT = null;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastT);
+  toastT = setTimeout(() => t.classList.remove("show"), 2600);
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function money(n) { return "$" + (Number(n) || 0).toFixed(2); }
+function rel(d) {
+  if (!d) return "";
+  const t = new Date(d).getTime();
+  if (!t) return "";
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + "d ago";
+  return new Date(t).toLocaleDateString();
+}
+async function copyText(v, label) {
+  try {
+    await navigator.clipboard.writeText(v);
+    toast((label || "Copied") + " ✓");
+  } catch {
+    // WebView / older browsers fallback
+    const ta = document.createElement("textarea");
+    ta.value = v; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast((label || "Copied") + " ✓"); }
+    catch { toast("Copy failed"); }
+    ta.remove();
+  }
+}
+function openSheet(html) {
+  $("sheetBody").innerHTML = '<div class="grab"></div>' + html;
+  $("sheetBack").classList.add("show");
+  document.body.style.overflow = "hidden";
+}
+function closeSheet() {
+  $("sheetBack").classList.remove("show");
+  document.body.style.overflow = "";
+}
+function confirmSheet({ title, body, okLabel, danger, onOk }) {
+  openSheet(`
+    <h2>${esc(title)}</h2>
+    <div class="small muted" style="margin-bottom:16px">${body}</div>
+    <button class="btn ${danger ? "danger" : ""}" id="cfOk">${esc(okLabel || "Confirm")}</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("cfOk").onclick = onOk;
+}
+function credBlock(label, value) {
+  if (!value) return "";
+  const id = "cred_" + Math.random().toString(36).slice(2, 8);
+  return `<div class="cred"><div class="row">
+      <div class="grow"><div class="lbl">${esc(label)}</div><div class="val" id="${id}">${esc(value)}</div></div>
+      <button class="btn ghost sm" onclick="copyText(document.getElementById('${id}').textContent,'${esc(label)} copied')">Copy</button>
+    </div></div>`;
+}
+
+/* ---------------- login ---------------- */
+function showLogin(expired) {
+  $("app").style.display = "none";
+  $("tabbar").style.display = "none";
+  $("login").classList.add("show");
+  $("tfaForm").style.display = "none";
+  $("loginForm").style.display = "";
+  if (expired) {
+    const e = $("loginErr");
+    e.textContent = "Session expired — sign in again";
+    e.classList.add("show");
+  }
+}
+function loginErr(msg) {
+  const e = $("loginErr");
+  if (!msg) { e.classList.remove("show"); return; }
+  e.textContent = msg; e.classList.add("show");
+}
+$("loginForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  loginErr(null);
+  const btn = $("loginBtn");
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  try {
+    const data = await api("/admin-login", {
+      method: "POST", noKick: true,
+      body: { username: $("lUser").value.trim(), password: $("lPass").value },
+    });
+    if (data.twofa) {
+      $("loginForm").style.display = "none";
+      $("tfaForm").style.display = "";
+      $("lCode").value = ""; $("lCode").focus();
+    } else if (data.mustEnroll) {
+      toast("2FA setup required — opening Settings");
+      setTimeout(() => { location.href = "/settings.html"; }, 800);
+    } else {
+      await enterApp();
+    }
+  } catch (e) {
+    loginErr(e.message || "Login failed");
+  } finally {
+    btn.disabled = false; btn.textContent = "Sign in";
+  }
+});
+$("tfaForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  loginErr(null);
+  const btn = $("tfaBtn");
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  try {
+    await api("/admin-2fa", { method: "POST", noKick: true, body: { token: $("lCode").value.trim() } });
+    await enterApp();
+  } catch (e) {
+    loginErr(e.message || "Incorrect code");
+  } finally {
+    btn.disabled = false; btn.textContent = "Verify";
+  }
+});
+$("tfaBack").onclick = () => {
+  $("tfaForm").style.display = "none";
+  $("loginForm").style.display = "";
+};
+async function logout() {
+  try { await api("/admin-logout", { method: "POST" }); } catch { /* ignore */ }
+  S.admin = null; S.me = null; S.inboxLoaded = false;
+  $("inboxFrame").src = "about:blank";
+  showLogin(false);
+}
+
+/* ---------------- boot / router ---------------- */
+async function boot() {
+  try {
+    const data = await api("/whoami", { noKick: true });
+    S.admin = data.admin;
+    await enterApp();
+  } catch {
+    showLogin(false);
+  }
+}
+async function enterApp() {
+  const data = await api("/whoami");
+  S.admin = data.admin;
+  $("login").classList.remove("show");
+  $("app").style.display = "block";
+  $("tabbar").style.display = "block";
+  loginErr(null);
+  $("loginForm").reset && $("loginForm").reset();
+  buildMore();
+  const start = (location.hash || "#home").slice(1).split("/")[0];
+  go(["home", "shop", "orders", "inbox", "more"].includes(start) ? start : "home", true);
+}
+function go(tab, force) {
+  if (S.tab === tab && !force) { return; }
+  S.tab = tab;
+  if (("#" + tab) !== location.hash) {
+    try { history.pushState(null, "", "#" + tab); } catch { location.hash = tab; }
+  }
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  $("view-" + tab).classList.add("active");
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.tab === tab));
+  // Native pull-to-refresh only where a plain scrollable list lives.
+  if (IS_APP && AppBridge.setPullToRefresh) {
+    try { AppBridge.setPullToRefresh(tab !== "inbox"); } catch { /* ignore */ }
+  }
+  const stale = !S.lastLoad[tab] || Date.now() - S.lastLoad[tab] > 45000;
+  if (tab === "home" && stale) loadHome();
+  if (tab === "shop" && stale) { loadListings(); loadPurchases(true); }
+  if (tab === "orders" && stale) loadOrders();
+  if (tab === "more" && stale) loadMore();
+  if (tab === "inbox" && !S.inboxLoaded) {
+    S.inboxLoaded = true;
+    $("inboxFrame").src = "/admin.html";
+  }
+}
+window.addEventListener("popstate", () => {
+  const tab = (location.hash || "#home").slice(1).split("/")[0];
+  if (["home", "shop", "orders", "inbox", "more"].includes(tab) && tab !== S.tab) go(tab, true);
+});
+function refreshCurrent() {
+  S.lastLoad[S.tab] = 0;
+  if (S.tab === "inbox") { $("inboxFrame").src = "/admin.html"; done(); return; }
+  const p = [];
+  if (S.tab === "home") p.push(loadHome());
+  if (S.tab === "shop") { p.push(loadListings()); p.push(loadPurchases(true)); }
+  if (S.tab === "orders") p.push(loadOrders());
+  if (S.tab === "more") p.push(loadMore());
+  Promise.allSettled(p).then(done);
+  function done() {
+    if (IS_APP && AppBridge.refreshDone) { try { AppBridge.refreshDone(); } catch { /* ignore */ } }
+  }
+}
+// Native shell calls this on swipe-down.
+window.__appRefresh = refreshCurrent;
+
+/* ---------------- HOME ---------------- */
+async function loadHome() {
+  S.lastLoad.home = Date.now();
+  const a = S.admin || {};
+  $("homeName").textContent = a.username || "";
+  $("homeAvatar").textContent = (a.username || "?").slice(0, 1).toUpperCase();
+  $("moreAvatar").textContent = (a.username || "?").slice(0, 1).toUpperCase();
+  $("homeRole").textContent = a.role || "admin";
+
+  api("/shop/me").then((d) => {
+    S.me = d;
+    $("homeBalance").textContent = money(d.balance);
+  }).catch(() => { $("homeBalance").textContent = "–"; });
+
+  api("/orders/list").then((orders) => {
+    const list = Array.isArray(orders) ? orders : [];
+    S.orders = list;
+    $("stOpen").textContent = list.filter((o) => !o.used).length;
+    $("stDelivered").textContent = list.filter((o) => o.used).length;
+  }).catch(() => {});
+
+  api("/shop/purchases?limit=5").then((d) => {
+    $("stPurchases").textContent = d.total != null ? d.total : (d.purchases || []).length;
+    const box = $("recentList");
+    const ps = d.purchases || [];
+    if (!ps.length) { box.innerHTML = '<div class="empty small" style="padding:14px">Nothing yet</div>'; return; }
+    box.innerHTML = ps.map((p) => `
+      <div class="listrow" onclick="openPurchase('${esc(p.id)}')">
+        <div class="grow">
+          <div class="ellip" style="font-weight:700">${esc(p.setName)}</div>
+          <div class="small muted">${esc(p.accountLogin || "")} · ${rel(p.createdAt)}</div>
+        </div>
+        ${p.refundedAt ? '<span class="chip warn">Refunded</span>' : ""}
+        <div style="font-weight:800">${money(p.price)}</div>
+      </div>`).join("");
+  }).catch(() => {});
+
+  if ((S.admin || {}).role === "superadmin") {
+    $("saHome").style.display = "block";
+    api("/drops-archive/overview").then((d) => {
+      const o = d.overview || {};
+      $("saAccounts").textContent = o.accounts != null ? o.accounts : "–";
+      $("saDrops").textContent = o.totalDrops != null ? o.totalDrops : "–";
+      $("saGames").textContent = o.games != null ? o.games : "–";
+    }).catch(() => {});
+    api("/drops-archive/progress").then((d) => {
+      const p = d.progress || {};
+      const pend = p.pending != null ? p.pending
+        : (p.total != null && p.scanned != null ? Math.max(0, p.total - p.scanned) : null);
+      $("saBacklog").textContent = pend != null ? (pend + " pending") : "–";
+    }).catch(() => { $("saBacklog").textContent = "–"; });
+    api("/api/bot-health/status").then((d) => {
+      const cs = d.containers || [];
+      const stuck = cs.filter((c) => c.stuck).length;
+      $("saBots").innerHTML = stuck
+        ? '<span class="chip bad">' + stuck + " stuck</span>"
+        : '<span class="chip good">' + (d.enabled ? "healthy" : "monitor off") + "</span>";
+    }).catch(() => { $("saBots").textContent = "–"; });
+    api("/drops-archive/bad-tokens").then((d) => {
+      const n = (d.accounts || d.badTokens || []).length;
+      $("saBadTokens").innerHTML = n
+        ? '<span class="chip warn">' + n + "</span>"
+        : '<span class="chip good">0</span>';
+    }).catch(() => { $("saBadTokens").textContent = "–"; });
+  }
+}
+
+/* ---------------- SHOP ---------------- */
+function setShopSeg(seg) {
+  S.shopSeg = seg;
+  $("segStore").classList.toggle("on", seg === "store");
+  $("segPurchases").classList.toggle("on", seg === "purchases");
+  $("shopStore").style.display = seg === "store" ? "" : "none";
+  $("shopPurchases").style.display = seg === "purchases" ? "" : "none";
+}
+async function loadListings() {
+  S.lastLoad.shop = Date.now();
+  const grid = $("shopGrid");
+  if (!S.listings.length) {
+    grid.innerHTML = '<div class="skel" style="height:180px"></div><div class="skel" style="height:180px"></div>';
+  }
+  try {
+    const d = await api("/shop/listings");
+    S.listings = d.listings || [];
+    $("shopEmpty").style.display = S.listings.length ? "none" : "block";
+    grid.innerHTML = S.listings.map((l) => {
+      const imgs = (l.items || []).map((i) => i.image).filter(Boolean).slice(0, 2);
+      const out = l.stock <= 0;
+      return `<div class="prod" onclick="openListing('${esc(l.id)}')">
+        <div class="imgs ${imgs.length > 1 ? "two" : ""}">
+          ${imgs.length
+            ? imgs.map((u) => `<img loading="lazy" src="${esc(u)}" alt="" onerror="this.style.visibility='hidden'">`).join("")
+            : '<div class="center muted" style="font-size:26px">🎁</div>'}
+          <span class="stock chip ${out ? "bad" : "good"}">${out ? "Out" : l.stock + " left"}</span>
+        </div>
+        <div class="body">
+          <div class="name">${esc(l.name)}</div>
+          <div class="price">${money(l.price)}</div>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+  }
+}
+async function openListing(id) {
+  openSheet('<div class="center" style="padding:30px"><div class="spin"></div></div>');
+  try {
+    const d = await api("/shop/listings/" + encodeURIComponent(id));
+    const l = d.listing;
+    const out = l.stock <= 0;
+    const bal = S.me ? S.me.balance : null;
+    const cantAfford = bal != null && bal < l.price;
+    openSheet(`
+      <h2>${esc(l.name)}</h2>
+      ${l.note ? `<div class="small muted" style="margin-bottom:10px">${esc(l.note)}</div>` : ""}
+      <div class="row" style="margin-bottom:12px">
+        <span class="chip ${out ? "bad" : "good"}">${out ? "Out of stock" : l.stock + " in stock"}</span>
+        <div class="spacer" style="flex:1"></div>
+        <div style="font-size:22px;font-weight:800;color:var(--accent2)">${money(l.price)}</div>
+      </div>
+      <div class="card" style="margin-bottom:14px"><h3>You receive one account with</h3>
+        ${(l.items || []).map((i) => `
+          <div class="item-line">
+            ${i.image ? `<img loading="lazy" src="${esc(i.image)}" alt="" onerror="this.style.visibility='hidden'">` : ""}
+            <div class="grow">
+              <div class="small" style="font-weight:700">${esc(i.name)}</div>
+              <div class="small muted">${esc(i.game || "")}</div>
+            </div>
+            <div class="chip role">×${i.count != null && i.count > 0 ? i.count : i.qty || 1}</div>
+          </div>`).join("")}
+      </div>
+      ${bal != null ? `<div class="small muted" style="margin-bottom:10px">Your balance: <b>${money(bal)}</b>${cantAfford ? ' — <span style="color:var(--bad)">not enough</span>' : ""}</div>` : ""}
+      <button class="btn" id="buyBtn" ${out || cantAfford ? "disabled" : ""}>Buy for ${money(l.price)}</button>
+      <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+    $("buyBtn").onclick = () => doBuy(l);
+  } catch (e) {
+    closeSheet();
+    if (e.status !== 401) toast(e.message);
+  }
+}
+function doBuy(l) {
+  const btn = $("buyBtn");
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  api("/shop/listings/" + encodeURIComponent(l.id) + "/buy", { method: "POST", body: {} })
+    .then((d) => {
+      if (S.me) S.me.balance = d.balance;
+      $("homeBalance").textContent = money(d.balance);
+      S.lastLoad.home = 0;
+      const p = d.purchase || {};
+      const c = p.credentials || {};
+      openSheet(`
+        <h2>✅ Purchased</h2>
+        <div class="small muted" style="margin-bottom:14px">
+          ${esc(p.setName)} — save these credentials now. You can re-open them any time under <b>My purchases</b>.
+        </div>
+        ${credBlock("Login", c.login)}
+        ${c.username && c.username !== c.login ? credBlock("Username", c.username) : ""}
+        ${credBlock("Password", c.password)}
+        ${credBlock("Email", c.email)}
+        <div class="small muted" style="margin:8px 0 12px">New balance: <b>${money(d.balance)}</b></div>
+        <button class="btn" onclick="closeSheet();loadListings();loadPurchases(true)">Done</button>`);
+    })
+    .catch((e) => {
+      if (e.status === 409) { toast("Out of stock — someone beat you to it"); closeSheet(); loadListings(); }
+      else if (e.status !== 401) { toast(e.message); btn.disabled = false; btn.textContent = "Buy for " + money(l.price); }
+    });
+}
+async function loadPurchases(reset) {
+  if (reset) { S.purchPage = 0; S.purchases = []; }
+  const page = S.purchPage + 1;
+  try {
+    const d = await api("/shop/purchases?limit=25&page=" + page);
+    S.purchPage = page;
+    S.purchases = reset ? (d.purchases || []) : S.purchases.concat(d.purchases || []);
+    S.purchHasMore = !!d.hasMore;
+    renderPurchases();
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+  }
+}
+function renderPurchases() {
+  const box = $("purchaseList");
+  $("purchEmpty").style.display = S.purchases.length ? "none" : "block";
+  $("purchMore").style.display = S.purchHasMore ? "" : "none";
+  box.innerHTML = S.purchases.map((p) => `
+    <div class="card" style="padding:12px" onclick="openPurchase('${esc(p.id)}')">
+      <div class="row">
+        <div class="grow">
+          <div class="ellip" style="font-weight:700">${esc(p.setName)}</div>
+          <div class="small muted">${esc(p.accountLogin || "")}${p.buyerUsername && S.admin && S.admin.role === "superadmin" ? " · by " + esc(p.buyerUsername) : ""} · ${rel(p.createdAt)}</div>
+        </div>
+        ${p.refundedAt ? '<span class="chip warn">Refunded</span>' : ""}
+        <div style="font-weight:800">${money(p.price)}</div>
+      </div>
+    </div>`).join("");
+}
+async function openPurchase(id) {
+  openSheet('<div class="center" style="padding:30px"><div class="spin"></div></div>');
+  try {
+    const d = await api("/shop/purchases/" + encodeURIComponent(id));
+    const p = d.purchase || {};
+    const c = p.credentials || {};
+    const canRefund = S.admin && S.admin.role === "superadmin" && !p.refundedAt;
+    openSheet(`
+      <h2>${esc(p.setName)}</h2>
+      <div class="small muted" style="margin-bottom:12px">
+        ${money(p.price)} · ${rel(p.createdAt)}${p.refundedAt ? ' · <span style="color:var(--warn)">refunded ' + rel(p.refundedAt) + "</span>" : ""}
+        ${p.buyerUsername ? " · buyer: " + esc(p.buyerUsername) : ""}
+      </div>
+      ${credBlock("Login", c.login)}
+      ${c.username && c.username !== c.login ? credBlock("Username", c.username) : ""}
+      ${credBlock("Password", c.password)}
+      ${credBlock("Email", c.email)}
+      ${(p.items || []).length ? `<div class="card mt12"><h3>Included items</h3>
+        ${p.items.map((i) => `<div class="item-line">
+            ${i.image ? `<img loading="lazy" src="${esc(i.image)}" alt="" onerror="this.style.visibility='hidden'">` : ""}
+            <div class="grow small" style="font-weight:600">${esc(i.name)}<div class="muted">${esc(i.game || "")}</div></div>
+            <div class="chip role">×${i.count || 1}</div>
+          </div>`).join("")}</div>` : ""}
+      ${canRefund ? '<button class="btn danger mt12" id="refundBtn">Refund & return to stock</button>' : ""}
+      <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+    if (canRefund) {
+      $("refundBtn").onclick = () => confirmSheet({
+        title: "Refund this purchase?",
+        body: `${esc(p.setName)} — credits <b>${money(p.price)}</b> back to ${esc(p.buyerUsername)} and returns the account's drops to stock.`,
+        okLabel: "Refund", danger: true,
+        onOk: async () => {
+          try {
+            await api("/shop/purchases/" + encodeURIComponent(id) + "/refund", { method: "POST", body: {} });
+            toast("Refunded");
+            closeSheet();
+            loadPurchases(true); loadListings();
+          } catch (e) { if (e.status !== 401) toast(e.message); }
+        },
+      });
+    }
+  } catch (e) {
+    closeSheet();
+    if (e.status !== 401) toast(e.message);
+  }
+}
+
+/* ---------------- ORDERS ---------------- */
+async function loadOrders() {
+  S.lastLoad.orders = Date.now();
+  try {
+    const d = await api("/orders/list");
+    S.orders = Array.isArray(d) ? d : [];
+    renderOrders();
+    $("stOpen").textContent = S.orders.filter((o) => !o.used).length;
+    $("stDelivered").textContent = S.orders.filter((o) => o.used).length;
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+  }
+}
+function orderAccounts(o) {
+  const list = Array.isArray(o.accounts) && o.accounts.length
+    ? o.accounts
+    : (o.username || o.password ? [{ username: o.username, password: o.password }] : []);
+  return list;
+}
+function renderOrders() {
+  const q = ($("orderSearch").value || "").trim().toLowerCase();
+  const list = S.orders.filter((o) =>
+    !q ||
+    String(o.orderId || "").toLowerCase().includes(q) ||
+    String(o.gamerTag || "").toLowerCase().includes(q) ||
+    String(o.sellerName || "").toLowerCase().includes(q));
+  $("orderEmpty").style.display = list.length ? "none" : "block";
+  $("orderList").innerHTML = list.map((o, idx) => `
+    <div class="card" style="padding:12px" onclick="openOrder(${S.orders.indexOf(o)})">
+      <div class="row">
+        <div class="grow">
+          <div class="ellip" style="font-weight:700;font-family:ui-monospace,Menlo,monospace">${esc(o.orderId)}</div>
+          <div class="small muted ellip">
+            ${o.used ? "🎮 " + esc(o.gamerTag || "?") + " · " + rel(o.usedAt) : "Waiting for buyer"}
+            ${S.admin && S.admin.role === "superadmin" && o.sellerName ? " · " + esc(o.sellerName) : ""}
+          </div>
+        </div>
+        <span class="chip ${o.used ? "good" : "warn"}">${o.used ? "Claimed" : "Open"}</span>
+      </div>
+    </div>`).join("");
+}
+function openOrder(i) {
+  const o = S.orders[i];
+  if (!o) return;
+  const accs = orderAccounts(o);
+  openSheet(`
+    <h2 style="font-family:ui-monospace,Menlo,monospace;font-size:16px">${esc(o.orderId)}</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span class="chip ${o.used ? "good" : "warn"}">${o.used ? "Claimed" : "Open"}</span>
+      ${o.used ? `<span class="small muted">by <b>${esc(o.gamerTag || "?")}</b> ${rel(o.usedAt)}</span>` : ""}
+    </div>
+    <button class="btn ghost sm" style="margin-bottom:14px" onclick="copyText(${JSON.stringify(esc(o.orderId))},'Order ID copied')">Copy order ID</button>
+    ${accs.length ? accs.map((a, n) => `
+      ${accs.length > 1 ? `<div class="small muted" style="margin:8px 2px 4px;font-weight:700">Account ${n + 1}</div>` : ""}
+      ${credBlock("Username", a.username)}
+      ${credBlock("Password", a.password)}`).join("") : '<div class="small muted" style="margin-bottom:10px">No delivery credentials stored on this order.</div>'}
+    ${o.used ? '<button class="btn mt8" onclick="closeSheet();go(\'inbox\')">Open buyer chat</button>' : ""}
+    <button class="btn danger mt8" id="delOrder">Delete order</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  $("delOrder").onclick = () => confirmSheet({
+    title: "Delete this order?",
+    body: `Order <b>${esc(o.orderId)}</b>${o.used ? " (already claimed by " + esc(o.gamerTag || "?") + ")" : ""} will be removed. The buyer's link stops working.`,
+    okLabel: "Delete", danger: true,
+    onOk: async () => {
+      try {
+        await api("/orders/delete/" + encodeURIComponent(o._id || o.id), { method: "DELETE" });
+        toast("Order deleted");
+        closeSheet(); loadOrders();
+      } catch (e) { if (e.status !== 401) toast(e.message); }
+    },
+  });
+}
+function genOrderId() {
+  const abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  const a = new Uint32Array(10);
+  crypto.getRandomValues(a);
+  for (let i = 0; i < 10; i++) s += abc[a[i] % abc.length];
+  return s.slice(0, 5) + "-" + s.slice(5);
+}
+function openOrderCreate() {
+  openSheet(`
+    <h2>New order</h2>
+    <div class="small muted" style="margin-bottom:14px">Create the order ID you give the buyer after a sale. They enter it on the site to start their delivery chat.</div>
+    <label class="f"><span>Order ID</span>
+      <div class="row"><input id="noId" autocapitalize="characters" autocorrect="off" />
+      <button class="btn ghost sm" type="button" onclick="$('noId').value=genOrderId()">Random</button></div>
+    </label>
+    <div id="noAccs">
+      <div class="acc-pair">
+        <label class="f"><span>Account username (optional)</span><input class="noUser" autocapitalize="none" autocorrect="off" /></label>
+        <label class="f"><span>Account password (optional)</span><input class="noPass" autocapitalize="none" autocorrect="off" /></label>
+      </div>
+    </div>
+    <button class="btn ghost sm" type="button" onclick="addAccRow()">+ Add another account</button>
+    <button class="btn mt12" id="noCreate">Create order</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("noId").value = genOrderId();
+  $("noCreate").onclick = async () => {
+    const orderId = $("noId").value.trim();
+    if (!orderId) { toast("Order ID required"); return; }
+    const pairs = Array.from(document.querySelectorAll("#noAccs .acc-pair")).map((p) => ({
+      username: p.querySelector(".noUser").value.trim(),
+      password: p.querySelector(".noPass").value.trim(),
+    })).filter((a) => a.username || a.password);
+    const btn = $("noCreate");
+    btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+    try {
+      await api("/orders/add", {
+        method: "POST",
+        body: {
+          orderId,
+          username: pairs[0] ? pairs[0].username : "",
+          password: pairs[0] ? pairs[0].password : "",
+          accounts: pairs,
+        },
+      });
+      toast("Order created");
+      closeSheet();
+      loadOrders();
+      copyText(orderId, "Order ID copied");
+    } catch (e) {
+      if (e.status !== 401) toast(e.message);
+      btn.disabled = false; btn.textContent = "Create order";
+    }
+  };
+}
+function addAccRow() {
+  const div = document.createElement("div");
+  div.className = "acc-pair";
+  div.innerHTML = `
+    <label class="f"><span>Account username</span><input class="noUser" autocapitalize="none" autocorrect="off" /></label>
+    <label class="f"><span>Account password</span><input class="noPass" autocapitalize="none" autocorrect="off" /></label>`;
+  $("noAccs").appendChild(div);
+}
+
+/* ---------------- MORE ---------------- */
+function buildMore() {
+  const a = S.admin || {};
+  $("moreName").textContent = a.username || "";
+  $("moreRole").textContent = (a.role || "admin") + (a.tfa ? " · 2FA on" : "");
+  const isSuper = a.role === "superadmin";
+  const links = [
+    ["/settings.html", "Settings", "2FA · Telegram · account"],
+    ["/marketplace.html", "Marketplace", "price comparison"],
+    ["/inventory", "Inventory", "codes & items"],
+    ["/orders", "Orders (desktop)", "full order manager"],
+  ];
+  if (isSuper) {
+    links.push(
+      ["/listings.html", "Listings", "publish to markets"],
+      ["/bots.html", "Bots", "farm containers"],
+      ["/drops-archive.html", "Drops Archive", "stock by game"],
+      ["/account-stash.html", "Account Stash", "imports"],
+      ["/bulk-orders.html", "Bulk Orders", "multi-account deals"],
+      ["/radar.html", "Radar", "new campaigns"],
+      ["/prime.html", "Prime", "prime gaming offers"],
+      ["/research.html", "Research", "market demand"],
+      ["/integrity.html", "Integrity", "guardian findings"],
+      ["/superadmin.html", "Admins", "sellers & balances"],
+    );
+  }
+  $("moreLinks").innerHTML = links.map(([href, name, sub]) =>
+    `<a href="${href}">${esc(name)}<span>${esc(sub)}</span></a>`).join("");
+  let ver = "RedeemHub Seller";
+  if (IS_APP && AppBridge.getVersion) {
+    try { ver += " · Android app v" + AppBridge.getVersion(); } catch { /* ignore */ }
+  } else {
+    ver += " · web";
+  }
+  $("verLine").textContent = ver;
+}
+async function loadMore() {
+  S.lastLoad.more = Date.now();
+  buildMore();
+  const box = $("tgBody");
+  try {
+    const d = await api("/me/telegram");
+    if (d.linked) {
+      box.innerHTML = `<div class="row"><span class="chip good">Linked</span>
+        <div class="grow small muted">${d.username ? "@" + esc(d.username) : "Telegram connected"} — you get order alerts</div>
+        <button class="btn ghost sm" id="tgUnlink">Unlink</button></div>`;
+      $("tgUnlink").onclick = async () => {
+        try { await api("/me/telegram/unlink", { method: "POST", body: {} }); loadMore(); } catch (e) { toast(e.message); }
+      };
+    } else if (!d.botUsername) {
+      box.innerHTML = '<span class="muted small">Telegram bot is not configured on the server.</span>';
+    } else {
+      box.innerHTML = `<div class="small muted" style="margin-bottom:10px">Link your Telegram to get an instant alert when a buyer redeems one of your orders.</div>
+        <button class="btn sm" id="tgLink">Link my Telegram</button>`;
+      $("tgLink").onclick = async () => {
+        try {
+          const r = await api("/me/telegram/link", { method: "POST", body: {} });
+          box.innerHTML = `<div class="small muted" style="margin-bottom:10px">
+              Tap the button — it opens <b>@${esc(r.botUsername)}</b> in Telegram and links automatically.
+              Or message the bot <code>/link ${esc(r.code)}</code> yourself (expires in 15 min).</div>
+            ${r.deepLink ? `<a class="btn sm" style="text-decoration:none" href="${esc(r.deepLink)}" target="_blank" rel="noopener">Open Telegram</a>` : ""}
+            <button class="btn ghost sm mt8" onclick="loadMore()">I've linked it — refresh</button>`;
+        } catch (e) { toast(e.message); }
+      };
+    }
+  } catch (e) {
+    if (e.status !== 401) box.innerHTML = '<span class="muted small">Could not load Telegram status.</span>';
+  }
+}
+
+/* ---------------- go ---------------- */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.admin) {
+    const stale = !S.lastLoad[S.tab] || Date.now() - S.lastLoad[S.tab] > 60000;
+    if (stale && S.tab !== "inbox") refreshCurrent();
+  }
+});
+boot();
+</script>
+</body>
+</html>

@@ -133,6 +133,13 @@ app.use(
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         frameAncestors: ["'self'"],
+        // Local development only (CSP_NO_UPGRADE=1): stop the browser from
+        // upgrading same-origin requests to https, which breaks plain-http dev
+        // servers (e.g. the Android debug shell hitting 10.0.2.2:3000).
+        // Unset in production, so the live CSP is unchanged.
+        ...(process.env.CSP_NO_UPGRADE
+          ? { upgradeInsecureRequests: null }
+          : {}),
       },
     },
   }),
@@ -474,6 +481,13 @@ app.get("/japanese.html", requireAdmin, enforce2fa, (req, res) => {
 // API in japaneseLearnRoutes does the rest.
 app.get("/learn", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "japanese.html"));
+});
+
+// Mobile seller app shell (also wrapped by the Android app). Served without a
+// guard, like the login page: the SPA renders its own sign-in and every data
+// API it calls is session-gated, so the bare shell exposes nothing.
+app.get("/app", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "app.html"));
 });
 
 // Public buyer portal for a bulk order. No login: the token in the path is the
