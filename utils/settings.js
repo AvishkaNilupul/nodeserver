@@ -15,7 +15,8 @@ const AUTO_FARM_DEFAULTS = {
   accountsPerBot: 10, // accounts per container
   poolReserve: 20, // never draw the pool below this many ready accounts
   probeSize: 5, // batch size for unknown games (market test)
-  maxAutoBots: 6, // max auto containers on the host at once
+  maxAutoBots: 20, // max auto containers on the host at once (total supply is
+  // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
 };
 

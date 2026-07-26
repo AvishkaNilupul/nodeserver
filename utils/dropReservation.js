@@ -11,6 +11,7 @@
 // stock — that gate is now per drop.
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const SaleSignal = require("../models/SaleSignal");
 
 // Aggregation/query fragment for a drop that is available to sell: not redeemed
 // and not reserved. Spread into a $match alongside the itemKey filter.
@@ -60,6 +61,42 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
     { _id: accountId, soldAt: null },
     { $set: stamp },
   ).catch(() => {});
+  // Sale training data for the auto-farmer: one signal per game in the sold
+  // set. Deduped per (account, set, game) so refund + re-sell of the same
+  // set doesn't double count. Best-effort — never blocks the sale.
+  try {
+    const games = [
+      ...new Set((set.items || []).map((i) => i.game).filter(Boolean)),
+    ];
+    for (const game of games) {
+      await SaleSignal.updateOne(
+        {
+          dedupeKey:
+            "reserved:" +
+            accountId +
+            ":" +
+            String(set._id || "") +
+            ":" +
+            game.toLowerCase(),
+        },
+        {
+          $setOnInsert: {
+            game,
+            gameKey: game.toLowerCase(),
+            itemKey: "",
+            name: set.name || "",
+            login: "",
+            account: accountId,
+            source: "drop_reserved",
+            at: now,
+          },
+        },
+        { upsert: true },
+      );
+    }
+  } catch {
+    /* ignore */
+  }
   return true;
 }
 

@@ -15,6 +15,9 @@ const AutoFarmTask = require("../models/AutoFarmTask");
 const TwitchCampaign = require("../models/TwitchCampaign");
 const MarketResearch = require("../models/MarketResearch");
 const AvailableAccount = require("../models/AvailableAccount");
+const SaleSignal = require("../models/SaleSignal");
+const DropLog = require("../models/DropLog");
+const marketResearch = require("./marketResearch");
 const hosts = require("./botHosts");
 const botFactory = require("./botFactory");
 const settings = require("./settings");
@@ -26,6 +29,11 @@ const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
 // Demand tiers (demandScore is 0-100 from utils/marketResearch.js).
 const DEMAND_FULL = 40; // proven seller -> full allocation
 const DEMAND_HALF = 15; // some demand -> half allocation; below -> skip
+const RESEARCH_STALE_MS = 7 * 86400000; // re-scan markets older than a week
+const SALES_WINDOW_MS = 45 * 86400000; // own-sales training window
+// Each of our own recent sales is worth this many demand points (log-damped
+// below). 5+ recent sales pushes any game to full allocation on its own.
+const INTERNAL_SALE_WEIGHT = 18;
 
 // Skips that may be retried when conditions change (pool refills, a
 // container slot frees up, the Pi comes back online).
@@ -33,6 +41,7 @@ const RETRYABLE = new Set([
   "skip_no_accounts",
   "skip_no_capacity",
   "skip_host_offline",
+  "skip_already_covered", // covered accounts may sell — demand reopens
 ]);
 
 const state = {
@@ -85,35 +94,171 @@ async function researchForGame(game) {
   return doc || null;
 }
 
+// Research that is missing or stale gets refreshed live against Gameflip,
+// GGSel and Plati before we decide — a decision that spends up to 30
+// accounts deserves market data younger than a week. Best-effort: if the
+// scouts fail we fall back to whatever stored research exists.
+async function freshResearchForGame(game) {
+  let doc = await researchForGame(game);
+  const stale =
+    !doc ||
+    !doc.scannedAt ||
+    Date.now() - new Date(doc.scannedAt).getTime() > RESEARCH_STALE_MS;
+  if (stale) {
+    try {
+      doc = (await marketResearch.refreshGame(game)) || doc;
+    } catch {
+      /* scouts unreachable — use stored doc (possibly null) */
+    }
+  }
+  return doc;
+}
+
+// Own sales history — the training data. Counts SaleSignal rows (connection
+// flips seen by the 24h drop scanner + reserved-drop sales from orders) in
+// the window, per game.
+async function internalSalesForGame(game) {
+  const cutoff = new Date(Date.now() - SALES_WINDOW_MS);
+  try {
+    return await SaleSignal.countDocuments({
+      gameKey: String(game).toLowerCase(),
+      at: { $gte: cutoff },
+    });
+  } catch {
+    return 0;
+  }
+}
+
+// ---- Existing coverage: who is ALREADY farming/holding a game? ----
+
+// Read every non-auto bot config across all hosts once per tick and count
+// enabled accounts farming each game. A config with OnlyFavouriteGames=false
+// or no favourites at all farms every available campaign, so those accounts
+// count toward every game (the wildcard set). Auto-bot files are excluded
+// via the AutoFarmTask registry so we never count ourselves.
+async function manualFarmMap(autoKeys) {
+  const map = new Map(); // gameLower -> Set(login)
+  const wildcard = new Set(); // logins farming everything
+  for (const h of hosts.listHosts()) {
+    let host;
+    let files;
+    try {
+      host = hosts.resolveHost(h.id);
+      files = await hosts.readdir(host);
+    } catch {
+      continue; // host offline — its bots aren't farming right now anyway
+    }
+    for (const f of files) {
+      if (!/^config(_\d{1,3})?\.json$/.test(f)) continue;
+      if (autoKeys.has(h.id + "|" + f)) continue; // our own auto-bots
+      let cfg;
+      try {
+        cfg = JSON.parse(await hosts.readFile(host, f));
+      } catch {
+        continue;
+      }
+      const ts = cfg.TwitchSettings || {};
+      const users = Array.isArray(ts.TwitchUsers) ? ts.TwitchUsers : [];
+      const cfgFavs = Array.isArray(ts.FavouriteGames) ? ts.FavouriteGames : [];
+      const only = ts.OnlyFavouriteGames !== false;
+      for (const u of users) {
+        if (!u || u.Enabled === false) continue;
+        const login = String(u.Login || "").toLowerCase();
+        if (!login) continue;
+        const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
+        const favs = own.length ? own : cfgFavs;
+        if (!favs.length || !only) {
+          wildcard.add(login); // farms whatever campaign is live
+          continue;
+        }
+        for (const g of favs) {
+          const k = String(g || "").toLowerCase();
+          if (!k) continue;
+          if (!map.has(k)) map.set(k, new Set());
+          map.get(k).add(login);
+        }
+      }
+    }
+  }
+  return { map, wildcard };
+}
+
+// Accounts that already HOLD this campaign's drops (unsold, unredeemed) —
+// straight from the drop archive. Farming the same campaign onto more
+// accounts only makes sense when these holders can't cover expected demand.
+async function archiveHoldersForCampaign(c) {
+  try {
+    const q = {
+      game: c.game,
+      connected: { $ne: true },
+      soldAt: null,
+    };
+    if (c.name) q.campaign = c.name;
+    const logins = await DropLog.distinct("login", q);
+    return logins.filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+
 function hoursLeft(endAt) {
   if (!endAt) return Infinity;
   return (new Date(endAt).getTime() - Date.now()) / 3600000;
 }
 
-// How many accounts a game deserves based on its demand tier.
-// Returns { target, tierNote, skip } — skip=true means proven low demand.
-function demandAllocation(research, af) {
+// How many accounts a game deserves. External market demand (Gameflip/GGSel/
+// Plati via MarketResearch) is blended with OUR OWN sales history: every
+// recent sale of this game's items (connection flips + reserved drops) adds
+// log-damped demand points. A game our own data proves sells never gets
+// skipped just because external scouts are quiet.
+// Returns { target, tierNote, skip, effective } — skip=true means proven low demand.
+function demandAllocation(research, af, internalSales = 0) {
+  const salesBoost =
+    internalSales > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(internalSales) : 0;
   if (!research || research.scannedAt == null) {
+    if (salesBoost >= DEMAND_HALF) {
+      // No market data but our own sales history says it sells.
+      const full = salesBoost >= DEMAND_FULL;
+      return {
+        target: full
+          ? af.maxPerGame
+          : Math.max(1, Math.ceil(af.maxPerGame / 2)),
+        tierNote:
+          "no external market data, but " +
+          internalSales +
+          " of our own recent sales — " +
+          (full ? "full" : "half") +
+          " allocation",
+        effective: Math.round(salesBoost),
+      };
+    }
     return {
       target: Math.min(af.probeSize, af.maxPerGame),
       tierNote: "no market data — probe batch",
       probe: true,
+      effective: Math.round(salesBoost),
     };
   }
-  const d = Number(research.demandScore || 0);
+  const market = Number(research.demandScore || 0);
+  const d = Math.round((market + salesBoost) * 10) / 10;
+  const salesNote =
+    internalSales > 0 ? " incl. " + internalSales + " own sales" : "";
   if (d >= DEMAND_FULL) {
     return {
       target: af.maxPerGame,
-      tierNote: "demand " + d + " (proven seller) — full allocation",
+      tierNote:
+        "demand " + d + salesNote + " (proven seller) — full allocation",
+      effective: d,
     };
   }
   if (d >= DEMAND_HALF) {
     return {
       target: Math.max(1, Math.ceil(af.maxPerGame / 2)),
-      tierNote: "demand " + d + " (moderate) — half allocation",
+      tierNote: "demand " + d + salesNote + " (moderate) — half allocation",
+      effective: d,
     };
   }
-  return { skip: true, demand: d };
+  return { skip: true, demand: d, effective: d };
 }
 
 // Split a limited budget across several campaigns proportionally to their
@@ -230,24 +375,33 @@ async function processCampaign(c, ctx) {
     );
   }
 
-  // 1) Sellability gate.
-  const research = await researchForGame(game);
-  const alloc = demandAllocation(research, af);
+  // 1) Sellability gate — fresh market data (Gameflip/GGSel/Plati, re-scanned
+  // when stale) blended with our own sales history (SaleSignal training data).
+  const info = (ctx.infoMap && ctx.infoMap.get(key)) || {
+    research: await freshResearchForGame(game),
+    internalSales: await internalSalesForGame(game),
+  };
+  const research = info.research;
+  const internalSales = info.internalSales || 0;
+  const alloc = demandAllocation(research, af, internalSales);
   if (alloc.skip) {
     await record({
       decision: "skip_low_demand",
       status: "skipped",
       reason:
-        "Market research shows demand score " +
+        "Effective demand " +
         alloc.demand +
-        " — items for this game don't sell; not worth pool accounts.",
+        " (market research + " +
+        internalSales +
+        " own recent sales) — items for this game don't sell; not worth pool accounts.",
       demandScore: alloc.demand,
       hadResearch: true,
+      internalSales,
     });
     await tg(
       "🤖 Auto-farm SKIP — " +
         game +
-        "\nDemand score " +
+        "\nEffective demand " +
         alloc.demand +
         " (items not salable). No accounts spent.",
     );
@@ -269,6 +423,7 @@ async function processCampaign(c, ctx) {
         "h) — too late to farm meaningfully.",
       demandScore,
       hadResearch: !!research,
+      internalSales,
     });
     return { decision: "skip_ends_soon" };
   }
@@ -347,9 +502,57 @@ async function processCampaign(c, ctx) {
     return { decision: "reuse_existing" };
   }
 
-  // 5) Allocation: fair-share budget for this tick, capped by tier target.
+  // 5) Coverage gate: how much of this game's demand is ALREADY covered by
+  // manual bots farming it right now and by unsold archive accounts holding
+  // this campaign's items? Only the uncovered remainder is worth new accounts.
+  const farmMap = ctx.farmMap || { map: new Map(), wildcard: new Set() };
+  const gameKey = game.toLowerCase();
+  const manualFarmers =
+    (farmMap.map.get(gameKey) ? farmMap.map.get(gameKey).size : 0) +
+    farmMap.wildcard.size;
+  const archiveHolders = await archiveHoldersForCampaign(c);
+  const covered = manualFarmers + archiveHolders;
+  const wanted = Math.min(alloc.target, af.maxPerGame);
+  const uncovered = Math.max(0, wanted - covered);
+  if (uncovered < 1) {
+    await record({
+      decision: "skip_already_covered",
+      status: "skipped",
+      reason:
+        "Demand target of " +
+        wanted +
+        " accounts is already covered: " +
+        manualFarmers +
+        " account" +
+        (manualFarmers === 1 ? "" : "s") +
+        " farming this game in manual bots + " +
+        archiveHolders +
+        " unsold archive account" +
+        (archiveHolders === 1 ? "" : "s") +
+        " already holding this campaign's items. No new accounts needed.",
+      demandScore,
+      hadResearch: !!research,
+      internalSales,
+      coverage: { manualFarmers, archiveHolders },
+    });
+    await tg(
+      "🤖 Auto-farm SKIP — " +
+        game +
+        "\nAlready covered: " +
+        manualFarmers +
+        " manual farmers + " +
+        archiveHolders +
+        " archive holders ≥ target " +
+        wanted +
+        ".",
+    );
+    return { decision: "skip_already_covered" };
+  }
+
+  // 6) Allocation: fair-share budget for this tick, capped by the UNCOVERED
+  // remainder of the tier target.
   const budget = budgetMap.get(key) || 0;
-  const target = Math.min(alloc.target, af.maxPerGame, budget);
+  const target = Math.min(uncovered, budget);
   if (target < 1) {
     await record({
       decision: "skip_no_accounts",
@@ -360,6 +563,8 @@ async function processCampaign(c, ctx) {
         " protects manual work) — will retry when the pool refills.",
       demandScore,
       hadResearch: !!research,
+      internalSales,
+      coverage: { manualFarmers, archiveHolders },
       plannedAccounts: 0,
     });
     return { decision: "skip_no_accounts" };
@@ -380,6 +585,8 @@ async function processCampaign(c, ctx) {
         " are busy — queued; retries when a campaign ends and frees a slot.",
       demandScore,
       hadResearch: !!research,
+      internalSales,
+      coverage: { manualFarmers, archiveHolders },
       plannedAccounts: target,
     });
     return { decision: "skip_no_capacity" };
@@ -388,6 +595,18 @@ async function processCampaign(c, ctx) {
   const accounts = Math.min(target, slotsFree * af.accountsPerBot);
   const botCount = Math.ceil(accounts / af.accountsPerBot);
   const decision = alloc.probe ? "probe" : "farm";
+  const covNote =
+    covered > 0
+      ? " (" +
+        covered +
+        " account" +
+        (covered === 1 ? "" : "s") +
+        " already covering: " +
+        manualFarmers +
+        " manual + " +
+        archiveHolders +
+        " archive)"
+      : "";
   const reason =
     (alloc.probe
       ? "New game with no sales history — farming a small probe batch to test the market. "
@@ -404,7 +623,9 @@ async function processCampaign(c, ctx) {
     host.label +
     " (campaign ends in " +
     Math.round(hrs) +
-    "h).";
+    "h)" +
+    covNote +
+    ".";
 
   // 7) Dry-run: record the plan, alert, touch nothing.
   if (af.dryRun) {
@@ -414,6 +635,8 @@ async function processCampaign(c, ctx) {
       reason,
       demandScore,
       hadResearch: !!research,
+      internalSales,
+      coverage: { manualFarmers, archiveHolders },
       plannedAccounts: accounts,
     });
     await tg(
@@ -433,6 +656,8 @@ async function processCampaign(c, ctx) {
     reason,
     demandScore,
     hadResearch: !!research,
+    internalSales,
+    coverage: { manualFarmers, archiveHolders },
     plannedAccounts: accounts,
   });
   return executeTask(task, ctx);
@@ -640,20 +865,45 @@ async function runOnce() {
       }
     }
 
-    // Fair-share budget across everything competing in this tick.
+    // Prefetch decision inputs once per candidate: live-refreshed market
+    // research (Gameflip/GGSel/Plati when stale) + our own sales history.
+    const infoMap = new Map();
+    for (const c of candidates) {
+      infoMap.set(c.campaignId, {
+        research: await freshResearchForGame(c.game),
+        internalSales: await internalSalesForGame(c.game),
+      });
+    }
+
+    // Snapshot which games manual bots are farming right now (one config
+    // sweep across all hosts per tick; auto-bot files excluded via registry).
+    const autoTasks = await AutoFarmTask.find(
+      { "bots.0": { $exists: true } },
+      { bots: 1 },
+    ).lean();
+    const autoKeys = new Set();
+    for (const t of autoTasks) {
+      for (const b of t.bots || []) autoKeys.add(b.host + "|" + b.file);
+    }
+    const farmMap = hostOnline
+      ? await manualFarmMap(autoKeys)
+      : { map: new Map(), wildcard: new Set() };
+
+    // Fair-share budget across everything competing in this tick. Weights use
+    // the blended demand (market + own sales) so proven sellers win supply.
     const ready = await countReadyPool();
     const spendable = Math.max(0, ready - af.poolReserve);
     const requests = [];
     for (const c of candidates) {
-      const research = await researchForGame(c.game);
-      const alloc = demandAllocation(research, af);
+      const info = infoMap.get(c.campaignId);
+      const alloc = demandAllocation(info.research, af, info.internalSales);
       if (alloc.skip) {
         requests.push({ key: c.campaignId, want: 0, weight: 0 });
       } else {
         requests.push({
           key: c.campaignId,
           want: Math.min(alloc.target, af.maxPerGame),
-          weight: research ? Math.max(1, Number(research.demandScore || 0)) : 5,
+          weight: Math.max(1, Number(alloc.effective || 0) || 5),
         });
       }
     }
@@ -662,7 +912,14 @@ async function runOnce() {
     const results = [];
     for (const c of candidates) {
       try {
-        const r = await processCampaign(c, { af, host, hostOnline, budgetMap });
+        const r = await processCampaign(c, {
+          af,
+          host,
+          hostOnline,
+          budgetMap,
+          infoMap,
+          farmMap,
+        });
         results.push({ game: c.game, ...r });
       } catch (e) {
         results.push({ game: c.game, error: e.message });
