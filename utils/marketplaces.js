@@ -1019,24 +1019,120 @@ function ggselStockField(o) {
   return null;
 }
 
-// "Copy the category from my newest live offer" — used by the auto-lister so
-// GGSel listings land in the same catalog section the seller already uses,
-// without any manual setting. Newest = highest id.
-async function ggselLatestCategoryId() {
+/* ------------------- GGSel per-game category resolution ------------------ */
+// GGSel's catalog has a per-game "Twitch Drops" section (often with a lower
+// fee than generic categories — 2% vs 15%+). Resolution order, verified
+// against the live API and the seller's own 58-offer history:
+//   1. The seller's own past offers: an offer whose category tree reads
+//      "Games > {Game} > Twitch Drops" for this game — reuse its category.
+//   2. Catalog search: find the game node under Игры/Games, list its
+//      children, pick the "Twitch Drops" child.
+//   3. The game's "Accounts/Аккаунты" child (how the seller listed games
+//      that lack a Twitch Drops section, e.g. Where Winds Meet).
+// Returns "" when nothing matches; caller decides the final fallback.
+
+function normGame(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0400-\u04ff]+/g, " ")
+    .trim();
+}
+
+function gameMatches(a, b) {
+  const na = normGame(a);
+  const nb = normGame(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+// Own-offer category history, cached 12h (building it costs one detail call
+// per offer).
+let ggCatHistory = { until: 0, rows: [] };
+
+async function ggselCategoryHistory() {
+  if (Date.now() < ggCatHistory.until) return ggCatHistory.rows;
   const keys = requireKeys("ggsel");
-  const r = await axios.get(GG_API + "/offers", {
+  const list = await axios.get(GG_API + "/offers?limit=100", {
     headers: ggHeaders(keys),
     timeout: 20000,
   });
-  const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
-  let best = null;
-  for (const o of rows) {
-    if (!o) continue;
-    const cat = Number(o.category_id || o.id_category || 0);
-    if (!cat) continue;
-    if (!best || Number(o.id) > Number(best.id)) best = { id: o.id, cat };
+  const rows = [];
+  for (const o of (list.data && list.data.data) || []) {
+    if (!o || !o.id) continue;
+    try {
+      const det = await axios.get(GG_API + "/offers/" + o.id, {
+        headers: ggHeaders(keys),
+        timeout: 20000,
+      });
+      const cat = det.data && det.data.data && det.data.data.category;
+      if (cat && cat.id && cat.tree) {
+        rows.push({ id: String(cat.id), tree: String(cat.tree) });
+      }
+    } catch {
+      /* skip unreadable offers */
+    }
   }
-  return best ? String(best.cat) : "";
+  ggCatHistory = { until: Date.now() + 12 * 3600 * 1000, rows };
+  return rows;
+}
+
+async function ggselResolveCategoryId(game) {
+  const keys = requireKeys("ggsel");
+
+  // 1) Own history: "Games > {Game} > Twitch Drops" (tree root may be
+  //    localized as Игры).
+  try {
+    for (const row of await ggselCategoryHistory()) {
+      const parts = row.tree.split(">").map((x) => x.trim());
+      if (parts.length < 3) continue;
+      if (!/twitch/i.test(parts[parts.length - 1])) continue;
+      if (gameMatches(parts[1], game)) return row.id;
+    }
+  } catch {
+    /* fall through to search */
+  }
+
+  // 2) Catalog search: game node under Игры/Games, then its Twitch child.
+  let parent = null;
+  try {
+    const r = await axios.get(
+      GG_API + "/categories/search?q=" + encodeURIComponent(game),
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
+    for (const h of (r.data && r.data.data) || []) {
+      const root = String(h.tree || "")
+        .split(">")[0]
+        .trim();
+      if (!h.has_children) continue;
+      if (root !== "\u0418\u0433\u0440\u044b" && root !== "Games") continue;
+      if (!gameMatches(h.title, game)) continue;
+      parent = h;
+      break;
+    }
+  } catch {
+    return "";
+  }
+  if (!parent) return "";
+
+  try {
+    const kids = await axios.get(
+      GG_API + "/categories?parent_id=" + parent.id,
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
+    const rows = (kids.data && kids.data.data) || [];
+    const twitch = rows.find((k) => /twitch/i.test(String(k.title || "")));
+    if (twitch) return String(twitch.id);
+    // 3) The game's accounts section — the seller's own fallback pattern.
+    const acc = rows.find((k) =>
+      /^(accounts|\u0430\u043a\u043a\u0430\u0443\u043d\u0442\u044b)$/i.test(
+        String(k.title || "").trim(),
+      ),
+    );
+    if (acc) return String(acc.id);
+  } catch {
+    /* nothing */
+  }
+  return "";
 }
 
 async function ggselOfferStock(offerId) {
@@ -1861,7 +1957,7 @@ module.exports = {
   ggselPublish,
   ggselAddProducts,
   ggselOfferStock,
-  ggselLatestCategoryId,
+  ggselResolveCategoryId,
   ggselEnableAutoselling,
   ggselFinalizeStock,
   ggselDelist,
