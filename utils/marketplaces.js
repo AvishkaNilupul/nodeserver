@@ -340,6 +340,30 @@ const DS_API = "https://api.digiseller.com/api";
 
 let dsToken = { token: "", validUntil: 0, sellerId: "" };
 
+// Digiseller's API is occasionally slow enough to blow the 20s timeout.
+// Retry transient failures (timeouts, resets, 5xx) with a short backoff —
+// real auth errors (retval != 0, 4xx) still fail on the first attempt.
+function isTransientNetError(e) {
+  if (!e) return false;
+  if (e.code === "ECONNABORTED" || e.code === "ECONNRESET") return true;
+  if (e.response && e.response.status >= 500) return true;
+  return /timeout|socket hang up|network/i.test(String(e.message || ""));
+}
+
+async function withNetRetries(fn, attempts = 3) {
+  let last;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      if (!isTransientNetError(e) || i === attempts - 1) throw e;
+      await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
 async function digisellerToken() {
   const keys = requireKeys("digiseller");
   const now = Date.now();
@@ -356,10 +380,12 @@ async function digisellerToken() {
     .update(keys.apiKey + timestamp)
     .digest("hex");
   try {
-    const r = await axios.post(
-      DS_API + "/apilogin",
-      { seller_id: Number(keys.sellerId), timestamp, sign },
-      { headers: { "Content-Type": "application/json" }, timeout: 20000 },
+    const r = await withNetRetries(() =>
+      axios.post(
+        DS_API + "/apilogin",
+        { seller_id: Number(keys.sellerId), timestamp, sign },
+        { headers: { "Content-Type": "application/json" }, timeout: 20000 },
+      ),
     );
     if (String(r.data.retval) !== "0" || !r.data.token) {
       throw new Error(
