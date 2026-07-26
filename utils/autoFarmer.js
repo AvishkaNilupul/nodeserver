@@ -35,6 +35,9 @@ const RESEARCH_STALE_MS = 7 * 86400000; // re-scan markets older than a week
 // the condition persists until the operator acts and a per-tick repeat would be
 // exactly the spam this system was just fixed for.
 const STARVATION_COOLDOWN_MS = 12 * 3600 * 1000;
+// How many "farms everything" accounts may be credited as coverage for a single
+// game. See the coverage gate for why this is a constant and why it is 0.
+const WILDCARD_CREDIT_CAP = 0;
 const SALES_WINDOW_MS = 45 * 86400000; // own-sales training window
 // Each of our own recent sales is worth this many demand points (log-damped
 // below). 5+ recent sales pushes any game to full allocation on its own.
@@ -221,22 +224,51 @@ async function manualFarmMap(autoKeys) {
   return { map, wildcard };
 }
 
-// Accounts that already HOLD this campaign's drops (unsold, unredeemed) —
-// straight from the drop archive. Farming the same campaign onto more
-// accounts only makes sense when these holders can't cover expected demand.
+// Accounts that already HOLD this game's drops (unsold, unredeemed) — straight
+// from the drop archive. Farming onto more accounts only makes sense when these
+// holders can't cover expected demand.
+//
+// Deliberately keyed on GAME, not campaign. The old query added
+// `campaign: c.name`, but DropLog.campaign is populated on only 1.81% of rows
+// on prod (2877 of 158774), so the term returned 0 for essentially every
+// campaign and the only real inventory signal in the coverage model was dead.
+// Game-level counting is also the honest question: an unsold account holding
+// this game's drops is sellable stock whichever campaign minted it. Verified
+// live — Overwatch 297 holders, Fortnite 205, Albion Online 92, all previously
+// counted as 0. This can only RAISE coverage and therefore only LOWER spending.
 async function archiveHoldersForCampaign(c) {
   try {
-    const q = {
+    const logins = await DropLog.distinct("login", {
       game: c.game,
       connected: { $ne: true },
       soldAt: null,
-    };
-    if (c.name) q.campaign = c.name;
-    const logins = await DropLog.distinct("login", q);
+    });
     return logins.filter(Boolean).length;
   } catch {
     return 0;
   }
+}
+
+// The same count for many games in ONE aggregation, built once per tick. The
+// per-campaign version above costs a distinct() each, which was ~55 round-trips
+// on a tick with a full candidate list. Scoped to the games actually being
+// decided so the $addToSet stays small (prod Mongo is an Atlas shared tier with
+// allowDiskUse disabled, so aggregations must stay under 100MB).
+async function archiveHoldersByGame(games) {
+  const out = new Map();
+  const list = [...new Set(games.filter(Boolean))];
+  if (!list.length) return out;
+  try {
+    const rows = await DropLog.aggregate([
+      { $match: { game: { $in: list }, connected: { $ne: true }, soldAt: null } },
+      { $group: { _id: { game: "$game", login: "$login" } } },
+      { $group: { _id: "$_id.game", n: { $sum: 1 } } },
+    ]);
+    for (const r of rows) out.set(String(r._id).toLowerCase(), r.n || 0);
+  } catch {
+    /* fall back to the per-campaign query */
+  }
+  return out;
 }
 
 function hoursLeft(endAt) {
@@ -726,11 +758,31 @@ async function processCampaign(c, ctx) {
   // this campaign's items? Only the uncovered remainder is worth new accounts.
   const farmMap = ctx.farmMap || { map: new Map(), wildcard: new Set() };
   const gameKey = game.toLowerCase();
-  const manualFarmers =
-    (farmMap.map.get(gameKey) ? farmMap.map.get(gameKey).size : 0) +
-    farmMap.wildcard.size;
-  const archiveHolders = await archiveHoldersForCampaign(c);
-  const covered = manualFarmers + archiveHolders;
+  const gameSpecificFarmers = farmMap.map.get(gameKey)
+    ? farmMap.map.get(gameKey).size
+    : 0;
+  // Wildcard accounts (no per-account FavouriteGames, so they farm whatever the
+  // config lists) were counted IN FULL against every game at once. With ~1615 of
+  // them on prod and `wanted` capped at maxPerGame (30), covered always exceeded
+  // wanted, so uncovered was 0 for every campaign, forever — a silent 100% block
+  // on all new farming. One account cannot deliver 127 campaigns of drops
+  // simultaneously, so crediting it to all of them is simply wrong.
+  //
+  // Capped at a constant rather than divided by the live campaign count: a
+  // moving denominator inverts under load (floor(1615/N) > 30 whenever N <= 53,
+  // i.e. it silently reverts to a total block whenever the calendar is quiet)
+  // and risks a NaN, which would bypass BOTH spend gates. Starts at 0 because
+  // archiveHoldersForCampaign now supplies real inventory-based coverage.
+  const wildcardCredit = Math.min(farmMap.wildcard.size, WILDCARD_CREDIT_CAP);
+  const manualFarmers = gameSpecificFarmers + wildcardCredit;
+  const archiveHolders = ctx.archiveHolders
+    ? ctx.archiveHolders.get(gameKey) || 0
+    : await archiveHoldersForCampaign(c);
+  // Fail closed: a NaN here would make every comparison below false and slip
+  // past both the coverage gate and the pool/fair-share gate, persisting
+  // plannedAccounts: NaN straight through Mongoose.
+  const coveredRaw = manualFarmers + archiveHolders;
+  const covered = Number.isFinite(coveredRaw) ? coveredRaw : 0;
   // Non-probe campaigns must at least fill every enabled market's shelf.
   const floor = alloc.probe ? 0 : marketStockFloor(af);
   const wanted = Math.min(Math.max(alloc.target, floor), af.maxPerGame);
@@ -743,14 +795,15 @@ async function processCampaign(c, ctx) {
         "Demand target of " +
         wanted +
         " accounts is already covered: " +
-        manualFarmers +
-        " account" +
-        (manualFarmers === 1 ? "" : "s") +
-        " farming this game in manual bots + " +
+        gameSpecificFarmers +
+        " bot account(s) farming this game specifically + " +
+        wildcardCredit +
+        " credited from " +
+        farmMap.wildcard.size +
+        " farming everything + " +
         archiveHolders +
-        " unsold archive account" +
-        (archiveHolders === 1 ? "" : "s") +
-        " already holding this campaign's items. No new accounts needed.",
+        " unsold archive account(s) already holding this game's items. " +
+        "No new accounts needed.",
       demandScore,
       hadResearch: !!research,
       internalSales,
@@ -781,7 +834,9 @@ async function processCampaign(c, ctx) {
   // remainder of the tier target.
   const budget = budgetMap.get(key) || 0;
   const target = Math.min(uncovered, budget);
-  if (target < 1) {
+  // Fail closed alongside the coverage guard: `target < 1` is false for NaN, so
+  // without this a non-finite budget would fall straight through to claiming.
+  if (!Number.isFinite(target) || target < 1) {
     await record({
       decision: "skip_no_accounts",
       status: "skipped",
@@ -1417,7 +1472,19 @@ async function runOnce() {
         farmMap.map.size +
         " game(s) farmed by manual bots, " +
         farmMap.wildcard.size +
-        " account(s) farming everything.",
+        " account(s) farming everything (credited " +
+        Math.min(farmMap.wildcard.size, WILDCARD_CREDIT_CAP) +
+        " per game).",
+    );
+
+    // Unsold archive holders for every candidate game, in one aggregation.
+    const archiveHolders = await archiveHoldersByGame(
+      candidates.map((c) => c.game),
+    );
+    progress(
+      "Archive coverage: " +
+        archiveHolders.size +
+        " game(s) with unsold holders already in stock.",
     );
 
     // Fair-share budget across everything competing in this tick. Weights use
@@ -1456,6 +1523,7 @@ async function runOnce() {
           budgetMap,
           infoMap,
           farmMap,
+          archiveHolders,
           priorTasks,
         });
         progress(
@@ -1643,11 +1711,46 @@ async function runOnce() {
 // half-post-event split.
 async function backfillActiveTasks(af, host, progress) {
   if (af.dryRun || !host) return 0;
+  // Highest demand first, not oldest first. With a scarce pool the old
+  // executedAt ordering let whichever campaign happened to run earliest drain
+  // the refill before proven sellers were served — and backfill is where most
+  // of the pool actually goes (140 of 174 claims in a day on prod).
   const tasks = await AutoFarmTask.find({ status: "active" }).sort({
+    demandScore: -1,
     executedAt: 1,
   });
+  // Fresh accounts cannot finish a drop that ends in a few hours, so a task
+  // whose campaign is inside the same time gate that blocks new farming is not
+  // worth spending on either.
+  const worthTopping = tasks.filter(
+    (t) => !t.campaignEndAt || hoursLeft(t.campaignEndAt) >= af.minHoursLeft,
+  );
+  if (worthTopping.length < tasks.length) {
+    progress(
+      "Backfill: skipping " +
+        (tasks.length - worthTopping.length) +
+        " task(s) whose campaign ends within " +
+        af.minHoursLeft +
+        "h.",
+    );
+  }
+  // Never let one game absorb an entire refill: cap this tick's backfill at
+  // half of what is spendable so a fresh campaign can still be started.
+  const readyNow = await countReadyPool();
+  const backfillCap = Math.max(
+    1,
+    Math.floor(Math.max(0, readyNow - af.poolReserve) / 2),
+  );
   let added = 0;
-  for (const task of tasks) {
+  for (const task of worthTopping) {
+    if (added >= backfillCap) {
+      progress(
+        "Backfill: reached this tick's cap of " +
+          backfillCap +
+          " account(s); the rest stays available for new campaigns.",
+      );
+      break;
+    }
     const target = Math.min(
       Math.max(
         Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
@@ -1671,7 +1774,7 @@ async function backfillActiveTasks(af, host, progress) {
           " ready, reserve " +
           af.poolReserve +
           ") — " +
-          (tasks.length - tasks.indexOf(task)) +
+          (worthTopping.length - worthTopping.indexOf(task)) +
           " task(s) left under target this tick.",
         "warn",
       );
