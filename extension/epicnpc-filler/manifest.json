@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "EpicNPC Filler",
+  "version": "1.0.0",
+  "description": "Auto-fills the EpicNPC 'Post thread' form from listings opened via your panel's 'Sell on EpicNPC' button. Fill only - you review and click Post thread.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.epicnpc.com/*", "https://epicnpc.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

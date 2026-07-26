@@ -942,6 +942,39 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
   }
 });
 
+// EpicNPC Filler browser extension download. The extension packages the same
+// fill logic as the bookmarklet but runs automatically when a compose tab
+// opened from "Sell on EpicNPC" loads — no bookmark click needed. Served as a
+// stored zip built from the checked-in extension/ sources so it can never
+// drift from the repo.
+router.get(
+  "/marketplaces/epicnpc/extension.zip",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const { buildStoredZip } = require("../utils/storedZip");
+      const dir = path.join(__dirname, "..", "extension", "epicnpc-filler");
+      const files = [];
+      for (const name of await fsp.readdir(dir)) {
+        files.push({
+          name: "epicnpc-filler/" + name,
+          data: await fsp.readFile(path.join(dir, name)),
+        });
+      }
+      const zip = buildStoredZip(files);
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader(
+        "Content-Disposition",
+        'attachment; filename="epicnpc-filler.zip"',
+      );
+      res.send(zip);
+    } catch (err) {
+      console.error("epicnpc extension zip error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 // EpicNPC bridge: EpicNPC has no seller API and is bot-protected, so the server
 // can't post the listing. Instead it resolves the game's forum node and builds
 // the compose deep-link with the listing payload in the URL hash; the frontend
@@ -956,7 +989,9 @@ router.post(
       const body = req.body || {};
       const set = await DropSet.findById(body.setId).lean();
       if (!set) {
-        return res.status(404).json({ success: false, message: "Set not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Set not found" });
       }
       const game = String(body.game || set.game || "").trim();
       const hit = epicnpc.nodeForGame(game);
@@ -964,7 +999,9 @@ router.post(
         return res.status(422).json({
           success: false,
           message: game
-            ? '"' + game + '" has no EpicNPC forum — pick another game or skip EpicNPC for this listing.'
+            ? '"' +
+              game +
+              '" has no EpicNPC forum — pick another game or skip EpicNPC for this listing.'
             : "No game given for this listing, so EpicNPC has nowhere to post it.",
         });
       }
@@ -1000,7 +1037,12 @@ router.post(
           description: payload.description,
           price: priceUsd,
           status: "active",
-          note: "bridge post to " + hit.name + " (node " + hit.node + ") — posted manually via bookmarklet",
+          note:
+            "bridge post to " +
+            hit.name +
+            " (node " +
+            hit.node +
+            ") — posted manually via bookmarklet",
         });
         listingId = String(doc._id);
       }
