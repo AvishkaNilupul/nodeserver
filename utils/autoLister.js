@@ -429,6 +429,141 @@ async function retryMissingSecondaries(task) {
   return retried.length ? retried : null;
 }
 
+/* ------------------------------- refiller ------------------------------- */
+
+// Auto-refiller: top up markets that sold out (or were shorted at listing
+// time) WITHOUT delisting anything. Stock sources in order: free spare
+// accounts (assigned but not tied to any active listing), then the 50%
+// post-event holdback (decrementing the counter so the post-event release
+// stays honest), and when both run dry the task's target is raised so the
+// farmer's backfill pass grows the supply. Gameflip refills bump the relist
+// chain counter; Plati/GGSel refills add delivery codes to the SAME product.
+async function refillMarkets(task, { perMarketStock = 3 } = {}) {
+  const L = task.listing || {};
+  if (!L.externalId) return null; // not listed yet — nothing to refill
+  const actions = [];
+  const per = Math.max(1, Number(perMarketStock) || 3);
+
+  // How many accounts are free right now, and how many of those belong to
+  // the post-event holdback reserve.
+  const spare = await pickDeliveryAccounts(
+    task,
+    (task.assignedAccounts || []).length,
+  );
+  let heldBack = Math.max(0, Number(L.heldBack) || 0);
+  let freeSpare = Math.max(0, spare.length - heldBack);
+  let holdbackUsed = 0;
+  let cursor = 0;
+
+  function takeAccounts(n) {
+    // freeSpare first, then dip into the holdback reserve.
+    const take = Math.min(n, spare.length - cursor);
+    if (take < 1) return [];
+    const fromFree = Math.min(take, freeSpare);
+    const fromHold = take - fromFree;
+    freeSpare -= fromFree;
+    heldBack -= fromHold;
+    holdbackUsed += fromHold;
+    const out = spare.slice(cursor, cursor + take);
+    cursor += take;
+    return out;
+  }
+
+  // --- Gameflip: the relist chain sells while qtyRemaining > 0. Accounts
+  // are reserved from the archive at delivery time, so a refill is just a
+  // counter bump backed by real spare accounts.
+  try {
+    const row = await MarketplaceListing.findOne({
+      marketplace: "gameflip",
+      externalId: L.externalId,
+      status: "active",
+    });
+    if (row) {
+      const stock = Math.max(0, Number(row.qtyRemaining) || 0);
+      if (stock < per) {
+        const add = takeAccounts(per - stock).length;
+        if (add > 0) {
+          row.qtyRemaining = stock + add;
+          await row.save();
+          task.listing.qty = (Number(task.listing.qty) || 0) + add;
+          actions.push("gameflip +" + add);
+        }
+      }
+    }
+  } catch {
+    /* refill is best-effort per market */
+  }
+
+  // --- Plati (Digiseller): live stock read, then add codes to the product.
+  if (L.plati && L.plati.externalId) {
+    try {
+      const stock = await mp.digisellerProductStock(L.plati.externalId);
+      if (stock !== null && stock < per) {
+        const accs = takeAccounts(per - stock);
+        if (accs.length) {
+          await mp.digisellerAddContent(
+            L.plati.externalId,
+            accs.map((a) => digisellerDeliveryCode(a.login, a.password)),
+          );
+          task.listing.plati.qty =
+            (Number(task.listing.plati.qty) || 0) + accs.length;
+          actions.push("plati +" + accs.length);
+        }
+      }
+    } catch {
+      /* stock read or add failed — retried next sweep */
+    }
+  }
+
+  // --- GGSel: live stock read, add products, resync sellable quantity.
+  if (L.ggsel && L.ggsel.externalId) {
+    try {
+      const stock = await mp.ggselOfferStock(L.ggsel.externalId);
+      if (stock !== null && stock < per) {
+        const accs = takeAccounts(per - stock);
+        if (accs.length) {
+          await mp.ggselAddProducts(
+            L.ggsel.externalId,
+            accs.map((a) => ggselDeliveryCode(a.login, a.password)),
+          );
+          await mp.ggselFinalizeStock(L.ggsel.externalId).catch(() => {});
+          task.listing.ggsel.qty =
+            (Number(task.listing.ggsel.qty) || 0) + accs.length;
+          actions.push("ggsel +" + accs.length);
+        }
+      }
+    } catch {
+      /* retried next sweep */
+    }
+  }
+
+  // Bookkeeping: holdback we consumed is no longer waiting for post-event.
+  if (holdbackUsed > 0) {
+    task.listing.heldBack = Math.max(
+      0,
+      (Number(task.listing.heldBack) || 0) - holdbackUsed,
+    );
+    actions.push("holdback -" + holdbackUsed);
+  }
+
+  // Supply ran dry mid-refill? Raise the target so the farmer's backfill
+  // pass claims more pool accounts for this game ("farm more" leg).
+  if (cursor >= spare.length && actions.length === 0 && heldBack === 0) {
+    const target =
+      Number(task.targetAccounts) || Number(task.plannedAccounts) || 0;
+    const have = (task.assignedAccounts || []).length;
+    if (have >= target) {
+      task.targetAccounts = have + per;
+      actions.push("target raised to " + task.targetAccounts);
+    }
+  }
+
+  if (!actions.length) return null;
+  task.markModified("listing");
+  await task.save();
+  return actions;
+}
+
 // Main entry: called by the auto-farmer right after a task's bots start (and
 // re-tried on later ticks while no listing exists). Dry-run stores a preview.
 async function listActivatedTask(taskId, { dryRun = false } = {}) {
@@ -799,6 +934,7 @@ async function onCampaignEnded(taskId) {
 module.exports = {
   listActivatedTask,
   onCampaignEnded,
+  refillMarkets,
   // exported for tests
   buildTitle,
   buildDescription,
