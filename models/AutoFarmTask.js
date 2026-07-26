@@ -45,6 +45,9 @@ const autoFarmTaskSchema = new mongoose.Schema(
 
     // Allocation.
     plannedAccounts: { type: Number, default: 0 },
+    // Full tier target (before the pool fair-share trim). Backfill keeps
+    // topping the task up toward this as the pool refills.
+    targetAccounts: { type: Number, default: 0 },
     assignedAccounts: { type: [String], default: [] }, // pool usernames actually deployed
 
     // Bots created (or reused) for this task, all on the configured host (Pi).
@@ -89,6 +92,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
       title: { type: String, default: "" },
       price: { type: Number, default: 0 },
       qty: { type: Number, default: 0 },
+      heldBack: { type: Number, default: 0 },
       listedAt: { type: Date, default: null },
       repricedAt: { type: Date, default: null },
       postEvent: { type: Boolean, default: false },

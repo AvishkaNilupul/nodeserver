@@ -8,6 +8,7 @@ const {
   derivePrice,
   stackItems,
   stackedPrice,
+  computeSplit,
 } = require("../utils/autoLister");
 
 const items = [
@@ -124,4 +125,16 @@ test("stacking unions items across sets without duplicates", () => {
 test("stacked price sums campaign prices and applies +50%", () => {
   assert.strictEqual(stackedPrice([2.0, 3.0]), 7.5);
   assert.strictEqual(stackedPrice([0, 0]), 1.5);
+});
+
+test("hold-back split lists half now (rounded up), holds the rest", () => {
+  assert.deepStrictEqual(computeSplit(6), { listNow: 3, holdBack: 3 });
+  assert.deepStrictEqual(computeSplit(5), { listNow: 3, holdBack: 2 });
+  assert.deepStrictEqual(computeSplit(3), { listNow: 2, holdBack: 1 });
+  assert.deepStrictEqual(computeSplit(2), { listNow: 1, holdBack: 1 });
+});
+
+test("hold-back split never holds when there is only one account", () => {
+  assert.deepStrictEqual(computeSplit(1), { listNow: 1, holdBack: 0 });
+  assert.deepStrictEqual(computeSplit(0), { listNow: 0, holdBack: 0 });
 });

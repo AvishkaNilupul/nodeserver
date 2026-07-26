@@ -158,6 +158,19 @@ function buildDescription({ game, items, campaignName, endAt, postEvent }) {
   return lines.join("\n").slice(0, 5000);
 }
 
+/* ------------------------------ hold-back split -------------------------- */
+
+// "Farm 6, list 3 now, save the rest": half the farmed accounts (rounded up)
+// go on sale immediately at the early-bird price; the remainder is held back
+// and only released into the listing AFTER the event ends, at the +50%
+// post-event price — when supply is frozen and each account is worth more.
+function computeSplit(qty) {
+  const n = Math.max(0, Number(qty) || 0);
+  if (n <= 1) return { listNow: n, holdBack: 0 };
+  const listNow = Math.ceil(n / 2);
+  return { listNow, holdBack: n - listNow };
+}
+
 /* --------------------------------- price -------------------------------- */
 
 function round25(x) {
@@ -237,6 +250,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const research = await MarketResearch.findOne({ game: task.game }).lean();
   const price = derivePrice(research);
   const qty = Math.max(1, (task.assignedAccounts || []).length);
+  const split = computeSplit(qty);
   const title = buildTitle({
     game: task.game,
     items,
@@ -252,9 +266,9 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   });
 
   if (dryRun) {
-    task.wouldList = { title, price, qty };
+    task.wouldList = { title, price, qty: split.listNow };
     await task.save();
-    return { wouldList: { title, price, qty } };
+    return { wouldList: { title, price, qty: split.listNow } };
   }
 
   const account = await pickDeliveryAccount(task);
@@ -315,9 +329,11 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     status: "active",
     autoDeliver: true,
     accountLogin: account.login,
-    // First unit is the pool account itself; the remaining units relist
-    // through the normal farmed-archive chain as accounts finish farming.
-    qtyRemaining: Math.max(0, qty - 1),
+    // First unit is the pool account itself; the remaining list-now units
+    // relist through the farmed-archive chain. Held-back units are NOT
+    // counted here — they join qtyRemaining after the event ends, at the
+    // post-event price.
+    qtyRemaining: Math.max(0, split.listNow - 1),
   });
 
   task.listing = {
@@ -326,7 +342,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     url: published.url || "",
     title,
     price,
-    qty,
+    qty: split.listNow,
+    heldBack: split.holdBack,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,
@@ -424,6 +441,7 @@ async function onCampaignEnded(taskId) {
     marketplace: "gameflip",
     status: "active",
   });
+  const heldBack = Math.max(0, Number(task.listing.heldBack) || 0);
   if (row) {
     await mp.gameflipReprice(row.externalId, {
       priceUsd: price,
@@ -433,6 +451,9 @@ async function onCampaignEnded(taskId) {
     row.title = title;
     row.description = description;
     row.price = price;
+    // Release the held-back accounts into the chain: they sell at the new
+    // marked-up price — the whole point of saving them for after the event.
+    row.qtyRemaining = (Number(row.qtyRemaining) || 0) + heldBack;
     await row.save();
   }
 
@@ -440,8 +461,20 @@ async function onCampaignEnded(taskId) {
   task.listing.price = price;
   task.listing.repricedAt = new Date();
   task.listing.postEvent = true;
+  if (row && heldBack > 0) {
+    task.listing.qty = (Number(task.listing.qty) || 0) + heldBack;
+    task.listing.heldBack = 0;
+  }
   await task.save();
-  return { repriced: { title, price, items: items.length, live: !!row } };
+  return {
+    repriced: {
+      title,
+      price,
+      items: items.length,
+      live: !!row,
+      released: row ? heldBack : 0,
+    },
+  };
 }
 
 module.exports = {
@@ -453,4 +486,5 @@ module.exports = {
   derivePrice,
   stackItems,
   stackedPrice,
+  computeSplit,
 };
