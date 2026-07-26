@@ -18,6 +18,11 @@ const AUTO_FARM_DEFAULTS = {
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
+  // Multi-market auto-listing. Plati needs a cataloguer category id (owner 1
+  // on Digiseller) — pick one in Shop > Listings once and paste it here.
+  // GGSel: leave empty to copy the category from your newest live offer.
+  platiCategoryId: "",
+  ggselCategoryId: "",
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

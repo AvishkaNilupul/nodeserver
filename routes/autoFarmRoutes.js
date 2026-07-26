@@ -75,6 +75,17 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
     if ("probeSize" in b) patch.probeSize = clamp(b.probeSize, 1, 30);
     if ("maxAutoBots" in b) patch.maxAutoBots = clamp(b.maxAutoBots, 1, 50);
     if ("minHoursLeft" in b) patch.minHoursLeft = clamp(b.minHoursLeft, 0, 168);
+    // Multi-market category ids: numeric strings, empty = unset/auto.
+    if ("platiCategoryId" in b)
+      patch.platiCategoryId = String(b.platiCategoryId || "").replace(
+        /[^0-9]/g,
+        "",
+      );
+    if ("ggselCategoryId" in b)
+      patch.ggselCategoryId = String(b.ggselCategoryId || "").replace(
+        /[^0-9]/g,
+        "",
+      );
     for (const k of Object.keys(patch)) {
       if (typeof patch[k] === "number" && isNaN(patch[k])) delete patch[k];
     }
@@ -227,6 +238,34 @@ router.post(
         },
         { $set: { status: "removed" } },
       );
+      // Secondary markets ride along: best-effort removal on Plati + GGSel,
+      // their DB rows retired the same way.
+      const plId =
+        task.listing.plati && task.listing.plati.externalId
+          ? task.listing.plati.externalId
+          : "";
+      if (plId) {
+        await mp.digisellerDelist(plId).catch(() => {});
+        await MarketplaceListing.updateOne(
+          {
+            set: task.listing.setId,
+            marketplace: "digiseller",
+            externalId: plId,
+          },
+          { $set: { status: "removed" } },
+        );
+      }
+      const ggId =
+        task.listing.ggsel && task.listing.ggsel.externalId
+          ? task.listing.ggsel.externalId
+          : "";
+      if (ggId) {
+        await mp.ggselDelist(ggId).catch(() => {});
+        await MarketplaceListing.updateOne(
+          { set: task.listing.setId, marketplace: "ggsel", externalId: ggId },
+          { $set: { status: "removed" } },
+        );
+      }
       task.listing = undefined;
       task.wouldList = undefined;
       await task.save();

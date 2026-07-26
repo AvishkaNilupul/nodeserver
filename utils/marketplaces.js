@@ -1019,6 +1019,26 @@ function ggselStockField(o) {
   return null;
 }
 
+// "Copy the category from my newest live offer" — used by the auto-lister so
+// GGSel listings land in the same catalog section the seller already uses,
+// without any manual setting. Newest = highest id.
+async function ggselLatestCategoryId() {
+  const keys = requireKeys("ggsel");
+  const r = await axios.get(GG_API + "/offers", {
+    headers: ggHeaders(keys),
+    timeout: 20000,
+  });
+  const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
+  let best = null;
+  for (const o of rows) {
+    if (!o) continue;
+    const cat = Number(o.category_id || o.id_category || 0);
+    if (!cat) continue;
+    if (!best || Number(o.id) > Number(best.id)) best = { id: o.id, cat };
+  }
+  return best ? String(best.cat) : "";
+}
+
 async function ggselOfferStock(offerId) {
   const keys = requireKeys("ggsel");
   try {
@@ -1841,6 +1861,7 @@ module.exports = {
   ggselPublish,
   ggselAddProducts,
   ggselOfferStock,
+  ggselLatestCategoryId,
   ggselEnableAutoselling,
   ggselFinalizeStock,
   ggselDelist,

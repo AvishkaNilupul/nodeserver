@@ -831,6 +831,17 @@
             : (t.wouldList && t.wouldList.title
               ? '<div class="ab-farm muted">would list: ' + esc(t.wouldList.title) + " · $" + t.wouldList.price + " [dry-run]</div>"
               : "")) +
+          (t.listing && t.listing.externalId
+            ? '<div class="ab-farm">' +
+              (t.listing.plati && t.listing.plati.externalId
+                ? 'plati: <a href="' + esc(t.listing.plati.url) + '" target="_blank" rel="noopener">#' + esc(t.listing.plati.externalId) + "</a> · " + t.listing.plati.qty + " acc"
+                : 'plati: <span class="muted">' + esc((t.listing.plati && t.listing.plati.error) || "—") + "</span>") +
+              " · " +
+              (t.listing.ggsel && t.listing.ggsel.externalId
+                ? 'ggsel: <a href="' + esc(t.listing.ggsel.url) + '" target="_blank" rel="noopener">#' + esc(t.listing.ggsel.externalId) + "</a> · " + t.listing.ggsel.qty + " acc"
+                : 'ggsel: <span class="muted">' + esc((t.listing.ggsel && t.listing.ggsel.error) || "—") + "</span>") +
+              "</div>"
+            : "") +
           (t.listing && t.listing.error ? '<div class="ab-farm" style="color:var(--red)">listing: ' + esc(t.listing.error) + "</div>" : "") +
           (t.error ? '<div class="ab-farm" style="color:var(--red)">' + esc(t.error) + "</div>" : "") +
         "</div>" +

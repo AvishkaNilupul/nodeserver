@@ -14,6 +14,9 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const MarketResearch = require("../models/MarketResearch");
 const { gameflipDeliveryCode } = require("./gameflipFulfiller");
+const { digisellerDeliveryCode } = require("./digisellerFulfiller");
+const { ggselDeliveryCode } = require("./ggselFulfiller");
+const settings = require("./settings");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
@@ -207,16 +210,23 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
 // Pick a delivery account from the task's assigned pool accounts: needs a
 // decryptable password (buyer logs in with it). Skips ones already used by
 // another listing.
-async function pickDeliveryAccount(task) {
-  const used = new Set(
-    (
-      await MarketplaceListing.find(
-        { marketplace: "gameflip", status: "active" },
-        { accountLogin: 1 },
-      ).lean()
-    ).map((r) => (r.accountLogin || "").toLowerCase()),
-  );
+// Up to `max` deliverable accounts from the task, skipping any login already
+// attached to an active listing on ANY marketplace (accountLogin can be a
+// comma-separated list on Plati/GGSel rows) — one account is only ever sold
+// on one market.
+async function pickDeliveryAccounts(task, max) {
+  const used = new Set();
+  for (const r of await MarketplaceListing.find(
+    { status: "active" },
+    { accountLogin: 1 },
+  ).lean()) {
+    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
+      if (l) used.add(l.toLowerCase());
+    }
+  }
+  const out = [];
   for (const username of task.assignedAccounts || []) {
+    if (out.length >= max) break;
     if (used.has(String(username).toLowerCase())) continue;
     const acc = await AvailableAccount.findOne({
       usernameLower: String(username).toLowerCase(),
@@ -224,9 +234,9 @@ async function pickDeliveryAccount(task) {
     if (!acc) continue;
     const password = decrypt(acc.password);
     if (!password) continue;
-    return { login: username, password };
+    out.push({ login: username, password });
   }
-  return null;
+  return out;
 }
 
 // Main entry: called by the auto-farmer right after a task's bots start (and
@@ -291,8 +301,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     return { wouldList: { title, price, qty: split.listNow } };
   }
 
-  const account = await pickDeliveryAccount(task);
-  if (!account) {
+  const accounts = await pickDeliveryAccounts(task, split.listNow);
+  if (!accounts.length) {
     task.listing = task.listing || {};
     task.listing.error = "no delivery account with a readable password";
     await task.save();
@@ -300,6 +310,28 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       "Auto-list " + task.game + ": no assigned account has a usable password",
     );
   }
+
+  // Split the sellable accounts across the markets round-robin — Gameflip
+  // first (it always gets at least one), then Plati, then GGSel. One account
+  // is only ever attached to one market, so a sale on one platform can never
+  // hand out an account a buyer on another platform already received.
+  const af = settings.getAutoFarm();
+  const platiEnabled = !!af.platiCategoryId;
+  let ggselCategoryId = String(af.ggselCategoryId || "");
+  if (!ggselCategoryId) {
+    try {
+      ggselCategoryId = await mp.ggselLatestCategoryId();
+    } catch {
+      ggselCategoryId = "";
+    }
+  }
+  const marketOrder = ["gameflip"];
+  if (platiEnabled) marketOrder.push("plati");
+  if (ggselCategoryId) marketOrder.push("ggsel");
+  const shares = { gameflip: [], plati: [], ggsel: [] };
+  accounts.forEach((acc, i) => {
+    shares[marketOrder[i % marketOrder.length]].push(acc);
+  });
 
   // The DropSet makes the listing part of the normal machinery: the relist
   // chain, the Shop and the drop archive all understand sets.
@@ -325,15 +357,120 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   } catch {
     img = "";
   }
+
+  const gfAccounts = shares.gameflip;
   let published;
+  const plati = { externalId: "", url: "", qty: 0, error: "" };
+  const ggsel = { externalId: "", url: "", qty: 0, error: "" };
   try {
     published = await mp.gameflipPublish({
       title,
       description,
       priceUsd: price,
       imagePath: img,
-      autoDeliverCode: gameflipDeliveryCode(account.login, account.password),
+      autoDeliverCode: gameflipDeliveryCode(
+        gfAccounts[0].login,
+        gfAccounts[0].password,
+      ),
     });
+
+    // ---- Plati (Digiseller): same flow as the manual Shop route — create
+    // the product in the configured cataloguer category, attach one delivery
+    // code per account, upload the cover. A Plati failure never rolls back
+    // the Gameflip listing; it is recorded and retried by hand if needed.
+    if (platiEnabled && shares.plati.length) {
+      try {
+        const r = await mp.digisellerPublish({
+          title,
+          description,
+          priceUsd: price,
+          categories: [{ owner: 1, categoryId: af.platiCategoryId }],
+        });
+        try {
+          await mp.digisellerAddContent(
+            r.externalId,
+            shares.plati.map((a) =>
+              digisellerDeliveryCode(a.login, a.password),
+            ),
+          );
+        } catch (err) {
+          await mp.digisellerDelist(r.externalId).catch(() => {});
+          throw err;
+        }
+        if (img) {
+          await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
+        }
+        await MarketplaceListing.create({
+          set: set._id,
+          marketplace: "digiseller",
+          externalId: r.externalId,
+          url: r.url || "",
+          title,
+          description,
+          price,
+          status: "active",
+          note: "auto-farm: " + shares.plati.length + " account(s)",
+          autoDeliver: true,
+          accountLogin: shares.plati.map((a) => a.login).join(", "),
+          qtyTarget: shares.plati.length,
+        });
+        plati.externalId = r.externalId;
+        plati.url = r.url || "";
+        plati.qty = shares.plati.length;
+      } catch (err) {
+        plati.error = err.message;
+      }
+    } else if (!platiEnabled) {
+      plati.error = "no Plati category id in auto-farm settings";
+    } else {
+      plati.error = "no spare account for this market yet";
+    }
+
+    // ---- GGSel: publish with autoselling + one product line per account,
+    // in the configured category (or the one copied from the newest live
+    // offer). Same isolation: failures are recorded, not fatal.
+    if (ggselCategoryId && shares.ggsel.length) {
+      try {
+        const r = await mp.ggselPublish({
+          title,
+          description,
+          priceUsd: price,
+          categoryId: ggselCategoryId,
+          delivery: "auto",
+          coverImagePath: img,
+          products: shares.ggsel.map((a) =>
+            ggselDeliveryCode(a.login, a.password),
+          ),
+        });
+        await MarketplaceListing.create({
+          set: set._id,
+          marketplace: "ggsel",
+          externalId: r.externalId,
+          url: r.url || "",
+          title,
+          description,
+          price,
+          status: "active",
+          note:
+            (r.note ? r.note + " " : "") +
+            "auto-farm: " +
+            shares.ggsel.length +
+            " account(s)",
+          autoDeliver: true,
+          accountLogin: shares.ggsel.map((a) => a.login).join(", "),
+          qtyTarget: shares.ggsel.length,
+        });
+        ggsel.externalId = r.externalId;
+        ggsel.url = r.url || "";
+        ggsel.qty = shares.ggsel.length;
+      } catch (err) {
+        ggsel.error = err.message;
+      }
+    } else if (!ggselCategoryId) {
+      ggsel.error = "no GGSel category (none set, none inferable)";
+    } else {
+      ggsel.error = "no spare account for this market yet";
+    }
   } finally {
     if (img) await fsp.unlink(img).catch(() => {});
   }
@@ -348,12 +485,12 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     price,
     status: "active",
     autoDeliver: true,
-    accountLogin: account.login,
-    // First unit is the pool account itself; the remaining list-now units
-    // relist through the farmed-archive chain. Held-back units are NOT
-    // counted here — they join qtyRemaining after the event ends, at the
-    // post-event price.
-    qtyRemaining: Math.max(0, split.listNow - 1),
+    accountLogin: gfAccounts.map((a) => a.login).join(", "),
+    // First unit is the pool account itself; the rest of Gameflip's SHARE
+    // relists through the farmed-archive chain. Accounts given to Plati and
+    // GGSel are excluded — they sell on those platforms. Held-back units
+    // join qtyRemaining after the event ends, at the post-event price.
+    qtyRemaining: Math.max(0, gfAccounts.length - 1),
   });
 
   task.listing = {
@@ -362,8 +499,10 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     url: published.url || "",
     title,
     price,
-    qty: split.listNow,
+    qty: gfAccounts.length,
     heldBack: split.holdBack,
+    plati,
+    ggsel,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,

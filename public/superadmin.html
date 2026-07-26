@@ -670,6 +670,16 @@
             <label>Farm host</label>
             <select id="afHostId"><option value="">Auto (first SSH host)</option></select>
           </div>
+          <div class="field" style="max-width:180px">
+            <label>Plati category id</label>
+            <input type="text" id="afPlatiCategoryId" placeholder="e.g. 18069" />
+            <small class="muted">Cataloguer id from Shop &gt; Listings picker. Empty = skip Plati.</small>
+          </div>
+          <div class="field" style="max-width:180px">
+            <label>GGSel category id</label>
+            <input type="text" id="afGgselCategoryId" placeholder="auto" />
+            <small class="muted">Empty = copy from your newest live GGSel offer.</small>
+          </div>
         </div>
         <button class="btn" type="button" id="afSave" style="margin-top:12px">Save auto-farm settings</button>
       </div>
@@ -1318,6 +1328,8 @@
           $("afProbeSize").value = st.probeSize;
           $("afMaxAutoBots").value = st.maxAutoBots;
           $("afMinHoursLeft").value = st.minHoursLeft;
+          $("afPlatiCategoryId").value = st.platiCategoryId || "";
+          $("afGgselCategoryId").value = st.ggselCategoryId || "";
           const sel = $("afHostId");
           sel.innerHTML = '<option value="">Auto (first SSH host)</option>';
           for (const h of data.hosts || []) {
@@ -1344,6 +1356,8 @@
             probeSize: $("afProbeSize").value,
             maxAutoBots: $("afMaxAutoBots").value,
             minHoursLeft: $("afMinHoursLeft").value,
+            platiCategoryId: $("afPlatiCategoryId").value,
+            ggselCategoryId: $("afGgselCategoryId").value,
           });
           showMsg("Auto-farm settings saved.", "ok");
           loadAutoFarmSettings();
