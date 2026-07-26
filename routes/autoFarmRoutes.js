@@ -38,12 +38,28 @@ router.get("/auto-farm/status", requireSuperadmin, async (req, res) => {
 });
 
 // DECISION LOG + active/planned tasks (newest first).
+//
+// Every non-terminal task is returned unconditionally, and only the historical
+// log is capped. A flat .limit(200) sorted newest-first dropped the OLDEST rows
+// once the log passed 200 — which is precisely the long-running active tasks
+// and the oldest plans awaiting approval. They kept running on the Pi but
+// vanished from the UI, losing their Stop / Delist / Approve / Delete controls
+// with nothing to indicate it. There are 134 rows today, so this was days away.
+const HISTORY_LIMIT = 200;
 router.get("/auto-farm/tasks", requireSuperadmin, async (req, res) => {
   try {
-    const tasks = await AutoFarmTask.find({})
-      .sort({ createdAt: -1 })
-      .limit(200)
-      .lean();
+    const [liveTasks, history] = await Promise.all([
+      AutoFarmTask.find({ status: { $in: ["planned", "active"] } })
+        .sort({ createdAt: -1 })
+        .lean(),
+      AutoFarmTask.find({ status: { $nin: ["planned", "active"] } })
+        .sort({ createdAt: -1 })
+        .limit(HISTORY_LIMIT)
+        .lean(),
+    ]);
+    const tasks = liveTasks
+      .concat(history)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ success: true, tasks });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

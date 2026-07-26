@@ -587,6 +587,8 @@ async function processCampaign(c, ctx) {
     campaignName: c.name || "",
     campaignEndAt: c.endAt || null,
     dryRun: !!af.dryRun,
+    // Any recorded decision satisfies a pending rescan request.
+    rescanRequested: false,
   };
 
   // Decision this campaign was last left in (null on the first pass). Only set
@@ -729,15 +731,34 @@ async function processCampaign(c, ctx) {
         failed.push(b.container + ": " + e.message);
       }
     }
+    // Only accounts no OTHER live task already counts. assignedAccounts is what
+    // autoLister derives listing qty from (utils/autoLister.js), so copying the
+    // reused task's list wholesale made two campaigns each advertise the same
+    // accounts — stock that cannot be delivered twice, because
+    // pickDeliveryAccounts hands out any given login on one listing only. The
+    // buyer pays and there is nothing to fulfil. The bots really are shared;
+    // the sellable stock is not.
+    const spokenFor = new Set();
+    for (const other of await AutoFarmTask.find(
+      { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
+      { assignedAccounts: 1 },
+    ).lean()) {
+      for (const u of other.assignedAccounts || []) {
+        spokenFor.add(String(u).toLowerCase());
+      }
+    }
+    const mine = (reusable.assignedAccounts || []).filter(
+      (u) => !spokenFor.has(String(u).toLowerCase()),
+    );
     await record({
       decision: "reuse_existing",
       status: started.length ? "active" : "failed",
       reason,
       demandScore,
       hadResearch: !!research,
-      bots: bots.map((b) => ({ ...b, reused: true })),
-      assignedAccounts: reusable.assignedAccounts || [],
-      plannedAccounts: (reusable.assignedAccounts || []).length,
+      bots: bots.map((b) => ({ ...b, reused: true, shared: true })),
+      assignedAccounts: mine,
+      plannedAccounts: mine.length,
       error: failed.join("; "),
       executedAt: new Date(),
     });
@@ -1421,10 +1442,14 @@ async function runOnce() {
       if (!existing) {
         candidates.push(c);
       } else if (
-        existing.status === "skipped" &&
-        RETRYABLE.has(existing.decision)
+        (existing.status === "skipped" &&
+          RETRYABLE.has(existing.decision)) ||
+        existing.rescanRequested
       ) {
-        candidates.push(c); // conditions may have changed — re-decide
+        // Either the conditions may have changed on their own, or the operator
+        // asked for a fresh look via "Rescan all". Both re-decide; both keep the
+        // prior decision so an unchanged verdict is not re-announced.
+        candidates.push(c);
         priorTasks.set(c.campaignId, existing);
       }
     }
@@ -1903,11 +1928,20 @@ async function rescanAll() {
     { campaignId: 1 },
   ).lean();
   const ids = live.map((c) => c.campaignId);
-  const del = await AutoFarmTask.deleteMany({
-    campaignId: { $in: ids },
-    status: { $in: ["skipped", "failed", "completed", "stopped"] },
-  });
-  return { cleared: del.deletedCount || 0, campaigns: ids.length };
+  // Mark, don't delete. Deleting made every campaign look like it had never
+  // been decided, so the next tick re-announced every skip as brand new (~60
+  // Telegram messages from one button press) and threw away the decision log
+  // this model's header calls its reason for existing. The flag makes the row
+  // a candidate again while its previous decision stays readable, so an
+  // unchanged verdict stays silent.
+  const upd = await AutoFarmTask.updateMany(
+    {
+      campaignId: { $in: ids },
+      status: { $in: ["skipped", "failed", "completed", "stopped"] },
+    },
+    { $set: { rescanRequested: true } },
+  );
+  return { cleared: upd.modifiedCount || 0, campaigns: ids.length };
 }
 
 function status() {

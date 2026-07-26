@@ -87,6 +87,15 @@ const autoFarmTaskSchema = new mongoose.Schema(
     dryRun: { type: Boolean, default: false },
     error: { type: String, default: "" },
 
+    // Set by rescanAll() to mark a terminal task for a fresh decision on the
+    // next tick. Rescan used to DELETE these rows, which destroyed the audit
+    // trail this model exists to keep and, since the notification gate compares
+    // against the decision a task already carried, made every re-decision look
+    // brand new — one rescan re-announced ~60 skips. Cleared automatically the
+    // next time a decision is recorded. Declared here because Mongoose strict
+    // mode silently drops undeclared paths on $set (see `bots.shared` above).
+    rescanRequested: { type: Boolean, default: false },
+
     executedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
 
