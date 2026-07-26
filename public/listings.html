@@ -1616,34 +1616,55 @@ Reliable Daily Rewards</textarea
             <div class="mp-hint">
               EpicNPC has no API and blocks servers, so listings are posted from
               <b>your own logged-in EpicNPC tab</b>. On Publish, a new tab opens
-              on the correct game forum pre-loaded with this listing; click the
-              <b>EpicNPC Filler</b> bookmarklet (one-time setup below) to fill
-              the form, then review and hit <b>Post thread</b>. Trade Guardian is
-              turned on with the free (TG Free) escrow tier, you're set as the
-              original owner, and the price and quality tier fill automatically.
+              on the correct game forum pre-loaded with this listing. With the
+              <b>EpicNPC Filler extension</b> installed (one-time setup below)
+              the form fills itself the moment the tab loads — you just review
+              and hit <b>Post thread</b>. Trade Guardian is turned on with the
+              free (TG Free) escrow tier, you're set as the original owner, and
+              the price and quality tier fill automatically.
             </div>
             <div class="mp-hint">
               Target forum for this set: <b id="mpEpicGame">—</b>. A game with no
               EpicNPC forum is rejected before the tab opens.
             </div>
             <label style="margin-top: 6px"
-              >One-time setup — drag this to your bookmarks bar:</label
+              >One-time setup — install the auto-fill extension:</label
             >
             <div style="margin: 6px 0">
               <a
-                id="mpEpicBookmarklet"
-                href="#"
+                href="/marketplaces/epicnpc/extension.zip"
                 class="btn"
                 style="text-decoration: none; display: inline-block"
-                onclick="return false"
-                title="Drag me to your bookmarks bar"
-                >▶ EpicNPC Filler</a
+                >⬇ Download EpicNPC Filler extension</a
               >
             </div>
             <div class="mp-hint">
-              Clicking it here does nothing — drag it up to your bookmarks bar.
-              Then, on the EpicNPC compose tab, click that bookmark to auto-fill.
+              Unzip it, open <b>chrome://extensions</b>, turn on
+              <b>Developer mode</b> (top right), click
+              <b>Load unpacked</b> and select the unzipped
+              <b>epicnpc-filler</b> folder. Done — every EpicNPC tab opened from
+              here fills itself. It never posts; you always click Post thread.
             </div>
+            <details style="margin-top: 6px">
+              <summary class="mp-hint" style="cursor: pointer">
+                No extension? Use the bookmarklet instead
+              </summary>
+              <div style="margin: 6px 0">
+                <a
+                  id="mpEpicBookmarklet"
+                  href="#"
+                  class="btn"
+                  style="text-decoration: none; display: inline-block"
+                  onclick="return false"
+                  title="Drag me to your bookmarks bar"
+                  >▶ EpicNPC Filler</a
+                >
+              </div>
+              <div class="mp-hint">
+                Drag it to your bookmarks bar (clicking here does nothing).
+                Then, on the EpicNPC compose tab, click that bookmark to fill.
+              </div>
+            </details>
           </div>
         </div>
 
@@ -3684,7 +3705,7 @@ Reliable Daily Rewards</textarea
             toast(
               "EpicNPC tab opened for " +
                 j.epicName +
-                " — click your ‘EpicNPC Filler’ bookmarklet there, review, then Post thread.",
+                " — the extension fills the form there; review, then Post thread.",
             );
             if (mpSet) loadExtListings(mpSet.id);
           })
