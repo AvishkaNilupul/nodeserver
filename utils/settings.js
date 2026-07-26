@@ -18,10 +18,13 @@ const AUTO_FARM_DEFAULTS = {
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
-  // Multi-market auto-listing. Plati needs a cataloguer category id (owner 1
-  // on Digiseller) — pick one in Shop > Listings once and paste it here.
-  // GGSel: leave empty to copy the category from your newest live offer.
-  platiCategoryId: "",
+  // Multi-market auto-listing categories.
+  // Plati has ONE fixed section for all Twitch-drop accounts:
+  //   Digital Goods > Game Accounts > Twitch drops Accounts
+  //   (plati.market/cat/akkaunty-twitch-drops/203508 — verified live as a
+  //   valid cataloguer id with zero required attributes). Overridable.
+  // GGSel picks per game automatically; this is only a manual override.
+  platiCategoryId: "203508",
   ggselCategoryId: "",
 };
 
@@ -59,7 +62,12 @@ async function setRequire2fa(value) {
 function getAutoFarm() {
   const s = loadSettings();
   const cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return { ...AUTO_FARM_DEFAULTS, ...cur };
+  const out = { ...AUTO_FARM_DEFAULTS, ...cur };
+  // A saved empty Plati category means "use the default" — Plati's Twitch
+  // drops section is fixed, so blank should never silently disable Plati.
+  if (!out.platiCategoryId)
+    out.platiCategoryId = AUTO_FARM_DEFAULTS.platiCategoryId;
+  return out;
 }
 
 async function setAutoFarm(patch) {
