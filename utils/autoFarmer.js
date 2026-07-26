@@ -23,7 +23,7 @@ const botFactory = require("./botFactory");
 const settings = require("./settings");
 const { sendTelegram } = require("./telegram");
 
-const TICK_MS = 30 * 60 * 1000; // backstop interval; campaigns move slowly
+const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
 
 // Demand tiers (demandScore is 0-100 from utils/marketResearch.js).
@@ -51,6 +51,35 @@ const state = {
   lastError: "",
   lastSummary: null,
 };
+
+// Live progress log for the UI: every scan appends human-readable steps here
+// so "Scan now" can show exactly what the brain is doing in real time.
+// Ring buffer — keeps the last MAX_PROGRESS entries of the current/last run.
+const MAX_PROGRESS = 300;
+const progressLog = {
+  runId: 0,
+  startedAt: null,
+  finishedAt: null,
+  steps: [],
+};
+
+function progress(msg, level = "info") {
+  progressLog.steps.push({ at: new Date(), level, msg });
+  if (progressLog.steps.length > MAX_PROGRESS) {
+    progressLog.steps.splice(0, progressLog.steps.length - MAX_PROGRESS);
+  }
+}
+
+function progressBegin() {
+  progressLog.runId += 1;
+  progressLog.startedAt = new Date();
+  progressLog.finishedAt = null;
+  progressLog.steps = [];
+}
+
+function progressEnd() {
+  progressLog.finishedAt = new Date();
+}
 
 /* ------------------------------ helpers ------------------------------- */
 
@@ -800,6 +829,27 @@ async function completeEndedTasks() {
     t.completedAt = new Date();
     await t.save().catch(() => {});
     completed++;
+    // Event over = supply fixed: apply the post-event scarcity markup and
+    // rebuild the listing as a stacked bundle of every campaign this game's
+    // accounts have farmed. Failures are non-fatal; retried on manual rescan.
+    try {
+      const autoLister = require("./autoLister");
+      const r = await autoLister.onCampaignEnded(t._id);
+      if (r && r.repriced) {
+        await tg(
+          "\ud83d\udcc8 Post-event reprice \u2014 " +
+            t.game +
+            "\n$" +
+            r.repriced.price +
+            " \u00b7 " +
+            r.repriced.items +
+            " item(s) stacked" +
+            (r.repriced.live ? "" : " (listing not live)"),
+        );
+      }
+    } catch (e) {
+      console.error("post-event reprice failed:", e.message);
+    }
     await tg(
       "🤖 Auto-farm DONE — " +
         t.game +
@@ -818,16 +868,30 @@ async function completeEndedTasks() {
 async function runOnce() {
   if (state.running) return { skipped: "already running" };
   state.running = true;
+  progressBegin();
   try {
     const af = cfg();
     if (!af.enabled) {
+      progress("Auto farmer is disabled in settings — nothing to do.", "warn");
       state.lastSummary = { enabled: false };
       return state.lastSummary;
     }
+    progress(
+      "Scan started (" +
+        (af.dryRun ? "dry-run" : "LIVE") +
+        " mode, cap " +
+        af.maxPerGame +
+        "/game, reserve " +
+        af.poolReserve +
+        ").",
+    );
 
     // Always tidy up ended campaigns first — this frees container slots that
     // this same tick can then hand to queued campaigns.
+    progress("Checking for ended campaigns to clean up\u2026");
     const completed = await completeEndedTasks();
+    if (completed)
+      progress("Cleaned up " + completed + " ended campaign task(s).");
 
     const host = resolveFarmHost(af);
     let hostOnline = false;
@@ -839,6 +903,15 @@ async function runOnce() {
         hostOnline = false;
       }
     }
+    progress(
+      host
+        ? "Farm host: " +
+            (host.label || host.id) +
+            " — " +
+            (hostOnline ? "online" : "OFFLINE")
+        : "No farm host configured.",
+      hostOnline ? "info" : "warn",
+    );
 
     // Candidates: live campaigns not yet decided, plus retryable skips.
     const now = new Date();
@@ -848,6 +921,11 @@ async function runOnce() {
       $or: [{ endAt: null }, { endAt: { $gt: now } }],
     }).lean();
 
+    progress(
+      "Found " +
+        live.length +
+        " live campaign(s); checking which need decisions\u2026",
+    );
     const candidates = [];
     for (const c of live) {
       if (!c.game) continue;
@@ -864,15 +942,29 @@ async function runOnce() {
         candidates.push(c); // conditions may have changed — re-decide
       }
     }
+    progress(candidates.length + " campaign(s) to decide this tick.");
 
     // Prefetch decision inputs once per candidate: live-refreshed market
     // research (Gameflip/GGSel/Plati when stale) + our own sales history.
     const infoMap = new Map();
     for (const c of candidates) {
-      infoMap.set(c.campaignId, {
-        research: await freshResearchForGame(c.game),
-        internalSales: await internalSalesForGame(c.game),
-      });
+      progress(
+        "Researching " + c.game + " (markets + own sales history)\u2026",
+      );
+      const research = await freshResearchForGame(c.game);
+      const internalSales = await internalSalesForGame(c.game);
+      infoMap.set(c.campaignId, { research, internalSales });
+      progress(
+        c.game +
+          ": " +
+          (research && research.scannedAt
+            ? "market demand " +
+              (research.demandScore != null ? research.demandScore : "?")
+            : "no market data") +
+          ", " +
+          internalSales +
+          " own sale(s) in 45d.",
+      );
     }
 
     // Snapshot which games manual bots are farming right now (one config
@@ -885,9 +977,17 @@ async function runOnce() {
     for (const t of autoTasks) {
       for (const b of t.bots || []) autoKeys.add(b.host + "|" + b.file);
     }
+    progress("Sweeping manual bot configs for existing coverage\u2026");
     const farmMap = hostOnline
       ? await manualFarmMap(autoKeys)
       : { map: new Map(), wildcard: new Set() };
+    progress(
+      "Coverage sweep done: " +
+        farmMap.map.size +
+        " game(s) farmed by manual bots, " +
+        farmMap.wildcard.size +
+        " account(s) farming everything.",
+    );
 
     // Fair-share budget across everything competing in this tick. Weights use
     // the blended demand (market + own sales) so proven sellers win supply.
@@ -912,6 +1012,9 @@ async function runOnce() {
     const results = [];
     for (const c of candidates) {
       try {
+        progress(
+          "Deciding " + c.game + " (" + (c.name || c.campaignId) + ")\u2026",
+        );
         const r = await processCampaign(c, {
           af,
           host,
@@ -920,11 +1023,73 @@ async function runOnce() {
           infoMap,
           farmMap,
         });
+        progress(
+          c.game + " \u2192 " + (r && r.decision ? r.decision : "done") + ".",
+        );
         results.push({ game: c.game, ...r });
       } catch (e) {
+        progress(c.game + " FAILED: " + e.message, "error");
         results.push({ game: c.game, error: e.message });
       }
     }
+    // Auto-listing sweep: every active task that has no Gameflip listing yet
+    // gets one NOW — bots that started this very tick are listed in the same
+    // pass (early-bird flow). Failures retry automatically next tick.
+    const autoLister = require("./autoLister"); // lazy: avoids require cycles
+    const unlisted = await AutoFarmTask.find({
+      status: "active",
+      $or: [
+        { "listing.externalId": "" },
+        { "listing.externalId": { $exists: false } },
+      ],
+    }).lean();
+    for (const t of unlisted) {
+      if (af.dryRun && t.wouldList && t.wouldList.title) continue; // previewed
+      try {
+        progress("Auto-listing " + t.game + " on Gameflip\u2026");
+        const r = await autoLister.listActivatedTask(t._id, {
+          dryRun: af.dryRun,
+        });
+        if (r.listed) {
+          progress(
+            t.game +
+              " LISTED: " +
+              r.listed.title +
+              " ($" +
+              r.listed.price +
+              ", qty " +
+              r.listed.qty +
+              ") " +
+              r.listed.url,
+          );
+          await tg(
+            "\ud83d\udecd Auto-listed \u2014 " +
+              t.game +
+              "\n" +
+              r.listed.title +
+              "\n$" +
+              r.listed.price +
+              " \u00b7 qty " +
+              r.listed.qty +
+              "\n" +
+              r.listed.url,
+          );
+        } else if (r.wouldList) {
+          progress(
+            t.game +
+              " would list: " +
+              r.wouldList.title +
+              " ($" +
+              r.wouldList.price +
+              ") [dry-run]",
+          );
+        }
+      } catch (e) {
+        progress("Auto-list " + t.game + " failed: " + e.message, "warn");
+      }
+    }
+
+    progress("Scan complete: " + results.length + " decision(s) this tick.");
 
     state.lastError = "";
     state.lastSummary = {
@@ -941,11 +1106,34 @@ async function runOnce() {
     return state.lastSummary;
   } catch (err) {
     state.lastError = err.message || String(err);
+    progress("Scan aborted: " + (err.message || String(err)), "error");
     throw err;
   } finally {
     state.lastRun = new Date();
     state.running = false;
+    progressEnd();
   }
+}
+
+// Fresh full rescan: forget prior terminal decisions for LIVE campaigns so the
+// next tick re-decides every one of them from scratch (fresh research + all).
+// Active bots and pending (planned) approvals are preserved.
+async function rescanAll() {
+  const now = new Date();
+  const live = await TwitchCampaign.find(
+    {
+      active: true,
+      status: "ACTIVE",
+      $or: [{ endAt: null }, { endAt: { $gt: now } }],
+    },
+    { campaignId: 1 },
+  ).lean();
+  const ids = live.map((c) => c.campaignId);
+  const del = await AutoFarmTask.deleteMany({
+    campaignId: { $in: ids },
+    status: { $in: ["skipped", "failed", "completed", "stopped"] },
+  });
+  return { cleared: del.deletedCount || 0, campaigns: ids.length };
 }
 
 function status() {
@@ -956,6 +1144,13 @@ function status() {
     lastError: state.lastError,
     lastSummary: state.lastSummary,
     intervalMinutes: TICK_MS / 60000,
+    progress: {
+      runId: progressLog.runId,
+      startedAt: progressLog.startedAt,
+      finishedAt: progressLog.finishedAt,
+      running: state.running,
+      steps: progressLog.steps,
+    },
   };
 }
 
@@ -978,6 +1173,7 @@ function start() {
 module.exports = {
   start,
   runOnce,
+  rescanAll,
   status,
   executeTask,
   completeEndedTasks,

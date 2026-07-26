@@ -272,6 +272,44 @@ async function gameflipListingStatus(listingId) {
   }
 }
 
+// Patch an existing listing's price (cents) and optionally its name and
+// description — used for the post-event scarcity markup once a drop campaign
+// ends and the items become unobtainable.
+async function gameflipReprice(listingId, { priceUsd, title, description }) {
+  const keys = requireKeys("gameflip");
+  const ops = [];
+  const cents = Math.round(Number(priceUsd) * 100);
+  if (Number.isFinite(cents) && cents >= 75) {
+    ops.push({ op: "replace", path: "/price", value: cents });
+  }
+  if (title) {
+    ops.push({
+      op: "replace",
+      path: "/name",
+      value: String(title).slice(0, 120),
+    });
+  }
+  if (description) {
+    ops.push({
+      op: "replace",
+      path: "/description",
+      value: String(description).slice(0, 5000),
+    });
+  }
+  if (!ops.length) return;
+  try {
+    await axios.patch(GF_API + "/listing/" + listingId, ops, {
+      headers: {
+        ...gfHeaders(keys),
+        "Content-Type": "application/json-patch+json",
+      },
+      timeout: 20000,
+    });
+  } catch (e) {
+    throw apiError("Gameflip reprice", e);
+  }
+}
+
 async function gameflipDelist(listingId) {
   const keys = requireKeys("gameflip");
   try {
@@ -1779,6 +1817,7 @@ module.exports = {
   gameflipPublish,
   gameflipListingStatus,
   gameflipDelist,
+  gameflipReprice,
   digisellerTest,
   digisellerCategories,
   digisellerCategoryAttributes,

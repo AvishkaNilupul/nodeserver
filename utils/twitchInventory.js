@@ -382,7 +382,7 @@ async function fetchInventory(token, arg) {
       authFailed
         ? "Token invalid/expired or client-id mismatch"
         : "Twitch returned no user (transient; token not confirmed dead)" +
-          (status ? " [HTTP " + status + "]" : ""),
+            (status ? " [HTTP " + status + "]" : ""),
     );
     e.code = authFailed ? "token_invalid" : "no_user";
     throw e;
@@ -447,7 +447,7 @@ async function fetchDropCampaigns(token, arg) {
       authFailed
         ? "Token invalid/expired or client-id mismatch"
         : "Twitch returned no user (transient; token not confirmed dead)" +
-          (status ? " [HTTP " + status + "]" : ""),
+            (status ? " [HTTP " + status + "]" : ""),
     );
     e.code = authFailed ? "token_invalid" : "no_user";
     throw e;
@@ -455,4 +455,43 @@ async function fetchDropCampaigns(token, arg) {
   return user.dropCampaigns || [];
 }
 
-module.exports = { fetchInventory, fetchDropCampaigns, DEFAULT_CLIENT_ID };
+// Full details of one campaign (time-based drops + benefit names/images) —
+// what the auto-lister needs to name the items in a listing BEFORE any
+// account has farmed them. Raw query (no persisted hash needed).
+const CAMPAIGN_DETAILS_QUERY =
+  "query($dropID: ID!) { currentUser { dropCampaign(id: $dropID) { id name " +
+  "game { displayName } timeBasedDrops { id name requiredMinutesWatched " +
+  "benefitEdges { benefit { id name imageAssetURL game { name } } } } } } }";
+
+async function fetchCampaignDetails(token, dropID, arg) {
+  const { clientId, host } = scanOpts(arg);
+  const tok = cleanToken(token);
+  const cid = clientId || DEFAULT_CLIENT_ID;
+  if (!tok) {
+    const e = new Error("No token");
+    e.code = "token_invalid";
+    throw e;
+  }
+  const { parsed } = await gqlRequest({
+    token: tok,
+    clientId: cid,
+    host,
+    body: [
+      {
+        query: CAMPAIGN_DETAILS_QUERY,
+        variables: { dropID: String(dropID) },
+      },
+    ],
+  });
+  if (parsed?.errors?.length) throw gqlError(parsed.errors);
+  const camp = parsed?.data?.currentUser?.dropCampaign;
+  if (!camp) throw new Error("Campaign details unavailable");
+  return camp;
+}
+
+module.exports = {
+  fetchInventory,
+  fetchDropCampaigns,
+  fetchCampaignDetails,
+  DEFAULT_CLIENT_ID,
+};

@@ -733,6 +733,45 @@
     return '<span class="chip ' + (map[st] || "") + '">' + esc(st) + "</span>";
   }
 
+  // Live scan log: shows every step of the current (or last) scan so you can
+  // see exactly what the farmer is doing after hitting Scan now.
+  let _afPolling = false;
+  function afProgressPanel(eng) {
+    const p = eng && eng.progress;
+    if (!p || !p.steps || !p.steps.length) return "";
+    const open = p.running ? " open" : "";
+    const lines = p.steps.map(function (st) {
+      const col = st.level === "error" ? "var(--red)" : (st.level === "warn" ? "#b45309" : "var(--muted)");
+      const t = new Date(st.at).toLocaleTimeString();
+      return '<div style="font-size:12px;font-family:ui-monospace,monospace;color:' + col + '">' +
+        '<span style="opacity:.55">' + esc(t) + "</span> " + esc(st.msg) + "</div>";
+    }).join("");
+    const state = p.running
+      ? '<span class="chip on">scanning…</span>'
+      : (p.finishedAt ? '<span class="chip">done ' + esc(new Date(p.finishedAt).toLocaleTimeString()) + "</span>" : "");
+    return '<details' + open + ' style="margin-top:8px">' +
+      '<summary style="cursor:pointer;font-size:12.5px" class="muted">Scan log ' + state + "</summary>" +
+      '<div id="afProgressLog" style="max-height:220px;overflow:auto;margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;display:flex;flex-direction:column;gap:2px">' +
+      lines + "</div></details>";
+  }
+
+  // Poll the engine status every 2s while a scan runs so the log streams in.
+  async function afPollProgress() {
+    if (_afPolling) return;
+    _afPolling = true;
+    try {
+      for (let i = 0; i < 300; i++) {
+        if (CURRENT_HOST !== AUTOFARM_TAB) break;
+        await loadAutoFarm();
+        const box = $("afProgressLog");
+        if (box) box.scrollTop = box.scrollHeight;
+        const st = await api("/auto-farm/status").catch(function () { return null; });
+        if (!st || !st.engine || !st.engine.running) { await loadAutoFarm(); break; }
+        await new Promise(function (r) { setTimeout(r, 2000); });
+      }
+    } finally { _afPolling = false; await refreshAutoKeys(); loadAutoFarm(); }
+  }
+
   function renderAutoFarm(st, tasks) {
     const s = (st && st.settings) || {};
     const pool = (st && st.pool) || {};
@@ -749,15 +788,17 @@
           " · cap " + (s.maxPerGame || "?") + "/game, " + (s.accountsPerBot || "?") + "/bot, " + (s.maxAutoBots || "?") + " bots max</span>" +
           '<span style="margin-left:auto;display:flex;gap:8px">' +
             '<button class="btn-sm btn-ghost" onclick="afTick(this)">Scan now</button>' +
+            '<button class="btn-sm btn-ghost" onclick="afRescan(this)" title="Forget prior skip/failed decisions and re-decide every live campaign from scratch">Rescan all</button>' +
             '<a class="btn-sm btn-ghost" href="/superadmin.html" style="text-decoration:none;display:inline-flex;align-items:center">Settings</a>' +
           "</span>" +
         "</div>" +
         (eng.lastRun ? '<div class="muted" style="font-size:12px;margin-top:6px">Last scan: ' + esc(new Date(eng.lastRun).toLocaleString()) + (eng.lastError ? ' · <span style="color:var(--red)">' + esc(eng.lastError) + "</span>" : "") + "</div>" : "") +
+        afProgressPanel(eng) +
       "</div>";
 
     if (!tasks.length) {
       $("bots").innerHTML = head + '<div class="empty">No auto-farm decisions yet. ' +
-        (s.enabled ? "The farmer scans every " + (eng.intervalMinutes || 30) + " minutes — or hit Scan now." : "Turn it on in Superadmin settings.") + "</div>";
+        (s.enabled ? "The farmer scans every " + (eng.intervalMinutes || 10) + " minutes — or hit Scan now." : "Turn it on in Superadmin settings.") + "</div>";
       return;
     }
 
@@ -782,6 +823,13 @@
           '<div class="ab-farm muted">' + esc(t.reason || "") + "</div>" +
           (bots ? '<div class="ab-farm">bots: ' + esc(bots) + (accts ? " · " + accts + " accounts" : "") + "</div>"
                 : (t.plannedAccounts ? '<div class="ab-farm muted">planned: ' + t.plannedAccounts + " accounts</div>" : "")) +
+          (t.listing && t.listing.externalId
+            ? '<div class="ab-farm">listed: <a href="' + esc(t.listing.url) + '" target="_blank" rel="noopener">' + esc(t.listing.title) + "</a> · $" + t.listing.price +
+              (t.listing.postEvent ? ' · <span class="chip" style="background:#ecfdf5;color:#047857">post-event +50%</span>' : "") + "</div>"
+            : (t.wouldList && t.wouldList.title
+              ? '<div class="ab-farm muted">would list: ' + esc(t.wouldList.title) + " · $" + t.wouldList.price + " [dry-run]</div>"
+              : "")) +
+          (t.listing && t.listing.error ? '<div class="ab-farm" style="color:var(--red)">listing: ' + esc(t.listing.error) + "</div>" : "") +
           (t.error ? '<div class="ab-farm" style="color:var(--red)">' + esc(t.error) + "</div>" : "") +
         "</div>" +
         '<div class="ab-actions">' + ctrls.join("") + "</div>" +
@@ -792,9 +840,22 @@
 
   window.afTick = async function (btn) {
     if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
-    try { await api("/auto-farm/tick", { method: "POST" }); toast("Scan complete"); }
-    catch (e) { toast("Scan failed: " + e.message, true); }
-    finally { if (btn) { btn.disabled = false; btn.textContent = "Scan now"; } await refreshAutoKeys(); loadAutoFarm(); }
+    try {
+      await api("/auto-farm/tick", { method: "POST" });
+      toast("Scan started — follow the scan log below");
+      afPollProgress();
+    } catch (e) { toast("Scan failed: " + e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "Scan now"; } }
+  };
+  window.afRescan = async function (btn) {
+    if (!confirm("Fresh rescan: forget all prior skip/failed/completed decisions for live campaigns and re-decide everything from scratch (fresh market research)?")) return;
+    if (btn) { btn.disabled = true; btn.textContent = "Rescanning…"; }
+    try {
+      const r = await api("/auto-farm/rescan", { method: "POST" });
+      toast("Rescan started — cleared " + (r.cleared || 0) + " old decision(s)");
+      afPollProgress();
+    } catch (e) { toast("Rescan failed: " + e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "Rescan all"; } }
   };
   window.afApprove = async function (id, btn) {
     if (!confirm("Execute this plan for real? Pool accounts will be claimed and bots created on the farm host.")) return;
