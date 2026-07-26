@@ -233,7 +233,15 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
       others.push(Number(m.plati.lowest));
     base = others.length ? Math.min(...others) * 0.95 : 1.0;
   }
-  const priced = round25(base * postEventMultiplier);
+  let priced = round25(base * postEventMultiplier);
+  // Rounding to the nearest quarter can undo the undercut: a $1.20 rival gives
+  // base $1.14, which round25 lifts back to $1.25 — above the listing we were
+  // trying to beat. Step to the first quarter strictly below the rival so the
+  // "be the one that sells" intent survives. Only when we are not applying the
+  // post-event scarcity markup, which is deliberately meant to price high.
+  if (postEventMultiplier === 1 && rival > 0 && priced >= rival) {
+    priced = Math.floor((rival - 0.01) * 4) / 4;
+  }
   return Math.max(0.75, priced);
 }
 

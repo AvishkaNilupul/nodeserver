@@ -102,7 +102,22 @@ test("a cheap ruble-market floor never drags down a Gameflip price", () => {
       plati: { lowest: 1.28 },
     },
   };
-  assert.strictEqual(derivePrice(rocketLeague), 1.25);
+  // $1.20 rival -> undercut to $1.14 -> the first quarter strictly below the
+  // rival, so we are actually the cheapest rather than $0.05 above it.
+  assert.strictEqual(derivePrice(rocketLeague), 1.0);
+});
+
+// Rounding to the nearest quarter used to undo the undercut: a $1.20 rival
+// produced $1.14, which round25 lifted to $1.25 — above the listing we meant
+// to beat. Whenever there is live competition we must land strictly under it.
+test("the price always lands strictly below a live rival", () => {
+  for (const rival of [1.2, 1.5, 2.0, 3.1, 4.99]) {
+    const p = derivePrice({
+      markets: { gameflip: { soldRecent: 10, avgSoldPrice: 9, lowest: rival } },
+    });
+    assert.ok(p < rival, `priced ${p} is not below rival ${rival}`);
+    assert.ok(p >= 0.75, `priced ${p} is below the platform floor`);
+  }
 });
 
 // A thin sample can be a multi-account bundle rather than our single-account
@@ -113,8 +128,8 @@ test("a thin or outlier sold-price sample never inflates the price", () => {
     markets: { gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0 } },
   };
   // 2 sales is below MIN_SOLD_SAMPLES, so the anchor is ignored entirely and
-  // the live rival prices it.
-  assert.strictEqual(derivePrice(thin), 2.0);
+  // the live $2.00 rival prices it — landing at the quarter below.
+  assert.strictEqual(derivePrice(thin), 1.75);
 
   const outlier = {
     markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75 } },
