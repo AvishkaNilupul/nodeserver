@@ -78,12 +78,55 @@ test("post-event description leads with scarcity and drops the countdown", () =>
 test("price anchors on sold prices and undercuts live competition", () => {
   const research = {
     markets: {
-      gameflip: { avgSoldPrice: 4.0, lowest: 3.0 },
+      gameflip: { soldRecent: 5, avgSoldPrice: 4.0, lowest: 3.0 },
       ggsel: { lowest: 5.0 },
       plati: { lowest: 6.0 },
     },
   };
+  // Undercut the $3.00 live Gameflip rival by 5% -> 2.85 -> $2.75, which is
+  // still under the $4.00 buyers actually paid.
   assert.strictEqual(derivePrice(research), 2.75);
+});
+
+// The bug this guards: GGSel and Plati are ruble-denominated marketplaces. On
+// prod, ggsel.lowest was $0.38 and plati.lowest $1.28 (Plati's ~100 RUB floor)
+// while the cheapest live GAMEFLIP rival for the same game was $1.20. Taking
+// Math.min across all three let a ruble floor price a USD listing, undercut it,
+// and hit Gameflip's $0.75 clamp — so Rocket League, with 20 verified sales
+// averaging $7.93, was listed at $0.75.
+test("a cheap ruble-market floor never drags down a Gameflip price", () => {
+  const rocketLeague = {
+    markets: {
+      gameflip: { soldRecent: 20, avgSoldPrice: 7.93, lowest: 1.2 },
+      ggsel: { lowest: 0.38 },
+      plati: { lowest: 1.28 },
+    },
+  };
+  assert.strictEqual(derivePrice(rocketLeague), 1.25);
+});
+
+// A thin sample can be a multi-account bundle rather than our single-account
+// product: Hunt: Showdown shows $28.20 over 5 sales while its cheapest live
+// listing is $0.75. The anchor must not run away with that.
+test("a thin or outlier sold-price sample never inflates the price", () => {
+  const thin = {
+    markets: { gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0 } },
+  };
+  // 2 sales is below MIN_SOLD_SAMPLES, so the anchor is ignored entirely and
+  // the live rival prices it.
+  assert.strictEqual(derivePrice(thin), 2.0);
+
+  const outlier = {
+    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75 } },
+  };
+  // Enough samples, but the live rival is cheaper, so we still undercut it.
+  assert.strictEqual(derivePrice(outlier), 0.75);
+
+  const noRival = {
+    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0 } },
+  };
+  // No competition at all: the anchor stands, but capped at MAX_ANCHOR_USD.
+  assert.strictEqual(derivePrice(noRival), 10);
 });
 
 test("price falls back to cheapest competitor when nothing sold", () => {

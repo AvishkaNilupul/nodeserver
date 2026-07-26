@@ -178,28 +178,60 @@ function round25(x) {
 // Price from market research: what buyers actually PAID on Gameflip beats
 // asking prices; competitor floors (GGSel/Plati/Gameflip active) refine it.
 // postEventMultiplier applies the scarcity markup once farming is impossible.
+// Minimum verified sales before avgSoldPrice is trusted as an anchor. Below
+// this the mean is one or two rows and can be a bundle: Hunt: Showdown shows
+// $28.20 over 5 sales while its cheapest live listing is $0.75.
+const MIN_SOLD_SAMPLES = 3;
+// Hard ceiling on the anchor, for the same reason. Realised own price is $1.25;
+// anything above this is a multi-account bundle, not our single-account product.
+const MAX_ANCHOR_USD = 10;
+
 function derivePrice(research, { postEventMultiplier = 1 } = {}) {
   const m = (research && research.markets) || {};
   const gf = m.gameflip || {};
-  const candidates = [];
-  if (Number(gf.avgSoldPrice) > 0) candidates.push(Number(gf.avgSoldPrice));
-  if (Number(gf.lowest) > 0) candidates.push(Number(gf.lowest));
-  if (m.ggsel && Number(m.ggsel.lowest) > 0)
-    candidates.push(Number(m.ggsel.lowest));
-  if (m.plati && Number(m.plati.lowest) > 0)
-    candidates.push(Number(m.plati.lowest));
+
+  // Price against the marketplace we are actually selling on, and NOTHING else.
+  //
+  // This used to take Math.min across Gameflip, GGSel and Plati. GGSel and Plati
+  // are Russian, ruble-denominated marketplaces: live prod shows ggsel.lowest at
+  // $0.38 and plati.lowest at $1.28 (Plati's ~100 RUB platform floor) while the
+  // cheapest live GAMEFLIP competitor for the same game is $1.20. Taking the min
+  // let a ruble floor set the price of a USD listing, undercut it 5%, and hit
+  // Gameflip's $0.75 clamp — so Rocket League, with 20 verified sales averaging
+  // $7.93, was listed at $0.75. Different marketplace, different currency,
+  // different buyer; it is not competition for this listing.
+  //
+  // The old shape was also unreachable: `candidates` already contained
+  // avgSoldPrice, so `floor` was <= avgSoldPrice by construction and
+  // `Math.min(avgSoldPrice, floor * 0.95)` always collapsed to floor * 0.95.
+  // The "anchor on real sold prices" branch could never anchor on anything.
+  const soldEnough = Number(gf.soldRecent) >= MIN_SOLD_SAMPLES;
+  const sold = soldEnough
+    ? Math.min(Number(gf.avgSoldPrice) || 0, MAX_ANCHOR_USD)
+    : 0;
+  const rival = Number(gf.lowest) > 0 ? Number(gf.lowest) : 0;
+
   let base;
-  if (Number(gf.avgSoldPrice) > 0) {
-    // Anchor on real sold prices, but never above the cheapest live competitor
-    // (undercut slightly to be the one that sells).
-    const floor = Math.min(
-      ...candidates.filter((x) => x > 0).concat([Number(gf.avgSoldPrice)]),
-    );
-    base = Math.min(Number(gf.avgSoldPrice), floor * 0.95);
-  } else if (candidates.length) {
-    base = Math.min(...candidates) * 0.95;
+  if (rival > 0 && sold > 0) {
+    // Undercut the cheapest live Gameflip listing to be the one that sells, but
+    // never price above what buyers have actually paid.
+    base = Math.min(sold, rival * 0.95);
+  } else if (rival > 0) {
+    base = rival * 0.95;
+  } else if (sold > 0) {
+    // No live competition — the proven sold price stands on its own.
+    base = sold;
   } else {
-    base = 1.0; // unknown market — probe price
+    // No Gameflip signal of any kind. Only here do the other marketplaces get a
+    // say: a ruble floor is a poor guide for a USD listing, but it beats
+    // guessing. (The bug this replaces let them override Gameflip evidence
+    // rather than merely stand in for its absence.)
+    const others = [];
+    if (m.ggsel && Number(m.ggsel.lowest) > 0)
+      others.push(Number(m.ggsel.lowest));
+    if (m.plati && Number(m.plati.lowest) > 0)
+      others.push(Number(m.plati.lowest));
+    base = others.length ? Math.min(...others) * 0.95 : 1.0;
   }
   const priced = round25(base * postEventMultiplier);
   return Math.max(0.75, priced);
