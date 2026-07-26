@@ -1598,6 +1598,20 @@ Reliable Daily Rewards</textarea
               G2G offers attach to a catalog product — pick where the offer
               goes.
             </div>
+            <div class="mp-hint">
+              <b>Selling items?</b> G2G’s API rejects item-category offers, so
+              this path only works for accounts/currency-style products. For
+              item drops use the bulk auto-attach flow instead — it opens
+              g2g.com with the upload file already attached:
+            </div>
+            <button
+              class="btn"
+              id="mpG2gBulkJump"
+              type="button"
+              style="margin: 4px 0 8px"
+            >
+              Use G2G bulk auto-attach for this listing
+            </button>
             <label>Service</label>
             <select id="mpG2gService">
               <option value="">Loading…</option>
@@ -4521,7 +4535,9 @@ Reliable Daily Rewards</textarea
       var gbServiceRows = [];
       var gbBrandRows = [];
 
-      function gbOpen() {
+      var gbPreselectId = null;
+      function gbOpen(preId) {
+        gbPreselectId = typeof preId === "string" ? preId : null;
         $("g2gBulkOverlay").classList.add("open");
         if (!gbServiceRows.length) {
           api("/marketplaces/g2g/services")
@@ -4578,7 +4594,9 @@ Reliable Daily Rewards</textarea
               '<label class="mp-check" style="flex:1;min-width:180px">' +
               '<input type="checkbox" data-gbset="' +
               attr(s.id) +
-              '" checked /> ' +
+              '"' +
+              (!gbPreselectId || gbPreselectId === s.id ? " checked" : "") +
+              " /> " +
               esc(s.name) +
               "</label>" +
               '<input type="number" min="0" step="0.01" data-gbprice="' +
@@ -4629,6 +4647,12 @@ Reliable Daily Rewards</textarea
       }
 
       $("g2gBulkBtn").addEventListener("click", gbOpen);
+      $("mpG2gBulkJump").addEventListener("click", function () {
+        if (!mpSet) return;
+        $("mpPubOverlay").classList.remove("open");
+        gbOpen(mpSet.id);
+        toast("Tick more listings if you want — only this one is preselected");
+      });
       $("gbCancel").addEventListener("click", gbClose);
       $("g2gBulkOverlay").addEventListener("click", function (e) {
         if (e.target === this) gbClose();
