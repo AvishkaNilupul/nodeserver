@@ -28,6 +28,7 @@ const dsFulfiller = require("./digisellerFulfiller");
 const ggFulfiller = require("./ggselFulfiller");
 const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
+const { sendTelegram } = require("./telegram");
 
 const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
@@ -40,6 +41,12 @@ const CLAIM_TAGS = {
 let lastRun = null;
 let running = false;
 
+// Findings first raised during the current pass, and units auto-fed, collected
+// so one pass sends at most one Telegram of each kind instead of a message per
+// row. Reset at the start of every pass.
+let freshFindings = [];
+let freshFeeds = [];
+
 function accountIdsOf(row) {
   return String(row.accountId || "")
     .split(",")
@@ -49,7 +56,7 @@ function accountIdsOf(row) {
 
 async function upsertFinding(f) {
   const now = new Date();
-  await AuditFinding.findOneAndUpdate(
+  const res = await AuditFinding.findOneAndUpdate(
     { dedupeKey: f.dedupeKey },
     {
       $set: {
@@ -64,8 +71,15 @@ async function upsertFinding(f) {
       },
       $setOnInsert: { status: "open", detectedAt: now },
     },
-    { upsert: true },
+    // includeResultMetadata tells us whether this pass CREATED the finding or
+    // merely re-saw a known one — only brand-new problems are worth a push.
+    { upsert: true, includeResultMetadata: true },
   );
+  const isNew = !!(res && res.lastErrorObject && res.lastErrorObject.upserted);
+  if (isNew) {
+    freshFindings.push(f);
+  }
+  return isNew;
 }
 
 // Findings of the "condition" types that were NOT re-detected this pass have
@@ -509,6 +523,14 @@ async function feedListing(row, seenKeys) {
       },
     },
   );
+  freshFeeds.push({
+    marketplace: row.marketplace,
+    externalId: row.externalId,
+    title: row.title || "",
+    units: claimed.length,
+    remaining,
+    target,
+  });
   // Log the restock as an already-resolved finding so it shows as activity.
   await AuditFinding.create({
     type: "restocked",
@@ -536,6 +558,60 @@ async function feedListing(row, seenKeys) {
   return claimed.length;
 }
 
+// One Telegram per pass, at most: a restock digest (units auto-fed, which
+// means those units SOLD on Plati/GGSel — the closest thing those platforms
+// give us to a sale event) and a digest of problems first seen this pass.
+// Re-seen findings stay silent so a persistent issue can't spam the chat.
+const NOTIFY_LINES = 5;
+
+async function notifyPass() {
+  if (freshFeeds.length) {
+    const total = freshFeeds.reduce((n, f) => n + f.units, 0);
+    const lines = freshFeeds
+      .slice(0, NOTIFY_LINES)
+      .map(
+        (f) =>
+          "• " +
+          f.marketplace +
+          " " +
+          (f.title ? f.title.slice(0, 60) : f.externalId) +
+          " — fed " +
+          f.units +
+          " (was " +
+          f.remaining +
+          "/" +
+          f.target +
+          ")",
+      );
+    if (freshFeeds.length > NOTIFY_LINES) {
+      lines.push("…and " + (freshFeeds.length - NOTIFY_LINES) + " more");
+    }
+    await sendTelegram(
+      "📦 RESTOCKED " +
+        total +
+        " unit(s) — those units sold\n\n" +
+        lines.join("\n"),
+    );
+  }
+  // "restocked" is the success side of a feed, already covered above.
+  const problems = freshFindings.filter((f) => f.severity !== "info");
+  if (problems.length) {
+    const lines = problems
+      .slice(0, NOTIFY_LINES)
+      .map((f) => "• [" + (f.severity || "medium") + "] " + f.message);
+    if (problems.length > NOTIFY_LINES) {
+      lines.push("…and " + (problems.length - NOTIFY_LINES) + " more");
+    }
+    await sendTelegram(
+      "⚠️ GUARDIAN found " +
+        problems.length +
+        " new issue(s)\n\n" +
+        lines.join("\n") +
+        "\n\nReview them in the app under More → Integrity.",
+    );
+  }
+}
+
 // ------------------------------------------------------------------
 // One guardian pass
 // ------------------------------------------------------------------
@@ -543,6 +619,8 @@ async function runOnce() {
   if (running) return lastRun;
   running = true;
   const startedAt = new Date();
+  freshFindings = [];
+  freshFeeds = [];
   try {
     const rows = await MarketplaceListing.find({
       status: "active",
@@ -570,6 +648,9 @@ async function runOnce() {
       issuesDetected: found,
       openFindings: open,
     };
+    notifyPass().catch((e) =>
+      console.error("guardian notify error:", e.message),
+    );
     return lastRun;
   } finally {
     running = false;

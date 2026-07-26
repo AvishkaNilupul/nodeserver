@@ -7,6 +7,7 @@ const BotAccount = require("../models/BotAccount");
 const Purchase = require("../models/Purchase");
 const { decrypt } = require("../utils/secretBox");
 const { getBalance, adjustBalance } = require("../utils/admins");
+const { sendTelegram } = require("../utils/telegram");
 const BalanceLog = require("../models/BalanceLog");
 const {
   AVAILABLE_DROP,
@@ -433,6 +434,20 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
     );
     // Stock changed: drop the cached listings so the next load is accurate.
     invalidateListingsCache();
+
+    // Tell the operators a seller just drew stock (best-effort, never blocks).
+    sendTelegram(
+      "🛒 SHOP PURCHASE\n\n" +
+        buyerUsername +
+        " bought " +
+        set.name +
+        "\n$" +
+        price.toFixed(2) +
+        " · balance left $" +
+        Number(balanceAfter).toFixed(2) +
+        "\nAccount: " +
+        (account.login || account.credUsername || "?"),
+    ).catch((e) => console.error("shop purchase notify error:", e.message));
 
     // Audit the spend (best-effort; never blocks the sale).
     BalanceLog.create({

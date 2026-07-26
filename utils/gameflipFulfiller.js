@@ -16,6 +16,7 @@ const { availableAccountsForSet } = require("../routes/shopRoutes");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
+const { sendTelegram } = require("./telegram");
 const {
   reserveSetOnAccount,
   releaseAccountsForTag,
@@ -149,6 +150,21 @@ async function syncOnce() {
     );
     if (!claimed) continue;
     sold++;
+    // A marketplace sale is the one event an operator always wants pushed to
+    // their phone — the poller is the only thing that knows it happened.
+    sendTelegram(
+      "💰 SOLD on Gameflip\n\n" +
+        (row.title || "(untitled listing)") +
+        "\n$" +
+        (Number(row.price) || 0).toFixed(2) +
+        "\nAccount: " +
+        (row.accountLogin || "?") +
+        "\n" +
+        ((Number(row.qtyRemaining) || 0) > 0
+          ? "Relisting the next unit (" + row.qtyRemaining + " left)."
+          : "Last unit — nothing left to relist.") +
+        (row.url ? "\n\n" + row.url : ""),
+    ).catch((e) => console.error("gameflip sale notify error:", e.message));
     if ((Number(row.qtyRemaining) || 0) <= 0) continue;
     let img = "";
     try {
