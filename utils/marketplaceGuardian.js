@@ -73,13 +73,31 @@ async function upsertFinding(f) {
     },
     // includeResultMetadata tells us whether this pass CREATED the finding or
     // merely re-saw a known one — only brand-new problems are worth a push.
+    // `res.value` is the document as it was BEFORE this update (null on insert).
     { upsert: true, includeResultMetadata: true },
   );
   const isNew = !!(res && res.lastErrorObject && res.lastErrorObject.upserted);
-  if (isNew) {
+  const prev = res && res.value;
+  // A condition that cleared and came back: autoResolveStale had closed it, and
+  // the upsert above only refreshes fields — without this the row would stay
+  // "resolved", so a returning problem would be invisible in the tab and would
+  // never alert. Only rows the system auto-resolved are reopened; one a human
+  // resolved or ignored stays that way.
+  const returned =
+    !isNew &&
+    prev &&
+    prev.status === "resolved" &&
+    String(prev.resolution || "").startsWith("auto-resolved");
+  if (returned) {
+    await AuditFinding.updateOne(
+      { _id: prev._id },
+      { $set: { status: "open", resolution: "", resolvedAt: null } },
+    );
+  }
+  if (isNew || returned) {
     freshFindings.push(f);
   }
-  return isNew;
+  return isNew || returned;
 }
 
 // Findings of the "condition" types that were NOT re-detected this pass have
