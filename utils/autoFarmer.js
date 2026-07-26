@@ -362,6 +362,97 @@ async function activeAutoBotCount() {
   return seen.size;
 }
 
+// Free seats inside containers that active auto-farm tasks already run on
+// this host. A "seat" is one enabled TwitchUsers slot out of accountsPerBot.
+// Unreadable configs count as zero free seats (never over-promise capacity).
+async function autoSeatCapacity(host, af) {
+  if (!host || af.consolidate === false) return 0;
+  const rows = await AutoFarmTask.find(
+    { status: "active" },
+    { bots: 1 },
+  ).lean();
+  const seen = new Set();
+  let free = 0;
+  for (const t of rows) {
+    for (const b of t.bots || []) {
+      if (b.host !== host.id) continue;
+      const key = b.host + "|" + b.container;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        const data = JSON.parse(await hosts.readFile(host, b.file));
+        free += Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
+      } catch {
+        /* config renamed/unreadable — no seats there */
+      }
+    }
+  }
+  return free;
+}
+
+// Consolidation-first allocation: before paying RAM for a new container,
+// pack claimed accounts into free seats of bots that active tasks already
+// run on this host. Per-account FavouriteGames means one container can farm
+// many games at once. Returns { placed, remaining }; placed entries carry
+// the task.bots row plus the accounts that landed there. Every filled
+// container is restarted once so TwitchDropsBot reloads its config.
+async function fillExistingBots(host, claimed, game, af) {
+  const placed = [];
+  let remaining = claimed.slice();
+  if (!remaining.length || af.consolidate === false) {
+    return { placed, remaining };
+  }
+  const rows = await AutoFarmTask.find(
+    { status: "active" },
+    { bots: 1 },
+  ).lean();
+  const seen = new Set();
+  const containers = [];
+  for (const t of rows) {
+    for (const b of t.bots || []) {
+      if (b.host !== host.id) continue;
+      const key = b.host + "|" + b.container;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      containers.push(b);
+    }
+  }
+  for (const b of containers) {
+    if (!remaining.length) break;
+    let freeSeats = 0;
+    try {
+      const data = JSON.parse(await hosts.readFile(host, b.file));
+      freeSeats = Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
+    } catch {
+      continue; // retired/renamed config — skip
+    }
+    if (freeSeats < 1) continue;
+    const batch = remaining.slice(0, freeSeats);
+    try {
+      const r = await botFactory.addAccountsToBot(host, b.file, batch, game);
+      if (!r.added) continue;
+      const landed = new Set(r.logins);
+      const taken = batch.filter((a) => landed.has(a.username));
+      if (!taken.length) continue;
+      remaining = remaining.filter((a) => !taken.includes(a));
+      await hosts.dockerContainer(host, "restart", b.container).catch(() => {});
+      placed.push({
+        bot: {
+          host: host.id,
+          file: b.file,
+          container: b.container,
+          reused: true,
+          shared: true,
+        },
+        accounts: taken,
+      });
+    } catch {
+      /* config/container raced away — the remainder gets a new bot */
+    }
+  }
+  return { placed, remaining };
+}
+
 // The most recent task for this game that owns bots we can restart —
 // weekly campaigns reuse infrastructure instead of burning new accounts.
 async function reusableTaskForGame(game) {
@@ -473,7 +564,23 @@ async function processCampaign(c, ctx) {
   }
 
   // 4) Reuse-first: weekly campaigns restart the game's existing auto-bot.
-  const reusable = await reusableTaskForGame(game);
+  let reusable = await reusableTaskForGame(game);
+  if (reusable) {
+    // Retired bots (deleted container, config renamed .done-*) can't be
+    // restarted — drop them; if none survive, fall through to a fresh plan
+    // (which prefers packing into running bots anyway).
+    const live = [];
+    for (const b of reusable.bots || []) {
+      const h = hosts.resolveHost(b.host);
+      if (!h) continue;
+      try {
+        if (await hosts.exists(h, b.file)) live.push(b);
+      } catch {
+        /* host unreachable — treat as not reusable */
+      }
+    }
+    reusable = live.length ? { ...reusable, bots: live } : null;
+  }
   if (reusable) {
     const bots = reusable.bots || [];
     const reason =
@@ -599,10 +706,13 @@ async function processCampaign(c, ctx) {
     return { decision: "skip_no_accounts" };
   }
 
-  // 6) Capacity gate: how many new containers can we still run?
+  // 6) Capacity gate: free SEATS, not just container slots — running bots
+  // with spare TwitchUsers slots can absorb accounts without new containers.
   const activeBots = await activeAutoBotCount();
   const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  if (slotsFree < 1) {
+  const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
+  const seatCapacity = slotsFree * af.accountsPerBot + freeSeats;
+  if (seatCapacity < 1) {
     await record({
       decision: "skip_no_capacity",
       status: "skipped",
@@ -611,7 +721,8 @@ async function processCampaign(c, ctx) {
         af.maxAutoBots +
         " auto-bot slots on " +
         host.label +
-        " are busy — queued; retries when a campaign ends and frees a slot.",
+        " are busy and no running bot has a free seat — queued; retries " +
+        "when a campaign ends and frees capacity.",
       demandScore,
       hadResearch: !!research,
       internalSales,
@@ -620,8 +731,8 @@ async function processCampaign(c, ctx) {
     });
     return { decision: "skip_no_capacity" };
   }
-  // Trim the plan to fit free container slots.
-  const accounts = Math.min(target, slotsFree * af.accountsPerBot);
+  // Trim the plan to fit free seats (existing bots first, then new ones).
+  const accounts = Math.min(target, seatCapacity);
   const botCount = Math.ceil(accounts / af.accountsPerBot);
   const decision = alloc.probe ? "probe" : "farm";
   const covNote =
@@ -747,8 +858,17 @@ async function executeTask(task, ctx) {
   const deployed = [];
   let error = "";
   try {
-    for (let i = 0; i < claimed.length; i += af.accountsPerBot) {
-      const batch = claimed.slice(i, i + af.accountsPerBot);
+    // Pack into free seats of running auto-bots first — one container can
+    // farm many games via per-account FavouriteGames, and every container
+    // we don't create is RAM the Pi keeps.
+    const packed = await fillExistingBots(host, claimed, game, af);
+    for (const pl of packed.placed) {
+      bots.push(pl.bot);
+      for (const a of pl.accounts) deployed.push(a);
+    }
+    const rest = packed.remaining;
+    for (let i = 0; i < rest.length; i += af.accountsPerBot) {
+      const batch = rest.slice(i, i + af.accountsPerBot);
       const bot = await botFactory.createBot(host, batch, game, {
         startRunning: true,
       });
@@ -793,7 +913,12 @@ async function executeTask(task, ctx) {
           " bot(s) on " +
           host.label +
           ": " +
-          bots.map((b) => b.container).join(", ")
+          bots.map((b) => b.container).join(", ") +
+          (bots.some((b) => b.shared)
+            ? " (" +
+              bots.filter((b) => b.shared).length +
+              " packed into existing bots)"
+            : "")
         : "Could not create bots") +
       (error ? "\nIssues: " + error : ""),
   );
@@ -801,9 +926,16 @@ async function executeTask(task, ctx) {
   return { bots, accounts: deployed.length };
 }
 
-// Stop the bots of tasks whose campaign has ended. Accounts stay deployed
-// (they hold the farmed inventory the drop scanner sells from); the config
-// stays on disk so a future campaign for the same game reuses it.
+// Retire the bots of tasks whose campaign has ended.
+// - SHARED containers (other active tasks also farm there) survive: only
+//   this task's accounts get the game removed from their per-account
+//   FavouriteGames (disabled when nothing remains), then one restart.
+// - DEDICATED containers are stopped and — with deleteFinishedBots on —
+//   deleted: container removed, compose service dropped, config RENAMED to
+//   .done-<ts> (tokens survive; BotAccount rows keep the drop inventory the
+//   scanner sells from).
+// - This task's accounts are recycled back to the ready pool (unless the
+//   account itself was sold) so the next event reuses them in fresh bots.
 async function completeEndedTasks() {
   const active = await AutoFarmTask.find({ status: "active" });
   let completed = 0;
@@ -814,16 +946,123 @@ async function completeEndedTasks() {
       c.status === "EXPIRED" ||
       (c.endAt && new Date(c.endAt) < new Date());
     if (!ended) continue;
+    const af = cfg();
+    // Containers other ACTIVE tasks still use must survive this task ending.
+    const others = await AutoFarmTask.find(
+      { status: "active", _id: { $ne: t._id } },
+      { bots: 1 },
+    ).lean();
+    const sharedKeys = new Set();
+    for (const o of others) {
+      for (const b of o.bots || []) sharedKeys.add(b.host + "|" + b.container);
+    }
+    const mine = new Set(
+      (t.assignedAccounts || []).map((u) => String(u).toLowerCase()),
+    );
     const stopped = [];
+    const removed = [];
+    const trimmed = [];
     for (const b of t.bots || []) {
-      try {
-        const h = hosts.resolveHost(b.host);
-        if (h) {
-          await botFactory.stopContainer(h, b.container);
-          stopped.push(b.container);
+      const h = hosts.resolveHost(b.host);
+      if (!h) continue;
+      if (sharedKeys.has(b.host + "|" + b.container)) {
+        // Shared: switch only THIS task's accounts off the ended game (same
+        // per-account FavouriteGames edit farmControl.stopFarmingGame uses),
+        // one write + one restart; co-tenants keep farming untouched.
+        try {
+          const raw = await hosts.readFile(h, b.file);
+          const data = JSON.parse(raw);
+          const users =
+            data &&
+            data.TwitchSettings &&
+            Array.isArray(data.TwitchSettings.TwitchUsers)
+              ? data.TwitchSettings.TwitchUsers
+              : [];
+          let changed = 0;
+          for (const u of users) {
+            if (!u || !mine.has(String(u.Login || "").toLowerCase())) continue;
+            const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
+            const next = own.filter(
+              (f) =>
+                String(f).trim().toLowerCase() !==
+                String(t.game).trim().toLowerCase(),
+            );
+            if (next.length === own.length) continue;
+            u.FavouriteGames = next;
+            // An empty per-account list inherits the config-level games,
+            // which could resurrect the removed one — disable instead.
+            if (!next.length) u.Enabled = false;
+            changed++;
+          }
+          if (changed) {
+            await hosts.writeFileAtomic(
+              h,
+              b.file,
+              JSON.stringify(data, null, 2),
+            );
+            await hosts
+              .dockerContainer(h, "restart", b.container)
+              .catch(() => {});
+            trimmed.push(b.container + " (" + changed + " acct)");
+          }
+        } catch {
+          /* config unreadable — leave the shared bot alone */
         }
+        continue;
+      }
+      // Dedicated: stop it (frees the RAM), then optionally delete it
+      // (frees the slot + compose clutter; config renamed, never deleted).
+      try {
+        await botFactory.stopContainer(h, b.container);
+        stopped.push(b.container);
       } catch {
         /* container may already be gone; completing anyway */
+      }
+      if (af.deleteFinishedBots !== false) {
+        try {
+          await botFactory.deleteBot(h, b.file, b.container);
+          removed.push(b.container);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    // Recycle the accounts for the next event: back to the ready pool unless
+    // the account itself was sold to a buyer. The farmed drops live on the
+    // Twitch account either way, and a later sale still triggers
+    // farmControl.stopFarmingGame on whatever it farms next.
+    let recycled = 0;
+    if (t.assignedAccounts && t.assignedAccounts.length) {
+      try {
+        const BotAccount = require("../models/BotAccount");
+        const soldRows = await BotAccount.find(
+          { login: { $in: t.assignedAccounts }, soldAt: { $ne: null } },
+          { login: 1 },
+        ).lean();
+        const sold = new Set(
+          soldRows.map((r) => String(r.login).toLowerCase()),
+        );
+        const back = t.assignedAccounts.filter(
+          (u) => !sold.has(String(u).toLowerCase()),
+        );
+        if (back.length) {
+          const r = await AvailableAccount.updateMany(
+            {
+              usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
+              status: "claimed",
+            },
+            {
+              $set: {
+                status: "available",
+                claimedAt: null,
+                claimedNote: "recycled after " + t.game,
+              },
+            },
+          );
+          recycled = (r && r.modifiedCount) || 0;
+        }
+      } catch {
+        /* best-effort — accounts stay claimed, owner can release manually */
       }
     }
     t.status = "completed";
@@ -854,11 +1093,17 @@ async function completeEndedTasks() {
     await tg(
       "🤖 Auto-farm DONE — " +
         t.game +
-        "\nCampaign ended; stopped " +
-        (stopped.join(", ") || "(no containers)") +
-        ". " +
+        "\nCampaign ended." +
+        (stopped.length ? " Stopped: " + stopped.join(", ") + "." : "") +
+        (removed.length ? " Deleted: " + removed.join(", ") + "." : "") +
+        (trimmed.length
+          ? " Trimmed from shared: " + trimmed.join(", ") + "."
+          : "") +
+        " " +
         (t.assignedAccounts || []).length +
-        " farmed accounts kept as inventory.",
+        " farmed account(s) keep their drops" +
+        (recycled ? "; " + recycled + " recycled to the pool" : "") +
+        ".",
     );
   }
   return completed;
@@ -1153,9 +1398,14 @@ async function backfillActiveTasks(af, host, progress) {
 
     const activeBots = await activeAutoBotCount();
     const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-    if (slotsFree < 1) break;
+    const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
+    if (slotsFree < 1 && freeSeats < 1) break;
 
-    const n = Math.min(missing, spendable, slotsFree * af.accountsPerBot);
+    const n = Math.min(
+      missing,
+      spendable,
+      slotsFree * af.accountsPerBot + freeSeats,
+    );
     if (n < 1) continue;
     progress(
       "Backfilling " +
@@ -1177,8 +1427,18 @@ async function backfillActiveTasks(af, host, progress) {
     const deployed = [];
     let error = "";
     try {
-      for (let i = 0; i < claimed.length; i += af.accountsPerBot) {
-        const batch = claimed.slice(i, i + af.accountsPerBot);
+      const packed = await fillExistingBots(host, claimed, task.game, af);
+      for (const pl of packed.placed) {
+        const key = pl.bot.host + "|" + pl.bot.container;
+        const already = (task.bots || []).some(
+          (x) => x.host + "|" + x.container === key,
+        );
+        if (!already) task.bots.push(pl.bot);
+        for (const a of pl.accounts) deployed.push(a);
+      }
+      const rest = packed.remaining;
+      for (let i = 0; i < rest.length; i += af.accountsPerBot) {
+        const batch = rest.slice(i, i + af.accountsPerBot);
         const bot = await botFactory.createBot(host, batch, task.game, {
           startRunning: true,
         });

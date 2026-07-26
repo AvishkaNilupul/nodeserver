@@ -57,6 +57,9 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
     const patch = {};
     if ("enabled" in b) patch.enabled = !!b.enabled;
     if ("dryRun" in b) patch.dryRun = !!b.dryRun;
+    if ("consolidate" in b) patch.consolidate = !!b.consolidate;
+    if ("deleteFinishedBots" in b)
+      patch.deleteFinishedBots = !!b.deleteFinishedBots;
     if ("hostId" in b) {
       const id = String(b.hostId || "");
       if (id && !hosts.resolveHost(id)) {

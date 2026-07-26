@@ -85,6 +85,37 @@ function addServiceToComposeText(raw, container, file) {
   };
 }
 
+// Inverse of addServiceToComposeText — drop one service, leave the rest.
+function removeServiceFromComposeText(raw, container) {
+  const yaml = require("js-yaml");
+  const doc = yaml.load(raw) || {};
+  if (
+    !doc.services ||
+    typeof doc.services !== "object" ||
+    !doc.services[container]
+  ) {
+    return { existed: false, text: raw };
+  }
+  delete doc.services[container];
+  return {
+    existed: true,
+    text: yaml.dump(doc, { lineWidth: -1, noRefs: true }),
+  };
+}
+
+// Seats a bot config actually occupies: enabled TwitchUsers entries.
+// Disabled accounts (e.g. sold, or switched off after their game ended)
+// don't burn RAM in TwitchDropsBot, so their seats are reusable.
+function usedSeats(data) {
+  const users =
+    data &&
+    data.TwitchSettings &&
+    Array.isArray(data.TwitchSettings.TwitchUsers)
+      ? data.TwitchSettings.TwitchUsers
+      : [];
+  return users.filter((u) => u && u.Enabled !== false).length;
+}
+
 // Turn a pool account row (models/AvailableAccount) into a TwitchUsers entry.
 function poolAccountToUser(acc, favouriteGames) {
   const token = String(acc.clientSecret || "").trim();
@@ -251,13 +282,51 @@ async function stopContainer(host, container) {
   return hosts.dockerContainer(host, "stop", container);
 }
 
+// DELETE a finished auto-bot: force-remove the container, drop its compose
+// service, and RENAME the config to <file>.done-<ts> — never delete it, the
+// account tokens inside must survive for the next event. Best-effort per
+// step: a half-deleted bot is still better than a running one, and every
+// step's outcome is reported for the audit trail.
+async function deleteBot(host, file, container) {
+  const steps = [];
+  try {
+    await hosts.dockerContainer(host, "rm", container);
+    steps.push("container removed");
+  } catch (e) {
+    steps.push("container rm failed: " + (e.message || e));
+  }
+  try {
+    const composeFile = await hosts.composeName(host);
+    if (composeFile) {
+      const raw = await hosts.composeRead(host, composeFile);
+      const edited = removeServiceFromComposeText(raw, container);
+      if (edited.existed) {
+        await hosts.composeWrite(host, composeFile, edited.text);
+        steps.push("compose service removed");
+      }
+    }
+  } catch (e) {
+    steps.push("compose edit failed: " + (e.message || e));
+  }
+  try {
+    await hosts.rename(host, file, file + ".done-" + Date.now());
+    steps.push("config renamed");
+  } catch (e) {
+    steps.push("config rename failed: " + (e.message || e));
+  }
+  return steps.join(", ");
+}
+
 module.exports = {
   createBot,
   addAccountsToBot,
   startContainer,
   stopContainer,
+  deleteBot,
   containerForFile,
   findNextSlot,
   addServiceToComposeText,
+  removeServiceFromComposeText,
+  usedSeats,
   poolAccountToUser,
 };
