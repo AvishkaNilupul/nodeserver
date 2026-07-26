@@ -317,14 +317,16 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // hand out an account a buyer on another platform already received.
   const af = settings.getAutoFarm();
   const platiEnabled = !!af.platiCategoryId;
-  let ggselCategoryId = String(af.ggselCategoryId || "");
-  if (!ggselCategoryId) {
-    try {
-      ggselCategoryId = await mp.ggselLatestCategoryId();
-    } catch {
-      ggselCategoryId = "";
-    }
+  // Per-game category: own-history match first, then catalog search for the
+  // game's "Twitch Drops" section, then its Accounts section. The settings
+  // value is only a manual override / last resort.
+  let ggselCategoryId = "";
+  try {
+    ggselCategoryId = await mp.ggselResolveCategoryId(task.game);
+  } catch {
+    ggselCategoryId = "";
   }
+  if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
@@ -467,7 +469,10 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         ggsel.error = err.message;
       }
     } else if (!ggselCategoryId) {
-      ggsel.error = "no GGSel category (none set, none inferable)";
+      ggsel.error =
+        "no GGSel category found for " +
+        task.game +
+        " (set an override in auto-farm settings)";
     } else {
       ggsel.error = "no spare account for this market yet";
     }
