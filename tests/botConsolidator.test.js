@@ -5,7 +5,12 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { buildPlan, enabledCount } = require("../utils/botConsolidator");
+const {
+  buildPlan,
+  enabledCount,
+  materializeGames,
+  fileForContainer,
+} = require("../utils/botConsolidator");
 
 // A container holding `n` enabled accounts, plus optional disabled ones.
 function box(container, n, disabled = 0) {
@@ -115,4 +120,42 @@ test("enabledCount ignores junk and honours Enabled:false", () => {
     enabledCount([{ Enabled: true }, {}, { Enabled: false }, null]),
     2,
   );
+});
+
+// This is the case that would silently break farming: the Pi's config_10 has
+// ten blank accounts inheriting ["Fortnite"], while every other config on that
+// host inherits ["Warframe", ...]. Moving them without pinning the list first
+// would switch six live accounts onto the wrong game.
+test("blank accounts inherit the config-level games before they move", () => {
+  const users = [
+    { Login: "blank", Enabled: true, FavouriteGames: [] },
+    { Login: "explicit", Enabled: true, FavouriteGames: ["Rust"] },
+    { Login: "retired", Enabled: false, FavouriteGames: [] },
+  ];
+  const r = materializeGames(users, ["Fortnite"]);
+  assert.strictEqual(r.materialized, 1);
+  assert.deepStrictEqual(r.users[0].FavouriteGames, ["Fortnite"]);
+  // An explicit list is never overwritten.
+  assert.deepStrictEqual(r.users[1].FavouriteGames, ["Rust"]);
+  // A disabled account's empty list is the retirement marker — leave it.
+  assert.deepStrictEqual(r.users[2].FavouriteGames, []);
+  // The source entries are not mutated in place.
+  assert.deepStrictEqual(users[0].FavouriteGames, []);
+});
+
+test("materializeGames is a no-op when there is nothing to inherit", () => {
+  const users = [{ Login: "a", Enabled: true, FavouriteGames: [] }];
+  assert.strictEqual(materializeGames(users, []).materialized, 0);
+  assert.strictEqual(materializeGames(users, undefined).materialized, 0);
+});
+
+test("fileForContainer inverts botFactory.containerForFile", () => {
+  const { containerForFile } = require("../utils/botFactory");
+  assert.strictEqual(fileForContainer("twitchbot"), "config.json");
+  assert.strictEqual(fileForContainer("twitchbotx2"), "config_02.json");
+  assert.strictEqual(fileForContainer("twitchbotx26"), "config_26.json");
+  assert.strictEqual(fileForContainer("nonsense"), null);
+  for (const c of ["twitchbot", "twitchbotx2", "twitchbotx26", "twitchbotx37"]) {
+    assert.strictEqual(containerForFile(fileForContainer(c)), c);
+  }
 });

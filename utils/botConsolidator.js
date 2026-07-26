@@ -54,9 +54,60 @@ function secretOf(u) {
   return String((u && u.ClientSecret) || "").trim();
 }
 
+// An account with an empty per-account FavouriteGames INHERITS the config-level
+// FavouriteGames list (this is how manual bots are usually set up: one game at
+// the top, every account left blank). Moving such an account into a config with
+// a different top-level list would silently change what it farms — on the Pi,
+// config_10's ten blank accounts inherit ["Fortnite"] while every other config
+// inherits ["Warframe", ...]. So before a move we write the list the account was
+// actually inheriting onto the account itself. Behaviour is then identical no
+// matter which config it lands in.
+//
+// Only ENABLED accounts are materialised. An empty list on a disabled account is
+// the "retired" marker completeEndedTasks() writes when a campaign ends (see the
+// `if (!next.length) u.Enabled = false` branch in utils/autoFarmer.js); giving it
+// games back would misrepresent it, and it farms nothing either way.
+function materializeGames(users, configLevelGames) {
+  const inherited = Array.isArray(configLevelGames) ? configLevelGames : [];
+  let changed = 0;
+  const out = users.map((u) => {
+    if (!u || u.Enabled === false) return u;
+    const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
+    if (own.length || !inherited.length) return u;
+    changed++;
+    return { ...u, FavouriteGames: inherited.slice() };
+  });
+  return { users: out, materialized: changed };
+}
+
+// container -> config file, the inverse of botFactory.containerForFile.
+function fileForContainer(container) {
+  const c = String(container || "").trim();
+  if (c === "twitchbot") return "config.json";
+  const m = c.match(/^twitchbotx(\d+)$/);
+  if (!m) return null;
+  return "config_" + String(parseInt(m[1], 10)).padStart(2, "0") + ".json";
+}
+
 // Every container an ACTIVE auto-farm task owns on this host, with its config
 // contents. Containers whose config is unreadable are reported and then left
 // strictly alone — a container we cannot read is one we must not drain.
+async function readContainer(host, container, file) {
+  const data = JSON.parse(await hosts.readFile(host, file));
+  const raw = usersOf(data);
+  // Pin down inherited games BEFORE the entries leave this config.
+  const { users, materialized } = materializeGames(raw, data.FavouriteGames);
+  return {
+    file,
+    container,
+    data,
+    users,
+    materialized,
+    enabled: enabledCount(users),
+    total: users.length,
+  };
+}
+
 async function collectAutoContainers(host) {
   const rows = await AutoFarmTask.find({ status: "active" }, { bots: 1 }).lean();
   const seen = new Set();
@@ -69,16 +120,7 @@ async function collectAutoContainers(host) {
       if (!key || seen.has(key)) continue;
       seen.add(key);
       try {
-        const data = JSON.parse(await hosts.readFile(host, b.file));
-        const users = usersOf(data);
-        out.push({
-          file: b.file,
-          container: b.container,
-          data,
-          users,
-          enabled: enabledCount(users),
-          total: users.length,
-        });
+        out.push(await readContainer(host, b.container, b.file));
       } catch (e) {
         unreadable.push({
           container: b.container,
@@ -86,6 +128,41 @@ async function collectAutoContainers(host) {
           error: e.message || String(e),
         });
       }
+    }
+  }
+  return { containers: out, unreadable };
+}
+
+// Explicitly named containers, for repacking bots the auto-farmer does NOT own
+// (hand-made bots have no AutoFarmTask pointing at them). Any container that IS
+// owned by an active auto-farm task is refused here: those must go through the
+// auto path so their task pointers get rebuilt.
+async function collectNamedContainers(host, names) {
+  const rows = await AutoFarmTask.find({ status: "active" }, { bots: 1 }).lean();
+  const owned = new Set();
+  for (const t of rows) {
+    for (const b of t.bots || []) {
+      if (b.host === host.id) owned.add(b.container);
+    }
+  }
+  const out = [];
+  const unreadable = [];
+  for (const container of names) {
+    if (owned.has(container)) {
+      throw new Error(
+        container +
+          " is owned by an active auto-farm task — repack it with the auto path, not as a manual bot.",
+      );
+    }
+    const file = fileForContainer(container);
+    if (!file) {
+      unreadable.push({ container, file: null, error: "unrecognised name" });
+      continue;
+    }
+    try {
+      out.push(await readContainer(host, container, file));
+    } catch (e) {
+      unreadable.push({ container, file, error: e.message || String(e) });
     }
   }
   return { containers: out, unreadable };
@@ -233,18 +310,32 @@ async function reconcileTaskBots(host) {
   return updated;
 }
 
+// Gather the containers this run operates on. `opts.containers` selects the
+// manual path (explicitly named bots); omitting it selects every container the
+// active auto-farm tasks own.
+async function gather(host, opts) {
+  return Array.isArray(opts.containers) && opts.containers.length
+    ? collectNamedContainers(host, opts.containers)
+    : collectAutoContainers(host);
+}
+
 // Produce the plan without touching anything.
 async function plan(hostId, opts = {}) {
   const host = hosts.resolveHost(hostId);
   if (!host) throw new Error("Unknown host: " + hostId);
   const capacity = Math.max(1, Number(opts.capacity) || 70);
-  const { containers, unreadable } = await collectAutoContainers(host);
+  const { containers, unreadable } = await gather(host, opts);
   if (!containers.length) {
     return { host: host.id, capacity, empty: true, unreadable, moves: [] };
   }
   const p = buildPlan(containers, capacity);
   delete p._targets;
-  return { host: host.id, unreadable, ...p };
+  return {
+    host: host.id,
+    unreadable,
+    materialized: containers.reduce((s, c) => s + (c.materialized || 0), 0),
+    ...p,
+  };
 }
 
 // Execute the plan.
@@ -260,9 +351,17 @@ async function consolidate(hostId, opts = {}) {
   const capacity = Math.max(1, Number(opts.capacity) || 70);
   const log = typeof opts.progress === "function" ? opts.progress : () => {};
 
-  const { containers, unreadable } = await collectAutoContainers(host);
+  const { containers, unreadable } = await gather(host, opts);
   if (containers.length < 2) {
     return { host: host.id, skipped: "nothing to consolidate", unreadable };
+  }
+  const materialized = containers.reduce((s, c) => s + (c.materialized || 0), 0);
+  if (materialized) {
+    log(
+      "Pinned inherited FavouriteGames onto " +
+        materialized +
+        " account(s) so the move cannot change what they farm.",
+    );
   }
   const p = buildPlan(containers, capacity);
   if (!p.moves.length) {
@@ -364,4 +463,11 @@ async function consolidate(hostId, opts = {}) {
   };
 }
 
-module.exports = { plan, consolidate, buildPlan, enabledCount };
+module.exports = {
+  plan,
+  consolidate,
+  buildPlan,
+  enabledCount,
+  materializeGames,
+  fileForContainer,
+};
