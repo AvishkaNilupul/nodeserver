@@ -235,7 +235,37 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const task = await AutoFarmTask.findById(taskId);
   if (!task) return { skipped: "task gone" };
   if (task.listing && task.listing.externalId) {
-    return { skipped: "already listed" };
+    // Verify the listing still exists on Gameflip — if the seller deleted it
+    // manually, forget it and fall through to create a fresh one.
+    try {
+      const status = await mp.gameflipListingStatus(task.listing.externalId);
+      if (status && status !== "expired") {
+        return { skipped: "already listed" };
+      }
+    } catch (e) {
+      const msg = String(e.message || "");
+      // Anything other than "not found" (auth trouble, timeouts) keeps the
+      // record — we only relist when Gameflip confirms the listing is gone.
+      if (!/404|not.?found/i.test(msg)) {
+        return { skipped: "already listed (status check failed: " + msg + ")" };
+      }
+    }
+    // Also retire the stale DB listing row so the fulfiller stops watching it.
+    try {
+      await MarketplaceListing.updateOne(
+        {
+          set: task.listing.setId,
+          marketplace: "gameflip",
+          externalId: task.listing.externalId,
+        },
+        { $set: { status: "removed" } },
+      );
+    } catch {
+      /* best-effort */
+    }
+    task.listing = undefined;
+    task.wouldList = undefined;
+    await task.save();
   }
   const items = await campaignItems(task.campaignId, task.game);
   const research = await MarketResearch.findOne({ game: task.game }).lean();

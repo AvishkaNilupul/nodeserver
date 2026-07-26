@@ -187,6 +187,56 @@ router.delete("/auto-farm/tasks/:id", requireSuperadmin, async (req, res) => {
   }
 });
 
+// DELIST a task's Gameflip listing: remove it from Gameflip (ignoring
+// already-gone errors), retire the DB listing row, and clear the task's
+// listing record so the next scan can publish a fresh one if wanted.
+router.post(
+  "/auto-farm/tasks/:id/delist",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const task = await AutoFarmTask.findById(req.params.id);
+      if (!task)
+        return res
+          .status(404)
+          .json({ success: false, message: "Task not found" });
+      if (!task.listing || !task.listing.externalId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Task has no listing" });
+      }
+      const mp = require("../utils/marketplaces");
+      const MarketplaceListing = require("../models/MarketplaceListing");
+      let remote = "removed";
+      try {
+        await mp.gameflipDelist(task.listing.externalId);
+      } catch (e) {
+        // Already deleted on Gameflip (or never existed) is fine — the goal
+        // is a clean local record either way.
+        if (/404|not.?found/i.test(String(e.message || ""))) {
+          remote = "was already gone";
+        } else {
+          throw e;
+        }
+      }
+      await MarketplaceListing.updateOne(
+        {
+          set: task.listing.setId,
+          marketplace: "gameflip",
+          externalId: task.listing.externalId,
+        },
+        { $set: { status: "removed" } },
+      );
+      task.listing = undefined;
+      task.wouldList = undefined;
+      await task.save();
+      res.json({ success: true, remote });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
 // RUN the brain once on demand (the "Scan now" button).
 router.post("/auto-farm/tick", requireSuperadmin, async (req, res) => {
   // Fire-and-forget: the scan can take a while (research + SSH), so return
