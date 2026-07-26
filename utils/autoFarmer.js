@@ -31,6 +31,10 @@ const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
 const DEMAND_FULL = 40; // proven seller -> full allocation
 const DEMAND_HALF = 15; // some demand -> half allocation; below -> skip
 const RESEARCH_STALE_MS = 7 * 86400000; // re-scan markets older than a week
+// How long to stay quiet after warning that the pool is starved. Long, because
+// the condition persists until the operator acts and a per-tick repeat would be
+// exactly the spam this system was just fixed for.
+const STARVATION_COOLDOWN_MS = 12 * 3600 * 1000;
 const SALES_WINDOW_MS = 45 * 86400000; // own-sales training window
 // Each of our own recent sales is worth this many demand points (log-damped
 // below). 5+ recent sales pushes any game to full allocation on its own.
@@ -51,6 +55,10 @@ const state = {
   lastRun: null,
   lastError: "",
   lastSummary: null,
+  // Epoch ms of the last pool-starvation alert (0 = not currently starving).
+  // Plain in-process state on purpose: a missed alert after a restart is
+  // harmless, and the alternative would need a schema field.
+  lastPoolAlertAt: 0,
 };
 
 // Live progress log for the UI: every scan appends human-readable steps here
@@ -382,6 +390,47 @@ async function activeAutoBotCount() {
     for (const b of t.bots || []) seen.add(b.host + "|" + b.container);
   }
   return seen.size;
+}
+
+// Logins that must NEVER go back into the pool, out of the given list.
+//
+// Both recycle paths used to ask only `BotAccount.soldAt != null`. That is the
+// wrong signal: since the per-game reservation work (utils/dropReservation.js)
+// a sale commits the sold set's DROPS, not the account — an "everything"
+// account is sold once per game and BotAccount.sold* is only kept as a shadow
+// that "no longer gates stock". So an account delivered to a real buyer can
+// carry soldAt: null and passed the old guard straight back into the pool,
+// where it would be redeployed to farm again on credentials the BUYER now
+// holds (they can change the password, and anything it farms next is in their
+// hands). Verified on prod 2026-07-26: of 50 accounts in fulfilled orders only
+// 25 had BotAccount.soldAt set, so the old guard saw half of them as unsold.
+//
+// The drop-level signals are the same ones dropReservation.AVAILABLE_DROP uses
+// to decide sellability: `connected` (redeemed) or `soldAt` (reserved/sold).
+// This can only ever recycle FEWER accounts than before, never more.
+async function unrecyclableLogins(logins) {
+  const lower = logins.map((u) => String(u).toLowerCase()).filter(Boolean);
+  if (!lower.length) return new Set();
+  const BotAccount = require("../models/BotAccount");
+  const DropLog = require("../models/DropLog");
+  const [soldRows, dropSold, dropConnected] = await Promise.all([
+    BotAccount.find({ login: { $in: logins }, soldAt: { $ne: null } }, { login: 1 })
+      .lean()
+      .catch(() => []),
+    DropLog.distinct("login", {
+      login: { $in: logins },
+      soldAt: { $ne: null },
+    }).catch(() => []),
+    DropLog.distinct("login", { login: { $in: logins }, connected: true }).catch(
+      () => [],
+    ),
+  ]);
+  const out = new Set();
+  for (const r of soldRows) out.add(String(r.login || "").toLowerCase());
+  for (const l of dropSold) out.add(String(l || "").toLowerCase());
+  for (const l of dropConnected) out.add(String(l || "").toLowerCase());
+  out.delete("");
+  return out;
 }
 
 // Free seats inside containers that active auto-farm tasks already run on
@@ -821,6 +870,12 @@ async function processCampaign(c, ctx) {
       internalSales,
       coverage: { manualFarmers, archiveHolders },
       plannedAccounts: accounts,
+      // Same tier target the live path records below. Without it an approved
+      // plan enters "active" with targetAccounts: 0, and backfill's
+      // `targetAccounts || plannedAccounts || 0` falls through to the flat
+      // marketStockFloor — which is why ten active tasks sat at 18 accounts
+      // regardless of demand, capping proven sellers whose tier says 30.
+      targetAccounts: wanted,
     });
     await tg(
       "🤖 Auto-farm PLAN (dry-run) — " +
@@ -865,15 +920,13 @@ async function executeTask(task, ctx) {
   const spendable = Math.max(0, ready - af.poolReserve);
   const n = Math.min(want, spendable);
   if (n < 1) {
-    await AutoFarmTask.updateOne(
-      { _id: task._id },
-      {
-        $set: {
-          status: "failed",
-          error: "Pool below reserve floor at execution time",
-        },
-      },
-    );
+    // Throw WITHOUT marking the task failed. Nothing has been claimed yet, so
+    // there is no failure to record — the pool was simply empty this minute.
+    // Writing "failed" here bricked the plan permanently: "failed" is not in
+    // RETRYABLE, and the approve route only accepts "planned", so a single
+    // Approve click during a pool shortage put the campaign permanently beyond
+    // both the operator and the tick. Left as "planned", it stays approvable
+    // and the caller still surfaces the accurate reason below.
     throw new Error(
       "Pool below reserve floor (" +
         ready +
@@ -888,12 +941,10 @@ async function executeTask(task, ctx) {
     "auto-farm: " + game + " (" + task.campaignId + ")",
   );
   if (!claimed.length) {
-    await AutoFarmTask.updateOne(
-      { _id: task._id },
-      {
-        $set: { status: "failed", error: "Could not claim any pool accounts" },
-      },
-    );
+    // Same reasoning as the reserve-floor guard above: the claim won nothing,
+    // so nothing is owned and nothing is lost. Keep the task "planned" and
+    // retryable rather than burning it. The genuine terminal "failed" write
+    // stays further down, after accounts HAVE been claimed and bots touched.
     throw new Error("Could not claim any pool accounts");
   }
 
@@ -1031,17 +1082,12 @@ async function reapRetiredBots(af, host, progress) {
   // next event can reuse them — same rules as the live retirement path.
   let recycled = 0;
   try {
-    const BotAccount = require("../models/BotAccount");
     const logins = [];
     for (const t of done) {
       for (const u of t.assignedAccounts || []) logins.push(String(u));
     }
     if (logins.length) {
-      const soldRows = await BotAccount.find(
-        { login: { $in: logins }, soldAt: { $ne: null } },
-        { login: 1 },
-      ).lean();
-      const sold = new Set(soldRows.map((r) => String(r.login).toLowerCase()));
+      const sold = await unrecyclableLogins(logins);
       const back = logins.filter((u) => !sold.has(u.toLowerCase()));
       if (back.length) {
         const r = await AvailableAccount.updateMany(
@@ -1174,14 +1220,7 @@ async function completeEndedTasks() {
     let recycled = 0;
     if (t.assignedAccounts && t.assignedAccounts.length) {
       try {
-        const BotAccount = require("../models/BotAccount");
-        const soldRows = await BotAccount.find(
-          { login: { $in: t.assignedAccounts }, soldAt: { $ne: null } },
-          { login: 1 },
-        ).lean();
-        const sold = new Set(
-          soldRows.map((r) => String(r.login).toLowerCase()),
-        );
+        const sold = await unrecyclableLogins(t.assignedAccounts);
         const back = t.assignedAccounts.filter(
           (u) => !sold.has(String(u).toLowerCase()),
         );
@@ -1534,6 +1573,44 @@ async function runOnce() {
 
     progress("Scan complete: " + results.length + " decision(s) this tick.");
 
+    // Pool starvation is the one condition that silently stops everything: with
+    // spendable at 0 no campaign can be decided and no active task can be
+    // topped up, yet every previous surface for it was a muted number in the
+    // UI. Alert once, then stay quiet for STARVATION_COOLDOWN_MS — the point of
+    // today's notification work was to stop crying wolf, so this must not
+    // become the next per-tick spam. Deliberately placed AFTER every sweep and
+    // wrapped, so a Telegram hiccup can never abort a tick's real work.
+    try {
+      const starving = !af.dryRun && spendable < 1;
+      if (starving) {
+        const due =
+          !state.lastPoolAlertAt ||
+          Date.now() - state.lastPoolAlertAt > STARVATION_COOLDOWN_MS;
+        const underTarget = await AutoFarmTask.countDocuments({
+          status: "active",
+        });
+        if (due && underTarget > 0) {
+          state.lastPoolAlertAt = Date.now();
+          await tg(
+            "⚠️ Auto-farm STARVED — pool has " +
+              ready +
+              " ready but the reserve floor is " +
+              af.poolReserve +
+              ", so 0 are spendable.\n" +
+              "Nothing can be farmed or topped up until the pool refills or the " +
+              "reserve is lowered. " +
+              underTarget +
+              " active task(s) affected.",
+          );
+        }
+      } else if (state.lastPoolAlertAt) {
+        // Recovered — clear the latch so the next starvation alerts promptly.
+        state.lastPoolAlertAt = 0;
+      }
+    } catch {
+      /* alerting must never break a tick */
+    }
+
     state.lastError = "";
     state.lastSummary = {
       enabled: true,
@@ -1584,7 +1661,22 @@ async function backfillActiveTasks(af, host, progress) {
 
     const ready = await countReadyPool();
     const spendable = Math.max(0, ready - af.poolReserve);
-    if (spendable < 1) break; // pool exhausted — later tasks can't get any either
+    if (spendable < 1) {
+      // Pool exhausted — later tasks can't get any either. Say so: this used to
+      // break silently, so a fleet sitting far under target looked healthy
+      // while nothing was being delivered tick after tick.
+      progress(
+        "Pool exhausted (" +
+          ready +
+          " ready, reserve " +
+          af.poolReserve +
+          ") — " +
+          (tasks.length - tasks.indexOf(task)) +
+          " task(s) left under target this tick.",
+        "warn",
+      );
+      break;
+    }
 
     const activeBots = await activeAutoBotCount();
     const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
