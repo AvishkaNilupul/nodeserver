@@ -23,6 +23,7 @@
         --accent: #4f46e5;
         --green: #059669;
         --red: #dc2626;
+        --amber: #d97706;
       }
       html[data-theme="dark"] {
         --bg: #0e1014;
@@ -33,6 +34,7 @@
         --muted: #9aa3b4;
         --green: #34d399;
         --red: #f87171;
+        --amber: #fbbf24;
         color-scheme: dark;
       }
       * {
@@ -159,7 +161,7 @@
       main {
         flex: 1;
         padding: 30px 34px;
-        max-width: 980px;
+        max-width: 1080px;
       }
       h1 {
         font-size: 22px;
@@ -169,6 +171,7 @@
         color: var(--muted);
         font-size: 14px;
         margin-bottom: 22px;
+        max-width: 860px;
       }
       .card {
         background: var(--surface);
@@ -208,16 +211,6 @@
         opacity: 0.92;
         background: var(--accent);
       }
-      .btn-danger {
-        color: var(--red);
-        border-color: var(--line);
-      }
-      .btn-danger:hover {
-        background: #fef2f2;
-      }
-      html[data-theme="dark"] .btn-danger:hover {
-        background: rgba(220, 38, 38, 0.12);
-      }
       .btn:disabled {
         opacity: 0.55;
         cursor: not-allowed;
@@ -228,28 +221,6 @@
         flex-wrap: wrap;
         align-items: center;
       }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13.5px;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: 10px 8px;
-        border-bottom: 1px solid var(--line);
-      }
-      th {
-        color: var(--muted);
-        font-weight: 600;
-        font-size: 11.5px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-      }
-      td .acts {
-        display: flex;
-        gap: 6px;
-      }
       .btn-sm {
         padding: 6px 10px;
         font-size: 12.5px;
@@ -258,27 +229,8 @@
       .muted {
         color: var(--muted);
       }
-      .danger-zone {
-        border-color: #fecaca;
-      }
-      html[data-theme="dark"] .danger-zone {
-        border-color: rgba(220, 38, 38, 0.35);
-      }
-      .warn {
-        background: #fffbeb;
-        border: 1px solid #fde68a;
-        color: #92400e;
-        padding: 11px 14px;
-        border-radius: 10px;
-        font-size: 13px;
-        margin-bottom: 14px;
-      }
-      html[data-theme="dark"] .warn {
-        background: rgba(251, 191, 36, 0.1);
-        border-color: rgba(251, 191, 36, 0.3);
-        color: #fbbf24;
-      }
       input[type="text"],
+      input[type="search"],
       select {
         padding: 9px 11px;
         border-radius: 9px;
@@ -287,9 +239,211 @@
         color: var(--ink);
         font-size: 13.5px;
       }
-      input[type="file"] {
-        font-size: 13px;
+
+      /* Summary chips */
+      .chips {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 14px;
       }
+      .chip {
+        padding: 5px 11px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        background: var(--surface-2);
+        cursor: pointer;
+        user-select: none;
+      }
+      .chip b {
+        font-weight: 800;
+        color: var(--ink);
+      }
+      .chip.on {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .chip.on b {
+        color: var(--accent);
+      }
+      .chip.static {
+        cursor: default;
+      }
+
+      /* Severity pills */
+      .sev {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 700;
+        font-size: 12px;
+        text-transform: capitalize;
+      }
+      .sev::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: currentColor;
+        flex: none;
+      }
+      .sev-high {
+        color: var(--red);
+      }
+      .sev-medium {
+        color: var(--amber);
+      }
+      .sev-low {
+        color: var(--muted);
+      }
+      .sev-info {
+        color: var(--green);
+      }
+
+      /* Listing groups */
+      .group {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        margin-bottom: 14px;
+        overflow: hidden;
+      }
+      .ghead {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-2);
+        flex-wrap: wrap;
+      }
+      .ghead .t {
+        font-weight: 700;
+        font-size: 13.5px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 380px;
+      }
+      .ghead .grow {
+        flex: 1;
+      }
+      .ghead .ext {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .ghead .ext a:hover {
+        color: var(--accent);
+        text-decoration: underline;
+      }
+      .mpbadge {
+        font-size: 10.5px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 3px 8px;
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        flex: none;
+      }
+      .mp-funpay {
+        background: #2563eb;
+      }
+      .mp-ggsel {
+        background: #7c3aed;
+      }
+      .mp-digiseller {
+        background: #0d9488;
+      }
+      .mp-gameflip {
+        background: #ea580c;
+      }
+      .mp-g2g {
+        background: #db2777;
+      }
+      .mp-epicnpc {
+        background: #4b5563;
+      }
+      .mp-none {
+        background: #64748b;
+      }
+
+      .frow {
+        display: flex;
+        gap: 14px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        align-items: flex-start;
+      }
+      .frow:last-child {
+        border-bottom: none;
+      }
+      .fmeta {
+        width: 148px;
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .fmeta .type {
+        font-size: 12.5px;
+        font-weight: 600;
+      }
+      .fmeta .when {
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .fbody {
+        flex: 1;
+        min-width: 0;
+      }
+      .fbody .who {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: var(--accent);
+        margin-bottom: 2px;
+        word-break: break-all;
+      }
+      .msg {
+        font-size: 13px;
+        line-height: 1.45;
+        cursor: pointer;
+      }
+      .msg.clamp {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .resline {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .facts {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: stretch;
+        min-width: 120px;
+      }
+      .facts .btn {
+        width: 100%;
+      }
+      .statuschip {
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
       .toast {
         position: fixed;
         bottom: 22px;
@@ -305,7 +459,7 @@
         transition: all 0.2s;
         z-index: 120;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
-        max-width: 90vw;
+        max-width: min(640px, 90vw);
       }
       .toast.show {
         opacity: 1;
@@ -328,6 +482,25 @@
       @keyframes sp {
         to {
           transform: rotate(360deg);
+        }
+      }
+      @media (max-width: 860px) {
+        .frow {
+          flex-direction: column;
+          gap: 8px;
+        }
+        .fmeta {
+          width: auto;
+          flex-direction: row;
+          gap: 10px;
+          align-items: center;
+        }
+        .facts {
+          flex-direction: row;
+          flex-wrap: wrap;
+        }
+        .facts .btn {
+          width: auto;
         }
       }
     </style>
@@ -465,10 +638,10 @@
       <div class="sub">
         A background checker runs every 5 minutes over all live auto-delivery
         listings: it tops sold-down Plati / GGSel listings back up with fresh
-        server accounts, and flags anything that could burn a buyer — the same
-        account listed on two platforms, an account already sold to someone
-        else, redeemed drops in a live listing, or a dead Twitch token. Review
-        each finding below and fix, ignore, or delist.
+        server accounts, and flags anything that could burn a buyer. Findings
+        that have a safe one-click remedy show a <b>Fix</b> button — replace a
+        burned account, re-reserve drops, detach a sold unit, or retry a
+        restock — and everything else can be resolved or ignored by hand.
       </div>
 
       <div class="card">
@@ -483,17 +656,23 @@
             <option value="resolved">Resolved / activity log</option>
             <option value="">Everything</option>
           </select>
+          <select id="typeFilter">
+            <option value="">All issue types</option>
+          </select>
+          <select id="mpFilter">
+            <option value="">All platforms</option>
+          </select>
+          <input
+            type="search"
+            id="qFilter"
+            placeholder="Search account / listing / text…"
+            style="flex: 1; min-width: 180px"
+          />
         </div>
+        <div class="chips" id="summary"></div>
       </div>
 
-      <div class="card">
-        <h2>Findings</h2>
-        <p class="hint">
-          High severity = a buyer would run into a problem right now. Findings
-          auto-resolve when a later pass no longer detects the issue.
-        </p>
-        <div id="list"><div class="muted">Loading…</div></div>
-      </div>
+      <div id="list"><div class="muted">Loading…</div></div>
     </main>
 
     <div class="toast" id="toast"></div>
@@ -506,22 +685,15 @@
       };
       function toast(msg, err) {
         var t = $("toast");
-        t.textContent = msg;
+        t.textContent = String(msg || "").slice(0, 300);
         t.className = "toast show" + (err ? " err" : "");
         clearTimeout(toast._t);
         toast._t = setTimeout(
           function () {
             t.className = "toast";
           },
-          err ? 6000 : 3500,
+          err ? 7000 : 5000,
         );
-      }
-      function fmtDate(s) {
-        try {
-          return new Date(s).toLocaleString();
-        } catch (e) {
-          return s;
-        }
       }
       function esc(s) {
         return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -533,6 +705,25 @@
             "'": "&#39;",
           }[c];
         });
+      }
+      function fmtDate(s) {
+        try {
+          return new Date(s).toLocaleString();
+        } catch (e) {
+          return s;
+        }
+      }
+      // "2m ago" style relative time; hover for the exact stamp.
+      function rel(s) {
+        var d = new Date(s).getTime();
+        if (!d) return "";
+        var diff = Math.max(0, Date.now() - d);
+        var m = Math.floor(diff / 60000);
+        if (m < 1) return "just now";
+        if (m < 60) return m + "m ago";
+        var h = Math.floor(m / 60);
+        if (h < 48) return h + "h ago";
+        return Math.floor(h / 24) + "d ago";
       }
 
       async function api(url, opts) {
@@ -556,14 +747,18 @@
         "stock-unknown": "Stock unreadable",
         "restock-failed": "Restock failed",
         restocked: "Restocked",
+        fixed: "Auto-fixed",
         "farm-stopped": "Farming stopped",
       };
-      var SEV_COLOR = {
-        high: "var(--red)",
-        medium: "#d97706",
-        low: "var(--muted)",
-        info: "var(--green)",
-      };
+      // Activity rows are records of something the system already did — they
+      // have no "reopen" (there is nothing to put back into review).
+      var ACTIVITY_TYPES = { restocked: 1, fixed: 1, "farm-stopped": 1 };
+      var SEV_RANK = { high: 0, medium: 1, low: 2, info: 3 };
+
+      var DATA = [];
+      var expanded = {};
+      var filters = { type: "", mp: "", q: "", sev: "" };
+      var busy = false;
 
       async function loadStatus() {
         try {
@@ -591,71 +786,333 @@
         try {
           var st = $("statusFilter").value;
           var j = await api(
-            "/marketplaces/guardian/findings" +
-              (st ? "?status=" + encodeURIComponent(st) : ""),
+            "/marketplaces/guardian/findings?limit=500" +
+              (st ? "&status=" + encodeURIComponent(st) : ""),
           );
-          var rows = j.findings || [];
-          if (!rows.length) {
-            $("list").innerHTML =
-              '<div class="muted">Nothing here — all clear.</div>';
-            return;
-          }
-          $("list").innerHTML =
-            "<table><thead><tr><th>Severity</th><th>Issue</th><th>Where</th><th>Details</th><th>Seen</th><th></th></tr></thead><tbody>" +
-            rows
-              .map(function (f) {
-                var acts = "";
-                if (f.status === "open") {
-                  acts =
-                    '<button class="btn btn-sm" onclick="act(\'' +
-                    f.id +
-                    "','resolve')\">Resolve</button>" +
-                    '<button class="btn btn-sm" onclick="act(\'' +
-                    f.id +
-                    "','ignore')\">Ignore</button>";
-                } else if (
-                  f.status !== "resolved" ||
-                  (f.type !== "restocked" && f.type !== "farm-stopped")
-                ) {
-                  acts =
-                    '<button class="btn btn-sm" onclick="act(\'' +
-                    f.id +
-                    "','reopen')\">Reopen</button>";
-                }
-                return (
-                  '<tr><td><b style="color:' +
-                  (SEV_COLOR[f.severity] || "inherit") +
-                  '">' +
-                  esc(f.severity) +
-                  "</b>" +
-                  (f.status !== "open"
-                    ? '<div class="muted">' + esc(f.status) + "</div>"
-                    : "") +
-                  "</td><td>" +
-                  esc(TYPE_LABEL[f.type] || f.type) +
-                  "</td><td>" +
-                  esc(f.marketplace || "—") +
-                  (f.accountLogin
-                    ? '<div class="muted">' + esc(f.accountLogin) + "</div>"
-                    : "") +
-                  "</td><td>" +
-                  esc(f.message) +
-                  (f.resolution
-                    ? '<div class="muted">' + esc(f.resolution) + "</div>"
-                    : "") +
-                  "</td><td>" +
-                  esc(fmtDate(f.lastSeenAt)) +
-                  '</td><td><div class="acts">' +
-                  acts +
-                  "</div></td></tr>"
-                );
-              })
-              .join("") +
-            "</tbody></table>";
+          DATA = j.findings || [];
+          buildSelects();
+          render();
         } catch (e) {
           $("list").innerHTML =
-            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+            '<div class="card"><div class="muted">Failed to load: ' +
+            esc(e.message) +
+            "</div></div>";
         }
+      }
+
+      function buildSelects() {
+        var types = {};
+        var mps = {};
+        DATA.forEach(function (f) {
+          if (f.type) types[f.type] = 1;
+          var mp = (f.listing && f.listing.marketplace) || f.marketplace;
+          if (mp) mps[mp] = 1;
+        });
+        var keep = function (sel, vals, label) {
+          var cur = sel.value;
+          sel.innerHTML =
+            '<option value="">' +
+            label +
+            "</option>" +
+            Object.keys(vals)
+              .sort()
+              .map(function (v) {
+                return (
+                  '<option value="' +
+                  esc(v) +
+                  '">' +
+                  esc(TYPE_LABEL[v] || v) +
+                  "</option>"
+                );
+              })
+              .join("");
+          sel.value = vals[cur] ? cur : "";
+        };
+        keep($("typeFilter"), types, "All issue types");
+        keep($("mpFilter"), mps, "All platforms");
+        filters.type = $("typeFilter").value;
+        filters.mp = $("mpFilter").value;
+      }
+
+      function matches(f) {
+        if (filters.sev && f.severity !== filters.sev) return false;
+        if (filters.type && f.type !== filters.type) return false;
+        var mp = (f.listing && f.listing.marketplace) || f.marketplace || "";
+        if (filters.mp && mp !== filters.mp) return false;
+        if (filters.q) {
+          var q = filters.q.toLowerCase();
+          var hay = [
+            f.accountLogin,
+            f.message,
+            f.resolution,
+            f.type,
+            TYPE_LABEL[f.type],
+            mp,
+            f.listing && f.listing.title,
+            f.listing && f.listing.externalId,
+          ]
+            .join(" ")
+            .toLowerCase();
+          if (hay.indexOf(q) === -1) return false;
+        }
+        return true;
+      }
+
+      function renderSummary() {
+        var counts = { high: 0, medium: 0, low: 0, info: 0 };
+        var fixable = 0;
+        DATA.forEach(function (f) {
+          counts[f.severity] = (counts[f.severity] || 0) + 1;
+          if (f.fix && f.status === "open") fixable++;
+        });
+        var chip = function (sev, label) {
+          if (!counts[sev]) return "";
+          return (
+            '<span class="chip' +
+            (filters.sev === sev ? " on" : "") +
+            '" onclick="togSev(\'' +
+            sev +
+            "')\"><b>" +
+            counts[sev] +
+            "</b> " +
+            label +
+            "</span>"
+          );
+        };
+        $("summary").innerHTML =
+          chip("high", "high") +
+          chip("medium", "medium") +
+          chip("low", "low") +
+          chip("info", "info") +
+          (fixable
+            ? '<span class="chip static">🔧 <b>' +
+              fixable +
+              "</b> auto-fixable</span>"
+            : "") +
+          '<span class="chip static"><b>' +
+          DATA.length +
+          "</b> total shown</span>";
+      }
+
+      function togSev(sev) {
+        filters.sev = filters.sev === sev ? "" : sev;
+        render();
+      }
+
+      function groupOf(f) {
+        if (f.listing) return "l:" + f.listing.id;
+        if (f.listingId) return "l:" + f.listingId;
+        return "general";
+      }
+
+      function render() {
+        renderSummary();
+        var rows = DATA.filter(matches);
+        if (!rows.length) {
+          $("list").innerHTML =
+            '<div class="card"><div class="muted">Nothing here — all clear.</div></div>';
+          return;
+        }
+        var groups = {};
+        var order = [];
+        rows.forEach(function (f) {
+          var k = groupOf(f);
+          if (!groups[k]) {
+            groups[k] = [];
+            order.push(k);
+          }
+          groups[k].push(f);
+        });
+        var rank = function (f) {
+          return SEV_RANK[f.severity] != null ? SEV_RANK[f.severity] : 1;
+        };
+        order.sort(function (a, b) {
+          var ga = groups[a],
+            gb = groups[b];
+          var ra = Math.min.apply(
+            null,
+            ga.map(rank),
+          );
+          var rb = Math.min.apply(
+            null,
+            gb.map(rank),
+          );
+          if (ra !== rb) return ra - rb;
+          var ta = Math.max.apply(
+            null,
+            ga.map(function (f) {
+              return new Date(f.lastSeenAt).getTime() || 0;
+            }),
+          );
+          var tb = Math.max.apply(
+            null,
+            gb.map(function (f) {
+              return new Date(f.lastSeenAt).getTime() || 0;
+            }),
+          );
+          return tb - ta;
+        });
+        $("list").innerHTML = order
+          .map(function (k) {
+            var list = groups[k].slice().sort(function (a, b) {
+              return (
+                rank(a) - rank(b) ||
+                new Date(b.lastSeenAt) - new Date(a.lastSeenAt)
+              );
+            });
+            return groupHtml(k, list);
+          })
+          .join("");
+      }
+
+      function groupHtml(key, list) {
+        var f0 = list[0];
+        var lst = f0.listing;
+        var mp = (lst && lst.marketplace) || f0.marketplace || "";
+        var title = lst
+          ? lst.title || lst.externalId
+          : mp
+            ? mp + " findings"
+            : "Cross-platform checks";
+        var ext = lst
+          ? lst.url
+            ? '<a href="' +
+              esc(lst.url) +
+              '" target="_blank" rel="noopener">#' +
+              esc(lst.externalId) +
+              " ↗</a>"
+            : "#" + esc(lst.externalId)
+          : "";
+        var open = list.filter(function (f) {
+          return f.status === "open";
+        });
+        var fixable = open.filter(function (f) {
+          return f.fix;
+        });
+        var bulk = "";
+        if (fixable.length > 1) {
+          bulk +=
+            '<button class="btn btn-sm btn-primary" onclick="fixAll(\'' +
+            key +
+            "')\">Fix all (" +
+            fixable.length +
+            ")</button>";
+        }
+        if (open.length > 1) {
+          bulk +=
+            '<button class="btn btn-sm" onclick="bulkAct(\'' +
+            key +
+            "','resolve')\">Resolve all</button>" +
+            '<button class="btn btn-sm" onclick="bulkAct(\'' +
+            key +
+            "','ignore')\">Ignore all</button>";
+        }
+        return (
+          '<div class="group" data-group="' +
+          esc(key) +
+          '">' +
+          '<div class="ghead">' +
+          '<span class="mpbadge mp-' +
+          esc(mp || "none") +
+          '">' +
+          esc(mp || "system") +
+          "</span>" +
+          '<span class="t" title="' +
+          esc(title) +
+          '">' +
+          esc(title) +
+          "</span>" +
+          '<span class="ext">' +
+          ext +
+          (lst && lst.status !== "active"
+            ? ' · <b style="color:var(--amber)">' + esc(lst.status) + "</b>"
+            : "") +
+          "</span>" +
+          '<span class="grow"></span>' +
+          '<span class="muted" style="font-size:12px">' +
+          list.length +
+          " finding(s)</span>" +
+          bulk +
+          "</div>" +
+          list.map(rowHtml).join("") +
+          "</div>"
+        );
+      }
+
+      function rowHtml(f) {
+        var acts = "";
+        if (f.status === "open") {
+          if (f.fix) {
+            acts +=
+              '<button class="btn btn-sm btn-primary" title="' +
+              esc(f.fix.hint || "") +
+              "\" onclick=\"fixOne('" +
+              f.id +
+              "', this)\">🔧 " +
+              esc(f.fix.label) +
+              "</button>";
+          }
+          acts +=
+            '<button class="btn btn-sm" onclick="act(\'' +
+            f.id +
+            "','resolve')\">Resolve</button>" +
+            '<button class="btn btn-sm" onclick="act(\'' +
+            f.id +
+            "','ignore')\">Ignore</button>";
+        } else if (!ACTIVITY_TYPES[f.type]) {
+          acts =
+            '<button class="btn btn-sm" onclick="act(\'' +
+            f.id +
+            "','reopen')\">Reopen</button>";
+        }
+        var isOpenMsg = !!expanded[f.id];
+        return (
+          '<div class="frow">' +
+          '<div class="fmeta">' +
+          '<span class="sev sev-' +
+          esc(f.severity) +
+          '">' +
+          esc(f.severity) +
+          "</span>" +
+          '<span class="type">' +
+          esc(TYPE_LABEL[f.type] || f.type) +
+          "</span>" +
+          '<span class="when" title="first ' +
+          esc(fmtDate(f.detectedAt)) +
+          '\nlast ' +
+          esc(fmtDate(f.lastSeenAt)) +
+          '">' +
+          esc(rel(f.lastSeenAt)) +
+          "</span>" +
+          (f.status !== "open"
+            ? '<span class="statuschip">' + esc(f.status) + "</span>"
+            : "") +
+          "</div>" +
+          '<div class="fbody">' +
+          (f.accountLogin
+            ? '<div class="who">' + esc(f.accountLogin) + "</div>"
+            : "") +
+          '<div class="msg' +
+          (isOpenMsg ? "" : " clamp") +
+          "\" onclick=\"togMsg('" +
+          f.id +
+          "', this)\" title=\"Click to expand / collapse\">" +
+          esc(f.message) +
+          "</div>" +
+          (f.resolution
+            ? '<div class="resline">↳ ' + esc(f.resolution) + "</div>"
+            : "") +
+          "</div>" +
+          '<div class="facts">' +
+          acts +
+          "</div>" +
+          "</div>"
+        );
+      }
+
+      function togMsg(id, el) {
+        expanded[id] = !expanded[id];
+        el.classList.toggle("clamp", !expanded[id]);
       }
 
       async function act(id, action) {
@@ -674,6 +1131,127 @@
         } catch (e) {
           toast("Failed: " + e.message, true);
         }
+      }
+
+      async function fixOne(id, btn) {
+        if (btn) {
+          btn.disabled = true;
+          btn.innerHTML = '<span class="spin"></span>Fixing…';
+        }
+        busy = true;
+        try {
+          var r = await api(
+            "/marketplaces/guardian/findings/" +
+              encodeURIComponent(id) +
+              "/fix",
+            { method: "POST" },
+          );
+          toast("✓ " + (r.message || "Fixed"));
+        } catch (e) {
+          toast("Fix failed: " + e.message, true);
+        }
+        busy = false;
+        loadFindings();
+        loadStatus();
+      }
+
+      async function bulkAct(key, action) {
+        var ids = DATA.filter(function (f) {
+          return groupOf(f) === key && f.status === "open" && matches(f);
+        }).map(function (f) {
+          return f.id;
+        });
+        if (!ids.length) return;
+        if (
+          !confirm(
+            action.charAt(0).toUpperCase() +
+              action.slice(1) +
+              " all " +
+              ids.length +
+              " open finding(s) in this group?",
+          )
+        )
+          return;
+        busy = true;
+        var done = 0;
+        for (var i = 0; i < ids.length; i++) {
+          try {
+            await api(
+              "/marketplaces/guardian/findings/" + encodeURIComponent(ids[i]),
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: action }),
+              },
+            );
+            done++;
+          } catch (e) {
+            /* keep going */
+          }
+        }
+        busy = false;
+        toast(done + "/" + ids.length + " finding(s) " + action + "d");
+        loadFindings();
+        loadStatus();
+      }
+
+      async function fixAll(key) {
+        var items = DATA.filter(function (f) {
+          return (
+            groupOf(f) === key && f.status === "open" && f.fix && matches(f)
+          );
+        });
+        if (!items.length) return;
+        if (
+          !confirm(
+            "Run " +
+              items.length +
+              " fix(es) for this listing? Replacements claim fresh accounts " +
+              "from the pool.",
+          )
+        )
+          return;
+        var head = document.querySelector(
+          '[data-group="' + key + '"] .ghead .btn-primary',
+        );
+        busy = true;
+        var ok = 0,
+          fail = 0,
+          firstErr = "";
+        for (var i = 0; i < items.length; i++) {
+          if (head) {
+            head.disabled = true;
+            head.innerHTML =
+              '<span class="spin"></span>Fixing ' +
+              (i + 1) +
+              "/" +
+              items.length +
+              "…";
+          }
+          try {
+            await api(
+              "/marketplaces/guardian/findings/" +
+                encodeURIComponent(items[i].id) +
+                "/fix",
+              { method: "POST" },
+            );
+            ok++;
+          } catch (e) {
+            fail++;
+            if (!firstErr) firstErr = e.message;
+          }
+        }
+        busy = false;
+        toast(
+          ok +
+            " fixed" +
+            (fail
+              ? ", " + fail + " failed" + (firstErr ? " — " + firstErr : "")
+              : ""),
+          fail > 0,
+        );
+        loadFindings();
+        loadStatus();
       }
 
       $("btnRun").addEventListener("click", async function () {
@@ -705,10 +1283,25 @@
         loadFindings();
       });
       $("statusFilter").addEventListener("change", loadFindings);
+      $("typeFilter").addEventListener("change", function () {
+        filters.type = this.value;
+        render();
+      });
+      $("mpFilter").addEventListener("change", function () {
+        filters.mp = this.value;
+        render();
+      });
+      $("qFilter").addEventListener("input", function () {
+        filters.q = this.value.trim();
+        render();
+      });
 
       loadStatus();
       loadFindings();
-      setInterval(loadStatus, 30000);
+      setInterval(function () {
+        loadStatus();
+        if (!busy) loadFindings();
+      }, 30000);
     </script>
   </body>
 </html>

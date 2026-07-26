@@ -1802,6 +1802,7 @@ async function saIntegrity(box) {
         <div class="row" style="margin-bottom:6px">
           <div class="sevdot sev-${esc(f.severity || "medium")}"></div>
           <div class="grow small" style="font-weight:700">${esc(f.type)}</div>
+          ${f.fix ? '<span class="chip good">🔧 fixable</span>' : ""}
           ${f.marketplace ? `<span class="chip flat">${esc(f.marketplace)}</span>` : ""}
         </div>
         <div class="small muted">${esc(String(f.message || "").slice(0, 160))}</div>
@@ -1830,9 +1831,11 @@ function openFinding(i) {
     </div>
     <div style="margin-bottom:12px">${esc(f.message || "")}</div>
     ${f.accountLogin ? `<div class="kv"><div class="k">Account</div><div class="v mono small">${esc(f.accountLogin)}</div></div>` : ""}
+    ${f.listing ? `<div class="kv"><div class="k">Listing</div><div class="v small">${esc(f.listing.marketplace)} · ${esc(f.listing.title || f.listing.externalId)}</div></div>` : ""}
     <div class="kv"><div class="k">First seen</div><div class="v">${rel(f.detectedAt)}</div></div>
     <div class="kv"><div class="k">Last seen</div><div class="v">${rel(f.lastSeenAt)}</div></div>
-    <button class="btn good mt12" id="fResolve">Mark resolved</button>
+    ${f.fix ? `<button class="btn mt12" id="fFix">🔧 ${esc(f.fix.label)}</button><div class="small muted mt8">${esc(f.fix.hint || "")}</div>` : ""}
+    <button class="btn ${f.fix ? "ghost mt8" : "good mt12"}" id="fResolve">Mark resolved</button>
     <button class="btn ghost mt8" id="fIgnore">Ignore it</button>
     <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
   const send = (btnId, action, msg) => {
@@ -1844,6 +1847,15 @@ function openFinding(i) {
       reloadSub("integrity");
     });
   };
+  if (f.fix) {
+    const el = $("fFix");
+    el.onclick = () => act(el, async () => {
+      const r = await api("/marketplaces/guardian/findings/" + encodeURIComponent(f.id) + "/fix", { method: "POST", body: {} });
+      toast(String(r.message || "Fixed").slice(0, 140));
+      closeSheet();
+      reloadSub("integrity");
+    });
+  }
   send("fResolve", "resolve", "Marked resolved");
   send("fIgnore", "ignore", "Ignored");
 }

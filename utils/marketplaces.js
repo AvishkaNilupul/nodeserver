@@ -1625,6 +1625,40 @@ function fpFieldValue(html, name) {
   return ta ? fpUnescape(ta[1]) : "";
 }
 
+// Parse every named field of the offer editor form (inputs, selects,
+// textareas) so a re-save can round-trip values we don't model — category
+// nodes differ in which extra fields they carry. Checkboxes/radios are
+// included only when checked (HTML form semantics: unchecked = omitted).
+function fpFormValues(html) {
+  const out = {};
+  const inputRe = /<input\b[^>]*>/gi;
+  let m;
+  while ((m = inputRe.exec(html))) {
+    const tag = m[0];
+    const name = /name="([^"]+)"/.exec(tag);
+    if (!name) continue;
+    const type = ((/type="([^"]+)"/.exec(tag) || [])[1] || "text").toLowerCase();
+    if (type === "submit" || type === "button" || type === "file") continue;
+    const val = /value="([^"]*)"/.exec(tag);
+    if (type === "checkbox" || type === "radio") {
+      if (/\bchecked\b/i.test(tag)) {
+        out[name[1]] = val ? fpUnescape(val[1]) : "on";
+      }
+      continue;
+    }
+    out[name[1]] = val ? fpUnescape(val[1]) : "";
+  }
+  const taRe = /<textarea\b[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/textarea>/gi;
+  while ((m = taRe.exec(html))) out[m[1]] = fpUnescape(m[2]);
+  const selRe = /<select\b[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/select>/gi;
+  while ((m = selRe.exec(html))) {
+    const opt = /<option\b[^>]*\bselected\b[^>]*>/i.exec(m[2]);
+    const v = opt && /value="([^"]*)"/.exec(opt[0]);
+    out[m[1]] = v ? fpUnescape(v[1]) : "";
+  }
+  return out;
+}
+
 function fpOfferIds(html) {
   const ids = new Set();
   // FunPay's trade page lists each offer as <a class="tc-item"
@@ -1950,6 +1984,79 @@ async function funpayDelist(offerId, nodeId) {
   await fpPostOfferSave(goldenKey, editor.session, body);
 }
 
+// Edit the UNDELIVERED auto-delivery pool of an existing FunPay offer: drop
+// the lines belonging to `removeLogins` (matched on the "login:" prefix of
+// each login:password secret) and append `addLines`. FunPay has no update
+// API, so this reloads the editor and re-saves every current field with the
+// new pool — the editor's secrets textarea is the source of truth for which
+// lines are still undelivered, which is what lets a caller tell "burned line
+// pulled from the pool" apart from "line already handed to a buyer".
+// `activate`: true/false forces the active box; null keeps its current state.
+// An offer whose pool ends up empty is saved off-sale (FunPay would otherwise
+// sell with nothing to deliver).
+async function funpayUpdateSecrets(
+  offerId,
+  nodeId,
+  { removeLogins = [], addLines = [], activate = null } = {},
+) {
+  const keys = requireKeys("funpay");
+  if (!offerId || /^node\d+-/.test(String(offerId))) {
+    throw new Error("no FunPay offer id on record — edit it on FunPay");
+  }
+  const goldenKey = keys.golden_key;
+  const editor = await fpLoadEditor(goldenKey, nodeId, offerId);
+  const form = fpFormValues(editor.html);
+  const pool = String(form.secrets || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const prefixes = removeLogins
+    .map((l) => String(l || "").trim().toLowerCase() + ":")
+    .filter((p) => p.length > 1);
+  const kept = [];
+  const removedLines = [];
+  for (const line of pool) {
+    const burned = prefixes.some((p) => line.toLowerCase().startsWith(p));
+    (burned ? removedLines : kept).push(line);
+  }
+  const have = new Set(kept);
+  let added = 0;
+  for (const raw of addLines) {
+    const line = String(raw || "").trim();
+    if (!line || have.has(line)) continue;
+    kept.push(line);
+    have.add(line);
+    added++;
+  }
+  const wasActive = form.active != null;
+  const body = {
+    ...form,
+    csrf_token: editor.csrf,
+    form_created_at: form.form_created_at || editor.formCreatedAt,
+    offer_id: String(offerId),
+    node_id: form.node_id || editor.nodeId,
+    location: form.location || "",
+    deleted: "",
+    amount: form.amount || "1",
+  };
+  delete body.secrets;
+  delete body.auto_delivery;
+  delete body.active;
+  if (kept.length) {
+    body.auto_delivery = "on";
+    body.secrets = kept.join("\n");
+  }
+  const on = (activate === null ? wasActive : !!activate) && kept.length > 0;
+  if (on) body.active = "on";
+  await fpPostOfferSave(goldenKey, editor.session, body);
+  return {
+    removed: removedLines.length,
+    added,
+    pool: kept.length,
+    active: on,
+  };
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -1990,4 +2097,5 @@ module.exports = {
   funpayTest,
   funpayPublish,
   funpayDelist,
+  funpayUpdateSecrets,
 };

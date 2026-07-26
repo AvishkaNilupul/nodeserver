@@ -701,6 +701,21 @@ function status() {
   return { running, lastRun };
 }
 
+// Run the auto-feed for ONE listing right now (the Integrity tab's
+// "Retry restock" fix). Same feedListing path as a pass, so a success also
+// clears the standing restock-err finding and logs the restock activity row.
+async function feedOne(listingId) {
+  const row = await MarketplaceListing.findOne({
+    _id: listingId,
+    status: "active",
+    autoDeliver: true,
+  }).lean();
+  if (!row) {
+    throw new Error("Listing is not an active auto-delivery listing");
+  }
+  return feedListing(row, new Set());
+}
+
 const TICK_MS = 5 * 60 * 1000;
 let started = false;
 
@@ -720,4 +735,4 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { runOnce, status, start };
+module.exports = { runOnce, status, start, feedOne, CLAIM_TAGS };
