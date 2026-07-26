@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Marketplace Filler (EpicNPC + G2G)",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Auto-fills the EpicNPC 'Post thread' form and auto-attaches the G2G bulk-upload .xlsx from listings opened via your panel. Fill/attach only - you always review and submit.",
   "content_scripts": [
     {

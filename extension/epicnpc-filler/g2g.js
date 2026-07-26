@@ -6,6 +6,12 @@
 // (#g2gfill=<base64url xlsx>&fn=<name>) and this script attaches it to the
 // upload input the moment one appears. It NEVER submits - the seller reviews
 // the parsed offers and clicks G2G's own upload/confirm button.
+//
+// G2G's logged-in seller routes are a moving target (their SPA renders
+// client-side 404s for guessed URLs), so the payload is also persisted to
+// sessionStorage: whatever page the tab lands on, the seller can navigate
+// through G2G's own menus to Create Offer -> Bulk Upload and the file still
+// attaches there. The stash is cleared on attach or banner dismiss.
 (function () {
   "use strict";
 
@@ -13,22 +19,58 @@
   var attached = false;
   var bannerEl = null;
 
-  function parseHash() {
-    var m = (location.hash || "").match(/g2gfill=([^&]+)(?:&fn=([^&]+))?/);
-    if (!m) return null;
+  var STASH_KEY = "g2gfill-stash";
+
+  function decodePayload(b64url, name) {
     try {
-      var b = m[1].replace(/-/g, "+").replace(/_/g, "/");
+      var b = b64url.replace(/-/g, "+").replace(/_/g, "/");
       while (b.length % 4) b += "=";
       var bin = atob(b);
       var bytes = new Uint8Array(bin.length);
       for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      var name = m[2] ? decodeURIComponent(m[2]) : "g2g-bulk.xlsx";
       var file = new File([bytes], name, {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
       return { file: file, name: name };
     } catch (e) {
       return null;
+    }
+  }
+
+  function loadPayload() {
+    // Fresh handoff in the URL hash wins; otherwise fall back to the stash
+    // from an earlier load of this tab (survives full-page navigations).
+    var m = (location.hash || "").match(/g2gfill=([^&]+)(?:&fn=([^&]+))?/);
+    if (m) {
+      var name = m[2] ? decodeURIComponent(m[2]) : "g2g-bulk.xlsx";
+      var p = decodePayload(m[1], name);
+      if (p) {
+        try {
+          sessionStorage.setItem(
+            STASH_KEY,
+            JSON.stringify({ b64: m[1], name: name }),
+          );
+        } catch (e) {
+          /* quota - stash is best-effort */
+        }
+      }
+      return p;
+    }
+    try {
+      var raw = sessionStorage.getItem(STASH_KEY);
+      if (!raw) return null;
+      var st = JSON.parse(raw);
+      return decodePayload(st.b64, st.name);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function clearStash() {
+    try {
+      sessionStorage.removeItem(STASH_KEY);
+    } catch (e) {
+      /* ignore */
     }
   }
 
@@ -61,6 +103,7 @@
       "background:none;border:0;color:#fff;font-size:16px;cursor:pointer;padding:0 2px";
     x.onclick = function () {
       el.remove();
+      clearStash();
     };
     el.appendChild(x);
     document.body.appendChild(el);
@@ -91,6 +134,7 @@
       inp.dispatchEvent(new Event("input", { bubbles: true }));
       inp.dispatchEvent(new Event("change", { bubbles: true }));
       attached = true;
+      clearStash();
       banner(
         "G2G Filler: " +
           payload.name +
@@ -103,7 +147,7 @@
     }
   }
 
-  payload = parseHash();
+  payload = loadPayload();
   if (!payload) return;
 
   // Drop the huge hash so reloads/bookmarks stay clean; the file lives in
@@ -117,7 +161,8 @@
   banner(
     "G2G Filler: bulk file ready (" +
       payload.name +
-      ") - open Create Offer \u2192 Bulk Upload and it will attach itself",
+      ") - navigate to Create Offer \u2192 Bulk Upload (any path through " +
+      "G2G's menus works) and it will attach itself",
     false,
     true,
   );
