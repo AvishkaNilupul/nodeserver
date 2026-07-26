@@ -687,8 +687,34 @@ async function digisellerProductStock(productId) {
       const v = Number(raw);
       if (Number.isFinite(v)) return v;
     }
+    // The call SUCCEEDED (retval 0) but carried no stock figure. Verified live
+    // 2026-07-27 on 12 of our products: every one returns show_rest = 0, and
+    // none of the three stock fields is present. Digiseller omits the remaining
+    // count entirely when the product has "show remaining quantity" turned off,
+    // so this is a per-product storefront setting, not a transient API fault —
+    // and it is why the guardian's auto-feed skips every Digiseller listing.
+    // Enabling it needs the seller UI or an API key with edit rights (our key
+    // gets "Access denied" from /product/edit/base). Logged once per call so
+    // the cause is visible instead of arriving as a bare "stock unknown".
+    console.error(
+      "digiseller stock unreadable for product " +
+        productId +
+        ": response had no num_in_stock/in_stock/count_goods (show_rest=" +
+        JSON.stringify(p && p.show_rest) +
+        ") — enable 'show remaining quantity' on the product to make it readable",
+    );
     return null;
-  } catch {
+  } catch (e) {
+    // A genuine transport/API failure is a different problem from the above and
+    // must not look the same in the logs.
+    console.error(
+      "digiseller stock request failed for product " +
+        productId +
+        ": " +
+        (e.response
+          ? "HTTP " + e.response.status
+          : e.message || String(e)),
+    );
     return null;
   }
 }
