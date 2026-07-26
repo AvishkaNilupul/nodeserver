@@ -29,7 +29,30 @@ const GF_CLAIM_TAG = "gameflip";
 // while the account's other games stay sellable. Returns the account doc.
 async function claimAccountForSet(set) {
   const candidates = await availableAccountsForSet(set);
-  for (const c of candidates) {
+  // Hand out an account whose Twitch token still scans before one flagged
+  // token_invalid / integrity_failed. A dead token does not always mean the
+  // buyer cannot log in — the password is separate, and the guardian's own
+  // notes call these often-transient — but it is the best signal we have that
+  // an account's credentials moved, and it is what the guardian raises a
+  // "dead-token" finding on. When healthy stock exists there is no reason to
+  // ship a flagged account: the live Overwatch bundle went out on a
+  // token_invalid account while all 111 other candidates were clean.
+  // Flagged accounts are still used as a last resort rather than failing the
+  // sale, so this can only improve which account is picked, never lose stock.
+  const ids = candidates.map((c) => c.accountId);
+  const healthy = new Set();
+  if (ids.length) {
+    const rows = await BotAccount.find(
+      { _id: { $in: ids }, lastScanStatus: { $in: ["", "ok", null] } },
+      { _id: 1 },
+    ).lean();
+    for (const r of rows) healthy.add(String(r._id));
+  }
+  const ordered = candidates
+    .filter((c) => healthy.has(String(c.accountId)))
+    .concat(candidates.filter((c) => !healthy.has(String(c.accountId))));
+
+  for (const c of ordered) {
     const ok = await reserveSetOnAccount(c.accountId, set, {
       soldToUsername: GF_CLAIM_TAG,
       soldSetId: String(set._id),
