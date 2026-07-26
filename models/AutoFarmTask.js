@@ -51,6 +51,12 @@ const autoFarmTaskSchema = new mongoose.Schema(
     assignedAccounts: { type: [String], default: [] }, // pool usernames actually deployed
 
     // Bots created (or reused) for this task, all on the configured host (Pi).
+    // `shared` marks a container this task co-tenants with other active tasks
+    // (consolidation packs several campaigns into one container). It must be
+    // declared here or Mongoose's strict mode drops it on write — the flag is
+    // only informational (completeEndedTasks recomputes sharing live from the
+    // other active tasks), but an undeclared path silently reads back as
+    // undefined, which made the "shared" count in the Telegram summary wrong.
     bots: {
       type: [
         {
@@ -59,6 +65,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
           file: { type: String, default: "" },
           container: { type: String, default: "" },
           reused: { type: Boolean, default: false },
+          shared: { type: Boolean, default: false },
         },
       ],
       default: [],

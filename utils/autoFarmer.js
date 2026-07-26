@@ -508,6 +508,18 @@ async function processCampaign(c, ctx) {
     dryRun: !!af.dryRun,
   };
 
+  // Decision this campaign was last left in (null on the first pass). Only set
+  // for RETRYABLE skips, which are the ones re-decided on every tick.
+  const prior = (ctx.priorTasks && ctx.priorTasks.get(key)) || null;
+
+  // True when `decision` is not simply a repeat of the verdict this campaign
+  // already carried. Notifications for retryable skips are gated on this so a
+  // steady state is announced once, not once per tick. The task row is still
+  // rewritten every tick either way — only the Telegram send is suppressed.
+  function isNewDecision(decision) {
+    return !prior || prior.decision !== decision;
+  }
+
   async function record(fields) {
     // upsert keeps the unique (game, campaignId) index happy on retries
     return AutoFarmTask.findOneAndUpdate(
@@ -695,17 +707,24 @@ async function processCampaign(c, ctx) {
       internalSales,
       coverage: { manualFarmers, archiveHolders },
     });
-    await tg(
-      "🤖 Auto-farm SKIP — " +
-        game +
-        "\nAlready covered: " +
-        manualFarmers +
-        " manual farmers + " +
-        archiveHolders +
-        " archive holders ≥ target " +
-        wanted +
-        ".",
-    );
+    // Announce the transition into "covered", not every re-confirmation of it.
+    // This branch is retryable (demand reopens when covering accounts sell), so
+    // it is re-decided every tick; sending unconditionally was ~485 identical
+    // Telegram messages a day. The reason is recorded above regardless and is
+    // visible in the Bots → Auto farm tab.
+    if (isNewDecision("skip_already_covered")) {
+      await tg(
+        "🤖 Auto-farm SKIP — " +
+          game +
+          "\nAlready covered: " +
+          manualFarmers +
+          " manual farmers + " +
+          archiveHolders +
+          " archive holders ≥ target " +
+          wanted +
+          ".",
+      );
+    }
     return { decision: "skip_already_covered" };
   }
 
@@ -1294,6 +1313,11 @@ async function runOnce() {
         " live campaign(s); checking which need decisions\u2026",
     );
     const candidates = [];
+    // The decision each retried candidate was last left in. RETRYABLE skips are
+    // re-decided every tick by design, so a branch that notifies would otherwise
+    // re-announce an unchanged verdict on every tick, forever. Passing the prior
+    // task down lets processCampaign tell a NEW decision from a repeat of one.
+    const priorTasks = new Map();
     for (const c of live) {
       if (!c.game) continue;
       const existing = await AutoFarmTask.findOne({
@@ -1307,6 +1331,7 @@ async function runOnce() {
         RETRYABLE.has(existing.decision)
       ) {
         candidates.push(c); // conditions may have changed — re-decide
+        priorTasks.set(c.campaignId, existing);
       }
     }
     progress(candidates.length + " campaign(s) to decide this tick.");
@@ -1392,6 +1417,7 @@ async function runOnce() {
           budgetMap,
           infoMap,
           farmMap,
+          priorTasks,
         });
         progress(
           c.game + " \u2192 " + (r && r.decision ? r.decision : "done") + ".",
