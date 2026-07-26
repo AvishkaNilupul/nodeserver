@@ -498,6 +498,88 @@
         background: rgba(220, 38, 38, 0.12);
         color: var(--red);
       }
+      .badge.auto {
+        background: rgba(59, 130, 246, 0.14);
+        color: #6ea8ff;
+      }
+      /* Per-marketplace chips on listing rows: link when live, muted when
+         the market errored or was skipped. */
+      .mkt-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--text);
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .mkt-chip .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--muted);
+        flex-shrink: 0;
+      }
+      .mkt-chip.live .dot {
+        background: var(--green);
+      }
+      .mkt-chip.sold .dot {
+        background: #6ea8ff;
+      }
+      .mkt-chip.err {
+        color: var(--muted);
+        border-style: dashed;
+      }
+      .mkt-chip.err .dot {
+        background: var(--red);
+      }
+      a.mkt-chip:hover {
+        border-color: var(--muted);
+      }
+      /* Search + filter toolbar above listing lists. */
+      .list-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 12px 0 4px;
+      }
+      .list-toolbar input[type="search"] {
+        flex: 1;
+        min-width: 140px;
+        max-width: 260px;
+        padding: 6px 10px;
+        font-size: 13px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .list-toolbar .fchip {
+        font-size: 12px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .list-toolbar .fchip.on {
+        background: var(--surface-2);
+        color: var(--text);
+        border-color: var(--muted);
+      }
+      .list-toolbar .count {
+        font-size: 12px;
+        color: var(--muted);
+        margin-left: auto;
+      }
       .listing .price {
         font-weight: 700;
         font-size: 15px;
@@ -879,7 +961,19 @@
               <button class="btn" id="mpKeysBtn">Marketplace keys</button>
             </div>
           </div>
-          <div id="listings" style="margin-top: 12px">
+          <div class="list-toolbar">
+            <input
+              type="search"
+              id="lsSearch"
+              placeholder="Search listings…"
+              aria-label="Search listings"
+            />
+            <button class="fchip on" data-lsf="all">All</button>
+            <button class="fchip" data-lsf="listed">Listed</button>
+            <button class="fchip" data-lsf="draft">Draft</button>
+            <span class="count" id="lsCount"></span>
+          </div>
+          <div id="listings">
             <div class="empty">Loading…</div>
           </div>
         </section>
@@ -1004,6 +1098,23 @@ Reliable Daily Rewards</textarea
           >
             <h2 style="margin: 0">Custom listings</h2>
             <button class="btn" id="g2gBulkBtn">Export G2G bulk file</button>
+          </div>
+          <div class="mp-hint" style="margin-top: 2px">
+            Auto-farm scans land here too — each row shows where it's live. Use
+            <b>Edit</b> to tweak the title, price or description, and
+            <b>Sell on…</b> to publish it to more marketplaces.
+          </div>
+          <div class="list-toolbar">
+            <input
+              type="search"
+              id="clSearch"
+              placeholder="Search custom listings…"
+              aria-label="Search custom listings"
+            />
+            <button class="fchip on" data-clf="all">All</button>
+            <button class="fchip" data-clf="auto">Auto-farm</button>
+            <button class="fchip" data-clf="manual">Manual</button>
+            <span class="count" id="clCount"></span>
           </div>
           <div id="cListings"><div class="empty">Loading…</div></div>
         </section>
@@ -1148,6 +1259,32 @@ Reliable Daily Rewards</textarea
         <div id="mpKeysBody"><div class="empty">Loading…</div></div>
         <div class="mp-actions">
           <button class="btn ghost" id="mpKeysClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="mp-overlay" id="cEditOverlay">
+      <div class="mp-modal">
+        <h3>Edit listing</h3>
+        <div class="mp-hint">
+          Changes the stored set only — marketplaces already live keep their
+          current copy. Use “Sell on…” to publish the updated version.
+        </div>
+        <div class="field">
+          <label for="cEditName">Title</label>
+          <input type="text" id="cEditName" maxlength="200" />
+        </div>
+        <div class="field">
+          <label for="cEditPrice">Price (USD)</label>
+          <input type="number" id="cEditPrice" min="0" step="0.01" />
+        </div>
+        <div class="field">
+          <label for="cEditNote">Description</label>
+          <textarea id="cEditNote" rows="4" maxlength="2000"></textarea>
+        </div>
+        <div class="mp-actions">
+          <button class="btn ghost" id="cEditCancel">Cancel</button>
+          <button class="btn" id="cEditSave">Save</button>
         </div>
       </div>
     </div>
@@ -1624,8 +1761,8 @@ Reliable Daily Rewards</textarea
               the price and quality tier fill automatically.
             </div>
             <div class="mp-hint">
-              Target forum for this set: <b id="mpEpicGame">—</b>. A game with no
-              EpicNPC forum is rejected before the tab opens.
+              Target forum for this set: <b id="mpEpicGame">—</b>. A game with
+              no EpicNPC forum is rejected before the tab opens.
             </div>
             <label style="margin-top: 6px"
               >One-time setup — install the auto-fill extension:</label
@@ -1640,10 +1777,10 @@ Reliable Daily Rewards</textarea
             </div>
             <div class="mp-hint">
               Unzip it, open <b>chrome://extensions</b>, turn on
-              <b>Developer mode</b> (top right), click
-              <b>Load unpacked</b> and select the unzipped
-              <b>epicnpc-filler</b> folder. Done — every EpicNPC tab opened from
-              here fills itself. It never posts; you always click Post thread.
+              <b>Developer mode</b> (top right), click <b>Load unpacked</b> and
+              select the unzipped <b>epicnpc-filler</b> folder. Done — every
+              EpicNPC tab opened from here fills itself. It never posts; you
+              always click Post thread.
             </div>
             <details style="margin-top: 6px">
               <summary class="mp-hint" style="cursor: pointer">
@@ -1655,7 +1792,7 @@ Reliable Daily Rewards</textarea
                   href="#"
                   class="btn"
                   style="text-decoration: none; display: inline-block"
-                  onclick="return false"
+                  onclick="return false;"
                   title="Drag me to your bookmarks bar"
                   >▶ EpicNPC Filler</a
                 >
@@ -2305,18 +2442,43 @@ Reliable Daily Rewards</textarea
       }
 
       var listingsCache = [];
+      var lsFilter = "all";
+      function renderShopListings() {
+        var box = $("listings");
+        if (!listingsCache.length) {
+          $("lsCount").textContent = "";
+          box.innerHTML =
+            '<div class="empty">No listings yet. Create one above.</div>';
+          return;
+        }
+        var q = ($("lsSearch").value || "").toLowerCase();
+        var rows = listingsCache.filter(function (set) {
+          if (lsFilter === "listed" && !set.listed) return false;
+          if (lsFilter === "draft" && set.listed) return false;
+          if (
+            q &&
+            (set.name + " " + (set.note || "")).toLowerCase().indexOf(q) < 0
+          )
+            return false;
+          return true;
+        });
+        $("lsCount").textContent =
+          rows.length === listingsCache.length
+            ? listingsCache.length +
+              " listing" +
+              (listingsCache.length === 1 ? "" : "s")
+            : rows.length + " of " + listingsCache.length;
+        box.innerHTML = rows.length
+          ? rows.map(listingRow).join("")
+          : '<div class="empty">No matches.</div>';
+      }
       function loadListings() {
         return api("/drops-archive/sets")
           .then(function (j) {
             var sets = j.sets || [];
             listingsCache = sets;
-            var box = $("listings");
-            if (!sets.length) {
-              box.innerHTML =
-                '<div class="empty">No listings yet. Create one above.</div>';
-              return;
-            }
-            box.innerHTML = sets.map(listingRow).join("");
+            renderShopListings();
+            if (!sets.length) return;
             // Fetch live stock per set and patch the badges/meta. Each
             // fulfillment call runs heavy DB aggregations, so cap concurrency
             // instead of firing all N at once (a burst that grew slower as
@@ -2328,6 +2490,16 @@ Reliable Daily Rewards</textarea
               '<div class="empty">' + esc(e.message) + "</div>";
           });
       }
+      $("lsSearch").addEventListener("input", renderShopListings);
+      document.querySelectorAll("[data-lsf]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          lsFilter = b.dataset.lsf;
+          document.querySelectorAll("[data-lsf]").forEach(function (x) {
+            x.classList.toggle("on", x === b);
+          });
+          renderShopListings();
+        });
+      });
       function patchRow(set) {
         var el = document.querySelector('.listing[data-id="' + set.id + '"]');
         if (!el) return;
@@ -2495,7 +2667,9 @@ Reliable Daily Rewards</textarea
                 .replace(/</g, "&lt;")
                 .replace(/\n/g, "</p><p>") +
               "</p>";
-          var fr = document.querySelector('.fr-element[contenteditable="true"]');
+          var fr = document.querySelector(
+            '.fr-element[contenteditable="true"]',
+          );
           var hid = document.querySelector('textarea[name="message_html"]');
           if (fr) {
             fr.innerHTML = html;
@@ -2516,9 +2690,10 @@ Reliable Daily Rewards</textarea
               var o = typeSel.options[k];
               if (
                 o.value === want ||
-                o.text.replace(/\s/g, "").toLowerCase().indexOf(
-                  want.toLowerCase(),
-                ) >= 0
+                o.text
+                  .replace(/\s/g, "")
+                  .toLowerCase()
+                  .indexOf(want.toLowerCase()) >= 0
               ) {
                 typeSel.value = o.value;
                 typeSel.dispatchEvent(new Event("change", { bubbles: true }));
@@ -2536,12 +2711,18 @@ Reliable Daily Rewards</textarea
           if (tg && !tg.checked) tg.click();
           var tries = 0;
           (function afterTG() {
-            var price = document.querySelector('#tg_price,input[name="tg_price"]');
+            var price = document.querySelector(
+              '#tg_price,input[name="tg_price"]',
+            );
             var svc = null,
               boxes = document.querySelectorAll('input[name="tg_services[]"]');
             for (var i = 0; i < boxes.length; i++)
               if (boxes[i].value === (p.service || "free")) svc = boxes[i];
-            if (price && p.priceUsd != null && price.value !== String(p.priceUsd))
+            if (
+              price &&
+              p.priceUsd != null &&
+              price.value !== String(p.priceUsd)
+            )
               set(price, String(p.priceUsd));
             if (svc && !svc.checked) svc.click();
             // Keep retrying until the values actually stick — the Trade Guardian
@@ -4094,6 +4275,53 @@ Reliable Daily Rewards</textarea
           });
       });
 
+      function cIsAutoFarm(set) {
+        return /^auto-farmed/i.test(set.note || "");
+      }
+      // Marketplace chips for one set: live listings become links, sold ones
+      // are marked, and a failed market shows a muted chip whose tooltip is
+      // the recorded error (so "why isn't this on Plati?" is one hover away).
+      function cMarketChips(set) {
+        var rows = cMpBySet[set.id] || [];
+        if (!rows.length) return "";
+        return rows
+          .map(function (r) {
+            var label = MP_LABELS[r.marketplace] || r.marketplace;
+            var cls =
+              r.status === "sold"
+                ? "sold"
+                : r.status === "active"
+                  ? "live"
+                  : "err";
+            var body =
+              '<span class="dot"></span>' +
+              esc(label) +
+              (r.status === "sold" ? " · sold" : "");
+            if (r.url && r.status !== "delisted") {
+              return (
+                '<a class="mkt-chip ' +
+                cls +
+                '" href="' +
+                attr(r.url) +
+                '" target="_blank" rel="noopener" title="' +
+                attr(r.title || "") +
+                '">' +
+                body +
+                "</a>"
+              );
+            }
+            return (
+              '<span class="mkt-chip ' +
+              cls +
+              '" title="' +
+              attr(r.lastError || r.note || "") +
+              '">' +
+              body +
+              "</span>"
+            );
+          })
+          .join("");
+      }
       function cListingRow(set) {
         var imgs = (set.items || [])
           .slice(0, 4)
@@ -4101,6 +4329,8 @@ Reliable Daily Rewards</textarea
             return imgTag(i.image);
           })
           .join("");
+        var auto = cIsAutoFarm(set);
+        var chips = cMarketChips(set);
         return (
           '<div class="listing" data-id="' +
           attr(set.id) +
@@ -4112,21 +4342,32 @@ Reliable Daily Rewards</textarea
           '<div class="t">' +
           esc(set.name) +
           "</div>" +
+          (set.note
+            ? '<div class="d" title="' +
+              attr(set.note) +
+              '">' +
+              esc(set.note) +
+              "</div>"
+            : "") +
           '<div class="meta">' +
-          '<span class="badge live">Custom</span>' +
-          "<span>" +
-          esc(set.coverGame || "") +
-          "</span>" +
+          (auto
+            ? '<span class="badge auto">Auto-farm</span>'
+            : '<span class="badge live">Custom</span>') +
+          (set.coverGame ? "<span>" + esc(set.coverGame) + "</span>" : "") +
           "<span>" +
           set.itemCount +
           " item" +
           (set.itemCount === 1 ? "" : "s") +
           "</span>" +
+          chips +
           "</div></div>" +
           '<div class="price">' +
           (Number(set.price) || 0) +
           "</div>" +
           '<div class="ops">' +
+          '<button class="btn" data-cedit="' +
+          attr(set.id) +
+          '">Edit</button>' +
           '<button class="btn" data-cmp="' +
           attr(set.id) +
           '">Sell on…</button>' +
@@ -4136,22 +4377,117 @@ Reliable Daily Rewards</textarea
           "</div></div>"
         );
       }
+      var cMpBySet = {}; // setId -> [marketplace listing rows]
+      var cFilter = "all";
+      function cRenderCustomListings() {
+        var q = ($("clSearch").value || "").toLowerCase();
+        var rows = cSets.filter(function (set) {
+          if (cFilter === "auto" && !cIsAutoFarm(set)) return false;
+          if (cFilter === "manual" && cIsAutoFarm(set)) return false;
+          if (
+            q &&
+            (set.name + " " + (set.coverGame || "") + " " + (set.note || ""))
+              .toLowerCase()
+              .indexOf(q) < 0
+          )
+            return false;
+          return true;
+        });
+        $("clCount").textContent =
+          rows.length === cSets.length
+            ? cSets.length + " listing" + (cSets.length === 1 ? "" : "s")
+            : rows.length + " of " + cSets.length;
+        $("cListings").innerHTML = rows.length
+          ? rows.map(cListingRow).join("")
+          : '<div class="empty">' +
+            (cSets.length ? "No matches." : "No custom listings yet.") +
+            "</div>";
+      }
       function cLoadCustomListings() {
-        return api("/drops-archive/sets?custom=1")
-          .then(function (j) {
-            cSets = j.sets || [];
-            $("cListings").innerHTML = cSets.length
-              ? cSets.map(cListingRow).join("")
-              : '<div class="empty">No custom listings yet.</div>';
+        // One fetch for all marketplace rows (auto-farm included) grouped by
+        // set, so every custom row can show where it's actually live.
+        return Promise.all([
+          api("/drops-archive/sets?custom=1"),
+          api("/marketplaces/listings").catch(function () {
+            return { listings: [] };
+          }),
+        ])
+          .then(function (res) {
+            cSets = res[0].sets || [];
+            cMpBySet = {};
+            (res[1].listings || []).forEach(function (r) {
+              if (r.status === "delisted") return;
+              (cMpBySet[r.setId] = cMpBySet[r.setId] || []).push(r);
+            });
+            cRenderCustomListings();
           })
           .catch(function (e) {
             $("cListings").innerHTML =
               '<div class="empty">' + esc(e.message) + "</div>";
           });
       }
+      $("clSearch").addEventListener("input", cRenderCustomListings);
+      document.querySelectorAll("[data-clf]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          cFilter = b.dataset.clf;
+          document.querySelectorAll("[data-clf]").forEach(function (x) {
+            x.classList.toggle("on", x === b);
+          });
+          cRenderCustomListings();
+        });
+      });
+
+      // Quick edit: title / price / description via the normal sets PUT.
+      var cEditId = "";
+      function cOpenEdit(set) {
+        cEditId = set.id;
+        $("cEditName").value = set.name || "";
+        $("cEditPrice").value = Number(set.price) || 0;
+        $("cEditNote").value = set.note || "";
+        $("cEditOverlay").classList.add("open");
+      }
+      $("cEditCancel").addEventListener("click", function () {
+        $("cEditOverlay").classList.remove("open");
+      });
+      $("cEditSave").addEventListener("click", function () {
+        if (!cEditId) return;
+        var name = $("cEditName").value.trim();
+        if (!name) {
+          toast("Title required");
+          return;
+        }
+        $("cEditSave").disabled = true;
+        api("/drops-archive/sets/" + cEditId, {
+          method: "PUT",
+          body: {
+            name: name,
+            price: Number($("cEditPrice").value) || 0,
+            note: $("cEditNote").value.trim(),
+          },
+        })
+          .then(function () {
+            toast("Saved");
+            $("cEditOverlay").classList.remove("open");
+            cLoadCustomListings();
+          })
+          .catch(function (err) {
+            toast(err.message || "Save failed");
+          })
+          .then(function () {
+            $("cEditSave").disabled = false;
+          });
+      });
       $("cListings").addEventListener("click", function (e) {
         var mpB = e.target.closest("[data-cmp]");
         var delB = e.target.closest("[data-cdel]");
+        var edB = e.target.closest("[data-cedit]");
+        if (edB) {
+          var es = cSets.find(function (x) {
+            return x.id === edB.dataset.cedit;
+          });
+          if (es) cOpenEdit(es);
+          return;
+        }
         if (mpB) {
           var s = cSets.find(function (x) {
             return x.id === mpB.dataset.cmp;
