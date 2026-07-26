@@ -426,6 +426,13 @@ app.get("/research.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "research.html"));
 });
 
+// Guides (superadmin only) — long-form operator playbooks rendered for
+// reading. Must be a guarded route: anything left to the static handler
+// below would be served without auth.
+app.get("/guides.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "guides.html"));
+});
+
 // Bulk orders manager (superadmin only) — reserve N accounts for one buyer,
 // health-check + auto-replace, and mint the buyer's inventory link.
 app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
