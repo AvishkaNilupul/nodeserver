@@ -1,12 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "EpicNPC Filler",
-  "version": "1.0.0",
-  "description": "Auto-fills the EpicNPC 'Post thread' form from listings opened via your panel's 'Sell on EpicNPC' button. Fill only - you review and click Post thread.",
+  "name": "Marketplace Filler (EpicNPC + G2G)",
+  "version": "1.1.0",
+  "description": "Auto-fills the EpicNPC 'Post thread' form and auto-attaches the G2G bulk-upload .xlsx from listings opened via your panel. Fill/attach only - you always review and submit.",
   "content_scripts": [
     {
       "matches": ["https://www.epicnpc.com/*", "https://epicnpc.com/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.g2g.com/*", "https://g2g.com/*"],
+      "js": ["g2g.js"],
       "run_at": "document_idle"
     }
   ]

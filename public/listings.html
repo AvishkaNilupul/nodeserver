@@ -1296,8 +1296,11 @@ Reliable Daily Rewards</textarea
           Builds a G2G “Bulk Upload for Items” .xlsx for offers the API can’t
           create (non-instant item delivery). Pick the catalog product — its
           Product ID and Offer Attributes come straight from G2G, so no blank
-          template download is needed. Then tick the listings to include and
-          upload the file on g2g.com → Create Offer → Bulk Upload.
+          template download is needed. Tick the listings to include, then either
+          download the file, or — with the Marketplace Filler extension
+          installed — use <b>Open on G2G</b>: a g2g.com tab opens and the file
+          attaches itself on the Bulk Upload screen; you just review and confirm
+          the upload.
         </div>
 
         <div class="mp-ext" style="border-top: 0; margin-top: 8px">
@@ -1404,6 +1407,7 @@ Reliable Daily Rewards</textarea
         <div class="mp-actions">
           <button class="btn ghost" id="gbCancel">Cancel</button>
           <button class="btn primary" id="gbDownload">Download .xlsx</button>
+          <button class="btn" id="gbOpenG2g">Open on G2G (auto-attach)</button>
         </div>
       </div>
     </div>
@@ -1772,15 +1776,16 @@ Reliable Daily Rewards</textarea
                 href="/marketplaces/epicnpc/extension.zip"
                 class="btn"
                 style="text-decoration: none; display: inline-block"
-                >⬇ Download EpicNPC Filler extension</a
+                >⬇ Download Marketplace Filler extension (EpicNPC + G2G)</a
               >
             </div>
             <div class="mp-hint">
               Unzip it, open <b>chrome://extensions</b>, turn on
               <b>Developer mode</b> (top right), click <b>Load unpacked</b> and
               select the unzipped <b>epicnpc-filler</b> folder. Done — every
-              EpicNPC tab opened from here fills itself. It never posts; you
-              always click Post thread.
+              EpicNPC tab opened from here fills itself, and G2G bulk files sent
+              via <b>Open on G2G</b> attach themselves on the Bulk Upload
+              screen. It never submits; you always confirm.
             </div>
             <details style="margin-top: 6px">
               <summary class="mp-hint" style="cursor: pointer">
@@ -4773,56 +4778,12 @@ Reliable Daily Rewards</textarea
           });
       });
 
-      $("gbDownload").addEventListener("click", function () {
-        var productId = $("gbProduct").value;
-        if (!productId) {
-          toast("Pick a G2G product first");
-          return;
-        }
-        var attrValue = gbAttributeValue();
-        var offers = [];
-        document
-          .querySelectorAll("#gbSets [data-gbset]:checked")
-          .forEach(function (c) {
-            var id = c.dataset.gbset;
-            var set = gbSets.find(function (s) {
-              return s.id === id;
-            });
-            if (!set) return;
-            var priceEl = document.querySelector('[data-gbprice="' + id + '"]');
-            offers.push({
-              attributeValue: attrValue,
-              title: set.name,
-              description: gbBuildDescription(set),
-              stock: parseInt($("gbStock").value, 10) || 1,
-              unitPrice: parseFloat(priceEl && priceEl.value) || 0,
-            });
-          });
-        if (!offers.length) {
-          toast("Tick at least one listing");
-          return;
-        }
-        var productName =
-          $("gbProduct").options[$("gbProduct").selectedIndex].text.trim();
-        var body = {
-          productId: productId,
-          productName: productName,
-          offers: offers,
-          defaults: {
-            currency: "USD",
-            deliveryMethods: $("gbDelivery").value.trim(),
-            minQty: parseInt($("gbMinQty").value, 10) || 1,
-            lowStock: parseInt($("gbLowStock").value, 10) || 0,
-            deliverySpeedQty: $("gbSpeedQty").value.trim(),
-            deliverySpeedTime: $("gbSpeedTime").value.trim(),
-            salesCountrySettings: $("gbSalesCountry").value,
-            status: "live",
-          },
-        };
-        var btn = $("gbDownload");
+      // Fetch the bulk .xlsx as a Blob for either download or the extension
+      // handoff. Returns a promise resolving { blob, filename }.
+      function gbBuildFile(body, btn, busyLabel, idleLabel) {
         btn.disabled = true;
-        btn.innerText = "Building…";
-        fetch("/marketplaces/g2g/bulk-file", {
+        btn.innerText = busyLabel;
+        return fetch("/marketplaces/g2g/bulk-file", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
@@ -4837,22 +4798,122 @@ Reliable Daily Rewards</textarea
             return r.blob();
           })
           .then(function (blob) {
-            var url = URL.createObjectURL(blob);
+            return { blob: blob, filename: body.productId + ".xlsx" };
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.innerText = idleLabel;
+          });
+      }
+      // Collect the currently configured product + ticked offers, shared by
+      // both the download and Open-on-G2G buttons. Returns null (after a
+      // toast) when the form isn't ready.
+      function gbCollectBody() {
+        var productId = $("gbProduct").value;
+        if (!productId) {
+          toast("Pick a G2G product first");
+          return null;
+        }
+        var attrValue = gbAttributeValue();
+        var offers = [];
+        document
+          .querySelectorAll("#gbSets [data-gbset]:checked")
+          .forEach(function (c) {
+            var id = c.dataset.gbset;
+            var set = gbSets.find(function (x) {
+              return x.id === id;
+            });
+            if (!set) return;
+            var priceEl = document.querySelector('[data-gbprice="' + id + '"]');
+            offers.push({
+              attributeValue: attrValue,
+              title: set.name,
+              description: gbBuildDescription(set),
+              stock: parseInt($("gbStock").value, 10) || 1,
+              unitPrice: parseFloat(priceEl && priceEl.value) || 0,
+            });
+          });
+        if (!offers.length) {
+          toast("Tick at least one listing");
+          return null;
+        }
+        var productName =
+          $("gbProduct").options[$("gbProduct").selectedIndex].text.trim();
+        return {
+          productId: productId,
+          productName: productName,
+          offers: offers,
+          defaults: {
+            currency: "USD",
+            deliveryMethods: $("gbDelivery").value.trim(),
+            minQty: parseInt($("gbMinQty").value, 10) || 1,
+            lowStock: parseInt($("gbLowStock").value, 10) || 0,
+            deliverySpeedQty: $("gbSpeedQty").value.trim(),
+            deliverySpeedTime: $("gbSpeedTime").value.trim(),
+            salesCountrySettings: $("gbSalesCountry").value,
+            status: "live",
+          },
+        };
+      }
+      $("gbOpenG2g").addEventListener("click", function () {
+        var body = gbCollectBody();
+        if (!body) return;
+        gbBuildFile(
+          body,
+          $("gbOpenG2g"),
+          "Building…",
+          "Open on G2G (auto-attach)",
+        )
+          .then(function (f) {
+            return f.blob.arrayBuffer().then(function (buf) {
+              // base64url-encode the workbook so the extension's g2g.com
+              // content script can rebuild the File from the URL hash.
+              var bytes = new Uint8Array(buf);
+              var bin = "";
+              for (var i = 0; i < bytes.length; i += 0x8000) {
+                bin += String.fromCharCode.apply(
+                  null,
+                  bytes.subarray(i, i + 0x8000),
+                );
+              }
+              var b64 = btoa(bin)
+                .replace(/\+/g, "-")
+                .replace(/\//g, "_")
+                .replace(/=+$/, "");
+              window.open(
+                "https://www.g2g.com/en/sell/create-offer#g2gfill=" +
+                  b64 +
+                  "&fn=" +
+                  encodeURIComponent(f.filename),
+                "_blank",
+                "noopener",
+              );
+              toast(
+                "G2G tab opened — go to Bulk Upload there; the file attaches itself",
+              );
+            });
+          })
+          .catch(function (e) {
+            toast(e.message || "Export failed");
+          });
+      });
+      $("gbDownload").addEventListener("click", function () {
+        var body = gbCollectBody();
+        if (!body) return;
+        gbBuildFile(body, $("gbDownload"), "Building\u2026", "Download .xlsx")
+          .then(function (f) {
+            var url = URL.createObjectURL(f.blob);
             var a = document.createElement("a");
             a.href = url;
-            a.download = productId + ".xlsx";
+            a.download = f.filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
             URL.revokeObjectURL(url);
-            toast("File ready — upload it on g2g.com → Bulk Upload");
+            toast("File ready \u2014 upload it on g2g.com \u2192 Bulk Upload");
           })
           .catch(function (e) {
             toast(e.message || "Export failed");
-          })
-          .finally(function () {
-            btn.disabled = false;
-            btn.innerText = "Download .xlsx";
           });
       });
 
