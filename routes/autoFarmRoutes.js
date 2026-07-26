@@ -73,7 +73,7 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
       patch.accountsPerBot = clamp(b.accountsPerBot, 1, 30);
     if ("poolReserve" in b) patch.poolReserve = clamp(b.poolReserve, 0, 500);
     if ("probeSize" in b) patch.probeSize = clamp(b.probeSize, 1, 30);
-    if ("maxAutoBots" in b) patch.maxAutoBots = clamp(b.maxAutoBots, 1, 20);
+    if ("maxAutoBots" in b) patch.maxAutoBots = clamp(b.maxAutoBots, 1, 50);
     if ("minHoursLeft" in b) patch.minHoursLeft = clamp(b.minHoursLeft, 0, 168);
     for (const k of Object.keys(patch)) {
       if (typeof patch[k] === "number" && isNaN(patch[k])) delete patch[k];
@@ -97,12 +97,10 @@ router.post(
           .status(404)
           .json({ success: false, message: "Task not found" });
       if (task.status !== "planned") {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "Only planned tasks can be approved",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "Only planned tasks can be approved",
+        });
       }
       if (task.decision === "reuse_existing") {
         // Approving a reuse plan = restart the existing containers.

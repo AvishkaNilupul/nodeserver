@@ -722,6 +722,7 @@
       skip_low_demand: ["SKIP · low demand", "off"], skip_ends_soon: ["SKIP · ends soon", "off"],
       skip_no_accounts: ["SKIP · no accounts", "off"], skip_no_capacity: ["SKIP · no capacity", "off"],
       skip_host_offline: ["SKIP · host offline", "off"],
+      skip_already_covered: ["SKIP · already covered", "off"],
     };
     const m = map[t.decision] || [t.decision, ""];
     return '<span class="chip ' + m[1] + '">' + esc(m[0]) + "</span>";
@@ -773,7 +774,11 @@
             (t.dryRun && t.status === "planned" ? ' <span class="chip" style="background:#fffbeb;color:#b45309">awaiting approval</span>' : "") + "</div>" +
           '<div class="ab-sub">' + esc(t.campaignName || t.campaignId) +
             (t.campaignEndAt ? " · ends " + esc(new Date(t.campaignEndAt).toLocaleString()) : "") +
-            (t.demandScore != null ? " · demand " + t.demandScore : " · no market data") + "</div>" +
+            (t.demandScore != null ? " · demand " + t.demandScore : " · no market data") +
+            (t.internalSales ? " · " + t.internalSales + " own sales" : "") +
+            (t.coverage && (t.coverage.manualFarmers || t.coverage.archiveHolders)
+              ? " · covered: " + (t.coverage.manualFarmers || 0) + " manual / " + (t.coverage.archiveHolders || 0) + " archive"
+              : "") + "</div>" +
           '<div class="ab-farm muted">' + esc(t.reason || "") + "</div>" +
           (bots ? '<div class="ab-farm">bots: ' + esc(bots) + (accts ? " · " + accts + " accounts" : "") + "</div>"
                 : (t.plannedAccounts ? '<div class="ab-farm muted">planned: ' + t.plannedAccounts + " accounts</div>" : "")) +

@@ -34,6 +34,7 @@
 // remote host only makes scanning slower — never wrong, never stuck.
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const SaleSignal = require("../models/SaleSignal");
 const botHosts = require("./botHosts");
 const { fetchInventory } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
@@ -279,6 +280,20 @@ async function claimNext() {
 // still shows up there as a distinct, clearly-labelled "in pool" entry.
 async function upsertDrops(accountId, accountModel, login, drops) {
   const now = new Date();
+  // Snapshot prior connection states so we can detect drops flipping to
+  // connected in THIS scan. A flip means someone linked the game account —
+  // for a sold/delivered account that is hard evidence the item sold, so it
+  // is recorded as a SaleSignal (training data for the auto-farmer).
+  const prior = new Map();
+  try {
+    const rows = await DropLog.find(
+      { account: accountId, benefitId: { $in: drops.map((d) => d.benefitId) } },
+      { benefitId: 1, connected: 1 },
+    ).lean();
+    for (const r of rows) prior.set(r.benefitId, !!r.connected);
+  } catch {
+    /* signal detection is best-effort; never block the scan */
+  }
   // Cache-and-upsert drops in a small concurrency pool rather than one at a
   // time — each drop's image download + Atlas upsert is independent, and a
   // drop's key (account, benefitId) is unique within the account so concurrent
@@ -311,6 +326,34 @@ async function upsertDrops(accountId, accountModel, login, drops) {
       { $set: set, $setOnInsert: { firstSeenAt: now } },
       { upsert: true },
     );
+    // Connection flip: was known and not connected, now connected.
+    if (
+      d.connected &&
+      prior.has(d.benefitId) &&
+      !prior.get(d.benefitId) &&
+      d.game
+    ) {
+      try {
+        await SaleSignal.updateOne(
+          { dedupeKey: "connected:" + accountId + ":" + d.benefitId },
+          {
+            $setOnInsert: {
+              game: d.game,
+              gameKey: String(d.game).toLowerCase(),
+              itemKey: d.itemKey || "",
+              name: d.name || "",
+              login: login || "",
+              account: accountId,
+              source: "connected",
+              at: now,
+            },
+          },
+          { upsert: true },
+        );
+      } catch {
+        /* duplicate or transient write error — never block the scan */
+      }
+    }
     return r.upsertedCount ? 1 : 0;
   });
   return flags.reduce((a, b) => a + b, 0);

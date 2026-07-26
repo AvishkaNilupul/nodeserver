@@ -24,6 +24,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
         "skip_no_accounts", // pool at/below reserve floor, nothing to spend
         "skip_no_capacity", // Pi at max auto containers (may be retried later)
         "skip_host_offline", // the Pi was unreachable at decision time
+        "skip_already_covered", // manual bots / archived accounts already cover this game's demand
       ],
       required: true,
     },
@@ -32,6 +33,15 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // Decision inputs, kept so the log explains itself later.
     demandScore: { type: Number, default: null },
     hadResearch: { type: Boolean, default: false },
+    // Own sales history for this game (SaleSignal + reserved drops, last 45d)
+    // — the training-data signal that boosts demand beyond external markets.
+    internalSales: { type: Number, default: 0 },
+    // How many accounts already cover this game before we add anything:
+    // manual-bot farmers + unsold archive accounts holding this campaign.
+    coverage: {
+      manualFarmers: { type: Number, default: 0 },
+      archiveHolders: { type: Number, default: 0 },
+    },
 
     // Allocation.
     plannedAccounts: { type: Number, default: 0 },

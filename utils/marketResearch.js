@@ -326,4 +326,31 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { runScan, status, start };
+// On-demand single-game research for the auto-farmer: hit Gameflip (sold +
+// active), GGSel and Plati live, score the game, upsert the MarketResearch
+// doc, and return it. Used when the farmer meets a campaign whose research
+// is missing or stale — a fresh decision needs fresh market data.
+async function refreshGame(game) {
+  const { campaignsByGame } = await candidateGames();
+  const r = await scanGame(game, campaignsByGame);
+  const doc = {
+    game,
+    term: r.term,
+    campaign: {
+      active: !!r.camp.active,
+      upcoming: !!r.camp.upcoming,
+      count: r.camp.count || 0,
+      endAt: r.camp.endAt || null,
+    },
+    markets: r.markets,
+    demandScore: r.demandScore,
+    competitionScore: r.competitionScore,
+    opportunityScore: r.opportunityScore,
+    scannedAt: new Date(),
+  };
+  doc.recommendation = recommend(doc);
+  await MarketResearch.updateOne({ game }, { $set: doc }, { upsert: true });
+  return MarketResearch.findOne({ game }).lean();
+}
+
+module.exports = { runScan, status, start, refreshGame };
