@@ -109,7 +109,7 @@ function buildTitle({ game, items, campaignName, postEvent }) {
 
 // House description: item list first, then the seller's standard sections
 // (check before buying / multi-purchase warning / activation window / pitch).
-function buildDescription({ game, items, campaignName, postEvent }) {
+function buildDescription({ game, items, campaignName, postEvent, bonusItems }) {
   const lines = [];
   if (postEvent) {
     lines.push(
@@ -132,6 +132,23 @@ function buildDescription({ game, items, campaignName, postEvent }) {
         i.name +
         (i.game ? " (" + i.game + ")" : ""),
     );
+  }
+  // Real accounts carry drops from other games too. Disclose them as an
+  // explicit bonus block so the "ALL of the above" line below stays true and
+  // the buyer sees exactly what the account holds (no silent over-delivery).
+  if (Array.isArray(bonusItems) && bonusItems.length) {
+    lines.push(
+      "",
+      "\ud83c\udf81 Bonus \u2014 this account also has these unclaimed drops from other games:",
+    );
+    for (const i of bonusItems) {
+      lines.push(
+        "- " +
+          ((i.qty || 1) > 1 ? i.qty + "\u00d7 " : "") +
+          i.name +
+          (i.game ? " (" + i.game + ")" : ""),
+      );
+    }
   }
   lines.push(
     "",
@@ -975,6 +992,7 @@ module.exports = {
   listActivatedTask,
   onCampaignEnded,
   refillMarkets,
+  retryMissingSecondaries,
   // exported for tests
   buildTitle,
   buildDescription,

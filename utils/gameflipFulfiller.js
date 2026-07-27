@@ -10,6 +10,7 @@
 const fsp = require("fs/promises");
 
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
@@ -90,9 +91,73 @@ function gameflipDeliveryCode(login, password) {
   );
 }
 
+// Build an accurate title + description for the SPECIFIC account being handed
+// over. A bundle advertises a fixed item list, but the account picked to fill
+// it almost always holds more (extra copies, extra cosmetics, other games'
+// drops). Describing the static set then misrepresents what the buyer receives
+// — the exact "says 3 items, account has 20" complaint. So we generate per
+// unit: the set's own items lead (in set order), same-game extras follow, and
+// other games are disclosed as an explicit bonus block. Falls back to the
+// caller's static text if the account's drops can't be read.
+async function accountListingText(set, accountId, fallbackTitle, fallbackDescription) {
+  try {
+    const { buildTitle, buildDescription } = require("./autoLister");
+    const setItems = (set.items || []).filter((i) => i.itemKey);
+    const primaryGame = (setItems.find((i) => i.game) || {}).game || "";
+    const rows = await DropLog.aggregate([
+      { $match: { account: accountId, connected: { $ne: true } } },
+      {
+        $group: {
+          _id: { key: "$itemKey", name: "$name", game: "$game" },
+          qty: { $sum: "$count" },
+        },
+      },
+    ]);
+    if (!rows.length) return { title: fallbackTitle, description: fallbackDescription };
+    const byKey = new Map();
+    for (const r of rows) {
+      byKey.set(r._id.key, {
+        itemKey: r._id.key,
+        name: r._id.name,
+        game: r._id.game,
+        qty: r.qty,
+      });
+    }
+    // Headline = the set's own items, in the set's order, that the account has.
+    const headline = [];
+    for (const si of setItems) {
+      const hit = byKey.get(si.itemKey);
+      if (hit) {
+        headline.push(hit);
+        byKey.delete(si.itemKey);
+      }
+    }
+    const pg = String(primaryGame).toLowerCase();
+    const primaryExtra = [];
+    const bonus = [];
+    for (const it of byKey.values()) {
+      if (String(it.game || "").toLowerCase() === pg) primaryExtra.push(it);
+      else bonus.push(it);
+    }
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+    primaryExtra.sort(byName);
+    bonus.sort((a, b) => String(a.game).localeCompare(String(b.game)) || byName(a, b));
+    const items = headline.concat(primaryExtra);
+    if (!items.length) return { title: fallbackTitle, description: fallbackDescription };
+    return {
+      title: buildTitle({ game: primaryGame, items }),
+      description: buildDescription({ game: primaryGame, items, bonusItems: bonus }),
+    };
+  } catch {
+    return { title: fallbackTitle, description: fallbackDescription };
+  }
+}
+
 // Claim an account, publish one auto-delivery listing for it and record the
 // listing row. `qtyRemaining` is how many more units should be relisted after
-// this one sells. Releases the account again if publishing fails.
+// this one sells. Releases the account again if publishing fails. Title and
+// description are regenerated from the claimed account's real contents so the
+// listing matches what the buyer actually gets.
 async function publishAutoDelivery({
   set,
   title,
@@ -116,11 +181,17 @@ async function publishAutoDelivery({
       "Account " + login + " has no readable password — cannot auto-deliver",
     );
   }
+  const { title: liveTitle, description: liveDesc } = await accountListingText(
+    set,
+    account._id,
+    title,
+    description,
+  );
   let r;
   try {
     r = await mp.gameflipPublish({
-      title,
-      description,
+      title: liveTitle,
+      description: liveDesc,
       priceUsd,
       imagePath,
       autoDeliverCode: gameflipDeliveryCode(login, password),
@@ -134,8 +205,8 @@ async function publishAutoDelivery({
     marketplace: "gameflip",
     externalId: r.externalId,
     url: r.url || "",
-    title,
-    description: String(description || ""),
+    title: liveTitle,
+    description: String(liveDesc || ""),
     price: priceUsd,
     status: "active",
     note: "auto-delivery: " + (login || "account"),
@@ -250,6 +321,7 @@ module.exports = {
   claimAccountForSet,
   releaseAccount,
   gameflipDeliveryCode,
+  accountListingText,
   publishAutoDelivery,
   syncOnce,
   start,
