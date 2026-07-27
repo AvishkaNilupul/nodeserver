@@ -57,6 +57,29 @@ async function holdingsForKeys(keys) {
   ]);
 }
 
+// How much still-connectable content each account carries, by account id.
+// The buyer receives the WHOLE account and can click "Connect" on any drop
+// that isn't already redeemed — so every unconnected drop is something they
+// can take, whether or not it belongs to the set they paid for and whether or
+// not it's reserved for a different buyer. This total is the yardstick for
+// "how much does delivering this account give away / expose", used to prefer
+// the leanest matching account. One grouped aggregation on the (indexed)
+// account field; connected drops are excluded because they can't be taken.
+async function connectableLoadForAccounts(ids) {
+  const map = new Map();
+  if (!ids.length) return map;
+  const rows = await DropLog.aggregate([
+    { $match: { account: { $in: ids }, connected: { $ne: true } } },
+    { $group: { _id: "$account", copies: { $sum: "$count" }, drops: { $sum: 1 } } },
+  ]);
+  // Rank primarily by how many distinct drops are connectable (each is one
+  // "Connect" click a buyer could make), copies as the tiebreak.
+  for (const r of rows) {
+    map.set(String(r._id), (r.drops || 0) * 1e6 + (r.copies || 0));
+  }
+  return map;
+}
+
 // Of a list of candidate account ids, return the subset that is deliverable
 // (has a stored password). One indexed query on _id. NOTE: reservation is now
 // per drop (DropLog.soldAt), applied in the holdings aggregations above — an
@@ -112,10 +135,21 @@ async function availableAccountsForSet(set) {
       items: r.items,
     });
   }
-  // Prefer accounts with more spare copies of the bundle, then by login.
+  // Prefer the LEANEST matching account. The buyer is handed full account
+  // credentials and can Connect any unconnected drop on it, so shipping a
+  // loaded "everything" account for a single-game bundle both gives away far
+  // more than advertised (e.g. 6x each of a 3-drop set plus ~200 unrelated
+  // rewards) and lets the buyer claim drops already reserved for OTHER buyers.
+  // So rank by how little connectable content the account carries beyond what
+  // is needed, then by fewest spare copies of the set's own items, then login.
+  // (Was the reverse — most spare copies first — which deliberately picked the
+  // fattest account and caused exactly that over-delivery.)
+  const load = await connectableLoadForAccounts(out.map((o) => o.accountId));
+  for (const o of out) o.connectableLoad = load.get(String(o.accountId)) || 0;
   out.sort(
     (a, b) =>
-      b.minCount - a.minCount ||
+      a.connectableLoad - b.connectableLoad ||
+      a.minCount - b.minCount ||
       String(a.login || "").localeCompare(String(b.login || "")),
   );
   return out;
