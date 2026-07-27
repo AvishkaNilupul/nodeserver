@@ -336,19 +336,26 @@ router.post(
   requireSuperadmin,
   async (req, res) => {
     try {
+      // Default scope is the available accounts shown on the page. The old
+      // whole-pool sweep (which also backfills claimed accounts) is opt-in via
+      // ?includeClaimed=1, since claimed accounts are hidden from the list and
+      // seeing hundreds queued from a 41-row page reads as a bug otherwise.
+      const includeClaimed =
+        req.query.includeClaimed === "1" || req.query.includeClaimed === "true";
       const archivedIds = await DropLog.distinct("account", {
         accountModel: "AvailableAccount",
       });
-      const rows = await AvailableAccount.find(
-        { clientSecret: { $ne: "" }, _id: { $nin: archivedIds } },
-        { _id: 1, status: 1 },
-      ).lean();
+      const filter = { clientSecret: { $ne: "" }, _id: { $nin: archivedIds } };
+      if (!includeClaimed) filter.status = "available";
+      const rows = await AvailableAccount.find(filter, {
+        _id: 1,
+        status: 1,
+      }).lean();
       const ids = rows.map((r) => r._id);
       const queued = accountPoolChecker.enqueue(ids);
-      // This sweep is deliberately not limited to "available" — claimed
-      // accounts need their drops backfilled too — so report the split. The
-      // page lists available accounts only, and a queue total counting the
-      // whole pool otherwise reads as though it invented accounts.
+      // Report the available/claimed split so the toast can spell it out —
+      // relevant when includeClaimed is on and the total exceeds the visible
+      // (available-only) list.
       res.json({
         success: true,
         queued,
