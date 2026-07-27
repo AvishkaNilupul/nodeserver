@@ -543,6 +543,12 @@ app.use(enforce2fa, bulkOrderRoutes);
 app.use(renterAuthRoutes);
 app.use(renterRoutes);
 app.use(enforce2fa, renterAdminRoutes);
+// Mounted BEFORE the requireAdmin cascade below because stashRoutes contains
+// the bearer-authenticated POST /account-stash/ingest for the browser account
+// automator — requireAdmin runs unconditionally for every request and would
+// 401 any bearer-only call before it could reach the router. Other stash
+// routes self-guard with requireSuperadmin, so their position doesn't matter.
+app.use(enforce2fa, stashRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -552,7 +558,6 @@ app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
 app.use(enforce2fa, autoFarmRoutes);
-app.use(enforce2fa, stashRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
