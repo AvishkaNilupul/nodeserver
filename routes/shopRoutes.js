@@ -70,12 +70,31 @@ async function connectableLoadForAccounts(ids) {
   if (!ids.length) return map;
   const rows = await DropLog.aggregate([
     { $match: { account: { $in: ids }, connected: { $ne: true } } },
-    { $group: { _id: "$account", copies: { $sum: "$count" }, drops: { $sum: 1 } } },
+    {
+      $group: {
+        _id: "$account",
+        copies: { $sum: "$count" },
+        drops: { $sum: 1 },
+        // Drops already reserved (soldAt set) belong to OTHER sales — at the
+        // moment we're choosing an account, this set isn't reserved on it yet,
+        // so any reserved drop here is one a different buyer paid for. Handing
+        // over this account's credentials lets our buyer Connect (steal) them.
+        reservedToOthers: {
+          $sum: { $cond: [{ $ne: ["$soldAt", null] }, 1, 0] },
+        },
+      },
+    },
   ]);
-  // Rank primarily by how many distinct drops are connectable (each is one
-  // "Connect" click a buyer could make), copies as the tiebreak.
+  // Rank worst-harm-first: (1) fewest drops reserved to OTHER buyers — those are
+  // broken deliveries, the severe harm; then (2) fewest connectable drops — the
+  // give-away of unsold extras; copies as the final tiebreak. The weights keep
+  // the tiers from crossing over (a single reserved-to-others drop outranks any
+  // amount of unsold give-away).
   for (const r of rows) {
-    map.set(String(r._id), (r.drops || 0) * 1e6 + (r.copies || 0));
+    map.set(
+      String(r._id),
+      (r.reservedToOthers || 0) * 1e12 + (r.drops || 0) * 1e6 + (r.copies || 0),
+    );
   }
   return map;
 }
