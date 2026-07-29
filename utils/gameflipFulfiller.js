@@ -94,11 +94,15 @@ function gameflipDeliveryCode(login, password) {
 // Build an accurate title + description for the SPECIFIC account being handed
 // over. A bundle advertises a fixed item list, but the account picked to fill
 // it almost always holds more (extra copies, extra cosmetics, other games'
-// drops). Describing the static set then misrepresents what the buyer receives
-// — the exact "says 3 items, account has 20" complaint. So we generate per
-// unit: the set's own items lead (in set order), same-game extras follow, and
-// other games are disclosed as an explicit bonus block. Falls back to the
-// caller's static text if the account's drops can't be read.
+// drops), so the buyer should see those disclosed rather than arrive as a
+// surprise.
+//
+// The ADVERTISED bundle stays the set, though: the headline and item count are
+// the set's items, in set order — the same list the cover-image grid and the
+// other marketplaces' listings are built from. Folding the account's extras
+// into that count is what produced a "(56 Items)" title over a 5-item picture.
+// Everything the account holds beyond the set is disclosed in the bonus block
+// instead. Falls back to the caller's static text if the drops can't be read.
 async function accountListingText(set, accountId, fallbackTitle, fallbackDescription) {
   try {
     const { buildTitle, buildDescription } = require("./autoLister");
@@ -123,27 +127,33 @@ async function accountListingText(set, accountId, fallbackTitle, fallbackDescrip
         qty: r.qty,
       });
     }
-    // Headline = the set's own items, in the set's order, that the account has.
-    const headline = [];
-    for (const si of setItems) {
+    // Headline = the set's own items, in the set's order. Quantity comes from
+    // the real account whenever it holds more copies than the set advertises.
+    const items = setItems.map((si) => {
       const hit = byKey.get(si.itemKey);
-      if (hit) {
-        headline.push(hit);
-        byKey.delete(si.itemKey);
-      }
-    }
+      byKey.delete(si.itemKey);
+      return {
+        itemKey: si.itemKey,
+        name: si.name,
+        game: si.game,
+        qty: Math.max(Number(si.qty) || 1, (hit && Number(hit.qty)) || 0),
+      };
+    });
+    if (!items.length) return { title: fallbackTitle, description: fallbackDescription };
+    // Everything else the account carries — same game first, then other games.
     const pg = String(primaryGame).toLowerCase();
-    const primaryExtra = [];
-    const bonus = [];
+    const sameGame = [];
+    const otherGames = [];
     for (const it of byKey.values()) {
-      if (String(it.game || "").toLowerCase() === pg) primaryExtra.push(it);
-      else bonus.push(it);
+      if (String(it.game || "").toLowerCase() === pg) sameGame.push(it);
+      else otherGames.push(it);
     }
     const byName = (a, b) => String(a.name).localeCompare(String(b.name));
-    primaryExtra.sort(byName);
-    bonus.sort((a, b) => String(a.game).localeCompare(String(b.game)) || byName(a, b));
-    const items = headline.concat(primaryExtra);
-    if (!items.length) return { title: fallbackTitle, description: fallbackDescription };
+    sameGame.sort(byName);
+    otherGames.sort(
+      (a, b) => String(a.game).localeCompare(String(b.game)) || byName(a, b),
+    );
+    const bonus = sameGame.concat(otherGames);
     return {
       title: buildTitle({ game: primaryGame, items }),
       description: buildDescription({ game: primaryGame, items, bonusItems: bonus }),

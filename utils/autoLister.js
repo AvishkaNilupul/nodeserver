@@ -133,13 +133,14 @@ function buildDescription({ game, items, campaignName, postEvent, bonusItems }) 
         (i.game ? " (" + i.game + ")" : ""),
     );
   }
-  // Real accounts carry drops from other games too. Disclose them as an
-  // explicit bonus block so the "ALL of the above" line below stays true and
-  // the buyer sees exactly what the account holds (no silent over-delivery).
+  // Real accounts almost always carry more than the bundle advertises (extra
+  // cosmetics, other games' drops). Disclose those as an explicit bonus block,
+  // kept OUT of the item count above, so the headline still matches the cover
+  // image while the buyer still sees exactly what the account holds.
   if (Array.isArray(bonusItems) && bonusItems.length) {
     lines.push(
       "",
-      "\ud83c\udf81 Bonus \u2014 this account also has these unclaimed drops from other games:",
+      "\ud83c\udf81 Bonus \u2014 this account also has these extra unclaimed drops:",
     );
     for (const i of bonusItems) {
       lines.push(
