@@ -296,6 +296,49 @@ async function pickDeliveryAccounts(task, max) {
   return out;
 }
 
+// Why did pickDeliveryAccounts come back empty? Counts the same three
+// rejections it applies, so the recorded error names the actual blocker.
+async function deliveryBlockReason(task) {
+  const used = new Set();
+  for (const r of await MarketplaceListing.find(
+    { status: "active" },
+    { accountLogin: 1 },
+  ).lean()) {
+    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
+      if (l) used.add(l.toLowerCase());
+    }
+  }
+  let committed = 0;
+  let notInPool = 0;
+  let noPassword = 0;
+  for (const username of task.assignedAccounts || []) {
+    const lower = String(username).toLowerCase();
+    if (used.has(lower)) {
+      committed++;
+      continue;
+    }
+    const acc = await AvailableAccount.findOne({ usernameLower: lower }).lean();
+    if (!acc) {
+      notInPool++;
+      continue;
+    }
+    if (!decrypt(acc.password)) noPassword++;
+  }
+  const total = (task.assignedAccounts || []).length;
+  const parts = [];
+  if (committed)
+    parts.push(committed + " already committed to another active listing");
+  if (notInPool) parts.push(notInPool + " not in the account pool");
+  if (noPassword) parts.push(noPassword + " with no readable password");
+  return (
+    "no account free to deliver (" +
+    total +
+    " assigned: " +
+    (parts.join(", ") || "none assigned") +
+    ")"
+  );
+}
+
 // ---- Secondary-market publishers, shared by the initial listing and the
 // sweep retry. Each returns { externalId, url, qty } on success and throws
 // on failure; the caller records the error without touching other markets.
@@ -308,11 +351,17 @@ async function publishPlatiShare({
   accounts,
   categoryId,
 }) {
+  // The Plati "Twitch" cataloguer category (34187) has a REQUIRED "Content
+  // type" attribute; without it the create is rejected ("marketplace-1: you
+  // can not add goods"). Auto-farm only ever lists Twitch-drop accounts, so
+  // pass the configured attribute (default: Content type = Twitch Drops
+  // Accounts, 91328 -> 183570) alongside the category.
+  const attributes = settings.getAutoFarm().platiAttributes || [];
   const r = await mp.digisellerPublish({
     title,
     description,
     priceUsd: price,
-    categories: [{ owner: 1, categoryId }],
+    categories: [{ owner: 1, categoryId, attributes }],
   });
   try {
     await mp.digisellerAddContent(
@@ -696,12 +745,18 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
 
   const accounts = await pickDeliveryAccounts(task, split.listNow);
   if (!accounts.length) {
+    // Say WHICH of the two causes it was. pickDeliveryAccounts drops an account
+    // either because it is already committed to another active listing (one
+    // account cannot be delivered to two buyers) or because its password will
+    // not decrypt — and the old message asserted the second unconditionally.
+    // On prod both stuck tasks (Palia, Mir Tankov) had every assigned account
+    // spoken for and perfectly readable passwords, so the message sent anyone
+    // reading it hunting for a credential problem that did not exist.
+    const detail = await deliveryBlockReason(task);
     task.listing = task.listing || {};
-    task.listing.error = "no delivery account with a readable password";
+    task.listing.error = detail;
     await task.save();
-    throw new Error(
-      "Auto-list " + task.game + ": no assigned account has a usable password",
-    );
+    throw new Error("Auto-list " + task.game + ": " + detail);
   }
 
   // Split the sellable accounts across the markets round-robin — Gameflip

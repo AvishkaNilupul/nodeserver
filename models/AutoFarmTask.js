@@ -36,11 +36,17 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // Own sales history for this game (SaleSignal + reserved drops, last 45d)
     // — the training-data signal that boosts demand beyond external markets.
     internalSales: { type: Number, default: 0 },
-    // How many accounts already cover this game before we add anything:
-    // manual-bot farmers + unsold archive accounts holding this campaign.
+    // How many accounts already cover this game before we add anything.
+    // Only `archiveHolders` is actually credited: it counts unsold accounts
+    // holding this game's drops that are NOT parked on a manual bot. The other
+    // two measure the owner's long-term stash — accounts hoarding many
+    // campaigns' items for a later premium bundle — which is recorded for the
+    // audit log but never treated as stock (see COUNT_MANUAL_AS_COVERAGE in
+    // utils/autoFarmer.js).
     coverage: {
-      manualFarmers: { type: Number, default: 0 },
-      archiveHolders: { type: Number, default: 0 },
+      manualFarmers: { type: Number, default: 0 }, // enabled on a manual bot for this game
+      archiveHolders: { type: Number, default: 0 }, // sellable holders (stash removed)
+      stashHolders: { type: Number, default: 0 }, // holders excluded as stash
     },
 
     // Allocation.
@@ -86,6 +92,15 @@ const autoFarmTaskSchema = new mongoose.Schema(
     },
     dryRun: { type: Boolean, default: false },
     error: { type: String, default: "" },
+
+    // Set by rescanAll() to mark a terminal task for a fresh decision on the
+    // next tick. Rescan used to DELETE these rows, which destroyed the audit
+    // trail this model exists to keep and, since the notification gate compares
+    // against the decision a task already carried, made every re-decision look
+    // brand new — one rescan re-announced ~60 skips. Cleared automatically the
+    // next time a decision is recorded. Declared here because Mongoose strict
+    // mode silently drops undeclared paths on $set (see `bots.shared` above).
+    rescanRequested: { type: Boolean, default: false },
 
     executedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },

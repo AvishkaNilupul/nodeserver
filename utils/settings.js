@@ -19,12 +19,18 @@ const AUTO_FARM_DEFAULTS = {
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
   // Multi-market auto-listing categories.
-  // Plati has ONE fixed section for all Twitch-drop accounts:
-  //   Digital Goods > Game Accounts > Twitch drops Accounts
-  //   (plati.market/cat/akkaunty-twitch-drops/203508 — verified live as a
-  //   valid cataloguer id with zero required attributes). Overridable.
+  // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
+  //   Digital Goods and Access > Services and social networks > Twitch,
+  //   with the required "Content type" attribute = "Twitch Drops Accounts".
+  //   Category 34187 + attribute 91328->183570 lands products in the
+  //   plati.market storefront section 203508 (verified live 2026-07-28).
+  //   GOTCHA: 203508 is the STOREFRONT section id, NOT a cataloguer id — the
+  //   create API rejects it ("category 203508 does not exist"). The cataloguer
+  //   id is 34187 and it REQUIRES the Content-type attribute below, or the
+  //   create fails "marketplace-1: you can not add goods".
   // GGSel picks per game automatically; this is only a manual override.
-  platiCategoryId: "203508",
+  platiCategoryId: "34187",
+  platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
   ggselCategoryId: "",
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
@@ -33,6 +39,19 @@ const AUTO_FARM_DEFAULTS = {
   // tokens survive; accounts return to the pool for the next event).
   consolidate: true,
   deleteFinishedBots: true,
+  // Park a running bot once every one of its accounts has finished its
+  // ASSIGNED games (utils/farmCompletion.js), instead of waiting for the
+  // campaign to expire — accounts finish drops in hours but campaigns run for
+  // weeks, so the container idles fully paid-for in between. Measured on prod
+  // 2026-07-29: 15 of 35 running containers were in exactly that state, about
+  // 2 GB of RAM held by bots with nothing left to do.
+  //
+  // ON by default. The verdict is deliberately hard to obtain — it refuses
+  // while any account is unscanned, stale (>6h), still working or not yet
+  // started, when the config names no games at all, and when a campaign for one
+  // of its games started after the scan the verdict rests on. Waking is NOT
+  // gated by this and always runs — see utils/botWaker.js.
+  stopFinishedBots: true,
   // Stock floor: keep at least this many sellable accounts per ENABLED market
   // (gameflip + plati + ggsel). The planner doubles it so the 50% post-event
   // holdback stays intact. 3 markets x 3 x 2 = 18 accounts on a full-market

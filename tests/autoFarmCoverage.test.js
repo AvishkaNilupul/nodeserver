@@ -9,16 +9,27 @@ const test = require("node:test");
 const assert = require("node:assert");
 
 const WILDCARD_CREDIT_CAP = 0; // must match utils/autoFarmer.js
+const COUNT_MANUAL_AS_COVERAGE = false; // must match utils/autoFarmer.js
 
-// Mirrors the gate: credit is capped, a non-finite total fails closed to 0.
+// Mirrors the gate: manual farmers are measured but not credited, and the
+// archive count arrives with the manual stash already subtracted out.
 function coverage({ gameSpecific, wildcards, archive }) {
   const wildcardCredit = Math.min(wildcards, WILDCARD_CREDIT_CAP);
-  const raw = gameSpecific + wildcardCredit + archive;
+  const raw = COUNT_MANUAL_AS_COVERAGE
+    ? gameSpecific + wildcardCredit + archive
+    : archive;
   return Number.isFinite(raw) ? raw : 0;
 }
 
 function uncovered({ wanted, ...c }) {
   return Math.max(0, wanted - coverage(c));
+}
+
+// What archiveHoldersByGame does to a game's holder list before the gate sees
+// it: anything sitting on a manual bot is stash, not stock.
+function sellableHolders(holders, stash) {
+  const set = new Set(stash.map((s) => s.toLowerCase()));
+  return holders.filter((h) => !set.has(h.toLowerCase())).length;
 }
 
 test("the live prod case: 1615 wildcards no longer block a fresh campaign", () => {
@@ -29,13 +40,27 @@ test("the live prod case: 1615 wildcards no longer block a fresh campaign", () =
   assert.strictEqual(uncovered(args), 18, "the full target should be farmable");
 });
 
-test("accounts farming the game SPECIFICALLY still count in full", () => {
-  const args = { gameSpecific: 12, wildcards: 1615, archive: 0, wanted: 18 };
-  assert.strictEqual(coverage(args), 12);
-  assert.strictEqual(uncovered(args), 6);
+test("manual bots farming a game do NOT block auto-farming it", () => {
+  // EVE Online / Ravendawn on prod: 31 accounts on a hand-made bot against a
+  // target of 18, so uncovered was 0 and the game could never be auto-farmed.
+  // Those accounts are the owner's long-term stash — they hoard many campaigns
+  // of items for a premium bundle later — so they are not stock for today.
+  const args = { gameSpecific: 31, wildcards: 0, archive: 0, wanted: 18 };
+  assert.strictEqual(coverage(args), 0);
+  assert.strictEqual(uncovered(args), 18, "farm it anyway, alongside the stash");
 });
 
-test("unsold archive stock counts, so we don't farm what we already hold", () => {
+test("archive holders parked on a manual bot are stash, not stock", () => {
+  // Dead by Daylight on prod: 140 unsold holders, of which the manual Lost
+  // Ark/DbD container holds most. Only the rest is sellable coverage.
+  const holders = ["a", "b", "c", "d", "e"];
+  const stash = ["B", "c", "D"]; // case-insensitive on purpose
+  assert.strictEqual(sellableHolders(holders, stash), 2);
+  const args = { gameSpecific: 0, wildcards: 0, archive: 2, wanted: 18 };
+  assert.strictEqual(uncovered(args), 16);
+});
+
+test("unsold archive stock still counts when it is genuinely sellable", () => {
   // Overwatch on prod: 297 unsold holders. Previously read as 0 because the
   // query filtered on DropLog.campaign, which is set on only 1.81% of rows.
   const args = { gameSpecific: 0, wildcards: 1615, archive: 297, wanted: 30 };
@@ -51,7 +76,7 @@ test("coverage never goes negative and never exceeds the ask", () => {
 test("a non-finite coverage term fails CLOSED, not open", () => {
   // NaN would make every `< 1` comparison false and slip past both the coverage
   // gate and the pool gate, persisting plannedAccounts: NaN through Mongoose.
-  const args = { gameSpecific: NaN, wildcards: 10, archive: 0, wanted: 18 };
+  const args = { gameSpecific: 0, wildcards: 10, archive: NaN, wanted: 18 };
   assert.strictEqual(coverage(args), 0);
   assert.ok(Number.isFinite(uncovered(args)));
   assert.strictEqual(uncovered(args), 18);
