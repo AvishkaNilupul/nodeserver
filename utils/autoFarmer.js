@@ -269,27 +269,51 @@ async function manualFarmMap(autoKeys) {
 // on prod (2877 of 158774), so the term returned 0 for essentially every
 // campaign and the only real inventory signal in the coverage model was dead.
 // Game-level counting is also the honest question: an unsold account holding
-// this game's drops is sellable stock whichever campaign minted it. Verified
-// live — Overwatch 297 holders, Fortnite 205, Albion Online 92, all previously
-// counted as 0. This can only RAISE coverage and therefore only LOWER spending.
+// this game's drops is sellable stock whichever campaign minted it.
 //
-// `stash` is the set of logins that live on manual bots. Those accounts hold
-// the game's drops but are NOT for sale (see COUNT_MANUAL_AS_COVERAGE), so
-// they are subtracted here rather than counted as stock we already have.
-async function archiveHoldersForCampaign(c, stash) {
+// WHOSE STOCK COUNTS
+// Only the auto-farmer's OWN. Its listings deliver out of the assigning task
+// (autoLister.pickDeliveryAccounts walks task.assignedAccounts and nothing
+// else), so an archive account that belongs to no auto task can never be handed
+// to one of its buyers. Counting that stock as "demand already covered" stopped
+// it farming stock it COULD have sold: measured on prod, nine live campaigns
+// were blocked by inventory the auto system owns none of — Hunt: Showdown 219
+// holders, Black Desert 166, GOALS 120, Overwatch 110, owning 0 of each.
+//
+// The two excluded groups are still counted and recorded, because "why didn't
+// it farm this" deserves a real answer:
+//   * stashed  — enabled on a manual bot: the owner's long-term hoard.
+//   * other    — real archive stock, but attached to no auto task, so the
+//                manual listing flow is what sells it.
+async function archiveHoldersForCampaign(c, stash, owned) {
   try {
     const logins = await DropLog.distinct("login", {
       game: c.game,
       connected: { $ne: true },
       soldAt: null,
     });
-    const all = logins.filter(Boolean);
-    if (!stash || !stash.size) return { holders: all.length, stashed: 0 };
-    const sellable = all.filter((l) => !stash.has(String(l).toLowerCase()));
-    return { holders: sellable.length, stashed: all.length - sellable.length };
+    return splitHolders(logins.filter(Boolean), stash, owned);
   } catch {
-    return { holders: 0, stashed: 0 };
+    return { holders: 0, stashed: 0, other: 0 };
   }
+}
+
+// Sort one game's unsold holders into: ours to sell, stashed on a manual bot,
+// and everything else. Shared by the per-campaign and per-tick versions so both
+// can never drift apart.
+// `owned === null` means ownership could not be determined — every non-stashed
+// holder is then credited, which is the higher-coverage, lower-spend reading.
+function splitHolders(all, stash, owned) {
+  let holders = 0;
+  let stashed = 0;
+  let other = 0;
+  for (const raw of all) {
+    const l = String(raw).toLowerCase();
+    if (stash && stash.has(l)) stashed++;
+    else if (!owned || owned.has(l)) holders++;
+    else other++;
+  }
+  return { holders, stashed, other };
 }
 
 // The same count for many games in ONE aggregation, built once per tick. The
@@ -301,7 +325,7 @@ async function archiveHoldersForCampaign(c, stash) {
 // the stash runs to a couple of thousand logins on prod, and pushing that list
 // into the match stage would both bloat the query document and stop the
 // game+connected+soldAt index from doing the selective work first.
-async function archiveHoldersByGame(games, stash) {
+async function archiveHoldersByGame(games, stash, owned) {
   const out = new Map();
   const list = [...new Set(games.filter(Boolean))];
   if (!list.length) return out;
@@ -316,20 +340,36 @@ async function archiveHoldersByGame(games, stash) {
       { $group: { _id: "$_id.game", logins: { $addToSet: "$_id.login" } } },
     ]);
     for (const r of rows) {
-      const all = (r.logins || []).filter(Boolean);
-      const sellable =
-        stash && stash.size
-          ? all.filter((l) => !stash.has(String(l).toLowerCase()))
-          : all;
-      out.set(String(r._id).toLowerCase(), {
-        holders: sellable.length,
-        stashed: all.length - sellable.length,
-      });
+      out.set(
+        String(r._id).toLowerCase(),
+        splitHolders((r.logins || []).filter(Boolean), stash, owned),
+      );
     }
   } catch {
     /* fall back to the per-campaign query */
   }
   return out;
+}
+
+// Every account any auto-farm task has ever been given. This is exactly the
+// set utils/autoLister.js can deliver from, which is why it — and not the whole
+// drop archive — defines what the auto system counts as its own stock.
+//
+// Returns NULL if the lookup fails, and callers must treat that as "ownership
+// unknown". An empty Set would be a silent fail-OPEN: owning nothing reads as
+// zero coverage, which is the state that spends the most accounts. Unknown
+// instead falls back to counting every non-stashed holder, the conservative
+// reading this gate used before ownership was tracked.
+async function ownedAccounts() {
+  try {
+    const out = new Set();
+    for (const t of await AutoFarmTask.find({}, { assignedAccounts: 1 }).lean()) {
+      for (const u of t.assignedAccounts || []) out.add(String(u).toLowerCase());
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 function hoursLeft(endAt) {
@@ -995,10 +1035,11 @@ async function processCampaign(c, ctx) {
   const arch =
     (ctx.archiveHolders && ctx.archiveHolders.get(gameKey)) ||
     (ctx.archiveHolders
-      ? { holders: 0, stashed: 0 }
-      : await archiveHoldersForCampaign(c, farmMap.logins));
+      ? { holders: 0, stashed: 0, other: 0 }
+      : await archiveHoldersForCampaign(c, farmMap.logins, ctx.owned));
   const archiveHolders = arch.holders || 0;
   const stashHolders = arch.stashed || 0;
+  const otherHolders = arch.other || 0;
   // Fail closed: a NaN here would make every comparison below false and slip
   // past both the coverage gate and the pool/fair-share gate, persisting
   // plannedAccounts: NaN straight through Mongoose.
@@ -1023,17 +1064,19 @@ async function processCampaign(c, ctx) {
         wanted +
         " accounts is already covered by " +
         archiveHolders +
-        " unsold, sellable archive account(s) holding this game's items. " +
-        "No new accounts needed. (" +
+        " unsold account(s) of its OWN holding this game's items. " +
+        "No new accounts needed. Not counted, because auto-listings cannot " +
+        "deliver them: " +
         manualFarmers +
-        " manual-bot account(s) also farm this game and " +
+        " manual-bot account(s) farming this game, " +
         stashHolders +
-        " archive holder(s) sit on manual bots — both are the long-term " +
-        "stash and are deliberately NOT counted as coverage.)",
+        " holder(s) parked on manual bots, " +
+        otherHolders +
+        " holder(s) in the archive that belong to no auto task.",
       demandScore,
       hadResearch: !!research,
       internalSales,
-      coverage: { manualFarmers, archiveHolders, stashHolders },
+      coverage: { manualFarmers, archiveHolders, stashHolders, otherHolders },
     });
     // Announce the transition into "covered", not every re-confirmation of it.
     // This branch is retryable (demand reopens when covering accounts sell), so
@@ -1046,15 +1089,17 @@ async function processCampaign(c, ctx) {
           game +
           "\nAlready covered: " +
           archiveHolders +
-          " sellable archive holders ≥ target " +
+          " of its own unsold accounts ≥ target " +
           wanted +
           "." +
-          (manualFarmers || stashHolders
-            ? "\n(" +
+          (manualFarmers || stashHolders || otherHolders
+            ? "\n(Not counted: " +
               manualFarmers +
-              " manual farmer(s) + " +
+              " manual farmer(s), " +
               stashHolders +
-              " stashed holder(s) not counted.)"
+              " stashed holder(s), " +
+              otherHolders +
+              " archive holder(s) it cannot sell.)"
             : ""),
       );
     }
@@ -1078,7 +1123,7 @@ async function processCampaign(c, ctx) {
       demandScore,
       hadResearch: !!research,
       internalSales,
-      coverage: { manualFarmers, archiveHolders, stashHolders },
+      coverage: { manualFarmers, archiveHolders, stashHolders, otherHolders },
       plannedAccounts: 0,
     });
     return { decision: "skip_no_accounts" };
@@ -1104,7 +1149,7 @@ async function processCampaign(c, ctx) {
       demandScore,
       hadResearch: !!research,
       internalSales,
-      coverage: { manualFarmers, archiveHolders, stashHolders },
+      coverage: { manualFarmers, archiveHolders, stashHolders, otherHolders },
       plannedAccounts: target,
     });
     return { decision: "skip_no_capacity" };
@@ -1117,15 +1162,17 @@ async function processCampaign(c, ctx) {
     covered > 0
       ? " (" +
         covered +
-        " sellable account" +
+        " of its own account" +
         (covered === 1 ? "" : "s") +
         " already covering this game" +
-        (manualFarmers || stashHolders
-          ? "; " +
+        (manualFarmers || stashHolders || otherHolders
+          ? "; not counted: " +
             manualFarmers +
-            " manual farmer(s) + " +
+            " manual farmer(s), " +
             stashHolders +
-            " stashed holder(s) not counted"
+            " stashed, " +
+            otherHolders +
+            " archive holder(s) it cannot sell"
           : "") +
         ")"
       : "";
@@ -1158,7 +1205,7 @@ async function processCampaign(c, ctx) {
       demandScore,
       hadResearch: !!research,
       internalSales,
-      coverage: { manualFarmers, archiveHolders, stashHolders },
+      coverage: { manualFarmers, archiveHolders, stashHolders, otherHolders },
       plannedAccounts: accounts,
       // Same tier target the live path records below. Without it an approved
       // plan enters "active" with targetAccounts: 0, and backfill's
@@ -1185,7 +1232,7 @@ async function processCampaign(c, ctx) {
     demandScore,
     hadResearch: !!research,
     internalSales,
-    coverage: { manualFarmers, archiveHolders, stashHolders },
+    coverage: { manualFarmers, archiveHolders, stashHolders, otherHolders },
     plannedAccounts: accounts,
     targetAccounts: wanted,
   });
@@ -1950,19 +1997,34 @@ async function runOnce() {
     );
 
     // Unsold archive holders for every candidate game, in one aggregation,
-    // minus anything parked on a manual bot (that is stash, not stock).
+    // split into stock this system can actually sell vs. stock it cannot (the
+    // manual stash, and archive accounts belonging to no auto task).
+    const owned = await ownedAccounts();
     const archiveHolders = await archiveHoldersByGame(
       candidates.map((c) => c.game),
       farmMap.logins,
+      owned,
     );
     let stashedTotal = 0;
-    for (const v of archiveHolders.values()) stashedTotal += v.stashed || 0;
+    let otherTotal = 0;
+    for (const v of archiveHolders.values()) {
+      stashedTotal += v.stashed || 0;
+      otherTotal += v.other || 0;
+    }
     progress(
-      "Archive coverage: " +
-        archiveHolders.size +
-        " game(s) with unsold holders in stock (" +
-        stashedTotal +
-        " stashed holder(s) excluded).",
+      owned
+        ? "Archive coverage: " +
+            archiveHolders.size +
+            " game(s) checked against the " +
+            owned.size +
+            " account(s) this system owns; excluded " +
+            stashedTotal +
+            " stashed on manual bots and " +
+            otherTotal +
+            " archive holder(s) its listings cannot deliver."
+        : "Archive coverage: ownership lookup failed — counting every " +
+            "non-stashed holder (conservative).",
+      owned ? "info" : "warn",
     );
 
     // Fair-share budget across everything competing in this tick. Weights use
@@ -2002,6 +2064,7 @@ async function runOnce() {
           infoMap,
           farmMap,
           archiveHolders,
+          owned,
           priorTasks,
         });
         progress(

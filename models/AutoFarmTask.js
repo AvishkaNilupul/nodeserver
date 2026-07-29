@@ -37,16 +37,18 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // — the training-data signal that boosts demand beyond external markets.
     internalSales: { type: Number, default: 0 },
     // How many accounts already cover this game before we add anything.
-    // Only `archiveHolders` is actually credited: it counts unsold accounts
-    // holding this game's drops that are NOT parked on a manual bot. The other
-    // two measure the owner's long-term stash — accounts hoarding many
-    // campaigns' items for a later premium bundle — which is recorded for the
-    // audit log but never treated as stock (see COUNT_MANUAL_AS_COVERAGE in
-    // utils/autoFarmer.js).
+    //
+    // Only `archiveHolders` is credited, and it counts ONLY accounts assigned
+    // to auto-farm tasks — the auto-lister delivers out of task.assignedAccounts
+    // and nothing else, so any other stock is unsellable by this system and
+    // cannot be "coverage" for it. The other three are recorded so the log can
+    // explain what it saw and chose to ignore (see COUNT_MANUAL_AS_COVERAGE and
+    // ownedAccounts in utils/autoFarmer.js).
     coverage: {
       manualFarmers: { type: Number, default: 0 }, // enabled on a manual bot for this game
-      archiveHolders: { type: Number, default: 0 }, // sellable holders (stash removed)
-      stashHolders: { type: Number, default: 0 }, // holders excluded as stash
+      archiveHolders: { type: Number, default: 0 }, // ITS OWN unsold holders — the only credited term
+      stashHolders: { type: Number, default: 0 }, // holders parked on manual bots
+      otherHolders: { type: Number, default: 0 }, // archive holders owned by no auto task
     },
 
     // Allocation.

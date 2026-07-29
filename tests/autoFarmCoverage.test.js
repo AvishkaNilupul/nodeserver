@@ -25,11 +25,22 @@ function uncovered({ wanted, ...c }) {
   return Math.max(0, wanted - coverage(c));
 }
 
-// What archiveHoldersByGame does to a game's holder list before the gate sees
-// it: anything sitting on a manual bot is stash, not stock.
-function sellableHolders(holders, stash) {
-  const set = new Set(stash.map((s) => s.toLowerCase()));
-  return holders.filter((h) => !set.has(h.toLowerCase())).length;
+// Mirrors utils/autoFarmer.js splitHolders: a game's unsold holders sorted into
+// stock this system can sell, stock parked on a manual bot, and stock that
+// belongs to no auto task. `owned === null` means ownership is unknown.
+function splitHolders(all, stash, owned) {
+  const s = stash === null ? null : new Set(stash.map((x) => x.toLowerCase()));
+  const o = owned === null ? null : new Set(owned.map((x) => x.toLowerCase()));
+  let holders = 0;
+  let stashed = 0;
+  let other = 0;
+  for (const raw of all) {
+    const l = String(raw).toLowerCase();
+    if (s && s.has(l)) stashed++;
+    else if (!o || o.has(l)) holders++;
+    else other++;
+  }
+  return { holders, stashed, other };
 }
 
 test("the live prod case: 1615 wildcards no longer block a fresh campaign", () => {
@@ -52,12 +63,42 @@ test("manual bots farming a game do NOT block auto-farming it", () => {
 
 test("archive holders parked on a manual bot are stash, not stock", () => {
   // Dead by Daylight on prod: 140 unsold holders, of which the manual Lost
-  // Ark/DbD container holds most. Only the rest is sellable coverage.
-  const holders = ["a", "b", "c", "d", "e"];
-  const stash = ["B", "c", "D"]; // case-insensitive on purpose
-  assert.strictEqual(sellableHolders(holders, stash), 2);
-  const args = { gameSpecific: 0, wildcards: 0, archive: 2, wanted: 18 };
-  assert.strictEqual(uncovered(args), 16);
+  // Ark/DbD container holds most. Only the rest can be coverage.
+  const r = splitHolders(["a", "b", "c", "d", "e"], ["B", "c", "D"], null);
+  assert.strictEqual(r.stashed, 3, "case-insensitive stash match");
+  assert.strictEqual(r.holders, 2);
+  assert.strictEqual(uncovered({ gameSpecific: 0, wildcards: 0, archive: r.holders, wanted: 18 }), 16);
+});
+
+test("only stock the auto system OWNS counts as its coverage", () => {
+  // Its listings deliver from task.assignedAccounts and nothing else, so an
+  // archive account belonging to no auto task can never reach one of its
+  // buyers. Prod: Overwatch had 110 such holders and the system owned 0 —
+  // blocked from farming stock it could actually have sold.
+  const holders = ["mine1", "mine2", "somebodyelses", "stashed1"];
+  const r = splitHolders(holders, ["stashed1"], ["mine1", "mine2"]);
+  assert.deepStrictEqual(r, { holders: 2, stashed: 1, other: 1 });
+  assert.strictEqual(
+    uncovered({ gameSpecific: 0, wildcards: 0, archive: r.holders, wanted: 18 }),
+    16,
+    "the 1 unsellable holder must not reduce what it farms",
+  );
+});
+
+test("unknown ownership fails CONSERVATIVE, crediting every non-stashed holder", () => {
+  // ownedAccounts() returns null when its lookup fails. An empty Set there
+  // would read as "owns nothing" — zero coverage, maximum spend — so null must
+  // mean "count them all", the lower-spend reading.
+  const holders = ["a", "b", "c", "d"];
+  const unknown = splitHolders(holders, ["a"], null);
+  assert.strictEqual(unknown.holders, 3, "credited, so less is farmed");
+  assert.strictEqual(unknown.other, 0);
+  const ownsNothing = splitHolders(holders, ["a"], []);
+  assert.strictEqual(ownsNothing.holders, 0, "an empty set is the fail-open case");
+  assert.ok(
+    unknown.holders > ownsNothing.holders,
+    "null must never be treated as an empty set",
+  );
 });
 
 test("unsold archive stock still counts when it is genuinely sellable", () => {

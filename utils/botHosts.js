@@ -247,49 +247,86 @@ function remotePath(host, file) {
   return path.posix.join(host.dir, file);
 }
 
+// Retry a READ-ONLY host operation when the SSH transport itself failed.
+//
+// The Pi is reached over Tailscale across a home connection and drops the odd
+// connection under load — the auto-farm tick, the drop scanner and the park
+// sweep all talk to it at once. Observed twice on 2026-07-29: a `ls` failed at
+// the top of a tick (recording ~30 campaigns as "host unreachable"), and later
+// one failed mid-execution and killed a farm that had already been decided.
+// Both times the host answered again seconds afterwards.
+//
+// Applied ONLY to reads. `e.unreachable` covers a connection that never landed
+// as well as one killed by timeout, and for a read either way it is always safe
+// to simply ask again — which is not true of writes or docker actions, so those
+// deliberately keep failing fast.
+const READ_RETRIES = 2;
+const READ_RETRY_DELAY_MS = 1500;
+
+async function retryRead(fn) {
+  let last;
+  for (let attempt = 0; attempt <= READ_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      // A real answer from the far side (missing file, bad path) is final.
+      if (!e || !e.unreachable) throw e;
+      last = e;
+      if (attempt < READ_RETRIES) {
+        await new Promise((r) => setTimeout(r, READ_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw last;
+}
+
 async function readdir(host) {
   if (host.transport === "local") {
     return fsp.readdir(host.dir);
   }
-  try {
-    const { stdout } = await sshRun(host, "ls -1 -- " + shq(host.dir), {
-      timeout: SHORT_TIMEOUT,
-    });
-    return stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } catch (e) {
-    if (/No such file|not found/i.test(e.stderr || e.message || "")) {
-      const err = new Error(e.message);
-      err.code = "ENOENT";
-      throw err;
+  return retryRead(async () => {
+    try {
+      const { stdout } = await sshRun(host, "ls -1 -- " + shq(host.dir), {
+        timeout: SHORT_TIMEOUT,
+      });
+      return stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch (e) {
+      if (/No such file|not found/i.test(e.stderr || e.message || "")) {
+        const err = new Error(e.message);
+        err.code = "ENOENT";
+        throw err;
+      }
+      throw e;
     }
-    throw e;
-  }
+  });
 }
 
 async function readFile(host, file) {
   if (host.transport === "local") {
     return fsp.readFile(path.join(host.dir, file), "utf8");
   }
-  try {
-    const { stdout } = await sshRun(
-      host,
-      "cat -- " + shq(remotePath(host, file)),
-      {
-        timeout: SHORT_TIMEOUT,
-      },
-    );
-    return stdout;
-  } catch (e) {
-    if (/No such file/i.test(e.stderr || e.message || "")) {
-      const err = new Error("Not found");
-      err.code = "ENOENT";
-      throw err;
+  return retryRead(async () => {
+    try {
+      const { stdout } = await sshRun(
+        host,
+        "cat -- " + shq(remotePath(host, file)),
+        {
+          timeout: SHORT_TIMEOUT,
+        },
+      );
+      return stdout;
+    } catch (e) {
+      if (/No such file/i.test(e.stderr || e.message || "")) {
+        const err = new Error("Not found");
+        err.code = "ENOENT";
+        throw err;
+      }
+      throw e;
     }
-    throw e;
-  }
+  });
 }
 
 async function exists(host, file) {
@@ -422,9 +459,12 @@ async function dockerPs(host) {
       timeout: SHORT_TIMEOUT,
     }));
   } else {
-    ({ stdout } = await sshRun(host, "docker ps -a --format " + shq(fmt), {
-      timeout: SHORT_TIMEOUT,
-    }));
+    // Read-only: safe to re-ask when the link drops (see retryRead).
+    ({ stdout } = await retryRead(() =>
+      sshRun(host, "docker ps -a --format " + shq(fmt), {
+        timeout: SHORT_TIMEOUT,
+      }),
+    ));
   }
   const states = {};
   stdout
