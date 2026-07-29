@@ -73,24 +73,66 @@ router.get("/account-pool/list", requireSuperadmin, async (req, res) => {
 // {username, password} pairs, so they can be run through an external
 // device-auth flow and the resulting clientSecret brought back in via the
 // normal import (which fills it onto the existing row, doesn't duplicate).
+// `source` selects which table to draw from:
+//   pool (default) — AvailableAccount, the original behaviour
+//   bots           — BotAccount: accounts already deployed to (or retired from)
+//                    a bot config, whose token the drop scanner found dead
+//   all            — both, de-duplicated by login
+//
+// The bots source exists because the pool export could not reach the accounts
+// that need re-auth MOST. Audited on prod 2026-07-29: 436 accounts carry a dead
+// token, and the 35 sitting inside live Digiseller listings — the ones a buyer
+// could be handed right now — are every one of them BotAccount rows, so the
+// pool-only export returned exactly none of them. Their credentials are stored
+// (credPassword, encrypted), so they are all recoverable; there was simply no
+// route that handed them to the device-auth tool.
 router.get("/account-pool/export-needs-auth", requireSuperadmin, async (req, res) => {
   try {
     const status = String(req.query.status || "available");
-    const filter = status === "all" ? {} : { status };
-    filter.hasPassword = true;
-    // integrity_failed belongs here alongside dead tokens: the token
-    // authenticates but no bot can use it, and re-running the account through
-    // device-auth (which is what this export feeds) is precisely the remedy.
-    filter.$or = [
-      { clientSecret: "" },
-      { lastCheckStatus: "token_invalid" },
-      { lastCheckStatus: "integrity_failed" },
-    ];
-    const accounts = await AvailableAccount.find(filter).lean();
-    const out = accounts.map((a) => ({
-      username: a.username,
-      password: decrypt(a.password),
-    }));
+    const source = String(req.query.source || "pool");
+    const out = [];
+    const seen = new Set();
+
+    if (source !== "bots") {
+      const filter = status === "all" ? {} : { status };
+      filter.hasPassword = true;
+      // integrity_failed belongs here alongside dead tokens: the token
+      // authenticates but no bot can use it, and re-running the account through
+      // device-auth (which is what this export feeds) is precisely the remedy.
+      filter.$or = [
+        { clientSecret: "" },
+        { lastCheckStatus: "token_invalid" },
+        { lastCheckStatus: "integrity_failed" },
+      ];
+      for (const a of await AvailableAccount.find(filter).lean()) {
+        const key = String(a.username || "").toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push({ username: a.username, password: decrypt(a.password), source: "pool" });
+      }
+    }
+
+    if (source === "bots" || source === "all") {
+      const rows = await BotAccount.find(
+        { hasPassword: true, lastScanStatus: { $in: ["token_invalid", "error"] } },
+        { login: 1, credUsername: 1, credPassword: 1, enabled: 1 },
+      ).lean();
+      for (const r of rows) {
+        const username = r.credUsername || r.login;
+        const key = String(username || "").toLowerCase();
+        if (!key || seen.has(key)) continue;
+        const password = decrypt(r.credPassword);
+        if (!password) continue;
+        seen.add(key);
+        out.push({
+          username,
+          password,
+          source: "bot",
+          deployed: r.enabled !== false,
+        });
+      }
+    }
+
     res.json({ success: true, accounts: out, count: out.length });
   } catch (err) {
     console.error("account-pool export error:", err.message);

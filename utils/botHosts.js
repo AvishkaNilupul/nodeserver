@@ -47,7 +47,21 @@ const COMPOSE_NAMES = [
 ];
 
 const EXEC_TIMEOUT = 60000;
-const SHORT_TIMEOUT = 8000;
+// Budget for a "quick" remote read (ls, cat, docker ps).
+//
+// This was 8s — the SAME value as the SSH ConnectTimeout below, which made a
+// read structurally impossible on a slow link: the handshake alone could eat
+// the entire budget, leaving nothing for the command itself. Measured on the
+// Pi 2026-07-29 while it was struggling: 4.75 SECOND round-trip time and 66%
+// packet loss, at which point 5 of 6 SSH attempts failed and whole auto-farm
+// ticks were being written off as "host unreachable".
+//
+// These bots live on a Raspberry Pi at the end of a home connection reached
+// over Tailscale, so multi-second latency is a normal condition to tolerate,
+// not an exception. Generous timeouts cost nothing when the link is healthy —
+// the connection is multiplexed (ControlMaster/ControlPersist), so only the
+// first command pays the handshake at all.
+const SHORT_TIMEOUT = 30000;
 
 // ----------------------------------------------------------------------------
 // Host registry
@@ -168,13 +182,23 @@ function sshBaseArgs(host) {
     "-o",
     "StrictHostKeyChecking=accept-new",
     "-o",
-    "ConnectTimeout=8",
+    // Must comfortably exceed several round trips on a congested home link
+    // (see SHORT_TIMEOUT). At 8s a 4.75s-RTT link could not complete a
+    // handshake at all.
+    "ConnectTimeout=20",
     "-o",
     "ControlMaster=auto",
     "-o",
     "ControlPath=" + SSH_CONTROL_PATH,
     "-o",
     "ControlPersist=60",
+    // Kill a session whose link has died instead of holding the slot until the
+    // command timeout fires — with multiplexing, one wedged master would
+    // otherwise stall every later command queued behind it.
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3",
   ];
   if (host.ssh.identityFile) args.push("-i", host.ssh.identityFile);
   if (host.ssh.port) args.push("-p", String(host.ssh.port));
