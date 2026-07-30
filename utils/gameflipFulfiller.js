@@ -225,7 +225,32 @@ async function syncOnce() {
     let status;
     try {
       status = await mp.gameflipListingStatus(row.externalId);
-    } catch {
+    } catch (e) {
+      // A 404 means the listing is gone from Gameflip for good. Plain `continue`
+      // leaves the row active forever: the watcher re-reads it every tick, the
+      // units it still owes are never relisted, and its account stays reserved
+      // out of the sellable pool. Retire the row and hand the account back.
+      // Every other error (timeout, 429, 5xx) really is transient — skip those.
+      if (e && e.status === 404) {
+        const retired = await MarketplaceListing.findOneAndUpdate(
+          { _id: row._id, status: "active" },
+          {
+            $set: {
+              status: "removed",
+              lastError: "gone from Gameflip (404) — retired by the watcher",
+            },
+          },
+        ).catch(() => null);
+        if (retired && row.accountId) {
+          await releaseAccount(row.accountId).catch(() => {});
+        }
+        if (retired) {
+          console.error(
+            "gameflip listing " + row.externalId + " is 404 — retired, " +
+              (Number(row.qtyRemaining) || 0) + " unit(s) were still owed",
+          );
+        }
+      }
       continue;
     }
     if (status !== "sold") continue;
