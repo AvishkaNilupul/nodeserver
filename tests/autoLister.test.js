@@ -7,8 +7,9 @@ const {
   buildDescription,
   derivePrice,
   stackItems,
-  stackedPrice,
+  postEventPrice,
   computeSplit,
+  isAutoOwned,
 } = require("../utils/autoLister");
 
 const items = [
@@ -74,6 +75,34 @@ test("post-event description leads with scarcity and drops the countdown", () =>
   assert.ok(d.includes("no longer be earned"));
   assert.ok(d.includes("still redeem"));
   assert.ok(!d.includes("unobtainable"));
+});
+
+// Automatic repricing is only ever allowed to move the auto-farmer's OWN
+// prices. Listings the owner made by hand are their own stock at their own
+// price, and the post-event markup must not touch them even when they sit on a
+// drop set the auto-farmer also uses.
+test("only an explicitly auto listing may be repriced", () => {
+  assert.strictEqual(isAutoOwned({ origin: "auto", price: 2 }), true);
+  assert.strictEqual(isAutoOwned({ origin: "manual", price: 2 }), false);
+});
+
+test("a listing with no origin is treated as the owner's, not repriced", () => {
+  // Rows that predate the field, and anything the migration missed: unknown
+  // ownership must fail closed, or a backfill gap silently reprices real stock.
+  assert.strictEqual(isAutoOwned({ price: 2 }), false);
+  assert.strictEqual(isAutoOwned({ origin: "" }), false);
+  assert.strictEqual(isAutoOwned({ origin: undefined }), false);
+  assert.strictEqual(isAutoOwned(null), false);
+  assert.strictEqual(isAutoOwned(undefined), false);
+});
+
+// autoDeliver is set on hand-made auto-delivery listings too, so it can never
+// stand in for ownership — the whole reason `origin` had to be added.
+test("auto-delivery does not by itself make a listing repriceable", () => {
+  assert.strictEqual(
+    isAutoOwned({ origin: "manual", autoDeliver: true, qtyTarget: 5 }),
+    false,
+  );
 });
 
 test("price anchors on sold prices and undercuts live competition", () => {
@@ -181,9 +210,28 @@ test("stacking unions items across sets without duplicates", () => {
   ]);
 });
 
-test("stacked price sums campaign prices and applies +50%", () => {
-  assert.strictEqual(stackedPrice([2.0, 3.0]), 7.5);
-  assert.strictEqual(stackedPrice([0, 0]), 1.5);
+test("post-event price is +50% on the listing's own price", () => {
+  assert.strictEqual(postEventPrice(1.75), 2.75); // 2.625 -> nearest 0.25
+  assert.strictEqual(postEventPrice(1.5), 2.25);
+  assert.strictEqual(postEventPrice(0.75), 1.25); // 1.125 -> 1.25
+  assert.strictEqual(postEventPrice(0), 1.5); // no base -> $1 x 1.5
+  assert.ok(postEventPrice(0.1) >= 0.75); // never under Gameflip's floor
+});
+
+// The formula this replaced summed every past campaign price for the game and
+// marked THAT up. Because the item union de-duplicates while a sum does not,
+// price grew with campaign count even when the bundle didn't — The Quinfall
+// stacked to one item and priced at $12.50 — and each sibling's already-marked-up
+// price compounded the markup again. Applying it to the listing's own price is
+// bounded by construction: the result is always exactly 1.5x, never a multiple
+// of how many campaigns a game happens to have run.
+test("the markup cannot compound across repeated campaigns", () => {
+  let p = 1.0;
+  for (let i = 0; i < 4; i++) p = postEventPrice(p);
+  // Four ended campaigns: 1.5x each time, not 1.5x a growing sum.
+  assert.ok(p <= 1.0 * Math.pow(1.5, 4) + 0.25, "stays on the 1.5x curve");
+  // And one campaign's markup never depends on its siblings.
+  assert.strictEqual(postEventPrice(2.0), 3.0);
 });
 
 test("hold-back split lists half now (rounded up), holds the rest", () => {

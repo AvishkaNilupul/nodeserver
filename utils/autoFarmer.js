@@ -1605,6 +1605,94 @@ async function repackAutoBots(af, host, progress) {
   return r;
 }
 
+// Apply one task's post-event markup, recording the outcome on the task so a
+// failure is visible instead of living only in the process log.
+async function repriceTask(t, notify) {
+  try {
+    const autoLister = require("./autoLister");
+    const r = await autoLister.onCampaignEnded(t._id);
+    if (r && r.repriced) {
+      // Clear any error left by an earlier failed attempt.
+      await AutoFarmTask.updateOne(
+        { _id: t._id },
+        { $set: { "listing.error": "" } },
+      ).catch(() => {});
+      if (notify) {
+        await notify(
+          "📈 Post-event reprice — " +
+            t.game +
+            "\n$" +
+            r.repriced.price +
+            " · " +
+            r.repriced.items +
+            " item(s) stacked" +
+            (r.repriced.live ? "" : " (listing not live)") +
+            (r.repriced.released
+              ? "\n" + r.repriced.released + " held-back unit(s) released"
+              : ""),
+        );
+      }
+    }
+    return r || {};
+  } catch (e) {
+    // Persist it: onCampaignEnded used to fail into console.error alone, so a
+    // stuck listing was invisible in the UI and looked like it had simply been
+    // repriced. Prod carried four of those for up to 88h.
+    await AutoFarmTask.updateOne(
+      { _id: t._id },
+      {
+        $set: {
+          "listing.error": ("reprice failed: " + e.message).slice(0, 400),
+        },
+      },
+    ).catch(() => {});
+    console.error("post-event reprice failed (" + t.game + "):", e.message);
+    return { error: e.message };
+  }
+}
+
+// Retry sweep for markups that never landed.
+//
+// completeEndedTasks flips a task to "completed" and THEN reprices, so before
+// this existed a single transient Gameflip error (its rate limiter answers 429
+// for minutes at a time) permanently cost the markup, the retitle AND the
+// held-back stock release — nothing ever revisited a completed task. Prod had
+// four listings stuck at pre-event prices with ~26 accounts frozen in holdback.
+//
+// Deliberately slow: MAX_REPRICE_RETRIES_PER_TICK at a time, oldest first,
+// because gameflipReprice already spends up to ~3 minutes on its own restore
+// backoff and hammering the limiter is what caused the failures in the first
+// place. onCampaignEnded marks postEvent even when no live row remains, so this
+// queue always drains rather than spinning on dead listings.
+const MAX_REPRICE_RETRIES_PER_TICK = 2;
+
+async function repriceEndedTasks() {
+  const pending = await AutoFarmTask.find({
+    status: "completed",
+    "listing.externalId": { $nin: ["", null] },
+    "listing.postEvent": { $ne: true },
+  })
+    .sort({ completedAt: 1 })
+    .limit(MAX_REPRICE_RETRIES_PER_TICK);
+  if (!pending.length) return 0;
+  progress(
+    "Retrying post-event reprice on " + pending.length + " ended task(s)…",
+  );
+  let done = 0;
+  for (const t of pending) {
+    const r = await repriceTask(t, tg);
+    if (r && r.repriced) {
+      done++;
+      progress(t.game + " repriced to $" + r.repriced.price);
+    } else if (r && r.skipped) {
+      progress(t.game + " reprice skipped: " + r.skipped, "warn");
+    } else if (r && r.error) {
+      progress(t.game + " reprice failed: " + r.error, "warn");
+    }
+  }
+  return done;
+}
+
 async function completeEndedTasks() {
   const active = await AutoFarmTask.find({ status: "active" });
   let completed = 0;
@@ -1759,25 +1847,9 @@ async function completeEndedTasks() {
     completed++;
     // Event over = supply fixed: apply the post-event scarcity markup and
     // rebuild the listing as a stacked bundle of every campaign this game's
-    // accounts have farmed. Failures are non-fatal; retried on manual rescan.
-    try {
-      const autoLister = require("./autoLister");
-      const r = await autoLister.onCampaignEnded(t._id);
-      if (r && r.repriced) {
-        await tg(
-          "\ud83d\udcc8 Post-event reprice \u2014 " +
-            t.game +
-            "\n$" +
-            r.repriced.price +
-            " \u00b7 " +
-            r.repriced.items +
-            " item(s) stacked" +
-            (r.repriced.live ? "" : " (listing not live)"),
-        );
-      }
-    } catch (e) {
-      console.error("post-event reprice failed:", e.message);
-    }
+    // accounts have farmed. A failure here is picked up by repriceEndedTasks
+    // on a later tick \u2014 see why that retry had to exist in its comment.
+    await repriceTask(t, tg);
     await tg(
       "🤖 Auto-farm DONE — " +
         t.game +
@@ -1826,6 +1898,15 @@ async function runOnce() {
     const completed = await completeEndedTasks();
     if (completed)
       progress("Cleaned up " + completed + " ended campaign task(s).");
+    // Catch up any markup that failed on an earlier tick (dry runs never touch
+    // a live marketplace, so they must not reprice either).
+    if (!af.dryRun) {
+      const rp = await repriceEndedTasks().catch((e) => {
+        progress("Reprice sweep failed: " + e.message, "warn");
+        return 0;
+      });
+      if (rp) progress("Applied " + rp + " catch-up reprice(s).");
+    }
     const expired = await expireStalePlans().catch(() => 0);
     if (expired)
       progress(

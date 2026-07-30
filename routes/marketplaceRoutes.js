@@ -616,6 +616,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               priceUsd,
               imagePath: gridImage || coverImagePath(set),
               qtyRemaining: qty - 1,
+              // Published from the Listings page: the owner's own stock, so it
+              // (and every unit its relist chain publishes after it) is exempt
+              // from the auto-farmer's post-event repricing.
+              origin: "manual",
             });
             results[name] = {
               success: true,
@@ -1088,6 +1092,10 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
         lastError: r.lastError,
         autoDeliver: !!r.autoDeliver,
         qtyRemaining: Number(r.qtyRemaining) || 0,
+        // Auto-farmed or the owner's own. Sent so the page can show which rows
+        // the post-event markup is allowed to reprice — anything not marked
+        // "auto" keeps whatever price it was given.
+        origin: r.origin === "auto" ? "auto" : "manual",
         createdAt: r.createdAt,
       })),
     });

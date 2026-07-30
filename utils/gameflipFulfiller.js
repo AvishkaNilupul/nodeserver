@@ -150,6 +150,11 @@ async function accountListingText(set, accountId, fallbackTitle, fallbackDescrip
 // this one sells. Releases the account again if publishing fails. Title and
 // description are regenerated from the claimed account's real contents so the
 // listing matches what the buyer actually gets.
+// `origin` is carried through so a relisted unit stays whatever its
+// predecessor was: the successor of an auto-farmed listing is still auto stock
+// (and so still in scope for the post-event markup), while a chain the owner
+// started by hand stays manual. Defaults to "manual" — the same fail-safe the
+// model uses, since an unmarked chain must not become repriceable by accident.
 async function publishAutoDelivery({
   set,
   title,
@@ -157,6 +162,7 @@ async function publishAutoDelivery({
   priceUsd,
   imagePath,
   qtyRemaining,
+  origin,
 }) {
   const account = await claimAccountForSet(set);
   if (!account) {
@@ -201,6 +207,7 @@ async function publishAutoDelivery({
     description: String(liveDesc || ""),
     price: priceUsd,
     status: "active",
+    origin: origin === "auto" ? "auto" : "manual",
     note: "auto-delivery: " + (login || "account"),
     autoDeliver: true,
     accountId: String(account._id),
@@ -293,6 +300,7 @@ async function syncOnce() {
         priceUsd: row.price,
         imagePath: img,
         qtyRemaining: row.qtyRemaining - 1,
+        origin: row.origin,
       });
       relisted++;
     } catch (e) {

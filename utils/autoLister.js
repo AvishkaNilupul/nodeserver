@@ -376,6 +376,7 @@ async function publishPlatiShare({
     description,
     price,
     status: "active",
+    origin: "auto",
     note: "auto-farm: " + accounts.length + " account(s)",
     autoDeliver: true,
     accountLogin: accounts.map((a) => a.login).join(", "),
@@ -421,6 +422,7 @@ async function publishGgselShare({
     description,
     price,
     status: "active",
+    origin: "auto",
     note:
       (r.note ? r.note + " " : "") +
       "auto-farm: " +
@@ -894,6 +896,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     description,
     price,
     status: "active",
+    origin: "auto",
     autoDeliver: true,
     accountLogin: gfAccounts.map((a) => a.login).join(", "),
     // First unit is the pool account itself; the rest of Gameflip's SHARE
@@ -934,6 +937,15 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
 //      game, so the bundle (and its value) grows with each ended event.
 const POST_EVENT_MARKUP = 1.5;
 
+// The one rule that decides whether the auto-farmer is allowed to change a
+// listing's price. Positive-only on purpose: only a row explicitly marked
+// origin:"auto" is auto-farmed stock. Everything else is the owner's — listings
+// made by hand from the Listings page, and rows that predate the field — and
+// their prices are theirs to set, so an unknown row is never repriced.
+function isAutoOwned(row) {
+  return !!row && row.origin === "auto";
+}
+
 function stackItems(sets) {
   const out = [];
   const seen = new Set();
@@ -953,10 +965,22 @@ function stackItems(sets) {
   return out;
 }
 
-function stackedPrice(prices, { markup = POST_EVENT_MARKUP } = {}) {
-  const valid = prices.filter((x) => Number(x) > 0);
-  const sum = valid.reduce((a, b) => a + b, 0);
-  const base = sum > 0 ? sum : 1.0;
+// The scarcity markup: +50% on what this listing already charges.
+//
+// It used to sum EVERY past campaign price for the game and mark that up, on
+// the theory that a stacked bundle is worth the sum of its campaigns. Two
+// things made that produce nonsense. The item union is de-duplicated while the
+// sum is not, so price grew with the number of campaigns a game had run even
+// when the bundle did not: The Quinfall stacked to a SINGLE item and priced at
+// $12.50. And each sibling's recorded price already includes its own markup
+// once it has ended, so the markup compounded on itself every campaign.
+//
+// Basing it on the listing's own price is the literal reading of "+50%", cannot
+// compound, and cannot outrun the bundle. Items still stack — the bundle really
+// does grow — only its price stays tied to what the listing was actually
+// selling for.
+function postEventPrice(basePrice, { markup = POST_EVENT_MARKUP } = {}) {
+  const base = Number(basePrice) > 0 ? Number(basePrice) : 1.0;
   return Math.max(0.75, round25(base * markup));
 }
 
@@ -982,9 +1006,11 @@ async function onCampaignEnded(taskId) {
   if (!mySet) return { skipped: "set gone" };
 
   const items = stackItems(sets);
-  const price = stackedPrice(
-    siblings.map((t) => (t.listing && t.listing.price) || 0),
-  );
+  // Base the markup on the price recorded ON THE TASK, not on the live row.
+  // task.listing.price and postEvent are written together in the same save at
+  // the end, so a retry after a partial failure recomputes from the identical
+  // base — marking up the live row's (already raised) price would compound.
+  const price = postEventPrice(task.listing.price);
   const title = buildTitle({
     game: task.game,
     items,
@@ -1004,11 +1030,26 @@ async function onCampaignEnded(taskId) {
   mySet.price = price;
   await mySet.save();
 
-  const row = await MarketplaceListing.findOne({
+  // Find the live Gameflip row by SET rather than by the id recorded on the
+  // task: after the first sale the relist chain publishes a successor with a
+  // brand-new external id, so the task's own id is stale and only the set still
+  // identifies the live listing.
+  //
+  // origin:"auto" is the hard boundary on that widened lookup. The markup must
+  // only ever move an auto-farmed price — anything the owner listed by hand is
+  // their own stock at their own price and is never touched, even if it happens
+  // to sit on the same drop set.
+  const found = await MarketplaceListing.findOne({
     set: mySet._id,
     marketplace: "gameflip",
     status: "active",
+    origin: "auto",
   });
+  // Belt and braces: the query already excludes the owner's listings, but the
+  // block below moves a real price on a real marketplace, so the rule is
+  // re-checked here at the point of use rather than trusted from a filter that
+  // a later refactor could widen.
+  const row = isAutoOwned(found) ? found : null;
   const heldBack = Math.max(0, Number(task.listing.heldBack) || 0);
   if (row) {
     await mp.gameflipReprice(row.externalId, {
@@ -1050,11 +1091,12 @@ module.exports = {
   onCampaignEnded,
   refillMarkets,
   retryMissingSecondaries,
+  isAutoOwned,
   // exported for tests
   buildTitle,
   buildDescription,
   derivePrice,
   stackItems,
-  stackedPrice,
+  postEventPrice,
   computeSplit,
 };
