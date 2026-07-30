@@ -275,6 +275,14 @@ async function gameflipListingStatus(listingId) {
 // Patch an existing listing's price (cents) and optionally its name and
 // description — used for the post-event scarcity markup once a drop campaign
 // ends and the items become unobtainable.
+//
+// Gameflip refuses to edit a LIVE listing: "Cannot change 'price' when status
+// is onsale" (same for 'name'), and because a json-patch is atomic one rejected
+// op fails the whole request. Silently, this broke every post-event reprice —
+// the markup, the retitle AND the held-back stock release all went down with
+// it. So take the listing off sale, patch, and put it straight back. The
+// restore is retried and its failure outranks the patch's: a listing left in
+// draft is off the market entirely, which is far worse than stale text.
 async function gameflipReprice(listingId, { priceUsd, title, description }) {
   const keys = requireKeys("gameflip");
   const ops = [];
@@ -297,17 +305,82 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
     });
   }
   if (!ops.length) return;
-  try {
-    await axios.patch(GF_API + "/listing/" + listingId, ops, {
+  const patch = (body) =>
+    axios.patch(GF_API + "/listing/" + listingId, body, {
       headers: {
         ...gfHeaders(keys),
         "Content-Type": "application/json-patch+json",
       },
       timeout: 20000,
     });
-  } catch (e) {
-    throw apiError("Gameflip reprice", e);
+  const setStatus = (v) =>
+    patch([{ op: "replace", path: "/status", value: v }]);
+
+  let live = "";
+  try {
+    live = await gameflipListingStatus(listingId);
+  } catch {
+    // Status unreadable — try the plain patch and let its own error surface.
   }
+  if (live !== "onsale") {
+    try {
+      await patch(ops);
+    } catch (e) {
+      throw apiError("Gameflip reprice", e);
+    }
+    return;
+  }
+
+  try {
+    await setStatus("draft");
+  } catch (e) {
+    throw apiError("Gameflip reprice (could not take off sale)", e);
+  }
+  let patchErr = null;
+  try {
+    await patch(ops);
+  } catch (e) {
+    patchErr = apiError("Gameflip reprice", e);
+  }
+  // Putting it back is the step that must not be trusted blindly: under its
+  // rate limiter Gameflip answers 200 to the status patch yet leaves the
+  // listing in "ready" — complete, public, but NOT purchasable. So verify by
+  // reading the status back, and since the limiter's window is minutes wide
+  // (429 "Too many attempts"), back off in tens of seconds rather than ms.
+  let restored = false;
+  let restoreErr = null;
+  const waits = [0, 20000, 60000, 120000];
+  for (const w of waits) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("onsale");
+    } catch (e) {
+      restoreErr = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) === "onsale") {
+        restored = true;
+        restoreErr = null;
+        break;
+      }
+      restoreErr = new Error(
+        'status settled on "ready" instead of "onsale" (rate-limited)',
+      );
+    } catch (e) {
+      restoreErr = e;
+    }
+  }
+  if (!restored) {
+    throw new Error(
+      "Gameflip listing " +
+        listingId +
+        " IS NOT BACK ON SALE (left in draft/ready, so nobody can buy it) —" +
+        " put it back on sale manually. " +
+        ((restoreErr && restoreErr.message) || "unknown error"),
+    );
+  }
+  if (patchErr) throw patchErr;
 }
 
 async function gameflipDelist(listingId) {
@@ -400,7 +473,7 @@ async function digisellerToken() {
     };
     return dsToken.token;
   } catch (e) {
-    throw apiError("Digiseller login", e);
+    throw dsApiError("Digiseller login", e);
   }
 }
 
@@ -428,6 +501,46 @@ function dsErrorText(d) {
     msg += " — " + JSON.stringify(d.errors).slice(0, 400);
   }
   return msg;
+}
+
+// A Digiseller token inherits the permission set assigned to its API key in
+// the seller panel (Settings → API). Read calls (login, categories) work with
+// a read-only key, but every mutating call — create, edit/base, content/add —
+// comes back retval -1 / errors[].code "auth-0" ("Access denied" /
+// "Недостаточно прав") when the key lacks product-management rights. The
+// failure arrives two ways: as an axios HTTP-4xx whose response body is that
+// retval object, or as a thrown Error whose message already carries the
+// auth-0 text. Detect both.
+function dsIsPermissionDenied(e) {
+  const d = e && e.response && e.response.data;
+  if (
+    d &&
+    Array.isArray(d.errors) &&
+    d.errors.some((x) => x && String(x.code || "").toLowerCase() === "auth-0")
+  ) {
+    return true;
+  }
+  return /auth-0|access denied|недостаточно прав/i.test(
+    String((e && e.message) || ""),
+  );
+}
+
+// Surface an auth-0 denial as an actionable instruction instead of raw JSON,
+// so the auto-farm UI tells the operator exactly which permission to grant.
+function dsApiError(prefix, e) {
+  if (dsIsPermissionDenied(e)) {
+    const err = new Error(
+      prefix +
+        ': Digiseller API key lacks product-management rights (auth-0 "Access' +
+        ' denied"). In the Digiseller panel → Settings → API, enable "Products' +
+        ' / Create" and "Products / Edit" for this key, then retry — the token' +
+        " inherits the key's rights, so no re-login is needed.",
+    );
+    err.status = e.response && e.response.status;
+    err.permission = true;
+    return err;
+  }
+  return apiError(prefix, e);
 }
 
 function dsLocales(value, ruValue) {
@@ -502,7 +615,7 @@ async function digisellerCategories(rootCategoryId) {
   } catch (e) {
     // A stale cache entry is far more useful than a timeout error.
     if (hit) return hit.rows;
-    throw apiError("Digiseller categories", e);
+    throw dsApiError("Digiseller categories", e);
   }
 }
 
@@ -524,7 +637,7 @@ async function digisellerCategoryAttributes(categoryId) {
     }
     return d.content || [];
   } catch (e) {
-    throw apiError("Digiseller attributes", e);
+    throw dsApiError("Digiseller attributes", e);
   }
 }
 
@@ -598,7 +711,7 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
         " in Digiseller, or it stays unsellable.",
     };
   } catch (e) {
-    throw apiError("Digiseller create", e);
+    throw dsApiError("Digiseller create", e);
   }
 }
 
@@ -640,7 +753,7 @@ async function digisellerUploadImage(productId, imagePath) {
       lastErr = e;
     }
   }
-  throw apiError("Digiseller image upload", lastErr);
+  throw dsApiError("Digiseller image upload", lastErr);
 }
 
 // Attach delivery content (e.g. "user:pass" lines) so the product is sellable.
@@ -661,19 +774,67 @@ async function digisellerAddContent(productId, lines) {
     if (d.retval !== undefined && String(d.retval) !== "0") {
       throw new Error(dsErrorText(d));
     }
-    return { added: content.length };
+    // Digiseller answers with the id of every unit it created, in the order
+    // they were sent: {"content":[{"content_id":299264577,"serial":null}]}.
+    // Capturing them is the ONLY way to delete a single bad unit later —
+    // there is no endpoint that lists a product's content (verified live
+    // 2026-07-29: every list/get shape 404s, and GET on /product/content is
+    // 405). So an id we fail to record here can never be targeted again.
+    const contentIds = Array.isArray(d.content)
+      ? d.content.map((c) => (c && c.content_id != null ? String(c.content_id) : ""))
+      : [];
+    return { added: content.length, contentIds };
   } catch (e) {
-    throw apiError("Digiseller add content", e);
+    throw dsApiError("Digiseller add content", e);
   }
 }
 
-// How many delivery units a product still has, via the public product-info
-// endpoint (no token needed). Returns a number, or null when the response
-// doesn't carry a recognisable stock field.
+// Remove ONE delivery unit from a product. Both ids go in the query string and
+// are PascalCase — a JSON body is ignored and the call answers "Field
+// ProductId is required" (verified live 2026-07-29, along with the successful
+// add->delete round trip on product 6001876).
+async function digisellerRemoveContent(productId, contentId) {
+  const token = await digisellerToken();
+  try {
+    const r = await axios.delete(
+      DS_API +
+        "/product/content?token=" +
+        encodeURIComponent(token) +
+        "&ProductId=" +
+        Number(productId) +
+        "&ContentId=" +
+        Number(contentId),
+      { timeout: 25000 },
+    );
+    const d = r.data || {};
+    if (d.retval !== undefined && String(d.retval) !== "0") {
+      throw new Error(dsErrorText(d));
+    }
+    return { removed: true };
+  } catch (e) {
+    throw dsApiError("Digiseller remove content", e);
+  }
+}
+
+// How many delivery units a product still has. The PUBLIC product-info
+// endpoint omits num_in_stock unless "show remaining quantity" is enabled on
+// the product, but the TOKEN-authenticated read returns it regardless
+// (verified live 2026-07-28: public read shows only show_rest, the token read
+// shows num_in_stock). Reading with the seller token is what lets the guardian
+// auto-feed digiseller listings. Returns a number, or null when it genuinely
+// can't be determined.
 async function digisellerProductStock(productId) {
+  let qs = "";
+  try {
+    const token = await digisellerToken();
+    qs = "?token=" + encodeURIComponent(token) + "&showHiddenVariants=true";
+  } catch {
+    // Keys unavailable — fall back to the public read (may carry no stock).
+    qs = "";
+  }
   try {
     const r = await axios.get(
-      DS_API + "/products/" + encodeURIComponent(productId) + "/data",
+      DS_API + "/products/" + encodeURIComponent(productId) + "/data" + qs,
       { headers: { Accept: "application/json" }, timeout: 20000 },
     );
     const d = r.data || {};
@@ -687,21 +848,13 @@ async function digisellerProductStock(productId) {
       const v = Number(raw);
       if (Number.isFinite(v)) return v;
     }
-    // The call SUCCEEDED (retval 0) but carried no stock figure. Verified live
-    // 2026-07-27 on 12 of our products: every one returns show_rest = 0, and
-    // none of the three stock fields is present. Digiseller omits the remaining
-    // count entirely when the product has "show remaining quantity" turned off,
-    // so this is a per-product storefront setting, not a transient API fault —
-    // and it is why the guardian's auto-feed skips every Digiseller listing.
-    // Enabling it needs the seller UI or an API key with edit rights (our key
-    // gets "Access denied" from /product/edit/base). Logged once per call so
-    // the cause is visible instead of arriving as a bare "stock unknown".
+    // Authenticated read still carried no stock figure — only expected on the
+    // public fallback (no seller token) or an unusual product type.
     console.error(
       "digiseller stock unreadable for product " +
         productId +
-        ": response had no num_in_stock/in_stock/count_goods (show_rest=" +
-        JSON.stringify(p && p.show_rest) +
-        ") — enable 'show remaining quantity' on the product to make it readable",
+        ": response had no num_in_stock/in_stock/count_goods" +
+        (qs ? " (authenticated read)" : " (public read — no seller token)"),
     );
     return null;
   } catch (e) {
@@ -737,7 +890,7 @@ async function digisellerDelist(productId) {
       throw new Error(dsErrorText(d));
     }
   } catch (e) {
-    throw apiError("Digiseller delist", e);
+    throw dsApiError("Digiseller delist", e);
   }
 }
 
@@ -1057,6 +1210,39 @@ async function ggselPublish({
     note,
     qty,
   };
+}
+
+// Edit an existing offer's text (and optionally its price) in place. GGSel
+// supports PATCH /offers/{id} — verified live 2026-07-30 — so a stale title can
+// be corrected without delisting, which would lose the offer id, its attached
+// stock and its catalog placement. (Digiseller has no equivalent: every
+// /product/edit/* path 404s while /product/create/* answers, so a Digiseller
+// product's text can only be changed by republishing it.)
+async function ggselUpdateOffer(offerId, { title, description, priceRub } = {}) {
+  const keys = requireKeys("ggsel");
+  const body = {};
+  if (title) {
+    // Mirror ggselPublish: the English title is used for both locales.
+    const t = String(title).slice(0, 200);
+    body.title_ru = t;
+    body.title_en = t;
+  }
+  if (description) {
+    const d = String(description).slice(0, 5000);
+    body.description_en = d;
+    body.description_ru = (await translateEnToRu(d)).slice(0, 5000);
+  }
+  const p = Number(priceRub);
+  if (Number.isFinite(p) && p > 0) body.price = p;
+  if (!Object.keys(body).length) return;
+  try {
+    await axios.patch(GG_API + "/offers/" + encodeURIComponent(offerId), body, {
+      headers: ggHeaders(keys),
+      timeout: 30000,
+    });
+  } catch (e) {
+    throw apiError("GGSel update", e);
+  }
 }
 
 // Remaining sellable units of an offer. Tries the single-offer endpoint and
@@ -2099,6 +2285,7 @@ module.exports = {
   digisellerPublish,
   digisellerUploadImage,
   digisellerAddContent,
+  digisellerRemoveContent,
   digisellerProductStock,
   digisellerDelist,
   g2gTest,
@@ -2114,6 +2301,7 @@ module.exports = {
   ggselTest,
   ggselCategories,
   ggselPublish,
+  ggselUpdateOffer,
   ggselAddProducts,
   ggselOfferStock,
   ggselResolveCategoryId,
