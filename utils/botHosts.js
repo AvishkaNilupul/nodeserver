@@ -26,6 +26,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const os = require("os");
+const zlib = require("zlib");
 const { execFile } = require("child_process");
 
 // Reuse a single SSH connection across the many short-lived commands the Bots
@@ -351,6 +352,147 @@ async function readFile(host, file) {
       throw e;
     }
   });
+}
+
+// Read MANY files in one go. Returns { [file]: { ok: true, text } | { ok:
+// false, error } } — one entry per requested file, never throwing for a single
+// bad file so one unreadable config cannot cost the whole listing.
+//
+// Why this exists: reading the Pi's 27 configs one `cat` at a time took 110s
+// end to end, which is what left the Bots page sitting on "Loading…" for
+// minutes. Two separate costs had to go:
+//
+//   * Latency. Each round trip over the Pi's home link costs ~2s, so 27 reads
+//     is a minute before any work happens. One command covers the whole set.
+//   * Bandwidth. Those configs are 627KB of very repetitive JSON, and the Pi's
+//     uplink is slow enough that even a single raw transfer took 31s. Piping
+//     the WHOLE batch through one gzip (rather than compressing each file
+//     separately) shares one dictionary across all of them: 847KB -> 204KB,
+//     and 31s -> ~2s. Measured against the live Pi 2026-07-30.
+//
+// The stream is a sequence of `\n<nonce> ok <file>\n<contents>` records, gzipped
+// and base64-armoured so it survives the SSH text channel. The nonce is random
+// per call, so no file body can forge a record header. If the remote lacks gzip
+// or base64 the whole command fails and we fall back to reading one at a time —
+// slow, but the page still gets its data.
+const READ_FILES_CHUNK = 50;
+
+async function readFilesOneByOne(host, files, out) {
+  for (const f of files) {
+    try {
+      out[f] = { ok: true, text: await readFile(host, f) };
+    } catch (e) {
+      if (e && e.unreachable) throw e;
+      out[f] = {
+        ok: false,
+        error: e.code === "ENOENT" ? "Not found" : e.message,
+      };
+    }
+  }
+  return out;
+}
+
+async function readFiles(host, files) {
+  const out = {};
+  if (!files || !files.length) return out;
+  if (host.transport === "local") {
+    await Promise.all(
+      files.map(async (f) => {
+        try {
+          out[f] = {
+            ok: true,
+            text: await fsp.readFile(path.join(host.dir, f), "utf8"),
+          };
+        } catch (e) {
+          out[f] = {
+            ok: false,
+            error: e.code === "ENOENT" ? "Not found" : e.message,
+          };
+        }
+      }),
+    );
+    return out;
+  }
+
+  for (let i = 0; i < files.length; i += READ_FILES_CHUNK) {
+    const chunk = files.slice(i, i + READ_FILES_CHUNK);
+    const nonce =
+      "BOTCFG" + Math.random().toString(36).slice(2, 12).toUpperCase();
+    const mark = (state) =>
+      "printf '\\n%s " + state + " %s\\n' " + shq(nonce) + ' "$f"';
+    const script =
+      "cd " +
+      shq(host.dir) +
+      " || exit 1\n" +
+      "{ for f in " +
+      chunk.map(shq).join(" ") +
+      "; do\n" +
+      '  if [ -r "$f" ]; then ' +
+      mark("ok") +
+      '; cat -- "$f";\n' +
+      "  else " +
+      mark("err") +
+      "; fi\n" +
+      "done; } | gzip -c | base64\n";
+    let stdout;
+    try {
+      ({ stdout } = await retryRead(() =>
+        sshRun(host, script, { timeout: EXEC_TIMEOUT }),
+      ));
+    } catch (e) {
+      // A host outage is not a per-file problem — let it propagate so callers
+      // can mark the host offline. Anything else (no gzip, no base64, a shell
+      // that choked) falls back to the slow path rather than failing the page.
+      if (e && e.unreachable) throw e;
+      await readFilesOneByOne(host, chunk, out);
+      continue;
+    }
+
+    let text;
+    try {
+      text = zlib
+        .gunzipSync(Buffer.from(stdout.replace(/\s+/g, ""), "base64"))
+        .toString("utf8");
+    } catch {
+      // Truncated or non-gzip output (a shell banner, a partial transfer).
+      await readFilesOneByOne(host, chunk, out);
+      continue;
+    }
+
+    // Records are delimited by a marker LINE. Content is every line after a
+    // marker up to the next one; joining them with "\n" reproduces the file
+    // byte for byte, because the newline printf writes before each marker is
+    // exactly the one consumed as the split boundary.
+    let cur = null;
+    let buf = [];
+    const flush = () => {
+      if (!cur) return;
+      out[cur.file] = cur.ok
+        ? { ok: true, text: buf.join("\n") }
+        : { ok: false, error: "Not found" };
+      cur = null;
+      buf = [];
+    };
+    for (const line of text.split("\n")) {
+      if (line.startsWith(nonce + " ")) {
+        const rest = line.slice(nonce.length + 1);
+        const sp = rest.indexOf(" ");
+        const state = sp === -1 ? "" : rest.slice(0, sp);
+        if (state === "ok" || state === "err") {
+          flush();
+          cur = { ok: state === "ok", file: rest.slice(sp + 1) };
+          continue;
+        }
+      }
+      if (cur && cur.ok) buf.push(line);
+    }
+    flush();
+    // A file the remote never mentioned (marker lost, truncated output).
+    for (const f of chunk) {
+      if (!out[f]) out[f] = { ok: false, error: "no response for this file" };
+    }
+  }
+  return out;
 }
 
 async function exists(host, file) {
@@ -818,6 +960,7 @@ module.exports = {
   resolveHost,
   readdir,
   readFile,
+  readFiles,
   exists,
   writeFileAtomic,
   rename,

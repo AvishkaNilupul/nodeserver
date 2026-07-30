@@ -377,8 +377,14 @@
     list.configs = list.configs.filter((c) => !AUTO_KEYS.has(host + "|" + c.file));
     const files = list.configs.map((c) => c.file);
     const newConfigs = {};
+    // The list now carries each config's full data, so there is nothing left to
+    // fetch. This used to fire one request PER config right here — on a remote
+    // host that meant another SSH round trip each (~2s on the Pi), doubling an
+    // already minutes-long wait. The per-file fetch is kept as a fallback for
+    // any entry an older server sent without `data`.
     await Promise.all(list.configs.map(async (c) => {
       if (!c.ok) { newConfigs[c.file] = { container: c.container, ok: false, error: c.error }; return; }
+      if (c.data) { newConfigs[c.file] = { container: c.container, data: c.data, ok: true }; return; }
       try { const full = await api(url("/bot-configs/file/" + encodeURIComponent(c.file))); newConfigs[c.file] = { container: full.container, data: full.data, ok: true }; }
       catch (e) { newConfigs[c.file] = { container: c.container, ok: false, error: e.message }; }
     }));
