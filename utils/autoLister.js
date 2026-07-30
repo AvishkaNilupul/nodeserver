@@ -352,11 +352,13 @@ async function publishPlatiShare({
     priceUsd: price,
     categories: [{ owner: 1, categoryId, attributes }],
   });
+  let contentIds = [];
   try {
-    await mp.digisellerAddContent(
+    const added = await mp.digisellerAddContent(
       r.externalId,
       accounts.map((a) => digisellerDeliveryCode(a.login, a.password)),
     );
+    contentIds = (added && added.contentIds) || [];
   } catch (err) {
     await mp.digisellerDelist(r.externalId).catch(() => {});
     throw err;
@@ -377,6 +379,16 @@ async function publishPlatiShare({
     autoDeliver: true,
     accountLogin: accounts.map((a) => a.login).join(", "),
     qtyTarget: accounts.length,
+    // Record which unit belongs to which account. Digiseller has no endpoint
+    // that lists a product's content, so an id not captured here can NEVER be
+    // targeted again — a single bad unit then has no remedy but delisting the
+    // whole product (which is exactly what the EA FC listings needed on
+    // 2026-07-30, having been fed before this bookkeeping existed).
+    units: accounts.map((a, i) => ({
+      accountId: String(a.accountId || ""),
+      login: a.login,
+      contentId: contentIds[i] || "",
+    })),
   });
   return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
 }
