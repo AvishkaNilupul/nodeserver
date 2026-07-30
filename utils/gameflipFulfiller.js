@@ -91,18 +91,17 @@ function gameflipDeliveryCode(login, password) {
   );
 }
 
-// Build an accurate title + description for the SPECIFIC account being handed
-// over. A bundle advertises a fixed item list, but the account picked to fill
-// it almost always holds more (extra copies, extra cosmetics, other games'
-// drops), so the buyer should see those disclosed rather than arrive as a
-// surprise.
+// Title + description for the listing that carries one specific account.
 //
-// The ADVERTISED bundle stays the set, though: the headline and item count are
-// the set's items, in set order — the same list the cover-image grid and the
-// other marketplaces' listings are built from. Folding the account's extras
-// into that count is what produced a "(56 Items)" title over a 5-item picture.
-// Everything the account holds beyond the set is disclosed in the bonus block
-// instead. Falls back to the caller's static text if the drops can't be read.
+// The advertised bundle is ALWAYS the set: same items, same order, same count
+// as the cover-image grid and the other marketplaces' listings. The delivered
+// account holds far more than that, and earlier versions leaked those extras
+// into the text — first by counting them in the title ("(56 Items)" over a
+// 5-item picture), then by enumerating them in a bonus block (87 lines under a
+// 5-item heading). Both made the listing misdescribe the bundle, so the account
+// now influences exactly one thing: per-item quantity, when it holds more
+// copies than the set advertises. Falls back to the caller's static text if the
+// account's drops can't be read.
 async function accountListingText(set, accountId, fallbackTitle, fallbackDescription) {
   try {
     const { buildTitle, buildDescription } = require("./autoLister");
@@ -127,11 +126,8 @@ async function accountListingText(set, accountId, fallbackTitle, fallbackDescrip
         qty: r.qty,
       });
     }
-    // Headline = the set's own items, in the set's order. Quantity comes from
-    // the real account whenever it holds more copies than the set advertises.
     const items = setItems.map((si) => {
       const hit = byKey.get(si.itemKey);
-      byKey.delete(si.itemKey);
       return {
         itemKey: si.itemKey,
         name: si.name,
@@ -140,23 +136,9 @@ async function accountListingText(set, accountId, fallbackTitle, fallbackDescrip
       };
     });
     if (!items.length) return { title: fallbackTitle, description: fallbackDescription };
-    // Everything else the account carries — same game first, then other games.
-    const pg = String(primaryGame).toLowerCase();
-    const sameGame = [];
-    const otherGames = [];
-    for (const it of byKey.values()) {
-      if (String(it.game || "").toLowerCase() === pg) sameGame.push(it);
-      else otherGames.push(it);
-    }
-    const byName = (a, b) => String(a.name).localeCompare(String(b.name));
-    sameGame.sort(byName);
-    otherGames.sort(
-      (a, b) => String(a.game).localeCompare(String(b.game)) || byName(a, b),
-    );
-    const bonus = sameGame.concat(otherGames);
     return {
       title: buildTitle({ game: primaryGame, items }),
-      description: buildDescription({ game: primaryGame, items, bonusItems: bonus }),
+      description: buildDescription({ game: primaryGame, items }),
     };
   } catch {
     return { title: fallbackTitle, description: fallbackDescription };

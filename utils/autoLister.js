@@ -109,7 +109,7 @@ function buildTitle({ game, items, campaignName, postEvent }) {
 
 // House description: item list first, then the seller's standard sections
 // (check before buying / multi-purchase warning / activation window / pitch).
-function buildDescription({ game, items, campaignName, postEvent, bonusItems }) {
+function buildDescription({ game, items, campaignName, postEvent }) {
   const lines = [];
   if (postEvent) {
     lines.push(
@@ -133,24 +133,12 @@ function buildDescription({ game, items, campaignName, postEvent, bonusItems }) 
         (i.game ? " (" + i.game + ")" : ""),
     );
   }
-  // Real accounts almost always carry more than the bundle advertises (extra
-  // cosmetics, other games' drops). Disclose those as an explicit bonus block,
-  // kept OUT of the item count above, so the headline still matches the cover
-  // image while the buyer still sees exactly what the account holds.
-  if (Array.isArray(bonusItems) && bonusItems.length) {
-    lines.push(
-      "",
-      "\ud83c\udf81 Bonus \u2014 this account also has these extra unclaimed drops:",
-    );
-    for (const i of bonusItems) {
-      lines.push(
-        "- " +
-          ((i.qty || 1) > 1 ? i.qty + "\u00d7 " : "") +
-          i.name +
-          (i.game ? " (" + i.game + ")" : ""),
-      );
-    }
-  }
+  // NB: the item list above is the whole advertised bundle \u2014 deliberately just
+  // the set. A delivered account carries far more (this one held 87 extra
+  // drops), and an earlier version enumerated those in a "Bonus" block. Don't
+  // reintroduce it: it made a 5-item listing read as a 56-item one, and it
+  // advertised drops that are often reserved to OTHER buyers, inviting the
+  // buyer to claim them (the cross-buyer theft dropReservation exists to stop).
   lines.push(
     "",
     "You receive a Twitch account with ALL of the above drops sitting " +

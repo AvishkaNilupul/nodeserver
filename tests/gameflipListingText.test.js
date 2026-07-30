@@ -5,9 +5,11 @@
 // a cover image showing 5 — while the same set listed correctly as "(5 Items)"
 // on GGSel, which builds its title from the set.
 //
-// The rule these tests lock in: the item COUNT and headline are the set's, so
-// title, description and cover image always agree; the account's extras are
-// disclosed in the bonus block instead of inflating the count.
+// The rule these tests lock in: the advertised bundle is EXACTLY the set, so
+// title, description and cover image always agree. The account's extras must
+// not leak into the text at all - not into the count (which produced the
+// "(56 Items)" title) and not into a bonus block (which listed 87 extra drops
+// under a 5-item heading, and advertised drops reserved to other buyers).
 const test = require("node:test");
 const assert = require("node:assert");
 
@@ -62,24 +64,20 @@ test("the item count is the set's, not everything the account happens to hold", 
   });
 });
 
-test("extras are disclosed as bonus instead of inflating the advertised list", async () => {
+test("the description lists the set and nothing else", async () => {
   await withDrops(fatAccount(), async () => {
     const { description } = await accountListingText(SET, "acc1", "fb", "fb");
-    const includes = description.slice(
-      description.indexOf("Includes:"),
-      description.indexOf("🎁"),
-    );
-    // Exactly the five advertised items sit above the bonus block.
-    assert.strictEqual(includes.match(/^- /gm).length, 5);
-    assert.match(includes, /- Loot Box \(Overwatch 2\)/);
-    assert.doesNotMatch(includes, /Extra OW Cosmetic/);
-    // ...and the 51 extras are still shown, just below the line.
-    assert.match(description, /Bonus — this account also has these extra unclaimed drops:/);
-    assert.match(description, /- Extra OW Cosmetic 0 \(Overwatch 2\)/);
+    // Exactly five item lines in the whole description.
+    assert.strictEqual(description.match(/^- /gm).length, 5);
+    assert.match(description, /- Loot Box \(Overwatch 2\)/);
+    assert.doesNotMatch(description, /Extra OW Cosmetic/);
+    // No bonus block, however it might be reworded.
+    assert.doesNotMatch(description, /Bonus/i);
+    assert.ok(!description.includes("🎁"), "no bonus block");
   });
 });
 
-test("other games are still disclosed, after the same-game extras", async () => {
+test("other games never leak into the text either", async () => {
   const rows = [
     ...SET.items.map((i) => row(i.name, OW)),
     row("Zombie Skin", "Call of Duty"),
@@ -88,11 +86,8 @@ test("other games are still disclosed, after the same-game extras", async () => 
   await withDrops(rows, async () => {
     const { title, description } = await accountListingText(SET, "acc1", "fb", "fb");
     assert.match(title, /\(5 Items\)/);
-    const bonus = description.slice(description.indexOf("🎁"));
-    assert.ok(
-      bonus.indexOf("Overwatch Leftover") < bonus.indexOf("Zombie Skin"),
-      "same-game extras should lead the bonus block",
-    );
+    assert.doesNotMatch(description, /Zombie Skin|Call of Duty|Overwatch Leftover/);
+    assert.strictEqual(description.match(/^- /gm).length, 5);
   });
 });
 
@@ -106,6 +101,7 @@ test("a real extra copy still shows the account's higher quantity", async () => 
     // Quantity is not item count — the bundle is still five things.
     assert.match(title, /\(5 Items\)/);
     assert.match(description, /- 3× Loot Box \(Overwatch 2\)/);
+    assert.strictEqual(description.match(/^- /gm).length, 5);
   });
 });
 
