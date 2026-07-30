@@ -29,13 +29,14 @@ test("title follows house style with item names and count", () => {
   assert.ok(t.length <= 120);
 });
 
-test("post-event title leads with EVENT ENDED", () => {
+test("a post-event title is not flagged as ended", () => {
   const t = buildTitle({
     game: "Rust",
     items: items.slice(0, 1),
     postEvent: true,
   });
-  assert.ok(t.startsWith("[EVENT ENDED] Rust Twitch Drops (1 Item)"));
+  assert.ok(t.startsWith("Rust Twitch Drops (1 Item)"));
+  assert.doesNotMatch(t, /EVENT ENDED/);
 });
 
 test("title never exceeds Gameflip's 120-char limit", () => {

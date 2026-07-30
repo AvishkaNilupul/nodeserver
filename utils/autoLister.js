@@ -81,14 +81,15 @@ async function campaignItems(campaignId, game) {
 
 // House title style (matches the seller's live listings):
 //   "{Game} Twitch Drops ({N} Items) — {Item A} + {Item B} +{N-2} more"
-// with graceful truncation to Gameflip's 120-char limit. Post-event listings
-// lead with the scarcity hook instead.
-function buildTitle({ game, items, campaignName, postEvent }) {
+// with graceful truncation to Gameflip's 120-char limit.
+//
+// The title is the same before and after a campaign ends. An earlier version
+// prefixed post-event listings with "[EVENT ENDED]"; it burns characters of a
+// 120-char limit, and the buyer is shopping for the drops, not the campaign.
+function buildTitle({ game, items, campaignName }) {
   const n = items.length;
   const names = items.map((i) => i.name);
-  const prefix = postEvent
-    ? "[EVENT ENDED] " + game + " Twitch Drops"
-    : game + " Twitch Drops";
+  const prefix = game + " Twitch Drops";
   const countBit = " (" + n + " Item" + (n === 1 ? "" : "s") + ")";
   let tail = "";
   if (names.length) {
@@ -925,8 +926,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
 
 // Once the drop event ends the items can no longer be earned — supply is fixed.
 // Two things happen to this task's listing:
-//   1. +50% scarcity markup (the user-approved post-event repricing), with the
-//      title/description rewritten to lead with "EVENT ENDED".
+//   1. +50% scarcity markup (the user-approved post-event repricing). The
+//      TITLE is left alone — it reads the same before and after the event.
 //   2. STACKING: auto-bots are reused across a game's campaigns, so the same
 //      accounts hold drops from EVERY campaign farmed so far. The listing's
 //      set is rebuilt as the union of all completed auto-farm sets for the
