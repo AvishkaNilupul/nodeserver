@@ -8,14 +8,17 @@
 // live Gameflip profile), price comes from market research, and the existing
 // gameflipFulfiller relist chain takes over after the first sale.
 const AutoFarmTask = require("../models/AutoFarmTask");
-const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const MarketResearch = require("../models/MarketResearch");
-const { gameflipDeliveryCode } = require("./gameflipFulfiller");
-const { digisellerDeliveryCode } = require("./digisellerFulfiller");
-const { ggselDeliveryCode } = require("./ggselFulfiller");
+const { gameflipDeliveryCode, GF_CLAIM_TAG } = require("./gameflipFulfiller");
+const {
+  digisellerDeliveryCode,
+  DS_CLAIM_TAG,
+} = require("./digisellerFulfiller");
+const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
+const { reserveSetOnAccount } = require("./dropReservation");
 const settings = require("./settings");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
@@ -261,6 +264,21 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
 // attached to an active listing on ANY marketplace (accountLogin can be a
 // comma-separated list on Plati/GGSel rows) — one account is only ever sold
 // on one market.
+// Candidates only — does NOT reserve anything in DropLog. Some callers
+// (refillMarkets' Gameflip branch) just need a count of how many accounts
+// COULD be delivered, without committing any of them, so reservation happens
+// at the actual commit point instead (publishPlatiShare, publishGgselShare,
+// and the direct Gameflip ship in listActivatedTask) — see the CLAIM_TAG
+// reserveSetOnAccount calls there.
+//
+// Sourced from BotAccount, not AvailableAccount: the two can hold separate
+// DropLog rows for the very same real Twitch login (the account's pool entry
+// and its deployed bot entry are different Mongo documents), and it is the
+// BotAccount id that DropLog/Shop availability actually keys on (see
+// routes/shopRoutes.js sellableAccountMap). Picking via AvailableAccount used
+// to source a login/password pair with no connection to the id the rest of
+// the system checks — so nothing here ever collided with the Shop or another
+// listing's reservation, and the same drops could be handed out twice.
 async function pickDeliveryAccounts(task, max) {
   const used = new Set();
   for (const r of await MarketplaceListing.find(
@@ -275,13 +293,20 @@ async function pickDeliveryAccounts(task, max) {
   for (const username of task.assignedAccounts || []) {
     if (out.length >= max) break;
     if (used.has(String(username).toLowerCase())) continue;
-    const acc = await AvailableAccount.findOne({
-      usernameLower: String(username).toLowerCase(),
+    const acc = await BotAccount.findOne({
+      login: new RegExp(
+        "^" + String(username).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+        "i",
+      ),
     }).lean();
     if (!acc) continue;
-    const password = decrypt(acc.password);
+    const password = decrypt(acc.credPassword);
     if (!password) continue;
-    out.push({ login: username, password });
+    out.push({
+      accountId: String(acc._id),
+      login: acc.login || username,
+      password,
+    });
   }
   return out;
 }
@@ -307,12 +332,17 @@ async function deliveryBlockReason(task) {
       committed++;
       continue;
     }
-    const acc = await AvailableAccount.findOne({ usernameLower: lower }).lean();
+    const acc = await BotAccount.findOne({
+      login: new RegExp(
+        "^" + String(username).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+        "i",
+      ),
+    }).lean();
     if (!acc) {
       notInPool++;
       continue;
     }
-    if (!decrypt(acc.password)) noPassword++;
+    if (!decrypt(acc.credPassword)) noPassword++;
   }
   const total = (task.assignedAccounts || []).length;
   const parts = [];
@@ -327,6 +357,36 @@ async function deliveryBlockReason(task) {
     (parts.join(", ") || "none assigned") +
     ")"
   );
+}
+
+// Reserve every account's drops for this set before its credentials go out
+// as a real delivery code — the actual commit point, not pickDeliveryAccounts
+// (see the comment there). Filters out any account that lost the race (e.g.
+// a Shop sale claimed it a moment earlier); the caller ends up delivering
+// fewer units than requested rather than handing out drops twice.
+async function reserveAccountsForPublish(accounts, set, tag) {
+  const out = [];
+  for (const a of accounts) {
+    const ok = await reserveSetOnAccount(a.accountId, set, {
+      soldToUsername: tag,
+      soldSetId: String(set._id),
+    });
+    if (ok) out.push(a);
+  }
+  return out;
+}
+
+// Same idea, for Gameflip's single immediately-shipped unit: try candidates
+// in order and reserve+return the first one that still holds the bundle.
+async function reserveOneForDelivery(accounts, set, tag) {
+  for (const a of accounts) {
+    const ok = await reserveSetOnAccount(a.accountId, set, {
+      soldToUsername: tag,
+      soldSetId: String(set._id),
+    });
+    if (ok) return a;
+  }
+  return null;
 }
 
 // ---- Secondary-market publishers, shared by the initial listing and the
@@ -346,6 +406,12 @@ async function publishPlatiShare({
   // can not add goods"). Auto-farm only ever lists Twitch-drop accounts, so
   // pass the configured attribute (default: Content type = Twitch Drops
   // Accounts, 91328 -> 183570) alongside the category.
+  accounts = await reserveAccountsForPublish(accounts, set, DS_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
   const attributes = settings.getAutoFarm().platiAttributes || [];
   const r = await mp.digisellerPublish({
     title,
@@ -404,6 +470,12 @@ async function publishGgselShare({
   accounts,
   categoryId,
 }) {
+  accounts = await reserveAccountsForPublish(accounts, set, GG_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
   const r = await mp.ggselPublish({
     title,
     description,
@@ -605,11 +677,20 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- Plati (Digiseller): live stock read, then add codes to the product.
+  // Set is resolved lazily below (only when a refill actually has accounts to
+  // commit) since most ticks find every market already stocked.
+  let refillSet = null;
+  async function getRefillSet() {
+    if (!refillSet) refillSet = await DropSet.findById(L.setId);
+    return refillSet;
+  }
   if (L.plati && L.plati.externalId) {
     try {
       const stock = await mp.digisellerProductStock(L.plati.externalId);
       if (stock !== null && stock < per) {
-        const accs = takeAccounts(per - stock);
+        let accs = takeAccounts(per - stock);
+        const s = accs.length ? await getRefillSet() : null;
+        if (s) accs = await reserveAccountsForPublish(accs, s, DS_CLAIM_TAG);
         if (accs.length) {
           await mp.digisellerAddContent(
             L.plati.externalId,
@@ -630,7 +711,9 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
     try {
       const stock = await mp.ggselOfferStock(L.ggsel.externalId);
       if (stock !== null && stock < per) {
-        const accs = takeAccounts(per - stock);
+        let accs = takeAccounts(per - stock);
+        const s = accs.length ? await getRefillSet() : null;
+        if (s) accs = await reserveAccountsForPublish(accs, s, GG_CLAIM_TAG);
         if (accs.length) {
           await mp.ggselAddProducts(
             L.ggsel.externalId,
@@ -813,6 +896,15 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   }
 
   const gfAccounts = shares.gameflip;
+  const gfDeliver = await reserveOneForDelivery(gfAccounts, set, GF_CLAIM_TAG);
+  if (!gfDeliver) {
+    await DropSet.deleteOne({ _id: set._id }).catch(() => {});
+    throw new Error(
+      "Auto-list " +
+        task.game +
+        ": no account still held the full bundle unclaimed at publish time",
+    );
+  }
   let published;
   const plati = { externalId: "", url: "", qty: 0, error: "" };
   const ggsel = { externalId: "", url: "", qty: 0, error: "" };
@@ -823,8 +915,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       priceUsd: price,
       imagePath: img,
       autoDeliverCode: gameflipDeliveryCode(
-        gfAccounts[0].login,
-        gfAccounts[0].password,
+        gfDeliver.login,
+        gfDeliver.password,
       ),
     });
 

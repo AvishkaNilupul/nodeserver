@@ -102,7 +102,12 @@ function gameflipDeliveryCode(login, password) {
 // now influences exactly one thing: per-item quantity, when it holds more
 // copies than the set advertises. Falls back to the caller's static text if the
 // account's drops can't be read.
-async function accountListingText(set, accountId, fallbackTitle, fallbackDescription) {
+async function accountListingText(
+  set,
+  accountId,
+  fallbackTitle,
+  fallbackDescription,
+) {
   try {
     const { buildTitle, buildDescription } = require("./autoLister");
     const setItems = (set.items || []).filter((i) => i.itemKey);
@@ -116,7 +121,8 @@ async function accountListingText(set, accountId, fallbackTitle, fallbackDescrip
         },
       },
     ]);
-    if (!rows.length) return { title: fallbackTitle, description: fallbackDescription };
+    if (!rows.length)
+      return { title: fallbackTitle, description: fallbackDescription };
     const byKey = new Map();
     for (const r of rows) {
       byKey.set(r._id.key, {
@@ -135,7 +141,8 @@ async function accountListingText(set, accountId, fallbackTitle, fallbackDescrip
         qty: Math.max(Number(si.qty) || 1, (hit && Number(hit.qty)) || 0),
       };
     });
-    if (!items.length) return { title: fallbackTitle, description: fallbackDescription };
+    if (!items.length)
+      return { title: fallbackTitle, description: fallbackDescription };
     return {
       title: buildTitle({ game: primaryGame, items }),
       description: buildDescription({ game: primaryGame, items }),
@@ -253,8 +260,11 @@ async function syncOnce() {
         }
         if (retired) {
           console.error(
-            "gameflip listing " + row.externalId + " is 404 — retired, " +
-              (Number(row.qtyRemaining) || 0) + " unit(s) were still owed",
+            "gameflip listing " +
+              row.externalId +
+              " is 404 — retired, " +
+              (Number(row.qtyRemaining) || 0) +
+              " unit(s) were still owed",
           );
         }
       }
@@ -343,6 +353,7 @@ function start() {
 }
 
 module.exports = {
+  GF_CLAIM_TAG,
   claimAccountForSet,
   releaseAccount,
   gameflipDeliveryCode,
