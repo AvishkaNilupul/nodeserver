@@ -15,6 +15,7 @@ const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
 const fpFulfiller = require("../utils/funpayFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
+const guardianFixes = require("../utils/guardianFixes");
 const marketResearch = require("../utils/marketResearch");
 const mp = require("../utils/marketplaces");
 const epicnpc = require("../utils/epicnpcCatalog");
@@ -615,6 +616,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               priceUsd,
               imagePath: gridImage || coverImagePath(set),
               qtyRemaining: qty - 1,
+              // Published from the Listings page: the owner's own stock, so it
+              // (and every unit its relist chain publishes after it) is exempt
+              // from the auto-farmer's post-event repricing.
+              origin: "manual",
             });
             results[name] = {
               success: true,
@@ -1087,6 +1092,10 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
         lastError: r.lastError,
         autoDeliver: !!r.autoDeliver,
         qtyRemaining: Number(r.qtyRemaining) || 0,
+        // Auto-farmed or the owner's own. Sent so the page can show which rows
+        // the post-event markup is allowed to reprice — anything not marked
+        // "auto" keeps whatever price it was given.
+        origin: r.origin === "auto" ? "auto" : "manual",
         createdAt: r.createdAt,
       })),
     });
@@ -1254,30 +1263,90 @@ router.get(
       const q = {};
       const st = String(req.query.status || "");
       if (st) q.status = st;
+      const limit = Math.min(
+        1000,
+        Math.max(1, parseInt(req.query.limit, 10) || 300),
+      );
       const rows = await AuditFinding.find(q)
         .sort({ status: 1, severity: 1, lastSeenAt: -1 })
-        .limit(300)
+        .limit(limit)
         .lean();
+      // Join the referenced listings once, so the tab can group findings per
+      // listing and label which ones have a one-click fix.
+      const listingIds = [
+        ...new Set(rows.map((f) => String(f.listing || "")).filter(Boolean)),
+      ];
+      const listings = listingIds.length
+        ? await MarketplaceListing.find(
+            { _id: { $in: listingIds } },
+            {
+              marketplace: 1,
+              externalId: 1,
+              title: 1,
+              url: 1,
+              status: 1,
+              qtyTarget: 1,
+              // fixPlanFor needs these to decide whether a dead-token unit on
+              // a Digiseller product can actually be targeted individually.
+              units: 1,
+            },
+          ).lean()
+        : [];
+      const lmap = new Map(listings.map((l) => [String(l._id), l]));
       res.json({
         success: true,
-        findings: rows.map((f) => ({
-          id: String(f._id),
-          type: f.type,
-          severity: f.severity,
-          marketplace: f.marketplace,
-          listingId: f.listing ? String(f.listing) : "",
-          accountId: f.accountId,
-          accountLogin: f.accountLogin,
-          message: f.message,
-          status: f.status,
-          resolution: f.resolution,
-          detectedAt: f.detectedAt,
-          lastSeenAt: f.lastSeenAt,
-        })),
+        findings: rows.map((f) => {
+          const lst = lmap.get(String(f.listing || "")) || null;
+          return {
+            id: String(f._id),
+            type: f.type,
+            severity: f.severity,
+            marketplace: f.marketplace,
+            listingId: f.listing ? String(f.listing) : "",
+            listing: lst
+              ? {
+                  id: String(lst._id),
+                  marketplace: lst.marketplace,
+                  externalId: lst.externalId,
+                  title: lst.title,
+                  url: lst.url,
+                  status: lst.status,
+                  qtyTarget: lst.qtyTarget,
+                }
+              : null,
+            fix: guardianFixes.fixPlanFor(f, lst),
+            accountId: f.accountId,
+            accountLogin: f.accountLogin,
+            message: f.message,
+            status: f.status,
+            resolution: f.resolution,
+            detectedAt: f.detectedAt,
+            lastSeenAt: f.lastSeenAt,
+          };
+        }),
       });
     } catch (err) {
       console.error("guardian findings error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// One-click fix: replace the account / re-reserve / detach / retry restock,
+// depending on the finding (see utils/guardianFixes.js). Resolves the finding
+// on success and answers with a human-readable summary of what was done.
+router.post(
+  "/marketplaces/guardian/findings/:id/fix",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const r = await guardianFixes.fixFinding(req.params.id);
+      res.json({ success: true, message: r.message, action: r.action });
+    } catch (err) {
+      console.error("guardian fix error:", err.message);
+      res
+        .status(err.status || 500)
+        .json({ success: false, message: err.message });
     }
   },
 );
