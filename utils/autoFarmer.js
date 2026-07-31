@@ -235,7 +235,9 @@ async function manualFarmMap(autoKeys) {
       // per-account list — the normal way manual bots are set up — was
       // misfiled as a wildcard instead of as a farmer of the config's games.
       // That is where the "1615 accounts farming everything" figure came from.
-      const cfgFavs = Array.isArray(cfg.FavouriteGames) ? cfg.FavouriteGames : [];
+      const cfgFavs = Array.isArray(cfg.FavouriteGames)
+        ? cfg.FavouriteGames
+        : [];
       const only = ts.OnlyFavouriteGames !== false;
       for (const u of users) {
         if (!u || u.Enabled === false) continue;
@@ -331,7 +333,9 @@ async function archiveHoldersByGame(games, stash, owned) {
   if (!list.length) return out;
   try {
     const rows = await DropLog.aggregate([
-      { $match: { game: { $in: list }, connected: { $ne: true }, soldAt: null } },
+      {
+        $match: { game: { $in: list }, connected: { $ne: true }, soldAt: null },
+      },
       { $group: { _id: { game: "$game", login: "$login" } } },
       // One entry per (game, login) pair already exists after the first
       // $group, so collecting the logins costs nothing extra in documents and
@@ -363,8 +367,12 @@ async function archiveHoldersByGame(games, stash, owned) {
 async function ownedAccounts() {
   try {
     const out = new Set();
-    for (const t of await AutoFarmTask.find({}, { assignedAccounts: 1 }).lean()) {
-      for (const u of t.assignedAccounts || []) out.add(String(u).toLowerCase());
+    for (const t of await AutoFarmTask.find(
+      {},
+      { assignedAccounts: 1 },
+    ).lean()) {
+      for (const u of t.assignedAccounts || [])
+        out.add(String(u).toLowerCase());
     }
     return out;
   } catch {
@@ -484,22 +492,37 @@ function fairShare(requests, budget) {
 
 // Atomically reserve N ready pool accounts. Returns the claimed docs; on
 // partial failure the caller must release them via releasePoolAccounts.
-async function claimPoolAccounts(n, note) {
+// `preferGame` gives game affinity: accounts recycled after a previous
+// campaign of the SAME game (their claimedNote reads "recycled after <game>")
+// are claimed FIRST, so an account keeps stacking one game's drops event after
+// event instead of scattering across whatever campaign claims it next.
+async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
   const claimed = [];
-  for (let i = 0; i < n; i++) {
-    const doc = await AvailableAccount.findOneAndUpdate(
-      readyPoolQuery(),
-      {
-        $set: {
-          status: "claimed",
-          claimedAt: new Date(),
-          claimedNote: note,
+  const passes = [];
+  if (preferGame) {
+    const esc = String(preferGame).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    passes.push({
+      claimedNote: new RegExp("^recycled after " + esc + "$", "i"),
+    });
+  }
+  passes.push({});
+  for (const extra of passes) {
+    while (claimed.length < n) {
+      const doc = await AvailableAccount.findOneAndUpdate(
+        { ...readyPoolQuery(), ...extra },
+        {
+          $set: {
+            status: "claimed",
+            claimedAt: new Date(),
+            claimedNote: note,
+          },
         },
-      },
-      { new: true, sort: { lastCheckAt: -1 } }, // freshest-verified first
-    );
-    if (!doc) break;
-    claimed.push(doc);
+        { new: true, sort: { lastCheckAt: -1 } }, // freshest-verified first
+      );
+      if (!doc) break;
+      claimed.push(doc);
+    }
+    if (claimed.length >= n) break;
   }
   return claimed;
 }
@@ -548,16 +571,20 @@ async function unrecyclableLogins(logins) {
   const DropLog = require("../models/DropLog");
   const MarketplaceListing = require("../models/MarketplaceListing");
   const [soldRows, dropSold, dropConnected, listedRows] = await Promise.all([
-    BotAccount.find({ login: { $in: logins }, soldAt: { $ne: null } }, { login: 1 })
+    BotAccount.find(
+      { login: { $in: logins }, soldAt: { $ne: null } },
+      { login: 1 },
+    )
       .lean()
       .catch(() => []),
     DropLog.distinct("login", {
       login: { $in: logins },
       soldAt: { $ne: null },
     }).catch(() => []),
-    DropLog.distinct("login", { login: { $in: logins }, connected: true }).catch(
-      () => [],
-    ),
+    DropLog.distinct("login", {
+      login: { $in: logins },
+      connected: true,
+    }).catch(() => []),
     // Accounts attached to a live listing are promised stock a buyer can
     // purchase at any moment. Back in the pool they would be re-claimed and
     // redeployed while on sale — a bot logged in and rewriting the config of
@@ -666,9 +693,7 @@ async function fillExistingBots(host, claimed, game, af) {
     const secretOfAcc = (a) => String((a && a.clientSecret) || "").trim();
     const already = remaining.filter((a) => present.has(secretOfAcc(a)));
     const batch = already.concat(
-      remaining
-        .filter((a) => !present.has(secretOfAcc(a)))
-        .slice(0, freeSeats),
+      remaining.filter((a) => !present.has(secretOfAcc(a))).slice(0, freeSeats),
     );
     if (!batch.length) continue;
     try {
@@ -749,7 +774,9 @@ async function expireStalePlans() {
   for (const t of stale) {
     const c = byId.get(t.campaignId);
     const ended =
-      !c || c.status === "EXPIRED" || (c.endAt && new Date(c.endAt) < new Date());
+      !c ||
+      c.status === "EXPIRED" ||
+      (c.endAt && new Date(c.endAt) < new Date());
     if (ended) dead.push(t._id);
   }
   if (!dead.length) return 0;
@@ -803,7 +830,9 @@ async function probeHost(host, log) {
       await hosts.readdir(host);
       if (i > 1 && typeof log === "function") {
         log(
-          "Farm host answered on attempt " + i + " — the first probe was a flap.",
+          "Farm host answered on attempt " +
+            i +
+            " — the first probe was a flap.",
         );
       }
       return true;
@@ -1004,7 +1033,7 @@ async function processCampaign(c, ctx) {
     const mine = (reusable.assignedAccounts || []).filter(
       (u) => !spokenFor.has(String(u).toLowerCase()),
     );
-    await record({
+    const reuseTask = await record({
       decision: "reuse_existing",
       status: started.length ? "active" : "failed",
       reason,
@@ -1016,12 +1045,33 @@ async function processCampaign(c, ctx) {
       error: failed.join("; "),
       executedAt: new Date(),
     });
+    // Top-up: the reused accounts stack this game's drops event over event and
+    // sell as the stacked bundle — but demand above what they freely cover is
+    // worth FRESH pool accounts too, which farm only this event and sell it
+    // solo. Best-effort: a pool/capacity shortage leaves the reuse standing.
+    let toppedUp = 0;
+    const topUp = Math.min(
+      Math.max(0, (Number(alloc.target) || 0) - mine.length),
+      budgetMap.get(key) || 0,
+    );
+    if (started.length && Number.isFinite(topUp) && topUp >= 1) {
+      try {
+        reuseTask.plannedAccounts = topUp;
+        const r = await executeTask(reuseTask, ctx, { append: true });
+        toppedUp = (r && r.accounts) || 0;
+      } catch {
+        /* reuse alone stands; fresh accounts can join on a later campaign */
+      }
+    }
     await tg(
       "🤖 Auto-farm REUSE — " +
         game +
         "\nRestarted " +
         started.join(", ") +
         (failed.length ? "\nFailed: " + failed.join("; ") : "") +
+        (toppedUp
+          ? "\nTopped up with " + toppedUp + " fresh account(s) for solo stock."
+          : "") +
         "\nCampaign: " +
         (c.name || c.campaignId),
     );
@@ -1260,7 +1310,7 @@ async function processCampaign(c, ctx) {
 // Execute a planned task for real: claim pool accounts, create bot(s) on the
 // farm host, mark active. Used by live-mode ticks AND the one-click
 // "approve" button on dry-run plans.
-async function executeTask(task, ctx) {
+async function executeTask(task, ctx, { append = false } = {}) {
   const af = ctx && ctx.af ? ctx.af : cfg();
   const host = ctx && ctx.host ? ctx.host : resolveFarmHost(af);
   if (!host) throw new Error("No farm host configured");
@@ -1313,6 +1363,7 @@ async function executeTask(task, ctx) {
   const claimed = await claimPoolAccounts(
     n,
     "auto-farm: " + game + " (" + task.campaignId + ")",
+    { preferGame: game },
   );
   if (!claimed.length) {
     // Same reasoning as the reserve-floor guard above: the claim won nothing,
@@ -1373,15 +1424,42 @@ async function executeTask(task, ctx) {
     await releasePoolAccounts(leftover);
   }
 
-  const ok = bots.length > 0;
+  // Append mode (the reuse top-up): the task already carries reused bots and
+  // accounts — merge the fresh ones in rather than overwriting them. Normal
+  // execution keeps the overwrite semantics (a retried plan must not resurrect
+  // stale bots from a previous failed run).
+  let finalBots = bots;
+  let finalAccounts = deployed.map((d) => d.username);
+  if (append) {
+    const seenBot = new Set();
+    finalBots = [];
+    for (const b of [...(task.bots || []), ...bots]) {
+      const k = b.host + "|" + b.container;
+      if (seenBot.has(k)) continue;
+      seenBot.add(k);
+      finalBots.push(b);
+    }
+    const seenAcc = new Set();
+    finalAccounts = [];
+    for (const u of [
+      ...(task.assignedAccounts || []),
+      ...deployed.map((d) => d.username),
+    ]) {
+      const k = String(u).toLowerCase();
+      if (!k || seenAcc.has(k)) continue;
+      seenAcc.add(k);
+      finalAccounts.push(u);
+    }
+  }
+  const ok = finalBots.length > 0;
   await AutoFarmTask.updateOne(
     { _id: task._id },
     {
       $set: {
         status: ok ? "active" : "failed",
         dryRun: false,
-        bots,
-        assignedAccounts: deployed.map((d) => d.username),
+        bots: finalBots,
+        assignedAccounts: finalAccounts,
         error: error.trim(),
         executedAt: new Date(),
       },
@@ -1506,8 +1584,7 @@ async function reapRetiredBots(af, host, progress) {
         stillFarming.add(String(r.login || "").toLowerCase());
       }
       const back = logins.filter(
-        (u) =>
-          !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
+        (u) => !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
       );
       if (back.length) {
         const r = await AvailableAccount.updateMany(
@@ -2030,8 +2107,7 @@ async function runOnce() {
       if (!existing) {
         candidates.push(c);
       } else if (
-        (existing.status === "skipped" &&
-          RETRYABLE.has(existing.decision)) ||
+        (existing.status === "skipped" && RETRYABLE.has(existing.decision)) ||
         existing.rescanRequested
       ) {
         // Either the conditions may have changed on their own, or the operator
@@ -2303,6 +2379,56 @@ async function runOnce() {
         }
       } catch (e) {
         progress("Auto-list " + t.game + " failed: " + e.message, "warn");
+      }
+    }
+
+    // Stacked-bundle sweep: tasks whose reused accounts hold earlier
+    // campaigns' bundles TOO get a second, combined-bundle listing (old + new
+    // events, combined price) — the solo listing above keeps selling the
+    // current event alone. Live mode only; already-stacked tasks skip cheaply.
+    if (!af.dryRun) {
+      const stackable = await AutoFarmTask.find({
+        status: "active",
+        "listing.externalId": { $nin: ["", null] },
+        $or: [
+          { "stackListing.externalId": "" },
+          { "stackListing.externalId": { $exists: false } },
+        ],
+      }).lean();
+      for (const t of stackable) {
+        try {
+          const r = await autoLister.listStackedBundle(t._id, {});
+          if (r.listed) {
+            progress(
+              t.game +
+                " STACKED bundle listed: " +
+                r.listed.title +
+                " ($" +
+                r.listed.price +
+                ", qty " +
+                r.listed.qty +
+                ") " +
+                r.listed.url,
+            );
+            await tg(
+              "\ud83d\udce6 Auto-listed STACKED bundle \u2014 " +
+                t.game +
+                "\n" +
+                r.listed.title +
+                "\n$" +
+                r.listed.price +
+                " \u00b7 qty " +
+                r.listed.qty +
+                "\n" +
+                r.listed.url,
+            );
+          }
+        } catch (e) {
+          progress(
+            "Stacked listing " + t.game + " failed: " + e.message,
+            "warn",
+          );
+        }
       }
     }
 

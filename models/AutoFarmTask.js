@@ -136,6 +136,34 @@ const autoFarmTaskSchema = new mongoose.Schema(
       postEvent: { type: Boolean, default: false },
       error: { type: String, default: "" },
     },
+    // Stacked-bundle listing: when this game's accounts were reused across
+    // earlier campaigns they hold every prior bundle PLUS this one, so a
+    // second listing sells that combined stack at a combined price — while
+    // `listing` above keeps selling the current event solo. Same shape as
+    // `listing`; published by autoLister.listStackedBundle.
+    stackListing: {
+      setId: { type: String, default: "" },
+      externalId: { type: String, default: "" },
+      url: { type: String, default: "" },
+      title: { type: String, default: "" },
+      price: { type: Number, default: 0 },
+      qty: { type: Number, default: 0 },
+      heldBack: { type: Number, default: 0 },
+      plati: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
+      ggsel: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
+      listedAt: { type: Date, default: null },
+      error: { type: String, default: "" },
+    },
     // Dry-run preview: what WOULD have been listed (no real listing made).
     wouldList: {
       title: { type: String, default: "" },
