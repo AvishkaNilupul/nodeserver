@@ -546,7 +546,8 @@ async function unrecyclableLogins(logins) {
   if (!lower.length) return new Set();
   const BotAccount = require("../models/BotAccount");
   const DropLog = require("../models/DropLog");
-  const [soldRows, dropSold, dropConnected] = await Promise.all([
+  const MarketplaceListing = require("../models/MarketplaceListing");
+  const [soldRows, dropSold, dropConnected, listedRows] = await Promise.all([
     BotAccount.find({ login: { $in: logins }, soldAt: { $ne: null } }, { login: 1 })
       .lean()
       .catch(() => []),
@@ -557,11 +558,28 @@ async function unrecyclableLogins(logins) {
     DropLog.distinct("login", { login: { $in: logins }, connected: true }).catch(
       () => [],
     ),
+    // Accounts attached to a live listing are promised stock a buyer can
+    // purchase at any moment. Back in the pool they would be re-claimed and
+    // redeployed while on sale — a bot logged in and rewriting the config of
+    // an account mid-handover to a buyer.
+    MarketplaceListing.find(
+      { status: "active", accountLogin: { $ne: "" } },
+      { accountLogin: 1 },
+    )
+      .lean()
+      .catch(() => []),
   ]);
   const out = new Set();
   for (const r of soldRows) out.add(String(r.login || "").toLowerCase());
   for (const l of dropSold) out.add(String(l || "").toLowerCase());
   for (const l of dropConnected) out.add(String(l || "").toLowerCase());
+  const wanted = new Set(lower);
+  for (const r of listedRows) {
+    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
+      const n = l.trim().toLowerCase();
+      if (n && wanted.has(n)) out.add(n);
+    }
+  }
   out.delete("");
   return out;
 }

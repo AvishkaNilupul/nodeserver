@@ -366,6 +366,20 @@ async function deleteBot(host, file, container) {
   } catch (e) {
     steps.push("config rename failed: " + (e.message || e));
   }
+  // The BotAccount rows are a mirror of the config; with the config gone the
+  // accounts are no longer deployed. A mirror left enabled=true makes the
+  // recycler treat pool accounts as "still farming" forever (never recycled)
+  // and makes seat/coverage math count ghosts.
+  try {
+    const BotAccount = require("../models/BotAccount");
+    await BotAccount.updateMany(
+      { host: host.id, configFile: file, enabled: true },
+      { $set: { enabled: false } },
+    );
+    steps.push("mirror disabled");
+  } catch (e) {
+    steps.push("mirror disable failed: " + (e.message || e));
+  }
   return steps.join(", ");
 }
 
