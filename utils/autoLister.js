@@ -373,6 +373,9 @@ function filterVerifiedHolders(rows, accById, { needByKey, assignedLower }) {
       continue;
     }
     if (!acc.password) continue; // buyer needs a usable password
+    // A dead token means the credentials likely changed — the drops are on
+    // the account but the delivered login may not work. Never sell those.
+    if (acc.scanStatus === "token_invalid") continue;
     // Holds at least the required number of copies of EVERY promised item.
     const enough = (r.items || []).every(
       (it) => (it.count || 0) >= (needByKey.get(it.k) || 1),
@@ -423,12 +426,16 @@ async function verifiedHoldersForItems(task, items) {
   if (!rows.length) return [];
   const accs = await BotAccount.find(
     { _id: { $in: rows.map((r) => r._id) } },
-    { login: 1, credPassword: 1 },
+    { login: 1, credPassword: 1, lastScanStatus: 1 },
   ).lean();
   const accById = new Map(
     accs.map((a) => [
       String(a._id),
-      { login: a.login, password: decrypt(a.credPassword) },
+      {
+        login: a.login,
+        password: decrypt(a.credPassword),
+        scanStatus: a.lastScanStatus || "",
+      },
     ]),
   );
   return filterVerifiedHolders(rows, accById, { needByKey, assignedLower });
@@ -1420,4 +1427,8 @@ module.exports = {
   filterVerifiedHolders,
   // reserve→publish rollback (release stranded reservations on publish failure)
   withReservationRollback,
+  // secondary-market publishing (used by ops scripts to rebuild bad products)
+  publishPlatiShare,
+  publishGgselShare,
+  pickDeliveryAccounts,
 };
