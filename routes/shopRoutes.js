@@ -113,8 +113,13 @@ async function sellableAccountMap(ids) {
   const map = new Map();
   for (const a of accs) {
     // Accounts without a stored password can't be delivered, so they're
-    // excluded from the sellable pool.
-    if (a.credPassword && String(a.credPassword).length > 0) {
+    // excluded from the sellable pool. Same for a dead Twitch token: the
+    // credentials likely changed, so the delivered login may not work.
+    if (
+      a.credPassword &&
+      String(a.credPassword).length > 0 &&
+      a.lastScanStatus !== "token_invalid"
+    ) {
       map.set(String(a._id), a);
     }
   }
