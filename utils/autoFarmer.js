@@ -412,7 +412,25 @@ function marketStockFloor(af) {
   return Math.min(markets * per * 2, af.maxPerGame);
 }
 
+// Demand-scaled per-game cap. `maxPerGame` stays the SAFE base for anything
+// unproven (it exists to stop burning accounts on non-sellers), but a game
+// with real recorded sales of OURS earns headroom: +2 accounts per internal
+// sale in the 45-day window, hard-ceilinged at 2x the base. External market
+// scouts alone can never raise the cap — only our own sales history can, so
+// a junk game still tops out at the base no matter how loud the market looks.
+const SALES_CAP_BONUS_PER_SALE = 2;
+const SALES_CAP_MULT_MAX = 2;
+function capForGame(af, internalSales = 0) {
+  const base = Math.max(1, Number(af.maxPerGame) || 1);
+  const sales = Math.max(0, Number(internalSales) || 0);
+  return Math.min(
+    base + Math.floor(sales * SALES_CAP_BONUS_PER_SALE),
+    base * SALES_CAP_MULT_MAX,
+  );
+}
+
 function demandAllocation(research, af, internalSales = 0) {
+  const cap = capForGame(af, internalSales);
   const salesBoost =
     internalSales > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(internalSales) : 0;
   if (!research || research.scannedAt == null) {
@@ -420,9 +438,8 @@ function demandAllocation(research, af, internalSales = 0) {
       // No market data but our own sales history says it sells.
       const full = salesBoost >= DEMAND_FULL;
       return {
-        target: full
-          ? af.maxPerGame
-          : Math.max(1, Math.ceil(af.maxPerGame / 2)),
+        cap,
+        target: full ? cap : Math.max(1, Math.ceil(cap / 2)),
         tierNote:
           "no external market data, but " +
           internalSales +
@@ -433,7 +450,8 @@ function demandAllocation(research, af, internalSales = 0) {
       };
     }
     return {
-      target: Math.min(af.probeSize, af.maxPerGame),
+      cap,
+      target: Math.min(af.probeSize, cap),
       tierNote: "no market data — probe batch",
       probe: true,
       effective: Math.round(salesBoost),
@@ -445,15 +463,23 @@ function demandAllocation(research, af, internalSales = 0) {
     internalSales > 0 ? " incl. " + internalSales + " own sales" : "";
   if (d >= DEMAND_FULL) {
     return {
-      target: af.maxPerGame,
+      cap,
+      target: cap,
       tierNote:
-        "demand " + d + salesNote + " (proven seller) — full allocation",
+        "demand " +
+        d +
+        salesNote +
+        " (proven seller) — full allocation" +
+        (cap > af.maxPerGame
+          ? " (cap raised to " + cap + " by own sales)"
+          : ""),
       effective: d,
     };
   }
   if (d >= DEMAND_HALF) {
     return {
-      target: Math.max(1, Math.ceil(af.maxPerGame / 2)),
+      cap,
+      target: Math.max(1, Math.ceil(cap / 2)),
       tierNote: "demand " + d + salesNote + " (moderate) — half allocation",
       effective: d,
     };
@@ -1121,7 +1147,10 @@ async function processCampaign(c, ctx) {
   const covered = Number.isFinite(coveredRaw) ? coveredRaw : 0;
   // Non-probe campaigns must at least fill every enabled market's shelf.
   const floor = alloc.probe ? 0 : marketStockFloor(af);
-  const wanted = Math.min(Math.max(alloc.target, floor), af.maxPerGame);
+  const wanted = Math.min(
+    Math.max(alloc.target, floor),
+    alloc.cap || af.maxPerGame,
+  );
   const uncovered = Math.max(0, wanted - covered);
   if (uncovered < 1) {
     await record({
@@ -1316,7 +1345,12 @@ async function executeTask(task, ctx, { append = false } = {}) {
   if (!host) throw new Error("No farm host configured");
   const game = task.game;
 
-  const want = Math.min(task.plannedAccounts || 0, af.maxPerGame);
+  // Ceiling is the sales-boosted maximum, not the flat base: plannedAccounts
+  // was already capped by capForGame at decision time.
+  const want = Math.min(
+    task.plannedAccounts || 0,
+    af.maxPerGame * SALES_CAP_MULT_MAX,
+  );
   if (want < 1) throw new Error("Task has no planned accounts");
 
   // Re-check the reserve floor at execution time (things may have changed
@@ -2217,7 +2251,7 @@ async function runOnce() {
           key: c.campaignId,
           want: Math.min(
             Math.max(alloc.target, alloc.probe ? 0 : marketStockFloor(af)),
-            af.maxPerGame,
+            alloc.cap || af.maxPerGame,
           ),
           weight: Math.max(1, Number(alloc.effective || 0) || 5),
         });
@@ -2549,7 +2583,7 @@ async function backfillActiveTasks(af, host, progress) {
         Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
         marketStockFloor(af),
       ),
-      af.maxPerGame,
+      af.maxPerGame * SALES_CAP_MULT_MAX,
     );
     const have = (task.assignedAccounts || []).length;
     const missing = target - have;
@@ -2776,6 +2810,7 @@ module.exports = {
   // exported for tests
   fairShare,
   demandAllocation,
+  capForGame,
   resolveFarmHost,
   isStranded,
 };
