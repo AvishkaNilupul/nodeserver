@@ -9,6 +9,7 @@
 // gameflipFulfiller relist chain takes over after the first sale.
 const AutoFarmTask = require("../models/AutoFarmTask");
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const MarketResearch = require("../models/MarketResearch");
@@ -18,7 +19,7 @@ const {
   DS_CLAIM_TAG,
 } = require("./digisellerFulfiller");
 const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
-const { reserveSetOnAccount } = require("./dropReservation");
+const { reserveSetOnAccount, AVAILABLE_DROP } = require("./dropReservation");
 const settings = require("./settings");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
@@ -28,9 +29,70 @@ const fsp = require("fs/promises");
 
 /* --------------------------- campaign details --------------------------- */
 
+// Normalise a label to bare alphanumerics for placeholder comparison
+// ("AC Black Flag Resynced" -> "acblackflagresynced").
+function normLabel(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+// A benefit whose name is really just the game or campaign title is NOT a real
+// drop item — it's Twitch handing back an unresolved/placeholder benefit
+// (observed: a campaign whose only "drop" was named "AC Black Flag Resynced",
+// the campaign title itself). Real drops have specific reward names
+// ("Rustborne Swords", "Cheetah Claw Cat"). Refuse to treat a title as an item
+// so we never build a set around a fake itemKey that no account can ever hold.
+function looksLikeTitlePlaceholder(name, { game, campaignName }) {
+  const n = normLabel(name);
+  if (!n) return true;
+  const g = normLabel(game);
+  const c = normLabel(campaignName);
+  return (!!g && n === g) || (!!c && n === c);
+}
+
+// Turn a fetched campaign-details object into deduped item rows, dropping any
+// benefit that is really just the game/campaign title. Pure (no I/O) so the
+// placeholder guard is unit-testable. `rawBenefits` counts benefits seen
+// BEFORE filtering, so the caller can tell "campaign resolved but every benefit
+// was a placeholder" (don't publish) apart from "campaign didn't resolve at
+// all" (try another token).
+function resolveCampaignItems(camp, { game, campaignName }) {
+  const items = [];
+  const seen = new Set();
+  let rawBenefits = 0;
+  for (const d of (camp && camp.timeBasedDrops) || []) {
+    for (const e of d.benefitEdges || []) {
+      const b = e && e.benefit;
+      if (!b || !b.name) continue;
+      rawBenefits++;
+      if (looksLikeTitlePlaceholder(b.name, { game, campaignName })) continue;
+      const g = (b.game && b.game.name) || game || "";
+      const key =
+        String(b.name).trim().toLowerCase() +
+        "|" +
+        String(g).trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        itemKey: key,
+        name: String(b.name),
+        game: g,
+        // Real Twitch item artwork — setImage downloads it for the cover
+        // grid, exactly like the manually created listings.
+        image: String(b.imageAssetURL || ""),
+        qty: 1,
+        requiredMinutes: Number(d.requiredMinutesWatched) || 0,
+      });
+    }
+  }
+  return { items, rawBenefits };
+}
+
 // Borrow a healthy bot-account token (same trick campaignWatcher uses) to ask
 // Twitch what items this campaign actually gives, before anything is farmed.
-async function campaignItems(campaignId, game) {
+// Refuses to return a set built only from a title placeholder (the AC bug).
+async function campaignItems(campaignId, game, campaignName) {
   const { fetchCampaignDetails } = require("./twitchInventory");
   const candidates = await BotAccount.find({
     clientSecret: { $exists: true, $ne: "" },
@@ -43,38 +105,33 @@ async function campaignItems(campaignId, game) {
     ...candidates.filter((a) => a.lastScanStatus !== "ok"),
   ];
   let lastErr = null;
+  let sawPlaceholderOnly = false;
   for (const acc of ordered) {
     try {
       const camp = await fetchCampaignDetails(acc.clientSecret, campaignId);
-      const items = [];
-      const seen = new Set();
-      for (const d of camp.timeBasedDrops || []) {
-        for (const e of d.benefitEdges || []) {
-          const b = e && e.benefit;
-          if (!b || !b.name) continue;
-          const g = (b.game && b.game.name) || game || "";
-          const key =
-            String(b.name).trim().toLowerCase() +
-            "|" +
-            String(g).trim().toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          items.push({
-            itemKey: key,
-            name: String(b.name),
-            game: g,
-            // Real Twitch item artwork — setImage downloads it for the cover
-            // grid, exactly like the manually created listings.
-            image: String(b.imageAssetURL || ""),
-            qty: 1,
-            requiredMinutes: Number(d.requiredMinutesWatched) || 0,
-          });
-        }
-      }
+      const { items, rawBenefits } = resolveCampaignItems(camp, {
+        game,
+        campaignName,
+      });
       if (items.length) return items;
+      // The campaign resolved, but every benefit it returned was a title
+      // placeholder (or there were none). There is nothing real to sell here —
+      // probing another token won't change that, and publishing would create
+      // the exact fake-item listing we're guarding against.
+      if (rawBenefits > 0) sawPlaceholderOnly = true;
     } catch (e) {
       lastErr = e;
     }
+  }
+  if (sawPlaceholderOnly) {
+    throw new Error(
+      "Campaign " +
+        campaignId +
+        " (" +
+        (campaignName || game) +
+        ") has no resolvable drop items — only the campaign/game title. " +
+        "Not publishing.",
+    );
   }
   if (lastErr) throw lastErr;
   throw new Error("No bot tokens available for campaign details");
@@ -258,28 +315,118 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
 /* ------------------------------- publishing ------------------------------ */
 
 // Pick a delivery account from the task's assigned pool accounts: needs a
-// decryptable password (buyer logs in with it). Skips ones already used by
-// another listing.
-// Up to `max` deliverable accounts from the task, skipping any login already
-// attached to an active listing on ANY marketplace (accountLogin can be a
-// comma-separated list on Plati/GGSel rows) — one account is only ever sold
-// on one market.
-// Candidates only — does NOT reserve anything in DropLog. Some callers
-// (refillMarkets' Gameflip branch) just need a count of how many accounts
-// COULD be delivered, without committing any of them, so reservation happens
-// at the actual commit point instead (publishPlatiShare, publishGgselShare,
-// and the direct Gameflip ship in listActivatedTask) — see the CLAIM_TAG
-// reserveSetOnAccount calls there.
+// ---- Holdings gate (the fix for wrong/incomplete auto-delivered content) ----
 //
-// Sourced from BotAccount, not AvailableAccount: the two can hold separate
-// DropLog rows for the very same real Twitch login (the account's pool entry
-// and its deployed bot entry are different Mongo documents), and it is the
-// BotAccount id that DropLog/Shop availability actually keys on (see
-// routes/shopRoutes.js sellableAccountMap). Picking via AvailableAccount used
-// to source a login/password pair with no connection to the id the rest of
-// the system checks — so nothing here ever collided with the Shop or another
-// listing's reservation, and the same drops could be handed out twice.
-async function pickDeliveryAccounts(task, max) {
+// The initial auto-list path used to attach accounts straight from
+// task.assignedAccounts after only checking "exists + has password + not
+// already listed" — it NEVER verified the account actually holds the promised
+// drops. Accounts still mid-farm (partial bundle), accounts that farmed a
+// DIFFERENT campaign of the same game, or accounts holding none of the promised
+// itemKeys all sailed through, so buyers received wrong/incomplete accounts.
+//
+// The Shop path (routes/shopRoutes.js availableAccountsForSet) already does the
+// right thing: only accounts holding EVERY item in the set, unconnected and
+// unsold, with the required per-item copy count. This gate applies that same
+// verification to the initial path, intersected with the task's own accounts.
+// (Mirrors shopRoutes.holdingsForKeys/sellableAccountMap deliberately rather
+// than importing the routes layer into a util; keep the two in sync — a shared
+// utils/holdings module is the natural future refactor.)
+
+// Pure: given holdings-aggregation rows (account -> { have, items:[{k,count}] }),
+// a map accId -> { login, password }, the per-key required copy counts, and the
+// set of assigned logins (lowercased), return the deliverable, verified
+// accounts. Exported for unit tests — this is the load-bearing decision.
+function filterVerifiedHolders(rows, accById, { needByKey, assignedLower }) {
+  const out = [];
+  for (const r of rows || []) {
+    const acc = accById.get(String(r._id));
+    if (!acc) continue; // no BotAccount resolved / not deliverable
+    // Must be one of THIS task's assigned accounts (an assigned-scoped sale).
+    if (
+      assignedLower &&
+      assignedLower.size &&
+      !assignedLower.has(String(acc.login || "").toLowerCase())
+    ) {
+      continue;
+    }
+    if (!acc.password) continue; // buyer needs a usable password
+    // Holds at least the required number of copies of EVERY promised item.
+    const enough = (r.items || []).every(
+      (it) => (it.count || 0) >= (needByKey.get(it.k) || 1),
+    );
+    if (!enough) continue;
+    out.push({ login: acc.login, password: acc.password, accountId: r._id });
+  }
+  return out;
+}
+
+// Assigned accounts that ACTUALLY hold EVERY item in `items`, unconnected and
+// unsold (per-drop reservation via AVAILABLE_DROP), with a usable password.
+// Same verification as the Shop's availableAccountsForSet, intersected with the
+// task's assigned accounts.
+async function verifiedHoldersForItems(task, items) {
+  const keys = [
+    ...new Set((items || []).map((i) => i.itemKey).filter(Boolean)),
+  ];
+  if (!keys.length) return [];
+  const needByKey = new Map(
+    (items || [])
+      .filter((i) => i.itemKey)
+      .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
+  );
+  const assignedLower = new Set(
+    (task.assignedAccounts || []).map((u) => String(u).toLowerCase()),
+  );
+  if (!assignedLower.size) return [];
+  // Accounts holding ALL keys, counting only available (unconnected + unsold)
+  // drops. `have === keys.length` is the "holds the WHOLE bundle" gate.
+  const rows = await DropLog.aggregate([
+    { $match: { itemKey: { $in: keys }, ...AVAILABLE_DROP } },
+    {
+      $group: {
+        _id: { account: "$account", k: "$itemKey" },
+        count: { $sum: "$count" },
+      },
+    },
+    {
+      $group: {
+        _id: "$_id.account",
+        have: { $sum: 1 },
+        items: { $push: { k: "$_id.k", count: "$count" } },
+      },
+    },
+    { $match: { have: keys.length } },
+  ]);
+  if (!rows.length) return [];
+  const accs = await BotAccount.find(
+    { _id: { $in: rows.map((r) => r._id) } },
+    { login: 1, credPassword: 1 },
+  ).lean();
+  const accById = new Map(
+    accs.map((a) => [
+      String(a._id),
+      { login: a.login, password: decrypt(a.credPassword) },
+    ]),
+  );
+  return filterVerifiedHolders(rows, accById, { needByKey, assignedLower });
+}
+
+// Up to `max` VERIFIED delivery accounts for this task's bundle. Every returned
+// account provably holds the full set (unconnected + unsold), belongs to the
+// task, has a usable password, and isn't already attached to another active
+// listing (one account sells once). Returns { login, password, accountId }.
+//
+// `items` is REQUIRED — it's what the holdings gate verifies against. An
+// assigned account that hasn't finished farming the whole bundle is simply not
+// eligible yet: 0 eligible => list nothing this sweep, retry next (the honest
+// early-bird behaviour — only list accounts that have actually completed).
+async function pickDeliveryAccounts(task, max, items) {
+  const verified = await verifiedHoldersForItems(task, items);
+  if (!verified.length) return [];
+  // Exclude any login already live on another active listing (accountLogin can
+  // be a comma/space-separated list on Plati/GGSel rows). Per-drop reservation
+  // covers committed sales; this also guards the window before a concurrent
+  // listing commits its reservation.
   const used = new Set();
   for (const r of await MarketplaceListing.find(
     { status: "active" },
@@ -290,73 +437,12 @@ async function pickDeliveryAccounts(task, max) {
     }
   }
   const out = [];
-  for (const username of task.assignedAccounts || []) {
+  for (const acc of verified) {
     if (out.length >= max) break;
-    if (used.has(String(username).toLowerCase())) continue;
-    const acc = await BotAccount.findOne({
-      login: new RegExp(
-        "^" + String(username).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
-        "i",
-      ),
-    }).lean();
-    if (!acc) continue;
-    const password = decrypt(acc.credPassword);
-    if (!password) continue;
-    out.push({
-      accountId: String(acc._id),
-      login: acc.login || username,
-      password,
-    });
+    if (used.has(String(acc.login).toLowerCase())) continue;
+    out.push(acc);
   }
   return out;
-}
-
-// Why did pickDeliveryAccounts come back empty? Counts the same three
-// rejections it applies, so the recorded error names the actual blocker.
-async function deliveryBlockReason(task) {
-  const used = new Set();
-  for (const r of await MarketplaceListing.find(
-    { status: "active" },
-    { accountLogin: 1 },
-  ).lean()) {
-    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
-      if (l) used.add(l.toLowerCase());
-    }
-  }
-  let committed = 0;
-  let notInPool = 0;
-  let noPassword = 0;
-  for (const username of task.assignedAccounts || []) {
-    const lower = String(username).toLowerCase();
-    if (used.has(lower)) {
-      committed++;
-      continue;
-    }
-    const acc = await BotAccount.findOne({
-      login: new RegExp(
-        "^" + String(username).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
-        "i",
-      ),
-    }).lean();
-    if (!acc) {
-      notInPool++;
-      continue;
-    }
-    if (!decrypt(acc.credPassword)) noPassword++;
-  }
-  const total = (task.assignedAccounts || []).length;
-  const parts = [];
-  if (committed)
-    parts.push(committed + " already committed to another active listing");
-  if (notInPool) parts.push(notInPool + " not in the account pool");
-  if (noPassword) parts.push(noPassword + " with no readable password");
-  return (
-    "no account free to deliver (" +
-    total +
-    " assigned: " +
-    (parts.join(", ") || "none assigned") +
-    ")"
-  );
 }
 
 // Reserve every account's drops for this set before its credentials go out
@@ -518,15 +604,17 @@ async function retryMissingSecondaries(task) {
   const ggselMissing = !(L.ggsel && L.ggsel.externalId);
   if (!platiMissing && !ggselMissing) return null;
 
-  const spare = await pickDeliveryAccounts(task, 6);
-  if (!spare.length) return null;
-
   const gfRow = await MarketplaceListing.findOne({
     marketplace: "gameflip",
     externalId: L.externalId,
   }).lean();
   const set = L.setId ? await DropSet.findById(L.setId) : null;
   if (!gfRow || !set) return null;
+
+  // Verify against the set's items — a retry must not attach an account that
+  // doesn't hold the full bundle any more than the initial publish may.
+  const spare = await pickDeliveryAccounts(task, 6, set.items || []);
+  if (!spare.length) return null;
 
   const af = settings.getAutoFarm();
   const targets = [];
@@ -626,11 +714,18 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   const actions = [];
   const per = Math.max(1, Number(perMarketStock) || 3);
 
+  // Refill stock must pass the same holdings gate — never top a market up with
+  // an account that doesn't hold the full bundle. Verify against the listing's
+  // set items.
+  const set = L.setId ? await DropSet.findById(L.setId).lean() : null;
+  if (!set) return null;
+
   // How many accounts are free right now, and how many of those belong to
   // the post-event holdback reserve.
   const spare = await pickDeliveryAccounts(
     task,
     (task.assignedAccounts || []).length,
+    set.items || [],
   );
   let heldBack = Math.max(0, Number(L.heldBack) || 0);
   let freeSpare = Math.max(0, spare.length - heldBack);
@@ -677,20 +772,13 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- Plati (Digiseller): live stock read, then add codes to the product.
-  // Set is resolved lazily below (only when a refill actually has accounts to
-  // commit) since most ticks find every market already stocked.
-  let refillSet = null;
-  async function getRefillSet() {
-    if (!refillSet) refillSet = await DropSet.findById(L.setId);
-    return refillSet;
-  }
   if (L.plati && L.plati.externalId) {
     try {
       const stock = await mp.digisellerProductStock(L.plati.externalId);
       if (stock !== null && stock < per) {
         let accs = takeAccounts(per - stock);
-        const s = accs.length ? await getRefillSet() : null;
-        if (s) accs = await reserveAccountsForPublish(accs, s, DS_CLAIM_TAG);
+        if (accs.length)
+          accs = await reserveAccountsForPublish(accs, set, DS_CLAIM_TAG);
         if (accs.length) {
           await mp.digisellerAddContent(
             L.plati.externalId,
@@ -712,8 +800,8 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
       const stock = await mp.ggselOfferStock(L.ggsel.externalId);
       if (stock !== null && stock < per) {
         let accs = takeAccounts(per - stock);
-        const s = accs.length ? await getRefillSet() : null;
-        if (s) accs = await reserveAccountsForPublish(accs, s, GG_CLAIM_TAG);
+        if (accs.length)
+          accs = await reserveAccountsForPublish(accs, set, GG_CLAIM_TAG);
         if (accs.length) {
           await mp.ggselAddProducts(
             L.ggsel.externalId,
@@ -806,7 +894,11 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     task.wouldList = undefined;
     await task.save();
   }
-  const items = await campaignItems(task.campaignId, task.game);
+  const items = await campaignItems(
+    task.campaignId,
+    task.game,
+    task.campaignName,
+  );
   const research = await MarketResearch.findOne({ game: task.game }).lean();
   const price = derivePrice(research);
   const qty = Math.max(1, (task.assignedAccounts || []).length);
@@ -830,20 +922,18 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     return { wouldList: { title, price, qty: split.listNow } };
   }
 
-  const accounts = await pickDeliveryAccounts(task, split.listNow);
+  const accounts = await pickDeliveryAccounts(task, split.listNow, items);
   if (!accounts.length) {
-    // Say WHICH of the two causes it was. pickDeliveryAccounts drops an account
-    // either because it is already committed to another active listing (one
-    // account cannot be delivered to two buyers) or because its password will
-    // not decrypt — and the old message asserted the second unconditionally.
-    // On prod both stuck tasks (Palia, Mir Tankov) had every assigned account
-    // spoken for and perfectly readable passwords, so the message sent anyone
-    // reading it hunting for a credential problem that did not exist.
-    const detail = await deliveryBlockReason(task);
+    // No assigned account holds the COMPLETE bundle yet (still farming, or the
+    // finished ones are already listed). This is the honest early-bird state —
+    // publish nothing rather than ship a partial/wrong account, and let the
+    // next sweep pick it up once an account completes. Not an error, so it
+    // doesn't spam the task error field every tick.
     task.listing = task.listing || {};
-    task.listing.error = detail;
+    task.listing.error =
+      "waiting: no assigned account holds the full bundle yet";
     await task.save();
-    throw new Error("Auto-list " + task.game + ": " + detail);
+    return { skipped: "no verified holder yet", waiting: true };
   }
 
   // Split the sellable accounts across the markets round-robin — Gameflip
@@ -1191,4 +1281,9 @@ module.exports = {
   stackItems,
   postEventPrice,
   computeSplit,
+  // holdings gate + placeholder guard (the wrong-content fix)
+  normLabel,
+  looksLikeTitlePlaceholder,
+  resolveCampaignItems,
+  filterVerifiedHolders,
 };

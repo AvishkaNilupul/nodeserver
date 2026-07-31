@@ -10,6 +10,10 @@ const {
   postEventPrice,
   computeSplit,
   isAutoOwned,
+  normLabel,
+  looksLikeTitlePlaceholder,
+  resolveCampaignItems,
+  filterVerifiedHolders,
 } = require("../utils/autoLister");
 
 const items = [
@@ -244,4 +248,171 @@ test("hold-back split lists half now (rounded up), holds the rest", () => {
 test("hold-back split never holds when there is only one account", () => {
   assert.deepStrictEqual(computeSplit(1), { listNow: 1, holdBack: 0 });
   assert.deepStrictEqual(computeSplit(0), { listNow: 0, holdBack: 0 });
+});
+
+/* ------------ placeholder guard: don't build a set from a title ---------- */
+
+test("looksLikeTitlePlaceholder flags the game/campaign title, not real drops", () => {
+  const ctx = {
+    game: "Assassin's Creed Black Flag Resynced",
+    campaignName: "AC Black Flag Resynced",
+  };
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("AC Black Flag Resynced", ctx),
+    true,
+  );
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("assassins creed black flag resynced", ctx),
+    true,
+  );
+  assert.strictEqual(looksLikeTitlePlaceholder("Rustborne Swords", ctx), false);
+  assert.strictEqual(looksLikeTitlePlaceholder("Cheetah Claw Cat", ctx), false);
+  assert.strictEqual(looksLikeTitlePlaceholder("   ", ctx), true);
+});
+
+test("resolveCampaignItems drops the AC placeholder and keeps real drops", () => {
+  const game = "Assassin's Creed Black Flag Resynced";
+  const campaignName = "AC Black Flag Resynced";
+  const placeholderOnly = {
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 0,
+        benefitEdges: [{ benefit: { name: "AC Black Flag Resynced" } }],
+      },
+    ],
+  };
+  const r1 = resolveCampaignItems(placeholderOnly, { game, campaignName });
+  assert.strictEqual(r1.items.length, 0);
+  assert.strictEqual(r1.rawBenefits, 1);
+
+  const real = {
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [
+          { benefit: { name: "Rustborne Swords", game: { name: game } } },
+          { benefit: { name: "Cheetah Claw Cat", game: { name: game } } },
+          { benefit: { name: "Rustborne Swords", game: { name: game } } },
+        ],
+      },
+    ],
+  };
+  const r2 = resolveCampaignItems(real, { game, campaignName });
+  assert.strictEqual(r2.items.length, 2);
+  assert.deepStrictEqual(r2.items.map((i) => i.name).sort(), [
+    "Cheetah Claw Cat",
+    "Rustborne Swords",
+  ]);
+});
+
+/* --------------- holdings gate: only fully-holding accounts -------------- */
+
+const NEED = new Map([
+  ["poe nautical|poe", 1],
+  ["poe allflame|poe", 1],
+]);
+const ASSIGNED = new Set(["goodacct", "notmine", "nopass", "shortcopies"]);
+
+function accMap(entries) {
+  return new Map(
+    entries.map((e) => [e.id, { login: e.login, password: e.password }]),
+  );
+}
+
+test("verified holder with full bundle + password + assigned is delivered", () => {
+  const rows = [
+    {
+      _id: "1",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "1", login: "goodacct", password: "pw" }]),
+    {
+      needByKey: NEED,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].login, "goodacct");
+  assert.strictEqual(out[0].accountId, "1");
+});
+
+test("account NOT in the task's assigned set is rejected (wrong-account bucket)", () => {
+  const rows = [
+    {
+      _id: "2",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "2", login: "stranger", password: "pw" }]),
+    {
+      needByKey: NEED,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 0);
+});
+
+test("account without a usable password is rejected", () => {
+  const rows = [
+    {
+      _id: "3",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "3", login: "nopass", password: "" }]),
+    {
+      needByKey: NEED,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 0);
+});
+
+test("insufficient copies of a promised item is rejected (partial bucket)", () => {
+  const need2 = new Map([
+    ["poe nautical|poe", 2],
+    ["poe allflame|poe", 1],
+  ]);
+  const rows = [
+    {
+      _id: "4",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "4", login: "shortcopies", password: "pw" }]),
+    {
+      needByKey: need2,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 0);
+});
+
+test("empty rows (nobody holds the full bundle) => list nothing", () => {
+  const out = filterVerifiedHolders([], accMap([]), {
+    needByKey: NEED,
+    assignedLower: ASSIGNED,
+  });
+  assert.deepStrictEqual(out, []);
 });
