@@ -503,9 +503,33 @@
             '<button class="btn ghost sm" onclick="copyLogin(\''+esc(r.username)+'\',\''+r.id+'\')">Copy login</button></div>'+
           '<h2 style="font-size:14px;margin:18px 0 8px">Accounts <span class="muted" style="font-size:12px;font-weight:600">('+accs.length+')</span></h2>'+
           accountRows(accs)+
+          '<div class="credbox" style="margin-top:10px">'+
+            '<div style="font-weight:700;font-size:13px">Add account manually</div>'+
+            '<div class="sub" style="margin:4px 0 8px">If this Twitch account is already on any bot (yours or another renter\'s), it is moved off there onto this renter\'s bot automatically \u2014 it never farms in two places.</div>'+
+            '<div class="grid3">'+
+              '<div><label class="fld">Username</label><input id="mUser" autocomplete="off" placeholder="twitch login"/></div>'+
+              '<div><label class="fld">Password <span class="muted">(optional)</span></label><input id="mPass" autocomplete="off" placeholder="stored for Creds reveal"/></div>'+
+              '<div><label class="fld">Client token</label><input id="mToken" autocomplete="off" placeholder="ClientSecret"/></div>'+
+            '</div>'+
+            '<div style="margin-top:8px"><button class="btn sm" id="mAddBtn" onclick="manualAdd(\''+r.id+'\')">Add account</button></div>'+
+          '</div>'+
           '<h2 style="font-size:14px;margin:18px 0 8px">Submissions</h2>'+
           (subs.length? '<div class="rows">'+subs.map(s=>'<div class="approve-item"><div><b>'+s.count+'</b> account(s) · <span class="muted">'+new Date(s.createdAt).toLocaleString()+'</span>'+(s.status==="approved"?' · '+s.added+' added':'')+(s.status==="rejected"&&s.rejectReason?' · '+esc(s.rejectReason):'')+'</div><span class="badge '+(s.status==="approved"?"active":s.status==="rejected"?"suspended":"wait")+'">'+s.status+'</span></div>').join("")+'</div>' : '<div class="muted">No submissions.</div>');
       }
+      window.manualAdd = async (id)=>{
+        const username = ($("mUser").value||"").trim();
+        const password = $("mPass").value||"";
+        const token = ($("mToken").value||"").trim();
+        if(!username || !token){ toast("Username and client token are required"); return; }
+        const btn = $("mAddBtn"); if(btn){ btn.disabled = true; btn.textContent = "Adding\u2026"; }
+        try {
+          const d = await api("/renters/"+id+"/accounts/manual", { method:"POST",
+            body: JSON.stringify({ username, password, token }) });
+          toast(d.note || "Account added");
+          await Promise.all([loadRenters(), loadRentBots()]);
+          openRenter(id);
+        } catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent="Add account"; } }
+      };
       window.createRenterBot = async (id)=>{
         const host = ($("eBotHost") && $("eBotHost").value) || "local";
         if(!confirm("Create a new bot for this renter on "+host+"? It provisions a fresh config slot and starts once accounts are approved.")) return;

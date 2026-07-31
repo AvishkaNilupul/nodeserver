@@ -6,6 +6,7 @@
 // input, and renter-submitted credentials are only ever revealed to a superadmin.
 const express = require("express");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const Renter = require("../models/Renter");
@@ -21,8 +22,9 @@ const {
   sanitizeRenter,
   revealPassword,
 } = require("../utils/renters");
+const MarketplaceListing = require("../models/MarketplaceListing");
 const hosts = require("../utils/botHosts");
-const { decrypt } = require("../utils/secretBox");
+const { decrypt, encrypt } = require("../utils/secretBox");
 const {
   startConfigContainer,
   stopConfigContainer,
@@ -34,6 +36,7 @@ const {
   addRenterAccountsToConfig,
   provisionEmptyConfig,
   getConfigGames,
+  removeAccountFromConfig,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
@@ -786,6 +789,272 @@ router.get("/renter-accounts/:id/creds", requireSuperadmin, async (req, res) => 
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// MANUAL ADD — operator types one account (username + password + client token)
+// straight into a renter's bot. If that Twitch account is already farming
+// anywhere on the server — an operator bot config or another renter's bot — it
+// is pulled OUT of there first and moved onto this renter's bot, so the same
+// account never farms in two places. Typical case: someone buys an account and
+// then rents farming for it. Accounts attached to an ACTIVE marketplace listing
+// are refused: they are promised to a future buyer.
+router.post(
+  "/renters/:id/accounts/manual",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const username = String(body.username || "").trim();
+      const password = String(body.password || "");
+      const token = String(body.token || body.clientSecret || "").trim();
+      if (!username || !token) {
+        return res.status(400).json({
+          success: false,
+          message: "Username and client token are required",
+        });
+      }
+      const renter = await Renter.findById(req.params.id);
+      if (!renter)
+        return res.status(404).json({ success: false, message: "Not found" });
+      if (!renter.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter has no bot assigned" });
+      }
+      const host = hosts.resolveHost(renter.botHost);
+      if (!host) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter's host is unknown" });
+      }
+      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      if (used + 1 > (Number(renter.maxAccounts) || 0)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "That would exceed the renter's limit (" +
+            renter.maxAccounts +
+            "); their inventory already has " +
+            used +
+            ".",
+        });
+      }
+
+      const lower = username.toLowerCase();
+      const loginRe = new RegExp(
+        "^" + lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+        "i",
+      );
+
+      // Buyer safety: never hand a renter an account that a live listing has
+      // promised to deliver.
+      const listed = await MarketplaceListing.findOne({
+        status: "active",
+        accountLogin: { $regex: "(^|[,\\s])" + lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([,\\s]|$)", $options: "i" },
+      }).lean();
+      if (listed) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This account is attached to an active marketplace listing (" +
+            listed.marketplace +
+            " " +
+            (listed.externalId || "") +
+            ") — delist or replace it there first.",
+        });
+      }
+
+      // Already on THIS renter's inventory? Nothing to move.
+      const mine = await RenterAccount.findOne({
+        renter: renter._id,
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      }).lean();
+      if (mine) {
+        return res.status(409).json({
+          success: false,
+          message: "That account is already in this renter's inventory",
+        });
+      }
+
+      const notes = [];
+
+      // Pull it out of an operator bot, if it lives on one.
+      const botHit = await BotAccount.findOne({
+        configFile: { $nin: ["", null] },
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      });
+      if (botHit) {
+        const srcHost = hosts.resolveHost(botHit.host);
+        if (!srcHost) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Account is assigned to " +
+              botHit.configFile +
+              " on unknown host '" +
+              botHit.host +
+              "' — free it manually first.",
+          });
+        }
+        let removed = 0;
+        try {
+          removed = await removeAccountFromConfig(srcHost, botHit.configFile, {
+            clientSecret: botHit.clientSecret,
+            login: botHit.login || username,
+          });
+        } catch (e) {
+          return res.status(e.unreachable ? 502 : 500).json({
+            success: false,
+            offline: !!e.unreachable,
+            message:
+              "Could not remove the account from " +
+              botHit.configFile +
+              " on " +
+              srcHost.label +
+              ": " +
+              (e.message || e),
+          });
+        }
+        if (removed) {
+          // Best effort: bounce the source bot so it stops farming the account.
+          try {
+            await restartConfigContainer(srcHost, botHit.configFile);
+          } catch {
+            notes.push(
+              "Removed from " +
+                botHit.configFile +
+                " on " +
+                srcHost.label +
+                ", but that bot could not be restarted — restart it so the change takes effect.",
+            );
+          }
+        }
+        botHit.configFile = "";
+        botHit.container = "";
+        botHit.enabled = false;
+        await botHit.save();
+        notes.push(
+          "Moved off operator bot " +
+            (botHit.login ? botHit.login + " · " : "") +
+            (removed ? "" : "(config entry was already gone) ") +
+            "on " +
+            srcHost.label +
+            ".",
+        );
+      }
+
+      // Pull it off ANOTHER renter's bot, if it lives there.
+      const otherRenterAcc = await RenterAccount.findOne({
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      });
+      if (otherRenterAcc) {
+        if (otherRenterAcc.configFile) {
+          const srcHost = hosts.resolveHost(otherRenterAcc.host);
+          if (srcHost) {
+            try {
+              const removed = await removeAccountFromConfig(
+                srcHost,
+                otherRenterAcc.configFile,
+                {
+                  clientSecret: otherRenterAcc.clientSecret,
+                  login: otherRenterAcc.login || username,
+                },
+              );
+              if (removed) {
+                try {
+                  await restartConfigContainer(srcHost, otherRenterAcc.configFile);
+                } catch {
+                  notes.push(
+                    "Removed from the other renter's bot, but it could not be restarted — restart it so the change takes effect.",
+                  );
+                }
+              }
+            } catch (e) {
+              return res.status(e.unreachable ? 502 : 500).json({
+                success: false,
+                offline: !!e.unreachable,
+                message:
+                  "Could not remove the account from another renter's bot (" +
+                  otherRenterAcc.configFile +
+                  "): " +
+                  (e.message || e),
+              });
+            }
+          }
+        }
+        await RenterAccount.deleteOne({ _id: otherRenterAcc._id });
+        notes.push("Moved off another renter's bot.");
+      }
+
+      // Park the credentials in the account pool so the Creds reveal can always
+      // find the password later, and mark it claimed so no new bot grabs it.
+      const poolSet = {
+        username,
+        clientSecret: token,
+        status: "claimed",
+        claimedAt: new Date(),
+        claimedNote: "rented to " + renter.username,
+      };
+      if (password) {
+        poolSet.password = encrypt(password);
+        poolSet.hasPassword = true;
+      }
+      await AvailableAccount.updateOne(
+        { usernameLower: lower },
+        { $set: poolSet, $setOnInsert: { usernameLower: lower } },
+        { upsert: true },
+      ).catch(() => {});
+
+      // Finally: write it into the renter's bot config.
+      const games = await getConfigGames(host, renter.botFile);
+      const acct = {
+        ClientSecret: token,
+        UniqueId: crypto.randomBytes(16).toString("hex"),
+        Login: username,
+        Id: "",
+        Enabled: true,
+        FavouriteGames: games.slice(),
+      };
+      try {
+        await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+      } catch (e) {
+        return res.status(e.unreachable ? 502 : 500).json({
+          success: false,
+          offline: !!e.unreachable,
+          message:
+            "Could not write the account to the renter's bot: " +
+            (e.message || e),
+        });
+      }
+
+      // Restart the renter's bot so it picks the new account up (best effort —
+      // a stopped bot stays stopped until the operator starts it).
+      let restarted = false;
+      try {
+        const container = containerForFile(renter.botFile);
+        const states = await hosts.dockerPs(host);
+        const st = container && states[container];
+        if (st && st.state === "running") {
+          await restartConfigContainer(host, renter.botFile);
+          restarted = true;
+        }
+      } catch {
+        notes.push("Added, but the renter's bot could not be restarted.");
+      }
+
+      notes.unshift("Added " + username + " to " + renter.botFile + ".");
+      if (restarted) notes.push("Bot restarting.");
+      res.json({
+        success: true,
+        moved: !!(botHit || otherRenterAcc),
+        restarted,
+        note: notes.join(" "),
+      });
+    } catch (err) {
+      console.error("renter manual add error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 // ------------------------------------------------------------------
 // Submission review queue

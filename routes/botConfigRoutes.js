@@ -1729,6 +1729,38 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
   return { added: accounts.length, total };
 }
 
+// Pull ONE account out of a config, matched by ClientSecret or (case-insensitive)
+// Login. Returns how many entries were removed (0 when the config is missing or
+// the account isn't in it). Used when an account is reassigned — e.g. moved onto
+// a renter's bot — so it never farms in two places at once.
+async function removeAccountFromConfig(host, file, { clientSecret, login }) {
+  if (!validFile(file)) throw new Error("Invalid config file");
+  let data;
+  try {
+    data = JSON.parse(await hosts.readFile(host, file));
+  } catch (e) {
+    if (e.code === "ENOENT") return 0;
+    throw e;
+  }
+  const users =
+    data && data.TwitchSettings && Array.isArray(data.TwitchSettings.TwitchUsers)
+      ? data.TwitchSettings.TwitchUsers
+      : [];
+  const loginLower = String(login || "").toLowerCase();
+  const kept = users.filter((u) => {
+    if (!u || typeof u !== "object") return true;
+    if (clientSecret && u.ClientSecret === clientSecret) return false;
+    if (loginLower && String(u.Login || "").toLowerCase() === loginLower)
+      return false;
+    return true;
+  });
+  const removed = users.length - kept.length;
+  if (!removed) return 0;
+  data.TwitchSettings.TwitchUsers = kept;
+  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+  return removed;
+}
+
 // How many accounts a config currently holds (for renter quota accounting).
 // Returns 0 for a missing/unreadable/absent config rather than throwing.
 async function countConfigAccounts(host, file) {
@@ -1973,3 +2005,4 @@ module.exports.setAccountGames = setAccountGames;
 module.exports.stopConfigContainer = stopConfigContainer;
 module.exports.startConfigContainer = startConfigContainer;
 module.exports.restartConfigContainer = restartConfigContainer;
+module.exports.removeAccountFromConfig = removeAccountFromConfig;
