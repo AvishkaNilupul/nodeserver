@@ -12,6 +12,7 @@ const Renter = require("../models/Renter");
 const RenterSubmission = require("../models/RenterSubmission");
 const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
+const renterDropScanner = require("../utils/renterDropScanner");
 const {
   createRenter,
   setPassword,
@@ -137,7 +138,19 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     const [accAgg, dropAgg] = await Promise.all([
       RenterAccount.aggregate([
         { $match: { renter: { $in: ids } } },
-        { $group: { _id: "$renter", n: { $sum: 1 } } },
+        {
+          $group: {
+            _id: "$renter",
+            n: { $sum: 1 },
+            // Token health per renter, so a dead token shows up in the
+            // overview instead of silently farming nothing.
+            bad: {
+              $sum: {
+                $cond: [{ $eq: ["$lastScanStatus", "token_invalid"] }, 1, 0],
+              },
+            },
+          },
+        },
       ]),
       RenterDrop.aggregate([
         { $match: { renter: { $in: ids } } },
@@ -145,6 +158,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
       ]),
     ]);
     const accMap = new Map(accAgg.map((a) => [String(a._id), a.n]));
+    const badMap = new Map(accAgg.map((a) => [String(a._id), a.bad || 0]));
     const dropMap = new Map(dropAgg.map((a) => [String(a._id), a.n]));
 
     // One dockerPs per host, reused across every bot on that host.
@@ -187,6 +201,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         online,
         running,
         accounts: accMap.get(String(r._id)) || 0,
+        tokenIssues: badMap.get(String(r._id)) || 0,
         drops: dropMap.get(String(r._id)) || 0,
       });
     }
@@ -297,10 +312,27 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(100)
       .lean();
+    // The renter's account roster with scan health, so the operator can spot a
+    // dead token from the Manage panel (and rescan it) without SSH. Never
+    // includes clientSecret.
+    const accounts = await RenterAccount.find(
+      { renter: r._id },
+      { login: 1, lastScanStatus: 1, lastScanAt: 1, lastScanError: 1, dropCount: 1 },
+    )
+      .sort({ login: 1 })
+      .lean();
     res.json({
       success: true,
       renter: view,
       bot,
+      accounts: accounts.map((a) => ({
+        id: String(a._id),
+        login: a.login || "",
+        status: a.lastScanStatus || "pending",
+        error: a.lastScanError || "",
+        dropCount: a.dropCount || 0,
+        lastScanAt: a.lastScanAt || null,
+      })),
       submissions: submissions.map((s) => ({
         id: String(s._id),
         status: s.status,
@@ -339,8 +371,14 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       r.maxAccounts = Math.max(0, Math.floor(Number(b.maxAccounts) || 0));
     if (b.accessStart !== undefined)
       r.accessStart = b.accessStart ? new Date(b.accessStart) : null;
-    if (b.accessEnd !== undefined)
+    if (b.accessEnd !== undefined) {
       r.accessEnd = b.accessEnd ? new Date(b.accessEnd) : null;
+      // A lease that now ends in the future (or never) invalidates the "expiry
+      // sweep already stopped this bot" stamp — without this, the sweep (which
+      // filters on botStoppedAt: null) would never stop the bot when the
+      // extended lease lapses.
+      if (!r.accessEnd || r.accessEnd > new Date()) r.botStoppedAt = null;
+    }
     await r.save();
     res.json({ success: true, renter: sanitizeRenter(r) });
   } catch (err) {
@@ -576,6 +614,47 @@ router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
 });
 
 // ------------------------------------------------------------------
+// Renter drop scanner — operator visibility + manual rescan
+// ------------------------------------------------------------------
+
+// Scanner progress (counts, current account, errors) for the Renting page.
+router.get("/renter-scan/progress", requireSuperadmin, async (req, res) => {
+  try {
+    res.json({ success: true, progress: await renterDropScanner.getProgress() });
+  } catch (err) {
+    console.error("renter-scan progress error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Force-scan ONE renter account now — the fix for a stale "token_invalid"
+// badge (transient GQL failures look like dead tokens; a fresh scan clears
+// them) and the quickest way to confirm a replacement token works.
+router.post(
+  "/renter-accounts/:id/scan",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad account id" });
+      }
+      const r = await renterDropScanner.scanAccountNow(req.params.id);
+      if (!r.ok) {
+        return res
+          .status(400)
+          .json({ success: false, message: r.error || "Scan failed" });
+      }
+      res.json({ success: true, newDrops: r.newDrops || 0, total: r.total || 0 });
+    } catch (err) {
+      console.error("renter account scan error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
 // Submission review queue
 // ------------------------------------------------------------------
 
@@ -734,7 +813,10 @@ router.post(
       sub.status = "approved";
       sub.reviewedBy = req.session.admin.id;
       sub.reviewedAt = new Date();
-      sub.added = added || sub.count;
+      // "added" is honest history: what the paste actually landed on the bot.
+      // Only when NO tokens were pasted (operator added the accounts through
+      // another tool first) do we assume the whole batch made it.
+      sub.added = tokensText.trim() ? added : sub.count;
       await sub.save();
 
       // Start the renter's bot.

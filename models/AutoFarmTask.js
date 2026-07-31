@@ -36,11 +36,19 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // Own sales history for this game (SaleSignal + reserved drops, last 45d)
     // — the training-data signal that boosts demand beyond external markets.
     internalSales: { type: Number, default: 0 },
-    // How many accounts already cover this game before we add anything:
-    // manual-bot farmers + unsold archive accounts holding this campaign.
+    // How many accounts already cover this game before we add anything.
+    //
+    // Only `archiveHolders` is credited, and it counts ONLY accounts assigned
+    // to auto-farm tasks — the auto-lister delivers out of task.assignedAccounts
+    // and nothing else, so any other stock is unsellable by this system and
+    // cannot be "coverage" for it. The other three are recorded so the log can
+    // explain what it saw and chose to ignore (see COUNT_MANUAL_AS_COVERAGE and
+    // ownedAccounts in utils/autoFarmer.js).
     coverage: {
-      manualFarmers: { type: Number, default: 0 },
-      archiveHolders: { type: Number, default: 0 },
+      manualFarmers: { type: Number, default: 0 }, // enabled on a manual bot for this game
+      archiveHolders: { type: Number, default: 0 }, // ITS OWN unsold holders — the only credited term
+      stashHolders: { type: Number, default: 0 }, // holders parked on manual bots
+      otherHolders: { type: Number, default: 0 }, // archive holders owned by no auto task
     },
 
     // Allocation.
@@ -51,6 +59,12 @@ const autoFarmTaskSchema = new mongoose.Schema(
     assignedAccounts: { type: [String], default: [] }, // pool usernames actually deployed
 
     // Bots created (or reused) for this task, all on the configured host (Pi).
+    // `shared` marks a container this task co-tenants with other active tasks
+    // (consolidation packs several campaigns into one container). It must be
+    // declared here or Mongoose's strict mode drops it on write — the flag is
+    // only informational (completeEndedTasks recomputes sharing live from the
+    // other active tasks), but an undeclared path silently reads back as
+    // undefined, which made the "shared" count in the Telegram summary wrong.
     bots: {
       type: [
         {
@@ -59,6 +73,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
           file: { type: String, default: "" },
           container: { type: String, default: "" },
           reused: { type: Boolean, default: false },
+          shared: { type: Boolean, default: false },
         },
       ],
       default: [],
@@ -79,6 +94,15 @@ const autoFarmTaskSchema = new mongoose.Schema(
     },
     dryRun: { type: Boolean, default: false },
     error: { type: String, default: "" },
+
+    // Set by rescanAll() to mark a terminal task for a fresh decision on the
+    // next tick. Rescan used to DELETE these rows, which destroyed the audit
+    // trail this model exists to keep and, since the notification gate compares
+    // against the decision a task already carried, made every re-decision look
+    // brand new — one rescan re-announced ~60 skips. Cleared automatically the
+    // next time a decision is recorded. Declared here because Mongoose strict
+    // mode silently drops undeclared paths on $set (see `bots.shared` above).
+    rescanRequested: { type: Boolean, default: false },
 
     executedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },

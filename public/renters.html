@@ -94,6 +94,8 @@
       .drop .nm span { font-size: 11px; color: var(--muted); }
       .drop .ct { font-weight: 800; color: var(--accent); }
       .selin { width: auto; min-width: 150px; display: inline-block; }
+      .mono { font-family: ui-monospace, Menlo, monospace; }
+      .tokwarn { color: var(--red); font-weight: 700; }
       @media (max-width: 760px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } .row { grid-template-columns: 1fr; } }
     </style>
   </head>
@@ -145,7 +147,7 @@
       </div>
 
       <div class="sect">
-        <div class="shdr"><h2>Rented bots</h2><button class="btn ghost sm" id="refreshBots">Refresh</button></div>
+        <div class="shdr"><h2>Rented bots <span class="muted" id="scanStat" style="font-size:12.5px;font-weight:500"></span></h2><button class="btn ghost sm" id="refreshBots">Refresh</button></div>
         <div class="rows" id="rentBots"></div>
       </div>
 
@@ -279,7 +281,8 @@
               : '<span class="badge wait">Unknown</span>';
             return '<div class="row">'+
               '<div><div class="nm">'+esc(b.username)+' '+(b.status==="suspended"?'<span class="badge suspended">Suspended</span>':'')+'</div>'+
-                '<div class="meta">'+esc(b.hostLabel||b.host)+' · '+esc(b.file)+' · '+b.accounts+' account(s) · '+b.drops+' drop(s)</div></div>'+
+                '<div class="meta">'+esc(b.hostLabel||b.host)+' · '+esc(b.file)+' · '+b.accounts+' account(s) · '+b.drops+' drop(s)'+
+                (b.tokenIssues?' · <span class="tokwarn">⚠ '+b.tokenIssues+' token issue'+(b.tokenIssues>1?'s':'')+'</span>':'')+'</div></div>'+
               '<div class="meta">'+runPill+'</div>'+
               '<div class="meta mono">'+esc(b.container||"")+'</div>'+
               '<div class="acts">'+
@@ -290,6 +293,21 @@
               '</div></div>';
           }).join("");
         } catch(e){ $("rentBots").innerHTML = '<div class="muted">'+esc(e.message)+'</div>'; }
+        loadScanStat();
+      }
+
+      // Renter drop-scanner status line (next to the Rented bots heading).
+      async function loadScanStat(){
+        try {
+          const d = await api("/renter-scan/progress");
+          const p = d.progress || {}, c = p.counts || {};
+          if (!c.total){ $("scanStat").textContent = ""; return; }
+          const bits = ["· scanner: "+(c.scannedWindow||0)+"/"+c.total+" scanned", (c.due||0)+" due"];
+          if (c.paused) bits.push(c.paused+" paused (access ended)");
+          if (c.tokenInvalid) bits.push(c.tokenInvalid+" token issue"+(c.tokenInvalid>1?"s":""));
+          if (p.scanning && p.currentLogin) bits.push("scanning "+p.currentLogin);
+          $("scanStat").textContent = bits.join(" · ");
+        } catch(e){ $("scanStat").textContent = ""; }
       }
 
       // ---- rented drops archive ----
@@ -322,8 +340,18 @@
 
       // ---- renter detail modal ----
       window.openRenter = async (id)=>{
-        try { const d = await api("/renters/"+id); renderModal(d.renter, d.submissions||[], d.bot||{}); $("overlay").classList.add("show"); CURRENT=id; }
+        try { const d = await api("/renters/"+id); renderModal(d.renter, d.submissions||[], d.bot||{}, d.accounts||[]); $("overlay").classList.add("show"); CURRENT=id; }
         catch(e){ toast(e.message); }
+      };
+      // Rescan one renter account now (clears a stale token_invalid, verifies a fix).
+      window.scanAcct = async (id, btn)=>{
+        if (btn){ btn.disabled = true; btn.textContent = "Scanning…"; }
+        try {
+          const d = await api("/renter-accounts/"+id+"/scan", { method:"POST" });
+          toast("Scanned — "+(d.newDrops||0)+" new drop(s), "+(d.total||0)+" total");
+        } catch(e){ toast(e.message); }
+        if (CURRENT) openRenter(CURRENT);
+        loadRentBots();
       };
       function closeModal(){ $("overlay").classList.remove("show"); CURRENT=null; }
       $("overlay").addEventListener("click",(e)=>{ if(e.target===$("overlay")) closeModal(); });
@@ -339,7 +367,19 @@
           await Promise.all([loadRenters(), loadRentBots()]); if(CURRENT===id) openRenter(id); }
         catch(e){ toast(e.message); }
       };
-      function renderModal(r, subs, bot){
+      const SCAN_BADGE = {
+        ok: '<span class="badge active">OK</span>',
+        token_invalid: '<span class="badge suspended">Token invalid</span>',
+        error: '<span class="badge expired">Error</span>',
+        pending: '<span class="badge wait">Pending</span>',
+      };
+      function accountRows(accs){
+        if (!accs.length) return '<div class="muted">No accounts yet.</div>';
+        return '<div class="rows">'+accs.map(a=>'<div class="approve-item"><div><b class="mono">'+esc(a.login||"—")+'</b> · '+(a.dropCount||0)+' drop(s) · <span class="muted">'+(a.lastScanAt?"scanned "+new Date(a.lastScanAt).toLocaleString():"never scanned")+'</span>'+
+          (a.error && a.status!=="ok" ? '<div class="lg">'+esc(a.error)+'</div>' : '')+
+          '</div><div class="acts">'+(SCAN_BADGE[a.status]||SCAN_BADGE.pending)+'<button class="btn ghost sm" onclick="scanAcct(\''+a.id+'\', this)">Scan</button></div></div>').join("")+'</div>';
+      }
+      function renderModal(r, subs, bot, accs){
         $("modal").innerHTML =
           '<div class="mh"><div><h2 style="font-size:18px">'+esc(r.username)+' '+statusBadge(r)+'</h2><div class="sub">'+r.used+'/'+r.maxAccounts+' accounts · '+esc(remaining(r.accessEnd))+'</div></div><button class="btn ghost sm" onclick="closeModal()">Close</button></div>'+
           '<div class="grid3" style="margin-top:6px">'+
@@ -374,6 +414,8 @@
           '<div class="credbox" style="margin-top:12px">Login <code>'+esc(r.username)+'</code> &nbsp;·&nbsp; Password <code id="pwView">••••••••</code> '+
             '<button class="btn ghost sm" style="margin-left:8px" onclick="showPw(\''+r.id+'\')">Show</button> '+
             '<button class="btn ghost sm" onclick="copyLogin(\''+esc(r.username)+'\',\''+r.id+'\')">Copy login</button></div>'+
+          '<h2 style="font-size:14px;margin:18px 0 8px">Accounts <span class="muted" style="font-size:12px;font-weight:600">('+accs.length+')</span></h2>'+
+          accountRows(accs)+
           '<h2 style="font-size:14px;margin:18px 0 8px">Submissions</h2>'+
           (subs.length? '<div class="rows">'+subs.map(s=>'<div class="approve-item"><div><b>'+s.count+'</b> account(s) · <span class="muted">'+new Date(s.createdAt).toLocaleString()+'</span>'+(s.status==="approved"?' · '+s.added+' added':'')+(s.status==="rejected"&&s.rejectReason?' · '+esc(s.rejectReason):'')+'</div><span class="badge '+(s.status==="approved"?"active":s.status==="rejected"?"suspended":"wait")+'">'+s.status+'</span></div>').join("")+'</div>' : '<div class="muted">No submissions.</div>');
       }

@@ -1,0 +1,72 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+}
+
+// Release signing: android/keystore/keystore.properties (gitignored) with
+// storeFile/storePassword/keyAlias/keyPassword. Without it the release build
+// falls back to the debug key so a local build always succeeds.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file("keystore/keystore.properties")
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace "com.redeemhub.seller"
+    compileSdk 33
+    buildToolsVersion "33.0.1"
+
+    defaultConfig {
+        applicationId "com.redeemhub.seller"
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps["storeFile"])
+                storePassword keystoreProps["storePassword"]
+                keyAlias keystoreProps["keyAlias"]
+                keyPassword keystoreProps["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        // Debug points at a dev server on the host machine (10.0.2.2 is the
+        // emulator's alias for the host's localhost) and allows cleartext.
+        debug {
+            applicationIdSuffix ".debug"
+            buildConfigField "String", "BASE_URL", '"http://10.0.2.2:3000/app"'
+            manifestPlaceholders = [usesCleartext: "true", appLabel: "RedeemHub Dev"]
+        }
+        release {
+            minifyEnabled false
+            buildConfigField "String", "BASE_URL", '"https://redeemhub.lets.game/app"'
+            manifestPlaceholders = [usesCleartext: "false", appLabel: "@string/app_name"]
+            signingConfig keystorePropsFile.exists() ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation "androidx.core:core-ktx:1.10.1"
+    implementation "androidx.appcompat:appcompat:1.6.1"
+    implementation "androidx.swiperefreshlayout:swiperefreshlayout:1.1.0"
+}
