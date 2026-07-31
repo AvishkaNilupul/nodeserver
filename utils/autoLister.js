@@ -98,16 +98,35 @@ function resolveCampaignItems(camp, { game, campaignName }) {
 // Refuses to return a set built only from a title placeholder (the AC bug).
 async function campaignItems(campaignId, game, campaignName) {
   const { fetchCampaignDetails } = require("./twitchInventory");
-  const candidates = await BotAccount.find({
+  // fetchCampaignDetails is integrity-gated: a token whose last scan failed
+  // integrity will throw "Campaign details unavailable". So prefer known-good
+  // (lastScanStatus:"ok") tokens FIRST — pulled in their own query so the
+  // limit doesn't fill up with recently-scanned-but-integrity-failed tokens
+  // before the ok ones are even considered (the old code did .limit(5) BEFORE
+  // the ok-first sort, so a relist could fail with healthy tokens sitting
+  // right there). Fall back to any token if no ok one works.
+  const okC = await BotAccount.find({
+    clientSecret: { $exists: true, $ne: "" },
+    lastScanStatus: "ok",
+  })
+    .sort({ lastScanAt: -1 })
+    .limit(8)
+    .lean();
+  const anyC = await BotAccount.find({
     clientSecret: { $exists: true, $ne: "" },
   })
     .sort({ lastScanAt: -1 })
-    .limit(5)
+    .limit(8)
     .lean();
-  const ordered = [
-    ...candidates.filter((a) => a.lastScanStatus === "ok"),
-    ...candidates.filter((a) => a.lastScanStatus !== "ok"),
-  ];
+  const seen = new Set();
+  const ordered = [];
+  for (const a of [...okC, ...anyC]) {
+    const s = String(a.clientSecret || "");
+    if (s && !seen.has(s)) {
+      seen.add(s);
+      ordered.push(a);
+    }
+  }
   let lastErr = null;
   let sawPlaceholderOnly = false;
   for (const acc of ordered) {
