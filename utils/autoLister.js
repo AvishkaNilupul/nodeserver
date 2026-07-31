@@ -1203,14 +1203,20 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
 
 /* --------------------------- stacked-bundle listing ---------------------- */
 
-// Price for a stacked (multi-event) bundle: the current event's market price
-// plus what the game's newest prior bundle was selling for. Read once at
-// publish time from fixed recorded prices, so it cannot compound tick over
-// tick the way the old sum-of-campaigns markup did.
+// Price for a stacked (multi-event) bundle. Anchored to the CURRENT event's
+// market price (derivePrice already undercuts live competition) with only a
+// modest premium for the extra items — competitors sell stacked accounts
+// cheap, so summing bundle prices would price ours out of the market. The
+// premium is +25%, capped at +$1.00, and never above the two bundles' prices
+// combined. Read once at publish time, so it cannot compound tick over tick.
+const STACK_PREMIUM = 1.25;
+const STACK_PREMIUM_MAX_ADD = 1.0;
 function stackedBundlePrice(basePrice, priorPrice) {
   const base = Number(basePrice) > 0 ? Number(basePrice) : 1.0;
   const prior = Number(priorPrice) > 0 ? Number(priorPrice) : 0;
-  return Math.max(base, round25(base + prior));
+  let bumped = Math.min(base * STACK_PREMIUM, base + STACK_PREMIUM_MAX_ADD);
+  if (prior > 0) bumped = Math.min(bumped, base + prior);
+  return Math.max(base, round25(bumped));
 }
 
 // Publish a SECOND listing for a task whose accounts were reused across this
