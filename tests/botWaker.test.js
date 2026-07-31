@@ -11,7 +11,11 @@ const games = new Set(["delta force", "fortnite"]);
 
 test("a campaign that began after we parked the bot wakes it", () => {
   const t = wakeTrigger(games, PARKED, [
-    { game: "Delta Force", name: "New Season", startAt: "2026-07-29T09:00:00.000Z" },
+    {
+      game: "Delta Force",
+      name: "New Season",
+      startAt: "2026-07-29T09:00:00.000Z",
+    },
   ]);
   assert.ok(t);
   assert.strictEqual(t.name, "New Season");
@@ -20,21 +24,33 @@ test("a campaign that began after we parked the bot wakes it", () => {
 test("a campaign that was already running when we parked does NOT wake it", () => {
   // This is the whole point of parking: those drops are already farmed.
   const t = wakeTrigger(games, PARKED, [
-    { game: "Delta Force", name: "Old Season", startAt: "2026-07-26T09:00:00.000Z" },
+    {
+      game: "Delta Force",
+      name: "Old Season",
+      startAt: "2026-07-26T09:00:00.000Z",
+    },
   ]);
   assert.strictEqual(t, null);
 });
 
 test("a new campaign for a game the bot does not farm is ignored", () => {
   const t = wakeTrigger(games, PARKED, [
-    { game: "Sea of Thieves", name: "Not Ours", startAt: "2026-07-29T09:00:00.000Z" },
+    {
+      game: "Sea of Thieves",
+      name: "Not Ours",
+      startAt: "2026-07-29T09:00:00.000Z",
+    },
   ]);
   assert.strictEqual(t, null);
 });
 
 test("game matching is case and whitespace insensitive", () => {
   const t = wakeTrigger(games, PARKED, [
-    { game: "  DELTA force ", name: "Casing", startAt: "2026-07-29T09:00:00.000Z" },
+    {
+      game: "  DELTA force ",
+      name: "Casing",
+      startAt: "2026-07-29T09:00:00.000Z",
+    },
   ]);
   assert.ok(t);
 });
@@ -51,9 +67,12 @@ test("a live campaign with no startAt wakes rather than being assumed old", () =
 test("no campaigns, or none matching, yields no wake", () => {
   assert.strictEqual(wakeTrigger(games, PARKED, []), null);
   assert.strictEqual(wakeTrigger(games, PARKED, undefined), null);
-  assert.strictEqual(wakeTrigger(new Set(), PARKED, [
-    { game: "Delta Force", startAt: "2026-07-29T09:00:00.000Z" },
-  ]), null);
+  assert.strictEqual(
+    wakeTrigger(new Set(), PARKED, [
+      { game: "Delta Force", startAt: "2026-07-29T09:00:00.000Z" },
+    ]),
+    null,
+  );
 });
 
 test("container name maps back to its config file", () => {
@@ -94,7 +113,11 @@ test("per-account games win over the config-level list, and all are unioned", ()
       ],
     },
   });
-  assert.deepStrictEqual([...games].sort(), ["fortnite", "rust", "the quinfall"]);
+  assert.deepStrictEqual([...games].sort(), [
+    "fortnite",
+    "rust",
+    "the quinfall",
+  ]);
 });
 
 test("disabled accounts contribute nothing — a retired account must not wake a bot", () => {
@@ -115,7 +138,11 @@ test("games are normalised so campaign matching is case/space insensitive", () =
     FavouriteGames: [],
     TwitchSettings: {
       TwitchUsers: [
-        { ClientSecret: "a", Enabled: true, FavouriteGames: ["  Sea Of THIEVES  "] },
+        {
+          ClientSecret: "a",
+          Enabled: true,
+          FavouriteGames: ["  Sea Of THIEVES  "],
+        },
       ],
     },
   });
@@ -138,7 +165,11 @@ const SCANNED = "2026-07-29T06:00:00.000Z";
 
 test("a campaign newer than the scan blocks the park", () => {
   const blocked = wakeTrigger(games, SCANNED, [
-    { game: "Delta Force", name: "Started after we last looked", startAt: "2026-07-29T08:00:00.000Z" },
+    {
+      game: "Delta Force",
+      name: "Started after we last looked",
+      startAt: "2026-07-29T08:00:00.000Z",
+    },
   ]);
   assert.ok(blocked, "the verdict predates this campaign — do not park");
 });
@@ -147,14 +178,22 @@ test("a campaign older than the scan does not block the park", () => {
   // The scan already saw whatever this campaign gave the accounts, and it
   // reported them finished. Parking is safe.
   const blocked = wakeTrigger(games, SCANNED, [
-    { game: "Delta Force", name: "Already counted", startAt: "2026-07-28T08:00:00.000Z" },
+    {
+      game: "Delta Force",
+      name: "Already counted",
+      startAt: "2026-07-28T08:00:00.000Z",
+    },
   ]);
   assert.strictEqual(blocked, null);
 });
 
 test("a campaign for someone else's game never blocks the park", () => {
   const blocked = wakeTrigger(games, SCANNED, [
-    { game: "Overwatch", name: "Not ours", startAt: "2026-07-29T08:00:00.000Z" },
+    {
+      game: "Overwatch",
+      name: "Not ours",
+      startAt: "2026-07-29T08:00:00.000Z",
+    },
   ]);
   assert.strictEqual(blocked, null);
 });
@@ -166,4 +205,75 @@ test("no scan evidence at all blocks the park", () => {
     { game: "Fortnite", name: "Any", startAt: "2020-01-01T00:00:00.000Z" },
   ]);
   assert.ok(blocked);
+});
+
+/* ---- park-grace: don't park into a just-started (esports/broadcast) campaign ---- */
+
+const GRACE_48H = 48 * 60 * 60 * 1000;
+
+test("park grace keeps a bot up for a campaign that started just before the scan", () => {
+  // The OWCS MSC Day 2 case: campaign started 25 min BEFORE the scan behind the
+  // "finished" verdict, but its broadcast drops land afterwards. With graceMs,
+  // wakeTrigger must return the campaign (block the park).
+  const scan = "2026-07-30T10:10:35.000Z";
+  const t = wakeTrigger(
+    new Set(["overwatch"]),
+    scan,
+    [
+      {
+        game: "Overwatch",
+        name: "OWCS MSC Day 2",
+        startAt: "2026-07-30T09:45:00.000Z",
+      },
+    ],
+    GRACE_48H,
+  );
+  assert.ok(t, "should block park for a campaign within the grace window");
+  assert.strictEqual(t.name, "OWCS MSC Day 2");
+});
+
+test("park grace still lets a long seasonal campaign park (RAM reclaimed)", () => {
+  // OW S3 Midseason started weeks before the scan — outside 48h — so parking is
+  // allowed even with the grace on.
+  const scan = "2026-07-30T10:10:35.000Z";
+  const t = wakeTrigger(
+    new Set(["overwatch"]),
+    scan,
+    [
+      {
+        game: "Overwatch",
+        name: "OW 2026 S3 Midseason",
+        startAt: "2026-07-14T18:00:00.000Z",
+      },
+    ],
+    GRACE_48H,
+  );
+  assert.strictEqual(t, null, "a weeks-old campaign should not block parking");
+});
+
+test("grace defaults to 0 so waking behaviour is unchanged", () => {
+  // Without graceMs, a campaign that started before the park must NOT wake.
+  const t = wakeTrigger(games, PARKED, [
+    {
+      game: "Delta Force",
+      name: "Old Season",
+      startAt: "2026-07-26T09:00:00.000Z",
+    },
+  ]);
+  assert.strictEqual(t, null);
+});
+
+test("park grace still respects the game filter", () => {
+  const scan = "2026-07-30T10:10:35.000Z";
+  const t = wakeTrigger(
+    new Set(["overwatch"]),
+    scan,
+    [{ game: "Valorant", name: "VCT", startAt: "2026-07-30T09:45:00.000Z" }],
+    GRACE_48H,
+  );
+  assert.strictEqual(
+    t,
+    null,
+    "a grace-window campaign for another game is ignored",
+  );
 });

@@ -1335,6 +1335,49 @@ async function onCampaignEnded(taskId) {
     await row.save();
   }
 
+  // Stacking regenerated title/description, but the reprice above only touched
+  // the Gameflip row. The GGSel/Plati secondary rows for the same set kept
+  // their pre-stack text, so they under-list the (now larger) bundle. Bring
+  // them in line. origin:"auto" is the same hard owner-boundary the reprice
+  // uses. Best-effort per row: a secondary hiccup must not undo the Gameflip
+  // reprice or block the postEvent save.
+  let secondaryUpdated = 0;
+  const secondaryTextStale = [];
+  const secondaries = await MarketplaceListing.find({
+    set: mySet._id,
+    origin: "auto",
+    status: "active",
+    marketplace: { $in: ["ggsel", "digiseller"] },
+  });
+  for (const s of secondaries) {
+    if (s.marketplace === "ggsel") {
+      try {
+        // Text-only PATCH — omitting priceRub leaves the GGSel price untouched.
+        await mp.ggselUpdateOffer(s.externalId, { title, description });
+        s.title = title;
+        s.description = description;
+        await s.save();
+        secondaryUpdated++;
+      } catch (e) {
+        secondaryTextStale.push({
+          marketplace: "ggsel",
+          externalId: s.externalId,
+          error: e.message,
+        });
+      }
+    } else {
+      // Digiseller has no edit-text API (publish/add-content/delist only), and
+      // a republish would churn contentIds + the per-unit bookkeeping. The text
+      // under-lists (content is correct — the account holds everything), so it
+      // is left live and reported rather than republished.
+      secondaryTextStale.push({
+        marketplace: "digiseller",
+        externalId: s.externalId,
+        reason: "no edit-text API",
+      });
+    }
+  }
+
   task.listing.title = title;
   task.listing.price = price;
   task.listing.repricedAt = new Date();
@@ -1351,6 +1394,8 @@ async function onCampaignEnded(taskId) {
       items: items.length,
       live: !!row,
       released: row ? heldBack : 0,
+      secondaryUpdated,
+      secondaryTextStale,
     },
   };
 }

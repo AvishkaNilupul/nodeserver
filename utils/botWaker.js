@@ -30,6 +30,18 @@ const { botCompletion } = require("./farmCompletion");
 
 const REGISTRY = "parked-bots.json";
 
+// Broadcast-lag grace for the PARK decision. Esports/Twitch-Rivals drops become
+// earnable while a broadcast airs, which is AFTER the campaign's startAt — so a
+// scan taken minutes after startAt sees "nothing in progress", judges the
+// account finished, and parks it right before the broadcast drops land (this is
+// how local twitchbotx13 missed OWCS MSC Day 2: start 09:45Z, scan 10:10Z).
+// Refusing to park when a campaign started within this window BEFORE the scan
+// keeps the bot up through the broadcast. Long seasonal campaigns (started
+// weeks ago) fall outside the window and still park, reclaiming RAM. Waking is
+// unaffected — it passes graceMs 0.
+const PARK_CAMPAIGN_GRACE_MS =
+  Number(process.env.BOT_PARK_CAMPAIGN_GRACE_MS) || 48 * 60 * 60 * 1000; // 48h
+
 // twitchbotx7 -> config_07.json (inverse of botFactory.containerForFile)
 function fileForContainer(container) {
   const c = String(container || "").trim();
@@ -40,7 +52,9 @@ function fileForContainer(container) {
 }
 
 function norm(s) {
-  return String(s || "").trim().toLowerCase();
+  return String(s || "")
+    .trim()
+    .toLowerCase();
 }
 
 // Every game any enabled account in this config farms, honouring the rule that
@@ -70,13 +84,19 @@ function gamesOf(data) {
 // live campaign for a game we farm is exactly the case where guessing "old"
 // would silently cost drops, and a needless wake only costs RAM until the next
 // sweep parks it again.
-function wakeTrigger(games, parkedAt, campaigns) {
+// `graceMs` shifts the comparison floor earlier so a campaign that started up
+// to graceMs BEFORE `parkedAt` still counts. Waking passes 0 (unchanged: only a
+// campaign strictly newer than the park wakes a bot). The PARK path passes
+// PARK_CAMPAIGN_GRACE_MS so a bot isn't parked into a just-started campaign
+// whose broadcast drops haven't landed yet.
+function wakeTrigger(games, parkedAt, campaigns, graceMs = 0) {
   const since = parkedAt ? new Date(parkedAt).getTime() : 0;
   if (!Number.isFinite(since)) return null;
+  const floor = since - (Number(graceMs) || 0);
   for (const c of campaigns || []) {
     if (!games.has(norm(c.game))) continue;
     if (!c.startAt) return c;
-    if (new Date(c.startAt).getTime() > since) return c;
+    if (new Date(c.startAt).getTime() > floor) return c;
   }
   return null;
 }
@@ -153,7 +173,9 @@ async function wakeFinishedBots(hostId, opts = {}) {
     }
     let games;
     try {
-      games = gamesOf(JSON.parse(await hosts.readFile(host, fileForContainer(container))));
+      games = gamesOf(
+        JSON.parse(await hosts.readFile(host, fileForContainer(container))),
+      );
     } catch {
       continue; // config unreadable — leave it parked, try again next tick
     }
@@ -167,8 +189,13 @@ async function wakeFinishedBots(hostId, opts = {}) {
       dirty = true;
       woken.push({ container, game: trigger.game, campaign: trigger.name });
       log(
-        "Woke " + container + " — new campaign for " + trigger.game +
-        ' ("' + (trigger.name || "?") + '").',
+        "Woke " +
+          container +
+          " — new campaign for " +
+          trigger.game +
+          ' ("' +
+          (trigger.name || "?") +
+          '").',
       );
     } catch (e) {
       log("Could not start " + container + ": " + (e.message || e), "warn");
@@ -245,11 +272,19 @@ async function stopFinishedBots(hostId, opts = {}) {
       // any live campaign for an assigned game that this verdict cannot have
       // seen means "unknown", not "finished".
       const assigned = new Set((verdict.assignedGames || []).map(norm));
-      const newer = wakeTrigger(assigned, verdict.oldestScanAt, campaigns);
+      const newer = wakeTrigger(
+        assigned,
+        verdict.oldestScanAt,
+        campaigns,
+        PARK_CAMPAIGN_GRACE_MS,
+      );
       if (newer) {
         log(
-          "Keeping " + container + " — " + (newer.game || "a game it farms") +
-          " has a campaign newer than the scan this verdict rests on.",
+          "Keeping " +
+            container +
+            " — " +
+            (newer.game || "a game it farms") +
+            " has a campaign newer than the scan this verdict rests on.",
         );
         continue;
       }
@@ -274,8 +309,13 @@ async function stopFinishedBots(hostId, opts = {}) {
       log(
         empty
           ? "Parked " + container + " — it holds no enabled accounts."
-          : "Parked " + container + " — all " + verdict.total +
-            " account(s) finished [" + verdict.assignedGames.join(", ") + "].",
+          : "Parked " +
+              container +
+              " — all " +
+              verdict.total +
+              " account(s) finished [" +
+              verdict.assignedGames.join(", ") +
+              "].",
       );
     } catch (e) {
       log("Could not stop " + container + ": " + (e.message || e), "warn");
