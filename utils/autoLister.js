@@ -19,7 +19,11 @@ const {
   DS_CLAIM_TAG,
 } = require("./digisellerFulfiller");
 const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
-const { reserveSetOnAccount, AVAILABLE_DROP } = require("./dropReservation");
+const {
+  reserveSetOnAccount,
+  releaseSetForAccounts,
+  AVAILABLE_DROP,
+} = require("./dropReservation");
 const settings = require("./settings");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
@@ -475,6 +479,43 @@ async function reserveOneForDelivery(accounts, set, tag) {
   return null;
 }
 
+// Release the reservation made for THIS attempt on `set` from `accounts`. Keyed
+// on set._id (not the market tag) so it frees exactly this attempt's drops and
+// can never overreach into another set the same account may be reserved for
+// under the same tag. `accounts` may be one {accountId} or an array of them.
+async function releaseReservedForSet(accounts, set) {
+  const list = Array.isArray(accounts) ? accounts : [accounts];
+  const ids = list
+    .map((a) => a && a.accountId)
+    .filter(Boolean)
+    .map(String);
+  if (!ids.length || !set || !set._id) return;
+  await releaseSetForAccounts(ids, String(set._id));
+}
+
+// Run `doPublish` after a reservation is already held for `reserved` on `set`;
+// if it throws, release that reservation before rethrowing so a failed publish
+// never strands stock (a Gameflip 429 after reserving, a Digiseller timeout,
+// etc.). A failure of the release itself is swallowed — the ORIGINAL publish
+// error is always what surfaces, never masked by rollback trouble.
+async function withReservationRollback(
+  reserved,
+  set,
+  doPublish,
+  { release = releaseReservedForSet } = {},
+) {
+  try {
+    return await doPublish();
+  } catch (err) {
+    try {
+      await release(reserved, set);
+    } catch {
+      /* never let a rollback failure hide the real publish error */
+    }
+    throw err;
+  }
+}
+
 // ---- Secondary-market publishers, shared by the initial listing and the
 // sweep retry. Each returns { externalId, url, qty } on success and throws
 // on failure; the caller records the error without touching other markets.
@@ -498,53 +539,57 @@ async function publishPlatiShare({
       "no account still held the full bundle unclaimed at publish time",
     );
   }
-  const attributes = settings.getAutoFarm().platiAttributes || [];
-  const r = await mp.digisellerPublish({
-    title,
-    description,
-    priceUsd: price,
-    categories: [{ owner: 1, categoryId, attributes }],
+  // reserve → publish → (on throw) release the reservation so a failed publish
+  // never strands the account's drops.
+  return withReservationRollback(accounts, set, async () => {
+    const attributes = settings.getAutoFarm().platiAttributes || [];
+    const r = await mp.digisellerPublish({
+      title,
+      description,
+      priceUsd: price,
+      categories: [{ owner: 1, categoryId, attributes }],
+    });
+    let contentIds = [];
+    try {
+      const added = await mp.digisellerAddContent(
+        r.externalId,
+        accounts.map((a) => digisellerDeliveryCode(a.login, a.password)),
+      );
+      contentIds = (added && added.contentIds) || [];
+    } catch (err) {
+      await mp.digisellerDelist(r.externalId).catch(() => {});
+      throw err;
+    }
+    if (img) {
+      await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
+    }
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "digiseller",
+      externalId: r.externalId,
+      url: r.url || "",
+      title,
+      description,
+      price,
+      status: "active",
+      origin: "auto",
+      note: "auto-farm: " + accounts.length + " account(s)",
+      autoDeliver: true,
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      // Record which unit belongs to which account. Digiseller has no endpoint
+      // that lists a product's content, so an id not captured here can NEVER be
+      // targeted again — a single bad unit then has no remedy but delisting the
+      // whole product (which is exactly what the EA FC listings needed on
+      // 2026-07-30, having been fed before this bookkeeping existed).
+      units: accounts.map((a, i) => ({
+        accountId: String(a.accountId || ""),
+        login: a.login,
+        contentId: contentIds[i] || "",
+      })),
+    });
+    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
   });
-  let contentIds = [];
-  try {
-    const added = await mp.digisellerAddContent(
-      r.externalId,
-      accounts.map((a) => digisellerDeliveryCode(a.login, a.password)),
-    );
-    contentIds = (added && added.contentIds) || [];
-  } catch (err) {
-    await mp.digisellerDelist(r.externalId).catch(() => {});
-    throw err;
-  }
-  if (img) {
-    await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
-  }
-  await MarketplaceListing.create({
-    set: set._id,
-    marketplace: "digiseller",
-    externalId: r.externalId,
-    url: r.url || "",
-    title,
-    description,
-    price,
-    status: "active",
-    origin: "auto",
-    note: "auto-farm: " + accounts.length + " account(s)",
-    autoDeliver: true,
-    accountLogin: accounts.map((a) => a.login).join(", "),
-    qtyTarget: accounts.length,
-    // Record which unit belongs to which account. Digiseller has no endpoint
-    // that lists a product's content, so an id not captured here can NEVER be
-    // targeted again — a single bad unit then has no remedy but delisting the
-    // whole product (which is exactly what the EA FC listings needed on
-    // 2026-07-30, having been fed before this bookkeeping existed).
-    units: accounts.map((a, i) => ({
-      accountId: String(a.accountId || ""),
-      login: a.login,
-      contentId: contentIds[i] || "",
-    })),
-  });
-  return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
 }
 
 async function publishGgselShare({
@@ -562,35 +607,38 @@ async function publishGgselShare({
       "no account still held the full bundle unclaimed at publish time",
     );
   }
-  const r = await mp.ggselPublish({
-    title,
-    description,
-    priceUsd: price,
-    categoryId,
-    delivery: "auto",
-    coverImagePath: img,
-    products: accounts.map((a) => ggselDeliveryCode(a.login, a.password)),
+  // reserve → publish → (on throw) release the reservation.
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.ggselPublish({
+      title,
+      description,
+      priceUsd: price,
+      categoryId,
+      delivery: "auto",
+      coverImagePath: img,
+      products: accounts.map((a) => ggselDeliveryCode(a.login, a.password)),
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "ggsel",
+      externalId: r.externalId,
+      url: r.url || "",
+      title,
+      description,
+      price,
+      status: "active",
+      origin: "auto",
+      note:
+        (r.note ? r.note + " " : "") +
+        "auto-farm: " +
+        accounts.length +
+        " account(s)",
+      autoDeliver: true,
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+    });
+    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
   });
-  await MarketplaceListing.create({
-    set: set._id,
-    marketplace: "ggsel",
-    externalId: r.externalId,
-    url: r.url || "",
-    title,
-    description,
-    price,
-    status: "active",
-    origin: "auto",
-    note:
-      (r.note ? r.note + " " : "") +
-      "auto-farm: " +
-      accounts.length +
-      " account(s)",
-    autoDeliver: true,
-    accountLogin: accounts.map((a) => a.login).join(", "),
-    qtyTarget: accounts.length,
-  });
-  return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
 }
 
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
@@ -780,9 +828,12 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
         if (accs.length)
           accs = await reserveAccountsForPublish(accs, set, DS_CLAIM_TAG);
         if (accs.length) {
-          await mp.digisellerAddContent(
-            L.plati.externalId,
-            accs.map((a) => digisellerDeliveryCode(a.login, a.password)),
+          // reserve → add → (on throw, into the surrounding catch) release.
+          await withReservationRollback(accs, set, () =>
+            mp.digisellerAddContent(
+              L.plati.externalId,
+              accs.map((a) => digisellerDeliveryCode(a.login, a.password)),
+            ),
           );
           task.listing.plati.qty =
             (Number(task.listing.plati.qty) || 0) + accs.length;
@@ -803,9 +854,12 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
         if (accs.length)
           accs = await reserveAccountsForPublish(accs, set, GG_CLAIM_TAG);
         if (accs.length) {
-          await mp.ggselAddProducts(
-            L.ggsel.externalId,
-            accs.map((a) => ggselDeliveryCode(a.login, a.password)),
+          // reserve → add → (on throw, into the surrounding catch) release.
+          await withReservationRollback(accs, set, () =>
+            mp.ggselAddProducts(
+              L.ggsel.externalId,
+              accs.map((a) => ggselDeliveryCode(a.login, a.password)),
+            ),
           );
           await mp.ggselFinalizeStock(L.ggsel.externalId).catch(() => {});
           task.listing.ggsel.qty =
@@ -999,16 +1053,30 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const plati = { externalId: "", url: "", qty: 0, error: "" };
   const ggsel = { externalId: "", url: "", qty: 0, error: "" };
   try {
-    published = await mp.gameflipPublish({
-      title,
-      description,
-      priceUsd: price,
-      imagePath: img,
-      autoDeliverCode: gameflipDeliveryCode(
-        gfDeliver.login,
-        gfDeliver.password,
-      ),
-    });
+    // reserve → publish → (on throw) release the gameflip unit AND delete the
+    // now-empty set (mirrors the no-deliver path above) so a failed publish
+    // strands neither the account's drops nor an orphan DropSet.
+    published = await withReservationRollback(
+      gfDeliver,
+      set,
+      () =>
+        mp.gameflipPublish({
+          title,
+          description,
+          priceUsd: price,
+          imagePath: img,
+          autoDeliverCode: gameflipDeliveryCode(
+            gfDeliver.login,
+            gfDeliver.password,
+          ),
+        }),
+      {
+        release: async (acct, s) => {
+          await releaseReservedForSet(acct, s);
+          await DropSet.deleteOne({ _id: s._id }).catch(() => {});
+        },
+      },
+    );
 
     // ---- Plati (Digiseller): same flow as the manual Shop route — create
     // the product in the configured cataloguer category, attach one delivery
@@ -1286,4 +1354,6 @@ module.exports = {
   looksLikeTitlePlaceholder,
   resolveCampaignItems,
   filterVerifiedHolders,
+  // reserve→publish rollback (release stranded reservations on publish failure)
+  withReservationRollback,
 };

@@ -14,6 +14,7 @@ const {
   looksLikeTitlePlaceholder,
   resolveCampaignItems,
   filterVerifiedHolders,
+  withReservationRollback,
 } = require("../utils/autoLister");
 
 const items = [
@@ -415,4 +416,72 @@ test("empty rows (nobody holds the full bundle) => list nothing", () => {
     assignedLower: ASSIGNED,
   });
   assert.deepStrictEqual(out, []);
+});
+
+/* ------ reserve→publish rollback: release stranded reservations on fail ---- */
+
+test("withReservationRollback returns the publish result on success (no release)", async () => {
+  let released = false;
+  const set = { _id: "set1" };
+  const reserved = [{ accountId: "a1" }];
+  const r = await withReservationRollback(
+    reserved,
+    set,
+    async () => ({ externalId: "X", ok: true }),
+    {
+      release: async () => {
+        released = true;
+      },
+    },
+  );
+  assert.deepStrictEqual(r, { externalId: "X", ok: true });
+  assert.strictEqual(released, false, "must not release when publish succeeds");
+});
+
+test("withReservationRollback releases the reservation when publish throws", async () => {
+  const calls = [];
+  const set = { _id: "set2" };
+  const reserved = [{ accountId: "a1" }, { accountId: "a2" }];
+  await assert.rejects(
+    () =>
+      withReservationRollback(
+        reserved,
+        set,
+        async () => {
+          throw new Error("gameflip 429");
+        },
+        {
+          release: async (accts, s) => {
+            calls.push({ accts, setId: s._id });
+          },
+        },
+      ),
+    /gameflip 429/,
+  );
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].setId, "set2");
+  assert.deepStrictEqual(
+    calls[0].accts.map((a) => a.accountId),
+    ["a1", "a2"],
+  );
+});
+
+test("a rollback failure never masks the original publish error", async () => {
+  const set = { _id: "set3" };
+  await assert.rejects(
+    () =>
+      withReservationRollback(
+        [{ accountId: "a1" }],
+        set,
+        async () => {
+          throw new Error("real: digiseller timeout");
+        },
+        {
+          release: async () => {
+            throw new Error("rollback blew up");
+          },
+        },
+      ),
+    /real: digiseller timeout/, // the publish error, not the rollback error
+  );
 });
