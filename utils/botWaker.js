@@ -179,7 +179,16 @@ async function wakeFinishedBots(hostId, opts = {}) {
     } catch {
       continue; // config unreadable — leave it parked, try again next tick
     }
-    const trigger = wakeTrigger(games, entry.parkedAt, campaigns);
+    // Auto parks are protected at park time (stopFinishedBots refuses to park
+    // into a campaign newer than the scan its verdict rests on), so a strict
+    // "started after the park" comparison is safe for them. A MANUAL park has
+    // no such check — a campaign already running when the operator stopped the
+    // bot would never wake it, because nothing newer ever arrives. Manual
+    // entries therefore get the same broadcast grace the park path uses.
+    const graceMs = /manual/i.test(entry.reason || "")
+      ? PARK_CAMPAIGN_GRACE_MS
+      : 0;
+    const trigger = wakeTrigger(games, entry.parkedAt, campaigns, graceMs);
     if (!trigger) continue;
 
     await hosts.restoreRestartPolicy(host, container).catch(() => {});
