@@ -2970,7 +2970,14 @@ Reliable Daily Rewards</textarea
                   '<div class="mp-item">' +
                   "<span><b>" +
                   esc(MP_LABELS[r.marketplace] || r.marketplace) +
-                  "</b> — " +
+                  "</b> " +
+                  // Who owns the price. Auto-farmed rows get the post-event
+                  // scarcity markup applied automatically; anything listed by
+                  // hand keeps the price it was given, forever.
+                  (r.origin === "auto"
+                    ? '<span class="badge auto">Auto</span>'
+                    : '<span class="badge draft" title="Listed by you — automatic repricing never touches this">Mine · fixed price</span>') +
+                  " — " +
                   (r.url
                     ? '<a href="' +
                       attr(r.url) +

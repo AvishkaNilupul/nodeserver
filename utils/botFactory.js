@@ -249,6 +249,19 @@ async function createBot(host, poolAccounts, game, opts = {}) {
 }
 
 // ADD accounts to an existing bot config (used when topping up a reused bot).
+//
+// An account already in this config is MERGED, not skipped: `game` is unioned
+// into its per-account FavouriteGames (that list is exactly the mechanism that
+// lets one container farm several games at once). Returning it as "not added"
+// used to be actively harmful — utils/autoFarmer.fillExistingBots left such an
+// account in its `remaining` list, which fell through to createBot and paid
+// ~130 MB for a brand-new container holding an account that was already
+// running. Repeated every tick, that is how one Twitch account ended up
+// enabled in 30 containers at once on the Pi, which is both wasted RAM and the
+// concurrent-watching pattern that risks the account.
+//
+// `logins` therefore reports everything that is now farming `game` here,
+// merged or fresh, so callers can treat all of it as placed.
 async function addAccountsToBot(host, file, poolAccounts, game) {
   const raw = await hosts.readFile(host, file);
   const data = JSON.parse(raw);
@@ -258,20 +271,59 @@ async function addAccountsToBot(host, file, poolAccounts, game) {
   const existing = Array.isArray(data.TwitchSettings.TwitchUsers)
     ? data.TwitchSettings.TwitchUsers
     : [];
-  const have = new Set(
-    existing
-      .map((u) => String((u && u.ClientSecret) || "").trim())
-      .filter(Boolean),
-  );
+  const bySecret = new Map();
+  for (const u of existing) {
+    const s = String((u && u.ClientSecret) || "").trim();
+    if (s) bySecret.set(s, u);
+  }
+
   const favouriteGames = [game].filter(Boolean);
-  const fresh = poolAccounts
-    .map((a) => poolAccountToUser(a, favouriteGames))
-    .filter((u) => u && !have.has(u.ClientSecret));
-  if (!fresh.length) return { added: 0, logins: [] };
-  data.TwitchSettings.TwitchUsers = existing.concat(fresh);
-  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-  await upsertBotAccounts(fresh, host, file);
-  return { added: fresh.length, logins: fresh.map((u) => u.Login) };
+  const wanted = String(game || "").trim().toLowerCase();
+  const fresh = [];
+  const merged = [];
+  for (const acc of poolAccounts) {
+    const u = poolAccountToUser(acc, favouriteGames);
+    if (!u) continue;
+    const prior = bySecret.get(u.ClientSecret);
+    if (!prior) {
+      fresh.push(u);
+      bySecret.set(u.ClientSecret, u); // guard against dupes within one batch
+      continue;
+    }
+    // Already here. Union the game in, and re-enable if it had been retired —
+    // this account is being deployed onto this game again.
+    const own = Array.isArray(prior.FavouriteGames) ? prior.FavouriteGames : [];
+    let touched = false;
+    if (wanted && !own.some((g) => String(g).trim().toLowerCase() === wanted)) {
+      prior.FavouriteGames = own.concat(favouriteGames);
+      touched = true;
+    }
+    if (prior.Enabled === false) {
+      prior.Enabled = true;
+      touched = true;
+    }
+    merged.push({ user: prior, login: prior.Login || u.Login || "", touched });
+  }
+
+  const changed = fresh.length || merged.some((m) => m.touched);
+  if (changed) {
+    data.TwitchSettings.TwitchUsers = existing.concat(fresh);
+    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+    await upsertBotAccounts(
+      fresh.concat(merged.map((m) => m.user)),
+      host,
+      file,
+    );
+  }
+  return {
+    added: fresh.length,
+    merged: merged.length,
+    changed: !!changed,
+    logins: fresh
+      .map((u) => u.Login)
+      .concat(merged.map((m) => m.login))
+      .filter(Boolean),
+  };
 }
 
 // START / STOP a container (docker start/stop — compose service already exists).

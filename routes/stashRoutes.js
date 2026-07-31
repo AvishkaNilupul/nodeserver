@@ -10,6 +10,7 @@
 // removes them from the stash.
 const express = require("express");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const StashSet = require("../models/StashSet");
@@ -481,6 +482,192 @@ router.delete("/account-stash/:id", requireSuperadmin, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("stash account delete error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ---------------------------------------------------------------- ingest
+//
+// Machine-to-machine ingest endpoint for the browser account automator
+// (Documents/drive-code/ane.js on the operator's Mac). Bearer-authenticated
+// so it bypasses session/2FA. Runs entirely under the same server-side
+// safety as the UI paste-import: same encryption, same merge-by-username
+// semantics, same StashSet isolation. Auto-creates a default landing set
+// on first use so the automator never needs to know set IDs.
+//
+// Two record types keyed by body.type:
+//   "account" — from ane.js signup save: fills username/password/email.
+//   "token"   — from ane.js token mint:  fills clientSecret/uniqueId/twitchId
+//               on the existing StashAccount (matched by usernameLower).
+//
+// Merge semantics: fill missing fields only; never clobber. Matches the
+// UI paste-import so replays don't destroy work in progress.
+//
+// Auth: env STASH_INGEST_TOKEN (raw string). Timing-safe SHA-256 compare
+// so token length + comparison time never leak. Unset env => 503 so the
+// endpoint fails closed on misconfiguration.
+const STASH_INGEST_TOKEN = process.env.STASH_INGEST_TOKEN || "";
+const DEFAULT_INGEST_SET_NAME = "browser-automator";
+
+function requireIngestBearer(req, res, next) {
+  if (!STASH_INGEST_TOKEN) {
+    return res
+      .status(503)
+      .json({ success: false, message: "Ingest disabled: STASH_INGEST_TOKEN not set" });
+  }
+  const hdr = String(req.get("Authorization") || "");
+  const m = /^Bearer\s+(\S+)$/i.exec(hdr);
+  if (!m) return res.status(401).json({ success: false, message: "Missing bearer" });
+  const provided = crypto.createHash("sha256").update(m[1]).digest();
+  const expected = crypto.createHash("sha256").update(STASH_INGEST_TOKEN).digest();
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+    return res.status(401).json({ success: false, message: "Bad bearer" });
+  }
+  next();
+}
+
+async function findOrCreateIngestSet(name) {
+  const raw = String(name || DEFAULT_INGEST_SET_NAME).trim() || DEFAULT_INGEST_SET_NAME;
+  const nameLower = raw.toLowerCase();
+  let set = await StashSet.findOne({ nameLower });
+  if (set) return set;
+  try {
+    return await StashSet.create({
+      name: raw,
+      nameLower,
+      note: "auto-created by /account-stash/ingest",
+    });
+  } catch (err) {
+    // Race: another concurrent request created the same set — re-fetch.
+    if (err && err.code === 11000) return StashSet.findOne({ nameLower });
+    throw err;
+  }
+}
+
+router.post("/account-stash/ingest", requireIngestBearer, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const type = String(body.type || "").toLowerCase();
+    if (type !== "account" && type !== "token") {
+      return res
+        .status(400)
+        .json({ success: false, message: "type must be 'account' or 'token'" });
+    }
+    const record = body.record;
+    if (!record || typeof record !== "object") {
+      return res.status(400).json({ success: false, message: "record missing" });
+    }
+    const set = await findOrCreateIngestSet(body.setName);
+
+    if (type === "account") {
+      const username = String(record.username || record.Login || "").trim();
+      if (!username) {
+        return res
+          .status(400)
+          .json({ success: false, message: "record.username required" });
+      }
+      const usernameLower = username.toLowerCase();
+      const password = record.password != null ? String(record.password) : "";
+      const email = record.email != null ? String(record.email).trim() : "";
+      const source = String(record.source || "browser-automator");
+
+      const existing = await StashAccount.findOne({ setId: set._id, usernameLower });
+      if (existing) {
+        const set$ = {};
+        if (password && !existing.hasPassword) {
+          set$.password = encrypt(password);
+          set$.hasPassword = true;
+        }
+        if (email && !decrypt(existing.email)) set$.email = encrypt(email);
+        if (Object.keys(set$).length) {
+          await StashAccount.updateOne({ _id: existing._id }, { $set: set$ });
+        }
+        return res.json({
+          success: true,
+          action: "account-merged",
+          setId: set._id,
+          setName: set.name,
+          accountId: existing._id,
+        });
+      }
+      const created = await StashAccount.create({
+        setId: set._id,
+        username,
+        usernameLower,
+        password: password ? encrypt(password) : "",
+        hasPassword: !!password,
+        email: email ? encrypt(email) : "",
+        clientSecret: "",
+        uniqueId: "",
+        twitchId: "",
+        source,
+      });
+      return res.json({
+        success: true,
+        action: "account-created",
+        setId: set._id,
+        setName: set.name,
+        accountId: created._id,
+      });
+    }
+
+    // type === "token" — fill clientSecret/twitchId/uniqueId onto an existing row
+    // matched by usernameLower (or create a shell row if the token arrived without
+    // a prior signup save; source is tagged so the operator can spot the anomaly).
+    const login = String(record.Login || record.username || "").trim();
+    if (!login) {
+      return res
+        .status(400)
+        .json({ success: false, message: "record.Login required" });
+    }
+    const usernameLower = login.toLowerCase();
+    const clientSecret = String(record.ClientSecret || record.clientSecret || "").trim();
+    if (!clientSecret) {
+      return res
+        .status(400)
+        .json({ success: false, message: "record.ClientSecret required" });
+    }
+    const uniqueId = String(record.UniqueId || record.uniqueId || "").trim();
+    const twitchId = String(record.Id || record.twitchId || "").trim();
+
+    const existing = await StashAccount.findOne({ setId: set._id, usernameLower });
+    if (existing) {
+      const set$ = {};
+      if (clientSecret && !existing.clientSecret) set$.clientSecret = clientSecret;
+      if (uniqueId && !existing.uniqueId) set$.uniqueId = uniqueId;
+      if (twitchId && !existing.twitchId) set$.twitchId = twitchId;
+      if (Object.keys(set$).length) {
+        await StashAccount.updateOne({ _id: existing._id }, { $set: set$ });
+      }
+      return res.json({
+        success: true,
+        action: "token-merged",
+        setId: set._id,
+        setName: set.name,
+        accountId: existing._id,
+      });
+    }
+    const created = await StashAccount.create({
+      setId: set._id,
+      username: login,
+      usernameLower,
+      password: "",
+      hasPassword: false,
+      email: "",
+      clientSecret,
+      uniqueId,
+      twitchId,
+      source: "browser-automator (token-first)",
+    });
+    return res.json({
+      success: true,
+      action: "token-only-created",
+      setId: set._id,
+      setName: set.name,
+      accountId: created._id,
+    });
+  } catch (err) {
+    console.error("stash ingest error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });

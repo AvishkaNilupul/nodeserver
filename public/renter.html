@@ -81,6 +81,13 @@
       .muted { color: var(--muted); }
       .empty { color: var(--muted); padding: 16px 2px; font-size: 13.5px; }
       .theme-fab, .icobtn { width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); display: inline-grid; place-items: center; cursor: pointer; }
+      .warnbar { display: none; border: 1px solid var(--yellow); color: var(--yellow); background: rgba(180,83,9,.08); border-radius: 12px; padding: 11px 14px; font-size: 13px; font-weight: 600; margin-bottom: 14px; }
+      .warnbar.show { display: block; }
+      .ghdr { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 16px 0 8px; }
+      .ghdr:first-child { margin-top: 0; }
+      .ghdr b { color: var(--accent); font-size: 12.5px; }
+      .searchin { flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--ink); font-size: 13.5px; font-family: inherit; }
+      .searchin:focus { outline: none; border-color: var(--accent); }
       .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 100; }
       .toast.show { opacity: .95; }
       .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: none; align-items: center; justify-content: center; padding: 20px; z-index: 60; }
@@ -107,6 +114,8 @@
         </div>
       </div>
 
+      <div class="warnbar" id="leaseWarn"></div>
+
       <div class="stats" id="stats"></div>
 
       <div class="tabs">
@@ -117,7 +126,15 @@
       </div>
 
       <div class="panel active" id="panel-accounts"><div class="card"><div id="accounts"></div></div></div>
-      <div class="panel" id="panel-drops"><div class="card"><div id="drops"></div></div></div>
+      <div class="panel" id="panel-drops">
+        <div class="card">
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+            <input class="searchin" id="dropSearch" placeholder="Search drops or games…" />
+            <span class="hint" id="dropsTotal" style="margin:0;white-space:nowrap"></span>
+          </div>
+          <div id="drops"></div>
+        </div>
+      </div>
       <div class="panel" id="panel-games">
         <div class="card">
           <div class="hint">Games your bot farms drops for. Leave empty to farm every available campaign.</div>
@@ -197,6 +214,15 @@
         $("submitBtn").disabled = rem <= 0 || !bot.assigned;
         if (document.activeElement !== $("gamesInput")) $("gamesInput").value = (ME.games || []).join(", ");
         $("gamesBtn").disabled = !bot.assigned;
+        // Renewal heads-up inside the final 3 days of the lease.
+        const w = $("leaseWarn");
+        const msLeft = lease.end ? new Date(lease.end).getTime() - Date.now() : null;
+        if (msLeft !== null && msLeft > 0 && msLeft <= 3 * 864e5) {
+          w.textContent = "⏳ Your access ends soon — " + remaining(lease.end) + ". Contact the operator to renew so your bot keeps farming.";
+          w.classList.add("show");
+        } else {
+          w.classList.remove("show");
+        }
       }
 
       let ACCOUNTS = [];
@@ -266,15 +292,37 @@
         } catch(e){ if(e.message!=="auth") toast(e.message); btn.disabled=false; btn.textContent="Save"; }
       };
 
+      let DROPS = [];
+      function dropCard(x){
+        const img = x.image ? '<img src="'+esc(x.image)+'" alt="" referrerpolicy="no-referrer"/>' : '<span class="ph">'+esc((x.name||"?").slice(0,2))+'</span>';
+        return '<div class="drop">'+img+'<div class="nm"><b>'+esc(x.name)+'</b><span>'+esc(x.game||"")+'</span></div><span class="ct">×'+x.count+'</span></div>';
+      }
+      function renderDrops(){
+        if (!DROPS.length){ $("drops").innerHTML = '<div class="empty">No drops farmed yet.</div>'; return; }
+        const q = ($("dropSearch").value || "").trim().toLowerCase();
+        const list = q ? DROPS.filter(x => (x.name||"").toLowerCase().includes(q) || (x.game||"").toLowerCase().includes(q)) : DROPS;
+        if (!list.length){ $("drops").innerHTML = '<div class="empty">Nothing matches your search.</div>'; return; }
+        // Group by game, biggest haul first, so the inventory reads like a shop.
+        const groups = new Map();
+        for (const x of list){
+          const g = x.game || "Other";
+          if (!groups.has(g)) groups.set(g, { count: 0, items: [] });
+          const grp = groups.get(g);
+          grp.count += x.count || 0;
+          grp.items.push(x);
+        }
+        $("drops").innerHTML = [...groups.entries()]
+          .sort((a,b)=>b[1].count-a[1].count)
+          .map(([g,grp])=>'<div class="ghdr"><span>'+esc(g)+'</span><b>'+grp.count+'</b></div><div class="dgrid">'+grp.items.map(dropCard).join("")+'</div>')
+          .join("");
+      }
       async function loadDrops(){
         const d = await api("/renter/drops");
-        const drops = d.drops || [];
-        if (!drops.length){ $("drops").innerHTML = '<div class="empty">No drops farmed yet.</div>'; return; }
-        $("drops").innerHTML = '<div class="hint">'+d.total+' total across your accounts</div><div class="dgrid">' +
-          drops.map(x=>{ const img = x.image ? '<img src="'+esc(x.image)+'" alt="" referrerpolicy="no-referrer"/>' : '<span class="ph">'+esc((x.name||"?").slice(0,2))+'</span>';
-            return '<div class="drop">'+img+'<div class="nm"><b>'+esc(x.name)+'</b><span>'+esc(x.game||"")+'</span></div><span class="ct">×'+x.count+'</span></div>'; }).join("") +
-          '</div>';
+        DROPS = d.drops || [];
+        $("dropsTotal").textContent = d.total ? d.total + " total" : "";
+        renderDrops();
       }
+      $("dropSearch").addEventListener("input", renderDrops);
 
       const SUB_LABEL = { pending:"Pending", approved:"Approved", rejected:"Rejected" };
       const SUB_CLS = { pending:"wait", approved:"ok", rejected:"bad" };
@@ -344,6 +392,19 @@
         try { await loadMe(); await Promise.all([loadAccounts(), loadDrops(), loadSubs()]); }
         catch(e){ /* auth redirect handled in api() */ }
       })();
+
+      // Keep the dashboard live without hammering the server: bot status +
+      // accounts every minute (visible tabs only), drops + submissions every
+      // fifth tick. An expired/suspended renter gets bounced to the login page
+      // by api()'s 401/403 handling on the first refresh after the change.
+      let TICK = 0;
+      setInterval(()=>{
+        if (document.hidden) return;
+        TICK++;
+        loadMe().catch(()=>{});
+        loadAccounts().catch(()=>{});
+        if (TICK % 5 === 0){ loadDrops().catch(()=>{}); loadSubs().catch(()=>{}); }
+      }, 60000);
     </script>
     <script src="/theme.js"></script>
   </body>

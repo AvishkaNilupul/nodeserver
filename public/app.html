@@ -1,0 +1,2063 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0e14" />
+<meta name="color-scheme" content="dark" />
+<!-- iOS home-screen app: fullscreen, dark status bar, own name. -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="RedeemHub" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="format-detection" content="telephone=no" />
+<link rel="manifest" href="/app-manifest.json" />
+<link rel="icon" href="/app-icon-192.png" />
+<link rel="apple-touch-icon" href="/app-icon-180.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/app-icon-180.png" />
+<title>RedeemHub Seller</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --surface: #131826;
+    --surface2: #1b2233;
+    --line: #232c42;
+    --text: #e8ecf6;
+    --muted: #8b95ad;
+    --accent: #9146ff;
+    --accent2: #00c2a8;
+    --good: #2fd67b;
+    --warn: #f5b83d;
+    --bad: #ff5d6c;
+    --tabbar-h: 58px;
+    --top: env(safe-area-inset-top, 0px);
+    --bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overscroll-behavior-y: none;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  #app { display: none; min-height: 100%; }
+  button, a, .tab, .listrow, .prod, .card.tap, .stat.tap { touch-action: manipulation; }
+
+  /* ---------- Views / tabs ---------- */
+  .view {
+    display: none;
+    padding: calc(14px + var(--top)) 14px calc(var(--tabbar-h) + var(--bottom) + 18px);
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .view.active { display: block; }
+  #view-inbox { padding: var(--top) 0 calc(var(--tabbar-h) + var(--bottom)); max-width: none; }
+  #inboxFrame {
+    width: 100%;
+    height: calc(100vh - var(--tabbar-h) - var(--bottom) - var(--top));
+    height: calc(100dvh - var(--tabbar-h) - var(--bottom) - var(--top));
+    border: 0; display: block; background: var(--bg);
+  }
+
+  /* ---------- Tab bar ---------- */
+  #tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: none;
+    background: rgba(15, 19, 30, 0.96);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    border-top: 1px solid var(--line);
+    padding-bottom: var(--bottom);
+  }
+  #tabbar .tabs { display: flex; max-width: 640px; margin: 0 auto; }
+  .tab {
+    flex: 1; height: var(--tabbar-h);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    color: var(--muted); font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+    cursor: pointer; user-select: none; -webkit-user-select: none; border: 0; background: none;
+    -webkit-appearance: none; appearance: none; font-family: inherit;
+  }
+  .tab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .tab.active { color: var(--accent); }
+
+  /* ---------- Shared bits ---------- */
+  .h1 { font-size: 22px; font-weight: 800; margin: 6px 2px 14px; letter-spacing: -.01em; display: flex; align-items: center; gap: 10px; }
+  .h1 .spacer { flex: 1; }
+  .iconbtn {
+    width: 38px; height: 38px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--muted); flex: none;
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+  }
+  .iconbtn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .iconbtn:active { transform: scale(.94); }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 16px; padding: 14px; margin-bottom: 12px;
+  }
+  .card.tap { cursor: pointer; }
+  .card.tap:active { transform: scale(.99); }
+  .card h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    padding: 3px 9px; border-radius: 999px; text-transform: uppercase;
+  }
+  .chip.good { background: rgba(47,214,123,.12); color: var(--good); }
+  .chip.warn { background: rgba(245,184,61,.14); color: var(--warn); }
+  .chip.bad  { background: rgba(255,93,108,.13); color: var(--bad); }
+  .chip.role { background: rgba(145,70,255,.16); color: #c9a6ff; }
+  .chip.flat { background: var(--surface2); color: var(--muted); }
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 13px 16px; border-radius: 14px; border: 0;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+    cursor: pointer; transition: transform .06s ease, opacity .2s;
+    -webkit-appearance: none; appearance: none; font-family: inherit;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn[disabled] { opacity: .5; pointer-events: none; }
+  .btn.ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--line); }
+  .btn.danger { background: rgba(255,93,108,.14); color: var(--bad); }
+  .btn.good { background: rgba(47,214,123,.15); color: var(--good); }
+  .btn.sm { width: auto; padding: 9px 14px; font-size: 13.5px; border-radius: 11px; }
+  .btn.wide { width: 100%; }
+  .btnrow { display: flex; gap: 8px; }
+  .btnrow .btn { flex: 1; }
+  input, textarea, select {
+    width: 100%; padding: 13px 14px; border-radius: 13px;
+    border: 1px solid var(--line); background: var(--surface2); color: var(--text);
+    /* 16px keeps iOS from zooming the whole page in when a field is focused. */
+    font-size: 16px; outline: none; font-family: inherit;
+    -webkit-appearance: none; appearance: none;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  label.f { display: block; margin: 0 0 12px; }
+  label.f span { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin: 0 2px 6px; text-transform: uppercase; letter-spacing: .06em; }
+  .empty { text-align: center; color: var(--muted); padding: 38px 16px; }
+  .empty .big { font-size: 34px; margin-bottom: 8px; }
+  .skel { border-radius: 14px; background: linear-gradient(100deg, var(--surface) 40%, var(--surface2) 50%, var(--surface) 60%); background-size: 200% 100%; animation: sk 1.2s infinite linear; margin-bottom: 10px; }
+  @keyframes sk { to { background-position: -200% 0; } }
+  .errbox { background: rgba(255,93,108,.1); border: 1px solid rgba(255,93,108,.3); color: #ffc2c8; border-radius: 14px; padding: 13px; font-size: 13.5px; }
+
+  /* ---------- Login ---------- */
+  #login {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    background: radial-gradient(1200px 500px at 50% -10%, rgba(145,70,255,.16), transparent 60%), var(--bg);
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+  #login.show { display: block; }
+  #login .wrap { max-width: 380px; margin: 0 auto; padding: calc(10vh + var(--top)) 24px calc(40px + var(--bottom)); }
+  #login .logo { width: 74px; height: 74px; border-radius: 22px; margin: 0 auto 18px; display: block; }
+  #login h1 { text-align: center; font-size: 22px; margin: 0 0 4px; }
+  #login .sub { text-align: center; color: var(--muted); font-size: 13.5px; margin-bottom: 26px; }
+  .formerr { display: none; background: rgba(255,93,108,.12); color: var(--bad); border-radius: 12px; padding: 10px 13px; font-size: 13.5px; margin-bottom: 12px; }
+  .formerr.show { display: block; }
+
+  /* ---------- Home ---------- */
+  .hero { display: flex; align-items: center; gap: 12px; margin: 4px 2px 16px; }
+  .avatar {
+    width: 46px; height: 46px; border-radius: 15px; flex: none;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 19px; color: #fff;
+  }
+  .balance-card {
+    background: linear-gradient(135deg, rgba(145,70,255,.28), rgba(0,194,168,.16)), var(--surface);
+    border: 1px solid rgba(145,70,255,.35);
+  }
+  .balance-card .amount { font-size: 32px; font-weight: 800; letter-spacing: -.02em; margin: 2px 0; }
+  .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; padding: 12px; }
+  .stat.tap { cursor: pointer; }
+  .stat .v { font-size: 21px; font-weight: 800; }
+  .stat .l { font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+  .listrow { display: flex; align-items: center; gap: 11px; padding: 11px 2px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .listrow:last-child { border-bottom: 0; }
+
+  /* ---------- Shop ---------- */
+  .seg { display: flex; background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 4px; margin-bottom: 14px; }
+  .seg button {
+    flex: 1; border: 0; background: none; color: var(--muted); font-weight: 700;
+    font-size: 13.5px; padding: 9px; border-radius: 10px; cursor: pointer;
+    -webkit-appearance: none; appearance: none; font-family: inherit;
+  }
+  .seg button.on { background: var(--surface2); color: var(--text); }
+  .shop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+  .prod { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; cursor: pointer; }
+  .prod:active { transform: scale(.98); }
+  .prod .imgs { position: relative; aspect-ratio: 1.35; background: var(--surface2); display: grid; grid-template-columns: 1fr; }
+  /* Old WebViews (pre-Chrome 88) lack aspect-ratio: keep the media box open
+     so the stock chip never overlaps the title. */
+  @supports not (aspect-ratio: 1) {
+    .prod .imgs { min-height: 128px; }
+  }
+  .prod .imgs.two { grid-template-columns: 1fr 1fr; }
+  .prod .imgs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .prod .imgs .stock { position: absolute; top: 8px; right: 8px; }
+  .prod .body { padding: 10px 11px 12px; }
+  .prod .name { font-weight: 700; font-size: 13.5px; line-height: 1.3; max-height: 2.6em; overflow: hidden; }
+  .prod .price { margin-top: 6px; font-weight: 800; font-size: 15px; color: var(--accent2); }
+
+  /* ---------- Superadmin sub-views ---------- */
+  .subhead { display: flex; align-items: center; gap: 10px; margin: 2px 0 14px; }
+  .subhead .t { font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .sa-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .sa-tile {
+    display: block; text-decoration: none; color: var(--text);
+    background: var(--surface2); border: 1px solid var(--line);
+    border-radius: 14px; padding: 13px 12px; cursor: pointer; text-align: left;
+    -webkit-appearance: none; appearance: none; font-family: inherit; font-size: 14px;
+    width: 100%;
+  }
+  .sa-tile:active { transform: scale(.98); }
+  .sa-tile .n { font-weight: 700; display: flex; align-items: center; gap: 7px; }
+  .sa-tile .s { color: var(--muted); font-weight: 500; font-size: 11.5px; margin-top: 3px; }
+  .sa-tile .badge {
+    margin-left: auto; background: var(--bad); color: #fff; font-size: 10.5px; font-weight: 800;
+    min-width: 19px; height: 19px; border-radius: 10px; padding: 0 5px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .kv:last-child { border-bottom: 0; }
+  .kv .k { color: var(--muted); flex: none; }
+  .kv .v { text-align: right; word-break: break-word; font-weight: 600; }
+  .toggle {
+    position: relative; width: 46px; height: 27px; border-radius: 14px; flex: none;
+    background: var(--surface2); border: 1px solid var(--line); cursor: pointer;
+    -webkit-appearance: none; appearance: none; transition: background .18s;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 21px; height: 21px;
+    border-radius: 50%; background: var(--muted); transition: transform .18s, background .18s;
+  }
+  .toggle.on { background: rgba(145,70,255,.3); border-color: var(--accent); }
+  .toggle.on::after { transform: translateX(19px); background: var(--accent); }
+  .logbox {
+    background: #05070c; border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
+    max-height: 46vh; overflow-y: auto; -webkit-overflow-scrolling: touch; color: #b9c4da;
+  }
+  .sevdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .sev-high { background: var(--bad); }
+  .sev-medium { background: var(--warn); }
+  .sev-low { background: var(--muted); }
+  .sev-info { background: var(--accent2); }
+
+  /* ---------- Sheets & overlays ---------- */
+  .sheet-back {
+    position: fixed; inset: 0; z-index: 60; background: rgba(4,6,10,.62);
+    display: none; align-items: flex-end; justify-content: center;
+  }
+  .sheet-back.show { display: flex; }
+  .sheet {
+    background: var(--surface); border: 1px solid var(--line); border-bottom: 0;
+    border-radius: 22px 22px 0 0; width: 100%; max-width: 640px;
+    max-height: 88vh; max-height: 88dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    padding: 10px 16px calc(20px + var(--bottom));
+    animation: up .22s ease;
+  }
+  @keyframes up { from { transform: translateY(40px); opacity: .4; } }
+  .sheet .grab { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 4px auto 14px; }
+  .sheet h2 { font-size: 18px; margin: 0 0 12px; }
+
+  .cred { background: var(--surface2); border: 1px solid var(--line); border-radius: 13px; padding: 11px 12px; margin-bottom: 9px; }
+  .cred .lbl { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .cred .val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14.5px; word-break: break-all; margin-top: 3px; }
+
+  .item-line { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .item-line:last-child { border-bottom: 0; }
+  .item-line img { width: 38px; height: 38px; border-radius: 9px; object-fit: cover; background: var(--surface2); flex: none; }
+
+  /* ---------- Toast ---------- */
+  #toast {
+    position: fixed; left: 50%; bottom: calc(var(--tabbar-h) + var(--bottom) + 16px);
+    transform: translateX(-50%) translateY(20px); z-index: 120;
+    background: #21283c; color: var(--text); border: 1px solid var(--line);
+    padding: 11px 18px; border-radius: 13px; font-size: 14px; font-weight: 600;
+    /* Only fade/slide — never animate `bottom`, or the toast drifts when iOS
+       changes the safe area (rotation, keyboard). */
+    opacity: 0; pointer-events: none; max-width: 88vw; text-align: center;
+    transition: opacity .25s ease, transform .25s ease;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .spin { width: 20px; height: 20px; border: 2.5px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%; animation: rot .7s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  .center { display: flex; align-items: center; justify-content: center; }
+  .mt8 { margin-top: 8px; } .mt12 { margin-top: 12px; } .mt16 { margin-top: 16px; }
+  .mb12 { margin-bottom: 12px; }
+  .link-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .link-grid a {
+    display: block; text-decoration: none; color: var(--text); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 13px; padding: 13px 12px; font-weight: 700; font-size: 13.5px;
+  }
+  .link-grid a span { display: block; color: var(--muted); font-weight: 500; font-size: 11.5px; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ================= LOGIN ================= -->
+<div id="login">
+  <div class="wrap">
+    <img class="logo" src="/app-icon-192.png" alt="" />
+    <h1>RedeemHub Seller</h1>
+    <div class="sub">Sign in with your admin account</div>
+    <div class="formerr" id="loginErr"></div>
+
+    <form id="loginForm" autocomplete="on">
+      <label class="f"><span>Username</span>
+        <input id="lUser" name="username" autocapitalize="none" autocorrect="off" autocomplete="username" required />
+      </label>
+      <label class="f"><span>Password</span>
+        <input id="lPass" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="btn" id="loginBtn" type="submit">Sign in</button>
+    </form>
+
+    <form id="tfaForm" style="display:none" autocomplete="off">
+      <label class="f"><span>2FA code</span>
+        <input id="lCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit or backup code" required />
+      </label>
+      <button class="btn" id="tfaBtn" type="submit">Verify</button>
+      <button class="btn ghost mt8" type="button" id="tfaBack">Back</button>
+    </form>
+  </div>
+</div>
+
+<!-- ================= APP ================= -->
+<div id="app">
+
+  <!-- HOME -->
+  <div class="view" id="view-home">
+    <div class="hero">
+      <div class="avatar" id="homeAvatar">?</div>
+      <div class="grow">
+        <div style="font-weight:800;font-size:17px" id="homeName">&nbsp;</div>
+        <span class="chip role" id="homeRole">admin</span>
+      </div>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+
+    <div class="card balance-card tap" onclick="go('shop');setShopSeg('purchases')">
+      <h3 style="color:#c9a6ff">Balance</h3>
+      <div class="amount" id="homeBalance">–</div>
+      <div class="small" style="color:#cdd6ea">Tap to view your purchases</div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat tap" onclick="go('orders')"><div class="v" id="stOpen">–</div><div class="l">Open orders</div></div>
+      <div class="stat tap" onclick="go('orders')"><div class="v" id="stDelivered">–</div><div class="l">Delivered</div></div>
+      <div class="stat tap" onclick="go('shop');setShopSeg('purchases')"><div class="v" id="stPurchases">–</div><div class="l">Purchases</div></div>
+    </div>
+
+    <div class="card" id="recentCard">
+      <h3 id="recentTitle">Recent purchases</h3>
+      <div id="recentList"><div class="empty small">Nothing yet</div></div>
+    </div>
+
+    <!-- superadmin farm overview -->
+    <div id="saHome" style="display:none">
+      <div class="stat-grid">
+        <div class="stat tap" onclick="openSub('stock')"><div class="v" id="saAccounts">–</div><div class="l">Farm accts</div></div>
+        <div class="stat tap" onclick="openSub('stock')"><div class="v" id="saDrops">–</div><div class="l">Drops</div></div>
+        <div class="stat tap" onclick="openSub('stock')"><div class="v" id="saGames">–</div><div class="l">Games</div></div>
+      </div>
+      <div class="card tap" onclick="openSub('stock')">
+        <h3>Farm health</h3>
+        <div class="kv"><div class="k">Scanner backlog</div><div class="v" id="saBacklog">–</div></div>
+        <div class="kv"><div class="k">Bot containers</div><div class="v" id="saBots">–</div></div>
+        <div class="kv"><div class="k">Bad tokens</div><div class="v" id="saBadTokens">–</div></div>
+        <div class="kv"><div class="k">Open findings</div><div class="v" id="saFindings">–</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHOP -->
+  <div class="view" id="view-shop">
+    <div class="h1">Shop <div class="spacer"></div>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+    <div class="seg">
+      <button id="segStore" class="on" onclick="setShopSeg('store')">Store</button>
+      <button id="segPurchases" onclick="setShopSeg('purchases')">Purchases</button>
+    </div>
+    <div id="shopStore">
+      <div class="shop-grid" id="shopGrid"></div>
+      <div class="empty" id="shopEmpty" style="display:none"><div class="big">🛒</div>No bundles listed right now</div>
+    </div>
+    <div id="shopPurchases" style="display:none">
+      <div id="purchScope" class="seg" style="display:none">
+        <button id="scopeMine" class="on" onclick="setPurchScope(false)">Mine</button>
+        <button id="scopeAll" onclick="setPurchScope(true)">All sellers</button>
+      </div>
+      <div id="purchaseList"></div>
+      <div class="empty" id="purchEmpty" style="display:none"><div class="big">🧾</div>No purchases yet</div>
+      <button class="btn ghost" id="purchMore" style="display:none" onclick="loadPurchases(false)">Load more</button>
+    </div>
+  </div>
+
+  <!-- ORDERS -->
+  <div class="view" id="view-orders">
+    <div class="h1">Orders <div class="spacer"></div>
+      <button class="iconbtn" onclick="openOrderCreate()" aria-label="New order">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+    <input id="orderSearch" placeholder="Search order ID / gamertag…" oninput="renderOrders()" style="margin-bottom:12px" />
+    <div id="orderList"></div>
+    <div class="empty" id="orderEmpty" style="display:none"><div class="big">📦</div>No orders yet<br /><span class="small">Create one when you make a sale</span></div>
+  </div>
+
+  <!-- INBOX -->
+  <div class="view" id="view-inbox">
+    <iframe id="inboxFrame" src="about:blank" title="Inbox"></iframe>
+  </div>
+
+  <!-- MORE -->
+  <div class="view" id="view-more">
+    <div class="h1">More</div>
+
+    <div class="card">
+      <div class="row">
+        <div class="avatar" id="moreAvatar">?</div>
+        <div class="grow">
+          <div style="font-weight:800" id="moreName">&nbsp;</div>
+          <div class="small muted" id="moreRole"></div>
+        </div>
+        <button class="btn danger sm" onclick="logout()">Log out</button>
+      </div>
+    </div>
+
+    <div class="card" id="tgCard">
+      <h3>Telegram alerts</h3>
+      <div id="tgBody" class="small muted">Loading…</div>
+    </div>
+
+    <div class="card" id="saTools" style="display:none">
+      <h3>Operator</h3>
+      <div class="sa-grid" id="saToolGrid"></div>
+    </div>
+
+    <div class="card">
+      <h3>Web pages</h3>
+      <div class="link-grid" id="moreLinks"></div>
+    </div>
+
+    <div class="small muted" style="text-align:center;margin-top:18px" id="verLine">RedeemHub Seller</div>
+  </div>
+
+  <!-- SUPERADMIN SUB-VIEW -->
+  <div class="view" id="view-sub">
+    <div class="subhead">
+      <button class="iconbtn" onclick="closeSub()" aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <div class="t grow ellip" id="subTitle">&nbsp;</div>
+      <button class="iconbtn" id="subAction" style="display:none"></button>
+      <button class="iconbtn" onclick="refreshCurrent()" aria-label="Refresh">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      </button>
+    </div>
+    <div id="subBody"></div>
+  </div>
+</div>
+
+<!-- Tab bar -->
+<nav id="tabbar"><div class="tabs">
+  <button class="tab active" data-tab="home" onclick="go('home')">
+    <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5M5 9.5V21h14V9.5"/></svg>Home</button>
+  <button class="tab" data-tab="shop" onclick="go('shop')">
+    <svg viewBox="0 0 24 24"><path d="M6 7h12l1.5 14h-15L6 7ZM8.5 9V6a3.5 3.5 0 0 1 7 0v3"/></svg>Shop</button>
+  <button class="tab" data-tab="orders" onclick="go('orders')">
+    <svg viewBox="0 0 24 24"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9ZM12 12l8-4.5M12 12 4 7.5M12 12v9"/></svg>Orders</button>
+  <button class="tab" data-tab="inbox" onclick="go('inbox')">
+    <svg viewBox="0 0 24 24"><path d="M21 14a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9Z"/></svg>Inbox</button>
+  <button class="tab" data-tab="more" onclick="go('more')">
+    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>More</button>
+</div></nav>
+
+<!-- Generic sheet -->
+<div class="sheet-back" id="sheetBack" onclick="if(event.target===this)closeSheet()">
+  <div class="sheet" id="sheetBody"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   RedeemHub Seller — mobile app shell
+   Single-file SPA over the existing session-auth APIs.
+   ============================================================ */
+
+const $ = (id) => document.getElementById(id);
+const S = {
+  admin: null,          // {id, username, role, tfa}
+  me: null,             // {balance, role, username}
+  listings: [],
+  purchases: [], purchPage: 0, purchHasMore: false, purchAll: false,
+  orders: [],
+  tab: "home",
+  sub: "",
+  shopSeg: "store",
+  inboxLoaded: false,
+  lastLoad: {},         // view key -> ts
+};
+const IS_APP = !!window.AppBridge; // native Android shell present
+const isSuper = () => !!(S.admin && S.admin.role === "superadmin");
+
+/* ---------------- fetch wrapper ---------------- */
+class ApiErr extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+async function api(path, opts = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opts.method || "GET",
+      headers: { "Accept": "application/json", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+      credentials: "same-origin",
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch {
+    throw new ApiErr("Network error — check your connection", 0);
+  }
+  let data = null;
+  try { data = await res.json(); } catch { /* non-JSON */ }
+  if (res.status === 401) {
+    if (!opts.noKick) showLogin(true);
+    throw new ApiErr((data && data.message) || "Unauthorized", 401);
+  }
+  if (res.status === 403 && data && data.code === "enroll_2fa") {
+    toast("2FA setup is required — opening Settings");
+    setTimeout(() => { location.href = "/settings.html"; }, 900);
+    throw new ApiErr("2FA required", 403);
+  }
+  if (!res.ok) throw new ApiErr((data && data.message) || ("Error " + res.status), res.status);
+  return data;
+}
+
+/* ---------------- tiny UI helpers ---------------- */
+let toastT = null;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastT);
+  toastT = setTimeout(() => t.classList.remove("show"), 2600);
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function money(n) { return "$" + (Number(n) || 0).toFixed(2); }
+function num(n) { return (Number(n) || 0).toLocaleString(); }
+function rel(d) {
+  if (!d) return "";
+  const t = new Date(d).getTime();
+  if (!t) return "";
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + "d ago";
+  return new Date(t).toLocaleDateString();
+}
+function skel(n) {
+  let h = "";
+  for (let i = 0; i < n; i++) h += '<div class="skel" style="height:64px"></div>';
+  return h;
+}
+function errBox(e) {
+  return '<div class="errbox">' + esc((e && e.message) || "Something went wrong") + "</div>";
+}
+async function copyText(v, label) {
+  try {
+    await navigator.clipboard.writeText(v);
+    toast((label || "Copied") + " ✓");
+  } catch {
+    // WebView / older Safari fallback.
+    const ta = document.createElement("textarea");
+    ta.value = v;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    try { document.execCommand("copy"); toast((label || "Copied") + " ✓"); }
+    catch { toast("Copy failed"); }
+    ta.remove();
+  }
+}
+function openSheet(html) {
+  $("sheetBody").innerHTML = '<div class="grab"></div>' + html;
+  $("sheetBack").classList.add("show");
+  document.body.style.overflow = "hidden";
+}
+function closeSheet() {
+  $("sheetBack").classList.remove("show");
+  document.body.style.overflow = "";
+}
+function confirmSheet({ title, body, okLabel, danger, onOk }) {
+  openSheet(`
+    <h2>${esc(title)}</h2>
+    <div class="small muted" style="margin-bottom:16px">${body}</div>
+    <button class="btn ${danger ? "danger" : ""}" id="cfOk">${esc(okLabel || "Confirm")}</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("cfOk").onclick = onOk;
+}
+// Run an async action from a button: spinner while it works, toast on failure.
+async function act(btn, fn, okMsg) {
+  if (!btn) return null;
+  const old = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spin"></div>';
+  try {
+    const r = await fn();
+    if (okMsg) toast(okMsg);
+    return r;
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+    return null;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = old;
+  }
+}
+function credBlock(label, value) {
+  if (!value) return "";
+  const id = "cred_" + Math.random().toString(36).slice(2, 8);
+  return `<div class="cred"><div class="row">
+      <div class="grow"><div class="lbl">${esc(label)}</div><div class="val" id="${id}">${esc(value)}</div></div>
+      <button class="btn ghost sm" onclick="copyText(document.getElementById('${id}').textContent,'${esc(label)} copied')">Copy</button>
+    </div></div>`;
+}
+
+/* ---------------- login ---------------- */
+function showLogin(expired) {
+  $("app").style.display = "none";
+  $("tabbar").style.display = "none";
+  $("login").classList.add("show");
+  $("tfaForm").style.display = "none";
+  $("loginForm").style.display = "";
+  if (expired) {
+    const e = $("loginErr");
+    e.textContent = "Session expired — sign in again";
+    e.classList.add("show");
+  }
+}
+function loginErr(msg) {
+  const e = $("loginErr");
+  if (!msg) { e.classList.remove("show"); return; }
+  e.textContent = msg; e.classList.add("show");
+}
+$("loginForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  loginErr(null);
+  const btn = $("loginBtn");
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  try {
+    const data = await api("/admin-login", {
+      method: "POST", noKick: true,
+      body: { username: $("lUser").value.trim(), password: $("lPass").value },
+    });
+    if (data.twofa) {
+      $("loginForm").style.display = "none";
+      $("tfaForm").style.display = "";
+      $("lCode").value = ""; $("lCode").focus();
+    } else if (data.mustEnroll) {
+      toast("2FA setup required — opening Settings");
+      setTimeout(() => { location.href = "/settings.html"; }, 800);
+    } else {
+      await enterApp();
+    }
+  } catch (e) {
+    loginErr(e.message || "Login failed");
+  } finally {
+    btn.disabled = false; btn.textContent = "Sign in";
+  }
+});
+$("tfaForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  loginErr(null);
+  const btn = $("tfaBtn");
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  try {
+    await api("/admin-2fa", { method: "POST", noKick: true, body: { token: $("lCode").value.trim() } });
+    await enterApp();
+  } catch (e) {
+    loginErr(e.message || "Incorrect code");
+  } finally {
+    btn.disabled = false; btn.textContent = "Verify";
+  }
+});
+$("tfaBack").onclick = () => {
+  $("tfaForm").style.display = "none";
+  $("loginForm").style.display = "";
+};
+async function logout() {
+  try { await api("/admin-logout", { method: "POST" }); } catch { /* ignore */ }
+  S.admin = null; S.me = null; S.inboxLoaded = false; S.lastLoad = {};
+  $("inboxFrame").src = "about:blank";
+  showLogin(false);
+}
+
+/* ---------------- boot / router ---------------- */
+const TABS = ["home", "shop", "orders", "inbox", "more"];
+
+async function boot() {
+  try {
+    const data = await api("/whoami", { noKick: true });
+    S.admin = data.admin;
+    await enterApp();
+  } catch {
+    showLogin(false);
+  }
+}
+async function enterApp() {
+  const data = await api("/whoami");
+  S.admin = data.admin;
+  $("login").classList.remove("show");
+  $("app").style.display = "block";
+  $("tabbar").style.display = "block";
+  loginErr(null);
+  if ($("loginForm").reset) $("loginForm").reset();
+  resetUi();
+  buildMore();
+  syncFromHash(true);
+}
+// Wipe whatever the previous session rendered. Without this, signing out of a
+// superadmin account and into a seller's on the same page leaves the operator
+// blocks and their numbers on screen until that tab happens to reload.
+function resetUi() {
+  $("saHome").style.display = isSuper() ? "block" : "none";
+  [
+    "stOpen", "stDelivered", "stPurchases", "homeBalance",
+    "saAccounts", "saDrops", "saGames", "saBacklog", "saBots",
+    "saBadTokens", "saFindings",
+  ].forEach((id) => { $(id).textContent = "–"; });
+  $("recentList").innerHTML = '<div class="empty small">Nothing yet</div>';
+  $("shopGrid").innerHTML = "";
+  $("purchaseList").innerHTML = "";
+  $("orderList").innerHTML = "";
+  S.listings = []; S.purchases = []; S.orders = [];
+  S.purchAll = false;
+  $("scopeMine").classList.add("on");
+  $("scopeAll").classList.remove("on");
+  setShopSeg("store");
+}
+function parseHash() {
+  const raw = (location.hash || "#home").slice(1);
+  const parts = raw.split("/");
+  const tab = TABS.indexOf(parts[0]) >= 0 ? parts[0] : "home";
+  const sub = parts[1] && isSuper() && SA[parts[1]] ? parts[1] : "";
+  return { tab, sub };
+}
+// Apply whatever the URL says — used on boot and on back/forward.
+function syncFromHash(force) {
+  const { tab, sub } = parseHash();
+  if (sub) { S.tab = tab; showSub(sub, force); }
+  else { S.sub = ""; showTab(tab, force); }
+}
+function showTab(tab, force) {
+  const changed = S.tab !== tab || S.sub;
+  S.tab = tab;
+  S.sub = "";
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  $("view-" + tab).classList.add("active");
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.tab === tab));
+  setPull(tab !== "inbox");
+  if (changed || force) window.scrollTo(0, 0);
+  const stale = !S.lastLoad[tab] || Date.now() - S.lastLoad[tab] > 45000;
+  if (tab === "home" && stale) loadHome();
+  if (tab === "shop" && stale) { loadListings(); loadPurchases(true); }
+  if (tab === "orders" && stale) loadOrders();
+  if (tab === "more" && stale) loadMore();
+  if (tab === "inbox" && !S.inboxLoaded) {
+    S.inboxLoaded = true;
+    $("inboxFrame").src = "/admin.html";
+  }
+}
+function go(tab, force) {
+  if (S.tab === tab && !S.sub && !force) return;
+  const target = "#" + tab;
+  if (location.hash !== target) {
+    try { history.pushState(null, "", target); } catch { location.hash = tab; }
+  }
+  showTab(tab, force);
+}
+// Native pull-to-refresh only where a plain scrollable list lives.
+function setPull(on) {
+  if (IS_APP && AppBridge.setPullToRefresh) {
+    try { AppBridge.setPullToRefresh(!!on); } catch { /* ignore */ }
+  }
+}
+function refreshCurrent() {
+  const key = S.sub || S.tab;
+  S.lastLoad[key] = 0;
+  const done = () => {
+    if (IS_APP && AppBridge.refreshDone) { try { AppBridge.refreshDone(); } catch { /* ignore */ } }
+  };
+  if (S.sub) { showSub(S.sub, true); done(); return; }
+  if (S.tab === "inbox") { $("inboxFrame").src = "/admin.html"; done(); return; }
+  const p = [];
+  if (S.tab === "home") p.push(loadHome());
+  if (S.tab === "shop") { p.push(loadListings()); p.push(loadPurchases(true)); }
+  if (S.tab === "orders") p.push(loadOrders());
+  if (S.tab === "more") p.push(loadMore());
+  Promise.allSettled(p).then(done);
+}
+// The native shell calls this on swipe-down.
+window.__appRefresh = refreshCurrent;
+
+window.addEventListener("popstate", () => {
+  if (!S.admin) return;
+  closeSheet();
+  syncFromHash(false);
+});
+
+/* ---------------- HOME ---------------- */
+async function loadHome() {
+  S.lastLoad.home = Date.now();
+  const a = S.admin || {};
+  $("homeName").textContent = a.username || "";
+  $("homeAvatar").textContent = (a.username || "?").slice(0, 1).toUpperCase();
+  $("moreAvatar").textContent = (a.username || "?").slice(0, 1).toUpperCase();
+  $("homeRole").textContent = a.role || "admin";
+
+  api("/shop/me").then((d) => {
+    S.me = d;
+    $("homeBalance").textContent = money(d.balance);
+  }).catch(() => { $("homeBalance").textContent = "–"; });
+
+  api("/orders/list").then((orders) => {
+    const list = Array.isArray(orders) ? orders : [];
+    S.orders = list;
+    $("stOpen").textContent = list.filter((o) => !o.used).length;
+    $("stDelivered").textContent = list.filter((o) => o.used).length;
+  }).catch(() => {});
+
+  // A superadmin's home shows the whole operation's activity, not just theirs.
+  const purchUrl = isSuper() ? "/shop/purchases?all=1&limit=6" : "/shop/purchases?limit=5";
+  $("recentTitle").textContent = isSuper() ? "Recent shop activity" : "Recent purchases";
+  api(purchUrl).then((d) => {
+    $("stPurchases").textContent = d.total != null ? d.total : (d.purchases || []).length;
+    const box = $("recentList");
+    const ps = d.purchases || [];
+    if (!ps.length) { box.innerHTML = '<div class="empty small" style="padding:14px">Nothing yet</div>'; return; }
+    box.innerHTML = ps.map((p) => `
+      <div class="listrow" onclick="openPurchase('${esc(p.id)}')">
+        <div class="grow">
+          <div class="ellip" style="font-weight:700">${esc(p.setName)}</div>
+          <div class="small muted ellip">${isSuper() && p.buyerUsername ? esc(p.buyerUsername) + " · " : ""}${esc(p.accountLogin || "")} · ${rel(p.createdAt)}</div>
+        </div>
+        ${p.refundedAt ? '<span class="chip warn">Refunded</span>' : ""}
+        <div style="font-weight:800">${money(p.price)}</div>
+      </div>`).join("");
+  }).catch(() => {});
+
+  if (isSuper()) {
+    $("saHome").style.display = "block";
+    api("/drops-archive/overview").then((d) => {
+      const o = d.overview || {};
+      $("saAccounts").textContent = o.accounts != null ? num(o.accounts) : "–";
+      $("saDrops").textContent = o.totalDrops != null ? num(o.totalDrops) : "–";
+      $("saGames").textContent = o.games != null ? num(o.games) : "–";
+    }).catch(() => {});
+    api("/drops-archive/progress").then((d) => {
+      const c = ((d.progress || {}).counts) || {};
+      $("saBacklog").innerHTML = c.due != null
+        ? (c.due > 0 ? '<span class="chip warn">' + num(c.due) + " due</span>" : '<span class="chip good">clear</span>')
+        : "–";
+    }).catch(() => { $("saBacklog").textContent = "–"; });
+    api("/api/bot-health/status").then((d) => {
+      const cs = d.containers || [];
+      const stuck = cs.filter((c) => c.stuck).length;
+      $("saBots").innerHTML = stuck
+        ? '<span class="chip bad">' + stuck + " stuck</span>"
+        : '<span class="chip good">' + (d.enabled ? "healthy" : "monitor off") + "</span>";
+    }).catch(() => { $("saBots").textContent = "–"; });
+    api("/drops-archive/bad-tokens").then((d) => {
+      const n = (d.accounts || []).length;
+      $("saBadTokens").innerHTML = n
+        ? '<span class="chip warn">' + num(n) + "</span>"
+        : '<span class="chip good">0</span>';
+    }).catch(() => { $("saBadTokens").textContent = "–"; });
+    api("/marketplaces/guardian/findings?status=open").then((d) => {
+      const n = (d.findings || []).length;
+      $("saFindings").innerHTML = n
+        ? '<span class="chip bad">' + n + " open</span>"
+        : '<span class="chip good">none</span>';
+    }).catch(() => { $("saFindings").textContent = "–"; });
+  } else {
+    $("saHome").style.display = "none";
+  }
+}
+
+/* ---------------- SHOP ---------------- */
+function setShopSeg(seg) {
+  S.shopSeg = seg;
+  $("segStore").classList.toggle("on", seg === "store");
+  $("segPurchases").classList.toggle("on", seg === "purchases");
+  $("shopStore").style.display = seg === "store" ? "" : "none";
+  $("shopPurchases").style.display = seg === "purchases" ? "" : "none";
+  $("purchScope").style.display = seg === "purchases" && isSuper() ? "flex" : "none";
+}
+function setPurchScope(all) {
+  S.purchAll = all;
+  $("scopeMine").classList.toggle("on", !all);
+  $("scopeAll").classList.toggle("on", all);
+  loadPurchases(true);
+}
+async function loadListings() {
+  S.lastLoad.shop = Date.now();
+  const grid = $("shopGrid");
+  if (!S.listings.length) {
+    grid.innerHTML = '<div class="skel" style="height:180px"></div><div class="skel" style="height:180px"></div>';
+  }
+  try {
+    const d = await api("/shop/listings");
+    S.listings = d.listings || [];
+    $("shopEmpty").style.display = S.listings.length ? "none" : "block";
+    grid.innerHTML = S.listings.map((l) => {
+      const imgs = (l.items || []).map((i) => i.image).filter(Boolean).slice(0, 2);
+      const out = l.stock <= 0;
+      return `<div class="prod" onclick="openListing('${esc(l.id)}')">
+        <div class="imgs ${imgs.length > 1 ? "two" : ""}">
+          ${imgs.length
+            ? imgs.map((u) => `<img loading="lazy" src="${esc(u)}" alt="" onerror="this.style.visibility='hidden'">`).join("")
+            : '<div class="center muted" style="font-size:26px">🎁</div>'}
+          <span class="stock chip ${out ? "bad" : "good"}">${out ? "Out" : l.stock + " left"}</span>
+        </div>
+        <div class="body">
+          <div class="name">${esc(l.name)}</div>
+          <div class="price">${money(l.price)}</div>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+  }
+}
+async function openListing(id) {
+  openSheet('<div class="center" style="padding:30px"><div class="spin"></div></div>');
+  try {
+    const d = await api("/shop/listings/" + encodeURIComponent(id));
+    const l = d.listing;
+    const out = l.stock <= 0;
+    const bal = S.me ? S.me.balance : null;
+    const cantAfford = bal != null && bal < l.price;
+    openSheet(`
+      <h2>${esc(l.name)}</h2>
+      ${l.note ? `<div class="small muted" style="margin-bottom:10px">${esc(l.note)}</div>` : ""}
+      <div class="row" style="margin-bottom:12px">
+        <span class="chip ${out ? "bad" : "good"}">${out ? "Out of stock" : l.stock + " in stock"}</span>
+        <div class="grow"></div>
+        <div style="font-size:22px;font-weight:800;color:var(--accent2)">${money(l.price)}</div>
+      </div>
+      <div class="card" style="margin-bottom:14px"><h3>You receive one account with</h3>
+        ${(l.items || []).map((i) => `
+          <div class="item-line">
+            ${i.image ? `<img loading="lazy" src="${esc(i.image)}" alt="" onerror="this.style.visibility='hidden'">` : ""}
+            <div class="grow">
+              <div class="small" style="font-weight:700">${esc(i.name)}</div>
+              <div class="small muted">${esc(i.game || "")}</div>
+            </div>
+            <div class="chip role">×${i.count != null && i.count > 0 ? i.count : i.qty || 1}</div>
+          </div>`).join("")}
+      </div>
+      ${bal != null ? `<div class="small muted" style="margin-bottom:10px">Your balance: <b>${money(bal)}</b>${cantAfford ? ' — <span style="color:var(--bad)">not enough</span>' : ""}</div>` : ""}
+      <button class="btn" id="buyBtn" ${out || cantAfford ? "disabled" : ""}>Buy for ${money(l.price)}</button>
+      <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+    $("buyBtn").onclick = () => doBuy(l);
+  } catch (e) {
+    closeSheet();
+    if (e.status !== 401) toast(e.message);
+  }
+}
+function doBuy(l) {
+  const btn = $("buyBtn");
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  api("/shop/listings/" + encodeURIComponent(l.id) + "/buy", { method: "POST", body: {} })
+    .then((d) => {
+      if (S.me) S.me.balance = d.balance;
+      $("homeBalance").textContent = money(d.balance);
+      S.lastLoad.home = 0;
+      const p = d.purchase || {};
+      const c = p.credentials || {};
+      openSheet(`
+        <h2>✅ Purchased</h2>
+        <div class="small muted" style="margin-bottom:14px">
+          ${esc(p.setName)} — save these credentials now. You can re-open them any time under <b>Purchases</b>.
+        </div>
+        ${credBlock("Login", c.login)}
+        ${c.username && c.username !== c.login ? credBlock("Username", c.username) : ""}
+        ${credBlock("Password", c.password)}
+        ${credBlock("Email", c.email)}
+        <div class="small muted" style="margin:8px 0 12px">New balance: <b>${money(d.balance)}</b></div>
+        <button class="btn" onclick="closeSheet();loadListings();loadPurchases(true)">Done</button>`);
+    })
+    .catch((e) => {
+      if (e.status === 409) { toast("Out of stock — someone beat you to it"); closeSheet(); loadListings(); }
+      else if (e.status !== 401) { toast(e.message); btn.disabled = false; btn.textContent = "Buy for " + money(l.price); }
+    });
+}
+async function loadPurchases(reset) {
+  if (reset) { S.purchPage = 0; S.purchases = []; }
+  const page = S.purchPage + 1;
+  const all = S.purchAll && isSuper() ? "&all=1" : "";
+  try {
+    const d = await api("/shop/purchases?limit=25&page=" + page + all);
+    S.purchPage = page;
+    S.purchases = reset ? (d.purchases || []) : S.purchases.concat(d.purchases || []);
+    S.purchHasMore = !!d.hasMore;
+    renderPurchases();
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+  }
+}
+function renderPurchases() {
+  const box = $("purchaseList");
+  $("purchEmpty").style.display = S.purchases.length ? "none" : "block";
+  $("purchMore").style.display = S.purchHasMore ? "" : "none";
+  box.innerHTML = S.purchases.map((p) => `
+    <div class="card tap" style="padding:12px" onclick="openPurchase('${esc(p.id)}')">
+      <div class="row">
+        <div class="grow">
+          <div class="ellip" style="font-weight:700">${esc(p.setName)}</div>
+          <div class="small muted ellip">${esc(p.accountLogin || "")}${p.buyerUsername && isSuper() ? " · by " + esc(p.buyerUsername) : ""} · ${rel(p.createdAt)}</div>
+        </div>
+        ${p.refundedAt ? '<span class="chip warn">Refunded</span>' : ""}
+        <div style="font-weight:800">${money(p.price)}</div>
+      </div>
+    </div>`).join("");
+}
+async function openPurchase(id) {
+  openSheet('<div class="center" style="padding:30px"><div class="spin"></div></div>');
+  try {
+    const d = await api("/shop/purchases/" + encodeURIComponent(id));
+    const p = d.purchase || {};
+    const c = p.credentials || {};
+    const canRefund = isSuper() && !p.refundedAt;
+    openSheet(`
+      <h2>${esc(p.setName)}</h2>
+      <div class="small muted" style="margin-bottom:12px">
+        ${money(p.price)} · ${rel(p.createdAt)}${p.refundedAt ? ' · <span style="color:var(--warn)">refunded ' + rel(p.refundedAt) + "</span>" : ""}
+        ${p.buyerUsername ? " · buyer: " + esc(p.buyerUsername) : ""}
+      </div>
+      ${credBlock("Login", c.login)}
+      ${c.username && c.username !== c.login ? credBlock("Username", c.username) : ""}
+      ${credBlock("Password", c.password)}
+      ${credBlock("Email", c.email)}
+      ${(p.items || []).length ? `<div class="card mt12"><h3>Included items</h3>
+        ${p.items.map((i) => `<div class="item-line">
+            ${i.image ? `<img loading="lazy" src="${esc(i.image)}" alt="" onerror="this.style.visibility='hidden'">` : ""}
+            <div class="grow small" style="font-weight:600">${esc(i.name)}<div class="muted">${esc(i.game || "")}</div></div>
+            <div class="chip role">×${i.count || 1}</div>
+          </div>`).join("")}</div>` : ""}
+      ${canRefund ? '<button class="btn danger mt12" id="refundBtn">Refund & return to stock</button>' : ""}
+      <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+    if (canRefund) {
+      $("refundBtn").onclick = () => confirmSheet({
+        title: "Refund this purchase?",
+        body: `${esc(p.setName)} — credits <b>${money(p.price)}</b> back to ${esc(p.buyerUsername)} and returns the account's drops to stock.`,
+        okLabel: "Refund", danger: true,
+        onOk: async () => {
+          try {
+            await api("/shop/purchases/" + encodeURIComponent(id) + "/refund", { method: "POST", body: {} });
+            toast("Refunded");
+            closeSheet();
+            loadPurchases(true); loadListings();
+          } catch (e) { if (e.status !== 401) toast(e.message); }
+        },
+      });
+    }
+  } catch (e) {
+    closeSheet();
+    if (e.status !== 401) toast(e.message);
+  }
+}
+
+/* ---------------- ORDERS ---------------- */
+async function loadOrders() {
+  S.lastLoad.orders = Date.now();
+  try {
+    const d = await api("/orders/list");
+    S.orders = Array.isArray(d) ? d : [];
+    renderOrders();
+    $("stOpen").textContent = S.orders.filter((o) => !o.used).length;
+    $("stDelivered").textContent = S.orders.filter((o) => o.used).length;
+  } catch (e) {
+    if (e.status !== 401) toast(e.message);
+  }
+}
+function orderAccounts(o) {
+  return Array.isArray(o.accounts) && o.accounts.length
+    ? o.accounts
+    : (o.username || o.password ? [{ username: o.username, password: o.password }] : []);
+}
+function renderOrders() {
+  const q = ($("orderSearch").value || "").trim().toLowerCase();
+  const list = S.orders.filter((o) =>
+    !q ||
+    String(o.orderId || "").toLowerCase().includes(q) ||
+    String(o.gamerTag || "").toLowerCase().includes(q) ||
+    String(o.sellerName || "").toLowerCase().includes(q));
+  $("orderEmpty").style.display = list.length ? "none" : "block";
+  $("orderList").innerHTML = list.map((o) => `
+    <div class="card tap" style="padding:12px" onclick="openOrder(${S.orders.indexOf(o)})">
+      <div class="row">
+        <div class="grow">
+          <div class="ellip mono" style="font-weight:700">${esc(o.orderId)}</div>
+          <div class="small muted ellip">
+            ${o.used ? "🎮 " + esc(o.gamerTag || "?") + " · " + rel(o.usedAt) : "Waiting for buyer"}
+            ${isSuper() && o.sellerName ? " · " + esc(o.sellerName) : ""}
+          </div>
+        </div>
+        <span class="chip ${o.used ? "good" : "warn"}">${o.used ? "Claimed" : "Open"}</span>
+      </div>
+    </div>`).join("");
+}
+function openOrder(i) {
+  const o = S.orders[i];
+  if (!o) return;
+  const accs = orderAccounts(o);
+  openSheet(`
+    <h2 class="mono" style="font-size:16px">${esc(o.orderId)}</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span class="chip ${o.used ? "good" : "warn"}">${o.used ? "Claimed" : "Open"}</span>
+      ${o.used ? `<span class="small muted">by <b>${esc(o.gamerTag || "?")}</b> ${rel(o.usedAt)}</span>` : ""}
+    </div>
+    <button class="btn ghost sm" style="margin-bottom:14px" onclick="copyText(${JSON.stringify(esc(o.orderId))},'Order ID copied')">Copy order ID</button>
+    ${accs.length ? accs.map((a, n) => `
+      ${accs.length > 1 ? `<div class="small muted" style="margin:8px 2px 4px;font-weight:700">Account ${n + 1}</div>` : ""}
+      ${credBlock("Username", a.username)}
+      ${credBlock("Password", a.password)}`).join("") : '<div class="small muted" style="margin-bottom:10px">No delivery credentials stored on this order.</div>'}
+    ${o.used ? '<button class="btn mt8" onclick="closeSheet();go(\'inbox\')">Open buyer chat</button>' : ""}
+    <button class="btn danger mt8" id="delOrder">Delete order</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  $("delOrder").onclick = () => confirmSheet({
+    title: "Delete this order?",
+    body: `Order <b>${esc(o.orderId)}</b>${o.used ? " (already claimed by " + esc(o.gamerTag || "?") + ")" : ""} will be removed. The buyer's link stops working.`,
+    okLabel: "Delete", danger: true,
+    onOk: async () => {
+      try {
+        await api("/orders/delete/" + encodeURIComponent(o._id || o.id), { method: "DELETE" });
+        toast("Order deleted");
+        closeSheet(); loadOrders();
+      } catch (e) { if (e.status !== 401) toast(e.message); }
+    },
+  });
+}
+function genOrderId() {
+  const abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  const a = new Uint32Array(10);
+  crypto.getRandomValues(a);
+  for (let i = 0; i < 10; i++) s += abc[a[i] % abc.length];
+  return s.slice(0, 5) + "-" + s.slice(5);
+}
+function openOrderCreate() {
+  openSheet(`
+    <h2>New order</h2>
+    <div class="small muted" style="margin-bottom:14px">Create the order ID you give the buyer after a sale. They enter it on the site to start their delivery chat.</div>
+    <label class="f"><span>Order ID</span>
+      <div class="row"><input id="noId" autocapitalize="characters" autocorrect="off" />
+      <button class="btn ghost sm" type="button" onclick="$('noId').value=genOrderId()">Random</button></div>
+    </label>
+    <div id="noAccs">
+      <div class="acc-pair">
+        <label class="f"><span>Account username (optional)</span><input class="noUser" autocapitalize="none" autocorrect="off" /></label>
+        <label class="f"><span>Account password (optional)</span><input class="noPass" autocapitalize="none" autocorrect="off" /></label>
+      </div>
+    </div>
+    <button class="btn ghost sm" type="button" onclick="addAccRow()">+ Add another account</button>
+    <button class="btn mt12" id="noCreate">Create order</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("noId").value = genOrderId();
+  $("noCreate").onclick = async () => {
+    const orderId = $("noId").value.trim();
+    if (!orderId) { toast("Order ID required"); return; }
+    const pairs = Array.from(document.querySelectorAll("#noAccs .acc-pair")).map((p) => ({
+      username: p.querySelector(".noUser").value.trim(),
+      password: p.querySelector(".noPass").value.trim(),
+    })).filter((a) => a.username || a.password);
+    const btn = $("noCreate");
+    btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+    try {
+      await api("/orders/add", {
+        method: "POST",
+        body: {
+          orderId,
+          username: pairs[0] ? pairs[0].username : "",
+          password: pairs[0] ? pairs[0].password : "",
+          accounts: pairs,
+        },
+      });
+      toast("Order created");
+      closeSheet();
+      loadOrders();
+      copyText(orderId, "Order ID copied");
+    } catch (e) {
+      if (e.status !== 401) toast(e.message);
+      btn.disabled = false; btn.textContent = "Create order";
+    }
+  };
+}
+function addAccRow() {
+  const div = document.createElement("div");
+  div.className = "acc-pair";
+  div.innerHTML = `
+    <label class="f"><span>Account username</span><input class="noUser" autocapitalize="none" autocorrect="off" /></label>
+    <label class="f"><span>Account password</span><input class="noPass" autocapitalize="none" autocorrect="off" /></label>`;
+  $("noAccs").appendChild(div);
+}
+
+/* ============================================================
+   SUPERADMIN SECTIONS
+   Each renders a full-screen sub-view over the tab views, routed
+   as #<tab>/<section> so the phone's back button works normally.
+   ============================================================ */
+const SA = {
+  sellers:   { title: "Sellers",   icon: "👤", sub: "balances · roles · 2FA", load: saSellers },
+  bots:      { title: "Bots",      icon: "🤖", sub: "containers · logs · control", load: saBots },
+  stock:     { title: "Stock",     icon: "📦", sub: "drops by game · scanner", load: saStock },
+  farm:      { title: "Auto-farm", icon: "🌾", sub: "engine · plans · tasks", load: saFarm },
+  integrity: { title: "Integrity", icon: "🛡️", sub: "guardian findings", load: saIntegrity },
+  listings:  { title: "Listings",  icon: "🏷️", sub: "marketplaces · repricing", load: saMarketListings },
+};
+
+function openSub(name) {
+  if (!SA[name] || !isSuper()) return;
+  const target = "#" + S.tab + "/" + name;
+  if (location.hash !== target) {
+    try { history.pushState(null, "", target); } catch { location.hash = S.tab + "/" + name; }
+  }
+  showSub(name, true);
+}
+function showSub(name, force) {
+  const sec = SA[name];
+  if (!sec) { showTab(S.tab, true); return; }
+  const changed = S.sub !== name;
+  S.sub = name;
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  $("view-sub").classList.add("active");
+  $("subTitle").textContent = sec.title;
+  $("subAction").style.display = "none";
+  $("subAction").onclick = null;
+  setPull(true);
+  if (changed || force) window.scrollTo(0, 0);
+  const stale = !S.lastLoad[name] || Date.now() - S.lastLoad[name] > 30000;
+  if (changed || force || stale) {
+    S.lastLoad[name] = Date.now();
+    $("subBody").innerHTML = skel(4);
+    sec.load($("subBody")).catch((e) => {
+      $("subBody").innerHTML = errBox(e);
+    });
+  }
+}
+function closeSub() {
+  // Prefer real history so this button and the phone's back button agree.
+  if (history.length > 1) history.back();
+  else { location.hash = S.tab; showTab(S.tab, true); }
+}
+// A context action button in the sub-view header (e.g. "+", "run").
+function subAction(svgPath, label, fn) {
+  const b = $("subAction");
+  b.style.display = "inline-flex";
+  b.setAttribute("aria-label", label);
+  b.innerHTML = '<svg viewBox="0 0 24 24">' + svgPath + "</svg>";
+  b.onclick = fn;
+}
+const ICON_PLUS = '<path d="M12 5v14M5 12h14"/>';
+const ICON_PLAY = '<path d="M7 4l12 8-12 8V4Z"/>';
+// Reload the section that's currently open (after an action changed something).
+function reloadSub(name) {
+  S.lastLoad[name] = 0;
+  if (S.sub === name) showSub(name, true);
+}
+
+/* ---------------- SA: Sellers ---------------- */
+async function saSellers(box) {
+  const d = await api("/admins");
+  const admins = (d.admins || []).slice().sort((a, b) =>
+    String(a.username).localeCompare(String(b.username)));
+  SA._admins = admins;
+  subAction(ICON_PLUS, "Add seller", openAddSeller);
+  box.innerHTML =
+    admins.map((a, i) => `
+      <div class="card tap" style="padding:12px" onclick="openSeller(${i})">
+        <div class="row">
+          <div class="avatar" style="width:38px;height:38px;font-size:15px;border-radius:12px">${esc((a.username || "?").slice(0, 1).toUpperCase())}</div>
+          <div class="grow">
+            <div class="ellip" style="font-weight:700">${esc(a.username)}</div>
+            <div class="small muted">${esc(a.role)}${a.totpEnabled ? " · 2FA" : ""}${a.telegramLinked ? " · Telegram" : ""}</div>
+          </div>
+          <div style="font-weight:800;color:var(--accent2)">${money(a.balance)}</div>
+        </div>
+      </div>`).join("") +
+    '<div class="card"><h3>Recent balance activity</h3><div id="ledgerBox" class="small muted">Loading…</div></div>';
+  api("/admins/ledger").then((l) => {
+    const rows = (l.ledger || []).slice(0, 15);
+    $("ledgerBox").innerHTML = rows.length
+      ? rows.map((r) => `
+        <div class="kv"><div class="k">
+            <b style="color:var(--text)">${esc(r.username || "?")}</b> ${esc(r.kind || "")}
+            <div class="small">${esc(r.note || "")} ${rel(r.createdAt)}</div>
+          </div>
+          <div class="v" style="color:${(Number(r.delta) || 0) >= 0 ? "var(--good)" : "var(--bad)"}">
+            ${(Number(r.delta) || 0) >= 0 ? "+" : ""}${money(r.delta)}
+          </div></div>`).join("")
+      : "No balance changes yet";
+  }).catch(() => { if ($("ledgerBox")) $("ledgerBox").textContent = "Could not load the ledger."; });
+}
+function openSeller(i) {
+  const a = (SA._admins || [])[i];
+  if (!a) return;
+  const isMe = S.admin && S.admin.id === a.id;
+  openSheet(`
+    <h2>${esc(a.username)}</h2>
+    <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+      <span class="chip role">${esc(a.role)}</span>
+      <span class="chip ${a.totpEnabled ? "good" : "flat"}">${a.totpEnabled ? "2FA on" : "no 2FA"}</span>
+      <span class="chip ${a.telegramLinked ? "good" : "flat"}">${a.telegramLinked ? "Telegram" : "no Telegram"}</span>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="row"><div class="grow"><h3 style="margin:0">Balance</h3></div>
+        <div style="font-size:24px;font-weight:800;color:var(--accent2)">${money(a.balance)}</div></div>
+      <div class="btnrow mt12">
+        <button class="btn good sm" onclick="adjustSeller('${esc(a.id)}',10)">+$10</button>
+        <button class="btn good sm" onclick="adjustSeller('${esc(a.id)}',25)">+$25</button>
+        <button class="btn good sm" onclick="adjustSeller('${esc(a.id)}',50)">+$50</button>
+      </div>
+      <button class="btn ghost sm wide mt8" onclick="openSellerAmount('${esc(a.id)}','${esc(a.username)}')">Custom amount / set exact</button>
+    </div>
+    <button class="btn ghost" onclick="openSellerRole('${esc(a.id)}','${esc(a.username)}','${esc(a.role)}')">Change role</button>
+    <button class="btn ghost mt8" onclick="openSellerPassword('${esc(a.id)}','${esc(a.username)}')">Set new password</button>
+    ${a.totpEnabled ? `<button class="btn ghost mt8" onclick="resetSeller2fa('${esc(a.id)}','${esc(a.username)}')">Reset their 2FA</button>` : ""}
+    ${isMe ? "" : `<button class="btn danger mt8" onclick="deleteSeller('${esc(a.id)}','${esc(a.username)}')">Delete seller</button>`}
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+}
+async function sellerBalance(id, body, msg) {
+  try {
+    await api("/admins/" + encodeURIComponent(id) + "/balance", { method: "POST", body });
+    toast(msg);
+    closeSheet();
+    reloadSub("sellers");
+    if (S.admin && S.admin.id === id) { S.lastLoad.home = 0; loadHome(); }
+  } catch (e) { if (e.status !== 401) toast(e.message); }
+}
+function adjustSeller(id, amount) {
+  sellerBalance(id, { amount, note: "app top-up" }, "Added " + money(amount));
+}
+function openSellerAmount(id, username) {
+  openSheet(`
+    <h2>${esc(username)} — balance</h2>
+    <label class="f"><span>Add / subtract (minus sign deducts)</span>
+      <input id="sbDelta" inputmode="decimal" placeholder="e.g. 25 or -5" /></label>
+    <button class="btn" id="sbAdd">Apply change</button>
+    <div class="small muted" style="margin:16px 0 8px">…or overwrite the balance entirely:</div>
+    <label class="f"><span>Set exact balance</span>
+      <input id="sbSet" inputmode="decimal" placeholder="e.g. 100" /></label>
+    <button class="btn ghost" id="sbSetBtn">Set balance</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("sbAdd").onclick = () => {
+    const v = Number($("sbDelta").value);
+    if (!Number.isFinite(v) || v === 0) { toast("Enter an amount"); return; }
+    sellerBalance(id, { amount: v, note: "app adjustment" }, "Balance updated");
+  };
+  $("sbSetBtn").onclick = () => {
+    const v = Number($("sbSet").value);
+    if (!Number.isFinite(v) || v < 0) { toast("Enter a valid balance"); return; }
+    sellerBalance(id, { set: v, note: "app set" }, "Balance set");
+  };
+}
+function openSellerRole(id, username, role) {
+  const next = role === "superadmin" ? "admin" : "superadmin";
+  confirmSheet({
+    title: "Change role?",
+    body: `<b>${esc(username)}</b> becomes a <b>${esc(next)}</b>.` +
+      (next === "superadmin"
+        ? " Superadmins can see and control the whole farm, stock and every seller's balance."
+        : " They lose access to the operator sections."),
+    okLabel: "Make " + next,
+    onOk: async () => {
+      try {
+        await api("/admins/" + encodeURIComponent(id), { method: "PUT", body: { role: next } });
+        toast("Role updated");
+        closeSheet(); reloadSub("sellers");
+      } catch (e) { if (e.status !== 401) toast(e.message); }
+    },
+  });
+}
+function openSellerPassword(id, username) {
+  openSheet(`
+    <h2>${esc(username)} — new password</h2>
+    <div class="small muted" style="margin-bottom:12px">They can sign in with this immediately. At least 6 characters.</div>
+    <label class="f"><span>New password</span><input id="spPass" autocapitalize="none" autocorrect="off" /></label>
+    <button class="btn" id="spSave">Save password</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("spSave").onclick = async () => {
+    const pw = $("spPass").value;
+    if (!pw || pw.length < 6) { toast("At least 6 characters"); return; }
+    try {
+      await api("/admins/" + encodeURIComponent(id), { method: "PUT", body: { password: pw } });
+      toast("Password updated");
+      closeSheet();
+    } catch (e) { if (e.status !== 401) toast(e.message); }
+  };
+}
+function resetSeller2fa(id, username) {
+  confirmSheet({
+    title: "Reset 2FA?",
+    body: `Turns off two-factor for <b>${esc(username)}</b> so they can sign in and enrol again — use this when they've lost their phone.`,
+    okLabel: "Reset 2FA", danger: true,
+    onOk: async () => {
+      try {
+        await api("/admins/" + encodeURIComponent(id) + "/2fa-reset", { method: "POST", body: {} });
+        toast("2FA reset");
+        closeSheet(); reloadSub("sellers");
+      } catch (e) { if (e.status !== 401) toast(e.message); }
+    },
+  });
+}
+function deleteSeller(id, username) {
+  confirmSheet({
+    title: "Delete this seller?",
+    body: `<b>${esc(username)}</b> loses access immediately. Their orders and purchase history stay on record.`,
+    okLabel: "Delete", danger: true,
+    onOk: async () => {
+      try {
+        await api("/admins/" + encodeURIComponent(id), { method: "DELETE" });
+        toast("Seller deleted");
+        closeSheet(); reloadSub("sellers");
+      } catch (e) { if (e.status !== 401) toast(e.message); }
+    },
+  });
+}
+function openAddSeller() {
+  openSheet(`
+    <h2>Add a seller</h2>
+    <label class="f"><span>Username</span><input id="asUser" autocapitalize="none" autocorrect="off" /></label>
+    <label class="f"><span>Password (min 6)</span><input id="asPass" autocapitalize="none" autocorrect="off" /></label>
+    <label class="f"><span>Role</span>
+      <select id="asRole"><option value="admin">admin — seller</option><option value="superadmin">superadmin — full control</option></select>
+    </label>
+    <button class="btn" id="asCreate">Create seller</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("asCreate").onclick = async () => {
+    const username = $("asUser").value.trim();
+    const password = $("asPass").value;
+    if (!username) { toast("Username required"); return; }
+    if (!password || password.length < 6) { toast("Password must be 6+ characters"); return; }
+    try {
+      await api("/admins", { method: "POST", body: { username, password, role: $("asRole").value } });
+      toast("Seller created");
+      closeSheet(); reloadSub("sellers");
+    } catch (e) { if (e.status !== 401) toast(e.message); }
+  };
+}
+
+/* ---------------- SA: Bots ---------------- */
+async function saBots(box) {
+  const d = await api("/bot-configs/all");
+  const hostList = d.hosts || [];
+  SA._hosts = hostList;
+  if (!hostList.length) {
+    box.innerHTML = '<div class="empty"><div class="big">🤖</div>No bot hosts configured</div>';
+    return;
+  }
+  box.innerHTML = hostList.map((h, hi) => {
+    const bots = h.bots || [];
+    const running = bots.filter((b) => b.running).length;
+    const accts = bots.reduce((n, b) => n + (b.accountCount || 0), 0);
+    return `
+      <div class="card">
+        <div class="row" style="margin-bottom:10px">
+          <div class="grow">
+            <div style="font-weight:800">${esc(h.label || h.id)}</div>
+            <div class="small muted">${bots.length} bots · ${num(accts)} accounts</div>
+          </div>
+          <span class="chip ${h.online ? (running ? "good" : "warn") : "bad"}">
+            ${h.online ? running + "/" + bots.length + " up" : "offline"}
+          </span>
+        </div>
+        ${bots.length ? bots.map((b, bi) => `
+          <div class="listrow" onclick="openBot(${hi},${bi})">
+            <div class="sevdot ${b.running ? "sev-info" : "sev-medium"}"></div>
+            <div class="grow">
+              <div class="ellip" style="font-weight:600">${esc(b.container || b.file)}</div>
+              <div class="small muted ellip">
+                ${num(b.accountCount)} acct${b.accountCount === 1 ? "" : "s"}${b.enabledCount !== b.accountCount ? " (" + num(b.enabledCount) + " on)" : ""}${b.source === "snapshot" ? " · from snapshot" : ""}
+              </div>
+            </div>
+            <span class="chip ${b.running ? "good" : "flat"}">${b.running ? "running" : esc(b.state || "stopped")}</span>
+          </div>`).join("") : '<div class="small muted">No bots on this host.</div>'}
+      </div>`;
+  }).join("");
+}
+function openBot(hi, bi) {
+  const h = (SA._hosts || [])[hi];
+  const b = h && (h.bots || [])[bi];
+  if (!b) return;
+  const q = "?host=" + encodeURIComponent(h.id);
+  const f = encodeURIComponent(b.file);
+  const games = b.favouriteGames || [];
+  openSheet(`
+    <h2 class="mono" style="font-size:16px">${esc(b.container || b.file)}</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span class="chip ${b.running ? "good" : "flat"}">${b.running ? "running" : esc(b.state || "stopped")}</span>
+      <span class="chip flat">${esc(h.label || h.id)}</span>
+    </div>
+    <div class="kv"><div class="k">Config file</div><div class="v mono small">${esc(b.file)}</div></div>
+    <div class="kv"><div class="k">Accounts</div><div class="v">${num(b.accountCount)} (${num(b.enabledCount)} enabled)</div></div>
+    ${b.farming ? `<div class="kv"><div class="k">Farming</div><div class="v small">${esc(String(b.farming).slice(0, 120))}</div></div>` : ""}
+    ${games.length ? `<div class="kv"><div class="k">Games</div><div class="v small">${esc(games.slice(0, 6).join(", "))}${games.length > 6 ? " +" + (games.length - 6) : ""}</div></div>` : ""}
+    <div class="btnrow mt12">
+      ${b.running
+        ? '<button class="btn danger sm" id="botStop">Stop</button><button class="btn ghost sm" id="botRestart">Restart</button>'
+        : '<button class="btn good sm" id="botStart">Start</button>'}
+      <button class="btn ghost sm" id="botLogs">Logs</button>
+    </div>
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  const ctl = (id, verb, label) => {
+    const el = $(id);
+    if (!el) return;
+    el.onclick = () => act(el, async () => {
+      await api("/bot-configs/" + verb + "/" + f + q, { method: "POST", body: { host: h.id } });
+      toast(label);
+      closeSheet();
+      reloadSub("bots");
+    });
+  };
+  ctl("botStart", "start", "Bot started");
+  ctl("botStop", "stop", "Bot stopped");
+  ctl("botRestart", "restart", "Bot restarted");
+  const lg = $("botLogs");
+  if (lg) lg.onclick = () => showBotLogs(h, b);
+}
+function showBotLogs(h, b) {
+  openSheet(`
+    <h2 class="mono" style="font-size:15px">${esc(b.container || b.file)}</h2>
+    <div class="logbox" id="logBox">Loading…</div>
+    <button class="btn ghost mt12" id="logReload">Reload</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  const load = async () => {
+    try {
+      const d = await api("/bot-configs/logs/" + encodeURIComponent(b.file) +
+        "?host=" + encodeURIComponent(h.id) + "&tail=150");
+      const boxEl = $("logBox");
+      if (!boxEl) return;
+      boxEl.textContent = d.logs || "(no output)";
+      boxEl.scrollTop = boxEl.scrollHeight;
+    } catch (e) {
+      if ($("logBox")) $("logBox").textContent = "Could not read logs: " + e.message;
+    }
+  };
+  $("logReload").onclick = load;
+  load();
+}
+
+/* ---------------- SA: Stock ---------------- */
+async function saStock(box) {
+  const [ov, games, prog, bad] = await Promise.all([
+    api("/drops-archive/overview").catch(() => null),
+    api("/drops-archive/by-game").catch(() => null),
+    api("/drops-archive/progress").catch(() => null),
+    api("/drops-archive/bad-tokens").catch(() => null),
+  ]);
+  const o = (ov && ov.overview) || {};
+  const scan = (prog && prog.progress) || {};
+  const c = scan.counts || {};
+  const badList = (bad && bad.accounts) || [];
+  SA._bad = badList;
+  const rows = (games && games.games) || [];
+  box.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat"><div class="v">${num(o.accounts)}</div><div class="l">Accounts</div></div>
+      <div class="stat"><div class="v">${num(o.totalDrops)}</div><div class="l">Drops</div></div>
+      <div class="stat"><div class="v">${num(o.items)}</div><div class="l">Items</div></div>
+    </div>
+    <div class="card">
+      <h3>Scanner</h3>
+      <div class="kv"><div class="k">State</div><div class="v">
+        ${scan.enabled === false
+          ? '<span class="chip warn">paused</span>'
+          : (scan.scanning ? '<span class="chip good">scanning</span>' : '<span class="chip flat">idle</span>')}
+      </div></div>
+      <div class="kv"><div class="k">Due to scan</div><div class="v">${c.due != null ? num(c.due) : "–"}</div></div>
+      <div class="kv"><div class="k">Healthy / bad tokens</div><div class="v">${num(c.ok)} / ${num(c.tokenInvalid)}</div></div>
+      ${(scan.hosts || []).length ? `<div class="kv"><div class="k">Scan hosts</div><div class="v small">${
+        scan.hosts.map((hh) => esc(hh.label || hh.id) + (hh.scanning ? " ⏳" : "")).join(", ")
+      }</div></div>` : ""}
+      ${badList.length ? '<button class="btn ghost sm wide mt12" onclick="openBadTokens()">Review ' + badList.length + " bad-token account(s)</button>" : ""}
+    </div>
+    <div class="card">
+      <h3>Stock by game</h3>
+      ${rows.length ? rows.slice(0, 40).map((g) => `
+        <div class="listrow" style="cursor:default">
+          <div class="grow">
+            <div class="ellip" style="font-weight:600">${esc(g.game || "(unknown)")}</div>
+            <div class="small muted">${num(g.accounts)} accounts · ${num(g.items)} items${g.poolDrops ? " · " + num(g.poolDrops) + " in pool" : ""}</div>
+          </div>
+          <div style="font-weight:800">${num(g.totalCount)}</div>
+        </div>`).join("") : '<div class="small muted">No drops archived yet.</div>'}
+      ${rows.length > 40 ? '<div class="small muted mt8">Showing the top 40 games by drop count.</div>' : ""}
+    </div>`;
+}
+function openBadTokens() {
+  const list = SA._bad || [];
+  openSheet(`
+    <h2>Bad tokens (${list.length})</h2>
+    <div class="small muted" style="margin-bottom:12px">
+      These accounts failed their last Twitch check — usually a changed password. Purging strips them from the
+      live bot configs so the bots stop retrying; the account records themselves are kept.
+    </div>
+    <div class="card" style="max-height:40vh;overflow-y:auto">
+      ${list.length ? list.slice(0, 60).map((a) => `
+        <div class="listrow" style="cursor:default">
+          <div class="grow"><div class="ellip small mono">${esc(a.login || a.credUsername || "?")}</div>
+          <div class="small muted ellip">${esc(a.configFile || "no bot")} · ${esc(a.host || "local")}</div></div>
+          <div class="small muted">${num(a.dropCount)} drops</div>
+        </div>`).join("") : '<div class="small muted">None 🎉</div>'}
+      ${list.length > 60 ? '<div class="small muted mt8">…and ' + (list.length - 60) + " more</div>" : ""}
+    </div>
+    ${list.length ? '<button class="btn danger mt12" id="purgeBtn">Purge from bot configs</button>' : ""}
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  const pb = $("purgeBtn");
+  if (pb) {
+    pb.onclick = () => confirmSheet({
+      title: "Purge bad-token accounts?",
+      body: `Removes ${list.length} dead account(s) from every bot config file so the bots stop wasting time on them. The account records are kept.`,
+      okLabel: "Purge", danger: true,
+      onOk: async () => {
+        try {
+          const r = await api("/drops-archive/bad-tokens/purge", { method: "POST", body: {} });
+          toast("Removed " + num(r.removedFromConfigs) + " from " + num(r.filesUpdated) + " file(s)");
+          closeSheet(); reloadSub("stock");
+        } catch (e) { if (e.status !== 401) toast(e.message); }
+      },
+    });
+  }
+}
+
+/* ---------------- SA: Auto-farm ---------------- */
+async function saFarm(box) {
+  const [st, tk] = await Promise.all([
+    api("/auto-farm/status"),
+    api("/auto-farm/tasks").catch(() => ({ tasks: [] })),
+  ]);
+  const cfg = st.settings || {};
+  const pool = st.pool || {};
+  const eng = st.engine || {};
+  const tasks = tk.tasks || [];
+  SA._tasks = tasks;
+  subAction(ICON_PLAY, "Scan now", farmTick);
+  const active = tasks.filter((t) => t.status === "active").length;
+  const planned = tasks.filter((t) => t.status === "planned").length;
+  box.innerHTML = `
+    <div class="card">
+      <div class="row" style="margin-bottom:4px">
+        <div class="grow"><h3 style="margin:0">Engine</h3></div>
+        <span class="chip ${cfg.enabled ? (cfg.dryRun ? "warn" : "good") : "flat"}">
+          ${cfg.enabled ? (cfg.dryRun ? "dry run" : "live") : "off"}
+        </span>
+      </div>
+      <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+        <div class="grow"><b>Enabled</b><div class="small muted">Turn the auto-farmer on or off</div></div>
+        <button class="toggle ${cfg.enabled ? "on" : ""}" id="tgEnabled" aria-label="Enabled"></button>
+      </div>
+      <div class="row" style="padding:10px 0">
+        <div class="grow"><b>Dry run</b><div class="small muted">Plan only — nothing starts for real</div></div>
+        <button class="toggle ${cfg.dryRun ? "on" : ""}" id="tgDry" aria-label="Dry run"></button>
+      </div>
+      <div class="kv"><div class="k">Status</div><div class="v">${eng.running ? '<span class="chip good">scanning…</span>' : '<span class="chip flat">idle</span>'}</div></div>
+      <div class="kv"><div class="k">Farm host</div><div class="v">${esc((st.host && st.host.label) || "not set")}</div></div>
+      <div class="kv"><div class="k">Pool</div><div class="v">${num(pool.spendable)} spendable <span class="muted small">(${num(pool.ready)} ready · ${num(pool.reserve)} reserved)</span></div></div>
+      <div class="kv"><div class="k">Per game / per bot</div><div class="v">${num(cfg.maxPerGame)} / ${num(cfg.accountsPerBot)}</div></div>
+      <button class="btn ghost sm wide mt12" id="farmScan">Scan for new campaigns now</button>
+    </div>
+    <div class="card">
+      <h3>Tasks (${active} active · ${planned} planned)</h3>
+      ${tasks.length ? tasks.slice(0, 40).map((t, i) => `
+        <div class="listrow" onclick="openFarmTask(${i})">
+          <div class="grow">
+            <div class="ellip" style="font-weight:600">${esc(t.game || "(unknown game)")}</div>
+            <div class="small muted ellip">${esc(t.decision || "")}${t.reason ? " · " + esc(String(t.reason).slice(0, 60)) : ""}</div>
+          </div>
+          <span class="chip ${
+            t.status === "active" ? "good" : t.status === "planned" ? "warn" : t.status === "failed" ? "bad" : "flat"
+          }">${esc(t.status || "")}</span>
+        </div>`).join("") : '<div class="small muted">No decisions logged yet.</div>'}
+    </div>`;
+  $("tgEnabled").onclick = () => farmSet({ enabled: !cfg.enabled });
+  $("tgDry").onclick = () => farmSet({ dryRun: !cfg.dryRun });
+  $("farmScan").onclick = () => farmTick();
+}
+async function farmSet(patch) {
+  try {
+    await api("/auto-farm/settings", { method: "POST", body: patch });
+    toast("Saved");
+    reloadSub("farm");
+  } catch (e) { if (e.status !== 401) toast(e.message); }
+}
+async function farmTick() {
+  try {
+    const r = await api("/auto-farm/tick", { method: "POST", body: {} });
+    toast(r.alreadyRunning ? "Already scanning…" : "Scan started");
+    setTimeout(() => reloadSub("farm"), 4000);
+  } catch (e) { if (e.status !== 401) toast(e.message); }
+}
+function openFarmTask(i) {
+  const t = (SA._tasks || [])[i];
+  if (!t) return;
+  const id = encodeURIComponent(t._id || t.id);
+  const bots = t.bots || [];
+  const accts = t.assignedAccounts && t.assignedAccounts.length
+    ? t.assignedAccounts.length
+    : (t.plannedAccounts || t.targetAccounts || 0);
+  openSheet(`
+    <h2>${esc(t.game || "(unknown game)")}</h2>
+    <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+      <span class="chip ${t.status === "active" ? "good" : t.status === "planned" ? "warn" : "flat"}">${esc(t.status || "")}</span>
+      <span class="chip flat">${esc(t.decision || "")}</span>
+      ${t.dryRun ? '<span class="chip warn">dry run</span>' : ""}
+    </div>
+    ${t.reason ? `<div class="small muted" style="margin-bottom:12px">${esc(t.reason)}</div>` : ""}
+    <div class="kv"><div class="k">Accounts</div><div class="v">${num(accts)}</div></div>
+    ${bots.length ? `<div class="kv"><div class="k">Bots</div><div class="v small mono">${esc(bots.map((b) => b.container).join(", "))}</div></div>` : ""}
+    ${t.listing && t.listing.externalId ? `<div class="kv"><div class="k">Listing</div><div class="v small">${money(t.listing.price)} · qty ${num(t.listing.qty)}</div></div>` : ""}
+    <div class="kv"><div class="k">Created</div><div class="v">${rel(t.createdAt)}</div></div>
+    ${t.status === "planned" ? '<button class="btn good mt12" id="ftApprove">Approve &amp; run for real</button>' : ""}
+    ${t.status === "active" ? '<button class="btn danger mt12" id="ftStop">Stop its bots</button>' : ""}
+    ${t.listing && t.listing.externalId ? '<button class="btn ghost mt8" id="ftDelist">Delist its listing</button>' : ""}
+    ${t.status !== "active" ? '<button class="btn ghost mt8" id="ftDel">Dismiss from log</button>' : ""}
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  const wire = (btnId, path, method, msg, confirmBody) => {
+    const el = $(btnId);
+    if (!el) return;
+    const run = () => act(el, async () => {
+      await api(path, { method, body: method === "DELETE" ? undefined : {} });
+      toast(msg);
+      closeSheet();
+      reloadSub("farm");
+    });
+    el.onclick = () => {
+      if (confirmBody) {
+        confirmSheet({ title: msg + "?", body: confirmBody, okLabel: "Yes", danger: true, onOk: run });
+      } else run();
+    };
+  };
+  wire("ftApprove", "/auto-farm/tasks/" + id + "/approve", "POST", "Task approved");
+  wire("ftStop", "/auto-farm/tasks/" + id + "/stop", "POST", "Bots stopped",
+    "The bots for <b>" + esc(t.game || "") + "</b> stop farming. Their accounts stay as inventory.");
+  wire("ftDelist", "/auto-farm/tasks/" + id + "/delist", "POST", "Listing removed",
+    "Removes this task's marketplace listing(s) and frees its accounts.");
+  wire("ftDel", "/auto-farm/tasks/" + id, "DELETE", "Dismissed");
+}
+
+/* ---------------- SA: Integrity ---------------- */
+async function saIntegrity(box) {
+  const [st, fd] = await Promise.all([
+    api("/marketplaces/guardian/status").catch(() => ({})),
+    api("/marketplaces/guardian/findings?status=open").catch(() => ({ findings: [] })),
+  ]);
+  const last = st.lastRun || {};
+  const findings = fd.findings || [];
+  SA._findings = findings;
+  subAction(ICON_PLAY, "Run guardian", runGuardian);
+  box.innerHTML = `
+    <div class="card">
+      <div class="row" style="margin-bottom:4px">
+        <div class="grow"><h3 style="margin:0">Guardian</h3></div>
+        <span class="chip ${st.running ? "good" : "flat"}">${st.running ? "running" : "idle"}</span>
+      </div>
+      <div class="kv"><div class="k">Last pass</div><div class="v">${last.at ? rel(last.at) : "not yet"}</div></div>
+      <div class="kv"><div class="k">Listings checked</div><div class="v">${num(last.listingsChecked)}</div></div>
+      <div class="kv"><div class="k">Units auto-fed</div><div class="v">${num(last.accountsFed)}</div></div>
+      <div class="kv"><div class="k">Open findings</div><div class="v">${num(last.openFindings != null ? last.openFindings : findings.length)}</div></div>
+      <button class="btn ghost sm wide mt12" id="gRun">Run a pass now</button>
+    </div>
+    ${findings.length ? findings.slice(0, 50).map((f, i) => `
+      <div class="card tap" style="padding:12px" onclick="openFinding(${i})">
+        <div class="row" style="margin-bottom:6px">
+          <div class="sevdot sev-${esc(f.severity || "medium")}"></div>
+          <div class="grow small" style="font-weight:700">${esc(f.type)}</div>
+          ${f.fix ? '<span class="chip good">🔧 fixable</span>' : ""}
+          ${f.marketplace ? `<span class="chip flat">${esc(f.marketplace)}</span>` : ""}
+        </div>
+        <div class="small muted">${esc(String(f.message || "").slice(0, 160))}</div>
+      </div>`).join("")
+      : '<div class="empty"><div class="big">✅</div>No open findings — everything checks out</div>'}
+    ${findings.length > 50 ? '<div class="small muted">Showing the 50 most severe of ' + findings.length + " open findings.</div>" : ""}`;
+  $("gRun").onclick = () => runGuardian();
+}
+async function runGuardian() {
+  toast("Running the guardian…");
+  try {
+    const r = await api("/marketplaces/guardian/run", { method: "POST", body: {} });
+    const l = r.lastRun || {};
+    toast("Checked " + num(l.listingsChecked) + " · " + num(l.openFindings) + " open");
+    reloadSub("integrity");
+  } catch (e) { if (e.status !== 401) toast(e.message); }
+}
+function openFinding(i) {
+  const f = (SA._findings || [])[i];
+  if (!f) return;
+  openSheet(`
+    <h2>${esc(f.type)}</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span class="chip ${f.severity === "high" ? "bad" : f.severity === "low" ? "flat" : "warn"}">${esc(f.severity || "")}</span>
+      ${f.marketplace ? `<span class="chip flat">${esc(f.marketplace)}</span>` : ""}
+    </div>
+    <div style="margin-bottom:12px">${esc(f.message || "")}</div>
+    ${f.accountLogin ? `<div class="kv"><div class="k">Account</div><div class="v mono small">${esc(f.accountLogin)}</div></div>` : ""}
+    ${f.listing ? `<div class="kv"><div class="k">Listing</div><div class="v small">${esc(f.listing.marketplace)} · ${esc(f.listing.title || f.listing.externalId)}</div></div>` : ""}
+    <div class="kv"><div class="k">First seen</div><div class="v">${rel(f.detectedAt)}</div></div>
+    <div class="kv"><div class="k">Last seen</div><div class="v">${rel(f.lastSeenAt)}</div></div>
+    ${f.fix ? `<button class="btn mt12" id="fFix">🔧 ${esc(f.fix.label)}</button><div class="small muted mt8">${esc(f.fix.hint || "")}</div>` : ""}
+    <button class="btn ${f.fix ? "ghost mt8" : "good mt12"}" id="fResolve">Mark resolved</button>
+    <button class="btn ghost mt8" id="fIgnore">Ignore it</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  const send = (btnId, action, msg) => {
+    const el = $(btnId);
+    el.onclick = () => act(el, async () => {
+      await api("/marketplaces/guardian/findings/" + encodeURIComponent(f.id), { method: "POST", body: { action } });
+      toast(msg);
+      closeSheet();
+      reloadSub("integrity");
+    });
+  };
+  if (f.fix) {
+    const el = $("fFix");
+    el.onclick = () => act(el, async () => {
+      const r = await api("/marketplaces/guardian/findings/" + encodeURIComponent(f.id) + "/fix", { method: "POST", body: {} });
+      toast(String(r.message || "Fixed").slice(0, 140));
+      closeSheet();
+      reloadSub("integrity");
+    });
+  }
+  send("fResolve", "resolve", "Marked resolved");
+  send("fIgnore", "ignore", "Ignored");
+}
+
+/* ---------------- SA: Marketplace listings ---------------- */
+async function saMarketListings(box) {
+  const d = await api("/marketplaces/listings");
+  const rows = d.listings || [];
+  SA._mlist = rows;
+  const live = rows.filter((r) => r.status === "active");
+  box.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <div class="grow"><h3 style="margin:0">Published offers</h3>
+          <div class="small muted">${live.length} active of ${rows.length}</div></div>
+        <button class="btn ghost sm" id="mSync">Sync</button>
+      </div>
+    </div>
+    ${rows.length ? rows.slice(0, 60).map((r, i) => `
+      <div class="card tap" style="padding:12px" onclick="openMListing(${i})">
+        <div class="row">
+          <div class="grow">
+            <div class="ellip" style="font-weight:700">${esc(r.title || r.externalId)}</div>
+            <div class="small muted ellip">${esc(r.marketplace)} · ${money(r.price)}${r.qtyRemaining ? " · " + num(r.qtyRemaining) + " left" : ""}${r.autoDeliver ? " · auto" : ""}</div>
+          </div>
+          <span class="chip ${
+            r.status === "active" ? "good" : r.status === "sold" ? "role" : r.status === "error" ? "bad" : "flat"
+          }">${esc(r.status)}</span>
+        </div>
+      </div>`).join("") : '<div class="empty"><div class="big">🏷️</div>Nothing published yet</div>'}
+    ${rows.length > 60 ? '<div class="small muted">Showing the 60 newest listings.</div>' : ""}`;
+  $("mSync").onclick = () => act($("mSync"), async () => {
+    const r = await api("/marketplaces/sync", { method: "POST", body: {} });
+    toast("Checked " + num(r.checked) + " · " + num(r.sold) + " sold · " + num(r.relisted) + " relisted");
+    reloadSub("listings");
+  });
+}
+function openMListing(i) {
+  const r = (SA._mlist || [])[i];
+  if (!r) return;
+  openSheet(`
+    <h2 style="font-size:16px">${esc(r.title || r.externalId)}</h2>
+    <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+      <span class="chip ${r.status === "active" ? "good" : "flat"}">${esc(r.status)}</span>
+      <span class="chip flat">${esc(r.marketplace)}</span>
+      ${r.autoDeliver ? '<span class="chip role">auto-delivery</span>' : ""}
+    </div>
+    <div class="kv"><div class="k">Price</div><div class="v">${money(r.price)} ${esc(r.currency || "")}</div></div>
+    <div class="kv"><div class="k">External id</div><div class="v mono small">${esc(r.externalId || "–")}</div></div>
+    ${r.qtyRemaining ? `<div class="kv"><div class="k">Units left</div><div class="v">${num(r.qtyRemaining)}</div></div>` : ""}
+    <div class="kv"><div class="k">Created</div><div class="v">${rel(r.createdAt)}</div></div>
+    ${r.lastError ? `<div class="errbox mt12 small">${esc(r.lastError)}</div>` : ""}
+    ${r.url ? `<a class="btn ghost mt12" style="text-decoration:none" href="${esc(r.url)}" target="_blank" rel="noopener">Open on ${esc(r.marketplace)}</a>` : ""}
+    ${r.marketplace === "g2g" && r.externalId ? '<button class="btn ghost mt8" id="mlPrice">Change price</button>' : ""}
+    ${r.status === "active" ? '<button class="btn danger mt8" id="mlDelist">Delist</button>' : ""}
+    <button class="btn ghost mt8" onclick="closeSheet()">Close</button>`);
+  const dl = $("mlDelist");
+  if (dl) {
+    dl.onclick = () => confirmSheet({
+      title: "Delist this offer?",
+      body: `Removes it from <b>${esc(r.marketplace)}</b> and releases any accounts reserved for it back into stock.`,
+      okLabel: "Delist", danger: true,
+      onOk: async () => {
+        try {
+          await api("/marketplaces/listings/" + encodeURIComponent(r.id), { method: "DELETE" });
+          toast("Delisted");
+          closeSheet(); reloadSub("listings");
+        } catch (e) { if (e.status !== 401) toast(e.message); }
+      },
+    });
+  }
+  const pb = $("mlPrice");
+  if (pb) pb.onclick = () => openG2GPrice(r);
+}
+function openG2GPrice(r) {
+  openSheet(`
+    <h2>Change price</h2>
+    <div class="small muted" style="margin-bottom:12px">${esc(r.title || r.externalId)} — currently ${money(r.price)}</div>
+    <label class="f"><span>New unit price (USD)</span>
+      <input id="g2gPrice" inputmode="decimal" value="${Number(r.price) || 0}" /></label>
+    <button class="btn" id="g2gSave">Update on G2G</button>
+    <button class="btn ghost mt8" onclick="closeSheet()">Cancel</button>`);
+  $("g2gSave").onclick = () => {
+    const v = Number($("g2gPrice").value);
+    if (!Number.isFinite(v) || v <= 0) { toast("Enter a valid price"); return; }
+    act($("g2gSave"), async () => {
+      await api("/marketplaces/g2g/offers/" + encodeURIComponent(r.externalId), {
+        method: "PUT", body: { unitPrice: v },
+      });
+      toast("Price updated");
+      closeSheet(); reloadSub("listings");
+    });
+  };
+}
+
+/* ---------------- MORE ---------------- */
+function buildMore() {
+  const a = S.admin || {};
+  $("moreName").textContent = a.username || "";
+  $("moreRole").textContent = (a.role || "admin") + (a.tfa ? " · 2FA on" : "");
+  $("moreAvatar").textContent = (a.username || "?").slice(0, 1).toUpperCase();
+
+  // Operator tiles (native, in-app) — superadmin only.
+  $("saTools").style.display = isSuper() ? "block" : "none";
+  if (isSuper()) {
+    $("saToolGrid").innerHTML = Object.keys(SA).map((k) => `
+      <button class="sa-tile" onclick="openSub('${k}')">
+        <div class="n">${SA[k].icon} ${esc(SA[k].title)}<span class="badge" id="badge_${k}" style="display:none"></span></div>
+        <div class="s">${esc(SA[k].sub)}</div>
+      </button>`).join("");
+  }
+
+  const links = [
+    ["/settings.html", "Settings", "2FA · Telegram · account"],
+    ["/marketplace.html", "Marketplace", "price comparison"],
+    ["/inventory", "Inventory", "codes & items"],
+    ["/orders", "Orders (desktop)", "full order manager"],
+  ];
+  if (isSuper()) {
+    links.push(
+      ["/listings.html", "Publish", "build & publish offers"],
+      ["/drops-archive.html", "Drops Archive", "full stock explorer"],
+      ["/account-stash.html", "Account Stash", "imports"],
+      ["/bulk-orders.html", "Bulk Orders", "multi-account deals"],
+      ["/radar.html", "Radar", "new campaigns"],
+      ["/prime.html", "Prime", "prime gaming offers"],
+      ["/research.html", "Research", "market demand"],
+      ["/renters.html", "Renters", "rented bots"],
+      ["/epic-accounts.html", "Epic", "free games"],
+      ["/backup.html", "Backups", "database snapshots"],
+    );
+  }
+  $("moreLinks").innerHTML = links.map(([href, name, sub]) =>
+    `<a href="${href}">${esc(name)}<span>${esc(sub)}</span></a>`).join("");
+
+  let ver = "RedeemHub Seller";
+  if (IS_APP && AppBridge.getVersion) {
+    try { ver += " · Android app v" + AppBridge.getVersion(); } catch { /* ignore */ }
+  } else if (window.navigator.standalone ||
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)) {
+    ver += " · home screen";
+  } else {
+    ver += " · web";
+  }
+  $("verLine").textContent = ver;
+}
+async function loadMore() {
+  S.lastLoad.more = Date.now();
+  buildMore();
+  if (isSuper()) {
+    // Badge the operator tiles that need attention.
+    api("/marketplaces/guardian/findings?status=open").then((d) => {
+      const n = (d.findings || []).length;
+      const b = $("badge_integrity");
+      if (b && n) { b.textContent = n; b.style.display = "inline-flex"; }
+    }).catch(() => {});
+    api("/drops-archive/bad-tokens").then((d) => {
+      const n = (d.accounts || []).length;
+      const b = $("badge_stock");
+      if (b && n) { b.textContent = n; b.style.display = "inline-flex"; }
+    }).catch(() => {});
+  }
+  const box = $("tgBody");
+  try {
+    const d = await api("/me/telegram");
+    if (d.linked) {
+      box.innerHTML = `<div class="row"><span class="chip good">Linked</span>
+        <div class="grow small muted">${d.username ? "@" + esc(d.username) : "Telegram connected"} — you get sale &amp; order alerts</div>
+        <button class="btn ghost sm" id="tgUnlink">Unlink</button></div>`;
+      $("tgUnlink").onclick = async () => {
+        try { await api("/me/telegram/unlink", { method: "POST", body: {} }); loadMore(); } catch (e) { toast(e.message); }
+      };
+    } else if (!d.botUsername) {
+      box.innerHTML = '<span class="muted small">Telegram bot is not configured on the server.</span>';
+    } else {
+      box.innerHTML = `<div class="small muted" style="margin-bottom:10px">Link your Telegram for instant alerts: marketplace sales, buyer redemptions${isSuper() ? ", restocks and integrity warnings" : ""}.</div>
+        <button class="btn sm" id="tgLink">Link my Telegram</button>`;
+      $("tgLink").onclick = async () => {
+        try {
+          const r = await api("/me/telegram/link", { method: "POST", body: {} });
+          box.innerHTML = `<div class="small muted" style="margin-bottom:10px">
+              Tap the button — it opens <b>@${esc(r.botUsername)}</b> in Telegram and links automatically.
+              Or message the bot <code>/link ${esc(r.code)}</code> yourself (expires in 15 min).</div>
+            ${r.deepLink ? `<a class="btn sm" style="text-decoration:none" href="${esc(r.deepLink)}" target="_blank" rel="noopener">Open Telegram</a>` : ""}
+            <button class="btn ghost sm mt8" onclick="loadMore()">I've linked it — refresh</button>`;
+        } catch (e) { toast(e.message); }
+      };
+    }
+  } catch (e) {
+    if (e.status !== 401) box.innerHTML = '<span class="muted small">Could not load Telegram status.</span>';
+  }
+}
+
+/* ---------------- lifecycle ---------------- */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.admin) {
+    const key = S.sub || S.tab;
+    const stale = !S.lastLoad[key] || Date.now() - S.lastLoad[key] > 60000;
+    if (stale && S.tab !== "inbox") refreshCurrent();
+  }
+});
+boot();
+</script>
+</body>
+</html>

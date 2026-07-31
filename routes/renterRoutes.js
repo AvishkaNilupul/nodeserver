@@ -346,6 +346,16 @@ async function botControl(action, req, res) {
     } else {
       await stopConfigContainer(bot.host, bot.file);
     }
+    // Keep the expiry-sweep stamp truthful (it means "a stop already happened
+    // and is still in effect"): a renter starting their own bot must clear it,
+    // or the sweep — which filters on botStoppedAt: null — would never stop
+    // this bot again after a lease renewal. Mirrors the operator start/stop
+    // routes in renterAdminRoutes. Best-effort: bookkeeping must not fail the
+    // action itself.
+    req.renter.botStoppedAt = action === "start" ? null : new Date();
+    await req.renter
+      .save()
+      .catch((e) => console.error("renter botStoppedAt:", e.message));
     res.json({ success: true, running: action === "start" });
   } catch (e) {
     if (e.code === "disabled") {

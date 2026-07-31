@@ -28,6 +28,7 @@ const dsFulfiller = require("./digisellerFulfiller");
 const ggFulfiller = require("./ggselFulfiller");
 const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
+const { sendTelegram } = require("./telegram");
 
 const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
@@ -40,6 +41,12 @@ const CLAIM_TAGS = {
 let lastRun = null;
 let running = false;
 
+// Findings first raised during the current pass, and units auto-fed, collected
+// so one pass sends at most one Telegram of each kind instead of a message per
+// row. Reset at the start of every pass.
+let freshFindings = [];
+let freshFeeds = [];
+
 function accountIdsOf(row) {
   return String(row.accountId || "")
     .split(",")
@@ -49,7 +56,7 @@ function accountIdsOf(row) {
 
 async function upsertFinding(f) {
   const now = new Date();
-  await AuditFinding.findOneAndUpdate(
+  const res = await AuditFinding.findOneAndUpdate(
     { dedupeKey: f.dedupeKey },
     {
       $set: {
@@ -64,8 +71,33 @@ async function upsertFinding(f) {
       },
       $setOnInsert: { status: "open", detectedAt: now },
     },
-    { upsert: true },
+    // includeResultMetadata tells us whether this pass CREATED the finding or
+    // merely re-saw a known one — only brand-new problems are worth a push.
+    // `res.value` is the document as it was BEFORE this update (null on insert).
+    { upsert: true, includeResultMetadata: true },
   );
+  const isNew = !!(res && res.lastErrorObject && res.lastErrorObject.upserted);
+  const prev = res && res.value;
+  // A condition that cleared and came back: autoResolveStale had closed it, and
+  // the upsert above only refreshes fields — without this the row would stay
+  // "resolved", so a returning problem would be invisible in the tab and would
+  // never alert. Only rows the system auto-resolved are reopened; one a human
+  // resolved or ignored stays that way.
+  const returned =
+    !isNew &&
+    prev &&
+    prev.status === "resolved" &&
+    String(prev.resolution || "").startsWith("auto-resolved");
+  if (returned) {
+    await AuditFinding.updateOne(
+      { _id: prev._id },
+      { $set: { status: "open", resolution: "", resolvedAt: null } },
+    );
+  }
+  if (isNew || returned) {
+    freshFindings.push(f);
+  }
+  return isNew || returned;
 }
 
 // Findings of the "condition" types that were NOT re-detected this pass have
@@ -413,10 +445,32 @@ async function feedListing(row, seenKeys) {
         claimed.map((c) => c.code),
       );
     } else {
-      await mp.digisellerAddContent(
+      const res = await mp.digisellerAddContent(
         row.externalId,
         claimed.map((c) => c.code),
       );
+      // Record each unit's content_id against the account it carries, in the
+      // order they were sent (Digiseller answers in that order). Without this
+      // the unit can never be removed individually — see the `units` comment
+      // on models/MarketplaceListing.js. Best-effort: a bookkeeping failure
+      // must not undo a feed that the platform already accepted.
+      const ids = (res && res.contentIds) || [];
+      if (ids.length) {
+        const units = claimed
+          .map((c, i) => ({
+            contentId: ids[i] || "",
+            accountId: String(c.accountId || ""),
+            login: c.login || "",
+            addedAt: new Date(),
+          }))
+          .filter((u) => u.contentId);
+        if (units.length) {
+          await MarketplaceListing.updateOne(
+            { _id: row._id },
+            { $push: { units: { $each: units } } },
+          ).catch(() => {});
+        }
+      }
     }
   } catch (e) {
     // The bulk add call can fail as a whole even though the platform already
@@ -444,7 +498,13 @@ async function feedListing(row, seenKeys) {
       severity: partial ? "high" : "medium",
       marketplace: row.marketplace,
       listing: row._id,
-      dedupeKey: "restock-err:" + row._id + ":" + Date.now(),
+      // One finding per listing, NOT one per pass. Date.now() made this key
+      // unique every time, so the dedupe above never matched: each pass
+      // inserted a brand-new row and, because an insert counts as isNew, sent
+      // another Telegram. A permanently-failing listing therefore re-alerted
+      // forever — one archived GGSel offer produced 38 identical open findings.
+      // Keyed on the listing, a repeat now just refreshes lastSeenAt.
+      dedupeKey: "restock-err:" + row._id,
       message:
         "Auto-feed of " +
         row.marketplace +
@@ -509,6 +569,30 @@ async function feedListing(row, seenKeys) {
       },
     },
   );
+  freshFeeds.push({
+    marketplace: row.marketplace,
+    externalId: row.externalId,
+    title: row.title || "",
+    units: claimed.length,
+    remaining,
+    target,
+  });
+  // A successful feed clears any standing failure for this listing. Now that
+  // the failure finding is keyed on the listing rather than the moment, it
+  // would otherwise stay open forever once a listing had failed even once:
+  // "restock-err:" is not one of the CONDITION_TYPES autoResolveStale sweeps,
+  // so nothing else would ever close it. Resolving it here also lets the
+  // reopen-on-return path treat a recurrence as genuinely new.
+  await AuditFinding.updateMany(
+    { dedupeKey: "restock-err:" + row._id, status: "open" },
+    {
+      $set: {
+        status: "resolved",
+        resolution: "auto-resolved: a later restock succeeded",
+        resolvedAt: new Date(),
+      },
+    },
+  );
   // Log the restock as an already-resolved finding so it shows as activity.
   await AuditFinding.create({
     type: "restocked",
@@ -536,6 +620,60 @@ async function feedListing(row, seenKeys) {
   return claimed.length;
 }
 
+// One Telegram per pass, at most: a restock digest (units auto-fed, which
+// means those units SOLD on Plati/GGSel — the closest thing those platforms
+// give us to a sale event) and a digest of problems first seen this pass.
+// Re-seen findings stay silent so a persistent issue can't spam the chat.
+const NOTIFY_LINES = 5;
+
+async function notifyPass() {
+  if (freshFeeds.length) {
+    const total = freshFeeds.reduce((n, f) => n + f.units, 0);
+    const lines = freshFeeds
+      .slice(0, NOTIFY_LINES)
+      .map(
+        (f) =>
+          "• " +
+          f.marketplace +
+          " " +
+          (f.title ? f.title.slice(0, 60) : f.externalId) +
+          " — fed " +
+          f.units +
+          " (was " +
+          f.remaining +
+          "/" +
+          f.target +
+          ")",
+      );
+    if (freshFeeds.length > NOTIFY_LINES) {
+      lines.push("…and " + (freshFeeds.length - NOTIFY_LINES) + " more");
+    }
+    await sendTelegram(
+      "📦 RESTOCKED " +
+        total +
+        " unit(s) — those units sold\n\n" +
+        lines.join("\n"),
+    );
+  }
+  // "restocked" is the success side of a feed, already covered above.
+  const problems = freshFindings.filter((f) => f.severity !== "info");
+  if (problems.length) {
+    const lines = problems
+      .slice(0, NOTIFY_LINES)
+      .map((f) => "• [" + (f.severity || "medium") + "] " + f.message);
+    if (problems.length > NOTIFY_LINES) {
+      lines.push("…and " + (problems.length - NOTIFY_LINES) + " more");
+    }
+    await sendTelegram(
+      "⚠️ GUARDIAN found " +
+        problems.length +
+        " new issue(s)\n\n" +
+        lines.join("\n") +
+        "\n\nReview them in the app under More → Integrity.",
+    );
+  }
+}
+
 // ------------------------------------------------------------------
 // One guardian pass
 // ------------------------------------------------------------------
@@ -543,6 +681,8 @@ async function runOnce() {
   if (running) return lastRun;
   running = true;
   const startedAt = new Date();
+  freshFindings = [];
+  freshFeeds = [];
   try {
     const rows = await MarketplaceListing.find({
       status: "active",
@@ -570,6 +710,9 @@ async function runOnce() {
       issuesDetected: found,
       openFindings: open,
     };
+    notifyPass().catch((e) =>
+      console.error("guardian notify error:", e.message),
+    );
     return lastRun;
   } finally {
     running = false;
@@ -578,6 +721,21 @@ async function runOnce() {
 
 function status() {
   return { running, lastRun };
+}
+
+// Run the auto-feed for ONE listing right now (the Integrity tab's
+// "Retry restock" fix). Same feedListing path as a pass, so a success also
+// clears the standing restock-err finding and logs the restock activity row.
+async function feedOne(listingId) {
+  const row = await MarketplaceListing.findOne({
+    _id: listingId,
+    status: "active",
+    autoDeliver: true,
+  }).lean();
+  if (!row) {
+    throw new Error("Listing is not an active auto-delivery listing");
+  }
+  return feedListing(row, new Set());
 }
 
 const TICK_MS = 5 * 60 * 1000;
@@ -599,4 +757,4 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { runOnce, status, start };
+module.exports = { runOnce, status, start, feedOne, CLAIM_TAGS };

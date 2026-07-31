@@ -693,6 +693,24 @@
             Accounts return to the pool for the next event.
           </label>
         </div>
+        <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afStopFinishedBots" />
+          <label
+            for="afStopFinishedBots"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Park bots when the drops are farmed &mdash; stop a container as soon
+            as every one of its accounts has finished the games it was given,
+            instead of waiting weeks for the campaign to expire. Applies to
+            manual bots too, and each parked bot restarts by itself when a new
+            campaign for its games goes live.
+          </label>
+        </div>
         <div
           style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px"
         >
@@ -1392,6 +1410,7 @@
           $("afDryRun").checked = !!st.dryRun;
           $("afConsolidate").checked = st.consolidate !== false;
           $("afDeleteFinishedBots").checked = st.deleteFinishedBots !== false;
+          $("afStopFinishedBots").checked = st.stopFinishedBots !== false;
           $("afMaxPerGame").value = st.maxPerGame;
           $("afAccountsPerBot").value = st.accountsPerBot;
           $("afPoolReserve").value = st.poolReserve;
@@ -1423,6 +1442,7 @@
             dryRun: $("afDryRun").checked,
             consolidate: $("afConsolidate").checked,
             deleteFinishedBots: $("afDeleteFinishedBots").checked,
+            stopFinishedBots: $("afStopFinishedBots").checked,
             hostId: $("afHostId").value,
             maxPerGame: $("afMaxPerGame").value,
             accountsPerBot: $("afAccountsPerBot").value,

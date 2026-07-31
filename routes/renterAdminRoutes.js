@@ -12,6 +12,9 @@ const Renter = require("../models/Renter");
 const RenterSubmission = require("../models/RenterSubmission");
 const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
+const BotAccount = require("../models/BotAccount");
+const AvailableAccount = require("../models/AvailableAccount");
+const renterDropScanner = require("../utils/renterDropScanner");
 const {
   createRenter,
   setPassword,
@@ -137,7 +140,19 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     const [accAgg, dropAgg] = await Promise.all([
       RenterAccount.aggregate([
         { $match: { renter: { $in: ids } } },
-        { $group: { _id: "$renter", n: { $sum: 1 } } },
+        {
+          $group: {
+            _id: "$renter",
+            n: { $sum: 1 },
+            // Token health per renter, so a dead token shows up in the
+            // overview instead of silently farming nothing.
+            bad: {
+              $sum: {
+                $cond: [{ $eq: ["$lastScanStatus", "token_invalid"] }, 1, 0],
+              },
+            },
+          },
+        },
       ]),
       RenterDrop.aggregate([
         { $match: { renter: { $in: ids } } },
@@ -145,6 +160,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
       ]),
     ]);
     const accMap = new Map(accAgg.map((a) => [String(a._id), a.n]));
+    const badMap = new Map(accAgg.map((a) => [String(a._id), a.bad || 0]));
     const dropMap = new Map(dropAgg.map((a) => [String(a._id), a.n]));
 
     // One dockerPs per host, reused across every bot on that host.
@@ -187,6 +203,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         online,
         running,
         accounts: accMap.get(String(r._id)) || 0,
+        tokenIssues: badMap.get(String(r._id)) || 0,
         drops: dropMap.get(String(r._id)) || 0,
       });
     }
@@ -297,10 +314,27 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(100)
       .lean();
+    // The renter's account roster with scan health, so the operator can spot a
+    // dead token from the Manage panel (and rescan it) without SSH. Never
+    // includes clientSecret.
+    const accounts = await RenterAccount.find(
+      { renter: r._id },
+      { login: 1, lastScanStatus: 1, lastScanAt: 1, lastScanError: 1, dropCount: 1 },
+    )
+      .sort({ login: 1 })
+      .lean();
     res.json({
       success: true,
       renter: view,
       bot,
+      accounts: accounts.map((a) => ({
+        id: String(a._id),
+        login: a.login || "",
+        status: a.lastScanStatus || "pending",
+        error: a.lastScanError || "",
+        dropCount: a.dropCount || 0,
+        lastScanAt: a.lastScanAt || null,
+      })),
       submissions: submissions.map((s) => ({
         id: String(s._id),
         status: s.status,
@@ -339,8 +373,14 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       r.maxAccounts = Math.max(0, Math.floor(Number(b.maxAccounts) || 0));
     if (b.accessStart !== undefined)
       r.accessStart = b.accessStart ? new Date(b.accessStart) : null;
-    if (b.accessEnd !== undefined)
+    if (b.accessEnd !== undefined) {
       r.accessEnd = b.accessEnd ? new Date(b.accessEnd) : null;
+      // A lease that now ends in the future (or never) invalidates the "expiry
+      // sweep already stopped this bot" stamp — without this, the sweep (which
+      // filters on botStoppedAt: null) would never stop the bot when the
+      // extended lease lapses.
+      if (!r.accessEnd || r.accessEnd > new Date()) r.botStoppedAt = null;
+    }
     await r.save();
     res.json({ success: true, renter: sanitizeRenter(r) });
   } catch (err) {
@@ -507,6 +547,42 @@ router.get("/renters/:id/bot", requireSuperadmin, async (req, res) => {
   }
 });
 
+// LIVE LOGS for a renter's bot — the same docker-logs tail the operator's Bots
+// page offers (/bot-configs/logs/:file), but the container is always derived
+// from the renter's own record instead of a client-supplied file, so this can
+// never be pointed at someone else's bot. The frontend polls it.
+router.get("/renters/:id/bot/logs", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Bad renter id" });
+    }
+    const r = await Renter.findById(req.params.id);
+    if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    if (!r.botFile) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Renter has no bot assigned" });
+    }
+    const host = hosts.resolveHost(r.botHost);
+    if (!host) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Renter's host is unknown" });
+    }
+    const container = containerForFile(r.botFile);
+    const logs = await hosts.dockerLogs(host, container, { tail: req.query.tail });
+    res.json({ success: true, container, logs });
+  } catch (e) {
+    res.status(e.unreachable ? 502 : 500).json({
+      success: false,
+      offline: !!e.unreachable,
+      message: e.unreachable
+        ? "The bot host is offline right now."
+        : e.message || "Could not read the logs.",
+    });
+  }
+});
+
 // Start / stop / restart a renter's bot (operator). Target is always the
 // renter's own assigned config — never anything from the request body.
 router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
@@ -571,6 +647,142 @@ router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("renter delete error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ------------------------------------------------------------------
+// Renter drop scanner — operator visibility + manual rescan
+// ------------------------------------------------------------------
+
+// Scanner progress (counts, current account, errors) for the Renting page.
+router.get("/renter-scan/progress", requireSuperadmin, async (req, res) => {
+  try {
+    res.json({ success: true, progress: await renterDropScanner.getProgress() });
+  } catch (err) {
+    console.error("renter-scan progress error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Force-scan ONE renter account now — the fix for a stale "token_invalid"
+// badge (transient GQL failures look like dead tokens; a fresh scan clears
+// them) and the quickest way to confirm a replacement token works.
+router.post(
+  "/renter-accounts/:id/scan",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad account id" });
+      }
+      const r = await renterDropScanner.scanAccountNow(req.params.id);
+      if (!r.ok) {
+        return res
+          .status(400)
+          .json({ success: false, message: r.error || "Scan failed" });
+      }
+      res.json({ success: true, newDrops: r.newDrops || 0, total: r.total || 0 });
+    } catch (err) {
+      console.error("renter account scan error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Where a renter account's Twitch password can be found. The account itself
+// only ever stores the auth token (RenterAccount has no password field), so the
+// login/password is looked up by username across the three places it can live:
+// the renter's own submission, the account pool, and — for an account the
+// operator moved onto the rental from their own fleet — the BotAccount record.
+async function resolveAccountCreds(acc) {
+  const login = String(acc.login || "");
+  const lower = login.toLowerCase();
+  const out = { password: "", email: "", source: "" };
+  if (!login) return out;
+
+  // 1. The renter submitted it themselves — their batch holds the credentials.
+  const subs = await RenterSubmission.find(
+    { renter: acc.renter, accountsEnc: { $gt: "" } },
+    { accountsEnc: 1 },
+  )
+    .sort({ createdAt: -1 })
+    .lean();
+  for (const s of subs) {
+    let parsed;
+    try {
+      parsed = JSON.parse(decrypt(s.accountsEnc) || "[]");
+    } catch {
+      continue;
+    }
+    const hit = (parsed || []).find(
+      (a) => a && String(a.username || "").toLowerCase() === lower,
+    );
+    if (hit && hit.password) {
+      out.password = hit.password;
+      out.email = hit.email || "";
+      out.source = "renter submission";
+      return out;
+    }
+  }
+
+  // 2. The account pool (where an operator-supplied account's credentials are
+  //    parked once it is handed to a renter).
+  const pool = await AvailableAccount.findOne({ usernameLower: lower }).lean();
+  if (pool && pool.password) {
+    const pw = decrypt(pool.password);
+    if (pw) {
+      out.password = pw;
+      out.email = pool.email ? decrypt(pool.email) || "" : "";
+      out.source = "account pool";
+      return out;
+    }
+  }
+
+  // 3. The operator's own record, for an account still tracked there.
+  const bot = await BotAccount.findOne({ login }).lean();
+  if (bot && bot.credPassword) {
+    const pw = decrypt(bot.credPassword);
+    if (pw) {
+      out.password = pw;
+      out.email = bot.credEmail ? decrypt(bot.credEmail) || "" : "";
+      out.source = "bot account";
+      return out;
+    }
+  }
+  return out;
+}
+
+// REVEAL one renter account's live credentials — Twitch login, the auth token
+// the bot runs on (ClientSecret), and the password if it is stored anywhere.
+// Superadmin only, and never returned by the roster endpoint: the renter's own
+// /renter/accounts deliberately exposes neither token nor password.
+router.get("/renter-accounts/:id/creds", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Bad account id" });
+    }
+    const acc = await RenterAccount.findById(req.params.id).lean();
+    if (!acc)
+      return res.status(404).json({ success: false, message: "Not found" });
+    const creds = await resolveAccountCreds(acc);
+    res.json({
+      success: true,
+      account: {
+        login: acc.login || "",
+        token: acc.clientSecret || "",
+        password: creds.password,
+        email: creds.email,
+        source: creds.source,
+        host: acc.host || "",
+        configFile: acc.configFile || "",
+        status: acc.lastScanStatus || "pending",
+      },
+    });
+  } catch (err) {
+    console.error("renter account creds error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -734,7 +946,10 @@ router.post(
       sub.status = "approved";
       sub.reviewedBy = req.session.admin.id;
       sub.reviewedAt = new Date();
-      sub.added = added || sub.count;
+      // "added" is honest history: what the paste actually landed on the bot.
+      // Only when NO tokens were pasted (operator added the accounts through
+      // another tool first) do we assume the whole batch made it.
+      sub.added = tokensText.trim() ? added : sub.count;
       await sub.save();
 
       // Start the renter's bot.
