@@ -698,13 +698,27 @@ function runShell(host, script, { timeout = SHORT_TIMEOUT, input } = {}) {
 
 // Tail a container's docker logs. docker writes logs to stderr, so we merge
 // 2>&1. Returns the raw text (caller splits into lines).
-async function dockerLogs(host, container, { tail = 200 } = {}) {
+//
+// `since` (optional) bounds the window by time using docker's `--since`
+// (a duration like "6h"/"30m" or an absolute timestamp). It combines with the
+// `tail` line cap: docker returns lines newer than `since`, then the cap keeps
+// transfer size bounded on a busy container. Native hosts (botctl) have no
+// time filter, so `since` is ignored there and only the line cap applies.
+async function dockerLogs(host, container, { tail = 200, since } = {}) {
   const n = Math.max(1, Math.min(2000, parseInt(tail, 10) || 200));
   if (isNative(host)) {
     return botctl(host, ["logs", container, String(n)], { timeout: 25000 });
   }
+  const sinceArg = since ? "--since " + shq(String(since)) + " " : "";
   const script =
-    "docker logs --tail " + n + " " + shq(container) + " 2>&1 | tail -n " + n;
+    "docker logs " +
+    sinceArg +
+    "--tail " +
+    n +
+    " " +
+    shq(container) +
+    " 2>&1 | tail -n " +
+    n;
   const { stdout } = await runShell(host, script, { timeout: 25000 });
   return stdout;
 }
