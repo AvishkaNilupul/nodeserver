@@ -11,6 +11,7 @@
 // (routes/shopRoutes.availableAccountsForSet), so a replacement can never be an
 // account another sale already handed out.
 const BotAccount = require("../models/BotAccount");
+const MarketplaceListing = require("../models/MarketplaceListing");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { fetchInventory } = require("./twitchInventory");
 const { reserveSetOnAccount } = require("./dropReservation");
@@ -189,11 +190,35 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(workers);
 }
 
+// Lowercased logins of every account currently attached to an active
+// marketplace listing, either as its auto-delivery account(s) or as a fed
+// per-unit delivery line (Plati/GGSel content).
+async function activeListingLogins() {
+  const out = new Set();
+  const rows = await MarketplaceListing.find(
+    { status: "active" },
+    { accountLogin: 1, units: 1 },
+  ).lean();
+  for (const r of rows) {
+    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
+      if (l) out.add(l.toLowerCase());
+    }
+    for (const u of r.units || []) {
+      const l = String((u && u.login) || "").toLowerCase();
+      if (l) out.add(l);
+    }
+  }
+  return out;
+}
+
 // Atomically claim one BotAccount for a bulk order (same guard the Shop uses).
-async function claimAccount(candidate, order) {
+// `setLike` carries the item keys to reserve; it defaults to the order's own
+// items snapshot, but at create time the order ref has no items yet, so the
+// caller passes the DropSet-shaped object explicitly.
+async function claimAccount(candidate, order, setLike) {
   // Per-game reservation: commit only this order's set's drops on the account
   // so its other games stay sellable.
-  const ok = await reserveSetOnAccount(candidate.accountId, setLikeOf(order), {
+  const ok = await reserveSetOnAccount(candidate.accountId, setLike || setLikeOf(order), {
     soldToUsername: "bulk:" + order.orderNo,
     soldSetId: order.setId || "",
     soldBulkOrderId: order.orderNo,
@@ -208,16 +233,22 @@ async function claimAccount(candidate, order) {
 // list, claiming each atomically. Returns { units, claimed, available }.
 async function reserveUnits({ order, setLike, qty, excludeIds = new Set() }) {
   const candidates = await availableAccountsForSet(setLike);
+  // Never hand a bulk buyer an account that is still attached to an active
+  // marketplace listing (as its auto-delivery account or a fed delivery unit)
+  // — another buyer could receive the same account from that platform.
+  const listedLogins = await activeListingLogins();
   const units = [];
   let available = 0;
   for (const c of candidates) {
     if (excludeIds.has(String(c.accountId))) continue;
+    if (listedLogins.has(String(c.login || "").toLowerCase())) continue;
     available++;
   }
   for (const c of candidates) {
     if (units.length >= qty) break;
     if (excludeIds.has(String(c.accountId))) continue;
-    const account = await claimAccount(c, order);
+    if (listedLogins.has(String(c.login || "").toLowerCase())) continue;
+    const account = await claimAccount(c, order, setLike);
     if (!account) continue; // lost the race to another buyer — skip
     excludeIds.add(String(c.accountId));
     units.push(unitFromCandidate(c, account));
@@ -261,6 +292,7 @@ async function runHealthCheck(
         (order.units || []).map((u) => String(u.account)),
       );
       const candidates = await availableAccountsForSet(setLike);
+      const listedLogins = await activeListingLogins();
       let ci = 0;
 
       // Pull the next pool account that actually verifies healthy. Any claimed
@@ -270,6 +302,7 @@ async function runHealthCheck(
         while (ci < candidates.length) {
           const c = candidates[ci++];
           if (inOrder.has(String(c.accountId))) continue;
+          if (listedLogins.has(String(c.login || "").toLowerCase())) continue;
           const account = await claimAccount(c, order);
           if (!account) continue;
           inOrder.add(String(c.accountId));
