@@ -29,7 +29,26 @@ const GF_CLAIM_TAG = "gameflip";
 // bundle, so a Shop buyer and a Gameflip listing can never get the same drops
 // while the account's other games stay sellable. Returns the account doc.
 async function claimAccountForSet(set) {
-  const candidates = await availableAccountsForSet(set);
+  let candidates = await availableAccountsForSet(set);
+  // Skip accounts already attached to another active listing (as its
+  // auto-delivery account or a fed Plati/GGSel unit): the buyer gets the whole
+  // account, so its other listing's promised drops would ship with it.
+  const listed = new Set();
+  for (const r of await MarketplaceListing.find(
+    { status: "active" },
+    { accountLogin: 1, units: 1 },
+  ).lean()) {
+    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
+      if (l) listed.add(l.toLowerCase());
+    }
+    for (const u of r.units || []) {
+      const l = String((u && u.login) || "").toLowerCase();
+      if (l) listed.add(l);
+    }
+  }
+  candidates = candidates.filter(
+    (c) => !listed.has(String(c.login || "").toLowerCase()),
+  );
   // Hand out an account whose Twitch token still scans before one flagged
   // token_invalid / integrity_failed. A dead token does not always mean the
   // buyer cannot log in — the password is separate, and the guardian's own
