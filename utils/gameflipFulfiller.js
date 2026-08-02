@@ -346,6 +346,58 @@ async function syncOnce() {
       if (img) await fsp.unlink(img).catch(() => {});
     }
   }
+  // Retry chains whose relist failed on an earlier pass. The row is already
+  // marked sold by then, so the loop above never looks at it again: a single
+  // transient error (Gameflip's 429 limiter, a timeout) silently ended a chain
+  // that still owed units, leaving the stock unlisted and its accounts idle.
+  const stalled = await MarketplaceListing.find({
+    marketplace: "gameflip",
+    status: "sold",
+    qtyRemaining: { $gt: 0 },
+    lastError: /^auto-relist failed/,
+  })
+    .limit(5)
+    .lean();
+  for (const row of stalled) {
+    let img = "";
+    try {
+      const set = await DropSet.findById(row.set).lean();
+      if (!set) throw new Error("the drop set no longer exists");
+      try {
+        img = await buildSetGridImage(set);
+      } catch {
+        img = "";
+      }
+      await publishAutoDelivery({
+        set,
+        title: row.title,
+        description: row.description,
+        priceUsd: row.price,
+        imagePath: img,
+        qtyRemaining: row.qtyRemaining - 1,
+        origin: row.origin,
+      });
+      // The debt now lives on the new row — clear it here so the retry can
+      // never double-list the same units.
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        { $set: { qtyRemaining: 0, lastError: "" } },
+      ).catch(() => {});
+      relisted++;
+    } catch (e) {
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        {
+          $set: {
+            lastError: ("auto-relist failed: " + e.message).slice(0, 400),
+          },
+        },
+      ).catch(() => {});
+      console.error("gameflip relist retry failed:", e.message);
+    } finally {
+      if (img) await fsp.unlink(img).catch(() => {});
+    }
+  }
   return { checked: rows.length, sold, relisted };
 }
 
