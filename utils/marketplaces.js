@@ -2629,6 +2629,132 @@ function zeusxOfferUrl(offer) {
   return "https://zeusx.com/offer/" + ((offer && offer.offer_code) || (offer && offer.id) || "");
 }
 
+// ZeusX's game catalog. The site loads it as a static JSON blob (the same one
+// the create-offer game picker uses), so every game's category ids are
+// resolvable without the seller mapping anything by hand — the settings map is
+// only an override for games whose name we cannot match.
+const ZX_MENU_URL =
+  "https://us-prod-zeusx-assets.s3.amazonaws.com/static-content/get-menu.json";
+const ZX_MENU_TTL_MS = 6 * 60 * 60 * 1000;
+let zxMenuCache = { at: 0, bases: [] };
+
+async function zeusxMenu() {
+  if (zxMenuCache.bases.length && Date.now() - zxMenuCache.at < ZX_MENU_TTL_MS) {
+    return zxMenuCache.bases;
+  }
+  const r = await axios.get(ZX_MENU_URL, { timeout: 20000 });
+  const cats = (r.data && r.data.data) || [];
+  const bases = [];
+  for (const c of cats) {
+    for (const b of c.bases || []) {
+      bases.push({
+        serviceCategoryId: String(c.service_category_id),
+        serviceCategoryName: c.service_category_name,
+        serviceCategoryBaseId: String(b.service_category_base_id),
+        gameId: String(b.game_id || ""),
+        name: String(b.base_name || ""),
+      });
+    }
+  }
+  if (bases.length) zxMenuCache = { at: Date.now(), bases };
+  return bases;
+}
+
+const zxNorm = (v) =>
+  String(v || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+// Game name -> ZeusX Accounts category. Matched on word overlap rather than
+// substrings, because ZeusX's catalog is full of near-namesakes: "Black
+// Desert" must not land on "Black Desert Mobile", and a game it simply does
+// not carry (PUBG PC) must resolve to nothing rather than "PUBG: BLINDSPOT".
+const ZX_NOISE_WORDS = new Set([
+  "twitch",
+  "drops",
+  "drop",
+  "account",
+  "accounts",
+  "the",
+  "of",
+  "a",
+]);
+// Edition words that change WHICH product is being sold, so a query without
+// one must not silently match a candidate that has it.
+const ZX_EDITION_WORDS = new Set([
+  "mobile",
+  "classic",
+  "online",
+  "remastered",
+  "legacy",
+  "beta",
+  "pc",
+  "console",
+]);
+// A different platform is a different product, so these cost far more than a
+// cosmetic suffix: "Black Desert" is the PC game, not "Black Desert Mobile".
+const ZX_PLATFORM_WORDS = new Set(["mobile", "console", "pc"]);
+
+function zxTokens(v) {
+  return zxNorm(v)
+    .split(" ")
+    .filter((w) => w && !ZX_NOISE_WORDS.has(w));
+}
+
+function zxMatchScore(queryTokens, name) {
+  const cand = zxTokens(name);
+  if (!cand.length || !queryTokens.length) return 0;
+  const q = new Set(queryTokens);
+  const c = new Set(cand);
+  let shared = 0;
+  for (const w of c) if (q.has(w)) shared++;
+  if (!shared) return 0;
+  const union = new Set([...q, ...c]).size;
+  let score = shared / union;
+  // Every word of the candidate must be in the query, or "Rust" would match
+  // "Rust Console" as readily as itself. Sequel numbers and edition words are
+  // exempt: sellers write "Overwatch" for "Overwatch 2".
+  const core = cand.filter(
+    (w) => !ZX_EDITION_WORDS.has(w) && !/^\d+$/.test(w),
+  );
+  if (!core.every((w) => q.has(w))) score -= 0.34;
+  for (const w of cand) {
+    if (q.has(w)) continue;
+    if (ZX_PLATFORM_WORDS.has(w)) score -= 0.3;
+    else if (ZX_EDITION_WORDS.has(w)) score -= 0.02;
+    else if (/^\d+$/.test(w)) score -= 0.02;
+  }
+  return score;
+}
+
+async function zeusxResolveCategory(game, serviceCategoryId) {
+  const q = zxTokens(game);
+  if (!q.length) return null;
+  const catId = String(serviceCategoryId || "1");
+  let bases;
+  try {
+    bases = (await zeusxMenu()).filter((b) => b.serviceCategoryId === catId);
+  } catch {
+    return null;
+  }
+  const exact = bases.find((b) => zxNorm(b.name) === zxNorm(game));
+  if (exact) return exact;
+  let best = null;
+  let bestScore = 0;
+  for (const b of bases) {
+    const score = zxMatchScore(q, b.name);
+    if (score > bestScore) {
+      bestScore = score;
+      best = b;
+    }
+  }
+  // Below this the "match" is one shared word out of several — a different
+  // game with a word in common. A bare sequel ("Overwatch" -> "Overwatch 2")
+  // lands just under 0.5, hence the slack.
+  return bestScore >= 0.45 ? best : null;
+}
+
 async function zeusxPublish({
   title,
   description,
@@ -2645,13 +2771,21 @@ async function zeusxPublish({
 }) {
   requireKeys("zeusx");
   const cfg = zeusxGameConfig(game) || {};
-  const baseId = String(serviceCategoryBaseId || cfg.serviceCategoryBaseId || "");
-  const categoryId = String(serviceCategoryId || cfg.serviceCategoryId || "1");
+  let baseId = String(serviceCategoryBaseId || cfg.serviceCategoryBaseId || "");
+  let categoryId = String(serviceCategoryId || cfg.serviceCategoryId || "1");
+  if (!baseId) {
+    const hit = await zeusxResolveCategory(game, categoryId);
+    if (hit) {
+      baseId = hit.serviceCategoryBaseId;
+      categoryId = hit.serviceCategoryId;
+    }
+  }
   if (!baseId) {
     throw new Error(
-      'ZeusX has no category mapped for "' +
+      'ZeusX has no game called "' +
         (game || "") +
-        '" — add it under autoFarm.zeusxGames (serviceCategoryBaseId).',
+        '" in its Accounts catalog — map it by hand under autoFarm.zeusxGames ' +
+        "(serviceCategoryBaseId).",
     );
   }
   let price = Number(priceUsd);
@@ -2896,4 +3030,6 @@ module.exports = {
   zeusxBaseAttributes,
   zeusxUploadPhoto,
   zeusxOfferUrl,
+  zeusxResolveCategory,
+  zeusxMenu,
 };

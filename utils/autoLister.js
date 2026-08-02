@@ -1093,8 +1093,12 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   // ZeusX only joins the split when the owner has it switched on AND the
   // game has a ZeusX category mapped.
-  const zeusxEnabled =
-    !!af.zeusxAuto && !!(af.zeusxGames || {}) && zeusxGameMapped(af, task.game);
+  let zeusxEnabled = false;
+  if (af.zeusxAuto) {
+    zeusxEnabled =
+      zeusxGameMapped(af, task.game) ||
+      !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
+  }
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
@@ -1246,7 +1250,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     } else if (!af.zeusxAuto) {
       zeusx.error = "ZeusX auto-listing is switched off";
     } else if (!zeusxEnabled) {
-      zeusx.error = "no ZeusX category mapped for " + task.game;
+      zeusx.error = "no ZeusX category for " + task.game;
     } else {
       zeusx.error = "no spare account for this market yet";
     }
