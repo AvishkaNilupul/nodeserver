@@ -443,13 +443,36 @@ async function consolidate(hostId, opts = {}) {
   }
 
   // 6) Retire the drained containers (config renamed, never deleted).
+  //
+  // If retiring fails the donor config survives holding the very accounts we
+  // just wrote into a target, so the moment anything starts that container
+  // again the same Twitch account is watching from two bots. Strip the moved
+  // entries out of the donor so a failed retire can only leave an empty bot,
+  // never a duplicate.
   const retired = [];
+  const movedSecrets = new Set(moved.map(({ user }) => secretOf(user)).filter(Boolean));
   for (const d of donorList) {
     log("Retiring " + d.container + "…");
     const steps = await botFactory
       .deleteBot(host, d.file, d.container)
       .catch((e) => "failed: " + e.message);
     retired.push({ container: d.container, steps });
+    if (typeof steps !== "string" || !steps.startsWith("failed:")) continue;
+    try {
+      const data = JSON.parse(await hosts.readFile(host, d.file));
+      const users = usersOf(data);
+      const kept = users.filter((u) => !movedSecrets.has(secretOf(u)));
+      if (kept.length === users.length) continue;
+      data.TwitchSettings.TwitchUsers = kept;
+      await hosts.writeFileAtomic(host, d.file, JSON.stringify(data, null, 2));
+      log(
+        "Retire failed for " + d.container + " — stripped " +
+          (users.length - kept.length) +
+          " moved account(s) from its config so they cannot farm twice.",
+      );
+    } catch (e) {
+      log("Could not strip moved accounts from " + d.file + ": " + e.message);
+    }
   }
 
   delete p._targets;
