@@ -182,10 +182,17 @@ async function freshResearchForGame(game) {
 async function internalSalesForGame(game) {
   const cutoff = new Date(Date.now() - SALES_WINDOW_MS);
   try {
-    return await SaleSignal.countDocuments({
-      gameKey: String(game).toLowerCase(),
-      at: { $gte: cutoff },
-    });
+    // One SALE, not one drop row: a signal is written per drop, so a single
+    // sold account carrying a 50-item bundle used to read as 50 sales. That
+    // pinned every bundled game at full allocation and the maximum cap off one
+    // buyer, drowning out the games that really sell. Count the accounts the
+    // signals came from instead — an account sells once.
+    const rows = await SaleSignal.aggregate([
+      { $match: { gameKey: String(game).toLowerCase(), at: { $gte: cutoff } } },
+      { $group: { _id: { $ifNull: ["$account", "$login"] } } },
+      { $count: "n" },
+    ]);
+    return (rows[0] && rows[0].n) || 0;
   } catch {
     return 0;
   }
