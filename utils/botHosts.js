@@ -514,6 +514,17 @@ async function exists(host, file) {
 // copy of any previous version — matching the local behaviour the routes relied
 // on before, but for either transport.
 async function writeFileAtomic(host, file, text) {
+  await writeFileRaw(host, file, text);
+  // An account may only be enabled in one config per host — strip stale copies
+  // left in sibling configs (utils/dupeGuard.js).
+  try {
+    const guard = require("./dupeGuard");
+    await guard.enforceSingleHome(module.exports, host, file, text);
+  } catch (e) {
+    console.error("[botHosts] dupe guard error: " + e.message);
+  }
+}
+async function writeFileRaw(host, file, text) {
   if (host.transport === "local") {
     const full = path.join(host.dir, file);
     try {
