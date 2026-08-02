@@ -493,6 +493,37 @@ async function feedListing(row, seenKeys) {
     if (!partial) {
       await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
     }
+    // An offer archived on the platform's side can never accept products
+    // again, but our row stayed "active" — so every pass re-tried the feed and
+    // refreshed the same alarm forever. Mirror the platform: mark the listing
+    // delisted and close its findings, so it leaves the live set entirely.
+    if (!partial && /\barchived\b/i.test(e.message || "")) {
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        { $set: { status: "delisted" } },
+      );
+      await AuditFinding.updateMany(
+        { listing: row._id, status: "open" },
+        {
+          $set: {
+            status: "resolved",
+            resolution:
+              "auto-resolved: offer is archived on " +
+              row.marketplace +
+              " — listing marked delisted",
+            resolvedAt: new Date(),
+          },
+        },
+      );
+      console.log(
+        "guardian: " +
+          row.marketplace +
+          " offer " +
+          row.externalId +
+          " is archived — marked delisted",
+      );
+      return 0;
+    }
     await upsertFinding({
       type: "restock-failed",
       severity: partial ? "high" : "medium",
