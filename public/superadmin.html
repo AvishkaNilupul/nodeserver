@@ -677,6 +677,23 @@
           </label>
         </div>
         <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afZeusxAuto" />
+          <label
+            for="afZeusxAuto"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Auto-list on ZeusX &mdash; give ZeusX a share of each auto-farmed
+            campaign's accounts. ZeusX has no auto-delivery API, so those units
+            are handed over in ZeusX chat and marked sold from the Drop Archive.
+            Turn this off to stop new ZeusX listings; existing ones stay.
+          </label>
+        </div>
+        <div class="switch" style="margin-top: 10px">
           <input type="checkbox" id="afDeleteFinishedBots" />
           <label
             for="afDeleteFinishedBots"
@@ -754,6 +771,18 @@
             <small class="muted"
               >Default 203508 = Digital Goods &gt; Game Accounts &gt; Twitch
               drops Accounts. Empty = default.</small
+            >
+          </div>
+          <div class="field" style="max-width: 420px">
+            <label>ZeusX game map (JSON)</label>
+            <input
+              type="text"
+              id="afZeusxGames"
+              placeholder='{"overwatch":{"serviceCategoryId":"1","serviceCategoryBaseId":"269"}}'
+            />
+            <small class="muted"
+              >Per-game ZeusX category. A game with no entry is never
+              auto-listed on ZeusX.</small
             >
           </div>
           <div class="field" style="max-width: 180px">
@@ -1420,6 +1449,10 @@
           $("afMinHoursLeft").value = st.minHoursLeft;
           $("afPlatiCategoryId").value = st.platiCategoryId || "";
           $("afGgselCategoryId").value = st.ggselCategoryId || "";
+          $("afZeusxAuto").checked = !!st.zeusxAuto;
+          $("afZeusxGames").value = Object.keys(st.zeusxGames || {}).length
+            ? JSON.stringify(st.zeusxGames)
+            : "";
           const sel = $("afHostId");
           sel.innerHTML = '<option value="">Auto (first SSH host)</option>';
           for (const h of data.hosts || []) {
@@ -1453,6 +1486,8 @@
             minHoursLeft: $("afMinHoursLeft").value,
             platiCategoryId: $("afPlatiCategoryId").value,
             ggselCategoryId: $("afGgselCategoryId").value,
+            zeusxAuto: $("afZeusxAuto").checked,
+            zeusxGames: $("afZeusxGames").value,
           });
           showMsg("Auto-farm settings saved.", "ok");
           loadAutoFarmSettings();

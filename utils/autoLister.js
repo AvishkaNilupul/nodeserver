@@ -19,6 +19,9 @@ const {
   DS_CLAIM_TAG,
 } = require("./digisellerFulfiller");
 const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
+// ZeusX sells the same accounts, so its reservations need their own tag or a
+// release on one market would free stock another market is selling.
+const ZX_CLAIM_TAG = "zeusx";
 const {
   reserveSetOnAccount,
   releaseSetForAccounts,
@@ -667,6 +670,62 @@ async function publishGgselShare({
   });
 }
 
+// True when the ZeusX game map covers this game (exact or fuzzy, matching the
+// connector's own lookup).
+function zeusxGameMapped(af, game) {
+  const map = (af && af.zeusxGames) || {};
+  const key = String(game || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return false;
+  return Object.keys(map).some((k) => k === key || key.includes(k) || k.includes(key));
+}
+
+// ZeusX has no auto-delivery API, so its share is listed as a coordinated
+// offer: the accounts are reserved (never sold twice on another market) and
+// handed over in ZeusX chat, then marked sold from the Drop Archive.
+async function publishZeusxShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  accounts = await reserveAccountsForPublish(accounts, set, ZX_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.zeusxPublish({
+      title,
+      description,
+      priceUsd: price,
+      quantity: accounts.length,
+      game,
+      coverImagePath: img,
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "zeusx",
+      externalId: r.externalId,
+      url: r.url || "",
+      title,
+      description,
+      price,
+      status: "active",
+      origin: "auto",
+      note: "auto-farm: " + accounts.length + " account(s), manual hand-over",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+    });
+    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
+  });
+}
+
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
 // cost a market. On every sweep tick where the Gameflip listing is alive,
 // try to publish any secondary market that has no externalId yet, using
@@ -1032,10 +1091,15 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     ggselCategoryId = "";
   }
   if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
+  // ZeusX only joins the split when the owner has it switched on AND the
+  // game has a ZeusX category mapped.
+  const zeusxEnabled =
+    !!af.zeusxAuto && !!(af.zeusxGames || {}) && zeusxGameMapped(af, task.game);
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
-  const shares = { gameflip: [], plati: [], ggsel: [] };
+  if (zeusxEnabled) marketOrder.push("zeusx");
+  const shares = { gameflip: [], plati: [], ggsel: [], zeusx: [] };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
   });
@@ -1078,6 +1142,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   let published;
   const plati = { externalId: "", url: "", qty: 0, error: "" };
   const ggsel = { externalId: "", url: "", qty: 0, error: "" };
+  const zeusx = { externalId: "", url: "", qty: 0, error: "" };
   try {
     // reserve → publish → (on throw) release the gameflip unit AND delete the
     // now-empty set (mirrors the no-deliver path above) so a failed publish
@@ -1159,6 +1224,32 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     } else {
       ggsel.error = "no spare account for this market yet";
     }
+
+    // ---- ZeusX: coordinated offer for its share (see publishZeusxShare).
+    if (zeusxEnabled && shares.zeusx.length) {
+      try {
+        const r = await publishZeusxShare({
+          set,
+          title,
+          description,
+          price,
+          img,
+          accounts: shares.zeusx,
+          game: task.game,
+        });
+        zeusx.externalId = r.externalId;
+        zeusx.url = r.url;
+        zeusx.qty = r.qty;
+      } catch (err) {
+        zeusx.error = err.message;
+      }
+    } else if (!af.zeusxAuto) {
+      zeusx.error = "ZeusX auto-listing is switched off";
+    } else if (!zeusxEnabled) {
+      zeusx.error = "no ZeusX category mapped for " + task.game;
+    } else {
+      zeusx.error = "no spare account for this market yet";
+    }
   } finally {
     if (img) await fsp.unlink(img).catch(() => {});
   }
@@ -1192,6 +1283,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     heldBack: split.holdBack,
     plati,
     ggsel,
+    zeusx,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,

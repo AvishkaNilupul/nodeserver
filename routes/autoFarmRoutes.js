@@ -115,6 +115,50 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
         /[^0-9]/g,
         "",
       );
+    if ("zeusxAuto" in b) patch.zeusxAuto = !!b.zeusxAuto;
+    // Per-game ZeusX placement, pasted as JSON:
+    //   { "overwatch": { "serviceCategoryId": "1",
+    //                    "serviceCategoryBaseId": "269" } }
+    if ("zeusxGames" in b) {
+      const raw = b.zeusxGames;
+      let map = raw;
+      if (typeof raw === "string") {
+        const text = raw.trim();
+        if (!text) map = {};
+        else {
+          try {
+            map = JSON.parse(text);
+          } catch {
+            return res.status(400).json({
+              success: false,
+              message: "ZeusX game map must be valid JSON",
+            });
+          }
+        }
+      }
+      if (!map || typeof map !== "object" || Array.isArray(map)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "ZeusX game map must be an object" });
+      }
+      const clean = {};
+      for (const [game, cfg] of Object.entries(map)) {
+        if (!cfg || typeof cfg !== "object") continue;
+        const baseId = String(
+          cfg.serviceCategoryBaseId || cfg.baseId || "",
+        ).replace(/[^0-9]/g, "");
+        if (!baseId) continue;
+        clean[String(game).trim().toLowerCase()] = {
+          serviceCategoryId: String(cfg.serviceCategoryId || "1").replace(
+            /[^0-9]/g,
+            "",
+          ),
+          serviceCategoryBaseId: baseId,
+          attributes: Array.isArray(cfg.attributes) ? cfg.attributes : [],
+        };
+      }
+      patch.zeusxGames = clean;
+    }
     for (const k of Object.keys(patch)) {
       if (typeof patch[k] === "number" && isNaN(patch[k])) delete patch[k];
     }

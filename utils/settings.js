@@ -32,6 +32,11 @@ const AUTO_FARM_DEFAULTS = {
   platiCategoryId: "34187",
   platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
   ggselCategoryId: "",
+  // ZeusX auto-listing. Off unless the owner turns it on; a game only
+  // lists when zeusxGames has its category, e.g.
+  //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }
+  zeusxAuto: false,
+  zeusxGames: {},
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign

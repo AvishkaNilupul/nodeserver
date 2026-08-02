@@ -112,6 +112,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "digiseller") r = await mp.digisellerTest();
     else if (name === "g2g") r = await mp.g2gTest();
     else if (name === "ggsel") r = await mp.ggselTest();
+    else if (name === "zeusx") r = await mp.zeusxTest();
     else if (name === "funpay") r = await mp.funpayTest();
     else {
       return res
@@ -561,7 +562,8 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     if (
       targets.includes("gameflip") ||
       targets.includes("ggsel") ||
-      targets.includes("digiseller")
+      targets.includes("digiseller") ||
+      targets.includes("zeusx")
     ) {
       try {
         if (wantPromo) {
@@ -911,6 +913,26 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             autoDelivery: false,
             paymentMsg: fp.paymentMsg,
           });
+        } else if (name === "zeusx") {
+          const zx = body.zeusx || {};
+          r = await mp.zeusxPublish({
+            title,
+            description,
+            priceUsd,
+            quantity: zx.quantity,
+            game:
+              zx.game ||
+              set.game ||
+              set.coverGame ||
+              ((set.items || []).find((i) => i.game) || {}).game,
+            serviceCategoryId: zx.serviceCategoryId,
+            serviceCategoryBaseId: zx.serviceCategoryBaseId,
+            attributes: zx.attributes,
+            tags: zx.tags,
+            coverImagePath: gridImage || coverImagePath(set),
+            deliveryDays: zx.deliveryDays,
+            deliveryHours: zx.deliveryHours,
+          });
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -1128,6 +1150,8 @@ router.delete(
           await mp.ggselDelist(row.externalId);
         } else if (row.marketplace === "funpay") {
           await mp.funpayDelist(row.externalId, row.externalNode);
+        } else if (row.marketplace === "zeusx") {
+          await mp.zeusxDelist(row.externalId);
         }
       } catch (err) {
         row.lastError = err.message.slice(0, 400);

@@ -24,6 +24,9 @@ const FIELDS = {
   ggsel: ["apiKey"],
   // FunPay has no API — the single credential is the account's session token.
   funpay: ["golden_key"],
+  // ZeusX has no public API either — the credential is the seller session's
+  // access_token (expires, so it needs re-pasting when it does).
+  zeusx: ["accessToken"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -2417,6 +2420,427 @@ async function funpayUpdateSecrets(
   };
 }
 
+// ------------------------------------------------------------------
+// ZeusX (no public API — the seller panel's own JSON endpoints)
+//
+// zeusx.com itself sits behind Cloudflare, but api.zeusx.com answers a plain
+// bearer token (the seller session's access_token). A listing needs the game's
+// "service category base" id plus that base's required attributes, which are
+// per game and are configured under autoFarm.zeusxGames.
+// ------------------------------------------------------------------
+const ZX_API = "https://api.zeusx.com/v1";
+// ZeusX refuses to create or update an offer below this.
+const ZX_MIN_PRICE = 1;
+
+function zxHeaders(keys) {
+  return {
+    Authorization: "Bearer " + keys.accessToken,
+    Origin: "https://zeusx.com",
+    Referer: "https://zeusx.com/",
+    "Content-Type": "application/json",
+    "zeusx-currency": "USD",
+  };
+}
+
+function zxError(what, e) {
+  if (e && e.__zeusx) return e;
+  const body = e.response && e.response.data;
+  const msg =
+    (body && body.error && (body.error.description || body.error.message)) ||
+    (body && body.message) ||
+    e.message;
+  return new Error(what + ": " + String(msg).slice(0, 300));
+}
+
+// The API answers 200 with { isSuccess: false, error } for business failures.
+function zxData(what, r) {
+  const body = r.data || {};
+  if (body.isSuccess === false) {
+    const err = body.error || {};
+    const out = new Error(
+      what + ": " + String(err.description || err.message || "failed").slice(0, 300),
+    );
+    out.__zeusx = true;
+    throw out;
+  }
+  return body.data;
+}
+
+async function zeusxTest() {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(ZX_API + "/user/me", {
+      headers: zxHeaders(keys),
+      timeout: 20000,
+    });
+    const me = zxData("ZeusX", r) || {};
+    return {
+      ok: true,
+      detail: "Signed in as " + (me.username || me.display_name || me.id || "seller"),
+    };
+  } catch (e) {
+    throw zxError("ZeusX test", e);
+  }
+}
+
+// Attributes a listing must carry for one game category (Rank, Tier, ...).
+async function zeusxBaseAttributes(serviceCategoryBaseId) {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(
+      ZX_API +
+        "/base-attribute/get-attributes?service_category_base_id=" +
+        encodeURIComponent(serviceCategoryBaseId),
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    return zxData("ZeusX attributes", r) || [];
+  } catch (e) {
+    throw zxError("ZeusX attributes", e);
+  }
+}
+
+// Required attributes with no configured answer get the base's first option,
+// so publishing never dies on a cosmetic field we do not model.
+async function zeusxAttributeValues(serviceCategoryBaseId, configured) {
+  const chosen = new Map(
+    (Array.isArray(configured) ? configured : []).map((a) => [
+      String(a.base_attribute_id || a.attributeId),
+      String(a.base_attribute_value || a.attributeValueId),
+    ]),
+  );
+  const attrs = await zeusxBaseAttributes(serviceCategoryBaseId);
+  const out = [];
+  for (const attr of attrs) {
+    const id = String(attr.id || attr.base_attribute_id || "");
+    if (!id) continue;
+    const options = attr.base_attribute_options || [];
+    let value = chosen.get(id);
+    if (!value) {
+      if (!attr.is_required && !attr.required) continue;
+      const first = options.find((o) => o.is_active !== false);
+      if (!first) continue;
+      value = String(first.id);
+    }
+    out.push({ base_attribute_id: id, base_attribute_value: String(value) });
+  }
+  // Keep configured answers for attributes the listing endpoint expects but
+  // the attribute feed did not return.
+  for (const [id, value] of chosen) {
+    if (!out.some((o) => o.base_attribute_id === id)) {
+      out.push({ base_attribute_id: id, base_attribute_value: value });
+    }
+  }
+  return out;
+}
+
+// Photos go to S3 through a presigned URL, then the listing references the id.
+async function zeusxUploadPhoto(imagePath) {
+  const keys = requireKeys("zeusx");
+  const buf = fs.readFileSync(imagePath);
+  const ext = (path.extname(imagePath) || ".png").toLowerCase();
+  const contentType =
+    ext === ".jpg" || ext === ".jpeg"
+      ? "image/jpeg"
+      : ext === ".webp"
+        ? "image/webp"
+        : "image/png";
+  let slot;
+  try {
+    const r = await axios.post(
+      ZX_API + "/upload/request-upload-urls",
+      {
+        type: "OFFER_PHOTO",
+        files: [{ file_name: "cover" + ext, content_type: contentType }],
+      },
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    slot = (zxData("ZeusX upload url", r) || [])[0];
+  } catch (e) {
+    throw zxError("ZeusX upload url", e);
+  }
+  if (!slot || !slot.upload_url) throw new Error("ZeusX upload: no upload url");
+  try {
+    await axios.put(slot.upload_url, buf, {
+      headers: { "Content-Type": contentType },
+      timeout: 60000,
+      maxBodyLength: Infinity,
+    });
+  } catch (e) {
+    throw zxError("ZeusX upload", e);
+  }
+  return {
+    photo_id: slot.upload_file_id,
+    photo_url: slot.upload_file_path,
+    file_name: slot.upload_file_name,
+  };
+}
+
+function zxDescriptionHtml(description) {
+  const text = String(description || "").trim();
+  if (/<[a-z][\s\S]*>/i.test(text)) return text.slice(0, 20000);
+  return text
+    .split(/\n{2,}/)
+    .map((p) => "<p>" + p.replace(/\n/g, "<br>") + "</p>")
+    .join("")
+    .slice(0, 20000);
+}
+
+// Per-game placement, configured under autoFarm.zeusxGames:
+//   { "overwatch": { serviceCategoryId: "1", serviceCategoryBaseId: "269",
+//                    attributes: [{ base_attribute_id, base_attribute_value }] } }
+function zeusxGameConfig(game) {
+  const { loadSettings: load } = require("./settings");
+  const af = (load().autoFarm || {});
+  const map = af.zeusxGames || {};
+  const key = String(game || "").trim().toLowerCase();
+  if (!key) return null;
+  if (map[key]) return map[key];
+  const hit = Object.keys(map).find(
+    (k) => key.includes(k) || k.includes(key),
+  );
+  return hit ? map[hit] : null;
+}
+
+// Storefront URL. ZeusX serves offers under
+// /game/<game-slug>/<game_id>/<category>/<slug>, and only falls back to the id
+// route when the create response has not filled the slug in yet.
+function zeusxOfferUrl(offer) {
+  const slug = offer && offer.slug;
+  const gameId = offer && offer.game_id;
+  const category = String(
+    (offer && (offer.service_category_name || offer.cache_sc_service_category_name)) ||
+      "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+  const gameSlug = String(
+    (offer && (offer.service_category_base_name || offer.cache_scb_base_name)) || "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+  if (slug && gameId && gameSlug && category) {
+    return (
+      "https://zeusx.com/game/" + gameSlug + "/" + gameId + "/" + category + "/" + slug
+    );
+  }
+  return "https://zeusx.com/offer/" + ((offer && offer.offer_code) || (offer && offer.id) || "");
+}
+
+async function zeusxPublish({
+  title,
+  description,
+  priceUsd,
+  quantity,
+  game,
+  serviceCategoryId,
+  serviceCategoryBaseId,
+  attributes,
+  tags,
+  coverImagePath,
+  deliveryDays,
+  deliveryHours,
+}) {
+  requireKeys("zeusx");
+  const cfg = zeusxGameConfig(game) || {};
+  const baseId = String(serviceCategoryBaseId || cfg.serviceCategoryBaseId || "");
+  const categoryId = String(serviceCategoryId || cfg.serviceCategoryId || "1");
+  if (!baseId) {
+    throw new Error(
+      'ZeusX has no category mapped for "' +
+        (game || "") +
+        '" — add it under autoFarm.zeusxGames (serviceCategoryBaseId).',
+    );
+  }
+  let price = Number(priceUsd);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("ZeusX needs a price above 0");
+  }
+  let priceNote = "";
+  if (price < ZX_MIN_PRICE) {
+    priceNote =
+      "Listed at $" +
+      ZX_MIN_PRICE.toFixed(2) +
+      " — ZeusX rejects anything below its $1 minimum (set price was $" +
+      price.toFixed(2) +
+      ").";
+    price = ZX_MIN_PRICE;
+  }
+  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  const photos = [];
+  if (coverImagePath) {
+    try {
+      photos.push(await zeusxUploadPhoto(coverImagePath));
+    } catch (e) {
+      console.error("zeusx cover upload failed:", e.message);
+    }
+  }
+  const offer = {
+    service_category_id: categoryId,
+    service_category_base_id: baseId,
+    offer_base_attribute_value: await zeusxAttributeValues(
+      baseId,
+      attributes && attributes.length ? attributes : cfg.attributes,
+    ),
+    title: String(title || "").slice(0, 200),
+    description: zxDescriptionHtml(description),
+    listed_price: String(price),
+    quantity: qty,
+    has_multiple_stock: qty > 1,
+    // Auto delivery on ZeusX needs credentials uploaded to their vault, which
+    // has no documented endpoint — sales are handed over in chat, the same way
+    // the other API-less markets work here.
+    delivery_method: "COORDINATED",
+    is_account_linked: false,
+    days: Math.max(0, parseInt(deliveryDays, 10) || 0),
+    hours: Math.max(0, parseInt(deliveryHours, 10) || (deliveryDays ? 0 : 1)),
+    tags: (Array.isArray(tags) ? tags : [])
+      .map((t) => String(t || "").trim())
+      .filter(Boolean)
+      .slice(0, 10),
+    uploaded_photos: photos,
+    removing_photo_ids: [],
+    photos: [],
+    agreeTerm: true,
+  };
+  const keys = requireKeys("zeusx");
+  let created;
+  try {
+    const r = await axios.post(
+      ZX_API + "/offer/create-offer",
+      { offer },
+      { headers: zxHeaders(keys), timeout: 60000 },
+    );
+    created = zxData("ZeusX create", r) || {};
+  } catch (e) {
+    throw zxError("ZeusX create", e);
+  }
+  const id = created.id || created.offer_id || created.offer_code || "";
+  if (!id) {
+    throw new Error(
+      "ZeusX create: no offer id in response: " +
+        JSON.stringify(created).slice(0, 300),
+    );
+  }
+  return {
+    externalId: String(id),
+    url: zeusxOfferUrl(created),
+    qty,
+    note: priceNote,
+  };
+}
+
+async function zeusxOffer(offerId) {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(ZX_API + "/offer/" + encodeURIComponent(offerId), {
+      headers: zxHeaders(keys),
+      timeout: 20000,
+    });
+    return zxData("ZeusX offer", r) || {};
+  } catch (e) {
+    throw zxError("ZeusX offer", e);
+  }
+}
+
+async function zeusxUpdateOffer(offerId, { title, description, priceUsd, quantity } = {}) {
+  const keys = requireKeys("zeusx");
+  const current = await zeusxOffer(offerId);
+  const offer = {
+    service_category_id: String(current.service_category_id || "1"),
+    service_category_base_id: String(current.service_category_base_id || ""),
+    offer_base_attribute_value: (current.offer_base_attribute_value || []).map(
+      (a) => ({
+        base_attribute_id: String(a.base_attribute_id),
+        base_attribute_value: String(a.base_attribute_value),
+      }),
+    ),
+    title: String(title != null ? title : current.title || "").slice(0, 200),
+    description:
+      description != null
+        ? zxDescriptionHtml(description)
+        : current.description || "",
+    listed_price: String(
+      priceUsd != null
+        ? Math.max(ZX_MIN_PRICE, Number(priceUsd))
+        : current.listed_price,
+    ),
+    quantity:
+      quantity != null
+        ? Math.max(0, parseInt(quantity, 10) || 0)
+        : Number(current.quantity) || 0,
+    delivery_method: current.delivery_method || "COORDINATED",
+    is_account_linked: !!current.is_account_linked,
+    days: Number(current.days) || 0,
+    hours: Number(current.hours) || 1,
+    tags: (current.tags || []).map((t) => (t && t.tag_name) || String(t)),
+    uploaded_photos: [],
+    removing_photo_ids: [],
+    photos: [],
+    agreeTerm: true,
+  };
+  offer.has_multiple_stock = offer.quantity > 1;
+  try {
+    const r = await axios.put(
+      ZX_API + "/offer/" + encodeURIComponent(offerId) + "/update",
+      { offer },
+      { headers: zxHeaders(keys), timeout: 60000 },
+    );
+    return zxData("ZeusX update", r);
+  } catch (e) {
+    throw zxError("ZeusX update", e);
+  }
+}
+
+// Hiding takes the offer off the storefront and is reversible; cancelling
+// (DELETE) is permanent, so delisting hides.
+async function zeusxDelist(offerId) {
+  const keys = requireKeys("zeusx");
+  const current = await zeusxOffer(offerId).catch(() => null);
+  if (current && current.is_hidden) return;
+  try {
+    const r = await axios.put(
+      ZX_API + "/offer/" + encodeURIComponent(offerId) + "/toggle-offer-hidden",
+      {},
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    zxData("ZeusX delist", r);
+  } catch (e) {
+    throw zxError("ZeusX delist", e);
+  }
+}
+
+async function zeusxRelist(offerId) {
+  const keys = requireKeys("zeusx");
+  const current = await zeusxOffer(offerId).catch(() => null);
+  if (current && !current.is_hidden) return;
+  try {
+    const r = await axios.put(
+      ZX_API + "/offer/" + encodeURIComponent(offerId) + "/toggle-offer-hidden",
+      {},
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    zxData("ZeusX relist", r);
+  } catch (e) {
+    throw zxError("ZeusX relist", e);
+  }
+}
+
+async function zeusxMyListings(pageIndex) {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(
+      ZX_API + "/offer/my-sales-listing?pageIndex=" + (parseInt(pageIndex, 10) || 0),
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    return zxData("ZeusX listings", r) || { sales: [] };
+  } catch (e) {
+    throw zxError("ZeusX listings", e);
+  }
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -2462,4 +2886,14 @@ module.exports = {
   funpayPublish,
   funpayDelist,
   funpayUpdateSecrets,
+  zeusxTest,
+  zeusxPublish,
+  zeusxOffer,
+  zeusxUpdateOffer,
+  zeusxDelist,
+  zeusxRelist,
+  zeusxMyListings,
+  zeusxBaseAttributes,
+  zeusxUploadPhoto,
+  zeusxOfferUrl,
 };
