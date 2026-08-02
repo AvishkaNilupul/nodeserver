@@ -190,6 +190,12 @@ async function publishAutoDelivery({
   qtyRemaining,
   origin,
 }) {
+  // A set can carry a price floor the owner set by hand. Relists inherit the
+  // price of the row that sold, and the auto-lister derives its own from live
+  // competition, so without this a floored bundle drifts back down to the
+  // market price on the next unit.
+  const floor = Number(set && set.minPriceUsd) || 0;
+  if (floor > 0 && (Number(priceUsd) || 0) < floor) priceUsd = floor;
   const account = await claimAccountForSet(set);
   if (!account) {
     throw new Error(
