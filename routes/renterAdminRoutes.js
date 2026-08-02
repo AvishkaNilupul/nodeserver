@@ -322,7 +322,16 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
     // includes clientSecret.
     const accounts = await RenterAccount.find(
       { renter: r._id },
-      { login: 1, lastScanStatus: 1, lastScanAt: 1, lastScanError: 1, dropCount: 1 },
+      {
+        login: 1,
+        lastScanStatus: 1,
+        lastScanAt: 1,
+        lastScanError: 1,
+        dropCount: 1,
+        farmUntil: 1,
+        farmEndedAt: 1,
+        enabled: 1,
+      },
     )
       .sort({ login: 1 })
       .lean();
@@ -337,6 +346,9 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
         error: a.lastScanError || "",
         dropCount: a.dropCount || 0,
         lastScanAt: a.lastScanAt || null,
+        farmUntil: a.farmUntil || null,
+        farmEndedAt: a.farmEndedAt || null,
+        enabled: a.enabled !== false,
       })),
       submissions: submissions.map((s) => ({
         id: String(s._id),
@@ -790,6 +802,89 @@ router.get("/renter-accounts/:id/creds", requireSuperadmin, async (req, res) => 
   }
 });
 
+// FULL ACCOUNT ROSTER across renters, with the credentials inline — the
+// renting system's own account list. Renter accounts are deliberately absent
+// from the Drops Archive (separate tenant inventory), so this is the only
+// place the operator can see username + password + client token together.
+// Superadmin only; ?renter=<id> narrows it to one renter.
+router.get("/renter-accounts", requireSuperadmin, async (req, res) => {
+  try {
+    const q = {};
+    const rid = req.query.renter;
+    if (rid && rid !== "all" && mongoose.isValidObjectId(rid)) {
+      q.renter = new mongoose.Types.ObjectId(rid);
+    }
+    const accs = await RenterAccount.find(q).sort({ login: 1 }).limit(500).lean();
+    const renters = await Renter.find(
+      { _id: { $in: [...new Set(accs.map((a) => String(a.renter)))] } },
+      { username: 1 },
+    ).lean();
+    const rmap = new Map(renters.map((r) => [String(r._id), r.username]));
+    const out = [];
+    for (const a of accs) {
+      // Credentials come from wherever this account's password lives (renter
+      // submission / pool / operator record) — same resolver the single-account
+      // reveal uses.
+      const creds = await resolveAccountCreds(a);
+      out.push({
+        id: String(a._id),
+        renterId: String(a.renter),
+        renter: rmap.get(String(a.renter)) || "",
+        login: a.login || "",
+        password: creds.password,
+        email: creds.email,
+        credSource: creds.source,
+        token: a.clientSecret || "",
+        host: a.host || "",
+        configFile: a.configFile || "",
+        enabled: a.enabled !== false,
+        status: a.lastScanStatus || "pending",
+        dropCount: a.dropCount || 0,
+        farmUntil: a.farmUntil || null,
+        farmEndedAt: a.farmEndedAt || null,
+        addedAt: a.createdAt || null,
+      });
+    }
+    res.json({ success: true, accounts: out });
+  } catch (err) {
+    console.error("renter-accounts list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// SET / CLEAR one account's farming window after the fact ("give it 15 more
+// days", "make it open-ended"). Days are counted from now; days = 0 clears it.
+router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Bad account id" });
+    }
+    const body = req.body || {};
+    const days = Math.floor(Number(body.days));
+    let farmUntil = null;
+    if (body.farmUntil) {
+      farmUntil = new Date(body.farmUntil);
+      if (isNaN(farmUntil.getTime())) {
+        return res.status(400).json({ success: false, message: "Bad date" });
+      }
+    } else if (Number.isFinite(days) && days > 0) {
+      farmUntil = new Date(Date.now() + days * 86400000);
+    }
+    const acc = await RenterAccount.findByIdAndUpdate(
+      req.params.id,
+      // Clearing farmEndedAt re-arms the sweep for the new window, the same way
+      // extending a renter's lease clears botStoppedAt.
+      { $set: { farmUntil, farmEndedAt: null } },
+      { new: true },
+    ).lean();
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true, farmUntil: acc.farmUntil || null });
+  } catch (err) {
+    console.error("renter account farm error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // MANUAL ADD — operator types one account (username + password + client token)
 // straight into a renter's bot. If that Twitch account is already farming
 // anywhere on the server — an operator bot config or another renter's bot — it
@@ -806,6 +901,18 @@ router.post(
       const username = String(body.username || "").trim();
       const password = String(body.password || "");
       const token = String(body.token || body.clientSecret || "").trim();
+      // Optional per-account farming window ("farm this one for 15 days").
+      const farmDays = Math.floor(Number(body.farmDays));
+      const farmUntil = body.farmUntil
+        ? new Date(body.farmUntil)
+        : Number.isFinite(farmDays) && farmDays > 0
+          ? new Date(Date.now() + farmDays * 86400000)
+          : null;
+      if (farmUntil && isNaN(farmUntil.getTime())) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad farm end date" });
+      }
       if (!username || !token) {
         return res.status(400).json({
           success: false,
@@ -1057,6 +1164,17 @@ router.post(
         }
       } catch {
         notes.push("Added, but the renter's bot could not be restarted.");
+      }
+
+      // Stamp the per-account lease on the row the config writer just created.
+      if (farmUntil) {
+        await RenterAccount.updateOne(
+          { renter: renter._id, clientSecret: token },
+          { $set: { farmUntil, farmEndedAt: null } },
+        ).catch(() => {});
+        notes.push(
+          "Farms until " + farmUntil.toISOString().slice(0, 10) + ".",
+        );
       }
 
       notes.unshift("Added " + username + " to " + renter.botFile + ".");
