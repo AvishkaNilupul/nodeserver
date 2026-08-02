@@ -2612,4 +2612,46 @@ router.get(
   },
 );
 
+// Warm the expensive archive views a few seconds after boot.
+//
+// by-item/by-game/overview are served from an in-memory cache, so the first
+// request after any restart pays the full aggregation over 150k+ drops — ~20-35s
+// of "Loading…" for whoever opens the page first. Nothing else changes: this
+// just pays that cost in the background instead of on someone's click.
+function warmArchiveViews() {
+  const targets = [
+    "/drops-archive/overview",
+    "/drops-archive/by-game",
+    "/drops-archive/by-item",
+  ];
+  for (const path of targets) {
+    const layer = router.stack.find(
+      (l) => l.route && l.route.path === path && l.route.methods.get,
+    );
+    if (!layer) continue;
+    // Last handler in the chain = the route body, skipping requireSuperadmin.
+    const handlers = layer.route.stack;
+    const handler = handlers[handlers.length - 1].handle;
+    const req = { query: {}, params: {}, body: {} };
+    const res = {
+      statusCode: 200,
+      status(c) {
+        this.statusCode = c;
+        return this;
+      },
+      json() {},
+      send() {},
+    };
+    const t = Date.now();
+    Promise.resolve(handler(req, res, () => {}))
+      .then(() =>
+        console.log(
+          "[dropsArchive] warmed " + path + " in " + (Date.now() - t) + "ms",
+        ),
+      )
+      .catch((e) => console.error("[dropsArchive] warm " + path + ":", e.message));
+  }
+}
+setTimeout(warmArchiveViews, 15000).unref();
+
 module.exports = router;
