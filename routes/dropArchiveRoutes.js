@@ -1848,6 +1848,8 @@ router.get(
             count: 1,
             state: 1,
             connected: 1,
+            soldAt: 1,
+            soldToUsername: 1,
             requiredAccountLink: 1,
             awardedAt: 1,
             firstSeenAt: 1,

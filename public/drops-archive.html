@@ -2191,6 +2191,20 @@
                 "</b></td>" +
                 "<td>" +
                 stateChipInline(a.state) +
+                (a.soldAt
+                  ? ' <span class="chip warn" title="Reserved/sold' +
+                    (a.soldToUsername
+                      ? " to " + attr(a.soldToUsername)
+                      : "") +
+                    (a.soldAt
+                      ? " on " + attr(String(a.soldAt).slice(0, 10))
+                      : "") +
+                    '">SOLD' +
+                    (a.soldToUsername
+                      ? ": " + esc(String(a.soldToUsername).slice(0, 18))
+                      : "") +
+                    "</span>"
+                  : "") +
                 "</td>" +
                 '<td class="hide-sm mono">' +
                 (a.inPool ? "—" : esc(a.container || a.configFile || "—")) +
@@ -2207,11 +2221,13 @@
                     : '<span class="chip warn">no pw</span>') +
                 (a.inPool
                   ? ""
-                  : ' <button class="btn-ghost btn-sm" data-marksold="' +
-                    attr(a.accountId) +
-                    '" data-login="' +
-                    attr(a.login || "") +
-                    '">Sold</button>') +
+                  : a.soldAt
+                    ? ""
+                    : ' <button class="btn-ghost btn-sm" data-marksold="' +
+                      attr(a.accountId) +
+                      '" data-login="' +
+                      attr(a.login || "") +
+                      '">Sold</button>') +
                 (a.inPool
                   ? ""
                   : ' <span class="chip" data-copies="' +
@@ -2247,6 +2263,20 @@
       async function copyCred(btn) {
         const id = btn.dataset.copycred;
         const login = btn.dataset.login || "";
+        // Don't let a sold account get copied to a second buyer by accident.
+        const row = currentItemAccounts.find((a) => a.accountId === id);
+        if (
+          row &&
+          row.soldAt &&
+          !confirm(
+            (login || "This account") +
+              "'s " + (row.game || "item") + " is already SOLD" +
+              (row.soldToUsername ? " (" + row.soldToUsername + ")" : "") +
+              ". Copy the credentials anyway?",
+          )
+        ) {
+          return;
+        }
         btn.disabled = true;
         try {
           const d = await api(
