@@ -1004,13 +1004,31 @@ router.post(
         { upsert: true },
       ).catch(() => {});
 
-      // Finally: write it into the renter's bot config.
+      // Finally: write it into the renter's bot config. Reuse the Twitch user
+      // id and unique id already known for this account: TwitchDropsBot needs
+      // the Id to resolve time-based drops, and an account deployed without one
+      // throws instead of watching.
+      const poolRow = await AvailableAccount.findOne({
+        usernameLower: lower,
+      }).lean();
+      const twitchId = String(
+        (botHit && botHit.twitchId) ||
+          (otherRenterAcc && otherRenterAcc.twitchId) ||
+          (poolRow && poolRow.twitchId) ||
+          "",
+      ).trim();
+      const uniqueId = String(
+        (botHit && botHit.uniqueId) ||
+          (otherRenterAcc && otherRenterAcc.uniqueId) ||
+          (poolRow && poolRow.uniqueId) ||
+          "",
+      ).trim();
       const games = await getConfigGames(host, renter.botFile);
       const acct = {
         ClientSecret: token,
-        UniqueId: crypto.randomBytes(16).toString("hex"),
+        UniqueId: uniqueId || crypto.randomBytes(16).toString("hex"),
         Login: username,
-        Id: "",
+        Id: twitchId,
         Enabled: true,
         FavouriteGames: games.slice(),
       };
