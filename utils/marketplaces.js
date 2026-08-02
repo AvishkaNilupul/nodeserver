@@ -731,9 +731,15 @@ async function digisellerUploadImage(productId, imagePath) {
   let lastErr;
   for (const field of ["file", "image", "files[]"]) {
     const form = new FormData();
+    const ext = String(path.extname(imagePath) || ".png").toLowerCase();
     form.append(field, buf, {
-      filename: "cover.png",
-      contentType: "image/png",
+      filename: "cover" + (ext === ".jpeg" ? ".jpg" : ext),
+      contentType:
+        ext === ".jpg" || ext === ".jpeg"
+          ? "image/jpeg"
+          : ext === ".webp"
+            ? "image/webp"
+            : "image/png",
     });
     try {
       const r = await axios.post(url, form, {
