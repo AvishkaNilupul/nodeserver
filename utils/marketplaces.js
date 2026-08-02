@@ -383,6 +383,112 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
   if (patchErr) throw patchErr;
 }
 
+// Swap a live listing's cover photo (an oversized upload renders broken on
+// Gameflip, so a re-generated one has to replace it). Like a reprice, the
+// cover_photo field is rejected while the listing is onsale — "Cannot change
+// 'cover_photo' when status is onsale" — so take it off sale, patch, and put
+// it back with the same verified restore as gameflipReprice: Gameflip's rate
+// limiter can answer 200 yet leave the listing in "ready", i.e. not buyable.
+async function gameflipReplaceCover(listingId, imagePath) {
+  const keys = requireKeys("gameflip");
+  const patch = (body) =>
+    axios.patch(GF_API + "/listing/" + listingId, body, {
+      headers: {
+        ...gfHeaders(keys),
+        "Content-Type": "application/json-patch+json",
+      },
+      timeout: 20000,
+    });
+  const setStatus = (v) =>
+    patch([{ op: "replace", path: "/status", value: v }]);
+
+  let live = "";
+  try {
+    live = await gameflipListingStatus(listingId);
+  } catch {
+    live = "";
+  }
+  if (live === "onsale") {
+    try {
+      await setStatus("draft");
+    } catch (e) {
+      throw apiError("Gameflip cover (could not take off sale)", e);
+    }
+  }
+  // Photos already on the listing (the broken one, plus any half-finished
+  // upload) stay in the gallery unless they are explicitly deleted, so the
+  // buyer would still see the bad image next to the new cover.
+  let stale = [];
+  try {
+    const cur = await axios.get(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+    stale = Object.keys(((cur.data || {}).data || {}).photo || {});
+  } catch {
+    stale = [];
+  }
+  let uploadErr = null;
+  try {
+    await gfUploadPhoto(keys, listingId, imagePath);
+    if (stale.length) {
+      const ops = stale.map((id) => ({
+        op: "replace",
+        path: "/photo/" + id + "/status",
+        value: "deleted",
+      }));
+      // Gameflip's limiter rejects the delete right after an upload; a stale
+      // photo left behind is cosmetic, so retry a few times and give up.
+      for (const w of [0, 15000, 45000]) {
+        if (w) await new Promise((r) => setTimeout(r, w));
+        try {
+          await patch(ops);
+          break;
+        } catch (e) {
+          if (!e.response || e.response.status !== 429) break;
+        }
+      }
+    }
+  } catch (e) {
+    uploadErr = apiError("Gameflip cover", e);
+  }
+  if (live === "onsale") {
+    let restored = false;
+    let restoreErr = null;
+    for (const w of [0, 20000, 60000, 120000]) {
+      if (w) await new Promise((r) => setTimeout(r, w));
+      try {
+        await setStatus("onsale");
+      } catch (e) {
+        restoreErr = e;
+        continue;
+      }
+      try {
+        if ((await gameflipListingStatus(listingId)) === "onsale") {
+          restored = true;
+          restoreErr = null;
+          break;
+        }
+        restoreErr = new Error(
+          'status settled on "ready" instead of "onsale" (rate-limited)',
+        );
+      } catch (e) {
+        restoreErr = e;
+      }
+    }
+    if (!restored) {
+      throw new Error(
+        "Gameflip listing " +
+          listingId +
+          " IS NOT BACK ON SALE (left in draft/ready, so nobody can buy it) —" +
+          " put it back on sale manually. " +
+          ((restoreErr && restoreErr.message) || "unknown error"),
+      );
+    }
+  }
+  if (uploadErr) throw uploadErr;
+}
+
 async function gameflipDelist(listingId) {
   const keys = requireKeys("gameflip");
   try {
@@ -2285,6 +2391,7 @@ module.exports = {
   gameflipListingStatus,
   gameflipDelist,
   gameflipReprice,
+  gameflipReplaceCover,
   digisellerTest,
   digisellerCategories,
   digisellerCategoryAttributes,
