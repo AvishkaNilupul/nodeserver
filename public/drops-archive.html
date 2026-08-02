@@ -2191,19 +2191,27 @@
                 "</b></td>" +
                 "<td>" +
                 stateChipInline(a.state) +
-                (a.soldAt
-                  ? ' <span class="chip warn" title="Reserved/sold' +
-                    (a.soldToUsername
-                      ? " to " + attr(a.soldToUsername)
-                      : "") +
+                (a.soldGames && a.soldGames.length
+                  ? ' <span class="chip warn" title="Sold on this account: ' +
+                    attr(a.soldGames.join(", ")) +
                     (a.soldAt
-                      ? " on " + attr(String(a.soldAt).slice(0, 10))
+                      ? " (this item on " + attr(String(a.soldAt).slice(0, 10)) + ")"
                       : "") +
-                    '">SOLD' +
-                    (a.soldToUsername
-                      ? ": " + esc(String(a.soldToUsername).slice(0, 18))
-                      : "") +
+                    '">SOLD: ' +
+                    esc(
+                      a.soldGames.slice(0, 2).join(", ") +
+                        (a.soldGames.length > 2
+                          ? " +" + (a.soldGames.length - 2)
+                          : ""),
+                    ) +
                     "</span>"
+                  : "") +
+                (a.openGames && a.openGames.length
+                  ? ' <span class="chip" title="Still sellable on this account: ' +
+                    attr(a.openGames.join(", ")) +
+                    '">' +
+                    a.openGames.length +
+                    " left</span>"
                   : "") +
                 "</td>" +
                 '<td class="hide-sm mono">' +
@@ -2221,8 +2229,8 @@
                     : '<span class="chip warn">no pw</span>') +
                 (a.inPool
                   ? ""
-                  : a.soldAt
-                    ? ""
+                  : a.openGames && !a.openGames.length
+                    ? ' <span class="chip" title="Every game on this account is redeemed or sold">all sold</span>'
                     : ' <button class="btn-ghost btn-sm" data-marksold="' +
                       attr(a.accountId) +
                       '" data-login="' +
@@ -2265,14 +2273,17 @@
         const login = btn.dataset.login || "";
         // Don't let a sold account get copied to a second buyer by accident.
         const row = currentItemAccounts.find((a) => a.accountId === id);
+        const soldList = (row && row.soldGames) || [];
         if (
-          row &&
-          row.soldAt &&
+          soldList.length &&
           !confirm(
             (login || "This account") +
-              "'s " + (row.game || "item") + " is already SOLD" +
-              (row.soldToUsername ? " (" + row.soldToUsername + ")" : "") +
-              ". Copy the credentials anyway?",
+              " already SOLD: " +
+              soldList.join(", ") +
+              ((row && row.openGames && row.openGames.length)
+                ? "\nStill sellable: " + row.openGames.join(", ")
+                : "\nNothing left to sell on it.") +
+              "\n\nCopy the credentials anyway?",
           )
         ) {
           return;

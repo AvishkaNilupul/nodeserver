@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
@@ -1858,6 +1859,68 @@ router.get(
         },
         { $sort: { state: 1, login: 1 } },
       ]);
+      // An account is sold PER GAME. The row's own soldAt only says whether
+      // this item is spoken for, which is not what the operator needs to see:
+      // they need which games on the account are gone and whether there is
+      // anything left to sell before they copy or re-sell it.
+      const accIds = [...new Set(rows.map((r) => String(r.accountId)))]
+        .filter(Boolean)
+        .map((id) => new mongoose.Types.ObjectId(id));
+      const gameRows = accIds.length
+        ? await DropLog.aggregate([
+            { $match: { account: { $in: accIds } } },
+            {
+              $group: {
+                _id: {
+                  account: "$account",
+                  game: { $ifNull: ["$game", ""] },
+                },
+                sold: {
+                  $sum: {
+                    $cond: [
+                      { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                open: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                          { $ne: ["$connected", true] },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+          ])
+        : [];
+      const soldGames = new Map();
+      const openGames = new Map();
+      for (const g of gameRows) {
+        const key = String(g._id.account);
+        const label = g._id.game || "Other rewards";
+        if (g.sold) {
+          if (!soldGames.has(key)) soldGames.set(key, []);
+          soldGames.get(key).push(label);
+        }
+        if (g.open) {
+          if (!openGames.has(key)) openGames.set(key, []);
+          openGames.get(key).push(label);
+        }
+      }
+      for (const r of rows) {
+        const key = String(r.accountId);
+        r.soldGames = (soldGames.get(key) || []).sort();
+        r.openGames = (openGames.get(key) || []).sort();
+      }
       const first = rows[0];
       res.json({
         success: true,
