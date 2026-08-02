@@ -12,6 +12,13 @@ const {
   fillBotPasswordsFromPool,
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
+const MarketplaceListing = require("../models/MarketplaceListing");
+const SaleSignal = require("../models/SaleSignal");
+const mp = require("../utils/marketplaces");
+const guardian = require("../utils/marketplaceGuardian");
+const gfFulfiller = require("../utils/gameflipFulfiller");
+const { buildSetGridImage } = require("../utils/setImage");
+const fsp = require("fs").promises;
 
 const router = express.Router();
 
@@ -597,6 +604,335 @@ router.post(
       });
     } catch (err) {
       console.error("drops-archive copied error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
+// Manual "mark sold" — for marketplaces with no API, where the operator
+// copies credentials out of the archive and delivers by hand. Reserves ONE
+// game's drops on the account (the rest stay sellable), pulls the account
+// out of any live auto-lister listing that sells the sold game, and writes a
+// SaleSignal so the auto-farmer's demand learning sees the sale.
+// ------------------------------------------------------------------
+
+// What could be sold on this account: its games with per-game drop states,
+// plus the live listings the account is attached to.
+router.get(
+  "/drops-archive/accounts/:id/sale-info",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acc = await BotAccount.findById(req.params.id, {
+        login: 1,
+      }).lean();
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      const games = await DropLog.aggregate([
+        { $match: { account: acc._id } },
+        {
+          $group: {
+            _id: { $ifNull: ["$game", ""] },
+            total: { $sum: 1 },
+            available: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$connected", true] },
+                      { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            redeemed: { $sum: { $cond: [{ $eq: ["$connected", true] }, 1, 0] } },
+            reserved: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$connected", true] },
+                      { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+        { $sort: { available: -1, total: -1 } },
+      ]);
+      const idRe = new RegExp(
+        "(^|,\\s*)" + String(acc._id) + "(\\s*,|$)",
+      );
+      const listings = await MarketplaceListing.find(
+        { status: "active", accountId: idRe },
+        { marketplace: 1, externalId: 1, title: 1, price: 1, set: 1 },
+      ).lean();
+      res.json({
+        success: true,
+        login: acc.login || "",
+        games: games.map((g) => ({
+          game: g._id || "Other rewards",
+          gameValue: g._id,
+          total: g.total,
+          available: g.available,
+          redeemed: g.redeemed,
+          reserved: g.reserved,
+        })),
+        listings: listings.map((l) => ({
+          marketplace: l.marketplace,
+          externalId: l.externalId,
+          title: l.title,
+          price: l.price,
+        })),
+      });
+    } catch (err) {
+      console.error("drops-archive sale-info error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Remove one account from a listing row's comma-separated account fields.
+async function detachAccountFromRow(listing, accountId, login) {
+  const ids = String(listing.accountId || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => x !== String(accountId));
+  const lower = String(login || "").trim().toLowerCase();
+  const logins = String(listing.accountLogin || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => !lower || x.toLowerCase() !== lower);
+  await MarketplaceListing.updateOne(
+    { _id: listing._id },
+    { $set: { accountId: ids.join(","), accountLogin: logins.join(", ") } },
+  );
+}
+
+// Does this listing's set sell the given game?
+async function listingSellsGame(listing, gameLower) {
+  const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
+  if (!set) return true; // no set to check — assume affected, safer to detach
+  return (set.items || []).some((i) => {
+    const g = String(i.game || "").trim() ||
+      String(i.itemKey || "").split("|")[1] || "";
+    return g.toLowerCase() === gameLower;
+  });
+}
+
+router.post(
+  "/drops-archive/accounts/:id/mark-sold",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acc = await BotAccount.findById(req.params.id).lean();
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      const body = req.body || {};
+      if (!("game" in body)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "game required" });
+      }
+      const game = String(body.game || "").trim(); // "" = Other rewards
+      const buyer = String(body.buyer || "").trim();
+      const now = new Date();
+      const stamp = {
+        soldAt: now,
+        soldToUsername: "manual" + (buyer ? ":" + buyer : ""),
+        soldToAdminId: "",
+        soldSetId: "",
+        soldBulkOrderId: "",
+      };
+      const gameMatch = game
+        ? { game }
+        : { $or: [{ game: "" }, { game: null }] };
+      const upd = await DropLog.updateMany(
+        {
+          account: acc._id,
+          ...gameMatch,
+          connected: { $ne: true },
+          soldAt: null,
+        },
+        { $set: stamp },
+      );
+      if (!upd.modifiedCount) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "No available (unredeemed, unreserved) drops for that game on " +
+            (acc.login || "this account"),
+        });
+      }
+      // Shadow onto the account (first reservation wins) — same as the
+      // Shop/marketplace sale path.
+      await BotAccount.updateOne(
+        { _id: acc._id, soldAt: null },
+        { $set: stamp },
+      ).catch(() => {});
+      // Demand learning: one signal per (account, game), same shape the
+      // automated sale paths write.
+      const gameLabel = game || "Other rewards";
+      await SaleSignal.updateOne(
+        {
+          dedupeKey:
+            "manual-sold:" + acc._id + ":" + gameLabel.toLowerCase(),
+        },
+        {
+          $setOnInsert: {
+            game: gameLabel,
+            gameKey: gameLabel.toLowerCase(),
+            itemKey: "",
+            name: "manual sale",
+            login: acc.login || "",
+            account: acc._id,
+            source: "drop_reserved",
+            at: now,
+          },
+        },
+        { upsert: true },
+      ).catch(() => {});
+
+      // Pull the account out of live listings that sell the sold game. Other
+      // games' listings keep it — that stock is still real.
+      const detached = [];
+      const warnings = [];
+      const idRe = new RegExp("(^|,\\s*)" + String(acc._id) + "(\\s*,|$)");
+      const listings = await MarketplaceListing.find({
+        status: "active",
+        accountId: idRe,
+      }).lean();
+      const gameLower = gameLabel.toLowerCase();
+      for (const row of listings) {
+        if (!(await listingSellsGame(row, gameLower))) continue;
+        const label = row.marketplace + " " + row.externalId;
+        try {
+          if (row.marketplace === "gameflip" && row.autoDeliver) {
+            // The live Gameflip listing carries this account's credentials in
+            // its delivery code — it must come down, then the chain continues
+            // with a fresh account if one exists.
+            await mp.gameflipDelist(row.externalId).catch(() => {});
+            await MarketplaceListing.updateOne(
+              { _id: row._id },
+              {
+                $set: {
+                  status: "delisted",
+                  note: "account sold manually — delisted",
+                },
+              },
+            );
+            detached.push(label + " (delisted)");
+            const set = row.set
+              ? await DropSet.findById(row.set).lean()
+              : null;
+            if (set) {
+              let img = "";
+              try {
+                img = await buildSetGridImage(set);
+              } catch {
+                img = "";
+              }
+              try {
+                const fresh = await gfFulfiller.publishAutoDelivery({
+                  set,
+                  title: row.title,
+                  description: row.description,
+                  priceUsd: row.price,
+                  imagePath: img,
+                  qtyRemaining: Number(row.qtyRemaining) || 0,
+                  origin: row.origin,
+                });
+                detached.push(
+                  "republished on gameflip as " +
+                    fresh.externalId +
+                    " with " +
+                    (fresh.accountLogin || "a fresh account"),
+                );
+              } catch (e) {
+                warnings.push(
+                  label +
+                    " was delisted but could not be republished: " +
+                    e.message,
+                );
+              } finally {
+                if (img) await fsp.unlink(img).catch(() => {});
+              }
+            }
+          } else if (
+            row.marketplace === "digiseller" &&
+            (row.units || []).some(
+              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
+            )
+          ) {
+            const unit = (row.units || []).find(
+              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
+            );
+            await mp.digisellerRemoveContent(row.externalId, unit.contentId);
+            await MarketplaceListing.updateOne(
+              { _id: row._id },
+              { $pull: { units: { contentId: String(unit.contentId) } } },
+            );
+            await detachAccountFromRow(row, acc._id, acc.login);
+            detached.push(label + " (delivery unit removed)");
+            try {
+              await guardian.feedOne(String(row._id));
+            } catch {
+              /* auto-feed refills on its next pass */
+            }
+          } else if (
+            row.marketplace === "digiseller" ||
+            row.marketplace === "ggsel"
+          ) {
+            await detachAccountFromRow(row, acc._id, acc.login);
+            detached.push(label + " (detached)");
+            try {
+              await guardian.feedOne(String(row._id));
+            } catch {
+              /* auto-feed refills on its next pass */
+            }
+          } else {
+            warnings.push(
+              label +
+                " still references this account — remove it there manually",
+            );
+          }
+        } catch (e) {
+          warnings.push(label + ": " + e.message);
+        }
+      }
+
+      bustDropCache();
+      res.json({
+        success: true,
+        message:
+          "Marked " +
+          upd.modifiedCount +
+          " " +
+          gameLabel +
+          " drop(s) sold on " +
+          (acc.login || String(acc._id)),
+        reserved: upd.modifiedCount,
+        detached,
+        warnings,
+      });
+    } catch (err) {
+      console.error("drops-archive mark-sold error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },
