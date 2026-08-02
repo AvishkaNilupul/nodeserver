@@ -2206,6 +2206,18 @@
                     ) +
                     "</span>"
                   : "") +
+                (a.listedGames && a.listedGames.length
+                  ? ' <span class="chip" title="Attached to a live marketplace listing (not sold yet): ' +
+                    attr(a.listedGames.join(", ")) +
+                    '">LISTED: ' +
+                    esc(
+                      a.listedGames.slice(0, 2).join(", ") +
+                        (a.listedGames.length > 2
+                          ? " +" + (a.listedGames.length - 2)
+                          : ""),
+                    ) +
+                    "</span>"
+                  : "") +
                 (a.openGames && a.openGames.length
                   ? ' <span class="chip" title="Still sellable on this account: ' +
                     attr(a.openGames.join(", ")) +
@@ -2230,7 +2242,7 @@
                 (a.inPool
                   ? ""
                   : a.openGames && !a.openGames.length
-                    ? ' <span class="chip" title="Every game on this account is redeemed or sold">all sold</span>'
+                    ? ' <span class="chip" title="Nothing free to sell: every game is redeemed, sold, or attached to a live listing">nothing free</span>'
                     : ' <button class="btn-ghost btn-sm" data-marksold="' +
                       attr(a.accountId) +
                       '" data-login="' +
@@ -2274,12 +2286,17 @@
         // Don't let a sold account get copied to a second buyer by accident.
         const row = currentItemAccounts.find((a) => a.accountId === id);
         const soldList = (row && row.soldGames) || [];
+        const listedList = (row && row.listedGames) || [];
         if (
-          soldList.length &&
+          (soldList.length || listedList.length) &&
           !confirm(
             (login || "This account") +
-              " already SOLD: " +
-              soldList.join(", ") +
+              (soldList.length ? " already SOLD: " + soldList.join(", ") : "") +
+              (listedList.length
+                ? (soldList.length ? "\n" : "") +
+                  "On a live listing (a buyer may get it): " +
+                  listedList.join(", ")
+                : "") +
               ((row && row.openGames && row.openGames.length)
                 ? "\nStill sellable: " + row.openGames.join(", ")
                 : "\nNothing left to sell on it.") +

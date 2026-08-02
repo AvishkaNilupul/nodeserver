@@ -21,6 +21,17 @@ const gfFulfiller = require("../utils/gameflipFulfiller");
 const { buildSetGridImage } = require("../utils/setImage");
 const fsp = require("fs").promises;
 
+// Reservation tags written by the marketplace fulfillers into
+// DropLog.soldToUsername. A drop carrying one is attached to a live
+// listing, not sold to anyone yet.
+const MARKET_CLAIM_TAGS = [
+  "gameflip",
+  "ggsel",
+  "digiseller",
+  "funpay",
+  "zeusx",
+];
+
 const router = express.Router();
 
 // ------------------------------------------------------------------
@@ -1875,10 +1886,43 @@ router.get(
                   account: "$account",
                   game: { $ifNull: ["$game", ""] },
                 },
+                // soldAt doubles as "reserved for a live listing": the
+                // marketplace fulfillers stamp it with their claim tag when
+                // they attach the account to an offer. Only a real hand-over
+                // (Shop buyer, bulk order, manual sale) counts as sold —
+                // otherwise every listed account reads as sold.
                 sold: {
                   $sum: {
                     $cond: [
-                      { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                      {
+                        $and: [
+                          { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                          {
+                            $not: [
+                              {
+                                $in: [
+                                  { $ifNull: ["$soldToUsername", ""] },
+                                  MARKET_CLAIM_TAGS,
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                listed: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          { $ifNull: ["$soldToUsername", ""] },
+                          MARKET_CLAIM_TAGS,
+                        ],
+                      },
                       1,
                       0,
                     ],
@@ -1904,12 +1948,17 @@ router.get(
         : [];
       const soldGames = new Map();
       const openGames = new Map();
+      const listedGames = new Map();
       for (const g of gameRows) {
         const key = String(g._id.account);
         const label = g._id.game || "Other rewards";
         if (g.sold) {
           if (!soldGames.has(key)) soldGames.set(key, []);
           soldGames.get(key).push(label);
+        }
+        if (g.listed) {
+          if (!listedGames.has(key)) listedGames.set(key, []);
+          listedGames.get(key).push(label);
         }
         if (g.open) {
           if (!openGames.has(key)) openGames.set(key, []);
@@ -1920,6 +1969,7 @@ router.get(
         const key = String(r.accountId);
         r.soldGames = (soldGames.get(key) || []).sort();
         r.openGames = (openGames.get(key) || []).sort();
+        r.listedGames = (listedGames.get(key) || []).sort();
       }
       const first = rows[0];
       res.json({
