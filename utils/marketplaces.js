@@ -224,10 +224,20 @@ async function gameflipPublish({
         { headers: gfHeaders(keys), timeout: 20000 },
       );
     } catch (e) {
+      // Bin the half-built draft. Left behind it is invisible stock the seller
+      // has to clean up by hand, and Gameflip then rejects the next attempt
+      // with "code for digital goods already exists" because the same
+      // credentials are still attached to the abandoned draft.
+      await axios
+        .delete(GF_API + "/listing/" + listingId, {
+          headers: gfHeaders(keys),
+          timeout: 20000,
+        })
+        .catch(() => {});
       throw apiError(
-        "Gameflip created draft " +
+        "Gameflip could not attach the delivery content (draft " +
           listingId +
-          " but could not attach the delivery content",
+          " discarded)",
         e,
       );
     }
@@ -270,6 +280,32 @@ async function gameflipListingStatus(listingId) {
   } catch (e) {
     throw apiError("Gameflip listing status", e);
   }
+}
+
+// Every listing id of ours currently in a given status, in ONE paged query.
+// The watcher used to GET each listing separately; at ~150 live listings that
+// burns Gameflip's rate limit on every tick, and the 429s it earns look exactly
+// like "not sold yet" — so sales went unnoticed and their chains never relisted.
+async function gameflipListingIdsByStatus(status) {
+  const keys = requireKeys("gameflip");
+  const me = await axios.get(GF_API + "/account/me/profile", {
+    headers: gfHeaders(keys),
+    timeout: 20000,
+  });
+  const owner = ((me.data || {}).data || {}).owner;
+  if (!owner) throw new Error("Gameflip profile has no owner id");
+  const ids = new Set();
+  for (let start = 0; start < 2000; start += 100) {
+    const r = await axios.get(GF_API + "/listing", {
+      headers: gfHeaders(keys),
+      params: { owner, status, limit: 100, start },
+      timeout: 25000,
+    });
+    const rows = ((r.data || {}).data || []).filter(Boolean);
+    rows.forEach((x) => ids.add(x.id));
+    if (rows.length < 100) break;
+  }
+  return ids;
 }
 
 // Patch an existing listing's price (cents) and optionally its name and
@@ -2392,6 +2428,7 @@ module.exports = {
   gameflipDelist,
   gameflipReprice,
   gameflipReplaceCover,
+  gameflipListingIdsByStatus,
   digisellerTest,
   digisellerCategories,
   digisellerCategoryAttributes,

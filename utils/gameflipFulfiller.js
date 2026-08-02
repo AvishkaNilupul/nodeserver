@@ -260,10 +260,33 @@ async function syncOnce() {
     .lean();
   let sold = 0;
   let relisted = 0;
+  // One query for every sold listing we own, instead of one per row. Falls
+  // back to per-listing polling if the bulk query fails, so a Gameflip API
+  // change can only make this slower, never blind.
+  let soldIds = null;
+  let liveIds = null;
+  try {
+    soldIds = await mp.gameflipListingIdsByStatus("sold");
+    liveIds = await mp.gameflipListingIdsByStatus("onsale");
+  } catch (e) {
+    console.error("gameflip listing sweep failed:", e.message);
+    soldIds = null;
+    liveIds = null;
+  }
   for (const row of rows) {
     let status;
     try {
-      status = await mp.gameflipListingStatus(row.externalId);
+      // A row in neither sweep is unaccounted for (deleted, expired, still a
+      // draft), so it still gets its own status call — that is the only path
+      // that can retire a 404'd row, and there are only ever a handful.
+      status =
+        soldIds && liveIds
+          ? soldIds.has(row.externalId)
+            ? "sold"
+            : liveIds.has(row.externalId)
+              ? "onsale"
+              : await mp.gameflipListingStatus(row.externalId)
+          : await mp.gameflipListingStatus(row.externalId);
     } catch (e) {
       // A 404 means the listing is gone from Gameflip for good. Plain `continue`
       // leaves the row active forever: the watcher re-reads it every tick, the
