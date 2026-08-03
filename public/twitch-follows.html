@@ -94,6 +94,17 @@
 
   .empty { text-align: center; color: var(--muted); padding: 30px 10px; font-size: 13px; }
 
+  .fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  .fleet .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; min-width: 130px; }
+  .fleet .tile b { font-size: 20px; font-weight: 700; display: block; line-height: 1.1; }
+  .fleet .tile span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .fleet .tile.hero b { color: var(--accent); }
+  .fleet .tile .sub { font-size: 11.5px; color: var(--muted); margin-top: 4px; text-transform: none; letter-spacing: 0; }
+  .fleet .tile.hostbox { flex: 1 1 auto; min-width: 220px; }
+  .fleet .tile.hostbox .rows { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .fleet .tile.hostbox .row { font-size: 12.5px; padding: 3px 9px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
+  .fleet .tile.hostbox .row b { display: inline; font-size: 12.5px; color: var(--ink); margin-right: 4px; }
+
   .modal { position: fixed; inset: 0; background: rgba(15,23,42,.55); display: none; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
   .modal.open { display: flex; }
   .modal .box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; max-width: 780px; width: 100%; max-height: 88vh; overflow-y: auto; }
@@ -141,6 +152,10 @@
 <main class="page">
   <h1>Twitch follows</h1>
   <div class="sub">Route the farming fleet at a channel to add followers. The runner spreads follows over hours with jittered pacing so the traffic doesn't look like a synchronised bot burst, and every account it uses is logged — so re-running the same channel later will only draw from accounts that haven't already followed.</div>
+
+  <div class="fleet" id="fleetBar">
+    <div class="tile"><b>…</b><span>loading</span></div>
+  </div>
 
   <div class="layout">
     <div class="card">
@@ -460,9 +475,31 @@
   document.getElementById('createBtn').onclick = createJob;
   document.getElementById('channelInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') resolveChannel(); });
 
+  async function loadFleet() {
+    try {
+      const data = await api('/admin/twitch-follow/fleet');
+      const el = document.getElementById('fleetBar');
+      const hostRows = Object.entries(data.hostBreakdown || {})
+        .sort((a,b) => b[1] - a[1])
+        .map(([h,n]) => '<span class="row"><b>' + n + '</b>' + escapeHtml(h) + '</span>')
+        .join('');
+      el.innerHTML =
+        '<div class="tile hero"><b>' + data.ready + '</b><span>Ready to follow</span>' +
+          '<div class="sub">integrity-OK, enabled, unsold</div></div>' +
+        '<div class="tile"><b>' + data.pool + '</b><span>Broader pool</span>' +
+          '<div class="sub">any live token (integrity off)</div></div>' +
+        '<div class="tile"><b>' + data.total + '</b><span>Fleet total</span>' +
+          '<div class="sub">every BotAccount doc</div></div>' +
+        (hostRows ? '<div class="tile hostbox"><span>Ready by host</span><div class="rows">' + hostRows + '</div></div>' : '');
+    } catch (err) {
+      document.getElementById('fleetBar').innerHTML = '<div class="tile"><b style="color:var(--red);font-size:14px;">' + escapeHtml(err.message) + '</b><span>fleet stats</span></div>';
+    }
+  }
+
   loadHosts();
   loadJobs();
-  setInterval(loadJobs, 5000);
+  loadFleet();
+  setInterval(() => { loadJobs(); loadFleet(); }, 5000);
 </script>
 </body>
 </html>
