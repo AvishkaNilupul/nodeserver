@@ -154,6 +154,23 @@
   .pbar > span.full { background: var(--green); }
   .pmeta { font-size: 11px; color: var(--muted); }
 
+  .pick {
+    position: absolute; top: 8px; left: 8px; width: 18px; height: 18px;
+    accent-color: var(--accent); cursor: pointer; z-index: 2;
+  }
+  .claimed-card, .drop { position: relative; }
+  .drop .pick { top: 50%; left: 6px; transform: translateY(-50%); }
+  .drop.pickable { padding-left: 30px; }
+  .picked { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 10px; }
+  #selBar {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 50;
+    display: none; align-items: center; gap: 12px; padding: 10px 14px;
+    background: var(--panel-2); border: 1px solid var(--accent); border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.5);
+  }
+  #selBar .n { font-weight: 700; }
+  #selBar button { border-radius: 8px; padding: 7px 12px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: inherit; }
+  #selBar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .claimed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
   .claimed-card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -239,6 +256,11 @@
 
   <div id="status"></div>
   <div id="summary" class="summary-bar" style="display:none;"></div>
+  <div id="selBar">
+    <span class="n" id="selCount">0 selected</span>
+    <button type="button" id="selClear">Clear</button>
+    <button type="button" class="primary" id="selCreate">Create listing</button>
+  </div>
   <div id="filters" class="filters" style="display:none;">
     <button data-filter="all" class="active">All</button>
     <button data-filter="claimable">Claimable</button>
@@ -542,10 +564,54 @@ function groupByGame(items, key) {
   return [...map.entries()];
 }
 
+
+// Cross-filter item picking. Rewards live in two different renders (claimed
+// cards and in-progress campaign drops) and the operator wants one listing out
+// of both, so the selection is keyed by name|game and kept in memory while the
+// view re-renders around it.
+const picked = new Map();
+const pickKey = (name, game) =>
+  ((name || "") + "|" + (game || "")).trim().toLowerCase();
+
+function pickLabel(it) {
+  return it.name + (it.game ? " (" + it.game + ")" : "");
+}
+
+function refreshSelBar() {
+  const bar = $("selBar");
+  const n = picked.size;
+  const total = [...picked.values()].reduce((a, i) => a + (i.qty || 1), 0);
+  $("selCount").textContent =
+    n + " selected" + (total !== n ? " (" + total + " items)" : "");
+  bar.style.display = n ? "flex" : "none";
+}
+
+function togglePick(key, item, on) {
+  if (on) picked.set(key, item);
+  else picked.delete(key);
+  refreshSelBar();
+}
+
+function pickBoxHTML(item) {
+  const key = pickKey(item.name, item.game);
+  if (!item.name) return "";
+  return (
+    '<input type="checkbox" class="pick" data-pick="' +
+    escapeAttr(key) +
+    '" data-item="' +
+    escapeAttr(JSON.stringify(item)) +
+    '" title="Select for a listing"' +
+    (picked.has(key) ? " checked" : "") +
+    ">"
+  );
+}
+
 function claimedCardHTML(it) {
   const img = (it.img || "").replace("{width}", "84").replace("{height}", "84");
+  const pickItem = { name: (it.name || "").trim(), game: it.game || "", image: it.img || "", qty: Math.max(1, it.count || 1) };
   return `
-    <div class="claimed-card">
+    <div class="claimed-card${picked.has(pickKey(pickItem.name, pickItem.game)) ? " picked" : ""}">
+      ${pickBoxHTML(pickItem)}
       ${it.count > 1 ? `<span class="count">${it.count}</span>` : ""}
       ${img ? `<img class="reward" src="${escapeAttr(img)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="noimg"></div>`}
       <div class="cinfo">
@@ -619,8 +685,11 @@ function campaignCardHTML(c) {
       const badge = state === "claimed" ? `<span class="badge claimed">Claimed</span>`
         : state === "claimable" ? `<span class="badge claimable">Claimable</span>`
         : `<span class="badge progress">${pct}%</span>`;
+      const pickItem = { name: (benefit.name || d.name || "").trim(), game: (game.displayName || game.name) || "", image: benefit.imageAssetURL || "", qty: 1 };
+      const pk = pickKey(pickItem.name, pickItem.game);
       return `
-        <div class="drop">
+        <div class="drop pickable${picked.has(pk) ? " picked" : ""}">
+          ${pickBoxHTML(pickItem)}
           ${img ? `<img class="benefit" src="${img}" alt="" loading="lazy" onerror="this.style.display='none'">` : ""}
           <div class="info">
             <div class="dname">${escapeHtml(d.name || benefit.name || "Drop")}${badge}</div>
@@ -677,7 +746,7 @@ function buildAutoTitle(items) {
 // size for a real Gameflip cover. The prompt is the "list it or not" step, and
 // pre-fills the same auto-generated title the manual Listings editor produces.
 async function createSetFromItems(items, btn) {
-  if (!items.length) { alert("Nothing to list here."); return; }
+  if (!items.length) { alert("Nothing to list here."); return false; }
   // Total counts copies (qty), so a campaign with four Supply Crate tiers
   // reads as 5 items / 2 distinct — matching the auto-title's "(5 items)".
   const total = items.reduce((n, i) => n + (Number(i.qty) || 1), 0);
@@ -686,6 +755,7 @@ async function createSetFromItems(items, btn) {
   const name = prompt(`Create a listing — ${countLabel}.\n\nSet name:`, defaultName);
   if (name === null) return; // cancelled = "not"
   const old = btn.textContent;
+  let ok = false;
   btn.disabled = true; btn.textContent = "Creating…";
   try {
     const res = await fetch("/drops-archive/sets/from-items", {
@@ -699,12 +769,62 @@ async function createSetFromItems(items, btn) {
     if (!res.ok || !j.success) throw new Error(j.message || ("HTTP " + res.status));
     btn.textContent = "✓ Set created (" + total + ")";
     btn.classList.add("done");
+    ok = true;
     setStatus(`Created drop set "${j.set && j.set.name}" with ${countLabel}. Open the Listings/Shop page to price and publish it.`, "ok");
   } catch (err) {
     alert("Couldn't create the set: " + err.message);
     btn.disabled = false; btn.textContent = old;
   }
+  return ok;
 }
+
+resultsEl.addEventListener("change", (e) => {
+  const cb = e.target.closest("input[data-pick]");
+  if (!cb) return;
+  let item = {};
+  try {
+    item = JSON.parse(cb.getAttribute("data-item") || "{}");
+  } catch {}
+  togglePick(cb.getAttribute("data-pick"), item, cb.checked);
+  const card = cb.closest(".claimed-card, .drop");
+  if (card) card.classList.toggle("picked", cb.checked);
+});
+
+$("selClear").addEventListener("click", () => {
+  picked.clear();
+  refreshSelBar();
+  resultsEl
+    .querySelectorAll("input[data-pick]")
+    .forEach((cb) => { cb.checked = false; });
+  resultsEl
+    .querySelectorAll(".picked")
+    .forEach((el) => el.classList.remove("picked"));
+});
+
+$("selCreate").addEventListener("click", (e) => {
+  // Same duplicate folding as the per-campaign button: the same reward picked
+  // from two campaigns is one item with qty 2, not two lines.
+  const byKey = new Map();
+  for (const it of picked.values()) {
+    if (!it.name) continue;
+    const k = pickKey(it.name, it.game);
+    const cur = byKey.get(k);
+    if (cur) {
+      cur.qty += it.qty || 1;
+      if (!cur.image && it.image) cur.image = it.image;
+    } else {
+      byKey.set(k, { name: it.name, game: it.game || "", image: it.image || "", qty: it.qty || 1 });
+    }
+  }
+  const items = [...byKey.values()];
+  if (!items.length) { alert("Nothing selected."); return; }
+  createSetFromItems(items, e.target).then((ok) => {
+    if (!ok) return;
+    picked.clear();
+    refreshSelBar();
+    renderActive();
+  });
+});
 
 resultsEl.addEventListener("click", (e) => {
   // In-progress campaign -> list its drops (benefit name = what the bots log on

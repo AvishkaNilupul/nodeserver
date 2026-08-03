@@ -36,6 +36,15 @@ const renterAccountSchema = new mongoose.Schema(
 
     // Scan bookkeeping — same shape as BotAccount so utils/renterDropScanner.js
     // can reuse the exact rotation/upsert logic against this collection.
+    // Per-account farming lease. The renter's own lease (Renter.accessEnd)
+    // governs the whole bot; this governs ONE account, for "farm this one for
+    // 15 days" deals. Null = runs as long as the renter's lease does. When it
+    // passes, utils/renterExpiry pulls just this account out of the config.
+    farmUntil: { type: Date, default: null, index: true },
+    // Stamped when the sweep has already pulled the account, so it doesn't
+    // retry every tick (mirrors Renter.botStoppedAt).
+    farmEndedAt: { type: Date, default: null },
+
     lastScanAt: { type: Date, default: null, index: true },
     lastScanStatus: {
       type: String,

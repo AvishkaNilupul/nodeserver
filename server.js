@@ -133,6 +133,13 @@ app.use(
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         frameAncestors: ["'self'"],
+        // Local development only (CSP_NO_UPGRADE=1): stop the browser from
+        // upgrading same-origin requests to https, which breaks plain-http dev
+        // servers (e.g. the Android debug shell hitting 10.0.2.2:3000).
+        // Unset in production, so the live CSP is unchanged.
+        ...(process.env.CSP_NO_UPGRADE
+          ? { upgradeInsecureRequests: null }
+          : {}),
       },
     },
   }),
@@ -419,6 +426,13 @@ app.get("/research.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "research.html"));
 });
 
+// Guides (superadmin only) — long-form operator playbooks rendered for
+// reading. Must be a guarded route: anything left to the static handler
+// below would be served without auth.
+app.get("/guides.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "guides.html"));
+});
+
 // Bulk orders manager (superadmin only) — reserve N accounts for one buyer,
 // health-check + auto-replace, and mint the buyer's inventory link.
 app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -476,6 +490,13 @@ app.get("/learn", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "japanese.html"));
 });
 
+// Mobile seller app shell (also wrapped by the Android app). Served without a
+// guard, like the login page: the SPA renders its own sign-in and every data
+// API it calls is session-gated, so the bare shell exposes nothing.
+app.get("/app", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "app.html"));
+});
+
 // Public buyer portal for a bulk order. No login: the token in the path is the
 // secret, so it must be registered before the static handler and the 404. The
 // page reads the token from its own URL and calls /bulk-orders/portal/:token.
@@ -522,6 +543,12 @@ app.use(enforce2fa, bulkOrderRoutes);
 app.use(renterAuthRoutes);
 app.use(renterRoutes);
 app.use(enforce2fa, renterAdminRoutes);
+// Mounted BEFORE the requireAdmin cascade below because stashRoutes contains
+// the bearer-authenticated POST /account-stash/ingest for the browser account
+// automator — requireAdmin runs unconditionally for every request and would
+// 401 any bearer-only call before it could reach the router. Other stash
+// routes self-guard with requireSuperadmin, so their position doesn't matter.
+app.use(enforce2fa, stashRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -531,7 +558,6 @@ app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
 app.use(enforce2fa, autoFarmRoutes);
-app.use(enforce2fa, stashRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);

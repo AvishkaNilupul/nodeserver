@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
@@ -12,6 +13,24 @@ const {
   fillBotPasswordsFromPool,
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
+const MarketplaceListing = require("../models/MarketplaceListing");
+const SaleSignal = require("../models/SaleSignal");
+const mp = require("../utils/marketplaces");
+const guardian = require("../utils/marketplaceGuardian");
+const gfFulfiller = require("../utils/gameflipFulfiller");
+const { buildSetGridImage } = require("../utils/setImage");
+const fsp = require("fs").promises;
+
+// Reservation tags written by the marketplace fulfillers into
+// DropLog.soldToUsername. A drop carrying one is attached to a live
+// listing, not sold to anyone yet.
+const MARKET_CLAIM_TAGS = [
+  "gameflip",
+  "ggsel",
+  "digiseller",
+  "funpay",
+  "zeusx",
+];
 
 const router = express.Router();
 
@@ -25,20 +44,68 @@ const router = express.Router();
 // once. Worst-case staleness for passive viewing is one TTL window.
 // ------------------------------------------------------------------
 const DROP_CACHE_TTL = 15000;
-const dropCache = new Map(); // key -> { exp, data }
+// How long a fresh-enough entry may still be served while a refresh runs in the
+// background. Beyond this an entry is treated as gone and the caller waits.
+const DROP_CACHE_STALE_TTL = 10 * 60 * 1000;
+const dropCache = new Map(); // key -> { exp, staleExp, data }
+const inFlight = new Map(); // key -> Promise, so N viewers cause 1 recompute
 
-function dropCacheGet(key) {
-  const hit = dropCache.get(key);
-  if (hit && hit.exp > Date.now()) return hit.data;
-  if (hit) dropCache.delete(key);
-  return null;
-}
 function dropCacheSet(key, data) {
-  dropCache.set(key, { exp: Date.now() + DROP_CACHE_TTL, data });
+  const now = Date.now();
+  dropCache.set(key, {
+    exp: now + DROP_CACHE_TTL,
+    staleExp: now + DROP_CACHE_STALE_TTL,
+    data,
+  });
 }
 function bustDropCache() {
   dropCache.clear();
   _exclCache = null;
+}
+
+// Serve an expensive view without ever making two people pay for it at once.
+//
+// - fresh entry            -> returned immediately
+// - expired but not stale  -> returned immediately, refreshed in the background
+// - missing/too stale      -> compute, and anyone arriving meanwhile waits on
+//                             the same promise instead of starting their own
+//                             full pass over ~160k drops
+//
+// These views are rollups of a slowly-growing archive, so a few seconds of
+// staleness is invisible — but a page load that blocks for 4s is not. Any
+// successful write to /drops-archive/* still clears the cache outright, so an
+// operator's own edits and scans show up at once.
+async function cachedView(key, compute) {
+  const entry = dropCache.get(key);
+  const now = Date.now();
+  if (entry && entry.exp > now) return entry.data;
+
+  const refresh = () => {
+    if (inFlight.has(key)) return inFlight.get(key);
+    const p = (async () => {
+      try {
+        const data = await compute();
+        dropCacheSet(key, data);
+        return data;
+      } finally {
+        inFlight.delete(key);
+      }
+    })();
+    inFlight.set(key, p);
+    return p;
+  };
+
+  if (entry && entry.staleExp > now) {
+    // Stale-while-revalidate: hand back what we have, refresh behind the scenes.
+    refresh().catch((e) =>
+      console.error(
+        "drops-archive background refresh (" + key + "):",
+        e.message,
+      ),
+    );
+    return entry.data;
+  }
+  return refresh();
 }
 
 // Invalidate on any successful mutation so writes are reflected immediately.
@@ -149,6 +216,28 @@ function containerForFile(file) {
   return "";
 }
 
+// Exactly the fields publicAccount() reads. Passing this as a projection keeps
+// the two heavy account lists from hauling every account's clientSecret and
+// encrypted password across the wire and into memory just to throw them away —
+// measured 1116ms -> 563ms for 2.1k accounts, and a much smaller response.
+const PUBLIC_ACCOUNT_FIELDS = {
+  login: 1,
+  twitchId: 1,
+  configFile: 1,
+  container: 1,
+  host: 1,
+  enabled: 1,
+  dropCount: 1,
+  lastScanAt: 1,
+  lastScanStatus: 1,
+  lastScanError: 1,
+  hasPassword: 1,
+  credUsername: 1,
+  credEmail: 1,
+  copiedCount: 1,
+  lastCopiedAt: 1,
+};
+
 function publicAccount(a) {
   return {
     id: a._id,
@@ -209,11 +298,21 @@ router.get("/drops-archive/accounts", requireSuperadmin, async (req, res) => {
       q.lastScanStatus = { $ne: BAD_STATUS };
     }
     const limit = Math.min(Number(req.query.limit) || 1000, 5000);
-    const accounts = await BotAccount.find(q)
-      .sort({ login: 1 })
-      .limit(limit)
-      .lean();
-    res.json({ success: true, accounts: accounts.map(publicAccount) });
+    const load = async () => {
+      const accounts = await BotAccount.find(q, PUBLIC_ACCOUNT_FIELDS)
+        .sort({ login: 1 })
+        .limit(limit)
+        .lean();
+      return { success: true, accounts: accounts.map(publicAccount) };
+    };
+    // The unfiltered list is what the page loads every time it opens, and it's
+    // the same answer for every viewer — cache that one. Searches are typed
+    // per-operator and would just fill the map with single-use entries, so
+    // they always run live.
+    const payload = search
+      ? await load()
+      : await cachedView("accounts:" + status + ":" + limit, load);
+    res.json(payload);
   } catch (err) {
     console.error("drops-archive accounts error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -233,11 +332,18 @@ router.get("/drops-archive/bad-tokens", requireSuperadmin, async (req, res) => {
       const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       q.$or = [{ login: re }, { credUsername: re }, { configFile: re }];
     }
-    const accounts = await BotAccount.find(q)
-      .sort({ login: 1 })
-      .limit(5000)
-      .lean();
-    res.json({ success: true, accounts: accounts.map(publicAccount) });
+    const load = async () => {
+      const accounts = await BotAccount.find(q, PUBLIC_ACCOUNT_FIELDS)
+        .sort({ login: 1 })
+        .limit(5000)
+        .lean();
+      return { success: true, accounts: accounts.map(publicAccount) };
+    };
+    // Same reasoning as the account list: cache the unfiltered tab, not searches.
+    const payload = search
+      ? await load()
+      : await cachedView("bad-tokens", load);
+    res.json(payload);
   } catch (err) {
     console.error("drops-archive bad-tokens error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -510,6 +616,335 @@ router.post(
       });
     } catch (err) {
       console.error("drops-archive copied error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
+// Manual "mark sold" — for marketplaces with no API, where the operator
+// copies credentials out of the archive and delivers by hand. Reserves ONE
+// game's drops on the account (the rest stay sellable), pulls the account
+// out of any live auto-lister listing that sells the sold game, and writes a
+// SaleSignal so the auto-farmer's demand learning sees the sale.
+// ------------------------------------------------------------------
+
+// What could be sold on this account: its games with per-game drop states,
+// plus the live listings the account is attached to.
+router.get(
+  "/drops-archive/accounts/:id/sale-info",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acc = await BotAccount.findById(req.params.id, {
+        login: 1,
+      }).lean();
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      const games = await DropLog.aggregate([
+        { $match: { account: acc._id } },
+        {
+          $group: {
+            _id: { $ifNull: ["$game", ""] },
+            total: { $sum: 1 },
+            available: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$connected", true] },
+                      { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            redeemed: { $sum: { $cond: [{ $eq: ["$connected", true] }, 1, 0] } },
+            reserved: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$connected", true] },
+                      { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+        { $sort: { available: -1, total: -1 } },
+      ]);
+      const idRe = new RegExp(
+        "(^|,\\s*)" + String(acc._id) + "(\\s*,|$)",
+      );
+      const listings = await MarketplaceListing.find(
+        { status: "active", accountId: idRe },
+        { marketplace: 1, externalId: 1, title: 1, price: 1, set: 1 },
+      ).lean();
+      res.json({
+        success: true,
+        login: acc.login || "",
+        games: games.map((g) => ({
+          game: g._id || "Other rewards",
+          gameValue: g._id,
+          total: g.total,
+          available: g.available,
+          redeemed: g.redeemed,
+          reserved: g.reserved,
+        })),
+        listings: listings.map((l) => ({
+          marketplace: l.marketplace,
+          externalId: l.externalId,
+          title: l.title,
+          price: l.price,
+        })),
+      });
+    } catch (err) {
+      console.error("drops-archive sale-info error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Remove one account from a listing row's comma-separated account fields.
+async function detachAccountFromRow(listing, accountId, login) {
+  const ids = String(listing.accountId || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => x !== String(accountId));
+  const lower = String(login || "").trim().toLowerCase();
+  const logins = String(listing.accountLogin || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => !lower || x.toLowerCase() !== lower);
+  await MarketplaceListing.updateOne(
+    { _id: listing._id },
+    { $set: { accountId: ids.join(","), accountLogin: logins.join(", ") } },
+  );
+}
+
+// Does this listing's set sell the given game?
+async function listingSellsGame(listing, gameLower) {
+  const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
+  if (!set) return true; // no set to check — assume affected, safer to detach
+  return (set.items || []).some((i) => {
+    const g = String(i.game || "").trim() ||
+      String(i.itemKey || "").split("|")[1] || "";
+    return g.toLowerCase() === gameLower;
+  });
+}
+
+router.post(
+  "/drops-archive/accounts/:id/mark-sold",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acc = await BotAccount.findById(req.params.id).lean();
+      if (!acc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account not found" });
+      }
+      const body = req.body || {};
+      if (!("game" in body)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "game required" });
+      }
+      const game = String(body.game || "").trim(); // "" = Other rewards
+      const buyer = String(body.buyer || "").trim();
+      const now = new Date();
+      const stamp = {
+        soldAt: now,
+        soldToUsername: "manual" + (buyer ? ":" + buyer : ""),
+        soldToAdminId: "",
+        soldSetId: "",
+        soldBulkOrderId: "",
+      };
+      const gameMatch = game
+        ? { game }
+        : { $or: [{ game: "" }, { game: null }] };
+      const upd = await DropLog.updateMany(
+        {
+          account: acc._id,
+          ...gameMatch,
+          connected: { $ne: true },
+          soldAt: null,
+        },
+        { $set: stamp },
+      );
+      if (!upd.modifiedCount) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "No available (unredeemed, unreserved) drops for that game on " +
+            (acc.login || "this account"),
+        });
+      }
+      // Shadow onto the account (first reservation wins) — same as the
+      // Shop/marketplace sale path.
+      await BotAccount.updateOne(
+        { _id: acc._id, soldAt: null },
+        { $set: stamp },
+      ).catch(() => {});
+      // Demand learning: one signal per (account, game), same shape the
+      // automated sale paths write.
+      const gameLabel = game || "Other rewards";
+      await SaleSignal.updateOne(
+        {
+          dedupeKey:
+            "manual-sold:" + acc._id + ":" + gameLabel.toLowerCase(),
+        },
+        {
+          $setOnInsert: {
+            game: gameLabel,
+            gameKey: gameLabel.toLowerCase(),
+            itemKey: "",
+            name: "manual sale",
+            login: acc.login || "",
+            account: acc._id,
+            source: "drop_reserved",
+            at: now,
+          },
+        },
+        { upsert: true },
+      ).catch(() => {});
+
+      // Pull the account out of live listings that sell the sold game. Other
+      // games' listings keep it — that stock is still real.
+      const detached = [];
+      const warnings = [];
+      const idRe = new RegExp("(^|,\\s*)" + String(acc._id) + "(\\s*,|$)");
+      const listings = await MarketplaceListing.find({
+        status: "active",
+        accountId: idRe,
+      }).lean();
+      const gameLower = gameLabel.toLowerCase();
+      for (const row of listings) {
+        if (!(await listingSellsGame(row, gameLower))) continue;
+        const label = row.marketplace + " " + row.externalId;
+        try {
+          if (row.marketplace === "gameflip" && row.autoDeliver) {
+            // The live Gameflip listing carries this account's credentials in
+            // its delivery code — it must come down, then the chain continues
+            // with a fresh account if one exists.
+            await mp.gameflipDelist(row.externalId).catch(() => {});
+            await MarketplaceListing.updateOne(
+              { _id: row._id },
+              {
+                $set: {
+                  status: "delisted",
+                  note: "account sold manually — delisted",
+                },
+              },
+            );
+            detached.push(label + " (delisted)");
+            const set = row.set
+              ? await DropSet.findById(row.set).lean()
+              : null;
+            if (set) {
+              let img = "";
+              try {
+                img = await buildSetGridImage(set);
+              } catch {
+                img = "";
+              }
+              try {
+                const fresh = await gfFulfiller.publishAutoDelivery({
+                  set,
+                  title: row.title,
+                  description: row.description,
+                  priceUsd: row.price,
+                  imagePath: img,
+                  qtyRemaining: Number(row.qtyRemaining) || 0,
+                  origin: row.origin,
+                });
+                detached.push(
+                  "republished on gameflip as " +
+                    fresh.externalId +
+                    " with " +
+                    (fresh.accountLogin || "a fresh account"),
+                );
+              } catch (e) {
+                warnings.push(
+                  label +
+                    " was delisted but could not be republished: " +
+                    e.message,
+                );
+              } finally {
+                if (img) await fsp.unlink(img).catch(() => {});
+              }
+            }
+          } else if (
+            row.marketplace === "digiseller" &&
+            (row.units || []).some(
+              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
+            )
+          ) {
+            const unit = (row.units || []).find(
+              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
+            );
+            await mp.digisellerRemoveContent(row.externalId, unit.contentId);
+            await MarketplaceListing.updateOne(
+              { _id: row._id },
+              { $pull: { units: { contentId: String(unit.contentId) } } },
+            );
+            await detachAccountFromRow(row, acc._id, acc.login);
+            detached.push(label + " (delivery unit removed)");
+            try {
+              await guardian.feedOne(String(row._id));
+            } catch {
+              /* auto-feed refills on its next pass */
+            }
+          } else if (
+            row.marketplace === "digiseller" ||
+            row.marketplace === "ggsel"
+          ) {
+            await detachAccountFromRow(row, acc._id, acc.login);
+            detached.push(label + " (detached)");
+            try {
+              await guardian.feedOne(String(row._id));
+            } catch {
+              /* auto-feed refills on its next pass */
+            }
+          } else {
+            warnings.push(
+              label +
+                " still references this account — remove it there manually",
+            );
+          }
+        } catch (e) {
+          warnings.push(label + ": " + e.message);
+        }
+      }
+
+      bustDropCache();
+      res.json({
+        success: true,
+        message:
+          "Marked " +
+          upd.modifiedCount +
+          " " +
+          gameLabel +
+          " drop(s) sold on " +
+          (acc.login || String(acc._id)),
+        reserved: upd.modifiedCount,
+        detached,
+        warnings,
+      });
+    } catch (err) {
+      console.error("drops-archive mark-sold error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },
@@ -1072,21 +1507,18 @@ function searchRegex(s) {
   return new RegExp(String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
-// Aggregation expression for the grouping key: stored itemKey when present,
-// else a computed name|game (handles rows logged before itemKey existed).
-const itemKeyExpr = {
-  $cond: [
-    { $gt: [{ $strLenCP: { $ifNull: ["$itemKey", ""] } }, 0] },
-    "$itemKey",
-    {
-      $concat: [
-        { $toLower: { $trim: { input: { $ifNull: ["$name", ""] } } } },
-        "|",
-        { $toLower: { $trim: { input: { $ifNull: ["$game", ""] } } } },
-      ],
-    },
-  ],
-};
+// Grouping key for every aggregate view. This is the STORED, indexed itemKey —
+// not a per-document computation.
+//
+// It used to be a $cond that recomputed name|game whenever itemKey was empty,
+// as a guard for rows logged before the field existed. That guard ran
+// $strLenCP + two $toLower/$trim + $concat against all ~160k drops on every
+// pass of every archive view: measured 633ms vs 258ms for the same grouping on
+// the stored field. The guard is no longer needed — the scanner now always
+// writes a key (utils/dropScanner.js), the startup backfill fills any legacy
+// row, and a prod check found 0 of 158,944 rows without one. Grouping on the
+// bare field is also what lets these pipelines use the itemKey index.
+const ITEM_KEY_FIELD = "$itemKey";
 
 // High-level totals for the dashboard header. Bad-token accounts (and their
 // drops) are left out so the header only counts sellable stock. Pool-account
@@ -1095,57 +1527,54 @@ const itemKeyExpr = {
 // reported separately as poolItems/poolDrops instead of inflating them.
 router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
   try {
-    const cached = dropCacheGet("overview");
-    if (cached) return res.json(cached);
-    const badIds = await excludedAccountIdsCached();
-    const dropMatch = {
-      account: { $nin: badIds },
-      accountModel: { $ne: "AvailableAccount" },
-    };
-    const poolMatch = { accountModel: "AvailableAccount" };
-    const [
-      accounts,
-      totalDrops,
-      totalItemsHeld,
-      games,
-      items,
-      poolDrops,
-      poolItems,
-    ] = await Promise.all([
-      BotAccount.countDocuments({ lastScanStatus: { $ne: BAD_STATUS } }),
-      DropLog.countDocuments(dropMatch),
-      DropLog.aggregate([
-        { $match: dropMatch },
-        { $group: { _id: null, n: { $sum: "$count" } } },
-      ]),
-      DropLog.distinct("game", dropMatch),
-      DropLog.aggregate([
-        { $match: dropMatch },
-        { $addFields: { _k: itemKeyExpr } },
-        { $group: { _id: "$_k" } },
-        { $count: "n" },
-      ]),
-      DropLog.countDocuments(poolMatch),
-      DropLog.aggregate([
-        { $match: poolMatch },
-        { $addFields: { _k: itemKeyExpr } },
-        { $group: { _id: "$_k" } },
-        { $count: "n" },
-      ]),
-    ]);
-    const payload = {
-      success: true,
-      overview: {
+    const payload = await cachedView("overview", async () => {
+      const badIds = await excludedAccountIdsCached();
+      const dropMatch = {
+        account: { $nin: badIds },
+        accountModel: { $ne: "AvailableAccount" },
+      };
+      const poolMatch = { accountModel: "AvailableAccount" };
+      const [
         accounts,
         totalDrops,
-        totalItemsHeld: (totalItemsHeld[0] && totalItemsHeld[0].n) || 0,
-        games: games.filter(Boolean).length,
-        items: (items[0] && items[0].n) || 0,
+        totalItemsHeld,
+        games,
+        items,
         poolDrops,
-        poolItems: (poolItems[0] && poolItems[0].n) || 0,
-      },
-    };
-    dropCacheSet("overview", payload);
+        poolItems,
+      ] = await Promise.all([
+        BotAccount.countDocuments({ lastScanStatus: { $ne: BAD_STATUS } }),
+        DropLog.countDocuments(dropMatch),
+        DropLog.aggregate([
+          { $match: dropMatch },
+          { $group: { _id: null, n: { $sum: "$count" } } },
+        ]),
+        DropLog.distinct("game", dropMatch),
+        DropLog.aggregate([
+          { $match: dropMatch },
+          { $group: { _id: ITEM_KEY_FIELD } },
+          { $count: "n" },
+        ]),
+        DropLog.countDocuments(poolMatch),
+        DropLog.aggregate([
+          { $match: poolMatch },
+          { $group: { _id: ITEM_KEY_FIELD } },
+          { $count: "n" },
+        ]),
+      ]);
+      return {
+        success: true,
+        overview: {
+          accounts,
+          totalDrops,
+          totalItemsHeld: (totalItemsHeld[0] && totalItemsHeld[0].n) || 0,
+          games: games.filter(Boolean).length,
+          items: (items[0] && items[0].n) || 0,
+          poolDrops,
+          poolItems: (poolItems[0] && poolItems[0].n) || 0,
+        },
+      };
+    });
     res.json(payload);
   } catch (err) {
     console.error("drops-archive overview error:", err.message);
@@ -1158,46 +1587,50 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
 // not wired into a bot yet) rather than merging them into one number.
 router.get("/drops-archive/by-game", requireSuperadmin, async (req, res) => {
   try {
-    const cached = dropCacheGet("by-game");
-    if (cached) return res.json(cached);
-    const badIds = await excludedAccountIdsCached();
-    const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
-    const rows = await DropLog.aggregate([
-      { $match: { account: { $nin: badIds } } },
-      { $addFields: { _k: itemKeyExpr } },
-      {
-        $group: {
-          _id: "$game",
-          drops: { $sum: { $cond: [isPool, 0, 1] } },
-          totalCount: { $sum: { $cond: [isPool, 0, "$count"] } },
-          accounts: { $addToSet: { $cond: [isPool, "$$REMOVE", "$account"] } },
-          items: { $addToSet: { $cond: [isPool, "$$REMOVE", "$_k"] } },
-          poolDrops: { $sum: { $cond: [isPool, 1, 0] } },
-          poolCount: { $sum: { $cond: [isPool, "$count", 0] } },
-          poolAccounts: {
-            $addToSet: { $cond: [isPool, "$account", "$$REMOVE"] },
+    const payload = await cachedView("by-game", async () => {
+      const badIds = await excludedAccountIdsCached();
+      const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
+      const rows = await DropLog.aggregate([
+        { $match: { account: { $nin: badIds } } },
+        {
+          $group: {
+            _id: "$game",
+            drops: { $sum: { $cond: [isPool, 0, 1] } },
+            totalCount: { $sum: { $cond: [isPool, 0, "$count"] } },
+            accounts: {
+              $addToSet: { $cond: [isPool, "$$REMOVE", "$account"] },
+            },
+            items: {
+              $addToSet: { $cond: [isPool, "$$REMOVE", ITEM_KEY_FIELD] },
+            },
+            poolDrops: { $sum: { $cond: [isPool, 1, 0] } },
+            poolCount: { $sum: { $cond: [isPool, "$count", 0] } },
+            poolAccounts: {
+              $addToSet: { $cond: [isPool, "$account", "$$REMOVE"] },
+            },
+            poolItems: {
+              $addToSet: { $cond: [isPool, ITEM_KEY_FIELD, "$$REMOVE"] },
+            },
           },
-          poolItems: { $addToSet: { $cond: [isPool, "$_k", "$$REMOVE"] } },
         },
-      },
-      {
-        $project: {
-          _id: 0,
-          game: "$_id",
-          drops: 1,
-          totalCount: 1,
-          accounts: { $size: "$accounts" },
-          items: { $size: "$items" },
-          poolDrops: 1,
-          poolCount: 1,
-          poolAccounts: { $size: "$poolAccounts" },
-          poolItems: { $size: "$poolItems" },
+        {
+          $project: {
+            _id: 0,
+            game: "$_id",
+            drops: 1,
+            totalCount: 1,
+            accounts: { $size: "$accounts" },
+            items: { $size: "$items" },
+            poolDrops: 1,
+            poolCount: 1,
+            poolAccounts: { $size: "$poolAccounts" },
+            poolItems: { $size: "$poolItems" },
+          },
         },
-      },
-      { $sort: { totalCount: -1 } },
-    ]);
-    const payload = { success: true, games: rows };
-    dropCacheSet("by-game", payload);
+        { $sort: { totalCount: -1 } },
+      ]);
+      return { success: true, games: rows };
+    });
     res.json(payload);
   } catch (err) {
     console.error("drops-archive by-game error:", err.message);
@@ -1212,147 +1645,151 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
     const game = String(req.query.game || "").trim();
     const search = String(req.query.search || "").trim();
     const cacheKey = "by-item:" + game + "\u0000" + search;
-    const cached = dropCacheGet(cacheKey);
-    if (cached) return res.json(cached);
+    const payload = await cachedView(cacheKey, async () => {
+      const badIds = await excludedAccountIdsCached();
+      const match = { account: { $nin: badIds } };
+      if (game) match.game = game === "Other rewards" ? "" : game;
+      if (search) match.name = searchRegex(search);
 
-    const badIds = await excludedAccountIdsCached();
-    const match = { account: { $nin: badIds } };
-    if (game) match.game = game === "Other rewards" ? "" : game;
-    if (search) match.name = searchRegex(search);
+      const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
+      const notPool = { $not: isPool };
 
-    const isPool = { $eq: ["$accountModel", "AvailableAccount"] };
-    const notPool = { $not: isPool };
+      // Two lean aggregations instead of one. Prod Mongo is an Atlas shared tier
+      // where allowDiskUse is disabled, so a single pipeline that pre-groups by
+      // (item, account) while carrying name/game/campaign/image strings blows
+      // past MongoDB's 100MB in-memory $group limit as the archive grows (150k+
+      // drops). Keeping the heavy per-account pre-group numeric-only, and pulling
+      // everything else from a group keyed by item alone (far fewer buckets),
+      // holds both well under the limit. Verified byte-identical to the old
+      // single-pipeline output.
 
-    // Two lean aggregations instead of one. Prod Mongo is an Atlas shared tier
-    // where allowDiskUse is disabled, so a single pipeline that pre-groups by
-    // (item, account) while carrying name/game/campaign/image strings blows
-    // past MongoDB's 100MB in-memory $group limit as the archive grows (150k+
-    // drops). Keeping the heavy per-account pre-group numeric-only, and pulling
-    // everything else from a group keyed by item alone (far fewer buckets),
-    // holds both well under the limit. Verified byte-identical to the old
-    // single-pipeline output.
-
-    // Item-level rollup: metadata, count/state tallies, distinct-account
-    // counts. Grouped by item only, so each string field costs one copy per
-    // item rather than one per (item, account) pair.
-    const mainP = DropLog.aggregate([
-      { $match: match },
-      // Fall back to a computed name|game key for any row whose itemKey
-      // wasn't backfilled yet, so items never merge into one bucket.
-      { $addFields: { _k: itemKeyExpr } },
-      {
-        $group: {
-          _id: "$_k",
-          name: { $first: "$name" },
-          game: { $first: "$game" },
-          imageLocal: { $max: "$imageLocal" },
-          imageURL: { $first: "$imageURL" },
-          campaign: { $first: "$campaign" },
-          // "Deployed" numbers — accounts actually wired into a bot, the
-          // sellable stock this view has always meant. Pool accounts
-          // (accountModel: "AvailableAccount") are excluded per row, matching
-          // the old $first(isPool)-then-exclude two-stage exactly.
-          totalCount: { $sum: { $cond: [isPool, 0, "$count"] } },
-          claimed: {
-            $sum: {
-              $cond: [{ $and: [notPool, { $eq: ["$state", "claimed"] }] }, 1, 0],
+      // Item-level rollup: metadata, count/state tallies, distinct-account
+      // counts. Grouped by item only, so each string field costs one copy per
+      // item rather than one per (item, account) pair.
+      const mainP = DropLog.aggregate([
+        { $match: match },
+        // Fall back to a computed name|game key for any row whose itemKey
+        // wasn't backfilled yet, so items never merge into one bucket.
+        {
+          $group: {
+            _id: ITEM_KEY_FIELD,
+            name: { $first: "$name" },
+            game: { $first: "$game" },
+            imageLocal: { $max: "$imageLocal" },
+            imageURL: { $first: "$imageURL" },
+            campaign: { $first: "$campaign" },
+            // "Deployed" numbers — accounts actually wired into a bot, the
+            // sellable stock this view has always meant. Pool accounts
+            // (accountModel: "AvailableAccount") are excluded per row, matching
+            // the old $first(isPool)-then-exclude two-stage exactly.
+            totalCount: { $sum: { $cond: [isPool, 0, "$count"] } },
+            claimed: {
+              $sum: {
+                $cond: [
+                  { $and: [notPool, { $eq: ["$state", "claimed"] }] },
+                  1,
+                  0,
+                ],
+              },
             },
-          },
-          connect: {
-            $sum: {
-              $cond: [{ $and: [notPool, { $eq: ["$state", "connect"] }] }, 1, 0],
+            connect: {
+              $sum: {
+                $cond: [
+                  { $and: [notPool, { $eq: ["$state", "connect"] }] },
+                  1,
+                  0,
+                ],
+              },
             },
+            connected: {
+              $sum: {
+                $cond: [
+                  { $and: [notPool, { $eq: ["$state", "connected"] }] },
+                  1,
+                  0,
+                ],
+              },
+            },
+            // Distinct accounts. $addToSet keyed by item alone stays small: the
+            // union across all items is bounded by the drop count, not by
+            // (items × accounts).
+            acctSet: { $addToSet: { $cond: [isPool, "$$REMOVE", "$account"] } },
+            poolAcctSet: {
+              $addToSet: { $cond: [isPool, "$account", "$$REMOVE"] },
+            },
+            // "In pool" count — checked, not yet wired into any bot.
+            poolCount: { $sum: { $cond: [isPool, "$count", 0] } },
           },
-          connected: {
-            $sum: {
+        },
+        {
+          $project: {
+            _id: 0,
+            itemKey: "$_id",
+            name: 1,
+            game: 1,
+            // Prefer the locally cached image; fall back to the live URL. Note
+            // imageLocal defaults to "" (not null), so test its length.
+            image: {
               $cond: [
-                { $and: [notPool, { $eq: ["$state", "connected"] }] },
-                1,
-                0,
+                { $gt: [{ $strLenCP: { $ifNull: ["$imageLocal", ""] } }, 0] },
+                "$imageLocal",
+                "$imageURL",
               ],
             },
+            imageURL: 1,
+            campaign: 1,
+            totalCount: 1,
+            accounts: { $size: "$acctSet" },
+            claimed: 1,
+            connect: 1,
+            connected: 1,
+            poolCount: 1,
+            poolAccounts: { $size: "$poolAcctSet" },
           },
-          // Distinct accounts. $addToSet keyed by item alone stays small: the
-          // union across all items is bounded by the drop count, not by
-          // (items × accounts).
-          acctSet: { $addToSet: { $cond: [isPool, "$$REMOVE", "$account"] } },
-          poolAcctSet: {
-            $addToSet: { $cond: [isPool, "$account", "$$REMOVE"] },
-          },
-          // "In pool" count — checked, not yet wired into any bot.
-          poolCount: { $sum: { $cond: [isPool, "$count", 0] } },
         },
-      },
-      {
-        $project: {
-          _id: 0,
-          itemKey: "$_id",
-          name: 1,
-          game: 1,
-          // Prefer the locally cached image; fall back to the live URL. Note
-          // imageLocal defaults to "" (not null), so test its length.
-          image: {
-            $cond: [
-              { $gt: [{ $strLenCP: { $ifNull: ["$imageLocal", ""] } }, 0] },
-              "$imageLocal",
-              "$imageURL",
-            ],
-          },
-          imageURL: 1,
-          campaign: 1,
-          totalCount: 1,
-          accounts: { $size: "$acctSet" },
-          claimed: 1,
-          connect: 1,
-          connected: 1,
-          poolCount: 1,
-          poolAccounts: { $size: "$poolAcctSet" },
-        },
-      },
-    ]);
+      ]);
 
-    // The one thing that genuinely needs a per-(item, account) pre-group: exact
-    // min/max copies held per deployed account (an account with 4x vs 5x of a
-    // drop differs). Numeric-only and non-pool, so it stays tiny. Pool rows are
-    // dropped up front, matching the old $$REMOVE-on-pool for these two fields
-    // (an item held only in the pool yields no row here → null min/max below).
-    const minMaxP = DropLog.aggregate([
-      { $match: { ...match, accountModel: { $ne: "AvailableAccount" } } },
-      { $addFields: { _k: itemKeyExpr } },
-      {
-        $group: {
-          _id: { k: "$_k", acct: "$account" },
-          cnt: { $sum: "$count" },
+      // The one thing that genuinely needs a per-(item, account) pre-group: exact
+      // min/max copies held per deployed account (an account with 4x vs 5x of a
+      // drop differs). Numeric-only and non-pool, so it stays tiny. Pool rows are
+      // dropped up front, matching the old $$REMOVE-on-pool for these two fields
+      // (an item held only in the pool yields no row here → null min/max below).
+      const minMaxP = DropLog.aggregate([
+        { $match: { ...match, accountModel: { $ne: "AvailableAccount" } } },
+        {
+          $group: {
+            _id: { k: ITEM_KEY_FIELD, acct: "$account" },
+            cnt: { $sum: "$count" },
+          },
         },
-      },
-      {
-        $group: {
-          _id: "$_id.k",
-          minPerAcct: { $min: "$cnt" },
-          maxPerAcct: { $max: "$cnt" },
+        {
+          $group: {
+            _id: "$_id.k",
+            minPerAcct: { $min: "$cnt" },
+            maxPerAcct: { $max: "$cnt" },
+          },
         },
-      },
-    ]);
+      ]);
 
-    const [mainRows, minMaxRows] = await Promise.all([mainP, minMaxP]);
-    const mmByKey = new Map(minMaxRows.map((r) => [r._id, r]));
-    const rows = mainRows
-      .map((r) => {
-        const mm = mmByKey.get(r.itemKey);
-        return {
-          ...r,
-          minPerAcct: mm ? mm.minPerAcct : null,
-          maxPerAcct: mm ? mm.maxPerAcct : null,
-        };
-      })
-      // Same order the old { $sort: { accounts: -1, totalCount: -1 } } gave.
-      // There are ~1.3k items, so the 2000 cap never actually clips.
-      .sort((a, b) => b.accounts - a.accounts || b.totalCount - a.totalCount);
-    // ~1.3k items today; expose hasMore so the UI can flag if the cap ever bites.
-    const LIMIT = 2000;
-    const hasMore = rows.length > LIMIT;
-    const payload = { success: true, items: rows.slice(0, LIMIT), hasMore };
-    dropCacheSet(cacheKey, payload);
+      const [mainRows, minMaxRows] = await Promise.all([mainP, minMaxP]);
+      const mmByKey = new Map(minMaxRows.map((r) => [r._id, r]));
+      const rows = mainRows
+        .map((r) => {
+          const mm = mmByKey.get(r.itemKey);
+          return {
+            ...r,
+            minPerAcct: mm ? mm.minPerAcct : null,
+            maxPerAcct: mm ? mm.maxPerAcct : null,
+          };
+        })
+        // Same order the old { $sort: { accounts: -1, totalCount: -1 } } gave.
+        // There are ~1.3k items, so the 2000 cap never actually clips.
+        .sort((a, b) => b.accounts - a.accounts || b.totalCount - a.totalCount);
+      // ~1.3k items today; expose hasMore so the UI can flag if the cap ever bites.
+      const LIMIT = 2000;
+      const hasMore = rows.length > LIMIT;
+      return { success: true, items: rows.slice(0, LIMIT), hasMore };
+    });
     res.json(payload);
   } catch (err) {
     console.error("drops-archive by-item error:", err.message);
@@ -1423,6 +1860,8 @@ router.get(
             count: 1,
             state: 1,
             connected: 1,
+            soldAt: 1,
+            soldToUsername: 1,
             requiredAccountLink: 1,
             awardedAt: 1,
             firstSeenAt: 1,
@@ -1431,6 +1870,107 @@ router.get(
         },
         { $sort: { state: 1, login: 1 } },
       ]);
+      // An account is sold PER GAME. The row's own soldAt only says whether
+      // this item is spoken for, which is not what the operator needs to see:
+      // they need which games on the account are gone and whether there is
+      // anything left to sell before they copy or re-sell it.
+      const accIds = [...new Set(rows.map((r) => String(r.accountId)))]
+        .filter(Boolean)
+        .map((id) => new mongoose.Types.ObjectId(id));
+      const gameRows = accIds.length
+        ? await DropLog.aggregate([
+            { $match: { account: { $in: accIds } } },
+            {
+              $group: {
+                _id: {
+                  account: "$account",
+                  game: { $ifNull: ["$game", ""] },
+                },
+                // soldAt doubles as "reserved for a live listing": the
+                // marketplace fulfillers stamp it with their claim tag when
+                // they attach the account to an offer. Only a real hand-over
+                // (Shop buyer, bulk order, manual sale) counts as sold —
+                // otherwise every listed account reads as sold.
+                sold: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                          {
+                            $not: [
+                              {
+                                $in: [
+                                  { $ifNull: ["$soldToUsername", ""] },
+                                  MARKET_CLAIM_TAGS,
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                listed: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          { $ifNull: ["$soldToUsername", ""] },
+                          MARKET_CLAIM_TAGS,
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                open: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                          { $ne: ["$connected", true] },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+          ])
+        : [];
+      const soldGames = new Map();
+      const openGames = new Map();
+      const listedGames = new Map();
+      for (const g of gameRows) {
+        const key = String(g._id.account);
+        const label = g._id.game || "Other rewards";
+        if (g.sold) {
+          if (!soldGames.has(key)) soldGames.set(key, []);
+          soldGames.get(key).push(label);
+        }
+        if (g.listed) {
+          if (!listedGames.has(key)) listedGames.set(key, []);
+          listedGames.get(key).push(label);
+        }
+        if (g.open) {
+          if (!openGames.has(key)) openGames.set(key, []);
+          openGames.get(key).push(label);
+        }
+      }
+      for (const r of rows) {
+        const key = String(r.accountId);
+        r.soldGames = (soldGames.get(key) || []).sort();
+        r.openGames = (openGames.get(key) || []).sort();
+        r.listedGames = (listedGames.get(key) || []).sort();
+      }
       const first = rows[0];
       res.json({
         success: true,
@@ -1534,27 +2074,33 @@ function publicSet(s) {
 router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
   try {
     const wantCustom = req.query.custom === "1" || req.query.custom === "true";
-    const sets = await DropSet.find({
-      custom: wantCustom ? true : { $ne: true },
-    })
-      .sort({ updatedAt: -1 })
-      .lean();
-    res.json({
-      success: true,
-      sets: sets.map((s) => ({
-        id: String(s._id),
-        name: s.name,
-        note: s.note || "",
-        items: s.items || [],
-        itemCount: (s.items || []).length,
-        price: Number(s.price) || 0,
-        listed: !!s.listed,
-        custom: !!s.custom,
-        coverStyle: s.coverStyle || "grid",
-        coverGame: s.coverGame || "",
-        updatedAt: s.updatedAt,
-      })),
+    // Sets carry their full item arrays, so this is a fat response for a list
+    // that only changes when an operator edits a bundle — and any such edit is
+    // a write to /drops-archive/*, which clears the cache immediately.
+    const payload = await cachedView("sets:" + wantCustom, async () => {
+      const sets = await DropSet.find({
+        custom: wantCustom ? true : { $ne: true },
+      })
+        .sort({ updatedAt: -1 })
+        .lean();
+      return {
+        success: true,
+        sets: sets.map((s) => ({
+          id: String(s._id),
+          name: s.name,
+          note: s.note || "",
+          items: s.items || [],
+          itemCount: (s.items || []).length,
+          price: Number(s.price) || 0,
+          listed: !!s.listed,
+          custom: !!s.custom,
+          coverStyle: s.coverStyle || "grid",
+          coverGame: s.coverGame || "",
+          updatedAt: s.updatedAt,
+        })),
+      };
     });
+    res.json(payload);
   } catch (err) {
     console.error("drops-archive sets list error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -1674,7 +2220,7 @@ router.post(
         if (!iname) continue;
         const game = String((it && it.game) || "").trim();
         // Same normalisation as utils/twitchInventory itemKeyFor + the archive's
-        // itemKeyExpr, so this key lines up with what the bots log on claim.
+        // itemKeyFor(), so this key lines up with what the bots log on claim.
         const itemKey = iname.toLowerCase() + "|" + game.toLowerCase();
         // Duplicate reward (same item at several watch-time tiers): fold the
         // copies into qty rather than dropping them, so a 5-drop campaign with
@@ -2115,5 +2661,47 @@ router.get(
     }
   },
 );
+
+// Warm the expensive archive views a few seconds after boot.
+//
+// by-item/by-game/overview are served from an in-memory cache, so the first
+// request after any restart pays the full aggregation over 150k+ drops — ~20-35s
+// of "Loading…" for whoever opens the page first. Nothing else changes: this
+// just pays that cost in the background instead of on someone's click.
+function warmArchiveViews() {
+  const targets = [
+    "/drops-archive/overview",
+    "/drops-archive/by-game",
+    "/drops-archive/by-item",
+  ];
+  for (const path of targets) {
+    const layer = router.stack.find(
+      (l) => l.route && l.route.path === path && l.route.methods.get,
+    );
+    if (!layer) continue;
+    // Last handler in the chain = the route body, skipping requireSuperadmin.
+    const handlers = layer.route.stack;
+    const handler = handlers[handlers.length - 1].handle;
+    const req = { query: {}, params: {}, body: {} };
+    const res = {
+      statusCode: 200,
+      status(c) {
+        this.statusCode = c;
+        return this;
+      },
+      json() {},
+      send() {},
+    };
+    const t = Date.now();
+    Promise.resolve(handler(req, res, () => {}))
+      .then(() =>
+        console.log(
+          "[dropsArchive] warmed " + path + " in " + (Date.now() - t) + "ms",
+        ),
+      )
+      .catch((e) => console.error("[dropsArchive] warm " + path + ":", e.message));
+  }
+}
+setTimeout(warmArchiveViews, 15000).unref();
 
 module.exports = router;

@@ -38,12 +38,28 @@ router.get("/auto-farm/status", requireSuperadmin, async (req, res) => {
 });
 
 // DECISION LOG + active/planned tasks (newest first).
+//
+// Every non-terminal task is returned unconditionally, and only the historical
+// log is capped. A flat .limit(200) sorted newest-first dropped the OLDEST rows
+// once the log passed 200 — which is precisely the long-running active tasks
+// and the oldest plans awaiting approval. They kept running on the Pi but
+// vanished from the UI, losing their Stop / Delist / Approve / Delete controls
+// with nothing to indicate it. There are 134 rows today, so this was days away.
+const HISTORY_LIMIT = 200;
 router.get("/auto-farm/tasks", requireSuperadmin, async (req, res) => {
   try {
-    const tasks = await AutoFarmTask.find({})
-      .sort({ createdAt: -1 })
-      .limit(200)
-      .lean();
+    const [liveTasks, history] = await Promise.all([
+      AutoFarmTask.find({ status: { $in: ["planned", "active"] } })
+        .sort({ createdAt: -1 })
+        .lean(),
+      AutoFarmTask.find({ status: { $nin: ["planned", "active"] } })
+        .sort({ createdAt: -1 })
+        .limit(HISTORY_LIMIT)
+        .lean(),
+    ]);
+    const tasks = liveTasks
+      .concat(history)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ success: true, tasks });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -60,6 +76,8 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
     if ("consolidate" in b) patch.consolidate = !!b.consolidate;
     if ("deleteFinishedBots" in b)
       patch.deleteFinishedBots = !!b.deleteFinishedBots;
+    if ("stopFinishedBots" in b)
+      patch.stopFinishedBots = !!b.stopFinishedBots;
     if ("hostId" in b) {
       const id = String(b.hostId || "");
       if (id && !hosts.resolveHost(id)) {
@@ -72,8 +90,14 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
     const clamp = (v, lo, hi) =>
       Math.max(lo, Math.min(hi, Math.floor(Number(v))));
     if ("maxPerGame" in b) patch.maxPerGame = clamp(b.maxPerGame, 1, 30);
+    // Accounts per container. The ceiling is high on purpose: a container costs
+    // a fixed ~130 MB of .NET baseline and only ~1.2 MB per account, so packing
+    // MORE accounts into each one is the RAM fix, not a risk. The old ceiling of
+    // 30 was a trap — prod runs 70 (set directly in settings.json), and any save
+    // from the settings page would silently clamp it back to 30 and let the
+    // container sprawl grow straight back.
     if ("accountsPerBot" in b)
-      patch.accountsPerBot = clamp(b.accountsPerBot, 1, 30);
+      patch.accountsPerBot = clamp(b.accountsPerBot, 1, 200);
     if ("poolReserve" in b) patch.poolReserve = clamp(b.poolReserve, 0, 500);
     if ("probeSize" in b) patch.probeSize = clamp(b.probeSize, 1, 30);
     if ("perMarketStock" in b)
@@ -91,6 +115,50 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
         /[^0-9]/g,
         "",
       );
+    if ("zeusxAuto" in b) patch.zeusxAuto = !!b.zeusxAuto;
+    // Per-game ZeusX placement, pasted as JSON:
+    //   { "overwatch": { "serviceCategoryId": "1",
+    //                    "serviceCategoryBaseId": "269" } }
+    if ("zeusxGames" in b) {
+      const raw = b.zeusxGames;
+      let map = raw;
+      if (typeof raw === "string") {
+        const text = raw.trim();
+        if (!text) map = {};
+        else {
+          try {
+            map = JSON.parse(text);
+          } catch {
+            return res.status(400).json({
+              success: false,
+              message: "ZeusX game map must be valid JSON",
+            });
+          }
+        }
+      }
+      if (!map || typeof map !== "object" || Array.isArray(map)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "ZeusX game map must be an object" });
+      }
+      const clean = {};
+      for (const [game, cfg] of Object.entries(map)) {
+        if (!cfg || typeof cfg !== "object") continue;
+        const baseId = String(
+          cfg.serviceCategoryBaseId || cfg.baseId || "",
+        ).replace(/[^0-9]/g, "");
+        if (!baseId) continue;
+        clean[String(game).trim().toLowerCase()] = {
+          serviceCategoryId: String(cfg.serviceCategoryId || "1").replace(
+            /[^0-9]/g,
+            "",
+          ),
+          serviceCategoryBaseId: baseId,
+          attributes: Array.isArray(cfg.attributes) ? cfg.attributes : [],
+        };
+      }
+      patch.zeusxGames = clean;
+    }
     for (const k of Object.keys(patch)) {
       if (typeof patch[k] === "number" && isNaN(patch[k])) delete patch[k];
     }

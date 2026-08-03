@@ -7,8 +7,14 @@ const {
   buildDescription,
   derivePrice,
   stackItems,
-  stackedPrice,
+  postEventPrice,
   computeSplit,
+  isAutoOwned,
+  normLabel,
+  looksLikeTitlePlaceholder,
+  resolveCampaignItems,
+  filterVerifiedHolders,
+  withReservationRollback,
 } = require("../utils/autoLister");
 
 const items = [
@@ -29,13 +35,14 @@ test("title follows house style with item names and count", () => {
   assert.ok(t.length <= 120);
 });
 
-test("post-event title leads with EVENT ENDED", () => {
+test("a post-event title is not flagged as ended", () => {
   const t = buildTitle({
     game: "Rust",
     items: items.slice(0, 1),
     postEvent: true,
   });
-  assert.ok(t.startsWith("[EVENT ENDED] Rust Twitch Drops (1 Item)"));
+  assert.ok(t.startsWith("Rust Twitch Drops (1 Item)"));
+  assert.doesNotMatch(t, /EVENT ENDED/);
 });
 
 test("title never exceeds Gameflip's 120-char limit", () => {
@@ -75,15 +82,101 @@ test("post-event description leads with scarcity and drops the countdown", () =>
   assert.ok(!d.includes("unobtainable"));
 });
 
+// Automatic repricing is only ever allowed to move the auto-farmer's OWN
+// prices. Listings the owner made by hand are their own stock at their own
+// price, and the post-event markup must not touch them even when they sit on a
+// drop set the auto-farmer also uses.
+test("only an explicitly auto listing may be repriced", () => {
+  assert.strictEqual(isAutoOwned({ origin: "auto", price: 2 }), true);
+  assert.strictEqual(isAutoOwned({ origin: "manual", price: 2 }), false);
+});
+
+test("a listing with no origin is treated as the owner's, not repriced", () => {
+  // Rows that predate the field, and anything the migration missed: unknown
+  // ownership must fail closed, or a backfill gap silently reprices real stock.
+  assert.strictEqual(isAutoOwned({ price: 2 }), false);
+  assert.strictEqual(isAutoOwned({ origin: "" }), false);
+  assert.strictEqual(isAutoOwned({ origin: undefined }), false);
+  assert.strictEqual(isAutoOwned(null), false);
+  assert.strictEqual(isAutoOwned(undefined), false);
+});
+
+// autoDeliver is set on hand-made auto-delivery listings too, so it can never
+// stand in for ownership — the whole reason `origin` had to be added.
+test("auto-delivery does not by itself make a listing repriceable", () => {
+  assert.strictEqual(
+    isAutoOwned({ origin: "manual", autoDeliver: true, qtyTarget: 5 }),
+    false,
+  );
+});
+
 test("price anchors on sold prices and undercuts live competition", () => {
   const research = {
     markets: {
-      gameflip: { avgSoldPrice: 4.0, lowest: 3.0 },
+      gameflip: { soldRecent: 5, avgSoldPrice: 4.0, lowest: 3.0 },
       ggsel: { lowest: 5.0 },
       plati: { lowest: 6.0 },
     },
   };
+  // Undercut the $3.00 live Gameflip rival by 5% -> 2.85 -> $2.75, which is
+  // still under the $4.00 buyers actually paid.
   assert.strictEqual(derivePrice(research), 2.75);
+});
+
+// The bug this guards: GGSel and Plati are ruble-denominated marketplaces. On
+// prod, ggsel.lowest was $0.38 and plati.lowest $1.28 (Plati's ~100 RUB floor)
+// while the cheapest live GAMEFLIP rival for the same game was $1.20. Taking
+// Math.min across all three let a ruble floor price a USD listing, undercut it,
+// and hit Gameflip's $0.75 clamp — so Rocket League, with 20 verified sales
+// averaging $7.93, was listed at $0.75.
+test("a cheap ruble-market floor never drags down a Gameflip price", () => {
+  const rocketLeague = {
+    markets: {
+      gameflip: { soldRecent: 20, avgSoldPrice: 7.93, lowest: 1.2 },
+      ggsel: { lowest: 0.38 },
+      plati: { lowest: 1.28 },
+    },
+  };
+  // $1.20 rival -> undercut to $1.14 -> the first quarter strictly below the
+  // rival, so we are actually the cheapest rather than $0.05 above it.
+  assert.strictEqual(derivePrice(rocketLeague), 1.0);
+});
+
+// Rounding to the nearest quarter used to undo the undercut: a $1.20 rival
+// produced $1.14, which round25 lifted to $1.25 — above the listing we meant
+// to beat. Whenever there is live competition we must land strictly under it.
+test("the price always lands strictly below a live rival", () => {
+  for (const rival of [1.2, 1.5, 2.0, 3.1, 4.99]) {
+    const p = derivePrice({
+      markets: { gameflip: { soldRecent: 10, avgSoldPrice: 9, lowest: rival } },
+    });
+    assert.ok(p < rival, `priced ${p} is not below rival ${rival}`);
+    assert.ok(p >= 0.75, `priced ${p} is below the platform floor`);
+  }
+});
+
+// A thin sample can be a multi-account bundle rather than our single-account
+// product: Hunt: Showdown shows $28.20 over 5 sales while its cheapest live
+// listing is $0.75. The anchor must not run away with that.
+test("a thin or outlier sold-price sample never inflates the price", () => {
+  const thin = {
+    markets: { gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0 } },
+  };
+  // 2 sales is below MIN_SOLD_SAMPLES, so the anchor is ignored entirely and
+  // the live $2.00 rival prices it — landing at the quarter below.
+  assert.strictEqual(derivePrice(thin), 1.75);
+
+  const outlier = {
+    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75 } },
+  };
+  // Enough samples, but the live rival is cheaper, so we still undercut it.
+  assert.strictEqual(derivePrice(outlier), 0.75);
+
+  const noRival = {
+    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0 } },
+  };
+  // No competition at all: the anchor stands, but capped at MAX_ANCHOR_USD.
+  assert.strictEqual(derivePrice(noRival), 10);
 });
 
 test("price falls back to cheapest competitor when nothing sold", () => {
@@ -122,9 +215,28 @@ test("stacking unions items across sets without duplicates", () => {
   ]);
 });
 
-test("stacked price sums campaign prices and applies +50%", () => {
-  assert.strictEqual(stackedPrice([2.0, 3.0]), 7.5);
-  assert.strictEqual(stackedPrice([0, 0]), 1.5);
+test("post-event price is +50% on the listing's own price", () => {
+  assert.strictEqual(postEventPrice(1.75), 2.75); // 2.625 -> nearest 0.25
+  assert.strictEqual(postEventPrice(1.5), 2.25);
+  assert.strictEqual(postEventPrice(0.75), 1.25); // 1.125 -> 1.25
+  assert.strictEqual(postEventPrice(0), 1.5); // no base -> $1 x 1.5
+  assert.ok(postEventPrice(0.1) >= 0.75); // never under Gameflip's floor
+});
+
+// The formula this replaced summed every past campaign price for the game and
+// marked THAT up. Because the item union de-duplicates while a sum does not,
+// price grew with campaign count even when the bundle didn't — The Quinfall
+// stacked to one item and priced at $12.50 — and each sibling's already-marked-up
+// price compounded the markup again. Applying it to the listing's own price is
+// bounded by construction: the result is always exactly 1.5x, never a multiple
+// of how many campaigns a game happens to have run.
+test("the markup cannot compound across repeated campaigns", () => {
+  let p = 1.0;
+  for (let i = 0; i < 4; i++) p = postEventPrice(p);
+  // Four ended campaigns: 1.5x each time, not 1.5x a growing sum.
+  assert.ok(p <= 1.0 * Math.pow(1.5, 4) + 0.25, "stays on the 1.5x curve");
+  // And one campaign's markup never depends on its siblings.
+  assert.strictEqual(postEventPrice(2.0), 3.0);
 });
 
 test("hold-back split lists half now (rounded up), holds the rest", () => {
@@ -137,4 +249,239 @@ test("hold-back split lists half now (rounded up), holds the rest", () => {
 test("hold-back split never holds when there is only one account", () => {
   assert.deepStrictEqual(computeSplit(1), { listNow: 1, holdBack: 0 });
   assert.deepStrictEqual(computeSplit(0), { listNow: 0, holdBack: 0 });
+});
+
+/* ------------ placeholder guard: don't build a set from a title ---------- */
+
+test("looksLikeTitlePlaceholder flags the game/campaign title, not real drops", () => {
+  const ctx = {
+    game: "Assassin's Creed Black Flag Resynced",
+    campaignName: "AC Black Flag Resynced",
+  };
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("AC Black Flag Resynced", ctx),
+    true,
+  );
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("assassins creed black flag resynced", ctx),
+    true,
+  );
+  assert.strictEqual(looksLikeTitlePlaceholder("Rustborne Swords", ctx), false);
+  assert.strictEqual(looksLikeTitlePlaceholder("Cheetah Claw Cat", ctx), false);
+  assert.strictEqual(looksLikeTitlePlaceholder("   ", ctx), true);
+});
+
+test("resolveCampaignItems drops the AC placeholder and keeps real drops", () => {
+  const game = "Assassin's Creed Black Flag Resynced";
+  const campaignName = "AC Black Flag Resynced";
+  const placeholderOnly = {
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 0,
+        benefitEdges: [{ benefit: { name: "AC Black Flag Resynced" } }],
+      },
+    ],
+  };
+  const r1 = resolveCampaignItems(placeholderOnly, { game, campaignName });
+  assert.strictEqual(r1.items.length, 0);
+  assert.strictEqual(r1.rawBenefits, 1);
+
+  const real = {
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [
+          { benefit: { name: "Rustborne Swords", game: { name: game } } },
+          { benefit: { name: "Cheetah Claw Cat", game: { name: game } } },
+          { benefit: { name: "Rustborne Swords", game: { name: game } } },
+        ],
+      },
+    ],
+  };
+  const r2 = resolveCampaignItems(real, { game, campaignName });
+  assert.strictEqual(r2.items.length, 2);
+  assert.deepStrictEqual(r2.items.map((i) => i.name).sort(), [
+    "Cheetah Claw Cat",
+    "Rustborne Swords",
+  ]);
+});
+
+/* --------------- holdings gate: only fully-holding accounts -------------- */
+
+const NEED = new Map([
+  ["poe nautical|poe", 1],
+  ["poe allflame|poe", 1],
+]);
+const ASSIGNED = new Set(["goodacct", "notmine", "nopass", "shortcopies"]);
+
+function accMap(entries) {
+  return new Map(
+    entries.map((e) => [e.id, { login: e.login, password: e.password }]),
+  );
+}
+
+test("verified holder with full bundle + password + assigned is delivered", () => {
+  const rows = [
+    {
+      _id: "1",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "1", login: "goodacct", password: "pw" }]),
+    {
+      needByKey: NEED,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].login, "goodacct");
+  assert.strictEqual(out[0].accountId, "1");
+});
+
+test("account NOT in the task's assigned set is rejected (wrong-account bucket)", () => {
+  const rows = [
+    {
+      _id: "2",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "2", login: "stranger", password: "pw" }]),
+    {
+      needByKey: NEED,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 0);
+});
+
+test("account without a usable password is rejected", () => {
+  const rows = [
+    {
+      _id: "3",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "3", login: "nopass", password: "" }]),
+    {
+      needByKey: NEED,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 0);
+});
+
+test("insufficient copies of a promised item is rejected (partial bucket)", () => {
+  const need2 = new Map([
+    ["poe nautical|poe", 2],
+    ["poe allflame|poe", 1],
+  ]);
+  const rows = [
+    {
+      _id: "4",
+      items: [
+        { k: "poe nautical|poe", count: 1 },
+        { k: "poe allflame|poe", count: 1 },
+      ],
+    },
+  ];
+  const out = filterVerifiedHolders(
+    rows,
+    accMap([{ id: "4", login: "shortcopies", password: "pw" }]),
+    {
+      needByKey: need2,
+      assignedLower: ASSIGNED,
+    },
+  );
+  assert.strictEqual(out.length, 0);
+});
+
+test("empty rows (nobody holds the full bundle) => list nothing", () => {
+  const out = filterVerifiedHolders([], accMap([]), {
+    needByKey: NEED,
+    assignedLower: ASSIGNED,
+  });
+  assert.deepStrictEqual(out, []);
+});
+
+/* ------ reserve→publish rollback: release stranded reservations on fail ---- */
+
+test("withReservationRollback returns the publish result on success (no release)", async () => {
+  let released = false;
+  const set = { _id: "set1" };
+  const reserved = [{ accountId: "a1" }];
+  const r = await withReservationRollback(
+    reserved,
+    set,
+    async () => ({ externalId: "X", ok: true }),
+    {
+      release: async () => {
+        released = true;
+      },
+    },
+  );
+  assert.deepStrictEqual(r, { externalId: "X", ok: true });
+  assert.strictEqual(released, false, "must not release when publish succeeds");
+});
+
+test("withReservationRollback releases the reservation when publish throws", async () => {
+  const calls = [];
+  const set = { _id: "set2" };
+  const reserved = [{ accountId: "a1" }, { accountId: "a2" }];
+  await assert.rejects(
+    () =>
+      withReservationRollback(
+        reserved,
+        set,
+        async () => {
+          throw new Error("gameflip 429");
+        },
+        {
+          release: async (accts, s) => {
+            calls.push({ accts, setId: s._id });
+          },
+        },
+      ),
+    /gameflip 429/,
+  );
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].setId, "set2");
+  assert.deepStrictEqual(
+    calls[0].accts.map((a) => a.accountId),
+    ["a1", "a2"],
+  );
+});
+
+test("a rollback failure never masks the original publish error", async () => {
+  const set = { _id: "set3" };
+  await assert.rejects(
+    () =>
+      withReservationRollback(
+        [{ accountId: "a1" }],
+        set,
+        async () => {
+          throw new Error("real: digiseller timeout");
+        },
+        {
+          release: async () => {
+            throw new Error("rollback blew up");
+          },
+        },
+      ),
+    /real: digiseller timeout/, // the publish error, not the rollback error
+  );
 });

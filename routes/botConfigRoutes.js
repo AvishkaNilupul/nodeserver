@@ -443,92 +443,117 @@ router.get("/bot-configs/hosts", requireSuperadmin, (req, res) => {
 // the last-known snapshot so its bots still appear (so the data is never lost
 // even if the Pi is down). Always 200: per-host errors are reported inline.
 router.get("/bot-configs/all", requireSuperadmin, async (req, res) => {
-  const out = [];
   const rented = await getRentedConfigSet();
   let rentedCount = 0;
-  for (const meta of hosts.listHosts()) {
-    const host = hosts.resolveHost(meta.id);
-    const entry = {
-      id: meta.id,
-      label: meta.label,
-      transport: meta.transport,
-      online: true,
-      bots: [],
-    };
-    let states = {};
-    try {
-      states = await hosts.dockerPs(host);
-    } catch (e) {
-      if (e.unreachable) entry.online = false;
-    }
-    let files = null;
-    try {
-      files = (await hosts.readdir(host)).filter((f) => FILE_RE.test(f)).sort();
-    } catch {
-      entry.online = false;
-    }
+  // Hosts are independent machines, so ask them all at once. Serially, one
+  // slow or dead host delayed every host behind it: with the phone offline
+  // this endpoint took 166s, which is most of why the All-bots tab hung.
+  const out = await Promise.all(
+    hosts.listHosts().map(async (meta) => {
+      const host = hosts.resolveHost(meta.id);
+      const entry = {
+        id: meta.id,
+        label: meta.label,
+        transport: meta.transport,
+        online: true,
+        bots: [],
+      };
+      let states = {};
+      try {
+        states = await hosts.dockerPs(host);
+      } catch (e) {
+        if (e.unreachable) entry.online = false;
+      }
+      let files = null;
+      // A host that just refused a connection will refuse this one too, and
+      // readdir retries an unreachable host three times at a 20s connect
+      // timeout — 63s spent re-proving what dockerPs already established.
+      if (entry.online) {
+        try {
+          files = (await hosts.readdir(host))
+            .filter((f) => FILE_RE.test(f))
+            .sort();
+        } catch {
+          entry.online = false;
+        }
+      }
 
-    if (files) {
-      for (const file of files) {
-        // Renter bots live in the Renting section, not the operator's Bots page.
-        if (rented.has(meta.id + "|" + file)) {
-          rentedCount++;
-          continue;
-        }
-        try {
-          const raw = await hosts.readFile(host, file);
-          // Keep a server-side copy so an offline host (or emergency move)
-          // still has this bot's accounts/tokens.
-          hosts.saveSnapshot(meta.id, file, raw).catch(() => {});
-          const data = JSON.parse(raw);
-          const sum = summarize(file, data);
-          const st = states[sum.container];
-          const running = !!(st && /^running/i.test(st.state || ""));
-          let farming = null;
-          if (running) {
-            try {
-              farming = await hosts.farmingStatus(host, sum.container);
-            } catch {
-              /* best effort */
-            }
+      if (files) {
+        const mine = files.filter((f) => {
+          // Renter bots live in the Renting section, not the operator's page.
+          if (rented.has(meta.id + "|" + f)) {
+            rentedCount++;
+            return false;
           }
+          return true;
+        });
+        // Batched read — one round trip for the host instead of one per config.
+        // See utils/botHosts.readFiles for why that matters on remote hosts.
+        const raws = await hosts.readFiles(host, mine).catch(() => ({}));
+        // Each running bot still costs its own farmingStatus round trip, so ask
+        // for them all at once rather than one after another.
+        const rows = [];
+        for (const file of mine) {
+          const r = raws[file];
+          if (!r || !r.ok) continue; // skip unreadable file
+          try {
+            // Keep a server-side copy so an offline host (or emergency move)
+            // still has this bot's accounts/tokens.
+            hosts.saveSnapshot(meta.id, file, r.text).catch(() => {});
+            const sum = summarize(file, JSON.parse(r.text));
+            const st = states[sum.container];
+            rows.push({
+              sum,
+              st,
+              running: !!(st && /^running/i.test(st.state || "")),
+            });
+          } catch {
+            /* skip unparseable file */
+          }
+        }
+        const farmings = await Promise.all(
+          rows.map((x) =>
+            x.running
+              ? hosts.farmingStatus(host, x.sum.container).catch(() => null)
+              : Promise.resolve(null),
+          ),
+        );
+        rows.forEach((x, i) => {
           entry.bots.push({
-            ...sum,
+            ...x.sum,
             source: "live",
-            state: st ? st.state : null,
-            status: st ? st.status : null,
-            running,
-            farming,
+            state: x.st ? x.st.state : null,
+            status: x.st ? x.st.status : null,
+            running: x.running,
+            farming: farmings[i],
           });
-        } catch {
-          /* skip unreadable file */
+        });
+      } else {
+        // Offline: reconstruct from the last-known snapshots.
+        const snaps = (await hosts.listSnapshot(meta.id).catch(() => []))
+          .filter((f) => FILE_RE.test(f))
+          .sort();
+        for (const file of snaps) {
+          if (rented.has(meta.id + "|" + file)) {
+            rentedCount++;
+            continue;
+          }
+          try {
+            const data = JSON.parse(await hosts.readSnapshot(meta.id, file));
+            entry.bots.push({
+              ...summarize(file, data),
+              source: "snapshot",
+              running: false,
+              farming: null,
+            });
+          } catch {
+            /* skip */
+          }
         }
       }
-    } else {
-      // Offline: reconstruct from the last-known snapshots.
-      const snaps = (await hosts.listSnapshot(meta.id).catch(() => []))
-        .filter((f) => FILE_RE.test(f))
-        .sort();
-      for (const file of snaps) {
-        if (rented.has(meta.id + "|" + file)) {
-          rentedCount++;
-          continue;
-        }
-        try {
-          const data = JSON.parse(await hosts.readSnapshot(meta.id, file));
-          entry.bots.push({
-            ...summarize(file, data),
-            source: "snapshot",
-            running: false,
-            farming: null,
-          });
-        } catch {
-          /* skip */
-        }
-      }
-    }
-    out.push(entry);
-  }
+      return entry;
+    }),
+  );
   res.json({ success: true, hosts: out, rentedCount });
 });
 
@@ -563,43 +588,58 @@ router.get("/bot-configs/rented", requireSuperadmin, async (req, res) => {
       if (e.unreachable) entry.online = false;
     }
     let files = null;
-    try {
-      files = (await hosts.readdir(host)).filter((f) => FILE_RE.test(f)).sort();
-    } catch {
-      entry.online = false;
+    // Same fast-fail as /bot-configs/all: don't re-prove an unreachable host.
+    if (entry.online) {
+      try {
+        files = (await hosts.readdir(host))
+          .filter((f) => FILE_RE.test(f))
+          .sort();
+      } catch {
+        entry.online = false;
+      }
     }
 
     if (files) {
-      for (const file of files) {
-        if (!rented.has(meta.id + "|" + file)) continue; // ONLY rented
+      const mine = files.filter((f) => rented.has(meta.id + "|" + f)); // ONLY rented
+      // Same batching as /bot-configs/all — one read for the host, then every
+      // running bot's farmingStatus asked for at once.
+      const raws = await hosts.readFiles(host, mine).catch(() => ({}));
+      const rows = [];
+      for (const file of mine) {
+        const r = raws[file];
+        if (!r || !r.ok) continue; // skip unreadable file
         try {
-          const raw = await hosts.readFile(host, file);
-          hosts.saveSnapshot(meta.id, file, raw).catch(() => {});
-          const data = JSON.parse(raw);
-          const sum = summarize(file, data);
+          hosts.saveSnapshot(meta.id, file, r.text).catch(() => {});
+          const sum = summarize(file, JSON.parse(r.text));
           const st = states[sum.container];
-          const running = !!(st && /^running/i.test(st.state || ""));
-          let farming = null;
-          if (running) {
-            try {
-              farming = await hosts.farmingStatus(host, sum.container);
-            } catch {
-              /* best effort */
-            }
-          }
-          entry.bots.push({
-            ...sum,
-            source: "live",
-            state: st ? st.state : null,
-            status: st ? st.status : null,
-            running,
-            farming,
-            rentedBy: byKey.get(meta.id + "|" + file) || null,
+          rows.push({
+            file,
+            sum,
+            st,
+            running: !!(st && /^running/i.test(st.state || "")),
           });
         } catch {
-          /* skip unreadable file */
+          /* skip unparseable file */
         }
       }
+      const farmings = await Promise.all(
+        rows.map((x) =>
+          x.running
+            ? hosts.farmingStatus(host, x.sum.container).catch(() => null)
+            : Promise.resolve(null),
+        ),
+      );
+      rows.forEach((x, i) => {
+        entry.bots.push({
+          ...x.sum,
+          source: "live",
+          state: x.st ? x.st.state : null,
+          status: x.st ? x.st.status : null,
+          running: x.running,
+          farming: farmings[i],
+          rentedBy: byKey.get(meta.id + "|" + x.file) || null,
+        });
+      });
     } else {
       const snaps = (await hosts.listSnapshot(meta.id).catch(() => []))
         .filter((f) => FILE_RE.test(f))
@@ -655,11 +695,19 @@ router.get("/bot-configs", requireSuperadmin, async (req, res) => {
     const configs = files
       .filter((f) => FILE_RE.test(f) && !rented.has(host.id + "|" + f))
       .sort();
+    // One batched read instead of a `cat` per file. On the Pi each round trip
+    // costs ~2s, so reading its 27 configs one at a time took ~110s and left
+    // the Bots page on "Loading…" for minutes; batched it is a few seconds.
+    // `data` rides along so the page does not then re-fetch every file
+    // individually — that second pass was the other half of the wait.
+    const raw = await hosts.readFiles(host, configs);
     const out = [];
     for (const file of configs) {
+      const r = raw[file];
       try {
-        const raw = await hosts.readFile(host, file);
-        out.push({ ...summarize(file, JSON.parse(raw)), ok: true });
+        if (!r || !r.ok) throw new Error((r && r.error) || "read failed");
+        const data = JSON.parse(r.text);
+        out.push({ ...summarize(file, data), ok: true, data });
       } catch (e) {
         out.push({
           file,
@@ -1681,6 +1729,38 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
   return { added: accounts.length, total };
 }
 
+// Pull ONE account out of a config, matched by ClientSecret or (case-insensitive)
+// Login. Returns how many entries were removed (0 when the config is missing or
+// the account isn't in it). Used when an account is reassigned — e.g. moved onto
+// a renter's bot — so it never farms in two places at once.
+async function removeAccountFromConfig(host, file, { clientSecret, login }) {
+  if (!validFile(file)) throw new Error("Invalid config file");
+  let data;
+  try {
+    data = JSON.parse(await hosts.readFile(host, file));
+  } catch (e) {
+    if (e.code === "ENOENT") return 0;
+    throw e;
+  }
+  const users =
+    data && data.TwitchSettings && Array.isArray(data.TwitchSettings.TwitchUsers)
+      ? data.TwitchSettings.TwitchUsers
+      : [];
+  const loginLower = String(login || "").toLowerCase();
+  const kept = users.filter((u) => {
+    if (!u || typeof u !== "object") return true;
+    if (clientSecret && u.ClientSecret === clientSecret) return false;
+    if (loginLower && String(u.Login || "").toLowerCase() === loginLower)
+      return false;
+    return true;
+  });
+  const removed = users.length - kept.length;
+  if (!removed) return 0;
+  data.TwitchSettings.TwitchUsers = kept;
+  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+  return removed;
+}
+
 // How many accounts a config currently holds (for renter quota accounting).
 // Returns 0 for a missing/unreadable/absent config rather than throwing.
 async function countConfigAccounts(host, file) {
@@ -1925,3 +2005,4 @@ module.exports.setAccountGames = setAccountGames;
 module.exports.stopConfigContainer = stopConfigContainer;
 module.exports.startConfigContainer = startConfigContainer;
 module.exports.restartConfigContainer = restartConfigContainer;
+module.exports.removeAccountFromConfig = removeAccountFromConfig;

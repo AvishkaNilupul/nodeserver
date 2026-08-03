@@ -6,20 +6,25 @@
 // input, and renter-submitted credentials are only ever revealed to a superadmin.
 const express = require("express");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const Renter = require("../models/Renter");
 const RenterSubmission = require("../models/RenterSubmission");
 const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
+const BotAccount = require("../models/BotAccount");
+const AvailableAccount = require("../models/AvailableAccount");
+const renterDropScanner = require("../utils/renterDropScanner");
 const {
   createRenter,
   setPassword,
   sanitizeRenter,
   revealPassword,
 } = require("../utils/renters");
+const MarketplaceListing = require("../models/MarketplaceListing");
 const hosts = require("../utils/botHosts");
-const { decrypt } = require("../utils/secretBox");
+const { decrypt, encrypt } = require("../utils/secretBox");
 const {
   startConfigContainer,
   stopConfigContainer,
@@ -31,6 +36,7 @@ const {
   addRenterAccountsToConfig,
   provisionEmptyConfig,
   getConfigGames,
+  removeAccountFromConfig,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
@@ -137,7 +143,19 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     const [accAgg, dropAgg] = await Promise.all([
       RenterAccount.aggregate([
         { $match: { renter: { $in: ids } } },
-        { $group: { _id: "$renter", n: { $sum: 1 } } },
+        {
+          $group: {
+            _id: "$renter",
+            n: { $sum: 1 },
+            // Token health per renter, so a dead token shows up in the
+            // overview instead of silently farming nothing.
+            bad: {
+              $sum: {
+                $cond: [{ $eq: ["$lastScanStatus", "token_invalid"] }, 1, 0],
+              },
+            },
+          },
+        },
       ]),
       RenterDrop.aggregate([
         { $match: { renter: { $in: ids } } },
@@ -145,6 +163,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
       ]),
     ]);
     const accMap = new Map(accAgg.map((a) => [String(a._id), a.n]));
+    const badMap = new Map(accAgg.map((a) => [String(a._id), a.bad || 0]));
     const dropMap = new Map(dropAgg.map((a) => [String(a._id), a.n]));
 
     // One dockerPs per host, reused across every bot on that host.
@@ -187,6 +206,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         online,
         running,
         accounts: accMap.get(String(r._id)) || 0,
+        tokenIssues: badMap.get(String(r._id)) || 0,
         drops: dropMap.get(String(r._id)) || 0,
       });
     }
@@ -297,10 +317,39 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(100)
       .lean();
+    // The renter's account roster with scan health, so the operator can spot a
+    // dead token from the Manage panel (and rescan it) without SSH. Never
+    // includes clientSecret.
+    const accounts = await RenterAccount.find(
+      { renter: r._id },
+      {
+        login: 1,
+        lastScanStatus: 1,
+        lastScanAt: 1,
+        lastScanError: 1,
+        dropCount: 1,
+        farmUntil: 1,
+        farmEndedAt: 1,
+        enabled: 1,
+      },
+    )
+      .sort({ login: 1 })
+      .lean();
     res.json({
       success: true,
       renter: view,
       bot,
+      accounts: accounts.map((a) => ({
+        id: String(a._id),
+        login: a.login || "",
+        status: a.lastScanStatus || "pending",
+        error: a.lastScanError || "",
+        dropCount: a.dropCount || 0,
+        lastScanAt: a.lastScanAt || null,
+        farmUntil: a.farmUntil || null,
+        farmEndedAt: a.farmEndedAt || null,
+        enabled: a.enabled !== false,
+      })),
       submissions: submissions.map((s) => ({
         id: String(s._id),
         status: s.status,
@@ -339,8 +388,14 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       r.maxAccounts = Math.max(0, Math.floor(Number(b.maxAccounts) || 0));
     if (b.accessStart !== undefined)
       r.accessStart = b.accessStart ? new Date(b.accessStart) : null;
-    if (b.accessEnd !== undefined)
+    if (b.accessEnd !== undefined) {
       r.accessEnd = b.accessEnd ? new Date(b.accessEnd) : null;
+      // A lease that now ends in the future (or never) invalidates the "expiry
+      // sweep already stopped this bot" stamp — without this, the sweep (which
+      // filters on botStoppedAt: null) would never stop the bot when the
+      // extended lease lapses.
+      if (!r.accessEnd || r.accessEnd > new Date()) r.botStoppedAt = null;
+    }
     await r.save();
     res.json({ success: true, renter: sanitizeRenter(r) });
   } catch (err) {
@@ -507,6 +562,42 @@ router.get("/renters/:id/bot", requireSuperadmin, async (req, res) => {
   }
 });
 
+// LIVE LOGS for a renter's bot — the same docker-logs tail the operator's Bots
+// page offers (/bot-configs/logs/:file), but the container is always derived
+// from the renter's own record instead of a client-supplied file, so this can
+// never be pointed at someone else's bot. The frontend polls it.
+router.get("/renters/:id/bot/logs", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Bad renter id" });
+    }
+    const r = await Renter.findById(req.params.id);
+    if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    if (!r.botFile) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Renter has no bot assigned" });
+    }
+    const host = hosts.resolveHost(r.botHost);
+    if (!host) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Renter's host is unknown" });
+    }
+    const container = containerForFile(r.botFile);
+    const logs = await hosts.dockerLogs(host, container, { tail: req.query.tail });
+    res.json({ success: true, container, logs });
+  } catch (e) {
+    res.status(e.unreachable ? 502 : 500).json({
+      success: false,
+      offline: !!e.unreachable,
+      message: e.unreachable
+        ? "The bot host is offline right now."
+        : e.message || "Could not read the logs.",
+    });
+  }
+});
+
 // Start / stop / restart a renter's bot (operator). Target is always the
 // renter's own assigned config — never anything from the request body.
 router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
@@ -574,6 +665,532 @@ router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// ------------------------------------------------------------------
+// Renter drop scanner — operator visibility + manual rescan
+// ------------------------------------------------------------------
+
+// Scanner progress (counts, current account, errors) for the Renting page.
+router.get("/renter-scan/progress", requireSuperadmin, async (req, res) => {
+  try {
+    res.json({ success: true, progress: await renterDropScanner.getProgress() });
+  } catch (err) {
+    console.error("renter-scan progress error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Force-scan ONE renter account now — the fix for a stale "token_invalid"
+// badge (transient GQL failures look like dead tokens; a fresh scan clears
+// them) and the quickest way to confirm a replacement token works.
+router.post(
+  "/renter-accounts/:id/scan",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad account id" });
+      }
+      const r = await renterDropScanner.scanAccountNow(req.params.id);
+      if (!r.ok) {
+        return res
+          .status(400)
+          .json({ success: false, message: r.error || "Scan failed" });
+      }
+      res.json({ success: true, newDrops: r.newDrops || 0, total: r.total || 0 });
+    } catch (err) {
+      console.error("renter account scan error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Where a renter account's Twitch password can be found. The account itself
+// only ever stores the auth token (RenterAccount has no password field), so the
+// login/password is looked up by username across the three places it can live:
+// the renter's own submission, the account pool, and — for an account the
+// operator moved onto the rental from their own fleet — the BotAccount record.
+async function resolveAccountCreds(acc) {
+  const login = String(acc.login || "");
+  const lower = login.toLowerCase();
+  const out = { password: "", email: "", source: "" };
+  if (!login) return out;
+
+  // 1. The renter submitted it themselves — their batch holds the credentials.
+  const subs = await RenterSubmission.find(
+    { renter: acc.renter, accountsEnc: { $gt: "" } },
+    { accountsEnc: 1 },
+  )
+    .sort({ createdAt: -1 })
+    .lean();
+  for (const s of subs) {
+    let parsed;
+    try {
+      parsed = JSON.parse(decrypt(s.accountsEnc) || "[]");
+    } catch {
+      continue;
+    }
+    const hit = (parsed || []).find(
+      (a) => a && String(a.username || "").toLowerCase() === lower,
+    );
+    if (hit && hit.password) {
+      out.password = hit.password;
+      out.email = hit.email || "";
+      out.source = "renter submission";
+      return out;
+    }
+  }
+
+  // 2. The account pool (where an operator-supplied account's credentials are
+  //    parked once it is handed to a renter).
+  const pool = await AvailableAccount.findOne({ usernameLower: lower }).lean();
+  if (pool && pool.password) {
+    const pw = decrypt(pool.password);
+    if (pw) {
+      out.password = pw;
+      out.email = pool.email ? decrypt(pool.email) || "" : "";
+      out.source = "account pool";
+      return out;
+    }
+  }
+
+  // 3. The operator's own record, for an account still tracked there.
+  const bot = await BotAccount.findOne({ login }).lean();
+  if (bot && bot.credPassword) {
+    const pw = decrypt(bot.credPassword);
+    if (pw) {
+      out.password = pw;
+      out.email = bot.credEmail ? decrypt(bot.credEmail) || "" : "";
+      out.source = "bot account";
+      return out;
+    }
+  }
+  return out;
+}
+
+// REVEAL one renter account's live credentials — Twitch login, the auth token
+// the bot runs on (ClientSecret), and the password if it is stored anywhere.
+// Superadmin only, and never returned by the roster endpoint: the renter's own
+// /renter/accounts deliberately exposes neither token nor password.
+router.get("/renter-accounts/:id/creds", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Bad account id" });
+    }
+    const acc = await RenterAccount.findById(req.params.id).lean();
+    if (!acc)
+      return res.status(404).json({ success: false, message: "Not found" });
+    const creds = await resolveAccountCreds(acc);
+    res.json({
+      success: true,
+      account: {
+        login: acc.login || "",
+        token: acc.clientSecret || "",
+        password: creds.password,
+        email: creds.email,
+        source: creds.source,
+        host: acc.host || "",
+        configFile: acc.configFile || "",
+        status: acc.lastScanStatus || "pending",
+      },
+    });
+  } catch (err) {
+    console.error("renter account creds error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// FULL ACCOUNT ROSTER across renters, with the credentials inline — the
+// renting system's own account list. Renter accounts are deliberately absent
+// from the Drops Archive (separate tenant inventory), so this is the only
+// place the operator can see username + password + client token together.
+// Superadmin only; ?renter=<id> narrows it to one renter.
+router.get("/renter-accounts", requireSuperadmin, async (req, res) => {
+  try {
+    const q = {};
+    const rid = req.query.renter;
+    if (rid && rid !== "all" && mongoose.isValidObjectId(rid)) {
+      q.renter = new mongoose.Types.ObjectId(rid);
+    }
+    const accs = await RenterAccount.find(q).sort({ login: 1 }).limit(500).lean();
+    const renters = await Renter.find(
+      { _id: { $in: [...new Set(accs.map((a) => String(a.renter)))] } },
+      { username: 1 },
+    ).lean();
+    const rmap = new Map(renters.map((r) => [String(r._id), r.username]));
+    const out = [];
+    for (const a of accs) {
+      // Credentials come from wherever this account's password lives (renter
+      // submission / pool / operator record) — same resolver the single-account
+      // reveal uses.
+      const creds = await resolveAccountCreds(a);
+      out.push({
+        id: String(a._id),
+        renterId: String(a.renter),
+        renter: rmap.get(String(a.renter)) || "",
+        login: a.login || "",
+        password: creds.password,
+        email: creds.email,
+        credSource: creds.source,
+        token: a.clientSecret || "",
+        host: a.host || "",
+        configFile: a.configFile || "",
+        enabled: a.enabled !== false,
+        status: a.lastScanStatus || "pending",
+        dropCount: a.dropCount || 0,
+        farmUntil: a.farmUntil || null,
+        farmEndedAt: a.farmEndedAt || null,
+        addedAt: a.createdAt || null,
+      });
+    }
+    res.json({ success: true, accounts: out });
+  } catch (err) {
+    console.error("renter-accounts list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// SET / CLEAR one account's farming window after the fact ("give it 15 more
+// days", "make it open-ended"). Days are counted from now; days = 0 clears it.
+router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Bad account id" });
+    }
+    const body = req.body || {};
+    const days = Math.floor(Number(body.days));
+    let farmUntil = null;
+    if (body.farmUntil) {
+      farmUntil = new Date(body.farmUntil);
+      if (isNaN(farmUntil.getTime())) {
+        return res.status(400).json({ success: false, message: "Bad date" });
+      }
+    } else if (Number.isFinite(days) && days > 0) {
+      farmUntil = new Date(Date.now() + days * 86400000);
+    }
+    const acc = await RenterAccount.findByIdAndUpdate(
+      req.params.id,
+      // Clearing farmEndedAt re-arms the sweep for the new window, the same way
+      // extending a renter's lease clears botStoppedAt.
+      { $set: { farmUntil, farmEndedAt: null } },
+      { new: true },
+    ).lean();
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true, farmUntil: acc.farmUntil || null });
+  } catch (err) {
+    console.error("renter account farm error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// MANUAL ADD — operator types one account (username + password + client token)
+// straight into a renter's bot. If that Twitch account is already farming
+// anywhere on the server — an operator bot config or another renter's bot — it
+// is pulled OUT of there first and moved onto this renter's bot, so the same
+// account never farms in two places. Typical case: someone buys an account and
+// then rents farming for it. Accounts attached to an ACTIVE marketplace listing
+// are refused: they are promised to a future buyer.
+router.post(
+  "/renters/:id/accounts/manual",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const username = String(body.username || "").trim();
+      const password = String(body.password || "");
+      const token = String(body.token || body.clientSecret || "").trim();
+      // Optional per-account farming window ("farm this one for 15 days").
+      const farmDays = Math.floor(Number(body.farmDays));
+      const farmUntil = body.farmUntil
+        ? new Date(body.farmUntil)
+        : Number.isFinite(farmDays) && farmDays > 0
+          ? new Date(Date.now() + farmDays * 86400000)
+          : null;
+      if (farmUntil && isNaN(farmUntil.getTime())) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad farm end date" });
+      }
+      if (!username || !token) {
+        return res.status(400).json({
+          success: false,
+          message: "Username and client token are required",
+        });
+      }
+      const renter = await Renter.findById(req.params.id);
+      if (!renter)
+        return res.status(404).json({ success: false, message: "Not found" });
+      if (!renter.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter has no bot assigned" });
+      }
+      const host = hosts.resolveHost(renter.botHost);
+      if (!host) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter's host is unknown" });
+      }
+      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      if (used + 1 > (Number(renter.maxAccounts) || 0)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "That would exceed the renter's limit (" +
+            renter.maxAccounts +
+            "); their inventory already has " +
+            used +
+            ".",
+        });
+      }
+
+      const lower = username.toLowerCase();
+      const loginRe = new RegExp(
+        "^" + lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+        "i",
+      );
+
+      // Buyer safety: never hand a renter an account that a live listing has
+      // promised to deliver.
+      const listed = await MarketplaceListing.findOne({
+        status: "active",
+        accountLogin: { $regex: "(^|[,\\s])" + lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([,\\s]|$)", $options: "i" },
+      }).lean();
+      if (listed) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This account is attached to an active marketplace listing (" +
+            listed.marketplace +
+            " " +
+            (listed.externalId || "") +
+            ") — delist or replace it there first.",
+        });
+      }
+
+      // Already on THIS renter's inventory? Nothing to move.
+      const mine = await RenterAccount.findOne({
+        renter: renter._id,
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      }).lean();
+      if (mine) {
+        return res.status(409).json({
+          success: false,
+          message: "That account is already in this renter's inventory",
+        });
+      }
+
+      const notes = [];
+
+      // Pull it out of an operator bot, if it lives on one.
+      const botHit = await BotAccount.findOne({
+        configFile: { $nin: ["", null] },
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      });
+      if (botHit) {
+        const srcHost = hosts.resolveHost(botHit.host);
+        if (!srcHost) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Account is assigned to " +
+              botHit.configFile +
+              " on unknown host '" +
+              botHit.host +
+              "' — free it manually first.",
+          });
+        }
+        let removed = 0;
+        try {
+          removed = await removeAccountFromConfig(srcHost, botHit.configFile, {
+            clientSecret: botHit.clientSecret,
+            login: botHit.login || username,
+          });
+        } catch (e) {
+          return res.status(e.unreachable ? 502 : 500).json({
+            success: false,
+            offline: !!e.unreachable,
+            message:
+              "Could not remove the account from " +
+              botHit.configFile +
+              " on " +
+              srcHost.label +
+              ": " +
+              (e.message || e),
+          });
+        }
+        if (removed) {
+          // Best effort: bounce the source bot so it stops farming the account.
+          try {
+            await restartConfigContainer(srcHost, botHit.configFile);
+          } catch {
+            notes.push(
+              "Removed from " +
+                botHit.configFile +
+                " on " +
+                srcHost.label +
+                ", but that bot could not be restarted — restart it so the change takes effect.",
+            );
+          }
+        }
+        botHit.configFile = "";
+        botHit.container = "";
+        botHit.enabled = false;
+        await botHit.save();
+        notes.push(
+          "Moved off operator bot " +
+            (botHit.login ? botHit.login + " · " : "") +
+            (removed ? "" : "(config entry was already gone) ") +
+            "on " +
+            srcHost.label +
+            ".",
+        );
+      }
+
+      // Pull it off ANOTHER renter's bot, if it lives there.
+      const otherRenterAcc = await RenterAccount.findOne({
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      });
+      if (otherRenterAcc) {
+        if (otherRenterAcc.configFile) {
+          const srcHost = hosts.resolveHost(otherRenterAcc.host);
+          if (srcHost) {
+            try {
+              const removed = await removeAccountFromConfig(
+                srcHost,
+                otherRenterAcc.configFile,
+                {
+                  clientSecret: otherRenterAcc.clientSecret,
+                  login: otherRenterAcc.login || username,
+                },
+              );
+              if (removed) {
+                try {
+                  await restartConfigContainer(srcHost, otherRenterAcc.configFile);
+                } catch {
+                  notes.push(
+                    "Removed from the other renter's bot, but it could not be restarted — restart it so the change takes effect.",
+                  );
+                }
+              }
+            } catch (e) {
+              return res.status(e.unreachable ? 502 : 500).json({
+                success: false,
+                offline: !!e.unreachable,
+                message:
+                  "Could not remove the account from another renter's bot (" +
+                  otherRenterAcc.configFile +
+                  "): " +
+                  (e.message || e),
+              });
+            }
+          }
+        }
+        await RenterAccount.deleteOne({ _id: otherRenterAcc._id });
+        notes.push("Moved off another renter's bot.");
+      }
+
+      // Park the credentials in the account pool so the Creds reveal can always
+      // find the password later, and mark it claimed so no new bot grabs it.
+      const poolSet = {
+        username,
+        clientSecret: token,
+        status: "claimed",
+        claimedAt: new Date(),
+        claimedNote: "rented to " + renter.username,
+      };
+      if (password) {
+        poolSet.password = encrypt(password);
+        poolSet.hasPassword = true;
+      }
+      await AvailableAccount.updateOne(
+        { usernameLower: lower },
+        { $set: poolSet, $setOnInsert: { usernameLower: lower } },
+        { upsert: true },
+      ).catch(() => {});
+
+      // Finally: write it into the renter's bot config. Reuse the Twitch user
+      // id and unique id already known for this account: TwitchDropsBot needs
+      // the Id to resolve time-based drops, and an account deployed without one
+      // throws instead of watching.
+      const poolRow = await AvailableAccount.findOne({
+        usernameLower: lower,
+      }).lean();
+      const twitchId = String(
+        (botHit && botHit.twitchId) ||
+          (otherRenterAcc && otherRenterAcc.twitchId) ||
+          (poolRow && poolRow.twitchId) ||
+          "",
+      ).trim();
+      const uniqueId = String(
+        (botHit && botHit.uniqueId) ||
+          (otherRenterAcc && otherRenterAcc.uniqueId) ||
+          (poolRow && poolRow.uniqueId) ||
+          "",
+      ).trim();
+      const games = await getConfigGames(host, renter.botFile);
+      const acct = {
+        ClientSecret: token,
+        UniqueId: uniqueId || crypto.randomBytes(16).toString("hex"),
+        Login: username,
+        Id: twitchId,
+        Enabled: true,
+        FavouriteGames: games.slice(),
+      };
+      try {
+        await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+      } catch (e) {
+        return res.status(e.unreachable ? 502 : 500).json({
+          success: false,
+          offline: !!e.unreachable,
+          message:
+            "Could not write the account to the renter's bot: " +
+            (e.message || e),
+        });
+      }
+
+      // Restart the renter's bot so it picks the new account up (best effort —
+      // a stopped bot stays stopped until the operator starts it).
+      let restarted = false;
+      try {
+        const container = containerForFile(renter.botFile);
+        const states = await hosts.dockerPs(host);
+        const st = container && states[container];
+        if (st && st.state === "running") {
+          await restartConfigContainer(host, renter.botFile);
+          restarted = true;
+        }
+      } catch {
+        notes.push("Added, but the renter's bot could not be restarted.");
+      }
+
+      // Stamp the per-account lease on the row the config writer just created.
+      if (farmUntil) {
+        await RenterAccount.updateOne(
+          { renter: renter._id, clientSecret: token },
+          { $set: { farmUntil, farmEndedAt: null } },
+        ).catch(() => {});
+        notes.push(
+          "Farms until " + farmUntil.toISOString().slice(0, 10) + ".",
+        );
+      }
+
+      notes.unshift("Added " + username + " to " + renter.botFile + ".");
+      if (restarted) notes.push("Bot restarting.");
+      res.json({
+        success: true,
+        moved: !!(botHit || otherRenterAcc),
+        restarted,
+        note: notes.join(" "),
+      });
+    } catch (err) {
+      console.error("renter manual add error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
 
 // ------------------------------------------------------------------
 // Submission review queue
@@ -734,7 +1351,10 @@ router.post(
       sub.status = "approved";
       sub.reviewedBy = req.session.admin.id;
       sub.reviewedAt = new Date();
-      sub.added = added || sub.count;
+      // "added" is honest history: what the paste actually landed on the bot.
+      // Only when NO tokens were pasted (operator added the accounts through
+      // another tool first) do we assume the whole batch made it.
+      sub.added = tokensText.trim() ? added : sub.count;
       await sub.save();
 
       // Start the renter's bot.

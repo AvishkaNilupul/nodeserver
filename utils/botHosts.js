@@ -26,6 +26,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const os = require("os");
+const zlib = require("zlib");
 const { execFile } = require("child_process");
 
 // Reuse a single SSH connection across the many short-lived commands the Bots
@@ -47,7 +48,21 @@ const COMPOSE_NAMES = [
 ];
 
 const EXEC_TIMEOUT = 60000;
-const SHORT_TIMEOUT = 8000;
+// Budget for a "quick" remote read (ls, cat, docker ps).
+//
+// This was 8s — the SAME value as the SSH ConnectTimeout below, which made a
+// read structurally impossible on a slow link: the handshake alone could eat
+// the entire budget, leaving nothing for the command itself. Measured on the
+// Pi 2026-07-29 while it was struggling: 4.75 SECOND round-trip time and 66%
+// packet loss, at which point 5 of 6 SSH attempts failed and whole auto-farm
+// ticks were being written off as "host unreachable".
+//
+// These bots live on a Raspberry Pi at the end of a home connection reached
+// over Tailscale, so multi-second latency is a normal condition to tolerate,
+// not an exception. Generous timeouts cost nothing when the link is healthy —
+// the connection is multiplexed (ControlMaster/ControlPersist), so only the
+// first command pays the handshake at all.
+const SHORT_TIMEOUT = 30000;
 
 // ----------------------------------------------------------------------------
 // Host registry
@@ -168,13 +183,23 @@ function sshBaseArgs(host) {
     "-o",
     "StrictHostKeyChecking=accept-new",
     "-o",
-    "ConnectTimeout=8",
+    // Must comfortably exceed several round trips on a congested home link
+    // (see SHORT_TIMEOUT). At 8s a 4.75s-RTT link could not complete a
+    // handshake at all.
+    "ConnectTimeout=20",
     "-o",
     "ControlMaster=auto",
     "-o",
     "ControlPath=" + SSH_CONTROL_PATH,
     "-o",
     "ControlPersist=60",
+    // Kill a session whose link has died instead of holding the slot until the
+    // command timeout fires — with multiplexing, one wedged master would
+    // otherwise stall every later command queued behind it.
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3",
   ];
   if (host.ssh.identityFile) args.push("-i", host.ssh.identityFile);
   if (host.ssh.port) args.push("-p", String(host.ssh.port));
@@ -247,49 +272,227 @@ function remotePath(host, file) {
   return path.posix.join(host.dir, file);
 }
 
+// Retry a READ-ONLY host operation when the SSH transport itself failed.
+//
+// The Pi is reached over Tailscale across a home connection and drops the odd
+// connection under load — the auto-farm tick, the drop scanner and the park
+// sweep all talk to it at once. Observed twice on 2026-07-29: a `ls` failed at
+// the top of a tick (recording ~30 campaigns as "host unreachable"), and later
+// one failed mid-execution and killed a farm that had already been decided.
+// Both times the host answered again seconds afterwards.
+//
+// Applied ONLY to reads. `e.unreachable` covers a connection that never landed
+// as well as one killed by timeout, and for a read either way it is always safe
+// to simply ask again — which is not true of writes or docker actions, so those
+// deliberately keep failing fast.
+const READ_RETRIES = 2;
+const READ_RETRY_DELAY_MS = 1500;
+
+async function retryRead(fn) {
+  let last;
+  for (let attempt = 0; attempt <= READ_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      // A real answer from the far side (missing file, bad path) is final.
+      if (!e || !e.unreachable) throw e;
+      last = e;
+      if (attempt < READ_RETRIES) {
+        await new Promise((r) => setTimeout(r, READ_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw last;
+}
+
 async function readdir(host) {
   if (host.transport === "local") {
     return fsp.readdir(host.dir);
   }
-  try {
-    const { stdout } = await sshRun(host, "ls -1 -- " + shq(host.dir), {
-      timeout: SHORT_TIMEOUT,
-    });
-    return stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } catch (e) {
-    if (/No such file|not found/i.test(e.stderr || e.message || "")) {
-      const err = new Error(e.message);
-      err.code = "ENOENT";
-      throw err;
+  return retryRead(async () => {
+    try {
+      const { stdout } = await sshRun(host, "ls -1 -- " + shq(host.dir), {
+        timeout: SHORT_TIMEOUT,
+      });
+      return stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch (e) {
+      if (/No such file|not found/i.test(e.stderr || e.message || "")) {
+        const err = new Error(e.message);
+        err.code = "ENOENT";
+        throw err;
+      }
+      throw e;
     }
-    throw e;
-  }
+  });
 }
 
 async function readFile(host, file) {
   if (host.transport === "local") {
     return fsp.readFile(path.join(host.dir, file), "utf8");
   }
-  try {
-    const { stdout } = await sshRun(
-      host,
-      "cat -- " + shq(remotePath(host, file)),
-      {
-        timeout: SHORT_TIMEOUT,
-      },
-    );
-    return stdout;
-  } catch (e) {
-    if (/No such file/i.test(e.stderr || e.message || "")) {
-      const err = new Error("Not found");
-      err.code = "ENOENT";
-      throw err;
+  return retryRead(async () => {
+    try {
+      const { stdout } = await sshRun(
+        host,
+        "cat -- " + shq(remotePath(host, file)),
+        {
+          timeout: SHORT_TIMEOUT,
+        },
+      );
+      return stdout;
+    } catch (e) {
+      if (/No such file/i.test(e.stderr || e.message || "")) {
+        const err = new Error("Not found");
+        err.code = "ENOENT";
+        throw err;
+      }
+      throw e;
     }
-    throw e;
+  });
+}
+
+// Read MANY files in one go. Returns { [file]: { ok: true, text } | { ok:
+// false, error } } — one entry per requested file, never throwing for a single
+// bad file so one unreadable config cannot cost the whole listing.
+//
+// Why this exists: reading the Pi's 27 configs one `cat` at a time took 110s
+// end to end, which is what left the Bots page sitting on "Loading…" for
+// minutes. Two separate costs had to go:
+//
+//   * Latency. Each round trip over the Pi's home link costs ~2s, so 27 reads
+//     is a minute before any work happens. One command covers the whole set.
+//   * Bandwidth. Those configs are 627KB of very repetitive JSON, and the Pi's
+//     uplink is slow enough that even a single raw transfer took 31s. Piping
+//     the WHOLE batch through one gzip (rather than compressing each file
+//     separately) shares one dictionary across all of them: 847KB -> 204KB,
+//     and 31s -> ~2s. Measured against the live Pi 2026-07-30.
+//
+// The stream is a sequence of `\n<nonce> ok <file>\n<contents>` records, gzipped
+// and base64-armoured so it survives the SSH text channel. The nonce is random
+// per call, so no file body can forge a record header. If the remote lacks gzip
+// or base64 the whole command fails and we fall back to reading one at a time —
+// slow, but the page still gets its data.
+const READ_FILES_CHUNK = 50;
+
+async function readFilesOneByOne(host, files, out) {
+  for (const f of files) {
+    try {
+      out[f] = { ok: true, text: await readFile(host, f) };
+    } catch (e) {
+      if (e && e.unreachable) throw e;
+      out[f] = {
+        ok: false,
+        error: e.code === "ENOENT" ? "Not found" : e.message,
+      };
+    }
   }
+  return out;
+}
+
+async function readFiles(host, files) {
+  const out = {};
+  if (!files || !files.length) return out;
+  if (host.transport === "local") {
+    await Promise.all(
+      files.map(async (f) => {
+        try {
+          out[f] = {
+            ok: true,
+            text: await fsp.readFile(path.join(host.dir, f), "utf8"),
+          };
+        } catch (e) {
+          out[f] = {
+            ok: false,
+            error: e.code === "ENOENT" ? "Not found" : e.message,
+          };
+        }
+      }),
+    );
+    return out;
+  }
+
+  for (let i = 0; i < files.length; i += READ_FILES_CHUNK) {
+    const chunk = files.slice(i, i + READ_FILES_CHUNK);
+    const nonce =
+      "BOTCFG" + Math.random().toString(36).slice(2, 12).toUpperCase();
+    const mark = (state) =>
+      "printf '\\n%s " + state + " %s\\n' " + shq(nonce) + ' "$f"';
+    const script =
+      "cd " +
+      shq(host.dir) +
+      " || exit 1\n" +
+      "{ for f in " +
+      chunk.map(shq).join(" ") +
+      "; do\n" +
+      '  if [ -r "$f" ]; then ' +
+      mark("ok") +
+      '; cat -- "$f";\n' +
+      "  else " +
+      mark("err") +
+      "; fi\n" +
+      "done; } | gzip -c | base64\n";
+    let stdout;
+    try {
+      ({ stdout } = await retryRead(() =>
+        sshRun(host, script, { timeout: EXEC_TIMEOUT }),
+      ));
+    } catch (e) {
+      // A host outage is not a per-file problem — let it propagate so callers
+      // can mark the host offline. Anything else (no gzip, no base64, a shell
+      // that choked) falls back to the slow path rather than failing the page.
+      if (e && e.unreachable) throw e;
+      await readFilesOneByOne(host, chunk, out);
+      continue;
+    }
+
+    let text;
+    try {
+      text = zlib
+        .gunzipSync(Buffer.from(stdout.replace(/\s+/g, ""), "base64"))
+        .toString("utf8");
+    } catch {
+      // Truncated or non-gzip output (a shell banner, a partial transfer).
+      await readFilesOneByOne(host, chunk, out);
+      continue;
+    }
+
+    // Records are delimited by a marker LINE. Content is every line after a
+    // marker up to the next one; joining them with "\n" reproduces the file
+    // byte for byte, because the newline printf writes before each marker is
+    // exactly the one consumed as the split boundary.
+    let cur = null;
+    let buf = [];
+    const flush = () => {
+      if (!cur) return;
+      out[cur.file] = cur.ok
+        ? { ok: true, text: buf.join("\n") }
+        : { ok: false, error: "Not found" };
+      cur = null;
+      buf = [];
+    };
+    for (const line of text.split("\n")) {
+      if (line.startsWith(nonce + " ")) {
+        const rest = line.slice(nonce.length + 1);
+        const sp = rest.indexOf(" ");
+        const state = sp === -1 ? "" : rest.slice(0, sp);
+        if (state === "ok" || state === "err") {
+          flush();
+          cur = { ok: state === "ok", file: rest.slice(sp + 1) };
+          continue;
+        }
+      }
+      if (cur && cur.ok) buf.push(line);
+    }
+    flush();
+    // A file the remote never mentioned (marker lost, truncated output).
+    for (const f of chunk) {
+      if (!out[f]) out[f] = { ok: false, error: "no response for this file" };
+    }
+  }
+  return out;
 }
 
 async function exists(host, file) {
@@ -311,6 +514,17 @@ async function exists(host, file) {
 // copy of any previous version — matching the local behaviour the routes relied
 // on before, but for either transport.
 async function writeFileAtomic(host, file, text) {
+  await writeFileRaw(host, file, text);
+  // An account may only be enabled in one config per host — strip stale copies
+  // left in sibling configs (utils/dupeGuard.js).
+  try {
+    const guard = require("./dupeGuard");
+    await guard.enforceSingleHome(module.exports, host, file, text);
+  } catch (e) {
+    console.error("[botHosts] dupe guard error: " + e.message);
+  }
+}
+async function writeFileRaw(host, file, text) {
   if (host.transport === "local") {
     const full = path.join(host.dir, file);
     try {
@@ -422,9 +636,12 @@ async function dockerPs(host) {
       timeout: SHORT_TIMEOUT,
     }));
   } else {
-    ({ stdout } = await sshRun(host, "docker ps -a --format " + shq(fmt), {
-      timeout: SHORT_TIMEOUT,
-    }));
+    // Read-only: safe to re-ask when the link drops (see retryRead).
+    ({ stdout } = await retryRead(() =>
+      sshRun(host, "docker ps -a --format " + shq(fmt), {
+        timeout: SHORT_TIMEOUT,
+      }),
+    ));
   }
   const states = {};
   stdout
@@ -492,13 +709,27 @@ function runShell(host, script, { timeout = SHORT_TIMEOUT, input } = {}) {
 
 // Tail a container's docker logs. docker writes logs to stderr, so we merge
 // 2>&1. Returns the raw text (caller splits into lines).
-async function dockerLogs(host, container, { tail = 200 } = {}) {
+//
+// `since` (optional) bounds the window by time using docker's `--since`
+// (a duration like "6h"/"30m" or an absolute timestamp). It combines with the
+// `tail` line cap: docker returns lines newer than `since`, then the cap keeps
+// transfer size bounded on a busy container. Native hosts (botctl) have no
+// time filter, so `since` is ignored there and only the line cap applies.
+async function dockerLogs(host, container, { tail = 200, since } = {}) {
   const n = Math.max(1, Math.min(2000, parseInt(tail, 10) || 200));
   if (isNative(host)) {
     return botctl(host, ["logs", container, String(n)], { timeout: 25000 });
   }
+  const sinceArg = since ? "--since " + shq(String(since)) + " " : "";
   const script =
-    "docker logs --tail " + n + " " + shq(container) + " 2>&1 | tail -n " + n;
+    "docker logs " +
+    sinceArg +
+    "--tail " +
+    n +
+    " " +
+    shq(container) +
+    " 2>&1 | tail -n " +
+    n;
   const { stdout } = await runShell(host, script, { timeout: 25000 });
   return stdout;
 }
@@ -754,6 +985,7 @@ module.exports = {
   resolveHost,
   readdir,
   readFile,
+  readFiles,
   exists,
   writeFileAtomic,
   rename,

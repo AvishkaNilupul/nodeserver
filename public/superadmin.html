@@ -677,6 +677,23 @@
           </label>
         </div>
         <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afZeusxAuto" />
+          <label
+            for="afZeusxAuto"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Auto-list on ZeusX &mdash; give ZeusX a share of each auto-farmed
+            campaign's accounts. ZeusX has no auto-delivery API, so those units
+            are handed over in ZeusX chat and marked sold from the Drop Archive.
+            Turn this off to stop new ZeusX listings; existing ones stay.
+          </label>
+        </div>
+        <div class="switch" style="margin-top: 10px">
           <input type="checkbox" id="afDeleteFinishedBots" />
           <label
             for="afDeleteFinishedBots"
@@ -691,6 +708,24 @@
             campaign shares the container, remove it and its compose entry (the
             config file is renamed, never deleted, so account tokens survive).
             Accounts return to the pool for the next event.
+          </label>
+        </div>
+        <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afStopFinishedBots" />
+          <label
+            for="afStopFinishedBots"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Park bots when the drops are farmed &mdash; stop a container as soon
+            as every one of its accounts has finished the games it was given,
+            instead of waiting weeks for the campaign to expire. Applies to
+            manual bots too, and each parked bot restarts by itself when a new
+            campaign for its games goes live.
           </label>
         </div>
         <div
@@ -736,6 +771,19 @@
             <small class="muted"
               >Default 203508 = Digital Goods &gt; Game Accounts &gt; Twitch
               drops Accounts. Empty = default.</small
+            >
+          </div>
+          <div class="field" style="max-width: 420px">
+            <label>ZeusX game map (JSON)</label>
+            <input
+              type="text"
+              id="afZeusxGames"
+              placeholder='{"overwatch":{"serviceCategoryId":"1","serviceCategoryBaseId":"269"}}'
+            />
+            <small class="muted"
+              >Optional override. Games are matched against ZeusX's own
+              catalog automatically; only add an entry when a game's name does
+              not match.</small
             >
           </div>
           <div class="field" style="max-width: 180px">
@@ -1392,6 +1440,7 @@
           $("afDryRun").checked = !!st.dryRun;
           $("afConsolidate").checked = st.consolidate !== false;
           $("afDeleteFinishedBots").checked = st.deleteFinishedBots !== false;
+          $("afStopFinishedBots").checked = st.stopFinishedBots !== false;
           $("afMaxPerGame").value = st.maxPerGame;
           $("afAccountsPerBot").value = st.accountsPerBot;
           $("afPoolReserve").value = st.poolReserve;
@@ -1401,6 +1450,10 @@
           $("afMinHoursLeft").value = st.minHoursLeft;
           $("afPlatiCategoryId").value = st.platiCategoryId || "";
           $("afGgselCategoryId").value = st.ggselCategoryId || "";
+          $("afZeusxAuto").checked = !!st.zeusxAuto;
+          $("afZeusxGames").value = Object.keys(st.zeusxGames || {}).length
+            ? JSON.stringify(st.zeusxGames)
+            : "";
           const sel = $("afHostId");
           sel.innerHTML = '<option value="">Auto (first SSH host)</option>';
           for (const h of data.hosts || []) {
@@ -1423,6 +1476,7 @@
             dryRun: $("afDryRun").checked,
             consolidate: $("afConsolidate").checked,
             deleteFinishedBots: $("afDeleteFinishedBots").checked,
+            stopFinishedBots: $("afStopFinishedBots").checked,
             hostId: $("afHostId").value,
             maxPerGame: $("afMaxPerGame").value,
             accountsPerBot: $("afAccountsPerBot").value,
@@ -1433,6 +1487,8 @@
             minHoursLeft: $("afMinHoursLeft").value,
             platiCategoryId: $("afPlatiCategoryId").value,
             ggselCategoryId: $("afGgselCategoryId").value,
+            zeusxAuto: $("afZeusxAuto").checked,
+            zeusxGames: $("afZeusxGames").value,
           });
           showMsg("Auto-farm settings saved.", "ok");
           loadAutoFarmSettings();
