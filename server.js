@@ -46,6 +46,8 @@ const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
+const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
+const twitchFollowRunner = require("./utils/twitchFollowRunner");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const japaneseRoutes = require("./routes/japaneseRoutes");
@@ -564,6 +566,7 @@ app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, epicAccountRoutes);
+app.use(enforce2fa, twitchFollowRoutes);
 app.use(enforce2fa, japaneseRoutes);
 
 // =========================
@@ -628,6 +631,9 @@ mongoose
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
     renterExpiry.start();
+    // Twitch follow-bot: resumes any pending/running follow job that was
+    // in flight when the server last stopped (see utils/twitchFollowRunner).
+    twitchFollowRunner.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
