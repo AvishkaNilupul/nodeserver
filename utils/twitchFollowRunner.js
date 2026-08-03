@@ -223,6 +223,26 @@ async function runWorker(jobId, workerIndex, pool, hostCursor, shared) {
       continue;
     }
 
+    // Enforce per-host hourly cap (stealth+ friend). If this host has
+    // already fired hostHourlyCap follows in the last 60min, put the
+    // account back at the end of the pool and wait a jittered gap before
+    // the next candidate. Prevents a single residential IP from bursting
+    // the same target too fast.
+    if ((fresh.hostHourlyCap || 0) > 0) {
+      const now = Date.now();
+      const key = host.id;
+      const arr = (shared.hostFireLog.get(key) || []).filter(
+        (t) => now - t < 60 * 60 * 1000,
+      );
+      shared.hostFireLog.set(key, arr);
+      if (arr.length >= fresh.hostHourlyCap) {
+        pool.push(account);
+        // Small wait so we don't spin at 100% CPU when every host is capped.
+        await sleep(5000 + Math.floor(Math.random() * 5000));
+        continue;
+      }
+    }
+
     // Delay BEFORE the follow so the first attempt after job creation isn't
     // an instant burst either. Skip the sleep on the very first candidate
     // when nothing has fired yet so the UI reacts responsively.
@@ -284,14 +304,24 @@ async function runWorker(jobId, workerIndex, pool, hostCursor, shared) {
 
     // The follow attempt itself. Handles three failure modes: transport
     // (retry via local once, then skip), twitch/token error (log + count as
-    // a failure), success (log + increment delivered).
+    // a failure), success (log + increment delivered). Stealth+ passes
+    // warmUp + randomizeNotifications so the follow leaves a human
+    // footprint on the account (channel-page visit) and doesn't uniformly
+    // disable notifications the way a naive bot service would.
     const outcome = await attemptFollow({
       token,
       channelId: midWait.channelId,
+      channelLogin: midWait.channelLogin,
       host,
+      stealthPlus: !!midWait.stealthPlus,
     });
 
     if (outcome.status === "ok") {
+      if ((fresh.hostHourlyCap || 0) > 0) {
+        const arr = shared.hostFireLog.get(outcome.hostUsed) || [];
+        arr.push(Date.now());
+        shared.hostFireLog.set(outcome.hostUsed, arr);
+      }
       await incJobCounters(
         jobId,
         { delivered: 1 },
@@ -349,14 +379,27 @@ async function runWorker(jobId, workerIndex, pool, hostCursor, shared) {
 // account's home) fails as a transport error, retry the same account through
 // local. Local is always reachable from the app server, so this converts a
 // Pi outage from "job stalls" to "small extra load on local egress".
-async function attemptFollow({ token, channelId, host }) {
+async function attemptFollow({
+  token,
+  channelId,
+  channelLogin,
+  host,
+  stealthPlus,
+}) {
+  const followOpts = {
+    host,
+    channelLogin,
+    warmUp: !!stealthPlus,
+    randomizeNotifications: !!stealthPlus,
+  };
   try {
-    await twitchFollow.followChannel(token, channelId, { host });
+    await twitchFollow.followChannel(token, channelId, followOpts);
     return { status: "ok", hostUsed: host.id };
   } catch (err) {
     if (err.transportFailed && host.id !== "local") {
       try {
         await twitchFollow.followChannel(token, channelId, {
+          ...followOpts,
           host: hosts.resolveHost("local"),
         });
         return { status: "ok", hostUsed: "local" };
@@ -421,6 +464,11 @@ async function runJob(jobId) {
     Math.min(MAX_CONCURRENCY, Number(job.concurrency) || 1),
   );
   const hostCursor = { i: 0 };
+  // Per-host rolling timestamps for enforcing job.hostHourlyCap. Only
+  // populated when the cap is > 0; each successful follow records its host
+  // and now(). Kept as an array of numbers, filtered on read so it doesn't
+  // grow past 1h of entries.
+  const hostFireLog = new Map();
   const shared = {
     get cancelled() {
       return state ? state.cancelled : false;
@@ -429,6 +477,7 @@ async function runJob(jobId) {
       if (state) state.cancelled = !!v;
     },
     terminated: false,
+    hostFireLog,
   };
 
   // Stagger worker starts a little so all N don't tick at the exact same

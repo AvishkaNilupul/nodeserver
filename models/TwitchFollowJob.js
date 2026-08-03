@@ -45,6 +45,27 @@ const twitchFollowJobSchema = new mongoose.Schema(
     // so parallel workers can't lose an increment.
     concurrency: { type: Number, default: 1, min: 1, max: 5 },
 
+    // "Stealth+" mode. When true, each worker simulates a real channel page
+    // visit before firing the follow (2-3 GQL queries a browser would
+    // produce on that visit, small jittered gaps), and randomises
+    // disableNotifications so the fleet doesn't uniformly look like bots
+    // that always mute. Slightly slower per follow, materially lower
+    // fingerprint. See utils/twitchFollow.followChannel(..., {warmUp:true}).
+    stealthPlus: { type: Boolean, default: false },
+
+    // Per-host hourly cap. When >0, the runner defers a candidate whose
+    // egress host has already delivered this many follows in the trailing
+    // hour; the deferred account goes back to the end of the pool. Guards
+    // against one residential IP (Pi) bursting the same target too fast.
+    hostHourlyCap: { type: Number, default: 0 },
+
+    // "Follows still stick?" verification results — populated by
+    // utils/twitchFollowVerify.verifyFollowsForJob on demand.
+    lastVerifiedAt: { type: Date, default: null },
+    verifiedStillFollowing: { type: Number, default: 0 },
+    verifiedDropped: { type: Number, default: 0 },
+    verifiedCheckFailed: { type: Number, default: 0 },
+
     // Only offer accounts whose token has passed a recent integrity check
     // (utils/twitchInventory records that indirectly — dead tokens surface as
     // lastScanStatus token_invalid). No dedicated integrity flag exists on

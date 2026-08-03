@@ -6,6 +6,7 @@ const TwitchFollowJob = require("../models/TwitchFollowJob");
 const TwitchFollowLog = require("../models/TwitchFollowLog");
 const twitchFollow = require("../utils/twitchFollow");
 const runner = require("../utils/twitchFollowRunner");
+const verify = require("../utils/twitchFollowVerify");
 const hosts = require("../utils/botHosts");
 const secretBox = require("../utils/secretBox");
 
@@ -257,6 +258,8 @@ router.post("/admin/twitch-follow/jobs", requireAdmin, async (req, res) => {
       1,
       Math.min(runner.MAX_CONCURRENCY || 5, Math.floor(Number(b.concurrency) || 1)),
     );
+    const stealthPlus = !!b.stealthPlus;
+    const hostHourlyCap = Math.max(0, Math.floor(Number(b.hostHourlyCap) || 0));
 
     const acct = await pickResolveAccount();
     if (!acct) {
@@ -290,6 +293,8 @@ router.post("/admin/twitch-follow/jobs", requireAdmin, async (req, res) => {
       hostIds,
       integrityOnly,
       concurrency,
+      stealthPlus,
+      hostHourlyCap,
       createdBy: admin.username || admin._id || "",
     });
     runner.enqueueJob(doc._id);
@@ -333,6 +338,24 @@ router.get("/admin/twitch-follow/jobs/:id", requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// POST /admin/twitch-follow/jobs/:id/verify — for every account this job
+// logged as ok-following, ask Twitch whether the follow still stands. Runs
+// synchronously up to a soft budget; the tab typically finishes in a few
+// seconds for small jobs. Result also persists on the job doc so the tab
+// keeps showing the last-verified numbers on refresh.
+router.post(
+  "/admin/twitch-follow/jobs/:id/verify",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const result = await verify.verifyFollowsForJob(req.params.id);
+      res.json({ success: true, result });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
 
 // POST /admin/twitch-follow/jobs/:id/cancel — flag + signal.
 router.post(
