@@ -7,6 +7,7 @@ const BotAccount = require("../models/BotAccount");
 const Purchase = require("../models/Purchase");
 const { decrypt } = require("../utils/secretBox");
 const { getBalance, adjustBalance } = require("../utils/admins");
+const { sendTelegram } = require("../utils/telegram");
 const BalanceLog = require("../models/BalanceLog");
 const {
   AVAILABLE_DROP,
@@ -56,6 +57,48 @@ async function holdingsForKeys(keys) {
   ]);
 }
 
+// How much still-connectable content each account carries, by account id.
+// The buyer receives the WHOLE account and can click "Connect" on any drop
+// that isn't already redeemed — so every unconnected drop is something they
+// can take, whether or not it belongs to the set they paid for and whether or
+// not it's reserved for a different buyer. This total is the yardstick for
+// "how much does delivering this account give away / expose", used to prefer
+// the leanest matching account. One grouped aggregation on the (indexed)
+// account field; connected drops are excluded because they can't be taken.
+async function connectableLoadForAccounts(ids) {
+  const map = new Map();
+  if (!ids.length) return map;
+  const rows = await DropLog.aggregate([
+    { $match: { account: { $in: ids }, connected: { $ne: true } } },
+    {
+      $group: {
+        _id: "$account",
+        copies: { $sum: "$count" },
+        drops: { $sum: 1 },
+        // Drops already reserved (soldAt set) belong to OTHER sales — at the
+        // moment we're choosing an account, this set isn't reserved on it yet,
+        // so any reserved drop here is one a different buyer paid for. Handing
+        // over this account's credentials lets our buyer Connect (steal) them.
+        reservedToOthers: {
+          $sum: { $cond: [{ $ne: ["$soldAt", null] }, 1, 0] },
+        },
+      },
+    },
+  ]);
+  // Rank worst-harm-first: (1) fewest drops reserved to OTHER buyers — those are
+  // broken deliveries, the severe harm; then (2) fewest connectable drops — the
+  // give-away of unsold extras; copies as the final tiebreak. The weights keep
+  // the tiers from crossing over (a single reserved-to-others drop outranks any
+  // amount of unsold give-away).
+  for (const r of rows) {
+    map.set(
+      String(r._id),
+      (r.reservedToOthers || 0) * 1e12 + (r.drops || 0) * 1e6 + (r.copies || 0),
+    );
+  }
+  return map;
+}
+
 // Of a list of candidate account ids, return the subset that is deliverable
 // (has a stored password). One indexed query on _id. NOTE: reservation is now
 // per drop (DropLog.soldAt), applied in the holdings aggregations above — an
@@ -70,8 +113,13 @@ async function sellableAccountMap(ids) {
   const map = new Map();
   for (const a of accs) {
     // Accounts without a stored password can't be delivered, so they're
-    // excluded from the sellable pool.
-    if (a.credPassword && String(a.credPassword).length > 0) {
+    // excluded from the sellable pool. Same for a dead Twitch token: the
+    // credentials likely changed, so the delivered login may not work.
+    if (
+      a.credPassword &&
+      String(a.credPassword).length > 0 &&
+      a.lastScanStatus !== "token_invalid"
+    ) {
       map.set(String(a._id), a);
     }
   }
@@ -111,10 +159,21 @@ async function availableAccountsForSet(set) {
       items: r.items,
     });
   }
-  // Prefer accounts with more spare copies of the bundle, then by login.
+  // Prefer the LEANEST matching account. The buyer is handed full account
+  // credentials and can Connect any unconnected drop on it, so shipping a
+  // loaded "everything" account for a single-game bundle both gives away far
+  // more than advertised (e.g. 6x each of a 3-drop set plus ~200 unrelated
+  // rewards) and lets the buyer claim drops already reserved for OTHER buyers.
+  // So rank by how little connectable content the account carries beyond what
+  // is needed, then by fewest spare copies of the set's own items, then login.
+  // (Was the reverse — most spare copies first — which deliberately picked the
+  // fattest account and caused exactly that over-delivery.)
+  const load = await connectableLoadForAccounts(out.map((o) => o.accountId));
+  for (const o of out) o.connectableLoad = load.get(String(o.accountId)) || 0;
   out.sort(
     (a, b) =>
-      b.minCount - a.minCount ||
+      a.connectableLoad - b.connectableLoad ||
+      a.minCount - b.minCount ||
       String(a.login || "").localeCompare(String(b.login || "")),
   );
   return out;
@@ -433,6 +492,20 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
     );
     // Stock changed: drop the cached listings so the next load is accurate.
     invalidateListingsCache();
+
+    // Tell the operators a seller just drew stock (best-effort, never blocks).
+    sendTelegram(
+      "🛒 SHOP PURCHASE\n\n" +
+        buyerUsername +
+        " bought " +
+        set.name +
+        "\n$" +
+        price.toFixed(2) +
+        " · balance left $" +
+        Number(balanceAfter).toFixed(2) +
+        "\nAccount: " +
+        (account.login || account.credUsername || "?"),
+    ).catch((e) => console.error("shop purchase notify error:", e.message));
 
     // Audit the spend (best-effort; never blocks the sale).
     BalanceLog.create({

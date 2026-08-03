@@ -25,6 +25,10 @@ const dropSetSchema = new mongoose.Schema(
     // Shop listing: superadmin sets a flat price and flips `listed` to make
     // the bundle buyable by regular admins from the Shop tab.
     price: { type: Number, default: 0, min: 0 },
+    // Never publish or relist this bundle below this price (0 = no floor).
+    // Set by the owner when a bundle is deliberately held at a price the
+    // market-derived pricing would undercut.
+    minPriceUsd: { type: Number, default: 0, min: 0 },
     listed: { type: Boolean, default: false, index: true },
     // Custom listings (game-based promo covers pushed to marketplaces) are kept
     // out of the regular Shop listings view via this flag. They still use the

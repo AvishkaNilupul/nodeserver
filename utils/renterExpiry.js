@@ -8,11 +8,24 @@
 // time-based case (accessEnd passing on its own). Idempotent: it only acts on
 // renters that are past their lease, still farming (botStoppedAt not set), and
 // have an assigned bot, then stamps botStoppedAt so it won't retry every tick.
+//
+// It also handles the renewal-revenue side of the lease: a Telegram heads-up to
+// the operator when a lease is inside its last WARN_MS (once per lease — see
+// Renter.expiryWarnedAt), and a Telegram notice when an expired bot is stopped,
+// so a lapse is never silent.
 const Renter = require("../models/Renter");
+const RenterAccount = require("../models/RenterAccount");
 const hosts = require("./botHosts");
-const { stopConfigContainer } = require("../routes/botConfigRoutes");
+const { sendTelegram } = require("./telegram");
+const {
+  stopConfigContainer,
+  removeAccountFromConfig,
+  restartConfigContainer,
+} = require("../routes/botConfigRoutes");
 
 const INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+// How close to accessEnd the "expiring soon" heads-up fires.
+const WARN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 let timer = null;
 
@@ -33,9 +46,102 @@ async function tick() {
   scheduleNext();
 }
 
+// Days (rounded up) until a date — for human-readable warnings.
+function daysLeft(end, now) {
+  return Math.max(1, Math.ceil((new Date(end) - now) / 86400000));
+}
+
+// Per-account leases (RenterAccount.farmUntil): pull just the lapsed account
+// out of the renter's config and leave the rest of the bot farming. The row is
+// kept (disabled, stamped) so the operator still sees it in the roster with its
+// drops, rather than it silently vanishing.
+async function sweepAccounts(now) {
+  const due = await RenterAccount.find({
+    farmUntil: { $ne: null, $lte: now },
+    farmEndedAt: null,
+  });
+  const touchedBots = new Map();
+  for (const a of due) {
+    const host = hosts.resolveHost(a.host);
+    if (a.configFile && host) {
+      try {
+        const removed = await removeAccountFromConfig(host, a.configFile, {
+          clientSecret: a.clientSecret,
+          login: a.login,
+        });
+        if (removed) touchedBots.set(host.id + "|" + a.configFile, { host, file: a.configFile });
+      } catch (e) {
+        // Host offline — leave farmEndedAt null and retry next tick.
+        console.error(
+          "[renterExpiry] could not pull " + (a.login || a._id) + ":",
+          e.message,
+        );
+        continue;
+      }
+    }
+    a.farmEndedAt = new Date();
+    a.enabled = false;
+    a.configFile = "";
+    a.container = "";
+    await a.save();
+    const renter = await Renter.findById(a.renter, { username: 1 }).lean();
+    console.log(
+      "[renterExpiry] farming window ended for " + (a.login || a._id),
+    );
+    await sendTelegram(
+      "⌛ Account farming window ended: " +
+        (a.login || String(a._id)) +
+        (renter ? " (renter " + renter.username + ")" : "") +
+        " — pulled off the bot.",
+    );
+  }
+  // One restart per affected bot, after all its accounts are out.
+  for (const b of touchedBots.values()) {
+    try {
+      await restartConfigContainer(b.host, b.file);
+    } catch (e) {
+      console.error(
+        "[renterExpiry] could not restart " + b.file + ":",
+        e.message,
+      );
+    }
+  }
+}
+
 async function sweepOnce() {
   const now = new Date();
-  // Expired (lease end in the past), assigned a bot, not already stopped by us.
+  await sweepAccounts(now).catch((e) =>
+    console.error("[renterExpiry] account sweep error:", e.message),
+  );
+
+  // 1) Leases inside their final WARN_MS: tell the operator once per lease so
+  // there's time to collect a renewal before the bot gets stopped. The stamp
+  // comparison (expiryWarnedAt < accessEnd - WARN_MS) re-arms the warning after
+  // a lease extension: the old stamp predates the new window, the fresh one
+  // doesn't.
+  const expiring = await Renter.find({
+    status: "active",
+    accessEnd: { $gt: now, $lte: new Date(now.getTime() + WARN_MS) },
+  });
+  for (const r of expiring) {
+    const windowStart = new Date(new Date(r.accessEnd).getTime() - WARN_MS);
+    if (r.expiryWarnedAt && r.expiryWarnedAt >= windowStart) continue;
+    r.expiryWarnedAt = now;
+    await r.save();
+    await sendTelegram(
+      "⏳ Renter lease expiring: " +
+        r.username +
+        " ends in " +
+        daysLeft(r.accessEnd, now) +
+        " day(s) (" +
+        new Date(r.accessEnd).toISOString().slice(0, 10) +
+        "). Renew it or the bot stops automatically.",
+    );
+    console.log("[renterExpiry] expiry warning sent for " + r.username);
+  }
+
+  // 2) Expired (lease end in the past), assigned a bot, not already stopped by
+  // us: stop the bot and tell the operator it happened.
   const expired = await Renter.find({
     accessEnd: { $ne: null, $lte: now },
     botFile: { $gt: "" },
@@ -50,6 +156,15 @@ async function sweepOnce() {
       await r.save();
       console.log(
         "[renterExpiry] stopped bot for expired renter " + r.username,
+      );
+      await sendTelegram(
+        "⏰ Renter lease ended: " +
+          r.username +
+          " — bot " +
+          r.botFile +
+          " on " +
+          (host.label || r.botHost) +
+          " was stopped.",
       );
     } catch (e) {
       // Host offline / no container — try again next tick (botStoppedAt stays
@@ -68,4 +183,4 @@ function start() {
   scheduleNext();
 }
 
-module.exports = { start, sweepOnce };
+module.exports = { start, sweepOnce, sweepAccounts };

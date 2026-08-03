@@ -11,7 +11,12 @@ const TwitchCampaign = require("../models/TwitchCampaign");
 const { fetchDropCampaigns } = require("./twitchInventory");
 const { sendTelegram } = require("./telegram");
 
-const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
+const TICK_MS = 2 * 60 * 60 * 1000; // every 2 hours
+// A failed pass (every borrowed token integrity-gated, network blip) used to
+// wait a full interval before trying again, so campaign discovery — and with
+// it bot waking and auto-farm decisions — stalled for hours. Errors retry on
+// this much shorter fuse instead.
+const RETRY_MS = 10 * 60 * 1000;
 
 const state = {
   started: false,
@@ -31,7 +36,7 @@ async function fetchWithAnyToken() {
     .lean();
   const ok = candidates.filter((a) => a.lastScanStatus === "ok");
   const rest = candidates.filter((a) => a.lastScanStatus !== "ok");
-  const ordered = [...ok, ...rest].slice(0, 5);
+  const ordered = [...ok, ...rest].slice(0, 10);
   if (!ordered.length) {
     throw new Error("No bot account tokens available for the campaign query");
   }
@@ -190,12 +195,14 @@ function start() {
   if (state.started) return;
   state.started = true;
   const tick = async () => {
+    let delay = TICK_MS;
     try {
       await runOnce();
     } catch (err) {
       console.error("campaignWatcher error:", err.message);
+      delay = RETRY_MS;
     }
-    const t = setTimeout(tick, TICK_MS);
+    const t = setTimeout(tick, delay);
     if (t.unref) t.unref();
   };
   const t = setTimeout(tick, 35000);

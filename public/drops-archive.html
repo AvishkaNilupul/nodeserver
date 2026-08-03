@@ -2191,6 +2191,40 @@
                 "</b></td>" +
                 "<td>" +
                 stateChipInline(a.state) +
+                (a.soldGames && a.soldGames.length
+                  ? ' <span class="chip warn" title="Sold on this account: ' +
+                    attr(a.soldGames.join(", ")) +
+                    (a.soldAt
+                      ? " (this item on " + attr(String(a.soldAt).slice(0, 10)) + ")"
+                      : "") +
+                    '">SOLD: ' +
+                    esc(
+                      a.soldGames.slice(0, 2).join(", ") +
+                        (a.soldGames.length > 2
+                          ? " +" + (a.soldGames.length - 2)
+                          : ""),
+                    ) +
+                    "</span>"
+                  : "") +
+                (a.listedGames && a.listedGames.length
+                  ? ' <span class="chip" title="Attached to a live marketplace listing (not sold yet): ' +
+                    attr(a.listedGames.join(", ")) +
+                    '">LISTED: ' +
+                    esc(
+                      a.listedGames.slice(0, 2).join(", ") +
+                        (a.listedGames.length > 2
+                          ? " +" + (a.listedGames.length - 2)
+                          : ""),
+                    ) +
+                    "</span>"
+                  : "") +
+                (a.openGames && a.openGames.length
+                  ? ' <span class="chip" title="Still sellable on this account: ' +
+                    attr(a.openGames.join(", ")) +
+                    '">' +
+                    a.openGames.length +
+                    " left</span>"
+                  : "") +
                 "</td>" +
                 '<td class="hide-sm mono">' +
                 (a.inPool ? "—" : esc(a.container || a.configFile || "—")) +
@@ -2205,6 +2239,15 @@
                       attr(a.login || "") +
                       '">Copy user:pass</button>'
                     : '<span class="chip warn">no pw</span>') +
+                (a.inPool
+                  ? ""
+                  : a.openGames && !a.openGames.length
+                    ? ' <span class="chip" title="Nothing free to sell: every game is redeemed, sold, or attached to a live listing">nothing free</span>'
+                    : ' <button class="btn-ghost btn-sm" data-marksold="' +
+                      attr(a.accountId) +
+                      '" data-login="' +
+                      attr(a.login || "") +
+                      '">Sold</button>') +
                 (a.inPool
                   ? ""
                   : ' <span class="chip" data-copies="' +
@@ -2240,6 +2283,28 @@
       async function copyCred(btn) {
         const id = btn.dataset.copycred;
         const login = btn.dataset.login || "";
+        // Don't let a sold account get copied to a second buyer by accident.
+        const row = currentItemAccounts.find((a) => a.accountId === id);
+        const soldList = (row && row.soldGames) || [];
+        const listedList = (row && row.listedGames) || [];
+        if (
+          (soldList.length || listedList.length) &&
+          !confirm(
+            (login || "This account") +
+              (soldList.length ? " already SOLD: " + soldList.join(", ") : "") +
+              (listedList.length
+                ? (soldList.length ? "\n" : "") +
+                  "On a live listing (a buyer may get it): " +
+                  listedList.join(", ")
+                : "") +
+              ((row && row.openGames && row.openGames.length)
+                ? "\nStill sellable: " + row.openGames.join(", ")
+                : "\nNothing left to sell on it.") +
+              "\n\nCopy the credentials anyway?",
+          )
+        ) {
+          return;
+        }
         btn.disabled = true;
         try {
           const d = await api(
@@ -2280,7 +2345,95 @@
         }
       }
 
+      // Manual sale: fetch the account's games, ask which one was sold,
+      // then reserve that game's drops and pull the account from any live
+      // listing selling it. The other games on the account stay sellable.
+      async function markSold(btn) {
+        const id = btn.dataset.marksold;
+        const login = btn.dataset.login || "";
+        btn.disabled = true;
+        let info;
+        try {
+          info = await api(
+            "/drops-archive/accounts/" + encodeURIComponent(id) + "/sale-info",
+          );
+        } catch (e) {
+          btn.disabled = false;
+          return banner(e.message || "Failed to load account games", "err");
+        }
+        btn.disabled = false;
+        const games = (info.games || []).filter((g) => g.available > 0);
+        if (!games.length) {
+          return banner(
+            (login || "This account") +
+              " has no available (unredeemed, unreserved) drops left to sell.",
+            "err",
+          );
+        }
+        const lines = games
+          .map(
+            (g, i) =>
+              i + 1 + ") " + g.game + " — " + g.available + " drop(s) available" +
+              (g.redeemed ? ", " + g.redeemed + " redeemed" : "") +
+              (g.reserved ? ", " + g.reserved + " already reserved" : ""),
+          )
+          .join("\n");
+        const extra = (info.listings || []).length
+          ? "\n\nOn live listing(s): " +
+            info.listings
+              .map((l) => l.marketplace + " " + l.externalId)
+              .join(", ") +
+            " — it will be pulled from any listing selling the sold game."
+          : "";
+        let pick = 1;
+        if (games.length > 1) {
+          const ans = prompt(
+            "Which game sold on " + (login || "this account") + "?\n\n" +
+              lines + extra + "\n\nEnter a number (1-" + games.length + "):",
+            "1",
+          );
+          if (ans === null) return;
+          pick = parseInt(ans, 10);
+          if (!(pick >= 1 && pick <= games.length)) {
+            return banner("Invalid choice.", "err");
+          }
+        } else if (
+          !confirm(
+            "Mark " + games[0].game + " (" + games[0].available +
+              " drop(s)) as sold on " + (login || "this account") + "?" + extra,
+          )
+        ) {
+          return;
+        }
+        const g = games[pick - 1];
+        btn.disabled = true;
+        try {
+          const r = await api(
+            "/drops-archive/accounts/" + encodeURIComponent(id) + "/mark-sold",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ game: g.gameValue }),
+            },
+          );
+          let msg = r.message || "Marked sold.";
+          if (r.detached && r.detached.length) {
+            msg += " " + r.detached.join("; ") + ".";
+          }
+          banner(msg, "ok");
+          if (r.warnings && r.warnings.length) {
+            setTimeout(() => banner(r.warnings.join(" — "), "err"), 1200);
+          }
+        } catch (e) {
+          banner(e.message || "Mark sold failed", "err");
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
       $("iBody").addEventListener("click", (e) => {
+        const ms = e.target.closest("[data-marksold]");
+        if (ms) return markSold(ms);
         const cp = e.target.closest("[data-copycred]");
         if (cp) return copyCred(cp);
         const c = e.target.closest("[data-acc]");

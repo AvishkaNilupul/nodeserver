@@ -1699,6 +1699,30 @@ Reliable Daily Rewards</textarea
           </div>
         </div>
 
+        <div id="mpZxBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">ZeusX placement</b>
+            <div class="mp-hint">
+              ZeusX has no public API — the offer is created on your account
+              with the stored seller session token (set it under “Marketplace
+              keys → ZeusX”). The game's category is taken from the ZeusX game
+              map in Auto-farm settings; delivery is coordinated (you hand the
+              account over in ZeusX chat), so mark the account sold in Drop
+              Archive after each sale.
+            </div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Quantity (stock)</label>
+                <input type="number" id="mpZxQty" min="1" value="1" />
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Delivery time (hours)</label>
+                <input type="number" id="mpZxHours" min="0" value="1" />
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="mpFpBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">FunPay placement</b>
@@ -2629,6 +2653,7 @@ Reliable Daily Rewards</textarea
         ggsel: "GGSel",
         funpay: "FunPay",
         epicnpc: "EpicNPC (browser bridge)",
+        zeusx: "ZeusX",
       };
       // EpicNPC bridge bookmarklet. Self-contained (runs on epicnpc.com, can't
       // reference this page), it reads the listing payload from the compose
@@ -2783,6 +2808,7 @@ Reliable Daily Rewards</textarea
         g2g: { userId: "User ID", apiKey: "API key", apiSecret: "API secret" },
         ggsel: { apiKey: "API key" },
         funpay: { golden_key: "golden_key (session cookie)" },
+        zeusx: { accessToken: "access_token (seller session cookie)" },
       };
       var mpStatus = null;
 
@@ -2970,7 +2996,14 @@ Reliable Daily Rewards</textarea
                   '<div class="mp-item">' +
                   "<span><b>" +
                   esc(MP_LABELS[r.marketplace] || r.marketplace) +
-                  "</b> — " +
+                  "</b> " +
+                  // Who owns the price. Auto-farmed rows get the post-event
+                  // scarcity markup applied automatically; anything listed by
+                  // hand keeps the price it was given, forever.
+                  (r.origin === "auto"
+                    ? '<span class="badge auto">Auto</span>'
+                    : '<span class="badge draft" title="Listed by you — automatic repricing never touches this">Mine · fixed price</span>') +
+                  " — " +
                   (r.url
                     ? '<a href="' +
                       attr(r.url) +
@@ -3173,6 +3206,10 @@ Reliable Daily Rewards</textarea
         var fp = e.target.closest('[data-mptarget="funpay"]');
         if (fp) {
           $("mpFpBox").style.display = fp.checked ? "block" : "none";
+        }
+        var zx = e.target.closest('[data-mptarget="zeusx"]');
+        if (zx) {
+          $("mpZxBox").style.display = zx.checked ? "block" : "none";
         }
         var ep = e.target.closest('[data-mptarget="epicnpc"]');
         if (ep) {
@@ -3826,6 +3863,12 @@ Reliable Daily Rewards</textarea
             quantity: parseInt($("mpGgQty").value, 10) || 1,
             delivery: $("mpGgDelivery").value,
             priceRub: ggRub > 0 ? ggRub : undefined,
+          };
+        }
+        if (targets.indexOf("zeusx") !== -1) {
+          body.zeusx = {
+            quantity: parseInt($("mpZxQty").value, 10) || 1,
+            deliveryHours: parseInt($("mpZxHours").value, 10) || 1,
           };
         }
         if (targets.indexOf("funpay") !== -1) {

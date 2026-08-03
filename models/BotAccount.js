@@ -53,6 +53,36 @@ const botAccountSchema = new mongoose.Schema(
     lastScanError: { type: String, default: "" },
     dropCount: { type: Number, default: 0 },
 
+    // Farming progress, captured from the same inventory fetch the drop scan
+    // already makes — fetchInventory has always returned `inProgress` and the
+    // scanner simply discarded it. An account with nothing unclaimed left is
+    // one that has finished every campaign it was watching and is now idling
+    // in TwitchDropsBot's 300-second sleep loop, still costing its share of a
+    // container. That idling is most of the fleet, so this is the signal a
+    // scheduler needs to stop paying for work that is already done.
+    //
+    // RAW DATA, NOT A VERDICT. Two traps make these unsafe to read alone, and
+    // utils/farmCompletion.js exists to apply both rules — use it instead:
+    //
+    //  1. inProgressCount counts EVERY campaign with unclaimed progress,
+    //     including games the bot does not farm and can never advance
+    //     (containers run OnlyFavouriteGames = true). Measured on the Pi:
+    //     twitchbotx19/x20 accounts all showed 2 pending drops for
+    //     "Assassin's Creed Black Flag Resynced" while farming Sea of Thieves
+    //     and Delta Force — stranded at 2/120 min forever. On the raw count
+    //     those bots look permanently busy; against their assigned games they
+    //     were finished. Completion is the INTERSECTION with assigned games.
+    //  2. Twitch only lists a campaign once watching has begun, so an account
+    //     that hasn't started yet also reports zero pending. Zero pending with
+    //     dropCount 0 means "not started", never "done".
+    //
+    // A scan that fails returns before these are written, so a dead token or
+    // an unreachable host cannot fake completion — but a STALE value can, so
+    // freshness is checked too.
+    inProgressCount: { type: Number, default: 0 },
+    inProgressGames: { type: [String], default: [] },
+    farmingCompleteAt: { type: Date, default: null, index: true },
+
     // How many times this account's credentials were copied from the archive
     // UI (delivery bookkeeping — flags accounts already handed to a buyer).
     copiedCount: { type: Number, default: 0 },

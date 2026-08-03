@@ -9,6 +9,7 @@
 // — so it never bursts Twitch's API. Each account is re-scanned about once per
 // `perAccountMs` (default 24h); nothing is ever deleted, so the inventory
 // outlives Twitch's ~6-month window.
+const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
 const { fetchInventory } = require("./twitchInventory");
@@ -125,12 +126,31 @@ async function scanAccount(acc) {
   return { ok: true, newDrops, total: acc.dropCount };
 }
 
-// Most-stale account that is due for a scan.
+// Renters whose access is over (suspended, or lease end in the past): their
+// accounts keep their inventory but stop consuming scan slots and Twitch API
+// calls — the rotation belongs to paying renters. Cheap: renters are few.
+async function blockedRenterIds() {
+  const rows = await Renter.find(
+    {
+      $or: [
+        { status: "suspended" },
+        { accessEnd: { $ne: null, $lte: new Date() } },
+      ],
+    },
+    { _id: 1 },
+  ).lean();
+  return rows.map((r) => r._id);
+}
+
+// Most-stale account that is due for a scan (skipping blocked renters).
 async function nextDueAccount() {
   const cutoff = new Date(Date.now() - state.perAccountMs);
-  return RenterAccount.findOne({
+  const blocked = await blockedRenterIds();
+  const q = {
     $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
-  })
+  };
+  if (blocked.length) q.renter = { $nin: blocked };
+  return RenterAccount.findOne(q)
     .sort({ lastScanAt: 1 }) // nulls sort first
     .exec();
 }
@@ -200,13 +220,21 @@ function start() {
 async function getProgress() {
   const now = Date.now();
   const cutoff = new Date(now - state.perAccountMs);
-  const [total, scannedWindow, due, ok, tokenInvalid, errored, totalDrops] =
+  // "due" mirrors nextDueAccount (blocked renters excluded) so the number the
+  // operator sees matches what the rotation will actually scan.
+  const blocked = await blockedRenterIds();
+  const dueQ = {
+    $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
+  };
+  if (blocked.length) dueQ.renter = { $nin: blocked };
+  const [total, scannedWindow, due, paused, ok, tokenInvalid, errored, totalDrops] =
     await Promise.all([
       RenterAccount.countDocuments({}),
       RenterAccount.countDocuments({ lastScanAt: { $gt: cutoff } }),
-      RenterAccount.countDocuments({
-        $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
-      }),
+      RenterAccount.countDocuments(dueQ),
+      blocked.length
+        ? RenterAccount.countDocuments({ renter: { $in: blocked } })
+        : 0,
       RenterAccount.countDocuments({ lastScanStatus: "ok" }),
       RenterAccount.countDocuments({ lastScanStatus: "token_invalid" }),
       RenterAccount.countDocuments({ lastScanStatus: "error" }),
@@ -224,6 +252,7 @@ async function getProgress() {
       total,
       scannedWindow,
       due,
+      paused,
       ok,
       tokenInvalid,
       error: errored,

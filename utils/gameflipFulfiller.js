@@ -10,12 +10,14 @@
 const fsp = require("fs/promises");
 
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
+const { sendTelegram } = require("./telegram");
 const {
   reserveSetOnAccount,
   releaseAccountsForTag,
@@ -27,8 +29,50 @@ const GF_CLAIM_TAG = "gameflip";
 // bundle, so a Shop buyer and a Gameflip listing can never get the same drops
 // while the account's other games stay sellable. Returns the account doc.
 async function claimAccountForSet(set) {
-  const candidates = await availableAccountsForSet(set);
-  for (const c of candidates) {
+  let candidates = await availableAccountsForSet(set);
+  // Skip accounts already attached to another active listing (as its
+  // auto-delivery account or a fed Plati/GGSel unit): the buyer gets the whole
+  // account, so its other listing's promised drops would ship with it.
+  const listed = new Set();
+  for (const r of await MarketplaceListing.find(
+    { status: "active" },
+    { accountLogin: 1, units: 1 },
+  ).lean()) {
+    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
+      if (l) listed.add(l.toLowerCase());
+    }
+    for (const u of r.units || []) {
+      const l = String((u && u.login) || "").toLowerCase();
+      if (l) listed.add(l);
+    }
+  }
+  candidates = candidates.filter(
+    (c) => !listed.has(String(c.login || "").toLowerCase()),
+  );
+  // Hand out an account whose Twitch token still scans before one flagged
+  // token_invalid / integrity_failed. A dead token does not always mean the
+  // buyer cannot log in — the password is separate, and the guardian's own
+  // notes call these often-transient — but it is the best signal we have that
+  // an account's credentials moved, and it is what the guardian raises a
+  // "dead-token" finding on. When healthy stock exists there is no reason to
+  // ship a flagged account: the live Overwatch bundle went out on a
+  // token_invalid account while all 111 other candidates were clean.
+  // Flagged accounts are still used as a last resort rather than failing the
+  // sale, so this can only improve which account is picked, never lose stock.
+  const ids = candidates.map((c) => c.accountId);
+  const healthy = new Set();
+  if (ids.length) {
+    const rows = await BotAccount.find(
+      { _id: { $in: ids }, lastScanStatus: { $in: ["", "ok", null] } },
+      { _id: 1 },
+    ).lean();
+    for (const r of rows) healthy.add(String(r._id));
+  }
+  const ordered = candidates
+    .filter((c) => healthy.has(String(c.accountId)))
+    .concat(candidates.filter((c) => !healthy.has(String(c.accountId))));
+
+  for (const c of ordered) {
     const ok = await reserveSetOnAccount(c.accountId, set, {
       soldToUsername: GF_CLAIM_TAG,
       soldSetId: String(set._id),
@@ -66,9 +110,77 @@ function gameflipDeliveryCode(login, password) {
   );
 }
 
+// Title + description for the listing that carries one specific account.
+//
+// The advertised bundle is ALWAYS the set: same items, same order, same count
+// as the cover-image grid and the other marketplaces' listings. The delivered
+// account holds far more than that, and earlier versions leaked those extras
+// into the text — first by counting them in the title ("(56 Items)" over a
+// 5-item picture), then by enumerating them in a bonus block (87 lines under a
+// 5-item heading). Both made the listing misdescribe the bundle, so the account
+// now influences exactly one thing: per-item quantity, when it holds more
+// copies than the set advertises. Falls back to the caller's static text if the
+// account's drops can't be read.
+async function accountListingText(
+  set,
+  accountId,
+  fallbackTitle,
+  fallbackDescription,
+) {
+  try {
+    const { buildTitle, buildDescription } = require("./autoLister");
+    const setItems = (set.items || []).filter((i) => i.itemKey);
+    const primaryGame = (setItems.find((i) => i.game) || {}).game || "";
+    const rows = await DropLog.aggregate([
+      { $match: { account: accountId, connected: { $ne: true } } },
+      {
+        $group: {
+          _id: { key: "$itemKey", name: "$name", game: "$game" },
+          qty: { $sum: "$count" },
+        },
+      },
+    ]);
+    if (!rows.length)
+      return { title: fallbackTitle, description: fallbackDescription };
+    const byKey = new Map();
+    for (const r of rows) {
+      byKey.set(r._id.key, {
+        itemKey: r._id.key,
+        name: r._id.name,
+        game: r._id.game,
+        qty: r.qty,
+      });
+    }
+    const items = setItems.map((si) => {
+      const hit = byKey.get(si.itemKey);
+      return {
+        itemKey: si.itemKey,
+        name: si.name,
+        game: si.game,
+        qty: Math.max(Number(si.qty) || 1, (hit && Number(hit.qty)) || 0),
+      };
+    });
+    if (!items.length)
+      return { title: fallbackTitle, description: fallbackDescription };
+    return {
+      title: buildTitle({ game: primaryGame, items }),
+      description: buildDescription({ game: primaryGame, items }),
+    };
+  } catch {
+    return { title: fallbackTitle, description: fallbackDescription };
+  }
+}
+
 // Claim an account, publish one auto-delivery listing for it and record the
 // listing row. `qtyRemaining` is how many more units should be relisted after
-// this one sells. Releases the account again if publishing fails.
+// this one sells. Releases the account again if publishing fails. Title and
+// description are regenerated from the claimed account's real contents so the
+// listing matches what the buyer actually gets.
+// `origin` is carried through so a relisted unit stays whatever its
+// predecessor was: the successor of an auto-farmed listing is still auto stock
+// (and so still in scope for the post-event markup), while a chain the owner
+// started by hand stays manual. Defaults to "manual" — the same fail-safe the
+// model uses, since an unmarked chain must not become repriceable by accident.
 async function publishAutoDelivery({
   set,
   title,
@@ -76,7 +188,14 @@ async function publishAutoDelivery({
   priceUsd,
   imagePath,
   qtyRemaining,
+  origin,
 }) {
+  // A set can carry a price floor the owner set by hand. Relists inherit the
+  // price of the row that sold, and the auto-lister derives its own from live
+  // competition, so without this a floored bundle drifts back down to the
+  // market price on the next unit.
+  const floor = Number(set && set.minPriceUsd) || 0;
+  if (floor > 0 && (Number(priceUsd) || 0) < floor) priceUsd = floor;
   const account = await claimAccountForSet(set);
   if (!account) {
     throw new Error(
@@ -92,11 +211,17 @@ async function publishAutoDelivery({
       "Account " + login + " has no readable password — cannot auto-deliver",
     );
   }
+  const { title: liveTitle, description: liveDesc } = await accountListingText(
+    set,
+    account._id,
+    title,
+    description,
+  );
   let r;
   try {
     r = await mp.gameflipPublish({
-      title,
-      description,
+      title: liveTitle,
+      description: liveDesc,
       priceUsd,
       imagePath,
       autoDeliverCode: gameflipDeliveryCode(login, password),
@@ -110,10 +235,11 @@ async function publishAutoDelivery({
     marketplace: "gameflip",
     externalId: r.externalId,
     url: r.url || "",
-    title,
-    description: String(description || ""),
+    title: liveTitle,
+    description: String(liveDesc || ""),
     price: priceUsd,
     status: "active",
+    origin: origin === "auto" ? "auto" : "manual",
     note: "auto-delivery: " + (login || "account"),
     autoDeliver: true,
     accountId: String(account._id),
@@ -134,11 +260,62 @@ async function syncOnce() {
     .lean();
   let sold = 0;
   let relisted = 0;
+  // One query for every sold listing we own, instead of one per row. Falls
+  // back to per-listing polling if the bulk query fails, so a Gameflip API
+  // change can only make this slower, never blind.
+  let soldIds = null;
+  let liveIds = null;
+  try {
+    soldIds = await mp.gameflipListingIdsByStatus("sold");
+    liveIds = await mp.gameflipListingIdsByStatus("onsale");
+  } catch (e) {
+    console.error("gameflip listing sweep failed:", e.message);
+    soldIds = null;
+    liveIds = null;
+  }
   for (const row of rows) {
     let status;
     try {
-      status = await mp.gameflipListingStatus(row.externalId);
-    } catch {
+      // A row in neither sweep is unaccounted for (deleted, expired, still a
+      // draft), so it still gets its own status call — that is the only path
+      // that can retire a 404'd row, and there are only ever a handful.
+      status =
+        soldIds && liveIds
+          ? soldIds.has(row.externalId)
+            ? "sold"
+            : liveIds.has(row.externalId)
+              ? "onsale"
+              : await mp.gameflipListingStatus(row.externalId)
+          : await mp.gameflipListingStatus(row.externalId);
+    } catch (e) {
+      // A 404 means the listing is gone from Gameflip for good. Plain `continue`
+      // leaves the row active forever: the watcher re-reads it every tick, the
+      // units it still owes are never relisted, and its account stays reserved
+      // out of the sellable pool. Retire the row and hand the account back.
+      // Every other error (timeout, 429, 5xx) really is transient — skip those.
+      if (e && e.status === 404) {
+        const retired = await MarketplaceListing.findOneAndUpdate(
+          { _id: row._id, status: "active" },
+          {
+            $set: {
+              status: "removed",
+              lastError: "gone from Gameflip (404) — retired by the watcher",
+            },
+          },
+        ).catch(() => null);
+        if (retired && row.accountId) {
+          await releaseAccount(row.accountId).catch(() => {});
+        }
+        if (retired) {
+          console.error(
+            "gameflip listing " +
+              row.externalId +
+              " is 404 — retired, " +
+              (Number(row.qtyRemaining) || 0) +
+              " unit(s) were still owed",
+          );
+        }
+      }
       continue;
     }
     if (status !== "sold") continue;
@@ -149,6 +326,21 @@ async function syncOnce() {
     );
     if (!claimed) continue;
     sold++;
+    // A marketplace sale is the one event an operator always wants pushed to
+    // their phone — the poller is the only thing that knows it happened.
+    sendTelegram(
+      "💰 SOLD on Gameflip\n\n" +
+        (row.title || "(untitled listing)") +
+        "\n$" +
+        (Number(row.price) || 0).toFixed(2) +
+        "\nAccount: " +
+        (row.accountLogin || "?") +
+        "\n" +
+        ((Number(row.qtyRemaining) || 0) > 0
+          ? "Relisting the next unit (" + row.qtyRemaining + " left)."
+          : "Last unit — nothing left to relist.") +
+        (row.url ? "\n\n" + row.url : ""),
+    ).catch((e) => console.error("gameflip sale notify error:", e.message));
     if ((Number(row.qtyRemaining) || 0) <= 0) continue;
     let img = "";
     try {
@@ -166,6 +358,7 @@ async function syncOnce() {
         priceUsd: row.price,
         imagePath: img,
         qtyRemaining: row.qtyRemaining - 1,
+        origin: row.origin,
       });
       relisted++;
     } catch (e) {
@@ -178,6 +371,58 @@ async function syncOnce() {
         },
       ).catch(() => {});
       console.error("gameflip auto-relist failed:", e.message);
+    } finally {
+      if (img) await fsp.unlink(img).catch(() => {});
+    }
+  }
+  // Retry chains whose relist failed on an earlier pass. The row is already
+  // marked sold by then, so the loop above never looks at it again: a single
+  // transient error (Gameflip's 429 limiter, a timeout) silently ended a chain
+  // that still owed units, leaving the stock unlisted and its accounts idle.
+  const stalled = await MarketplaceListing.find({
+    marketplace: "gameflip",
+    status: "sold",
+    qtyRemaining: { $gt: 0 },
+    lastError: /^auto-relist failed/,
+  })
+    .limit(5)
+    .lean();
+  for (const row of stalled) {
+    let img = "";
+    try {
+      const set = await DropSet.findById(row.set).lean();
+      if (!set) throw new Error("the drop set no longer exists");
+      try {
+        img = await buildSetGridImage(set);
+      } catch {
+        img = "";
+      }
+      await publishAutoDelivery({
+        set,
+        title: row.title,
+        description: row.description,
+        priceUsd: row.price,
+        imagePath: img,
+        qtyRemaining: row.qtyRemaining - 1,
+        origin: row.origin,
+      });
+      // The debt now lives on the new row — clear it here so the retry can
+      // never double-list the same units.
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        { $set: { qtyRemaining: 0, lastError: "" } },
+      ).catch(() => {});
+      relisted++;
+    } catch (e) {
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        {
+          $set: {
+            lastError: ("auto-relist failed: " + e.message).slice(0, 400),
+          },
+        },
+      ).catch(() => {});
+      console.error("gameflip relist retry failed:", e.message);
     } finally {
       if (img) await fsp.unlink(img).catch(() => {});
     }
@@ -208,9 +453,11 @@ function start() {
 }
 
 module.exports = {
+  GF_CLAIM_TAG,
   claimAccountForSet,
   releaseAccount,
   gameflipDeliveryCode,
+  accountListingText,
   publishAutoDelivery,
   syncOnce,
   start,

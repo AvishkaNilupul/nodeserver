@@ -42,6 +42,41 @@ async function loadImage(image) {
   return null;
 }
 
+// Marketplace covers have upload size limits (Gameflip mangles anything much
+// over 2 MB, and a 6x6 PNG grid easily exceeds that), so every cover we
+// generate is written under this budget: keep the lossless PNG when it fits,
+// otherwise re-encode as JPEG, dropping quality and then resolution until it
+// does.
+const MAX_COVER_BYTES = 1024 * 1024;
+const JPEG_QUALITIES = [88, 80, 72, 64, 55];
+const JPEG_WIDTHS = [null, 1600, 1200, 900];
+
+async function writeCoverFile(png, prefix) {
+  const stamp = Date.now() + "-" + Math.random().toString(36).slice(2);
+  if (png.length <= MAX_COVER_BYTES) {
+    const out = path.join(os.tmpdir(), prefix + stamp + ".png");
+    await fsp.writeFile(out, png);
+    return out;
+  }
+  let best = null;
+  for (const width of JPEG_WIDTHS) {
+    for (const quality of JPEG_QUALITIES) {
+      let img = sharp(png).flatten({ background: "#ffffff" });
+      if (width) img = img.resize({ width, withoutEnlargement: true });
+      const buf = await img.jpeg({ quality, mozjpeg: true }).toBuffer();
+      if (!best || buf.length < best.length) best = buf;
+      if (buf.length <= MAX_COVER_BYTES) {
+        const out = path.join(os.tmpdir(), prefix + stamp + ".jpg");
+        await fsp.writeFile(out, buf);
+        return out;
+      }
+    }
+  }
+  const out = path.join(os.tmpdir(), prefix + stamp + ".jpg");
+  await fsp.writeFile(out, best);
+  return out;
+}
+
 function escXml(s) {
   return String(s == null ? "" : s).replace(
     /[&<>"']/g,
@@ -262,23 +297,15 @@ async function buildSetGridImage(set) {
   // No guard on composites here: a set of only text tiles is still a valid,
   // useful cover (the names show what's in the bundle).
 
-  const out = path.join(
-    os.tmpdir(),
-    "set-grid-" +
-      Date.now() +
-      "-" +
-      Math.random().toString(36).slice(2) +
-      ".png",
-  );
-  await sharp(Buffer.from(baseSvg, "utf8"))
+  const png = await sharp(Buffer.from(baseSvg, "utf8"))
     .composite(
       composites.concat([
         { input: Buffer.from(badgeSvgStr, "utf8"), left: 0, top: 0 },
       ]),
     )
     .png()
-    .toFile(out);
-  return out;
+    .toBuffer();
+  return writeCoverFile(png, "set-grid-");
 }
 
 // ------------------------------------------------------------------
@@ -515,16 +542,11 @@ async function buildPromoCoverImage(opts) {
     }
   }
 
-  const out = path.join(
-    os.tmpdir(),
-    "promo-cover-" +
-      Date.now() +
-      "-" +
-      Math.random().toString(36).slice(2) +
-      ".png",
-  );
-  await sharp(Buffer.from(svg, "utf8")).composite(composites).png().toFile(out);
-  return out;
+  const png = await sharp(Buffer.from(svg, "utf8"))
+    .composite(composites)
+    .png()
+    .toBuffer();
+  return writeCoverFile(png, "promo-cover-");
 }
 
 module.exports = { buildSetGridImage, buildPromoCoverImage };

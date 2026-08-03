@@ -24,6 +24,9 @@ const FIELDS = {
   ggsel: ["apiKey"],
   // FunPay has no API — the single credential is the account's session token.
   funpay: ["golden_key"],
+  // ZeusX has no public API either — the credential is the seller session's
+  // access_token (expires, so it needs re-pasting when it does).
+  zeusx: ["accessToken"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -224,10 +227,20 @@ async function gameflipPublish({
         { headers: gfHeaders(keys), timeout: 20000 },
       );
     } catch (e) {
+      // Bin the half-built draft. Left behind it is invisible stock the seller
+      // has to clean up by hand, and Gameflip then rejects the next attempt
+      // with "code for digital goods already exists" because the same
+      // credentials are still attached to the abandoned draft.
+      await axios
+        .delete(GF_API + "/listing/" + listingId, {
+          headers: gfHeaders(keys),
+          timeout: 20000,
+        })
+        .catch(() => {});
       throw apiError(
-        "Gameflip created draft " +
+        "Gameflip could not attach the delivery content (draft " +
           listingId +
-          " but could not attach the delivery content",
+          " discarded)",
         e,
       );
     }
@@ -272,9 +285,43 @@ async function gameflipListingStatus(listingId) {
   }
 }
 
+// Every listing id of ours currently in a given status, in ONE paged query.
+// The watcher used to GET each listing separately; at ~150 live listings that
+// burns Gameflip's rate limit on every tick, and the 429s it earns look exactly
+// like "not sold yet" — so sales went unnoticed and their chains never relisted.
+async function gameflipListingIdsByStatus(status) {
+  const keys = requireKeys("gameflip");
+  const me = await axios.get(GF_API + "/account/me/profile", {
+    headers: gfHeaders(keys),
+    timeout: 20000,
+  });
+  const owner = ((me.data || {}).data || {}).owner;
+  if (!owner) throw new Error("Gameflip profile has no owner id");
+  const ids = new Set();
+  for (let start = 0; start < 2000; start += 100) {
+    const r = await axios.get(GF_API + "/listing", {
+      headers: gfHeaders(keys),
+      params: { owner, status, limit: 100, start },
+      timeout: 25000,
+    });
+    const rows = ((r.data || {}).data || []).filter(Boolean);
+    rows.forEach((x) => ids.add(x.id));
+    if (rows.length < 100) break;
+  }
+  return ids;
+}
+
 // Patch an existing listing's price (cents) and optionally its name and
 // description — used for the post-event scarcity markup once a drop campaign
 // ends and the items become unobtainable.
+//
+// Gameflip refuses to edit a LIVE listing: "Cannot change 'price' when status
+// is onsale" (same for 'name'), and because a json-patch is atomic one rejected
+// op fails the whole request. Silently, this broke every post-event reprice —
+// the markup, the retitle AND the held-back stock release all went down with
+// it. So take the listing off sale, patch, and put it straight back. The
+// restore is retried and its failure outranks the patch's: a listing left in
+// draft is off the market entirely, which is far worse than stale text.
 async function gameflipReprice(listingId, { priceUsd, title, description }) {
   const keys = requireKeys("gameflip");
   const ops = [];
@@ -297,17 +344,188 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
     });
   }
   if (!ops.length) return;
-  try {
-    await axios.patch(GF_API + "/listing/" + listingId, ops, {
+  const patch = (body) =>
+    axios.patch(GF_API + "/listing/" + listingId, body, {
       headers: {
         ...gfHeaders(keys),
         "Content-Type": "application/json-patch+json",
       },
       timeout: 20000,
     });
-  } catch (e) {
-    throw apiError("Gameflip reprice", e);
+  const setStatus = (v) =>
+    patch([{ op: "replace", path: "/status", value: v }]);
+
+  let live = "";
+  try {
+    live = await gameflipListingStatus(listingId);
+  } catch {
+    // Status unreadable — try the plain patch and let its own error surface.
   }
+  if (live !== "onsale") {
+    try {
+      await patch(ops);
+    } catch (e) {
+      throw apiError("Gameflip reprice", e);
+    }
+    return;
+  }
+
+  try {
+    await setStatus("draft");
+  } catch (e) {
+    throw apiError("Gameflip reprice (could not take off sale)", e);
+  }
+  let patchErr = null;
+  try {
+    await patch(ops);
+  } catch (e) {
+    patchErr = apiError("Gameflip reprice", e);
+  }
+  // Putting it back is the step that must not be trusted blindly: under its
+  // rate limiter Gameflip answers 200 to the status patch yet leaves the
+  // listing in "ready" — complete, public, but NOT purchasable. So verify by
+  // reading the status back, and since the limiter's window is minutes wide
+  // (429 "Too many attempts"), back off in tens of seconds rather than ms.
+  let restored = false;
+  let restoreErr = null;
+  const waits = [0, 20000, 60000, 120000];
+  for (const w of waits) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("onsale");
+    } catch (e) {
+      restoreErr = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) === "onsale") {
+        restored = true;
+        restoreErr = null;
+        break;
+      }
+      restoreErr = new Error(
+        'status settled on "ready" instead of "onsale" (rate-limited)',
+      );
+    } catch (e) {
+      restoreErr = e;
+    }
+  }
+  if (!restored) {
+    throw new Error(
+      "Gameflip listing " +
+        listingId +
+        " IS NOT BACK ON SALE (left in draft/ready, so nobody can buy it) —" +
+        " put it back on sale manually. " +
+        ((restoreErr && restoreErr.message) || "unknown error"),
+    );
+  }
+  if (patchErr) throw patchErr;
+}
+
+// Swap a live listing's cover photo (an oversized upload renders broken on
+// Gameflip, so a re-generated one has to replace it). Like a reprice, the
+// cover_photo field is rejected while the listing is onsale — "Cannot change
+// 'cover_photo' when status is onsale" — so take it off sale, patch, and put
+// it back with the same verified restore as gameflipReprice: Gameflip's rate
+// limiter can answer 200 yet leave the listing in "ready", i.e. not buyable.
+async function gameflipReplaceCover(listingId, imagePath) {
+  const keys = requireKeys("gameflip");
+  const patch = (body) =>
+    axios.patch(GF_API + "/listing/" + listingId, body, {
+      headers: {
+        ...gfHeaders(keys),
+        "Content-Type": "application/json-patch+json",
+      },
+      timeout: 20000,
+    });
+  const setStatus = (v) =>
+    patch([{ op: "replace", path: "/status", value: v }]);
+
+  let live = "";
+  try {
+    live = await gameflipListingStatus(listingId);
+  } catch {
+    live = "";
+  }
+  if (live === "onsale") {
+    try {
+      await setStatus("draft");
+    } catch (e) {
+      throw apiError("Gameflip cover (could not take off sale)", e);
+    }
+  }
+  // Photos already on the listing (the broken one, plus any half-finished
+  // upload) stay in the gallery unless they are explicitly deleted, so the
+  // buyer would still see the bad image next to the new cover.
+  let stale = [];
+  try {
+    const cur = await axios.get(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+    stale = Object.keys(((cur.data || {}).data || {}).photo || {});
+  } catch {
+    stale = [];
+  }
+  let uploadErr = null;
+  try {
+    await gfUploadPhoto(keys, listingId, imagePath);
+    if (stale.length) {
+      const ops = stale.map((id) => ({
+        op: "replace",
+        path: "/photo/" + id + "/status",
+        value: "deleted",
+      }));
+      // Gameflip's limiter rejects the delete right after an upload; a stale
+      // photo left behind is cosmetic, so retry a few times and give up.
+      for (const w of [0, 15000, 45000]) {
+        if (w) await new Promise((r) => setTimeout(r, w));
+        try {
+          await patch(ops);
+          break;
+        } catch (e) {
+          if (!e.response || e.response.status !== 429) break;
+        }
+      }
+    }
+  } catch (e) {
+    uploadErr = apiError("Gameflip cover", e);
+  }
+  if (live === "onsale") {
+    let restored = false;
+    let restoreErr = null;
+    for (const w of [0, 20000, 60000, 120000]) {
+      if (w) await new Promise((r) => setTimeout(r, w));
+      try {
+        await setStatus("onsale");
+      } catch (e) {
+        restoreErr = e;
+        continue;
+      }
+      try {
+        if ((await gameflipListingStatus(listingId)) === "onsale") {
+          restored = true;
+          restoreErr = null;
+          break;
+        }
+        restoreErr = new Error(
+          'status settled on "ready" instead of "onsale" (rate-limited)',
+        );
+      } catch (e) {
+        restoreErr = e;
+      }
+    }
+    if (!restored) {
+      throw new Error(
+        "Gameflip listing " +
+          listingId +
+          " IS NOT BACK ON SALE (left in draft/ready, so nobody can buy it) —" +
+          " put it back on sale manually. " +
+          ((restoreErr && restoreErr.message) || "unknown error"),
+      );
+    }
+  }
+  if (uploadErr) throw uploadErr;
 }
 
 async function gameflipDelist(listingId) {
@@ -400,7 +618,7 @@ async function digisellerToken() {
     };
     return dsToken.token;
   } catch (e) {
-    throw apiError("Digiseller login", e);
+    throw dsApiError("Digiseller login", e);
   }
 }
 
@@ -428,6 +646,46 @@ function dsErrorText(d) {
     msg += " — " + JSON.stringify(d.errors).slice(0, 400);
   }
   return msg;
+}
+
+// A Digiseller token inherits the permission set assigned to its API key in
+// the seller panel (Settings → API). Read calls (login, categories) work with
+// a read-only key, but every mutating call — create, edit/base, content/add —
+// comes back retval -1 / errors[].code "auth-0" ("Access denied" /
+// "Недостаточно прав") when the key lacks product-management rights. The
+// failure arrives two ways: as an axios HTTP-4xx whose response body is that
+// retval object, or as a thrown Error whose message already carries the
+// auth-0 text. Detect both.
+function dsIsPermissionDenied(e) {
+  const d = e && e.response && e.response.data;
+  if (
+    d &&
+    Array.isArray(d.errors) &&
+    d.errors.some((x) => x && String(x.code || "").toLowerCase() === "auth-0")
+  ) {
+    return true;
+  }
+  return /auth-0|access denied|недостаточно прав/i.test(
+    String((e && e.message) || ""),
+  );
+}
+
+// Surface an auth-0 denial as an actionable instruction instead of raw JSON,
+// so the auto-farm UI tells the operator exactly which permission to grant.
+function dsApiError(prefix, e) {
+  if (dsIsPermissionDenied(e)) {
+    const err = new Error(
+      prefix +
+        ': Digiseller API key lacks product-management rights (auth-0 "Access' +
+        ' denied"). In the Digiseller panel → Settings → API, enable "Products' +
+        ' / Create" and "Products / Edit" for this key, then retry — the token' +
+        " inherits the key's rights, so no re-login is needed.",
+    );
+    err.status = e.response && e.response.status;
+    err.permission = true;
+    return err;
+  }
+  return apiError(prefix, e);
 }
 
 function dsLocales(value, ruValue) {
@@ -502,7 +760,7 @@ async function digisellerCategories(rootCategoryId) {
   } catch (e) {
     // A stale cache entry is far more useful than a timeout error.
     if (hit) return hit.rows;
-    throw apiError("Digiseller categories", e);
+    throw dsApiError("Digiseller categories", e);
   }
 }
 
@@ -524,7 +782,7 @@ async function digisellerCategoryAttributes(categoryId) {
     }
     return d.content || [];
   } catch (e) {
-    throw apiError("Digiseller attributes", e);
+    throw dsApiError("Digiseller attributes", e);
   }
 }
 
@@ -598,7 +856,7 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
         " in Digiseller, or it stays unsellable.",
     };
   } catch (e) {
-    throw apiError("Digiseller create", e);
+    throw dsApiError("Digiseller create", e);
   }
 }
 
@@ -618,9 +876,15 @@ async function digisellerUploadImage(productId, imagePath) {
   let lastErr;
   for (const field of ["file", "image", "files[]"]) {
     const form = new FormData();
+    const ext = String(path.extname(imagePath) || ".png").toLowerCase();
     form.append(field, buf, {
-      filename: "cover.png",
-      contentType: "image/png",
+      filename: "cover" + (ext === ".jpeg" ? ".jpg" : ext),
+      contentType:
+        ext === ".jpg" || ext === ".jpeg"
+          ? "image/jpeg"
+          : ext === ".webp"
+            ? "image/webp"
+            : "image/png",
     });
     try {
       const r = await axios.post(url, form, {
@@ -640,7 +904,7 @@ async function digisellerUploadImage(productId, imagePath) {
       lastErr = e;
     }
   }
-  throw apiError("Digiseller image upload", lastErr);
+  throw dsApiError("Digiseller image upload", lastErr);
 }
 
 // Attach delivery content (e.g. "user:pass" lines) so the product is sellable.
@@ -661,19 +925,67 @@ async function digisellerAddContent(productId, lines) {
     if (d.retval !== undefined && String(d.retval) !== "0") {
       throw new Error(dsErrorText(d));
     }
-    return { added: content.length };
+    // Digiseller answers with the id of every unit it created, in the order
+    // they were sent: {"content":[{"content_id":299264577,"serial":null}]}.
+    // Capturing them is the ONLY way to delete a single bad unit later —
+    // there is no endpoint that lists a product's content (verified live
+    // 2026-07-29: every list/get shape 404s, and GET on /product/content is
+    // 405). So an id we fail to record here can never be targeted again.
+    const contentIds = Array.isArray(d.content)
+      ? d.content.map((c) => (c && c.content_id != null ? String(c.content_id) : ""))
+      : [];
+    return { added: content.length, contentIds };
   } catch (e) {
-    throw apiError("Digiseller add content", e);
+    throw dsApiError("Digiseller add content", e);
   }
 }
 
-// How many delivery units a product still has, via the public product-info
-// endpoint (no token needed). Returns a number, or null when the response
-// doesn't carry a recognisable stock field.
+// Remove ONE delivery unit from a product. Both ids go in the query string and
+// are PascalCase — a JSON body is ignored and the call answers "Field
+// ProductId is required" (verified live 2026-07-29, along with the successful
+// add->delete round trip on product 6001876).
+async function digisellerRemoveContent(productId, contentId) {
+  const token = await digisellerToken();
+  try {
+    const r = await axios.delete(
+      DS_API +
+        "/product/content?token=" +
+        encodeURIComponent(token) +
+        "&ProductId=" +
+        Number(productId) +
+        "&ContentId=" +
+        Number(contentId),
+      { timeout: 25000 },
+    );
+    const d = r.data || {};
+    if (d.retval !== undefined && String(d.retval) !== "0") {
+      throw new Error(dsErrorText(d));
+    }
+    return { removed: true };
+  } catch (e) {
+    throw dsApiError("Digiseller remove content", e);
+  }
+}
+
+// How many delivery units a product still has. The PUBLIC product-info
+// endpoint omits num_in_stock unless "show remaining quantity" is enabled on
+// the product, but the TOKEN-authenticated read returns it regardless
+// (verified live 2026-07-28: public read shows only show_rest, the token read
+// shows num_in_stock). Reading with the seller token is what lets the guardian
+// auto-feed digiseller listings. Returns a number, or null when it genuinely
+// can't be determined.
 async function digisellerProductStock(productId) {
+  let qs = "";
+  try {
+    const token = await digisellerToken();
+    qs = "?token=" + encodeURIComponent(token) + "&showHiddenVariants=true";
+  } catch {
+    // Keys unavailable — fall back to the public read (may carry no stock).
+    qs = "";
+  }
   try {
     const r = await axios.get(
-      DS_API + "/products/" + encodeURIComponent(productId) + "/data",
+      DS_API + "/products/" + encodeURIComponent(productId) + "/data" + qs,
       { headers: { Accept: "application/json" }, timeout: 20000 },
     );
     const d = r.data || {};
@@ -687,8 +999,26 @@ async function digisellerProductStock(productId) {
       const v = Number(raw);
       if (Number.isFinite(v)) return v;
     }
+    // Authenticated read still carried no stock figure — only expected on the
+    // public fallback (no seller token) or an unusual product type.
+    console.error(
+      "digiseller stock unreadable for product " +
+        productId +
+        ": response had no num_in_stock/in_stock/count_goods" +
+        (qs ? " (authenticated read)" : " (public read — no seller token)"),
+    );
     return null;
-  } catch {
+  } catch (e) {
+    // A genuine transport/API failure is a different problem from the above and
+    // must not look the same in the logs.
+    console.error(
+      "digiseller stock request failed for product " +
+        productId +
+        ": " +
+        (e.response
+          ? "HTTP " + e.response.status
+          : e.message || String(e)),
+    );
     return null;
   }
 }
@@ -711,7 +1041,7 @@ async function digisellerDelist(productId) {
       throw new Error(dsErrorText(d));
     }
   } catch (e) {
-    throw apiError("Digiseller delist", e);
+    throw dsApiError("Digiseller delist", e);
   }
 }
 
@@ -1031,6 +1361,39 @@ async function ggselPublish({
     note,
     qty,
   };
+}
+
+// Edit an existing offer's text (and optionally its price) in place. GGSel
+// supports PATCH /offers/{id} — verified live 2026-07-30 — so a stale title can
+// be corrected without delisting, which would lose the offer id, its attached
+// stock and its catalog placement. (Digiseller has no equivalent: every
+// /product/edit/* path 404s while /product/create/* answers, so a Digiseller
+// product's text can only be changed by republishing it.)
+async function ggselUpdateOffer(offerId, { title, description, priceRub } = {}) {
+  const keys = requireKeys("ggsel");
+  const body = {};
+  if (title) {
+    // Mirror ggselPublish: the English title is used for both locales.
+    const t = String(title).slice(0, 200);
+    body.title_ru = t;
+    body.title_en = t;
+  }
+  if (description) {
+    const d = String(description).slice(0, 5000);
+    body.description_en = d;
+    body.description_ru = (await translateEnToRu(d)).slice(0, 5000);
+  }
+  const p = Number(priceRub);
+  if (Number.isFinite(p) && p > 0) body.price = p;
+  if (!Object.keys(body).length) return;
+  try {
+    await axios.patch(GG_API + "/offers/" + encodeURIComponent(offerId), body, {
+      headers: ggHeaders(keys),
+      timeout: 30000,
+    });
+  } catch (e) {
+    throw apiError("GGSel update", e);
+  }
 }
 
 // Remaining sellable units of an offer. Tries the single-offer endpoint and
@@ -1625,6 +1988,40 @@ function fpFieldValue(html, name) {
   return ta ? fpUnescape(ta[1]) : "";
 }
 
+// Parse every named field of the offer editor form (inputs, selects,
+// textareas) so a re-save can round-trip values we don't model — category
+// nodes differ in which extra fields they carry. Checkboxes/radios are
+// included only when checked (HTML form semantics: unchecked = omitted).
+function fpFormValues(html) {
+  const out = {};
+  const inputRe = /<input\b[^>]*>/gi;
+  let m;
+  while ((m = inputRe.exec(html))) {
+    const tag = m[0];
+    const name = /name="([^"]+)"/.exec(tag);
+    if (!name) continue;
+    const type = ((/type="([^"]+)"/.exec(tag) || [])[1] || "text").toLowerCase();
+    if (type === "submit" || type === "button" || type === "file") continue;
+    const val = /value="([^"]*)"/.exec(tag);
+    if (type === "checkbox" || type === "radio") {
+      if (/\bchecked\b/i.test(tag)) {
+        out[name[1]] = val ? fpUnescape(val[1]) : "on";
+      }
+      continue;
+    }
+    out[name[1]] = val ? fpUnescape(val[1]) : "";
+  }
+  const taRe = /<textarea\b[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/textarea>/gi;
+  while ((m = taRe.exec(html))) out[m[1]] = fpUnescape(m[2]);
+  const selRe = /<select\b[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/select>/gi;
+  while ((m = selRe.exec(html))) {
+    const opt = /<option\b[^>]*\bselected\b[^>]*>/i.exec(m[2]);
+    const v = opt && /value="([^"]*)"/.exec(opt[0]);
+    out[m[1]] = v ? fpUnescape(v[1]) : "";
+  }
+  return out;
+}
+
 function fpOfferIds(html) {
   const ids = new Set();
   // FunPay's trade page lists each offer as <a class="tc-item"
@@ -1950,6 +2347,634 @@ async function funpayDelist(offerId, nodeId) {
   await fpPostOfferSave(goldenKey, editor.session, body);
 }
 
+// Edit the UNDELIVERED auto-delivery pool of an existing FunPay offer: drop
+// the lines belonging to `removeLogins` (matched on the "login:" prefix of
+// each login:password secret) and append `addLines`. FunPay has no update
+// API, so this reloads the editor and re-saves every current field with the
+// new pool — the editor's secrets textarea is the source of truth for which
+// lines are still undelivered, which is what lets a caller tell "burned line
+// pulled from the pool" apart from "line already handed to a buyer".
+// `activate`: true/false forces the active box; null keeps its current state.
+// An offer whose pool ends up empty is saved off-sale (FunPay would otherwise
+// sell with nothing to deliver).
+async function funpayUpdateSecrets(
+  offerId,
+  nodeId,
+  { removeLogins = [], addLines = [], activate = null } = {},
+) {
+  const keys = requireKeys("funpay");
+  if (!offerId || /^node\d+-/.test(String(offerId))) {
+    throw new Error("no FunPay offer id on record — edit it on FunPay");
+  }
+  const goldenKey = keys.golden_key;
+  const editor = await fpLoadEditor(goldenKey, nodeId, offerId);
+  const form = fpFormValues(editor.html);
+  const pool = String(form.secrets || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const prefixes = removeLogins
+    .map((l) => String(l || "").trim().toLowerCase() + ":")
+    .filter((p) => p.length > 1);
+  const kept = [];
+  const removedLines = [];
+  for (const line of pool) {
+    const burned = prefixes.some((p) => line.toLowerCase().startsWith(p));
+    (burned ? removedLines : kept).push(line);
+  }
+  const have = new Set(kept);
+  let added = 0;
+  for (const raw of addLines) {
+    const line = String(raw || "").trim();
+    if (!line || have.has(line)) continue;
+    kept.push(line);
+    have.add(line);
+    added++;
+  }
+  const wasActive = form.active != null;
+  const body = {
+    ...form,
+    csrf_token: editor.csrf,
+    form_created_at: form.form_created_at || editor.formCreatedAt,
+    offer_id: String(offerId),
+    node_id: form.node_id || editor.nodeId,
+    location: form.location || "",
+    deleted: "",
+    amount: form.amount || "1",
+  };
+  delete body.secrets;
+  delete body.auto_delivery;
+  delete body.active;
+  if (kept.length) {
+    body.auto_delivery = "on";
+    body.secrets = kept.join("\n");
+  }
+  const on = (activate === null ? wasActive : !!activate) && kept.length > 0;
+  if (on) body.active = "on";
+  await fpPostOfferSave(goldenKey, editor.session, body);
+  return {
+    removed: removedLines.length,
+    added,
+    pool: kept.length,
+    active: on,
+  };
+}
+
+// ------------------------------------------------------------------
+// ZeusX (no public API — the seller panel's own JSON endpoints)
+//
+// zeusx.com itself sits behind Cloudflare, but api.zeusx.com answers a plain
+// bearer token (the seller session's access_token). A listing needs the game's
+// "service category base" id plus that base's required attributes, which are
+// per game and are configured under autoFarm.zeusxGames.
+// ------------------------------------------------------------------
+const ZX_API = "https://api.zeusx.com/v1";
+// ZeusX refuses to create or update an offer below this.
+const ZX_MIN_PRICE = 1;
+
+function zxHeaders(keys) {
+  return {
+    Authorization: "Bearer " + keys.accessToken,
+    Origin: "https://zeusx.com",
+    Referer: "https://zeusx.com/",
+    "Content-Type": "application/json",
+    "zeusx-currency": "USD",
+  };
+}
+
+function zxError(what, e) {
+  if (e && e.__zeusx) return e;
+  const body = e.response && e.response.data;
+  const msg =
+    (body && body.error && (body.error.description || body.error.message)) ||
+    (body && body.message) ||
+    e.message;
+  return new Error(what + ": " + String(msg).slice(0, 300));
+}
+
+// The API answers 200 with { isSuccess: false, error } for business failures.
+function zxData(what, r) {
+  const body = r.data || {};
+  if (body.isSuccess === false) {
+    const err = body.error || {};
+    const out = new Error(
+      what + ": " + String(err.description || err.message || "failed").slice(0, 300),
+    );
+    out.__zeusx = true;
+    throw out;
+  }
+  return body.data;
+}
+
+async function zeusxTest() {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(ZX_API + "/user/me", {
+      headers: zxHeaders(keys),
+      timeout: 20000,
+    });
+    const me = zxData("ZeusX", r) || {};
+    return {
+      ok: true,
+      detail: "Signed in as " + (me.username || me.display_name || me.id || "seller"),
+    };
+  } catch (e) {
+    throw zxError("ZeusX test", e);
+  }
+}
+
+// Attributes a listing must carry for one game category (Rank, Tier, ...).
+async function zeusxBaseAttributes(serviceCategoryBaseId) {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(
+      ZX_API +
+        "/base-attribute/get-attributes?service_category_base_id=" +
+        encodeURIComponent(serviceCategoryBaseId),
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    return zxData("ZeusX attributes", r) || [];
+  } catch (e) {
+    throw zxError("ZeusX attributes", e);
+  }
+}
+
+// Required attributes with no configured answer get the base's first option,
+// so publishing never dies on a cosmetic field we do not model.
+async function zeusxAttributeValues(serviceCategoryBaseId, configured) {
+  const chosen = new Map(
+    (Array.isArray(configured) ? configured : []).map((a) => [
+      String(a.base_attribute_id || a.attributeId),
+      String(a.base_attribute_value || a.attributeValueId),
+    ]),
+  );
+  const attrs = await zeusxBaseAttributes(serviceCategoryBaseId);
+  const out = [];
+  for (const attr of attrs) {
+    const id = String(attr.id || attr.base_attribute_id || "");
+    if (!id) continue;
+    const options = attr.base_attribute_options || [];
+    let value = chosen.get(id);
+    if (!value) {
+      if (!attr.is_required && !attr.required) continue;
+      const first = options.find((o) => o.is_active !== false);
+      if (!first) continue;
+      value = String(first.id);
+    }
+    out.push({ base_attribute_id: id, base_attribute_value: String(value) });
+  }
+  // Keep configured answers for attributes the listing endpoint expects but
+  // the attribute feed did not return.
+  for (const [id, value] of chosen) {
+    if (!out.some((o) => o.base_attribute_id === id)) {
+      out.push({ base_attribute_id: id, base_attribute_value: value });
+    }
+  }
+  return out;
+}
+
+// Photos go to S3 through a presigned URL, then the listing references the id.
+async function zeusxUploadPhoto(imagePath) {
+  const keys = requireKeys("zeusx");
+  const buf = fs.readFileSync(imagePath);
+  const ext = (path.extname(imagePath) || ".png").toLowerCase();
+  const contentType =
+    ext === ".jpg" || ext === ".jpeg"
+      ? "image/jpeg"
+      : ext === ".webp"
+        ? "image/webp"
+        : "image/png";
+  let slot;
+  try {
+    const r = await axios.post(
+      ZX_API + "/upload/request-upload-urls",
+      {
+        type: "OFFER_PHOTO",
+        files: [{ file_name: "cover" + ext, content_type: contentType }],
+      },
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    slot = (zxData("ZeusX upload url", r) || [])[0];
+  } catch (e) {
+    throw zxError("ZeusX upload url", e);
+  }
+  if (!slot || !slot.upload_url) throw new Error("ZeusX upload: no upload url");
+  try {
+    await axios.put(slot.upload_url, buf, {
+      headers: { "Content-Type": contentType },
+      timeout: 60000,
+      maxBodyLength: Infinity,
+    });
+  } catch (e) {
+    throw zxError("ZeusX upload", e);
+  }
+  return {
+    photo_id: slot.upload_file_id,
+    photo_url: slot.upload_file_path,
+    file_name: slot.upload_file_name,
+  };
+}
+
+function zxDescriptionHtml(description) {
+  const text = String(description || "").trim();
+  if (/<[a-z][\s\S]*>/i.test(text)) return text.slice(0, 20000);
+  return text
+    .split(/\n{2,}/)
+    .map((p) => "<p>" + p.replace(/\n/g, "<br>") + "</p>")
+    .join("")
+    .slice(0, 20000);
+}
+
+// Per-game placement, configured under autoFarm.zeusxGames:
+//   { "overwatch": { serviceCategoryId: "1", serviceCategoryBaseId: "269",
+//                    attributes: [{ base_attribute_id, base_attribute_value }] } }
+function zeusxGameConfig(game) {
+  const { loadSettings: load } = require("./settings");
+  const af = (load().autoFarm || {});
+  const map = af.zeusxGames || {};
+  const key = String(game || "").trim().toLowerCase();
+  if (!key) return null;
+  if (map[key]) return map[key];
+  const hit = Object.keys(map).find(
+    (k) => key.includes(k) || k.includes(key),
+  );
+  return hit ? map[hit] : null;
+}
+
+// Storefront URL. ZeusX serves offers under
+// /game/<game-slug>/<game_id>/<category>/<slug>, and only falls back to the id
+// route when the create response has not filled the slug in yet.
+function zeusxOfferUrl(offer) {
+  const slug = offer && offer.slug;
+  const gameId = offer && offer.game_id;
+  const category = String(
+    (offer && (offer.service_category_name || offer.cache_sc_service_category_name)) ||
+      "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+  const gameSlug = String(
+    (offer && (offer.service_category_base_name || offer.cache_scb_base_name)) || "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+  if (slug && gameId && gameSlug && category) {
+    return (
+      "https://zeusx.com/game/" + gameSlug + "/" + gameId + "/" + category + "/" + slug
+    );
+  }
+  return "https://zeusx.com/offer/" + ((offer && offer.offer_code) || (offer && offer.id) || "");
+}
+
+// ZeusX's game catalog. The site loads it as a static JSON blob (the same one
+// the create-offer game picker uses), so every game's category ids are
+// resolvable without the seller mapping anything by hand — the settings map is
+// only an override for games whose name we cannot match.
+const ZX_MENU_URL =
+  "https://us-prod-zeusx-assets.s3.amazonaws.com/static-content/get-menu.json";
+const ZX_MENU_TTL_MS = 6 * 60 * 60 * 1000;
+let zxMenuCache = { at: 0, bases: [] };
+
+async function zeusxMenu() {
+  if (zxMenuCache.bases.length && Date.now() - zxMenuCache.at < ZX_MENU_TTL_MS) {
+    return zxMenuCache.bases;
+  }
+  const r = await axios.get(ZX_MENU_URL, { timeout: 20000 });
+  const cats = (r.data && r.data.data) || [];
+  const bases = [];
+  for (const c of cats) {
+    for (const b of c.bases || []) {
+      bases.push({
+        serviceCategoryId: String(c.service_category_id),
+        serviceCategoryName: c.service_category_name,
+        serviceCategoryBaseId: String(b.service_category_base_id),
+        gameId: String(b.game_id || ""),
+        name: String(b.base_name || ""),
+      });
+    }
+  }
+  if (bases.length) zxMenuCache = { at: Date.now(), bases };
+  return bases;
+}
+
+const zxNorm = (v) =>
+  String(v || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+// Game name -> ZeusX Accounts category. Matched on word overlap rather than
+// substrings, because ZeusX's catalog is full of near-namesakes: "Black
+// Desert" must not land on "Black Desert Mobile", and a game it simply does
+// not carry (PUBG PC) must resolve to nothing rather than "PUBG: BLINDSPOT".
+const ZX_NOISE_WORDS = new Set([
+  "twitch",
+  "drops",
+  "drop",
+  "account",
+  "accounts",
+  "the",
+  "of",
+  "a",
+]);
+// Edition words that change WHICH product is being sold, so a query without
+// one must not silently match a candidate that has it.
+const ZX_EDITION_WORDS = new Set([
+  "mobile",
+  "classic",
+  "online",
+  "remastered",
+  "legacy",
+  "beta",
+  "pc",
+  "console",
+]);
+// A different platform is a different product, so these cost far more than a
+// cosmetic suffix: "Black Desert" is the PC game, not "Black Desert Mobile".
+const ZX_PLATFORM_WORDS = new Set(["mobile", "console", "pc"]);
+
+function zxTokens(v) {
+  return zxNorm(v)
+    .split(" ")
+    .filter((w) => w && !ZX_NOISE_WORDS.has(w));
+}
+
+function zxMatchScore(queryTokens, name) {
+  const cand = zxTokens(name);
+  if (!cand.length || !queryTokens.length) return 0;
+  const q = new Set(queryTokens);
+  const c = new Set(cand);
+  let shared = 0;
+  for (const w of c) if (q.has(w)) shared++;
+  if (!shared) return 0;
+  const union = new Set([...q, ...c]).size;
+  let score = shared / union;
+  // Every word of the candidate must be in the query, or "Rust" would match
+  // "Rust Console" as readily as itself. Sequel numbers and edition words are
+  // exempt: sellers write "Overwatch" for "Overwatch 2".
+  const core = cand.filter(
+    (w) => !ZX_EDITION_WORDS.has(w) && !/^\d+$/.test(w),
+  );
+  if (!core.every((w) => q.has(w))) score -= 0.34;
+  for (const w of cand) {
+    if (q.has(w)) continue;
+    if (ZX_PLATFORM_WORDS.has(w)) score -= 0.3;
+    else if (ZX_EDITION_WORDS.has(w)) score -= 0.02;
+    else if (/^\d+$/.test(w)) score -= 0.02;
+  }
+  return score;
+}
+
+async function zeusxResolveCategory(game, serviceCategoryId) {
+  const q = zxTokens(game);
+  if (!q.length) return null;
+  const catId = String(serviceCategoryId || "1");
+  let bases;
+  try {
+    bases = (await zeusxMenu()).filter((b) => b.serviceCategoryId === catId);
+  } catch {
+    return null;
+  }
+  const exact = bases.find((b) => zxNorm(b.name) === zxNorm(game));
+  if (exact) return exact;
+  let best = null;
+  let bestScore = 0;
+  for (const b of bases) {
+    const score = zxMatchScore(q, b.name);
+    if (score > bestScore) {
+      bestScore = score;
+      best = b;
+    }
+  }
+  // Below this the "match" is one shared word out of several — a different
+  // game with a word in common. A bare sequel ("Overwatch" -> "Overwatch 2")
+  // lands just under 0.5, hence the slack.
+  return bestScore >= 0.45 ? best : null;
+}
+
+async function zeusxPublish({
+  title,
+  description,
+  priceUsd,
+  quantity,
+  game,
+  serviceCategoryId,
+  serviceCategoryBaseId,
+  attributes,
+  tags,
+  coverImagePath,
+  deliveryDays,
+  deliveryHours,
+}) {
+  requireKeys("zeusx");
+  const cfg = zeusxGameConfig(game) || {};
+  let baseId = String(serviceCategoryBaseId || cfg.serviceCategoryBaseId || "");
+  let categoryId = String(serviceCategoryId || cfg.serviceCategoryId || "1");
+  if (!baseId) {
+    const hit = await zeusxResolveCategory(game, categoryId);
+    if (hit) {
+      baseId = hit.serviceCategoryBaseId;
+      categoryId = hit.serviceCategoryId;
+    }
+  }
+  if (!baseId) {
+    throw new Error(
+      'ZeusX has no game called "' +
+        (game || "") +
+        '" in its Accounts catalog — map it by hand under autoFarm.zeusxGames ' +
+        "(serviceCategoryBaseId).",
+    );
+  }
+  let price = Number(priceUsd);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("ZeusX needs a price above 0");
+  }
+  let priceNote = "";
+  if (price < ZX_MIN_PRICE) {
+    priceNote =
+      "Listed at $" +
+      ZX_MIN_PRICE.toFixed(2) +
+      " — ZeusX rejects anything below its $1 minimum (set price was $" +
+      price.toFixed(2) +
+      ").";
+    price = ZX_MIN_PRICE;
+  }
+  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  const photos = [];
+  if (coverImagePath) {
+    try {
+      photos.push(await zeusxUploadPhoto(coverImagePath));
+    } catch (e) {
+      console.error("zeusx cover upload failed:", e.message);
+    }
+  }
+  const offer = {
+    service_category_id: categoryId,
+    service_category_base_id: baseId,
+    offer_base_attribute_value: await zeusxAttributeValues(
+      baseId,
+      attributes && attributes.length ? attributes : cfg.attributes,
+    ),
+    title: String(title || "").slice(0, 200),
+    description: zxDescriptionHtml(description),
+    listed_price: String(price),
+    quantity: qty,
+    has_multiple_stock: qty > 1,
+    // Auto delivery on ZeusX needs credentials uploaded to their vault, which
+    // has no documented endpoint — sales are handed over in chat, the same way
+    // the other API-less markets work here.
+    delivery_method: "COORDINATED",
+    is_account_linked: false,
+    days: Math.max(0, parseInt(deliveryDays, 10) || 0),
+    hours: Math.max(0, parseInt(deliveryHours, 10) || (deliveryDays ? 0 : 1)),
+    tags: (Array.isArray(tags) ? tags : [])
+      .map((t) => String(t || "").trim())
+      .filter(Boolean)
+      .slice(0, 10),
+    uploaded_photos: photos,
+    removing_photo_ids: [],
+    photos: [],
+    agreeTerm: true,
+  };
+  const keys = requireKeys("zeusx");
+  let created;
+  try {
+    const r = await axios.post(
+      ZX_API + "/offer/create-offer",
+      { offer },
+      { headers: zxHeaders(keys), timeout: 60000 },
+    );
+    created = zxData("ZeusX create", r) || {};
+  } catch (e) {
+    throw zxError("ZeusX create", e);
+  }
+  const id = created.id || created.offer_id || created.offer_code || "";
+  if (!id) {
+    throw new Error(
+      "ZeusX create: no offer id in response: " +
+        JSON.stringify(created).slice(0, 300),
+    );
+  }
+  return {
+    externalId: String(id),
+    url: zeusxOfferUrl(created),
+    qty,
+    note: priceNote,
+  };
+}
+
+async function zeusxOffer(offerId) {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(ZX_API + "/offer/" + encodeURIComponent(offerId), {
+      headers: zxHeaders(keys),
+      timeout: 20000,
+    });
+    return zxData("ZeusX offer", r) || {};
+  } catch (e) {
+    throw zxError("ZeusX offer", e);
+  }
+}
+
+async function zeusxUpdateOffer(offerId, { title, description, priceUsd, quantity } = {}) {
+  const keys = requireKeys("zeusx");
+  const current = await zeusxOffer(offerId);
+  const offer = {
+    service_category_id: String(current.service_category_id || "1"),
+    service_category_base_id: String(current.service_category_base_id || ""),
+    offer_base_attribute_value: (current.offer_base_attribute_value || []).map(
+      (a) => ({
+        base_attribute_id: String(a.base_attribute_id),
+        base_attribute_value: String(a.base_attribute_value),
+      }),
+    ),
+    title: String(title != null ? title : current.title || "").slice(0, 200),
+    description:
+      description != null
+        ? zxDescriptionHtml(description)
+        : current.description || "",
+    listed_price: String(
+      priceUsd != null
+        ? Math.max(ZX_MIN_PRICE, Number(priceUsd))
+        : current.listed_price,
+    ),
+    quantity:
+      quantity != null
+        ? Math.max(0, parseInt(quantity, 10) || 0)
+        : Number(current.quantity) || 0,
+    delivery_method: current.delivery_method || "COORDINATED",
+    is_account_linked: !!current.is_account_linked,
+    days: Number(current.days) || 0,
+    hours: Number(current.hours) || 1,
+    tags: (current.tags || []).map((t) => (t && t.tag_name) || String(t)),
+    uploaded_photos: [],
+    removing_photo_ids: [],
+    photos: [],
+    agreeTerm: true,
+  };
+  offer.has_multiple_stock = offer.quantity > 1;
+  try {
+    const r = await axios.put(
+      ZX_API + "/offer/" + encodeURIComponent(offerId) + "/update",
+      { offer },
+      { headers: zxHeaders(keys), timeout: 60000 },
+    );
+    return zxData("ZeusX update", r);
+  } catch (e) {
+    throw zxError("ZeusX update", e);
+  }
+}
+
+// Hiding takes the offer off the storefront and is reversible; cancelling
+// (DELETE) is permanent, so delisting hides.
+async function zeusxDelist(offerId) {
+  const keys = requireKeys("zeusx");
+  const current = await zeusxOffer(offerId).catch(() => null);
+  if (current && current.is_hidden) return;
+  try {
+    const r = await axios.put(
+      ZX_API + "/offer/" + encodeURIComponent(offerId) + "/toggle-offer-hidden",
+      {},
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    zxData("ZeusX delist", r);
+  } catch (e) {
+    throw zxError("ZeusX delist", e);
+  }
+}
+
+async function zeusxRelist(offerId) {
+  const keys = requireKeys("zeusx");
+  const current = await zeusxOffer(offerId).catch(() => null);
+  if (current && !current.is_hidden) return;
+  try {
+    const r = await axios.put(
+      ZX_API + "/offer/" + encodeURIComponent(offerId) + "/toggle-offer-hidden",
+      {},
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    zxData("ZeusX relist", r);
+  } catch (e) {
+    throw zxError("ZeusX relist", e);
+  }
+}
+
+async function zeusxMyListings(pageIndex) {
+  const keys = requireKeys("zeusx");
+  try {
+    const r = await axios.get(
+      ZX_API + "/offer/my-sales-listing?pageIndex=" + (parseInt(pageIndex, 10) || 0),
+      { headers: zxHeaders(keys), timeout: 20000 },
+    );
+    return zxData("ZeusX listings", r) || { sales: [] };
+  } catch (e) {
+    throw zxError("ZeusX listings", e);
+  }
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -1960,12 +2985,15 @@ module.exports = {
   gameflipListingStatus,
   gameflipDelist,
   gameflipReprice,
+  gameflipReplaceCover,
+  gameflipListingIdsByStatus,
   digisellerTest,
   digisellerCategories,
   digisellerCategoryAttributes,
   digisellerPublish,
   digisellerUploadImage,
   digisellerAddContent,
+  digisellerRemoveContent,
   digisellerProductStock,
   digisellerDelist,
   g2gTest,
@@ -1981,6 +3009,7 @@ module.exports = {
   ggselTest,
   ggselCategories,
   ggselPublish,
+  ggselUpdateOffer,
   ggselAddProducts,
   ggselOfferStock,
   ggselResolveCategoryId,
@@ -1990,4 +3019,17 @@ module.exports = {
   funpayTest,
   funpayPublish,
   funpayDelist,
+  funpayUpdateSecrets,
+  zeusxTest,
+  zeusxPublish,
+  zeusxOffer,
+  zeusxUpdateOffer,
+  zeusxDelist,
+  zeusxRelist,
+  zeusxMyListings,
+  zeusxBaseAttributes,
+  zeusxUploadPhoto,
+  zeusxOfferUrl,
+  zeusxResolveCategory,
+  zeusxMenu,
 };

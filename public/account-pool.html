@@ -122,7 +122,11 @@
     <div style="margin-left:auto;display:flex;gap:8px;">
       <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
       <button class="btn-ghost btn-sm" id="exportBtn" title="Download {username, password} for accounts with no working auth token yet">Export needs-auth (JSON)</button>
-      <button class="btn-ghost btn-sm" id="checkUncheckedBtn" title="Queue every account that has a token but hasn't fed the drops archive yet (including ones already verified before that existed)">Sync to drop archive</button>
+      <button class="btn-ghost btn-sm" id="exportBotsBtn" title="Also include accounts already deployed to (or retired from) a bot config whose token the scanner found dead — these never appeared in the pool export, yet they are the ones sitting inside live listings">Export needs-auth — incl. bot accounts</button>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap;cursor:pointer;" title="Off (default): sync only the available accounts shown here. On: also backfill claimed accounts hidden from this list.">
+        <input type="checkbox" id="includeClaimed" style="cursor:pointer;" /> Include claimed
+      </label>
+      <button class="btn-ghost btn-sm" id="checkUncheckedBtn" title="Queue accounts that have a token but haven't fed the drops archive yet. By default only the available accounts shown here; tick 'Include claimed' to also backfill claimed accounts.">Sync to drop archive</button>
       <button class="btn-sm" id="importBtn">Import accounts</button>
     </div>
   </div>
@@ -310,6 +314,36 @@ or JSON:
   $("search").addEventListener("input", render);
   $("refreshBtn").addEventListener("click", load);
 
+  async function exportNeedsAuth(btn, source) {
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Exporting…";
+    try {
+      const r = await api(
+        "/account-pool/export-needs-auth?status=" + encodeURIComponent(CURRENT_STATUS) +
+        (source ? "&source=" + encodeURIComponent(source) : ""),
+      );
+      if (!r.count) { toast("Nothing to export — everything here already has a working token"); return; }
+      const blob = new Blob([JSON.stringify(r.accounts, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "needs-auth-accounts.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast("Downloaded " + r.count + " account(s) needing a working token");
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  }
+
+  $("exportBotsBtn").addEventListener("click", (e) =>
+    exportNeedsAuth(e.target, "all"),
+  );
+
   $("exportBtn").addEventListener("click", async () => {
     const btn = $("exportBtn");
     const old = btn.textContent;
@@ -477,7 +511,8 @@ or JSON:
     const old = btn.textContent;
     btn.disabled = true; btn.textContent = "Queuing…";
     try {
-      const r = await api("/account-pool/check-queue/enqueue-unchecked", { method: "POST" });
+      const includeClaimed = $("includeClaimed").checked;
+      const r = await api("/account-pool/check-queue/enqueue-unchecked" + (includeClaimed ? "?includeClaimed=1" : ""), { method: "POST" });
       if (r.queued) {
         // Spell out the available/claimed split — this sweep covers the whole
         // pool, so the number is normally far bigger than the visible list.
