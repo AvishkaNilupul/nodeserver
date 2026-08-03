@@ -181,7 +181,8 @@
       <div class="field">
         <label>Speed preset</label>
         <div id="speedPresets" class="chips">
-          <span class="chip selected" data-preset="stealth">Stealth · slow &amp; safe</span>
+          <span class="chip" data-preset="stealthPlus">Stealth+ · warm-up &amp; noise</span>
+          <span class="chip selected" data-preset="stealth">Stealth</span>
           <span class="chip" data-preset="normal">Normal</span>
           <span class="chip" data-preset="fast">Fast</span>
           <span class="chip" data-preset="burst">Burst · aggressive</span>
@@ -214,6 +215,21 @@
           <span>Only use accounts whose last scan was OK</span>
         </label>
         <div class="hint">Off = broader pool, but higher chance of dead-token failures inflating the failure counter.</div>
+      </div>
+
+      <div class="field">
+        <label class="toggle">
+          <input type="checkbox" id="stealthPlus" />
+          <span class="knob"></span>
+          <span>Stealth+ warm-up &amp; notification variance</span>
+        </label>
+        <div class="hint">Before each follow, the account simulates a channel-page visit (3 GQL queries a browser would fire) and randomises the notification-bell state so the fleet doesn't uniformly look like a bot service. Adds ~2-3s per follow.</div>
+      </div>
+
+      <div class="field">
+        <label for="hostHourlyCap">Per-host hourly cap (optional)</label>
+        <input type="number" id="hostHourlyCap" min="0" step="1" value="0" />
+        <div class="hint">Max follows per egress host per hour. 0 = no cap. Guards a single residential IP (Pi) from bursting one target too fast.</div>
       </div>
 
       <button class="btn" id="createBtn" style="width:100%;margin-top:8px;">Start follow job</button>
@@ -341,6 +357,8 @@
         concurrency: parseInt(document.getElementById('concurrencyInput').value, 10) || 1,
         hosts: [...state.selectedHosts],
         integrityOnly: document.getElementById('integrityOnly').checked,
+        stealthPlus: document.getElementById('stealthPlus').checked,
+        hostHourlyCap: parseInt(document.getElementById('hostHourlyCap').value, 10) || 0,
       };
       await api('/admin/twitch-follow/jobs', { method: 'POST', body: JSON.stringify(body) });
       document.getElementById('countInput').value = 50;
@@ -361,6 +379,7 @@
       el.innerHTML = jobs.map(renderJob).join('');
       el.querySelectorAll('[data-cancel]').forEach(b => b.onclick = () => cancelJob(b.dataset.cancel));
       el.querySelectorAll('[data-detail]').forEach(b => b.onclick = () => openDetail(b.dataset.detail));
+      el.querySelectorAll('[data-verify]').forEach(b => b.onclick = () => verifyJob(b.dataset.verify, b));
     } catch (err) {
       document.getElementById('jobs').innerHTML = '<div class="empty" style="color:var(--red);">' + err.message + '</div>';
     }
@@ -372,9 +391,19 @@
     const started = j.startedAt ? new Date(j.startedAt).toLocaleString() : '—';
     const next = j.nextAttemptAt && active ? new Date(j.nextAttemptAt) : null;
     const nextStr = next ? etaFrom(next) : '';
+    const verifyLine = j.lastVerifiedAt
+      ? '<div class="meta" style="margin-top:4px;color:var(--muted);">'
+        + '<b style="color:var(--green);">' + (j.verifiedStillFollowing || 0) + '</b> still following · '
+        + '<b style="color:var(--red);">' + (j.verifiedDropped || 0) + '</b> dropped by twitch'
+        + ((j.verifiedCheckFailed || 0) > 0 ? ' · <b style="color:var(--yellow);">' + j.verifiedCheckFailed + '</b> check failed' : '')
+        + ' · verified ' + new Date(j.lastVerifiedAt).toLocaleTimeString()
+        + '</div>'
+      : '';
+    const canVerify = (j.delivered || 0) > 0 && !active;
+    const stealthBadge = j.stealthPlus ? ' <span class="chip on" style="font-size:10px;padding:2px 7px;">stealth+</span>' : '';
     return '<div class="job' + (active ? ' active' : '') + '">' +
       '<div class="top">' +
-        '<div class="name">' + escapeHtml(j.channelDisplayName || j.channelLogin) + ' <span style="color:var(--muted);font-weight:500;">@' + escapeHtml(j.channelLogin) + '</span></div>' +
+        '<div class="name">' + escapeHtml(j.channelDisplayName || j.channelLogin) + ' <span style="color:var(--muted);font-weight:500;">@' + escapeHtml(j.channelLogin) + '</span>' + stealthBadge + '</div>' +
         '<span class="status-pill ' + j.status + '">' + j.status + '</span>' +
         '<div style="margin-left:auto;color:var(--muted);font-size:12px;">' + started + '</div>' +
       '</div>' +
@@ -385,8 +414,10 @@
         '<b>' + j.skipped + '</b> skipped' +
         (nextStr ? ' · next in ' + nextStr : '') +
       '</div>' +
+      verifyLine +
       (j.lastError ? '<div class="err">' + escapeHtml(j.lastError) + '</div>' : '') +
       '<div class="actions">' +
+        (canVerify ? '<button class="btn btn-ghost" data-verify="' + j._id + '">Verify follows stick</button>' : '') +
         '<button class="btn btn-ghost" data-detail="' + j._id + '">Details</button>' +
         (active ? '<button class="btn btn-danger" data-cancel="' + j._id + '">Cancel</button>' : '') +
       '</div>' +
@@ -405,6 +436,29 @@
     if (!confirm('Cancel this job? Any follows already made will stay.')) return;
     try { await api('/admin/twitch-follow/jobs/' + id + '/cancel', { method: 'POST' }); await loadJobs(); }
     catch (err) { alert(err.message); }
+  }
+
+  async function verifyJob(id, btn) {
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Checking…';
+    try {
+      const { result } = await api('/admin/twitch-follow/jobs/' + id + '/verify', { method: 'POST' });
+      const dropRate = result.total ? (result.dropped / (result.dropped + result.stillFollowing || 1) * 100).toFixed(1) : '0';
+      alert(
+        'Verify complete for ' + result.total + ' follows:\n\n' +
+        '  ' + result.stillFollowing + ' still following\n' +
+        '  ' + result.dropped + ' silently dropped by twitch (' + dropRate + '% drop rate)\n' +
+        '  ' + result.checkFailed + ' check itself failed\n' +
+        (result.droppedSample && result.droppedSample.length
+          ? '\nFirst dropped accounts: ' + result.droppedSample.map(d => d.login + '(' + d.host + ')').join(', ')
+          : '')
+      );
+      await loadJobs();
+    } catch (err) {
+      alert('Verify failed: ' + err.message);
+    } finally {
+      btn.disabled = false; btn.textContent = orig;
+    }
   }
 
   async function openDetail(id) {
@@ -452,16 +506,19 @@
   }
 
   const PRESETS = {
-    stealth: { spread: 4, workers: 1, hint: 'Stealth: 4h spread, 1 worker. Best for <100 follows on a small channel.' },
-    normal:  { spread: 1, workers: 2, hint: 'Normal: 1h spread, 2 workers. Reasonable middle ground.' },
-    fast:    { spread: 0.25, workers: 3, hint: 'Fast: 15min spread, 3 workers. Faster delivery, still jittered.' },
-    burst:   { spread: 0.05, workers: 5, hint: 'Burst: ~3min spread, 5 workers. Highest risk of pattern detection — use only on throwaway channels or when you accept the risk.' },
+    stealthPlus: { spread: 12, workers: 1, stealthPlus: true, hostHourlyCap: 8, hint: 'Stealth+: 12h spread, 1 worker, warm-up + notification variance + 8/host/hr cap. Highest deliverability, smallest fingerprint. Slowest.' },
+    stealth: { spread: 4, workers: 1, stealthPlus: false, hostHourlyCap: 0, hint: 'Stealth: 4h spread, 1 worker. Best for <100 follows on a small channel.' },
+    normal:  { spread: 1, workers: 2, stealthPlus: false, hostHourlyCap: 0, hint: 'Normal: 1h spread, 2 workers. Reasonable middle ground.' },
+    fast:    { spread: 0.25, workers: 3, stealthPlus: false, hostHourlyCap: 0, hint: 'Fast: 15min spread, 3 workers. Faster delivery, still jittered.' },
+    burst:   { spread: 0.05, workers: 5, stealthPlus: false, hostHourlyCap: 0, hint: 'Burst: ~3min spread, 5 workers. Highest risk of pattern detection — use only on throwaway channels or when you accept the risk.' },
   };
   function applyPreset(name) {
     const p = PRESETS[name];
     if (!p) return;
     document.getElementById('spreadInput').value = p.spread;
     document.getElementById('concurrencyInput').value = p.workers;
+    document.getElementById('stealthPlus').checked = !!p.stealthPlus;
+    document.getElementById('hostHourlyCap').value = p.hostHourlyCap || 0;
     document.getElementById('speedPresetHint').textContent = p.hint;
     document.querySelectorAll('#speedPresets .chip').forEach(c => {
       c.classList.toggle('selected', c.dataset.preset === name);

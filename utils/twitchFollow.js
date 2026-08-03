@@ -199,6 +199,67 @@ const FOLLOW_MUTATION =
   "  } " +
   "}";
 
+// The queries a real browser fires when you land on twitch.tv/<channel>.
+// We don't need every one Twitch's SPA runs — the goal is only to leave a
+// footprint of "this account visited the channel page N seconds before
+// clicking follow", which is the human pattern and NOT what a raw follow
+// bot leaves behind. Three shallow queries covers the meaningful signal
+// without blowing our request budget per follow.
+const CHANNEL_SHELL_QUERY =
+  "query ChannelShell($login: String!) { userOrError: userResultByLogin(login: $login) { " +
+  "  ... on User { id login displayName primaryColorHex profileImageURL(width: 70) roles { isPartner } " +
+  "    stream { id type } lastBroadcast { id startedAt } " +
+  "  } " +
+  "} }";
+const USE_LIVE_QUERY =
+  "query UseLive($channelLogin: String!) { user(login: $channelLogin) { id login stream { id type createdAt } } }";
+const SUBSCRIBE_BUTTON_QUERY =
+  "query ChannelPage_SubscribeButton($login: String!) { user(login: $login) { " +
+  "  id login self { subscriptionBenefit { id tier } } " +
+  "  subscriptionProducts { id tier } " +
+  "} }";
+const WARM_UP_QUERIES = [
+  { operationName: "ChannelShell", query: CHANNEL_SHELL_QUERY, varsFrom: "login" },
+  { operationName: "UseLive", query: USE_LIVE_QUERY, varsFrom: "channelLogin" },
+  {
+    operationName: "ChannelPage_SubscribeButton",
+    query: SUBSCRIBE_BUTTON_QUERY,
+    varsFrom: "login",
+  },
+];
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Fire the browser-visit queries on the target channel as if the account
+// just clicked into it. Failures here are intentionally swallowed — the
+// warm-up is a signal booster, not a gate; a follow that fires after a
+// failed warm-up is still better than one that fires with no warm-up.
+async function warmUpChannelVisit(token, channelLogin, { clientId, host } = {}) {
+  if (!channelLogin) return;
+  const cid = clientId || DEFAULT_CLIENT_ID;
+  for (const q of WARM_UP_QUERIES) {
+    const variables = { [q.varsFrom]: channelLogin };
+    try {
+      await gqlRequest({
+        token,
+        clientId: cid,
+        host: host || null,
+        body: [{ operationName: q.operationName, query: q.query, variables }],
+      });
+    } catch {
+      // ignore — warm-up is best-effort
+    }
+    // 120-400ms between queries mirrors the SPA's actual firing cadence,
+    // which is quick but not instant.
+    await sleep(120 + Math.floor(Math.random() * 280));
+  }
+  // Small extra dwell after warm-up before the follow itself — a real user
+  // reads the page for a moment before clicking follow. 500-1800ms.
+  await sleep(500 + Math.floor(Math.random() * 1300));
+}
+
 // Fire the followUser mutation from one bot account against one channel.
 // Returns { status: "ok" | "already_following", follow } on success.
 // Throws on hard failures with .code set to one of:
@@ -220,7 +281,24 @@ async function followChannel(token, channelId, opts = {}) {
   }
   if (!channelId) throw new Error("channelId required");
   const clientId = opts.clientId || DEFAULT_CLIENT_ID;
-  const disableNotifications = opts.disableNotifications !== false; // default true
+
+  // Stealth+: pretend to visit the channel page a moment before we click
+  // follow. Adds ~1.5-3s of pre-follow activity that looks like a browser.
+  // Caller opts in explicitly so the plain fast path stays fast.
+  if (opts.warmUp && opts.channelLogin) {
+    await warmUpChannelVisit(tok, opts.channelLogin, {
+      clientId,
+      host: opts.host || null,
+    });
+  }
+
+  // Notification bell state per follow. When randomizeNotifications is on,
+  // roughly 30% of follows enable notifications — matching a real user
+  // distribution rather than the uniform "always disable" pattern that
+  // fingerprints as a bot service.
+  let disableNotifications = opts.disableNotifications !== false;
+  if (opts.randomizeNotifications) disableNotifications = Math.random() < 0.7;
+
   const { status, parsed } = await gqlRequest({
     token: tok,
     clientId,
@@ -271,6 +349,7 @@ module.exports = {
   parseChannelInput,
   resolveChannel,
   followChannel,
+  warmUpChannelVisit,
   cleanToken,
   DEFAULT_CLIENT_ID,
 };
