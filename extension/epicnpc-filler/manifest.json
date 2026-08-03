@@ -1,8 +1,26 @@
 {
   "manifest_version": 3,
-  "name": "Marketplace Filler (EpicNPC + G2G)",
-  "version": "1.1.1",
-  "description": "Auto-fills the EpicNPC 'Post thread' form and auto-attaches the G2G bulk-upload .xlsx from listings opened via your panel. Fill/attach only - you always review and submit.",
+  "name": "Marketplace Filler (EpicNPC + G2G + Epic Signup)",
+  "version": "1.2.0",
+  "description": "Auto-fills the EpicNPC 'Post thread' form, auto-attaches G2G bulk-upload .xlsx from panel listings, and drives new-Epic-Games-account signups end-to-end (identity + OTP handled server-side, you click one captcha).",
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Marketplace Filler",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://www.epicnpc.com/*",
+    "https://epicnpc.com/*",
+    "https://www.g2g.com/*",
+    "https://g2g.com/*",
+    "https://www.epicgames.com/*",
+    "https://epicgames.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://*/*",
+    "http://*/*"
+  ],
   "content_scripts": [
     {
       "matches": ["https://www.epicnpc.com/*", "https://epicnpc.com/*"],
@@ -13,6 +31,21 @@
       "matches": ["https://www.g2g.com/*", "https://g2g.com/*"],
       "js": ["g2g.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.epicgames.com/id/*",
+        "https://epicgames.com/id/*"
+      ],
+      "js": ["epic-signup.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["nodeserver-bridge.js"],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ]
 }

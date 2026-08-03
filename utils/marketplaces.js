@@ -27,6 +27,12 @@ const FIELDS = {
   // ZeusX has no public API either — the credential is the seller session's
   // access_token (expires, so it needs re-pasting when it does).
   zeusx: ["accessToken"],
+  // Z2U has no API and is behind Cloudflare Turnstile. The seller pastes the
+  // full Cookie header from their signed-in browser (PHPSESSID + cf_clearance
+  // + everything else the site set) plus the exact User-Agent that earned
+  // that cf_clearance — Cloudflare binds clearance to the UA fingerprint, so
+  // any mismatch 403s.
+  z2u: ["cookie", "user_agent"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -2975,6 +2981,250 @@ async function zeusxMyListings(pageIndex) {
   }
 }
 
+// ------------------------------------------------------------------
+// Z2U — no public API, Cloudflare-protected. Server-side path: forward the
+// seller's session cookies (PHPSESSID + cf_clearance + anything else Z2U set)
+// verbatim to the same endpoints the site's own Batch Release UI drives:
+//   GET  /downloadTemp?service=..&game=..   liveness probe (returns .xlsx)
+//   POST /Sell/acceptExcelProducts          multipart bulk upload
+// If Cloudflare rejects (403 or interstitial HTML), the caller should fall
+// back to the extension bridge so the request originates from LO's own
+// Chrome and rides on the same cf_clearance the browser already earned.
+// ------------------------------------------------------------------
+const Z2U_BASE = "https://www.z2u.com";
+const Z2U_UA_FALLBACK =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+function z2uHeaders(keys, extra) {
+  const cookie = String(keys.cookie || "").trim();
+  const ua = String(keys.user_agent || "").trim() || Z2U_UA_FALLBACK;
+  if (!cookie) {
+    throw new Error(
+      "Z2U cookie is empty — paste the full Cookie header from a signed-in " +
+        "z2u.com session (DevTools → Network → any request → Cookie)",
+    );
+  }
+  return Object.assign(
+    {
+      Cookie: cookie,
+      "User-Agent": ua,
+      "Accept-Language": "en-US,en;q=0.9",
+      Referer: Z2U_BASE + "/sell/create",
+      Origin: Z2U_BASE,
+    },
+    extra || {},
+  );
+}
+
+function z2uIsCloudflareBlock(status, body) {
+  if (status === 403) return true;
+  const s = typeof body === "string" ? body : "";
+  return (
+    /Just a moment/i.test(s) ||
+    /Verify you are human/i.test(s) ||
+    /challenge-platform/i.test(s) ||
+    /cf-chl-bypass/i.test(s)
+  );
+}
+
+// Cheap liveness probe: downloadTemp is the smallest authenticated endpoint
+// the Batch modal itself hits, and it never mutates listings — perfect for a
+// "cookies still work?" health check.
+async function z2uTest() {
+  const keys = requireKeys("z2u");
+  const { GAME_MAP, SERVICE_MAP } = require("./z2uBulk");
+  const g = GAME_MAP.overwatch;
+  const r = await axios.get(
+    Z2U_BASE +
+      "/downloadTemp?service=" +
+      SERVICE_MAP.items +
+      "&game=" +
+      g.game,
+    {
+      headers: z2uHeaders(keys, { Accept: "*/*" }),
+      timeout: 25000,
+      responseType: "arraybuffer",
+      validateStatus: () => true,
+    },
+  );
+  const bytes = r.data ? Buffer.from(r.data) : Buffer.alloc(0);
+  if (z2uIsCloudflareBlock(r.status, bytes.slice(0, 400).toString("utf8"))) {
+    throw new Error(
+      "Z2U blocked by Cloudflare — paste fresh cf_clearance + PHPSESSID " +
+        "(and the User-Agent from the same browser). Prod nodeserver IP " +
+        "may not match your Chrome — the extension bridge is the fix.",
+    );
+  }
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error("Z2U downloadTemp returned HTTP " + r.status);
+  }
+  // A real template is a valid .xlsx (ZIP: 50 4B 03 04).
+  if (bytes.length < 200 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+    throw new Error(
+      "Z2U returned a non-xlsx body (" +
+        bytes.length +
+        " bytes) — session likely expired, paste fresh cookies",
+    );
+  }
+  return {
+    ok: true,
+    detail:
+      "Connected — downloadTemp returned a valid " +
+      bytes.length +
+      "-byte template",
+  };
+}
+
+// Bulk-publish offers by uploading a filled Batch Release .xlsx. Returns
+// { externalId, externalIds, url, note }. externalId is the first created
+// offer id (best-effort extraction from the JSON response); externalIds
+// lists all of them so a bundle upload can be linked back to N listings.
+async function z2uPublish({ game, service, offers }) {
+  const keys = requireKeys("z2u");
+  const { buildZ2uBulkFile, GAME_MAP, SERVICE_MAP } = require("./z2uBulk");
+  if (!Array.isArray(offers) || !offers.length) {
+    throw new Error("z2uPublish needs at least one offer");
+  }
+  const g =
+    typeof game === "string"
+      ? GAME_MAP[game.toLowerCase()]
+      : game && game.game
+        ? game
+        : null;
+  if (!g) throw new Error("z2uPublish: unknown game key");
+  const svcId =
+    typeof service === "number"
+      ? service
+      : SERVICE_MAP[String(service || "").toLowerCase()] ||
+        SERVICE_MAP.items;
+
+  const buf = buildZ2uBulkFile({ game, service, offers });
+
+  // Same multipart shape the site's Upload modal ships: file field named
+  // 'upload' (input#upfile), plus game+service so the importer knows which
+  // template it just received.
+  const form = new FormData();
+  form.append("game", String(g.game));
+  form.append("service", String(svcId));
+  form.append("upload", buf, {
+    filename: "z2u-bulk-" + Date.now() + ".xlsx",
+    contentType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const r = await axios.post(
+    Z2U_BASE + "/Sell/acceptExcelProducts",
+    form,
+    {
+      headers: z2uHeaders(keys, {
+        ...form.getHeaders(),
+        "X-Requested-With": "XMLHttpRequest",
+        Accept: "application/json, text/javascript, */*; q=0.01",
+      }),
+      timeout: 60000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      validateStatus: () => true,
+    },
+  );
+  if (z2uIsCloudflareBlock(r.status, typeof r.data === "string" ? r.data : "")) {
+    throw new Error(
+      "Z2U blocked by Cloudflare on upload — cf_clearance rejected. Paste " +
+        "fresh cookies from the same browser, or switch to the extension bridge.",
+    );
+  }
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error(
+      "Z2U acceptExcelProducts returned HTTP " +
+        r.status +
+        " — " +
+        (typeof r.data === "string" ? r.data.slice(0, 200) : "no body"),
+    );
+  }
+  let data = r.data;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      data = { raw: data.slice(0, 400) };
+    }
+  }
+  // Z2U's JSON envelope shape isn't published; treat code!=1 / status!=1 or a
+  // fail-y msg as rejection. Any created offer ids we can find are attached
+  // to externalIds so the caller can persist them.
+  const rejected =
+    data &&
+    typeof data === "object" &&
+    ((data.code !== undefined && data.code !== 1 && data.code !== 200) ||
+      (data.status !== undefined &&
+        data.status !== 1 &&
+        data.status !== "success") ||
+      (data.success === false));
+  if (rejected) {
+    const msg =
+      (data.msg && String(data.msg)) ||
+      (data.message && String(data.message)) ||
+      JSON.stringify(data).slice(0, 300);
+    throw new Error("Z2U rejected the upload: " + msg);
+  }
+  const ids = new Set();
+  (function walk(v) {
+    if (v == null) return;
+    if (Array.isArray(v)) {
+      v.forEach(walk);
+      return;
+    }
+    if (typeof v === "object") {
+      for (const [k, val] of Object.entries(v)) {
+        if (/^(?:offer|good|product|item)_?id$/i.test(k)) {
+          ids.add(String(val));
+        }
+        walk(val);
+      }
+      return;
+    }
+  })(data);
+  const list = Array.from(ids);
+  return {
+    externalId: list[0] || "",
+    externalIds: list,
+    externalNode: String(g.game),
+    url:
+      Z2U_BASE +
+      "/sell/manageList?service=" +
+      svcId +
+      "&game=" +
+      g.game,
+    note: (data && (data.msg || data.message)) || "uploaded",
+  };
+}
+
+// Take an offer off sale. Z2U's Manage Listing page ships a bulk-deactivate
+// action; the per-offer form the "Deactivate" button submits is a POST to
+// /Sell/setSellStatus with offer_id + status=0. If Z2U changes the endpoint
+// this will fail obviously (non-2xx) so the caller can surface it.
+async function z2uDelist(offerId) {
+  const keys = requireKeys("z2u");
+  if (!offerId) throw new Error("z2uDelist needs an offer id");
+  const form = new URLSearchParams({
+    id: String(offerId),
+    status: "0",
+  }).toString();
+  const r = await axios.post(Z2U_BASE + "/Sell/setSellStatus", form, {
+    headers: z2uHeaders(keys, {
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+    }),
+    timeout: 20000,
+    validateStatus: () => true,
+  });
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error("Z2U setSellStatus returned HTTP " + r.status);
+  }
+  return { ok: true };
+}
+
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -3032,4 +3282,7 @@ module.exports = {
   zeusxOfferUrl,
   zeusxResolveCategory,
   zeusxMenu,
+  z2uTest,
+  z2uPublish,
+  z2uDelist,
 };

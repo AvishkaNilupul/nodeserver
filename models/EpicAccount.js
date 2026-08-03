@@ -33,6 +33,15 @@ const epicAccountSchema = new mongoose.Schema(
     // Sales lifecycle — mirrors how Twitch bot accounts are handled: a sold
     // account stops being fed new claims.
     sold: { type: Boolean, default: false, index: true },
+
+    // Login credentials — populated only for accounts created by the Chrome
+    // extension generator (source="generated"); older manually-imported rows
+    // leave these empty. Email + password + TOTP secret are encrypted at
+    // rest via utils/secretBox so a buyer can be handed the account whole.
+    email: { type: String, default: "" },
+    password: { type: String, default: "" },
+    totpSecret: { type: String, default: "" },
+    source: { type: String, default: "manual", index: true }, // manual | generated
   },
   { timestamps: true },
 );

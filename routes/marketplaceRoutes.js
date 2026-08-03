@@ -114,6 +114,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "ggsel") r = await mp.ggselTest();
     else if (name === "zeusx") r = await mp.zeusxTest();
     else if (name === "funpay") r = await mp.funpayTest();
+    else if (name === "z2u") r = await mp.z2uTest();
     else {
       return res
         .status(400)
@@ -932,6 +933,39 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             coverImagePath: gridImage || coverImagePath(set),
             deliveryDays: zx.deliveryDays,
             deliveryHours: zx.deliveryHours,
+          });
+        } else if (name === "z2u") {
+          const z = body.z2u || {};
+          if (!z.game) {
+            results[name] = {
+              success: false,
+              message:
+                "Pick a Z2U game key (e.g. overwatch, r6, hunt, brawlhalla)",
+            };
+            continue;
+          }
+          r = await mp.z2uPublish({
+            game: z.game,
+            service: z.service || "items",
+            offers: [
+              {
+                title,
+                description,
+                priceUsd,
+                stock: Math.max(1, parseInt(z.stock, 10) || 1),
+                minQty: Math.max(1, parseInt(z.minQty, 10) || 1),
+                maxQty: Math.max(1, parseInt(z.maxQty, 10) || 1),
+                delivery: z.delivery || "Gift Giving",
+                productType: z.productType || "Send a gift",
+                expiryDays: parseInt(z.expiryDays, 10) || 30,
+                onlineHour: parseInt(z.onlineHour, 10) || 24,
+                currency: z.currency || "USD",
+                area: z.area || "Global",
+                platform: z.platform,
+                device: z.device || "",
+                imageUrl: z.imageUrl || "",
+              },
+            ],
           });
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
