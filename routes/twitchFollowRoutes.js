@@ -26,6 +26,26 @@ async function pickResolveAccount() {
     .lean();
 }
 
+// Turn a raw resolve/preview failure into something worth showing in a UI:
+// transport errors expose the full SSH command (including key paths and host
+// IPs), and Twitch's own error strings often carry stack noise. Everything
+// else falls through unchanged.
+function sanitizeResolveError(err) {
+  if (err && err.transportFailed) {
+    return "Resolve host unreachable — the account we tried to look up the channel with is behind a scan host that's down. Try again in a moment.";
+  }
+  const code = err && err.code;
+  if (code === "channel_not_found") return err.message;
+  if (code === "bad_input") return err.message;
+  if (code === "token_invalid") {
+    return "Every account we tried to resolve the channel with has a dead token — refresh a token via the token-fetcher tool and retry.";
+  }
+  if (code === "integrity_failed") {
+    return "Twitch integrity gate rejected our lookup — no live account can query at the moment.";
+  }
+  return (err && err.message) || String(err);
+}
+
 function safeToken(raw) {
   if (!raw) return "";
   try {
@@ -43,7 +63,9 @@ router.get("/admin/twitch-follow/hosts", requireAdmin, (req, res) => {
 
 // POST /admin/twitch-follow/resolve — { channel } -> { id, login, displayName }
 // Lets the operator paste a URL and see who they're about to hit before
-// committing to a job.
+// committing to a job. Always egresses from the local server: the user()
+// lookup carries no integrity concerns, so binding it to the picked
+// account's home host would just break resolve whenever the Pi is down.
 router.post("/admin/twitch-follow/resolve", requireAdmin, async (req, res) => {
   try {
     const raw = String(req.body?.channel || "").trim();
@@ -67,14 +89,14 @@ router.post("/admin/twitch-follow/resolve", requireAdmin, async (req, res) => {
     }
     const info = await twitchFollow.resolveChannel(login, {
       token: safeToken(acct.clientSecret),
-      host: hosts.resolveHost(acct.host || "local"),
+      host: hosts.resolveHost("local"),
     });
     res.json({ success: true, channel: info });
   } catch (err) {
     res.status(400).json({
       success: false,
       code: err.code || "error",
-      message: err.message || String(err),
+      message: sanitizeResolveError(err),
     });
   }
 });
@@ -106,7 +128,7 @@ router.get("/admin/twitch-follow/preview", requireAdmin, async (req, res) => {
     }
     const info = await twitchFollow.resolveChannel(login, {
       token: safeToken(acct.clientSecret),
-      host: hosts.resolveHost(acct.host || "local"),
+      host: hosts.resolveHost("local"),
     });
 
     const integrityOnly = String(req.query.integrityOnly || "1") !== "0";
@@ -147,7 +169,7 @@ router.get("/admin/twitch-follow/preview", requireAdmin, async (req, res) => {
     res.status(400).json({
       success: false,
       code: err.code || "error",
-      message: err.message || String(err),
+      message: sanitizeResolveError(err),
     });
   }
 });
@@ -187,6 +209,10 @@ router.post("/admin/twitch-follow/jobs", requireAdmin, async (req, res) => {
       ? b.hosts.map(String).filter(Boolean)
       : [];
     const integrityOnly = b.integrityOnly !== false;
+    const concurrency = Math.max(
+      1,
+      Math.min(runner.MAX_CONCURRENCY || 5, Math.floor(Number(b.concurrency) || 1)),
+    );
 
     const acct = await pickResolveAccount();
     if (!acct) {
@@ -197,7 +223,7 @@ router.post("/admin/twitch-follow/jobs", requireAdmin, async (req, res) => {
     }
     const info = await twitchFollow.resolveChannel(channelInput, {
       token: safeToken(acct.clientSecret),
-      host: hosts.resolveHost(acct.host || "local"),
+      host: hosts.resolveHost("local"),
     });
 
     // Convert "spread over N hours" into an average per-follow gap so the
@@ -219,6 +245,7 @@ router.post("/admin/twitch-follow/jobs", requireAdmin, async (req, res) => {
       idlePauseChance,
       hostIds,
       integrityOnly,
+      concurrency,
       createdBy: admin.username || admin._id || "",
     });
     runner.enqueueJob(doc._id);
