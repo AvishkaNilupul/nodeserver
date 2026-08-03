@@ -38,6 +38,13 @@ const twitchFollowJobSchema = new mongoose.Schema(
     // enabled host. Same ids as botHosts.listHosts().
     hostIds: { type: [String], default: [] },
 
+    // Parallel worker sub-loops per job. Each worker drains from the same
+    // candidate pool, so N workers ≈ N× throughput. Capped at 5 — beyond
+    // that the follow burst against a single channel starts looking too
+    // synchronised regardless of jitter. Counter updates run through $inc
+    // so parallel workers can't lose an increment.
+    concurrency: { type: Number, default: 1, min: 1, max: 5 },
+
     // Only offer accounts whose token has passed a recent integrity check
     // (utils/twitchInventory records that indirectly — dead tokens surface as
     // lastScanStatus token_invalid). No dedicated integrity flag exists on

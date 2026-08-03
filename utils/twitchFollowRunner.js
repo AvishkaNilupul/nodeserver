@@ -1,15 +1,18 @@
 // Background worker that drives TwitchFollowJob docs to completion.
 //
-// One in-process loop per job so multiple jobs on different channels can run
-// side by side without one blocking the others. Each loop:
-//   1. Loads the eligible-account list once at start (BotAccount ∩ has token
-//      ∩ not sold ∩ not already logged 'ok' for THIS channel).
+// One in-process controller per job, but the controller can spawn N parallel
+// worker sub-loops (job.concurrency) that share a single candidate pool.
+// Counter updates use $inc so parallel workers can't lose an increment. Each
+// worker:
+//   1. Pops the next account from the shared pool (pool.shift is atomic in
+//      single-threaded JS — no lock needed).
 //   2. Waits a jittered delay (job.avgGapMs ± job.jitter), plus occasional
-//      long "distracted human" pauses, so the outbound traffic doesn't look
-//      like a fixed-cadence bot burst.
+//      long "distracted human" pauses.
 //   3. Fires utils/twitchFollow.followChannel from the picked account, on the
 //      picked host, and records the outcome to TwitchFollowLog.
-//   4. Bails on cancellation, on 5 consecutive failures (Twitch is angry),
+//   4. Falls back to the local host once if the account's home host is dead
+//      (Pi outage), before giving up on that account.
+//   5. Bails on cancellation, on 5 consecutive failures across the whole job,
 //      when requestedCount is reached, or when the candidate pool is drained.
 //
 // State is persisted on the job doc, so a server restart resumes cleanly:
@@ -23,15 +26,19 @@ const secretBox = require("./secretBox");
 const twitchFollow = require("./twitchFollow");
 const hosts = require("./botHosts");
 
-// Cap so a runaway config can't wedge the loop into a pathological wait.
-const MIN_DELAY_MS = 15 * 1000; // 15s floor per follow
-const MAX_DELAY_MS = 15 * 60 * 1000; // 15 minutes ceiling
+// A short 2s floor gives operators room to pick fast pacing (batches of a few
+// hundred follows over minutes rather than hours) without letting a misconfig
+// hammer twitch with zero-gap requests. The 15-minute ceiling stops a
+// runaway average * jitter from wedging a worker for hours per follow.
+const MIN_DELAY_MS = 2 * 1000;
+const MAX_DELAY_MS = 15 * 60 * 1000;
 const IDLE_PAUSE_MIN_MS = 3 * 60 * 1000;
 const IDLE_PAUSE_MAX_MS = 8 * 60 * 1000;
 const MAX_CONSECUTIVE_FAILURES = 5;
+const MAX_CONCURRENCY = 5;
 
 // Tracks the loops currently in flight so start() is idempotent and cancel
-// can flip a flag the loop reads on its next tick.
+// can flip a flag every worker sub-loop reads on its next tick.
 const activeLoops = new Map(); // jobId -> { cancelled: false, promise }
 
 function sleep(ms) {
@@ -119,56 +126,61 @@ async function buildCandidatePool(job) {
   return candidates;
 }
 
-async function markTerminal(job, status, message) {
-  job.status = status;
-  job.finishedAt = new Date();
-  if (message) job.lastMessage = message;
-  await job.save();
+// Small atomic-update helpers. $inc + optional $set means two workers that
+// increment `delivered` at the same time both land; the last-writer-wins
+// behaviour of .save() would lose one of them.
+async function incJobCounters(jobId, incFields, setFields) {
+  const update = { $inc: incFields };
+  if (setFields && Object.keys(setFields).length) update.$set = setFields;
+  return TwitchFollowJob.findByIdAndUpdate(jobId, update, {
+    new: true,
+    lean: true,
+  });
 }
 
-async function runJob(jobId) {
-  const state = activeLoops.get(String(jobId));
-  const job = await TwitchFollowJob.findById(jobId);
-  if (!job) return;
-  if (job.status === "cancelled" || job.status === "done" || job.status === "failed") {
-    return;
-  }
+// Terminal marking is idempotent — first worker to hit an end condition wins,
+// the others just exit on their next tick because status is no longer
+// 'running'. Guarding on `status: 'running'` in the filter is what stops a
+// second worker from stomping "done" back over "cancelled" a moment later.
+async function markTerminalAtomic(jobId, status, message) {
+  return TwitchFollowJob.findOneAndUpdate(
+    { _id: jobId, status: { $in: ["pending", "running"] } },
+    {
+      $set: {
+        status,
+        finishedAt: new Date(),
+        ...(message ? { lastMessage: message } : {}),
+      },
+    },
+    { new: true, lean: true },
+  );
+}
 
-  if (!job.startedAt) job.startedAt = new Date();
-  job.status = "running";
-  await job.save();
+// One worker sub-loop — N of these run in parallel per job. shared holds
+// cross-worker signals (cancelled flag, "already terminal" flag) so a peer
+// stopping the job is picked up on the next iteration by every other worker.
+async function runWorker(jobId, workerIndex, pool, hostCursor, shared) {
+  while (true) {
+    if (shared.cancelled || shared.terminated) return;
 
-  let pool;
-  try {
-    pool = await buildCandidatePool(job);
-  } catch (err) {
-    await markTerminal(job, "failed", "Pool build failed: " + err.message);
-    return;
-  }
-  if (!pool.length) {
-    await markTerminal(job, "done", "No eligible accounts (pool empty)");
-    return;
-  }
-
-  const hostCursor = { i: 0 };
-
-  while (job.delivered < job.requestedCount) {
-    if (state && state.cancelled) {
-      await markTerminal(job, "cancelled", "Cancelled by operator");
-      return;
-    }
-    // Re-read the doc every iteration so an operator flipping cancelRequested
-    // from the UI takes effect without needing an in-memory signal.
+    // Fresh doc — every worker re-reads the job before deciding to continue,
+    // so an operator-issued cancel or a peer's terminal decision propagates
+    // without needing an in-memory signal.
     const fresh = await TwitchFollowJob.findById(jobId).lean();
     if (!fresh) return;
     if (fresh.cancelRequested) {
-      if (state) state.cancelled = true;
-      await markTerminal(job, "cancelled", "Cancelled by operator");
+      shared.cancelled = true;
+      await markTerminalAtomic(jobId, "cancelled", "Cancelled by operator");
       return;
     }
-    if (job.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-      await markTerminal(
-        job,
+    if (["done", "cancelled", "failed"].includes(fresh.status)) {
+      shared.terminated = true;
+      return;
+    }
+    if (fresh.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      shared.terminated = true;
+      await markTerminalAtomic(
+        jobId,
         "failed",
         "Aborted after " +
           MAX_CONSECUTIVE_FAILURES +
@@ -176,61 +188,91 @@ async function runJob(jobId) {
       );
       return;
     }
+    if (fresh.delivered >= fresh.requestedCount) {
+      shared.terminated = true;
+      await markTerminalAtomic(
+        jobId,
+        "done",
+        "Delivered " +
+          fresh.delivered +
+          "/" +
+          fresh.requestedCount +
+          " follows",
+      );
+      return;
+    }
     if (!pool.length) {
-      await markTerminal(
-        job,
+      shared.terminated = true;
+      await markTerminalAtomic(
+        jobId,
         "done",
         "Pool exhausted at " +
-          job.delivered +
+          fresh.delivered +
           "/" +
-          job.requestedCount +
+          fresh.requestedCount +
           " delivered",
       );
       return;
     }
 
     const account = pool.shift();
-    const host = pickHostForAccount(account, job.hostIds, hostCursor);
+    if (!account) continue;
+    const host = pickHostForAccount(account, fresh.hostIds, hostCursor);
     if (!host) {
-      job.skipped += 1;
-      await job.save();
+      await incJobCounters(jobId, { skipped: 1 });
       continue;
     }
 
     // Delay BEFORE the follow so the first attempt after job creation isn't
     // an instant burst either. Skip the sleep on the very first candidate
-    // when delivered is 0 to keep the UI responsive.
-    if (job.delivered + job.failed + job.alreadyFollowing > 0) {
-      const gap = pickJitteredDelay(job.avgGapMs, job.jitter);
-      job.nextAttemptAt = new Date(Date.now() + gap);
-      await job.save();
+    // when nothing has fired yet so the UI reacts responsively.
+    const anyFired =
+      (fresh.delivered || 0) +
+        (fresh.failed || 0) +
+        (fresh.alreadyFollowing || 0) >
+      0;
+    if (anyFired) {
+      const gap = pickJitteredDelay(fresh.avgGapMs, fresh.jitter);
+      // Only one worker's nextAttemptAt is preserved (each write clobbers)
+      // — that's fine, the UI needs a rough ETA, not a per-worker read.
+      await incJobCounters(
+        jobId,
+        {},
+        { nextAttemptAt: new Date(Date.now() + gap) },
+      );
       await sleep(gap);
-      // Occasional long pause — humans don't follow at a metronomic gap.
-      if (Math.random() < (job.idlePauseChance || 0)) {
+      if (Math.random() < (fresh.idlePauseChance || 0)) {
         const pause = pickIdlePause();
-        job.nextAttemptAt = new Date(Date.now() + pause);
-        await job.save();
+        await incJobCounters(
+          jobId,
+          {},
+          { nextAttemptAt: new Date(Date.now() + pause) },
+        );
         await sleep(pause);
       }
     }
 
-    // A last cancel/failure check after the sleep — the operator or an
-    // earlier iteration may have changed the picture.
-    const beforeFire = await TwitchFollowJob.findById(jobId).lean();
-    if (!beforeFire) return;
-    if (beforeFire.cancelRequested) {
-      await markTerminal(job, "cancelled", "Cancelled by operator");
+    // Re-check cancel/terminal after the sleep.
+    if (shared.cancelled || shared.terminated) return;
+    const midWait = await TwitchFollowJob.findById(jobId).lean();
+    if (!midWait) return;
+    if (midWait.cancelRequested) {
+      shared.cancelled = true;
+      await markTerminalAtomic(jobId, "cancelled", "Cancelled by operator");
+      return;
+    }
+    if (["done", "cancelled", "failed"].includes(midWait.status)) {
+      shared.terminated = true;
       return;
     }
 
     const token = readToken(account);
     if (!token) {
-      job.skipped += 1;
-      await job.save();
+      await incJobCounters(jobId, { skipped: 1 });
       await TwitchFollowLog.create({
-        jobId: job._id,
-        channelId: job.channelId,
-        channelLogin: job.channelLogin,
+        jobId,
+        channelId: midWait.channelId,
+        channelLogin: midWait.channelLogin,
         botAccountId: account._id,
         botLogin: account.login,
         host: host.id,
@@ -240,52 +282,183 @@ async function runJob(jobId) {
       continue;
     }
 
-    try {
-      await twitchFollow.followChannel(token, job.channelId, { host });
-      job.delivered += 1;
-      job.consecutiveFailures = 0;
-      await job.save();
+    // The follow attempt itself. Handles three failure modes: transport
+    // (retry via local once, then skip), twitch/token error (log + count as
+    // a failure), success (log + increment delivered).
+    const outcome = await attemptFollow({
+      token,
+      channelId: midWait.channelId,
+      host,
+    });
+
+    if (outcome.status === "ok") {
+      await incJobCounters(
+        jobId,
+        { delivered: 1 },
+        { consecutiveFailures: 0 },
+      );
       await TwitchFollowLog.create({
-        jobId: job._id,
-        channelId: job.channelId,
-        channelLogin: job.channelLogin,
+        jobId,
+        channelId: midWait.channelId,
+        channelLogin: midWait.channelLogin,
         botAccountId: account._id,
         botLogin: account.login,
-        host: host.id,
+        host: outcome.hostUsed,
         status: "ok",
       });
-    } catch (err) {
-      // Transport failure: the host, not the account. Put the account back at
-      // the end of the queue and try a different one next iteration.
-      if (err.transportFailed) {
-        job.skipped += 1;
-        await job.save();
-        pool.push(account);
-        continue;
-      }
-      const code = err.code || "error";
-      job.failed += 1;
-      job.consecutiveFailures += 1;
-      job.lastError = code + ": " + (err.message || "").slice(0, 200);
-      await job.save();
+    } else if (outcome.status === "skip_transport") {
+      // Both the account's home host AND local are unreachable — extremely
+      // rare, effectively a fleet-wide network outage. Log skipped and move
+      // on rather than infinite-looping.
+      await incJobCounters(jobId, { skipped: 1 });
       await TwitchFollowLog.create({
-        jobId: job._id,
-        channelId: job.channelId,
-        channelLogin: job.channelLogin,
+        jobId,
+        channelId: midWait.channelId,
+        channelLogin: midWait.channelLogin,
         botAccountId: account._id,
         botLogin: account.login,
         host: host.id,
+        status: "skipped",
+        error: "transport: " + outcome.error,
+      });
+    } else {
+      await incJobCounters(
+        jobId,
+        { failed: 1, consecutiveFailures: 1 },
+        {
+          lastError:
+            outcome.code + ": " + String(outcome.error || "").slice(0, 200),
+        },
+      );
+      await TwitchFollowLog.create({
+        jobId,
+        channelId: midWait.channelId,
+        channelLogin: midWait.channelLogin,
+        botAccountId: account._id,
+        botLogin: account.login,
+        host: outcome.hostUsed,
         status: "failed",
-        error: code + (err.twitchCode ? "/" + err.twitchCode : ""),
+        error:
+          outcome.code + (outcome.twitchCode ? "/" + outcome.twitchCode : ""),
       });
     }
   }
+}
 
-  await markTerminal(
-    job,
-    "done",
-    "Delivered " + job.delivered + "/" + job.requestedCount + " follows",
+// Attempt a follow, with a single host-fallback: if the primary host (the
+// account's home) fails as a transport error, retry the same account through
+// local. Local is always reachable from the app server, so this converts a
+// Pi outage from "job stalls" to "small extra load on local egress".
+async function attemptFollow({ token, channelId, host }) {
+  try {
+    await twitchFollow.followChannel(token, channelId, { host });
+    return { status: "ok", hostUsed: host.id };
+  } catch (err) {
+    if (err.transportFailed && host.id !== "local") {
+      try {
+        await twitchFollow.followChannel(token, channelId, {
+          host: hosts.resolveHost("local"),
+        });
+        return { status: "ok", hostUsed: "local" };
+      } catch (err2) {
+        if (err2.transportFailed) {
+          return {
+            status: "skip_transport",
+            hostUsed: host.id,
+            error: err2.message || String(err2),
+          };
+        }
+        return {
+          status: "failed",
+          hostUsed: "local",
+          code: err2.code || "error",
+          twitchCode: err2.twitchCode,
+          error: err2.message || String(err2),
+        };
+      }
+    }
+    if (err.transportFailed) {
+      return {
+        status: "skip_transport",
+        hostUsed: host.id,
+        error: err.message || String(err),
+      };
+    }
+    return {
+      status: "failed",
+      hostUsed: host.id,
+      code: err.code || "error",
+      twitchCode: err.twitchCode,
+      error: err.message || String(err),
+    };
+  }
+}
+
+async function runJob(jobId) {
+  const state = activeLoops.get(String(jobId));
+  const job = await TwitchFollowJob.findById(jobId);
+  if (!job) return;
+  if (["cancelled", "done", "failed"].includes(job.status)) return;
+
+  if (!job.startedAt) job.startedAt = new Date();
+  job.status = "running";
+  await job.save();
+
+  let pool;
+  try {
+    pool = await buildCandidatePool(job);
+  } catch (err) {
+    await markTerminalAtomic(jobId, "failed", "Pool build failed: " + err.message);
+    return;
+  }
+  if (!pool.length) {
+    await markTerminalAtomic(jobId, "done", "No eligible accounts (pool empty)");
+    return;
+  }
+
+  const workerCount = Math.max(
+    1,
+    Math.min(MAX_CONCURRENCY, Number(job.concurrency) || 1),
   );
+  const hostCursor = { i: 0 };
+  const shared = {
+    get cancelled() {
+      return state ? state.cancelled : false;
+    },
+    set cancelled(v) {
+      if (state) state.cancelled = !!v;
+    },
+    terminated: false,
+  };
+
+  // Stagger worker starts a little so all N don't tick at the exact same
+  // moment and hammer the pool.shift + Mongo at t=0.
+  const workers = [];
+  for (let i = 0; i < workerCount; i++) {
+    workers.push(
+      (async () => {
+        await sleep(Math.floor(Math.random() * 500) * i);
+        return runWorker(jobId, i, pool, hostCursor, shared);
+      })(),
+    );
+  }
+  await Promise.all(workers);
+
+  // Last-resort terminal sweep: if every worker exited without one of them
+  // reaching the terminal-marking branch (should not happen, but the guard is
+  // cheap), stamp the doc as done based on final counters.
+  const finalDoc = await TwitchFollowJob.findById(jobId).lean();
+  if (finalDoc && finalDoc.status === "running") {
+    await markTerminalAtomic(
+      jobId,
+      "done",
+      "Delivered " +
+        finalDoc.delivered +
+        "/" +
+        finalDoc.requestedCount +
+        " follows",
+    );
+  }
 }
 
 function enqueueJob(jobId) {
@@ -299,13 +472,11 @@ function enqueueJob(jobId) {
     } catch (err) {
       // Last-chance catch so the loop map doesn't leak a Promise rejection.
       try {
-        const job = await TwitchFollowJob.findById(jobId);
-        if (job && !["done", "cancelled", "failed"].includes(job.status)) {
-          job.status = "failed";
-          job.lastError = "runner crash: " + (err.message || err);
-          job.finishedAt = new Date();
-          await job.save();
-        }
+        await markTerminalAtomic(
+          jobId,
+          "failed",
+          "runner crash: " + (err.message || err),
+        );
       } catch {
         // Nothing we can do at this point.
       }
@@ -320,7 +491,7 @@ function cancelJob(jobId) {
   const key = String(jobId);
   const state = activeLoops.get(key);
   if (state) state.cancelled = true;
-  // The loop also polls job.cancelRequested from Mongo, so a cancel issued
+  // The workers also poll job.cancelRequested from Mongo, so a cancel issued
   // while the runner isn't in memory (e.g. after a restart, before start()
   // has repicked the job) still takes effect on next resume.
 }
@@ -352,4 +523,5 @@ module.exports = {
   enqueueJob,
   cancelJob,
   status,
+  MAX_CONCURRENCY,
 };
