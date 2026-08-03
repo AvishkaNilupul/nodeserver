@@ -715,6 +715,22 @@
           </svg>
           Bots</a
         >
+        <a href="/twitch-follows.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle></svg
+          >
+          Twitch follows</a
+        >
         <a href="/drops-archive.html"
           ><svg
             width="18"
@@ -1765,6 +1781,67 @@ Reliable Daily Rewards</textarea
           </div>
         </div>
 
+        <div id="mpZ2uBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">Z2U placement</b>
+            <div class="mp-hint">
+              Z2U has no API and is Cloudflare-protected. The offer is
+              bulk-uploaded to your account as an .xlsx to
+              <b>Batch Release Products</b>, using the Cookie header and
+              User-Agent stored under "Marketplace keys → Z2U". If Cloudflare
+              rejects (403), paste fresh cookies from the same signed-in
+              browser (its <em>cf_clearance</em> rotates).
+            </div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Game</label>
+                <select id="mpZuGame">
+                  <option value="overwatch">Overwatch (Items)</option>
+                  <option value="r6">Rainbow Six Siege (Items)</option>
+                  <option value="hunt">Hunt: Showdown (Items)</option>
+                  <option value="brawlhalla">Brawlhalla (Items)</option>
+                </select>
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Stock</label>
+                <input type="number" id="mpZuStock" min="1" value="10" />
+              </div>
+            </div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Delivery option</label>
+                <select id="mpZuDelivery">
+                  <option value="Gift Giving">Gift Giving (manual)</option>
+                  <option value="Send Code">Send Code</option>
+                  <option value="Put into my account">
+                    Put into my account
+                  </option>
+                </select>
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Expiry (days)</label>
+                <select id="mpZuExpiry">
+                  <option value="30" selected>30</option>
+                  <option value="14">14</option>
+                  <option value="7">7</option>
+                </select>
+              </div>
+            </div>
+            <div class="mp-hint">
+              <b>Gift Giving</b> matches your existing OW listings — buyer
+              purchases, Z2U notifies you, you deliver via Twitch gift. The
+              server just creates the offer; delivery stays manual.
+            </div>
+            <label style="margin-top: 6px">Image URL (optional)</label>
+            <input
+              type="text"
+              id="mpZuImage"
+              placeholder="https://… (leave blank to inherit Z2U default)"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+
         <div id="mpEpicBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">EpicNPC placement (browser bridge)</b>
@@ -2628,6 +2705,7 @@ Reliable Daily Rewards</textarea
         g2g: "G2G",
         ggsel: "GGSel",
         funpay: "FunPay",
+        z2u: "Z2U",
         epicnpc: "EpicNPC (browser bridge)",
       };
       // EpicNPC bridge bookmarklet. Self-contained (runs on epicnpc.com, can't
@@ -2783,6 +2861,10 @@ Reliable Daily Rewards</textarea
         g2g: { userId: "User ID", apiKey: "API key", apiSecret: "API secret" },
         ggsel: { apiKey: "API key" },
         funpay: { golden_key: "golden_key (session cookie)" },
+        z2u: {
+          cookie: "Cookie header (from a signed-in z2u.com browser)",
+          user_agent: "User-Agent (from the same browser)",
+        },
       };
       var mpStatus = null;
 
@@ -3037,6 +3119,7 @@ Reliable Daily Rewards</textarea
         $("mpGfBox").style.display = "none";
         $("mpGgselBox").style.display = "none";
         $("mpFpBox").style.display = "none";
+        $("mpZ2uBox").style.display = "none";
         $("mpDsAttrs").innerHTML = "";
         $("mpG2gAttrs").innerHTML = "";
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
@@ -3180,6 +3263,10 @@ Reliable Daily Rewards</textarea
         var fp = e.target.closest('[data-mptarget="funpay"]');
         if (fp) {
           $("mpFpBox").style.display = fp.checked ? "block" : "none";
+        }
+        var zu = e.target.closest('[data-mptarget="z2u"]');
+        if (zu) {
+          $("mpZ2uBox").style.display = zu.checked ? "block" : "none";
         }
         var ep = e.target.closest('[data-mptarget="epicnpc"]');
         if (ep) {
@@ -3849,6 +3936,16 @@ Reliable Daily Rewards</textarea
             currency: $("mpFpCurrency").value,
             priceOverride: fpOverride > 0 ? fpOverride : undefined,
             active: $("mpFpActive").checked,
+          };
+        }
+        if (targets.indexOf("z2u") !== -1) {
+          body.z2u = {
+            game: $("mpZuGame").value,
+            service: "items",
+            stock: parseInt($("mpZuStock").value, 10) || 1,
+            delivery: $("mpZuDelivery").value,
+            expiryDays: parseInt($("mpZuExpiry").value, 10) || 30,
+            imageUrl: $("mpZuImage").value.trim(),
           };
         }
         var btn = $("mpPubGo");

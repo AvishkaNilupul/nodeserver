@@ -413,6 +413,22 @@
           </svg>
           Bots</a
         >
+        <a href="/twitch-follows.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle></svg
+          >
+          Twitch follows</a
+        >
       </nav>
       <div class="me">
         <span class="av" id="meAvatar">--</span>
@@ -494,6 +510,38 @@
           />
           <button class="btn btn-primary" id="btnAdd">Add account</button>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>Generate with extension</h2>
+        <p class="hint" id="genExtHint">
+          Fully automated Epic signup using the Marketplace Filler Chrome
+          extension. The server generates the identity + mailbox and
+          drives the wizard in a new tab; you just click the captcha.
+          Uses your real Chrome fingerprint + home IP (no VPN — Epic
+          blocks known VPN ranges).
+        </p>
+        <div id="genExtBanner" class="hint" style="display: none"></div>
+        <div class="row">
+          <label style="display: flex; align-items: center; gap: 6px">
+            <input type="checkbox" id="genEnableTotp" checked />
+            <span>Enable TOTP 2FA after signup (manual for now)</span>
+          </label>
+          <button class="btn btn-primary" id="btnGenStart">
+            Start signup
+          </button>
+        </div>
+        <div id="genProgress" class="muted" style="margin-top: 10px">
+          Idle. Click <b>Start signup</b> to queue one.
+        </div>
+        <details style="margin-top: 10px">
+          <summary class="muted" style="cursor: pointer">
+            Recent generator sessions
+          </summary>
+          <div id="genRecent" class="muted" style="margin-top: 6px">
+            Loading…
+          </div>
+        </details>
       </div>
 
       <div class="card">
@@ -763,6 +811,187 @@
         load();
       });
       $("btnRefresh").addEventListener("click", load);
+
+      // --------- Extension-driven generator wiring ---------
+
+      var genExtDetected = false;
+      var currentGenSession = null;
+
+      function setGenBanner(text, kind) {
+        var b = $("genExtBanner");
+        b.style.display = text ? "block" : "none";
+        b.textContent = text || "";
+        b.style.color =
+          kind === "err"
+            ? "var(--red)"
+            : kind === "ok"
+              ? "var(--green)"
+              : "";
+      }
+
+      function setGenProgress(html) {
+        $("genProgress").innerHTML = html;
+      }
+
+      window.addEventListener("message", function (ev) {
+        if (ev.source !== window) return;
+        var m = ev.data;
+        if (!m || typeof m !== "object" || typeof m.type !== "string") return;
+        if (m.type === "epicgen-hello") {
+          if (!genExtDetected) {
+            genExtDetected = true;
+            setGenBanner(
+              "Marketplace Filler extension detected (v" +
+                (m.version || "?") +
+                ")",
+              "ok",
+            );
+            setTimeout(function () {
+              setGenBanner("", "");
+            }, 3500);
+          }
+        } else if (m.type === "epicgen-drive-ack") {
+          if (m.ok) {
+            setGenProgress(
+              "Signup tab opened. Watch the Epic tab; click the captcha when it appears.",
+            );
+          } else {
+            setGenProgress(
+              '<span style="color:var(--red)">Extension refused: ' +
+                esc(m.error || "unknown") +
+                "</span>",
+            );
+          }
+        } else if (m.type === "epicgen-relay" && m.payload) {
+          var p = m.payload;
+          if (p.kind === "status") {
+            setGenProgress(
+              "Session " +
+                esc((p.sessionId || "").slice(0, 8)) +
+                " → <b>" +
+                esc(p.status) +
+                "</b>",
+            );
+          } else if (p.kind === "verified") {
+            setGenProgress(
+              '<span style="color:var(--green)">✓ Account created: ' +
+                esc(
+                  (p.account && p.account.displayName) ||
+                    (p.account && p.account.accountId) ||
+                    "",
+                ) +
+                "</span>",
+            );
+            toast("New Epic account saved to Mongo.");
+            currentGenSession = null;
+            $("btnGenStart").disabled = false;
+            load();
+            loadGenRecent();
+          } else if (p.kind === "failed") {
+            setGenProgress(
+              '<span style="color:var(--red)">Failed: ' +
+                esc(p.error || "unknown") +
+                "</span>",
+            );
+            currentGenSession = null;
+            $("btnGenStart").disabled = false;
+            loadGenRecent();
+          }
+        }
+      });
+
+      // Poll for extension presence on load. If nodeserver-bridge.js is
+      // installed, it announces "epicgen-hello" itself; this fallback
+      // covers the case where the page loads before the content script.
+      setTimeout(function () {
+        if (!genExtDetected) {
+          setGenBanner(
+            "Marketplace Filler extension NOT detected. Install / reload it at chrome://extensions to use this feature.",
+            "err",
+          );
+        }
+      }, 1500);
+
+      async function loadGenRecent() {
+        try {
+          var j = await api("/api/epic/signup/recent?limit=15");
+          var rows = j.sessions || [];
+          if (!rows.length) {
+            $("genRecent").innerHTML =
+              '<div class="muted">No generator sessions yet.</div>';
+            return;
+          }
+          $("genRecent").innerHTML =
+            "<table><thead><tr><th>Started</th><th>Email</th><th>Status</th><th>Error</th></tr></thead><tbody>" +
+            rows
+              .map(function (s) {
+                var pill =
+                  s.status === "verified"
+                    ? '<b style="color:var(--green)">' + esc(s.status) + "</b>"
+                    : s.status === "failed" ||
+                        s.status === "sms_required" ||
+                        s.status === "otp_timeout"
+                      ? '<b style="color:var(--red)">' + esc(s.status) + "</b>"
+                      : esc(s.status);
+                return (
+                  "<tr><td>" +
+                  esc(new Date(s.createdAt).toLocaleString()) +
+                  "</td><td>" +
+                  esc(s.email) +
+                  "</td><td>" +
+                  pill +
+                  "</td><td>" +
+                  esc(s.lastError || "") +
+                  "</td></tr>"
+                );
+              })
+              .join("") +
+            "</tbody></table>";
+        } catch (e) {
+          $("genRecent").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      }
+
+      $("btnGenStart").addEventListener("click", async function () {
+        var b = this;
+        b.disabled = true;
+        setGenProgress("Provisioning identity + mailbox…");
+        try {
+          var j = await api("/api/epic/signup/start", { method: "POST" });
+          currentGenSession = j.session;
+          window.postMessage(
+            {
+              type: "epicgen-drive",
+              sessionId: j.session.sessionId,
+              bearer: j.session.bearer,
+              identity: j.session.identity,
+              redirectUrl: j.session.redirectUrl,
+              nodeserverOrigin: location.origin,
+            },
+            location.origin,
+          );
+          setGenProgress(
+            "Session " +
+              esc(j.session.sessionId.slice(0, 8)) +
+              " → identity: <b>" +
+              esc(j.session.identity.email) +
+              "</b> / " +
+              esc(j.session.identity.displayName) +
+              ". Opening Epic tab…",
+          );
+        } catch (e) {
+          setGenProgress(
+            '<span style="color:var(--red)">Start failed: ' +
+              esc(e.message) +
+              "</span>",
+          );
+          b.disabled = false;
+        }
+      });
+
+      loadGenRecent();
+      setInterval(loadGenRecent, 8000);
 
       load();
     </script>
