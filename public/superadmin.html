@@ -728,6 +728,25 @@
             campaign for its games goes live.
           </label>
         </div>
+        <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afRecycleSoldAccounts" />
+          <label
+            for="afRecycleSoldAccounts"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Recycle sold-out accounts back into farming &mdash; once an account
+            has nothing left to sell, every drop the buyer bought is connected,
+            the cooldown below has passed, and a fresh rescan confirms the token
+            still works, return it to the pool to farm again. A buyer who changed
+            the password fails the rescan and is skipped, never reused. Leave OFF
+            unless you know your buyers only connect the drop and abandon it.
+          </label>
+        </div>
         <div
           style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px"
         >
@@ -750,6 +769,10 @@
           <div>
             <label>Stock per market (floor)</label>
             <input type="number" id="afPerMarketStock" min="1" max="10" />
+          </div>
+          <div class="field" style="max-width: 170px">
+            <label>Recycle cooldown (days)</label>
+            <input type="number" id="afRecycleCooldownDays" min="1" max="90" />
           </div>
           <div class="field" style="max-width: 150px">
             <label>Max auto bots</label>
@@ -1441,6 +1464,8 @@
           $("afConsolidate").checked = st.consolidate !== false;
           $("afDeleteFinishedBots").checked = st.deleteFinishedBots !== false;
           $("afStopFinishedBots").checked = st.stopFinishedBots !== false;
+          $("afRecycleSoldAccounts").checked = !!st.recycleSoldAccounts;
+          $("afRecycleCooldownDays").value = st.recycleCooldownDays || 14;
           $("afMaxPerGame").value = st.maxPerGame;
           $("afAccountsPerBot").value = st.accountsPerBot;
           $("afPoolReserve").value = st.poolReserve;
@@ -1477,6 +1502,8 @@
             consolidate: $("afConsolidate").checked,
             deleteFinishedBots: $("afDeleteFinishedBots").checked,
             stopFinishedBots: $("afStopFinishedBots").checked,
+            recycleSoldAccounts: $("afRecycleSoldAccounts").checked,
+            recycleCooldownDays: $("afRecycleCooldownDays").value,
             hostId: $("afHostId").value,
             maxPerGame: $("afMaxPerGame").value,
             accountsPerBot: $("afAccountsPerBot").value,
