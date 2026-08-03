@@ -19,6 +19,7 @@ const mp = require("../utils/marketplaces");
 const guardian = require("../utils/marketplaceGuardian");
 const gfFulfiller = require("../utils/gameflipFulfiller");
 const { buildSetGridImage } = require("../utils/setImage");
+const { sameGame } = require("../utils/gameLabel");
 const fsp = require("fs").promises;
 
 // Reservation tags written by the marketplace fulfillers into
@@ -734,14 +735,16 @@ async function detachAccountFromRow(listing, accountId, login) {
   );
 }
 
-// Does this listing's set sell the given game?
-async function listingSellsGame(listing, gameLower) {
+// Does this listing's set sell the given game? Uses sameGame() so formatting
+// drift between the DropLog label and a DropSet item label can't make this
+// silently miss and leave a sold account in a live same-game listing.
+async function listingSellsGame(listing, gameLabel) {
   const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
   if (!set) return true; // no set to check — assume affected, safer to detach
   return (set.items || []).some((i) => {
     const g = String(i.game || "").trim() ||
       String(i.itemKey || "").split("|")[1] || "";
-    return g.toLowerCase() === gameLower;
+    return sameGame(g, gameLabel);
   });
 }
 
@@ -830,9 +833,8 @@ router.post(
         status: "active",
         accountId: idRe,
       }).lean();
-      const gameLower = gameLabel.toLowerCase();
       for (const row of listings) {
-        if (!(await listingSellsGame(row, gameLower))) continue;
+        if (!(await listingSellsGame(row, gameLabel))) continue;
         const label = row.marketplace + " " + row.externalId;
         try {
           if (row.marketplace === "gameflip" && row.autoDeliver) {
