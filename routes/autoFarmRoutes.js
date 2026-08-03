@@ -78,6 +78,10 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
       patch.deleteFinishedBots = !!b.deleteFinishedBots;
     if ("stopFinishedBots" in b)
       patch.stopFinishedBots = !!b.stopFinishedBots;
+    if ("recycleSoldAccounts" in b)
+      patch.recycleSoldAccounts = !!b.recycleSoldAccounts;
+    if ("recycleCooldownDays" in b)
+      patch.recycleCooldownDays = clamp(b.recycleCooldownDays, 1, 90);
     if ("hostId" in b) {
       const id = String(b.hostId || "");
       if (id && !hosts.resolveHost(id)) {

@@ -62,6 +62,14 @@ const AUTO_FARM_DEFAULTS = {
   // holdback stays intact. 3 markets x 3 x 2 = 18 accounts on a full-market
   // game - the pool (180+ ready) supports this comfortably.
   perMarketStock: 3,
+  // Recycle sold-out accounts back into farming. OFF by default (opt-in): a
+  // sold account's login:password is in the buyer's hands, so it is only reused
+  // once it is fully spent, every drop the buyer bought is connected, the
+  // cooldown has passed AND a fresh rescan confirms the token still works (a
+  // buyer who changed the password fails the rescan and is skipped, never
+  // recycled). See utils/recycleEligibility.js + recycleSoldOutAccounts.
+  recycleSoldAccounts: false,
+  recycleCooldownDays: 14,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

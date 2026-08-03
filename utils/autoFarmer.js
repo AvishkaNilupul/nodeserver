@@ -644,6 +644,180 @@ async function unrecyclableLogins(logins) {
   return out;
 }
 
+// Opt-in inverse of unrecyclableLogins: recycle FULLY SOLD-OUT accounts back
+// into farming. Only for accounts we can prove are safe to reuse — spent (no
+// sellable drops left), every bought drop connected (buyer redeemed it), past
+// the cooldown, off any live listing/bot — AND still ours, verified with a
+// FRESH rescan here (a buyer who changed the password fails the rescan and is
+// flagged, never recycled). Gated OFF unless af.recycleSoldAccounts.
+const RECYCLE_BATCH = 20; // cap live rescans per tick
+
+async function recycleSoldOutAccounts(af, progress) {
+  if (!af || af.recycleSoldAccounts !== true) return 0;
+  const BotAccount = require("../models/BotAccount");
+  const MarketplaceListing = require("../models/MarketplaceListing");
+  const scanner = require("./dropScanner");
+  const { recycleEligibility } = require("./recycleEligibility");
+  const cooldownDays = Number(af.recycleCooldownDays) || 14;
+
+  // Sold accounts sit claimed in the pool with a non-rental, non-recycled note.
+  const claimed = await AvailableAccount.find(
+    { status: "claimed" },
+    { username: 1, usernameLower: 1, claimedNote: 1 },
+  ).lean();
+  const cand = claimed.filter(
+    (a) =>
+      !/^rented to/i.test(a.claimedNote || "") &&
+      !/^recycled/i.test(a.claimedNote || ""),
+  );
+  if (!cand.length) return 0;
+  const names = cand.map((a) => a.username).filter(Boolean);
+
+  // Drop-state per login (available / connected / sold-but-unconnected + newest sale).
+  const dropRows = await DropLog.aggregate([
+    { $match: { login: { $in: names } } },
+    {
+      $group: {
+        _id: { $toLower: "$login" },
+        available: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $ne: ["$connected", true] },
+                  { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+        connected: { $sum: { $cond: [{ $eq: ["$connected", true] }, 1, 0] } },
+        soldUnconnected: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+                  { $ne: ["$connected", true] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+        newestSold: { $max: "$soldAt" },
+        games: { $addToSet: "$game" },
+      },
+    },
+  ]);
+  const dropBy = new Map();
+  for (const d of dropRows) dropBy.set(d._id, d);
+
+  // Logins on a live listing (never recycle mid-sale).
+  const listed = new Set();
+  for (const l of await MarketplaceListing.find(
+    { status: "active", accountLogin: { $ne: "" } },
+    { accountLogin: 1 },
+  ).lean()) {
+    for (const p of String(l.accountLogin || "").split(/[,\s]+/)) {
+      const v = p.trim().toLowerCase();
+      if (v) listed.add(v);
+    }
+  }
+
+  // BotAccount state: deployed? and the id we rescan through.
+  const bots = await BotAccount.find(
+    { login: { $in: names } },
+    { _id: 1, login: 1, configFile: 1 },
+  ).lean();
+  const botBy = new Map();
+  for (const b of bots) botBy.set(String(b.login || "").toLowerCase(), b);
+
+  const eligible = [];
+  for (const a of cand) {
+    const key = a.usernameLower;
+    const d = dropBy.get(key) || {};
+    const bot = botBy.get(key);
+    const facts = {
+      claimedNote: a.claimedNote,
+      availableDrops: d.available || 0,
+      connectedDrops: d.connected || 0,
+      soldUnconnectedDrops: d.soldUnconnected || 0,
+      onActiveListing: listed.has(key),
+      enabledInLiveTask: !!(bot && bot.configFile),
+      newestDeliveredAt: d.newestSold || null,
+      cooldownDays,
+    };
+    if (!recycleEligibility(facts).eligible) continue;
+    if (!bot) continue; // no BotAccount to rescan — can't verify the token
+    const game =
+      (d.games || []).map((g) => String(g || "").trim()).filter(Boolean)[0] ||
+      "";
+    eligible.push({ pool: a, botId: bot._id, game });
+    if (eligible.length >= RECYCLE_BATCH) break;
+  }
+  if (!eligible.length) return 0;
+
+  let recycled = 0;
+  let reclaimed = 0;
+  for (const e of eligible) {
+    try {
+      await scanner.scanAccountNow(e.botId);
+    } catch {
+      /* a failed scan is treated as "not ok" below */
+    }
+    const fresh = await BotAccount.findById(e.botId, {
+      lastScanStatus: 1,
+    }).lean();
+    if (fresh && fresh.lastScanStatus === "ok") {
+      // Still ours → back to the pool. The claimedNote matches the preferGame
+      // affinity regex so it re-farms the same game preferentially.
+      await AvailableAccount.updateOne(
+        { _id: e.pool._id, status: "claimed" },
+        {
+          $set: {
+            status: "available",
+            claimedAt: null,
+            claimedNote: e.game ? "recycled after " + e.game : "recycled after sale",
+          },
+        },
+      );
+      recycled++;
+    } else {
+      // Buyer changed the password (or token died) — never redeploy it.
+      await AvailableAccount.updateOne(
+        { _id: e.pool._id },
+        { $set: { claimedNote: "sold — token reclaimed by buyer" } },
+      );
+      reclaimed++;
+    }
+  }
+  if (recycled || reclaimed) {
+    progress(
+      "Recycle: " +
+        recycled +
+        " sold-out account(s) returned to the pool" +
+        (reclaimed ? "; " + reclaimed + " skipped (token reclaimed by buyer)" : "") +
+        ".",
+    );
+    try {
+      await sendTelegram(
+        "♻️ Auto-farm recycle — " +
+          recycled +
+          " sold-out account(s) back to farming" +
+          (reclaimed ? ", " + reclaimed + " dead (buyer reclaimed)" : "") +
+          ".",
+      );
+    } catch {
+      /* telegram best-effort */
+    }
+  }
+  return recycled;
+}
+
 // Free seats inside containers that active auto-farm tasks already run on
 // this host. A "seat" is one enabled TwitchUsers slot out of accountsPerBot.
 // Unreadable configs count as zero free seats (never over-promise capacity).
@@ -2308,6 +2482,13 @@ async function runOnce() {
       } catch (e) {
         progress("Reaper failed: " + e.message, "warn");
       }
+      // Recycle sweep (opt-in): return fully sold-out, safe-to-reuse accounts
+      // to the pool so they re-farm. No-op unless af.recycleSoldAccounts.
+      try {
+        await recycleSoldOutAccounts(af, progress);
+      } catch (e) {
+        progress("Recycle failed: " + e.message, "warn");
+      }
       // Repack sweep: merge half-empty auto containers back together.
       try {
         await repackAutoBots(af, host, progress);
@@ -2812,6 +2993,7 @@ module.exports = {
   executeTask,
   completeEndedTasks,
   reapRetiredBots,
+  recycleSoldOutAccounts,
   expireStalePlans,
   repackAutoBots,
   // exported for tests
