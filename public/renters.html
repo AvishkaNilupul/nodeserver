@@ -587,6 +587,16 @@
             '</div>'+
             '<div style="margin-top:8px"><button class="btn sm" id="mAddBtn" onclick="manualAdd(\''+r.id+'\')">Add account</button></div>'+
           '</div>'+
+          '<div class="credbox" style="margin-top:10px">'+
+            '<div style="font-weight:700;font-size:13px">Add from account pool</div>'+
+            '<div class="sub" style="margin:4px 0 8px">Auto-pick fully-functional, unused accounts from your pool. Only pristine accounts auto-farm isn\'t using (not deployed, not sold/reserved, not listed, verified token) are eligible — so this never disturbs auto-farm.</div>'+
+            '<div class="grid3">'+
+              '<div><label class="fld">How many</label><input id="mPoolCount" type="number" min="1" value="1" autocomplete="off"/></div>'+
+              '<div style="display:flex;align-items:flex-end"><button class="btn ghost sm" id="mPoolPreviewBtn" onclick="previewPool(\''+r.id+'\')" style="width:100%">Preview</button></div>'+
+              '<div style="display:flex;align-items:flex-end"><button class="btn sm" id="mPoolAddBtn" onclick="addFromPool(\''+r.id+'\')" style="width:100%">Add from pool</button></div>'+
+            '</div>'+
+            '<div id="mPoolInfo" class="sub" style="margin-top:8px"></div>'+
+          '</div>'+
           '<h2 style="font-size:14px;margin:18px 0 8px">Submissions</h2>'+
           (subs.length? '<div class="rows">'+subs.map(s=>'<div class="approve-item"><div><b>'+s.count+'</b> account(s) · <span class="muted">'+new Date(s.createdAt).toLocaleString()+'</span>'+(s.status==="approved"?' · '+s.added+' added':'')+(s.status==="rejected"&&s.rejectReason?' · '+esc(s.rejectReason):'')+'</div><span class="badge '+(s.status==="approved"?"active":s.status==="rejected"?"suspended":"wait")+'">'+s.status+'</span></div>').join("")+'</div>' : '<div class="muted">No submissions.</div>');
       }
@@ -603,6 +613,33 @@
           await Promise.all([loadRenters(), loadRentBots()]);
           openRenter(id);
         } catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent="Add account"; } }
+      };
+      // ---- add-from-pool: preview what would be taken, then commit ----
+      window.previewPool = async (id)=>{
+        const count = parseInt(($("mPoolCount")||{}).value,10)||0;
+        const info = $("mPoolInfo");
+        const btn = $("mPoolPreviewBtn"); if(btn){ btn.disabled=true; btn.textContent="…"; }
+        try {
+          const d = await api("/renters/"+id+"/accounts/from-pool/preview?count="+encodeURIComponent(count));
+          const names = (d.preview||[]).map(a=>esc(a.username)).join(", ");
+          if(info) info.innerHTML = 'Will add <b>'+d.willAdd+'</b> of '+count+' requested · '+d.eligibleTotal+' eligible in pool · '+d.quotaRemaining+' quota left'+
+            (names?'<div style="margin-top:4px">'+names+'</div>':'')+
+            (!d.botAssigned?'<div style="margin-top:4px;color:#c0392b">No bot assigned yet — create one first.</div>':'');
+        } catch(e){ if(info) info.textContent = e.message; }
+        finally { if(btn){ btn.disabled=false; btn.textContent="Preview"; } }
+      };
+      window.addFromPool = async (id)=>{
+        const count = parseInt(($("mPoolCount")||{}).value,10)||0;
+        if(!(count>0)){ toast("Enter how many to add"); return; }
+        if(!confirm("Auto-pick up to "+count+" pristine pool account(s) and add them to this renter?")) return;
+        const btn = $("mPoolAddBtn"); if(btn){ btn.disabled=true; btn.textContent="Adding…"; }
+        try {
+          const d = await api("/renters/"+id+"/accounts/from-pool", { method:"POST", body: JSON.stringify({ count }) });
+          toast(d.message || ("Added "+d.added+" account(s)"));
+          if(d.skipped && d.skipped.length) toast(d.skipped.length+" skipped: "+d.skipped.map(s=>esc(s.username)+" ("+esc(s.reason)+")").join("; "));
+          await Promise.all([loadRenters(), loadRentBots()]);
+          openRenter(id);
+        } catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent="Add from pool"; } }
       };
       window.createRenterBot = async (id)=>{
         const host = ($("eBotHost") && $("eBotHost").value) || "local";

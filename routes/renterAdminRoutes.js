@@ -15,6 +15,12 @@ const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
 const BotAccount = require("../models/BotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
+const DropLog = require("../models/DropLog");
+const AutoFarmTask = require("../models/AutoFarmTask");
+const {
+  poolAccountEligibility,
+  pickCount,
+} = require("../utils/renterPoolEligibility");
 const renterDropScanner = require("../utils/renterDropScanner");
 const {
   createRenter,
@@ -1429,6 +1435,315 @@ router.post(
       res.json({ success: true });
     } catch (err) {
       console.error("renter reject error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// ------------------------------------------------------------------
+// Add accounts from the operator's own account pool (AvailableAccount).
+//
+// Instead of the operator pasting username/token/password, auto-pick N
+// pristine, unentangled pool accounts and feed them to a renter. "Unentangled"
+// is the whole safety story: we never take an account that auto-farm is using,
+// already selling, or has promised to a buyer — see utils/renterPoolEligibility
+// and the guards in movePoolAccountToRenter (claim in pool = the auto-farm
+// refiller can't redeploy it; see memory project_renting_out_own_accounts).
+// ------------------------------------------------------------------
+
+// Build the eligible-pool picture in bulk (no per-account N+1). Returns
+// { candidates: [{doc, facts, eligibility}], eligible: [docs] }.
+async function gatherPoolEligibility() {
+  // Pristine pre-filter: verified, deployable, unclaimed pool rows only.
+  const candidates = await AvailableAccount.find({
+    status: "available",
+    lastCheckStatus: "ok",
+    hasPassword: true,
+    clientSecret: { $nin: ["", null] },
+  }).lean();
+  if (!candidates.length) return { candidates: [], eligible: [] };
+
+  const secrets = candidates.map((c) => c.clientSecret).filter(Boolean);
+
+  // BotAccount traces for these tokens → deployed / sellable / sold sets.
+  const bots = await BotAccount.find(
+    { clientSecret: { $in: secrets } },
+    { _id: 1, clientSecret: 1, configFile: 1, credPassword: 1, soldAt: 1, soldSetId: 1 },
+  ).lean();
+  const deployedTokens = new Set();
+  const sellableTokens = new Set();
+  const soldTokens = new Set();
+  const botIdToToken = new Map();
+  for (const b of bots) {
+    botIdToToken.set(String(b._id), b.clientSecret);
+    if (b.configFile) deployedTokens.add(b.clientSecret);
+    if (b.credPassword) sellableTokens.add(b.clientSecret);
+    if (b.soldAt || (b.soldSetId && String(b.soldSetId))) soldTokens.add(b.clientSecret);
+  }
+  // Any sold/reserved/connected drop on those accounts also disqualifies.
+  if (bots.length) {
+    const drops = await DropLog.find(
+      {
+        account: { $in: bots.map((b) => b._id) },
+        $or: [
+          { soldAt: { $ne: null } },
+          { soldSetId: { $nin: ["", null] } },
+          { connected: true },
+        ],
+      },
+      { account: 1 },
+    ).lean();
+    for (const d of drops) {
+      const tok = botIdToToken.get(String(d.account));
+      if (tok) soldTokens.add(tok);
+    }
+  }
+
+  // Logins auto-farm has assigned to a task.
+  const assignedSet = new Set();
+  const tasks = await AutoFarmTask.find({}, { assignedAccounts: 1 }).lean();
+  for (const t of tasks) {
+    for (const u of t.assignedAccounts || []) {
+      const v = String(u || "").trim().toLowerCase();
+      if (v) assignedSet.add(v);
+    }
+  }
+
+  // Logins attached to any active marketplace listing.
+  const listedSet = new Set();
+  const listings = await MarketplaceListing.find(
+    { status: "active" },
+    { accountLogin: 1 },
+  ).lean();
+  for (const l of listings) {
+    for (const p of String(l.accountLogin || "").split(/[,\s]+/)) {
+      const v = p.trim().toLowerCase();
+      if (v) listedSet.add(v);
+    }
+  }
+
+  const out = candidates.map((c) => {
+    const tok = c.clientSecret;
+    const lower = String(c.username || "").trim().toLowerCase();
+    let passwordDecryptable = false;
+    try {
+      passwordDecryptable = !!(c.password && decrypt(c.password));
+    } catch {
+      passwordDecryptable = false;
+    }
+    const facts = {
+      status: c.status,
+      clientSecret: tok,
+      hasPassword: !!c.hasPassword,
+      passwordDecryptable,
+      lastCheckStatus: c.lastCheckStatus,
+      deployedOnBot: deployedTokens.has(tok),
+      hasSoldOrReservedDrops: soldTokens.has(tok),
+      sellable: sellableTokens.has(tok),
+      inAssignedAccounts: assignedSet.has(lower),
+      onActiveListing: listedSet.has(lower),
+    };
+    return { doc: c, facts, eligibility: poolAccountEligibility(facts) };
+  });
+  return { candidates: out, eligible: out.filter((x) => x.eligibility.eligible).map((x) => x.doc) };
+}
+
+// Move ONE pool account into a renter. Assumes it was found eligible; still
+// claims atomically (status guard) so a concurrent claim can't double-allocate.
+async function movePoolAccountToRenter(renter, host, doc) {
+  const token = doc.clientSecret;
+  const username = String(doc.username || "").trim();
+  const lower = username.toLowerCase();
+
+  // Guard 3: claim it in the pool so auto-farm's refiller can't redeploy it.
+  const claimNote =
+    "rented to " +
+    renter.username +
+    (renter.accessEnd
+      ? " until " + new Date(renter.accessEnd).toISOString().slice(0, 10)
+      : "");
+  const claim = await AvailableAccount.updateOne(
+    { _id: doc._id, status: "available" },
+    { $set: { status: "claimed", claimedAt: new Date(), claimedNote: claimNote } },
+  );
+  if (!(claim.modifiedCount || claim.nModified)) {
+    throw new Error("was claimed by someone else");
+  }
+
+  // Write into the renter's bot config (also creates the RenterAccount row).
+  const games = await getConfigGames(host, renter.botFile);
+  const acct = {
+    ClientSecret: token,
+    UniqueId: doc.uniqueId || crypto.randomBytes(16).toString("hex"),
+    Login: username,
+    Id: String(doc.twitchId || ""),
+    Enabled: true,
+    FavouriteGames: games.slice(),
+  };
+  await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+
+  // Defensive auto-farm guards on any stray BotAccount trace. Eligibility
+  // already excluded deployed/sellable/sold accounts, so for a picked account
+  // these are no-ops — kept as belt-and-braces so a race can never leave the
+  // token both farming for the renter and reachable by auto-farm/fulfilment.
+  await BotAccount.updateMany(
+    { clientSecret: token },
+    { $set: { configFile: "", container: "", enabled: false, credPassword: "", hasPassword: false } },
+  ).catch(() => {});
+  await AutoFarmTask.updateMany(
+    { assignedAccounts: { $in: [username, lower] } },
+    { $pull: { assignedAccounts: { $in: [username, lower] } } },
+  ).catch(() => {});
+
+  return username;
+}
+
+// Preview (read-only): what WOULD be taken for a given count.
+router.get(
+  "/renters/:id/accounts/from-pool/preview",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const renter = await Renter.findById(req.params.id);
+      if (!renter)
+        return res.status(404).json({ success: false, message: "Not found" });
+      const requested = Math.floor(Number(req.query.count) || 0);
+      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      const quotaRemaining = Math.max(
+        0,
+        (Number(renter.maxAccounts) || 0) - used,
+      );
+      const { eligible } = await gatherPoolEligibility();
+      const willAdd = pickCount({
+        requested,
+        quotaRemaining,
+        eligibleTotal: eligible.length,
+      });
+      res.json({
+        success: true,
+        botAssigned: !!renter.botFile,
+        requested,
+        eligibleTotal: eligible.length,
+        quotaRemaining,
+        willAdd,
+        preview: eligible.slice(0, willAdd).map((a) => ({
+          username: a.username,
+          lastCheckStatus: a.lastCheckStatus || "",
+          dropCount: a.dropCount || 0,
+        })),
+      });
+    } catch (err) {
+      console.error("renter from-pool preview error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+// Commit: auto-pick and move up to `count` eligible pool accounts.
+router.post(
+  "/renters/:id/accounts/from-pool",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const renter = await Renter.findById(req.params.id);
+      if (!renter)
+        return res.status(404).json({ success: false, message: "Not found" });
+      if (!renter.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter has no bot assigned" });
+      }
+      const host = hosts.resolveHost(renter.botHost);
+      if (!host) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter's host is unknown" });
+      }
+      const requested = Math.floor(Number((req.body || {}).count) || 0);
+      if (!(requested > 0)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "count must be a positive number" });
+      }
+      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      const quotaRemaining = Math.max(
+        0,
+        (Number(renter.maxAccounts) || 0) - used,
+      );
+      if (quotaRemaining <= 0) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Renter is already at their account limit (" +
+            renter.maxAccounts +
+            ").",
+        });
+      }
+
+      const { eligible } = await gatherPoolEligibility();
+      const n = pickCount({
+        requested,
+        quotaRemaining,
+        eligibleTotal: eligible.length,
+      });
+      if (n <= 0) {
+        return res.status(409).json({
+          success: false,
+          message: eligible.length
+            ? "No quota room to add accounts."
+            : "No eligible pristine pool accounts to add right now.",
+        });
+      }
+
+      const picked = eligible.slice(0, n);
+      const added = [];
+      const skipped = [];
+      for (const doc of picked) {
+        // Re-validate at move time (close the select→move race).
+        const fresh = await AvailableAccount.findById(doc._id).lean();
+        if (!fresh || fresh.status !== "available") {
+          skipped.push({ username: doc.username, reason: "no longer available" });
+          continue;
+        }
+        try {
+          added.push(await movePoolAccountToRenter(renter, host, fresh));
+        } catch (e) {
+          skipped.push({ username: doc.username, reason: e.message || String(e) });
+        }
+      }
+
+      // Restart the renter's bot once so it picks up the new accounts.
+      let restarted = false;
+      if (added.length) {
+        try {
+          const container = containerForFile(renter.botFile);
+          const states = await hosts.dockerPs(host);
+          const st = container && states[container];
+          if (st && st.state === "running") {
+            await restartConfigContainer(host, renter.botFile);
+            restarted = true;
+          }
+        } catch {
+          /* best effort — a stopped bot stays stopped until the operator starts it */
+        }
+      }
+
+      res.json({
+        success: true,
+        added: added.length,
+        addedLogins: added,
+        skipped,
+        restarted,
+        message:
+          "Added " +
+          added.length +
+          " account(s) from the pool to " +
+          renter.botFile +
+          (restarted ? " — bot restarting." : "") +
+          (skipped.length ? " " + skipped.length + " skipped." : ""),
+      });
+    } catch (err) {
+      console.error("renter from-pool add error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
     }
   },
