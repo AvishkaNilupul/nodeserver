@@ -61,6 +61,50 @@ router.get("/admin/twitch-follow/hosts", requireAdmin, (req, res) => {
   res.json({ success: true, hosts: hosts.listHosts() });
 });
 
+// GET /admin/twitch-follow/fleet — fleet-wide follow-bot capacity, refreshed
+// alongside the job list so the tab header always shows how many bots are
+// still available to fire follows with (independent of any specific channel).
+//
+// Three cohorts:
+//   total    - every BotAccount, sold + disabled + tokenless included; a raw
+//              denominator for the operator to sanity-check the fleet size
+//   pool     - what a job with integrityOnly=false would draw from
+//              (enabled, not sold, has a token)
+//   ready    - the default cohort: same as pool but limited to accounts
+//              whose most recent scan came back ok, which is the closest
+//              proxy we have to "this token still passes twitch's checks"
+// hostBreakdown mirrors 'ready' bucketed by BotAccount.host so the operator
+// can see at a glance which scan host owns the capacity.
+router.get("/admin/twitch-follow/fleet", requireAdmin, async (req, res) => {
+  try {
+    const base = { enabled: true, soldAt: null, clientSecret: { $gt: "" } };
+    const readyFilter = { ...base, lastScanStatus: "ok" };
+    const [total, pool, ready, perHost] = await Promise.all([
+      BotAccount.countDocuments({}),
+      BotAccount.countDocuments(base),
+      BotAccount.countDocuments(readyFilter),
+      BotAccount.aggregate([
+        { $match: readyFilter },
+        { $group: { _id: "$host", count: { $sum: 1 } } },
+      ]),
+    ]);
+    const hostBreakdown = {};
+    for (const row of perHost) {
+      const id = row._id || "local";
+      hostBreakdown[id] = row.count;
+    }
+    res.json({
+      success: true,
+      total,
+      pool,
+      ready,
+      hostBreakdown,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // POST /admin/twitch-follow/resolve — { channel } -> { id, login, displayName }
 // Lets the operator paste a URL and see who they're about to hit before
 // committing to a job. Always egresses from the local server: the user()
