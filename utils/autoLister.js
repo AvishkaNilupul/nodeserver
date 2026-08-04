@@ -1709,6 +1709,17 @@ async function onCampaignEnded(taskId) {
   mySet.price = price;
   await mySet.save();
 
+  // Rebuild the cover from the stacked set so the Gameflip photo shows every
+  // item in the grown bundle, not the pre-stack picture with items missing.
+  // Best-effort: a failed image build falls back to the text/price-only reprice
+  // rather than blocking the markup. Temp file is cleaned up after the reprice.
+  let stackedImg = "";
+  try {
+    stackedImg = await buildSetGridImage(mySet);
+  } catch {
+    stackedImg = "";
+  }
+
   // Find the live Gameflip row by SET rather than by the id recorded on the
   // task: after the first sale the relist chain publishes a successor with a
   // brand-new external id, so the task's own id is stale and only the set still
@@ -1731,18 +1742,25 @@ async function onCampaignEnded(taskId) {
   const row = isAutoOwned(found) ? found : null;
   const heldBack = Math.max(0, Number(task.listing.heldBack) || 0);
   if (row) {
-    await mp.gameflipReprice(row.externalId, {
-      priceUsd: price,
-      title,
-      description,
-    });
-    row.title = title;
-    row.description = description;
-    row.price = price;
-    // Release the held-back accounts into the chain: they sell at the new
-    // marked-up price — the whole point of saving them for after the event.
-    row.qtyRemaining = (Number(row.qtyRemaining) || 0) + heldBack;
-    await row.save();
+    try {
+      await mp.gameflipReprice(row.externalId, {
+        priceUsd: price,
+        title,
+        description,
+        imagePath: stackedImg,
+      });
+      row.title = title;
+      row.description = description;
+      row.price = price;
+      // Release the held-back accounts into the chain: they sell at the new
+      // marked-up price — the whole point of saving them for after the event.
+      row.qtyRemaining = (Number(row.qtyRemaining) || 0) + heldBack;
+      await row.save();
+    } finally {
+      if (stackedImg) await fsp.unlink(stackedImg).catch(() => {});
+    }
+  } else if (stackedImg) {
+    await fsp.unlink(stackedImg).catch(() => {});
   }
 
   // Stacking regenerated title/description, but the reprice above only touched

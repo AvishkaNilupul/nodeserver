@@ -322,7 +322,10 @@ async function gameflipListingIdsByStatus(status) {
 // it. So take the listing off sale, patch, and put it straight back. The
 // restore is retried and its failure outranks the patch's: a listing left in
 // draft is off the market entirely, which is far worse than stale text.
-async function gameflipReprice(listingId, { priceUsd, title, description }) {
+async function gameflipReprice(
+  listingId,
+  { priceUsd, title, description, imagePath } = {},
+) {
   const keys = requireKeys("gameflip");
   const ops = [];
   const cents = Math.round(Number(priceUsd) * 100);
@@ -343,7 +346,14 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
       value: String(description).slice(0, 5000),
     });
   }
-  if (!ops.length) return;
+  // A stacked bundle grows its cover too: swap in a freshly generated grid image
+  // so the photo matches the (now larger) item set instead of showing the
+  // pre-stack picture with items missing. cover_photo, like price, is rejected
+  // while the listing is onsale, so the swap rides the SAME off-sale window as
+  // the reprice — opening a second draft/onsale cycle would double the exposure
+  // to the rate limiter the restore backoff below already fights.
+  const wantCover = !!(imagePath && fs.existsSync(imagePath));
+  if (!ops.length && !wantCover) return;
   const patch = (body) =>
     axios.patch(GF_API + "/listing/" + listingId, body, {
       headers: {
@@ -354,6 +364,39 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
     });
   const setStatus = (v) =>
     patch([{ op: "replace", path: "/status", value: v }]);
+  // Upload the new cover and delete the photos it replaces. Only valid while the
+  // listing is in draft; every caller below runs it inside an off-sale window.
+  // Mirrors gameflipReplaceCover: a stale-photo delete the limiter rejects is
+  // cosmetic, so it retries a little and gives up without failing the swap.
+  const swapCover = async () => {
+    let stale = [];
+    try {
+      const cur = await axios.get(GF_API + "/listing/" + listingId, {
+        headers: gfHeaders(keys),
+        timeout: 20000,
+      });
+      stale = Object.keys(((cur.data || {}).data || {}).photo || {});
+    } catch {
+      stale = [];
+    }
+    await gfUploadPhoto(keys, listingId, imagePath);
+    if (stale.length) {
+      const delOps = stale.map((id) => ({
+        op: "replace",
+        path: "/photo/" + id + "/status",
+        value: "deleted",
+      }));
+      for (const w of [0, 15000, 45000]) {
+        if (w) await new Promise((r) => setTimeout(r, w));
+        try {
+          await patch(delOps);
+          break;
+        } catch (e) {
+          if (!e.response || e.response.status !== 429) break;
+        }
+      }
+    }
+  };
 
   let live = "";
   try {
@@ -362,10 +405,20 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
     // Status unreadable — try the plain patch and let its own error surface.
   }
   if (live !== "onsale") {
-    try {
-      await patch(ops);
-    } catch (e) {
-      throw apiError("Gameflip reprice", e);
+    // Already off sale: apply the ops and swap the cover directly, no toggle.
+    if (ops.length) {
+      try {
+        await patch(ops);
+      } catch (e) {
+        throw apiError("Gameflip reprice", e);
+      }
+    }
+    if (wantCover) {
+      try {
+        await swapCover();
+      } catch (e) {
+        throw apiError("Gameflip cover", e);
+      }
     }
     return;
   }
@@ -376,10 +429,20 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
     throw apiError("Gameflip reprice (could not take off sale)", e);
   }
   let patchErr = null;
-  try {
-    await patch(ops);
-  } catch (e) {
-    patchErr = apiError("Gameflip reprice", e);
+  if (ops.length) {
+    try {
+      await patch(ops);
+    } catch (e) {
+      patchErr = apiError("Gameflip reprice", e);
+    }
+  }
+  let coverErr = null;
+  if (wantCover) {
+    try {
+      await swapCover();
+    } catch (e) {
+      coverErr = apiError("Gameflip cover", e);
+    }
   }
   // Putting it back is the step that must not be trusted blindly: under its
   // rate limiter Gameflip answers 200 to the status patch yet leaves the
@@ -420,6 +483,7 @@ async function gameflipReprice(listingId, { priceUsd, title, description }) {
     );
   }
   if (patchErr) throw patchErr;
+  if (coverErr) throw coverErr;
 }
 
 // Swap a live listing's cover photo (an oversized upload renders broken on
