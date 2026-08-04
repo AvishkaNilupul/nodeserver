@@ -16,12 +16,8 @@ const {
 } = require("../utils/poolPasswords");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const SaleSignal = require("../models/SaleSignal");
-const mp = require("../utils/marketplaces");
-const guardian = require("../utils/marketplaceGuardian");
-const gfFulfiller = require("../utils/gameflipFulfiller");
-const { buildSetGridImage } = require("../utils/setImage");
+const { detachAccountFromListing } = require("../utils/listingDetach");
 const { sameGame } = require("../utils/gameLabel");
-const fsp = require("fs").promises;
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -751,25 +747,6 @@ router.get(
   },
 );
 
-// Remove one account from a listing row's comma-separated account fields.
-async function detachAccountFromRow(listing, accountId, login) {
-  const ids = String(listing.accountId || "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .filter((x) => x !== String(accountId));
-  const lower = String(login || "").trim().toLowerCase();
-  const logins = String(listing.accountLogin || "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .filter((x) => !lower || x.toLowerCase() !== lower);
-  await MarketplaceListing.updateOne(
-    { _id: listing._id },
-    { $set: { accountId: ids.join(","), accountLogin: logins.join(", ") } },
-  );
-}
-
 // Does this listing's set sell the given game? Uses sameGame() so formatting
 // drift between the DropLog label and a DropSet item label can't make this
 // silently miss and leave a sold account in a live same-game listing.
@@ -870,100 +847,13 @@ router.post(
       }).lean();
       for (const row of listings) {
         if (!(await listingSellsGame(row, gameLabel))) continue;
-        const label = row.marketplace + " " + row.externalId;
-        try {
-          if (row.marketplace === "gameflip" && row.autoDeliver) {
-            // The live Gameflip listing carries this account's credentials in
-            // its delivery code — it must come down, then the chain continues
-            // with a fresh account if one exists.
-            await mp.gameflipDelist(row.externalId).catch(() => {});
-            await MarketplaceListing.updateOne(
-              { _id: row._id },
-              {
-                $set: {
-                  status: "delisted",
-                  note: "account sold manually — delisted",
-                },
-              },
-            );
-            detached.push(label + " (delisted)");
-            const set = row.set
-              ? await DropSet.findById(row.set).lean()
-              : null;
-            if (set) {
-              let img = "";
-              try {
-                img = await buildSetGridImage(set);
-              } catch {
-                img = "";
-              }
-              try {
-                const fresh = await gfFulfiller.publishAutoDelivery({
-                  set,
-                  title: row.title,
-                  description: row.description,
-                  priceUsd: row.price,
-                  imagePath: img,
-                  qtyRemaining: Number(row.qtyRemaining) || 0,
-                  origin: row.origin,
-                });
-                detached.push(
-                  "republished on gameflip as " +
-                    fresh.externalId +
-                    " with " +
-                    (fresh.accountLogin || "a fresh account"),
-                );
-              } catch (e) {
-                warnings.push(
-                  label +
-                    " was delisted but could not be republished: " +
-                    e.message,
-                );
-              } finally {
-                if (img) await fsp.unlink(img).catch(() => {});
-              }
-            }
-          } else if (
-            row.marketplace === "digiseller" &&
-            (row.units || []).some(
-              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
-            )
-          ) {
-            const unit = (row.units || []).find(
-              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
-            );
-            await mp.digisellerRemoveContent(row.externalId, unit.contentId);
-            await MarketplaceListing.updateOne(
-              { _id: row._id },
-              { $pull: { units: { contentId: String(unit.contentId) } } },
-            );
-            await detachAccountFromRow(row, acc._id, acc.login);
-            detached.push(label + " (delivery unit removed)");
-            try {
-              await guardian.feedOne(String(row._id));
-            } catch {
-              /* auto-feed refills on its next pass */
-            }
-          } else if (
-            row.marketplace === "digiseller" ||
-            row.marketplace === "ggsel"
-          ) {
-            await detachAccountFromRow(row, acc._id, acc.login);
-            detached.push(label + " (detached)");
-            try {
-              await guardian.feedOne(String(row._id));
-            } catch {
-              /* auto-feed refills on its next pass */
-            }
-          } else {
-            warnings.push(
-              label +
-                " still references this account — remove it there manually",
-            );
-          }
-        } catch (e) {
-          warnings.push(label + ": " + e.message);
-        }
+        const r = await detachAccountFromListing(
+          row,
+          { _id: acc._id, login: acc.login },
+          { reason: "sold manually" },
+        );
+        detached.push(...r.detached);
+        warnings.push(...r.warnings);
       }
 
       bustDropCache();
