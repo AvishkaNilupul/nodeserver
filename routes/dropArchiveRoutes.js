@@ -5,6 +5,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
+const AvailableAccount = require("../models/AvailableAccount");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
 const { cacheImage } = require("../utils/imageCache");
@@ -188,15 +189,49 @@ async function shadowDuplicateIds() {
   return ids;
 }
 
-// The full set of account _ids excluded from stock/count/inventory views:
-// dead tokens plus shadow duplicates. Used everywhere a $nin filter guards an
-// aggregation, so every view agrees on what counts as real, sellable stock.
+// _ids of pool (AvailableAccount) rows whose Twitch login is ALSO deployed in a
+// bot. The account pool is scanned ahead of deployment
+// (utils/accountPoolChecker.js), so once a pool account is wired into a bot the
+// SAME Twitch login exists twice — the deployed BotAccount and the leftover
+// pool AvailableAccount — and its drops get logged under BOTH. That shows the
+// login twice in the item drill-down (once as "pool", once with its container)
+// and double-counts it in the "in pool" tallies. This defers the pool copy to
+// its deployed sibling: the mirror image of shadowDuplicateIds (which defers an
+// idle BotAccount to a deployed one), using the same "configFile set = deployed"
+// rule markDeployedPoolAccountsClaimed uses to flip these very rows to claimed.
+// Only ever returns AvailableAccount ids, so it can never hide deployed/sellable
+// stock. Computed live from two small collections — nothing stored, so turning
+// this off later fully restores the old numbers.
+async function poolShadowIds() {
+  const deployedLogins = await BotAccount.distinct("login", {
+    login: { $nin: ["", null] },
+    configFile: { $nin: ["", null] },
+  });
+  const lowers = [
+    ...new Set(
+      deployedLogins.map((l) => String(l || "").toLowerCase()).filter(Boolean),
+    ),
+  ];
+  if (!lowers.length) return [];
+  const dups = await AvailableAccount.find(
+    { usernameLower: { $in: lowers } },
+    { _id: 1 },
+  ).lean();
+  return dups.map((d) => d._id);
+}
+
+// The full set of account _ids excluded from stock/count/inventory views: dead
+// tokens, shadow duplicates (idle BotAccount twins), and pool shadows (pool
+// AvailableAccount copies of an already-deployed login). Used everywhere a $nin
+// filter guards an aggregation, so every view agrees on what counts as real,
+// sellable stock and no Twitch account is shown or counted twice.
 async function excludedAccountIds() {
-  const [bad, shadow] = await Promise.all([
+  const [bad, shadow, poolShadow] = await Promise.all([
     badAccountIds(),
     shadowDuplicateIds(),
+    poolShadowIds(),
   ]);
-  return bad.concat(shadow);
+  return bad.concat(shadow, poolShadow);
 }
 
 // Cached wrapper: excludedAccountIds() runs two aggregations and is called by
@@ -1535,7 +1570,12 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         account: { $nin: badIds },
         accountModel: { $ne: "AvailableAccount" },
       };
-      const poolMatch = { accountModel: "AvailableAccount" };
+      // badIds carries the pool-shadow ids too, so a pool copy of an already
+      // deployed login is not counted here (it's counted once, as deployed).
+      const poolMatch = {
+        accountModel: "AvailableAccount",
+        account: { $nin: badIds },
+      };
       const [
         accounts,
         totalDrops,
