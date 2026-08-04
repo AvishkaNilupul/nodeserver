@@ -56,6 +56,7 @@ const dropScanner = require("./utils/dropScanner");
 const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
+const zeusxTokenRefresher = require("./utils/zeusxTokenRefresher");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -610,6 +611,9 @@ mongoose
     // Watch live Gameflip auto-delivery listings: mark sales and relist the
     // next unit of multi-quantity chains. No-op without Gameflip listings.
     gameflipFulfiller.start();
+    // Keep the ZeusX seller token fresh from its (reusable) refresh token so the
+    // auto-lister never dies on an expired token. No-op without ZeusX keys.
+    zeusxTokenRefresher.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();

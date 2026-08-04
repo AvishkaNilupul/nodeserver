@@ -25,8 +25,11 @@ const FIELDS = {
   // FunPay has no API — the single credential is the account's session token.
   funpay: ["golden_key"],
   // ZeusX has no public API either — the credential is the seller session's
-  // access_token (expires, so it needs re-pasting when it does).
-  zeusx: ["accessToken"],
+  // access_token (~7-day life). The refresh_token is reusable (does not rotate),
+  // so the server mints fresh access tokens from it via /user/exchange-token and
+  // the operator never has to re-paste — see zeusxRefreshAccessToken +
+  // utils/zeusxTokenRefresher.
+  zeusx: ["accessToken", "refreshToken"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -2530,6 +2533,73 @@ function zxData(what, r) {
   return body.data;
 }
 
+// Milliseconds until the JWT's `exp`; negative if already expired, +Infinity if
+// unreadable (so a token we can't parse is never treated as expiring).
+function zxTokenMsLeft(token) {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(String(token).split(".")[1], "base64").toString("utf8"),
+    );
+    if (!payload.exp) return Infinity;
+    return payload.exp * 1000 - Date.now();
+  } catch {
+    return Infinity;
+  }
+}
+
+// Exchange the stored (reusable) refresh_token for a fresh access_token and save
+// it. ZeusX's refresh_token does NOT rotate, so this can run indefinitely — the
+// operator pastes a session once and never again. No-op-throws if no refresh
+// token was ever stored.
+async function zeusxRefreshAccessToken() {
+  const keys = getKeys("zeusx");
+  if (!keys.refreshToken) {
+    throw new Error(
+      "ZeusX refresh: no refresh token stored — paste a fresh ZeusX session once to enable auto-refresh",
+    );
+  }
+  let body;
+  try {
+    const r = await axios.post(
+      ZX_API + "/user/exchange-token",
+      { access_token: keys.accessToken || "", refresh_token: keys.refreshToken },
+      {
+        headers: {
+          Origin: "https://zeusx.com",
+          Referer: "https://zeusx.com/",
+          "Content-Type": "application/json",
+          "zeusx-currency": "USD",
+        },
+        timeout: 20000,
+      },
+    );
+    body = r.data || {};
+  } catch (e) {
+    throw zxError("ZeusX refresh", e);
+  }
+  if (body.isSuccess === false) {
+    throw new Error("ZeusX refresh: " + JSON.stringify(body.error || {}).slice(0, 200));
+  }
+  const data = body.data || body;
+  const access = data.access_token || data.accessToken || data.token;
+  const refresh = data.refresh_token || data.refreshToken || keys.refreshToken;
+  if (!access) throw new Error("ZeusX refresh: no access_token in response");
+  await setKeys("zeusx", { accessToken: access, refreshToken: refresh });
+  return access;
+}
+
+// Refresh proactively when the access_token is within `withinMs` of expiry (and
+// we have a refresh token to do it with). Returns true if it refreshed. Safe to
+// call often — it only hits the network when actually near expiry.
+async function zeusxEnsureFreshToken(withinMs) {
+  const keys = getKeys("zeusx");
+  if (!keys.accessToken || !keys.refreshToken) return false;
+  const margin = Number(withinMs) || 2 * 24 * 60 * 60 * 1000; // default 2 days
+  if (zxTokenMsLeft(keys.accessToken) > margin) return false;
+  await zeusxRefreshAccessToken();
+  return true;
+}
+
 async function zeusxTest() {
   const keys = requireKeys("zeusx");
   try {
@@ -2819,6 +2889,60 @@ async function zeusxResolveCategory(game, serviceCategoryId) {
   return bestScore >= 0.45 ? best : null;
 }
 
+// Automatic delivery: ZeusX itself hands the buyer the account the instant they
+// pay — the same model as the Gameflip/FunPay auto-delivery here, where the
+// marketplace holds the credential and releases it on payment (no chat, no
+// poller, works even if this server is offline at the sale). The credential
+// therefore has to ride on the offer at publish time.
+//
+// Confirmed live against create-offer (2026-08-04):
+//   delivery_method: "AUTOMATIC"  (vs the default "COORDINATED")
+//   the credential is a NESTED object, not inline fields — inline every-which-way
+//   returns HTTP 500 (which, gotcha, STILL creates a broken offer shell), while a
+//   nested `game_account` object is accepted (200).
+//   handover_method is null for an account we are NOT handing an email over for
+//   (is_account_linked:false) — the enum values only apply when linked.
+//   Per-account credential fields: registered_email, username, password,
+//   additional_information (the buyer-facing delivery text).
+//
+// Our Twitch-drop accounts are never bound to an email we hand over, so every
+// credential is is_account_linked:false + handover_method:null.
+function zxConnectGuide() {
+  return (
+    "You received a Twitch account (username + password above).\n\n" +
+    "1. Log in to it, then open https://www.twitch.tv/drops/inventory and " +
+    'scroll to the "Received" section at the bottom.\n' +
+    '2. Click the purple "Connect" button under the item you want to add.\n' +
+    "3. Follow the instructions on the site where the connection is made.\n\n" +
+    "Any issue — message the seller here on ZeusX."
+  );
+}
+
+function zxAutoDeliveryCredential(account) {
+  return {
+    is_account_linked: false,
+    handover_method: null,
+    registered_email: String((account && account.email) || ""),
+    username: String((account && account.login) || ""),
+    password: String((account && account.password) || ""),
+    additional_information: zxConnectGuide(),
+  };
+}
+
+// Build the delivery half of the offer body. `accounts` is [{login,password,email}].
+// One account -> nested `game_account`; several -> `game_accounts` array (each a
+// stock unit ZeusX hands out on a sale). See utils/../_zx_confirm1.js.
+function zxDeliveryFields(accounts) {
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    return { delivery_method: "COORDINATED", is_account_linked: false };
+  }
+  const creds = accounts.map(zxAutoDeliveryCredential);
+  const fields = { delivery_method: "AUTOMATIC", is_account_linked: false };
+  if (creds.length === 1) fields.game_account = creds[0];
+  else fields.game_accounts = creds;
+  return fields;
+}
+
 async function zeusxPublish({
   title,
   description,
@@ -2832,6 +2956,10 @@ async function zeusxPublish({
   coverImagePath,
   deliveryDays,
   deliveryHours,
+  // When set to a non-empty [{login,password,email}], the offer is published as
+  // ZeusX "Automatic" delivery (instant hand-over on payment) instead of the
+  // default "Coordinated" (manual) offer.
+  autoDeliverAccounts,
 }) {
   requireKeys("zeusx");
   const cfg = zeusxGameConfig(game) || {};
@@ -2866,7 +2994,13 @@ async function zeusxPublish({
       ").";
     price = ZX_MIN_PRICE;
   }
-  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  const auto =
+    Array.isArray(autoDeliverAccounts) && autoDeliverAccounts.length > 0;
+  // When auto-delivering, the stock count is exactly the number of accounts we
+  // attach — each is one deliverable unit ZeusX hands out on a sale.
+  const qty = auto
+    ? autoDeliverAccounts.length
+    : Math.max(1, parseInt(quantity, 10) || 1);
   const photos = [];
   if (coverImagePath) {
     try {
@@ -2887,11 +3021,10 @@ async function zeusxPublish({
     listed_price: String(price),
     quantity: qty,
     has_multiple_stock: qty > 1,
-    // Auto delivery on ZeusX needs credentials uploaded to their vault, which
-    // has no documented endpoint — sales are handed over in chat, the same way
-    // the other API-less markets work here.
-    delivery_method: "COORDINATED",
-    is_account_linked: false,
+    // Either "AUTOMATIC" (credential rides on the offer, ZeusX delivers on
+    // payment) when autoDeliverAccounts is set, or the default "COORDINATED"
+    // manual offer. See zxDeliveryFields above.
+    ...zxDeliveryFields(autoDeliverAccounts),
     days: Math.max(0, parseInt(deliveryDays, 10) || 0),
     hours: Math.max(0, parseInt(deliveryHours, 10) || (deliveryDays ? 0 : 1)),
     tags: (Array.isArray(tags) ? tags : [])
@@ -3085,6 +3218,8 @@ module.exports = {
   funpayDelist,
   funpayUpdateSecrets,
   zeusxTest,
+  zeusxRefreshAccessToken,
+  zeusxEnsureFreshToken,
   zeusxPublish,
   zeusxOffer,
   zeusxUpdateOffer,
