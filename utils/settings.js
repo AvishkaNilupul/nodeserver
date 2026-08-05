@@ -37,6 +37,13 @@ const AUTO_FARM_DEFAULTS = {
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }
   zeusxAuto: false,
   zeusxGames: {},
+  // Deliver ZeusX sales automatically (native "Automatic" delivery: the account
+  // credential rides on the offer and ZeusX hands it to the buyer the instant
+  // they pay). ZeusX only carries ONE credential per offer, so each farmed
+  // account becomes its own single-stock listing. OFF => the legacy behaviour:
+  // one "Coordinated" offer for the whole share, handed over by hand and marked
+  // sold from the Drop Archive. Only matters when zeusxAuto is also on.
+  zeusxAutoDeliver: false,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign
@@ -62,6 +69,14 @@ const AUTO_FARM_DEFAULTS = {
   // holdback stays intact. 3 markets x 3 x 2 = 18 accounts on a full-market
   // game - the pool (180+ ready) supports this comfortably.
   perMarketStock: 3,
+  // Recycle sold-out accounts back into farming. OFF by default (opt-in): a
+  // sold account's login:password is in the buyer's hands, so it is only reused
+  // once it is fully spent, every drop the buyer bought is connected, the
+  // cooldown has passed AND a fresh rescan confirms the token still works (a
+  // buyer who changed the password fails the rescan and is skipped, never
+  // recycled). See utils/recycleEligibility.js + recycleSoldOutAccounts.
+  recycleSoldAccounts: false,
+  recycleCooldownDays: 14,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

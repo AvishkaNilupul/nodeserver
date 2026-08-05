@@ -681,9 +681,17 @@ function zeusxGameMapped(af, game) {
   return Object.keys(map).some((k) => k === key || key.includes(k) || k.includes(key));
 }
 
-// ZeusX has no auto-delivery API, so its share is listed as a coordinated
-// offer: the accounts are reserved (never sold twice on another market) and
-// handed over in ZeusX chat, then marked sold from the Drop Archive.
+// ZeusX share. Two modes, chosen by the zeusxAutoDeliver switch:
+//
+//  • OFF (default): one "Coordinated" offer for the whole share (quantity N).
+//    Accounts are reserved so they're never sold twice on another market, then
+//    handed over by hand in ZeusX chat and marked sold from the Drop Archive.
+//
+//  • ON: native ZeusX "Automatic" delivery — ZeusX carries the credential and
+//    hands it to the buyer the instant they pay (no chat, no manual step, like
+//    the Gameflip/FunPay auto-delivery here). ZeusX only accepts ONE credential
+//    per offer (game_account is a single object — verified live), so each
+//    reserved account becomes its own single-stock listing.
 async function publishZeusxShare({
   set,
   title,
@@ -693,37 +701,91 @@ async function publishZeusxShare({
   accounts,
   game,
 }) {
+  const autoDeliver = !!settings.getAutoFarm().zeusxAutoDeliver;
   accounts = await reserveAccountsForPublish(accounts, set, ZX_CLAIM_TAG);
   if (!accounts.length) {
     throw new Error(
       "no account still held the full bundle unclaimed at publish time",
     );
   }
-  return withReservationRollback(accounts, set, async () => {
-    const r = await mp.zeusxPublish({
-      title,
-      description,
-      priceUsd: price,
-      quantity: accounts.length,
-      game,
-      coverImagePath: img,
+
+  if (!autoDeliver) {
+    return withReservationRollback(accounts, set, async () => {
+      const r = await mp.zeusxPublish({
+        title,
+        description,
+        priceUsd: price,
+        quantity: accounts.length,
+        game,
+        coverImagePath: img,
+      });
+      await MarketplaceListing.create({
+        set: set._id,
+        marketplace: "zeusx",
+        externalId: r.externalId,
+        url: r.url || "",
+        title,
+        description,
+        price,
+        status: "active",
+        origin: "auto",
+        note: "auto-farm: " + accounts.length + " account(s), manual hand-over",
+        accountLogin: accounts.map((a) => a.login).join(", "),
+        qtyTarget: accounts.length,
+      });
+      return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
     });
-    await MarketplaceListing.create({
-      set: set._id,
-      marketplace: "zeusx",
-      externalId: r.externalId,
-      url: r.url || "",
-      title,
-      description,
-      price,
-      status: "active",
-      origin: "auto",
-      note: "auto-farm: " + accounts.length + " account(s), manual hand-over",
-      accountLogin: accounts.map((a) => a.login).join(", "),
-      qtyTarget: accounts.length,
-    });
-    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
-  });
+  }
+
+  // Automatic: one instant-delivery listing per reserved account. A single
+  // account failing to list frees only its own reservation and never sinks the
+  // rest of the share; the whole share throwing (nothing listed) rolls every
+  // reservation back.
+  const listed = [];
+  for (const acc of accounts) {
+    try {
+      const r = await mp.zeusxPublish({
+        title,
+        description,
+        priceUsd: price,
+        game,
+        coverImagePath: img,
+        autoDeliverAccounts: [
+          { login: acc.login, password: acc.password, email: "" },
+        ],
+      });
+      await MarketplaceListing.create({
+        set: set._id,
+        marketplace: "zeusx",
+        externalId: r.externalId,
+        url: r.url || "",
+        title,
+        description,
+        price,
+        status: "active",
+        origin: "auto",
+        note: "auto-farm: automatic delivery — " + acc.login,
+        autoDeliver: true,
+        accountId: String(acc.accountId),
+        accountLogin: acc.login,
+        qtyTarget: 1,
+      });
+      listed.push({ acc, r });
+    } catch (e) {
+      await releaseReservedForSet([acc], set).catch(() => {});
+      console.error("zeusx auto-delivery listing failed for", acc.login, "-", e.message);
+    }
+  }
+  if (!listed.length) {
+    // Everything failed — release the whole share so nothing is stranded.
+    await releaseReservedForSet(accounts, set).catch(() => {});
+    throw new Error("ZeusX auto-delivery: no account could be listed");
+  }
+  return {
+    externalId: listed[0].r.externalId,
+    url: listed[0].r.url || "",
+    qty: listed.length,
+  };
 }
 
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
