@@ -68,6 +68,31 @@ async function suspendedLoginSet() {
   return new Set(rows.map((r) => lower(r.login)).filter(Boolean));
 }
 
+// A pool row and a BotAccount can be the same Twitch account in two tables (the
+// pool row is where it came from, the BotAccount is where it was deployed), so a
+// login proven gone on one side is gone on the other. Propagating it saves a
+// second probe and, more importantly, closes a loop that survived the first
+// prod sweep: backfill claims a dead pool row, deployment fails, the claim is
+// rolled back to `available`/`ok` (see releasePoolAccounts in utils/autoFarmer),
+// and the row is right back in the supply it was never part of.
+async function propagateSuspensionToPool(logins) {
+  const list = [...new Set(logins.map(lower).filter(Boolean))];
+  if (!list.length) return 0;
+  const res = await AvailableAccount.updateMany(
+    { usernameLower: { $in: list }, lastCheckStatus: { $ne: "suspended" } },
+    {
+      $set: {
+        lastCheckStatus: "suspended",
+        suspendedAt: new Date(),
+        existsProbeAt: new Date(),
+        lastCheckError:
+          "Account no longer exists on Twitch (suspended or deleted)",
+      },
+    },
+  );
+  return res.modifiedCount || 0;
+}
+
 /* ------------------------------- 1. classify ------------------------------ */
 
 // Probe accounts whose token Twitch refused and mark the ones that are gone.
@@ -76,19 +101,22 @@ async function suspendedLoginSet() {
 async function classifyBotAccounts({ limit = 0, onProgress } = {}) {
   const q = BotAccount.find(
     { lastScanStatus: { $in: PROBE_SCAN_STATUSES }, login: { $gt: "" } },
-    { login: 1 },
+    { login: 1, _id: 1 },
   ).lean();
   if (limit > 0) q.limit(limit);
   const rows = await q;
   if (!rows.length) return { probed: 0, suspended: 0, alive: 0, unknown: 0 };
   const verdicts = await accountState.probeAccounts(rows.map((r) => r.login));
   const gone = [];
+  const goneLogins = [];
   let alive = 0;
   let unknown = 0;
   for (const r of rows) {
     const v = verdicts.get(r.login);
-    if (v === accountState.GONE) gone.push(r._id);
-    else if (v === accountState.EXISTS) alive++;
+    if (v === accountState.GONE) {
+      gone.push(r._id);
+      goneLogins.push(r.login);
+    } else if (v === accountState.EXISTS) alive++;
     else unknown++;
   }
   if (gone.length) {
@@ -103,6 +131,7 @@ async function classifyBotAccounts({ limit = 0, onProgress } = {}) {
         },
       },
     );
+    await propagateSuspensionToPool(goneLogins);
   }
   if (onProgress) {
     onProgress(
@@ -432,6 +461,9 @@ async function purgeSuspended({ dryRun = false, onProgress } = {}) {
     return report;
   }
   const ids = doomed.map((d) => d.acc._id);
+  // Before the rows go: their pool twins must be retired too, or a deleted
+  // account comes straight back as supply the next time a claim is rolled back.
+  await propagateSuspensionToPool(doomed.map((d) => d.acc.login));
   // Drops first: an account row that survives a failed drop delete can be
   // purged again next sweep, whereas orphaned drops would have nothing left
   // pointing at them.
@@ -564,6 +596,7 @@ module.exports = {
   PROBE_SCAN_STATUSES,
   PROBE_CHECK_STATUSES,
   suspendedLoginSet,
+  propagateSuspensionToPool,
   classifyBotAccounts,
   classifyPoolAccounts,
   releaseSuspendedAssignments,
