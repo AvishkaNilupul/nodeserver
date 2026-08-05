@@ -44,6 +44,13 @@ const { sendTelegram } = require("./telegram");
 const PROBE_SCAN_STATUSES = ["token_invalid", "error"];
 const PROBE_CHECK_STATUSES = ["token_invalid", "error", "integrity_failed"];
 
+// How long an existence answer is trusted for a claimable pool row, and how many
+// such rows one sweep may re-probe. A ban does not un-ban, so daily is plenty,
+// and the cap is what keeps "I will feed new accounts" from turning every tick
+// into thousands of Twitch lookups.
+const PROBE_TTL_MS = 24 * 3600 * 1000;
+const POOL_PROBE_CAP = 600;
+
 function lower(s) {
   return String(s || "")
     .trim()
@@ -118,14 +125,30 @@ async function classifyBotAccounts({ limit = 0, onProgress } = {}) {
   };
 }
 
-// Same for the account pool. Also probes rows with no check result yet but no
-// usable token, since those are the ones that quietly get claimed.
+// Same for the account pool, plus the case the bad-status filter cannot see: a
+// row that is `available` with a perfectly good "ok" token. A token minted before
+// the ban still authenticates, so 71 rows on prod sat here as available/ok while
+// the accounts behind them no longer existed — backfill claimed them, deployed
+// them into bots and they farmed nothing. Anything claimable is therefore probed
+// on its own merit, at most once a day per row (existsProbeAt) and at most
+// POOL_PROBE_CAP rows a sweep, so feeding in thousands of fresh accounts cannot
+// turn a ten-minute tick into thousands of Twitch calls.
 async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
+  const stale = new Date(Date.now() - PROBE_TTL_MS);
   const q = AvailableAccount.find(
-    { lastCheckStatus: { $in: PROBE_CHECK_STATUSES } },
+    {
+      $or: [
+        { lastCheckStatus: { $in: PROBE_CHECK_STATUSES } },
+        {
+          status: "available",
+          $or: [{ existsProbeAt: null }, { existsProbeAt: { $lt: stale } }],
+        },
+      ],
+    },
     { usernameLower: 1 },
-  ).lean();
-  if (limit > 0) q.limit(limit);
+  )
+    .limit(limit > 0 ? limit : POOL_PROBE_CAP)
+    .lean();
   const rows = await q;
   if (!rows.length) return { probed: 0, suspended: 0, alive: 0, unknown: 0 };
   const verdicts = await accountState.probeAccounts(
@@ -140,17 +163,30 @@ async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
     else if (v === accountState.EXISTS) alive++;
     else unknown++;
   }
+  const now = new Date();
   if (gone.length) {
     await AvailableAccount.updateMany(
       { _id: { $in: gone } },
       {
         $set: {
           lastCheckStatus: "suspended",
-          suspendedAt: new Date(),
+          suspendedAt: now,
           lastCheckError:
             "Account no longer exists on Twitch (suspended or deleted)",
         },
       },
+    );
+  }
+  // Stamped for every row we got a definite answer about, gone or not, so the
+  // daily re-probe window starts now. An inconclusive probe is deliberately left
+  // unstamped: it answered nothing, so it must not buy the row a day of silence.
+  const settled = rows
+    .filter((r) => verdicts.get(r.usernameLower) !== accountState.UNKNOWN)
+    .map((r) => r._id);
+  if (settled.length) {
+    await AvailableAccount.updateMany(
+      { _id: { $in: settled } },
+      { $set: { existsProbeAt: now } },
     );
   }
   if (onProgress) {
