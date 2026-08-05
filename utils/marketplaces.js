@@ -314,6 +314,59 @@ async function gameflipListingIdsByStatus(status) {
   return ids;
 }
 
+// Gameflip's status patches cannot be trusted on the way DOWN either. The
+// restore below already documents the lie — under the rate limiter Gameflip
+// answers 200 to a status patch and leaves the listing where it was — but the
+// take-off-sale step trusted its 200, so when the limiter swallowed it the very
+// next patch hit a still-onsale listing and came back "Cannot change 'price'
+// when status is onsale". A json-patch is atomic, so the markup, the retitle and
+// the held-back stock release were all lost together, which is exactly the
+// failure this whole off-sale dance exists to prevent.
+//
+// So: read the status back and retry, same shape as the restore. Returns once
+// the listing really is off sale; throws (having changed nothing that matters)
+// otherwise, leaving the caller to retry on its next sweep.
+async function gfTakeOffSale(listingId, setStatus, label) {
+  let err = null;
+  for (const w of [0, 20000, 60000]) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("draft");
+    } catch (e) {
+      err = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) !== "onsale") return;
+      err = new Error("still onsale after the status patch (rate-limited)");
+    } catch (e) {
+      err = e;
+    }
+  }
+  throw apiError(label + " (could not take off sale)", err || new Error("?"));
+}
+
+// A listing whose status we cannot read must not be patched: "onsale" decides
+// whether the edit needs an off-sale window at all, and guessing it wrong either
+// loses the whole atomic patch (guessed draft, was onsale) or ends with a
+// listing put on sale that the owner had parked in draft (guessed onsale, was
+// draft). Retry the read, then give up and let the caller retry later.
+async function gfReadStatusOrThrow(listingId, label) {
+  let err = null;
+  for (const w of [0, 5000, 15000]) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      return await gameflipListingStatus(listingId);
+    } catch (e) {
+      err = e;
+    }
+  }
+  throw apiError(
+    label + " (could not read listing status, so it was left untouched)",
+    err || new Error("?"),
+  );
+}
+
 // Patch an existing listing's price (cents) and optionally its name and
 // description — used for the post-event scarcity markup once a drop campaign
 // ends and the items become unobtainable.
@@ -401,12 +454,7 @@ async function gameflipReprice(
     }
   };
 
-  let live = "";
-  try {
-    live = await gameflipListingStatus(listingId);
-  } catch {
-    // Status unreadable — try the plain patch and let its own error surface.
-  }
+  const live = await gfReadStatusOrThrow(listingId, "Gameflip reprice");
   if (live !== "onsale") {
     // Already off sale: apply the ops and swap the cover directly, no toggle.
     if (ops.length) {
@@ -426,11 +474,7 @@ async function gameflipReprice(
     return;
   }
 
-  try {
-    await setStatus("draft");
-  } catch (e) {
-    throw apiError("Gameflip reprice (could not take off sale)", e);
-  }
+  await gfTakeOffSale(listingId, setStatus, "Gameflip reprice");
   let patchErr = null;
   if (ops.length) {
     try {
@@ -508,18 +552,9 @@ async function gameflipReplaceCover(listingId, imagePath) {
   const setStatus = (v) =>
     patch([{ op: "replace", path: "/status", value: v }]);
 
-  let live = "";
-  try {
-    live = await gameflipListingStatus(listingId);
-  } catch {
-    live = "";
-  }
+  const live = await gfReadStatusOrThrow(listingId, "Gameflip cover");
   if (live === "onsale") {
-    try {
-      await setStatus("draft");
-    } catch (e) {
-      throw apiError("Gameflip cover (could not take off sale)", e);
-    }
+    await gfTakeOffSale(listingId, setStatus, "Gameflip cover");
   }
   // Photos already on the listing (the broken one, plus any half-finished
   // upload) stay in the gallery unless they are explicitly deleted, so the

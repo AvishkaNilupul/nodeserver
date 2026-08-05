@@ -2642,6 +2642,25 @@ async function runOnce() {
         }
       } catch (e) {
         progress("Auto-list " + t.game + " failed: " + e.message, "warn");
+        // The process log is not somewhere an operator looks. listActivatedTask
+        // records its own "waiting: ..." state on the task, so a task that keeps
+        // THROWING (a campaign with no resolvable items, a Gameflip 429, a
+        // ZeusX category that was never mapped) was the one failure mode that
+        // left no trace at all: on the auto-farm page it looked exactly like a
+        // healthy task still waiting for its first complete account.
+        if (!af.dryRun) {
+          await AutoFarmTask.updateOne(
+            { _id: t._id },
+            {
+              $set: {
+                "listing.error": ("auto-list failed: " + e.message).slice(
+                  0,
+                  400,
+                ),
+              },
+            },
+          ).catch(() => {});
+        }
       }
     }
 

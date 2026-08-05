@@ -83,6 +83,13 @@ const marketplaceListingSchema = new mongoose.Schema(
     accountLogin: { type: String, default: "" },
     // How many more units to relist (one at a time) after this one sells.
     qtyRemaining: { type: Number, default: 0 },
+    // Relist-retry backoff for a sold chain whose successor failed to publish.
+    // `relistRetryAt` is the earliest moment the fulfiller may try again and
+    // `relistAttempts` how many consecutive failures it has seen — together
+    // they stop a permanently unfulfillable chain (nothing in stock holds the
+    // bundle) from being retried every single tick forever.
+    relistRetryAt: { type: Date, default: null },
+    relistAttempts: { type: Number, default: 0 },
     // Quantity-based auto-delivery (Plati / GGSel): how many units the
     // guardian keeps available on the platform, topping the listing up with
     // freshly claimed accounts as units sell. 0 disables auto-feeding.
