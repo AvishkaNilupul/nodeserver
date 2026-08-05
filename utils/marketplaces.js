@@ -1359,6 +1359,21 @@ async function ggselAddProducts(offerId, values) {
   return products.length;
 }
 
+// GGSel rejects an offer whose title is over 100 characters, in either locale
+// ("Название (EN) слишком большой длины" / "Title (EN) too long") — half what
+// Gameflip allows, so an auto-list title that names every drop in the bundle
+// sails past it and takes the whole GGSel publish down with it. Cut on a word
+// boundary so the title still reads as a sentence rather than ending mid-word.
+const GG_TITLE_MAX = 100;
+
+function ggselTitle(title) {
+  const t = String(title || "").trim();
+  if (t.length <= GG_TITLE_MAX) return t;
+  const cut = t.slice(0, GG_TITLE_MAX);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > GG_TITLE_MAX * 0.6 ? cut.slice(0, sp) : cut).trim();
+}
+
 // Create an offer, then activate it so buyers can see it. GGSel prices are in
 // RUB, so a USD price is converted unless priceRub is passed explicitly.
 //
@@ -1410,7 +1425,7 @@ async function ggselPublish({
   const qty = autoselling
     ? content.length
     : Math.max(1, parseInt(quantity, 10) || 1);
-  const t = String(title || "").slice(0, 200);
+  const t = ggselTitle(title);
   const d = String(description || "").slice(0, 5000);
   const dRu = (await translateEnToRu(d)).slice(0, 5000);
   const instrEn = instructions ? String(instructions) : "";
@@ -1490,7 +1505,7 @@ async function ggselUpdateOffer(offerId, { title, description, priceRub } = {}) 
   const body = {};
   if (title) {
     // Mirror ggselPublish: the English title is used for both locales.
-    const t = String(title).slice(0, 200);
+    const t = ggselTitle(title);
     body.title_ru = t;
     body.title_en = t;
   }
@@ -1581,6 +1596,38 @@ async function ggselCategoryHistory() {
   return rows;
 }
 
+// GGSel only accepts an offer in a category with no children of its own
+// ("Категория не должна иметь дочерние категории"), and some games nest a
+// further level under their Twitch/Accounts section. Walk down to a leaf,
+// preferring a Twitch one at every step, so the resolved id is publishable.
+const GG_LEAF_MAX_DEPTH = 4;
+
+async function ggselLeafCategory(node, keys) {
+  let cur = node;
+  for (let depth = 0; cur && cur.has_children && depth < GG_LEAF_MAX_DEPTH; depth++) {
+    let rows = [];
+    try {
+      const r = await axios.get(GG_API + "/categories?parent_id=" + cur.id, {
+        headers: ggHeaders(keys),
+        timeout: 20000,
+      });
+      rows = (r.data && r.data.data) || [];
+    } catch {
+      break;
+    }
+    if (!rows.length) break;
+    cur =
+      rows.find((k) => /twitch/i.test(String(k.title || ""))) ||
+      rows.find((k) =>
+        /^(accounts|\u0430\u043a\u043a\u0430\u0443\u043d\u0442\u044b)$/i.test(
+          String(k.title || "").trim(),
+        ),
+      ) ||
+      rows[0];
+  }
+  return cur ? String(cur.id) : "";
+}
+
 async function ggselResolveCategoryId(game) {
   const keys = requireKeys("ggsel");
 
@@ -1626,14 +1673,14 @@ async function ggselResolveCategoryId(game) {
     );
     const rows = (kids.data && kids.data.data) || [];
     const twitch = rows.find((k) => /twitch/i.test(String(k.title || "")));
-    if (twitch) return String(twitch.id);
+    if (twitch) return ggselLeafCategory(twitch, keys);
     // 3) The game's accounts section — the seller's own fallback pattern.
     const acc = rows.find((k) =>
       /^(accounts|\u0430\u043a\u043a\u0430\u0443\u043d\u0442\u044b)$/i.test(
         String(k.title || "").trim(),
       ),
     );
-    if (acc) return String(acc.id);
+    if (acc) return ggselLeafCategory(acc, keys);
   } catch {
     /* nothing */
   }
@@ -3260,6 +3307,7 @@ module.exports = {
   ggselAddProducts,
   ggselOfferStock,
   ggselResolveCategoryId,
+  ggselTitle,
   ggselEnableAutoselling,
   ggselFinalizeStock,
   ggselDelist,
