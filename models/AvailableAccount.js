@@ -70,6 +70,12 @@ const availableAccountSchema = new mongoose.Schema(
     },
     lastCheckError: { type: String, default: "" },
     suspendedAt: { type: Date, default: null },
+    // Last time the token-less existence probe looked this login up on Twitch.
+    // Separate from lastCheckAt because the two answer different questions ("can
+    // this token still farm" vs "does this account still exist") and because it
+    // is what keeps the sweep from re-probing the whole claimable pool every ten
+    // minutes: a row is re-probed once a day at most.
+    existsProbeAt: { type: Date, default: null },
     dropCount: { type: Number, default: 0 },
 
     source: { type: String, default: "" },

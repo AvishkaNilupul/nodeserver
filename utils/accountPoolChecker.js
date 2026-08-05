@@ -140,6 +140,7 @@ async function checkOne(id, host) {
     // short of a definite "gone" leaves the verdict untouched.
     if (acc.lastCheckStatus === "token_invalid") {
       const seen = await accountState.probeAccount(acc.usernameLower);
+      if (seen !== accountState.UNKNOWN) acc.existsProbeAt = now;
       if (seen === accountState.GONE) {
         acc.lastCheckStatus = "suspended";
         acc.suspendedAt = acc.suspendedAt || now;
