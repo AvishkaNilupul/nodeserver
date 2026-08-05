@@ -57,8 +57,16 @@ function publicAccount(a) {
 
 router.get("/account-pool/list", requireSuperadmin, async (req, res) => {
   try {
+    // Rows whose account no longer exists on Twitch are kept only when they are
+    // sale evidence, and they are not stock any more — so they get their own tab
+    // instead of padding the lists the operator works from.
     const status = String(req.query.status || "available");
-    const filter = status === "all" ? {} : { status };
+    const filter =
+      status === "suspended"
+        ? { lastCheckStatus: "suspended" }
+        : status === "all"
+          ? { lastCheckStatus: { $ne: "suspended" } }
+          : { status, lastCheckStatus: { $ne: "suspended" } };
     const accounts = await AvailableAccount.find(filter)
       .sort({ createdAt: -1 })
       .lean();
@@ -392,7 +400,12 @@ router.post(
       const archivedIds = await DropLog.distinct("account", {
         accountModel: "AvailableAccount",
       });
-      const filter = { clientSecret: { $ne: "" }, _id: { $nin: archivedIds } };
+      const filter = {
+        clientSecret: { $ne: "" },
+        _id: { $nin: archivedIds },
+        // A confirmed-gone account cannot be re-checked into life.
+        lastCheckStatus: { $ne: "suspended" },
+      };
       if (!includeClaimed) filter.status = "available";
       const rows = await AvailableAccount.find(filter, {
         _id: 1,
