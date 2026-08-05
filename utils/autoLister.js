@@ -899,6 +899,51 @@ async function retryMissingSecondaries(task) {
 
 /* ------------------------------- refiller ------------------------------- */
 
+function splitCsv(v) {
+  return String(v || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Record who is behind each unit a refill just fed into a quantity product.
+// Without this a top-up leaves no trace on the listing but a counter, and the
+// consequences are silent: the guardian's integrity pass reads the row's
+// accounts, so an account that later gets suspended is never flagged and the
+// buyer receives a login that no longer exists (449 units on prod were in this
+// state), and on Digiseller the content_id is the only handle for deleting that
+// one unit later, so losing it means the whole product has to be delisted.
+// Best-effort by design: the platform already accepted the codes, so a
+// bookkeeping failure must not look like a failed feed.
+async function recordFedUnits(marketplace, externalId, accounts, contentIds) {
+  const row = await MarketplaceListing.findOne({
+    marketplace,
+    externalId: String(externalId),
+    status: "active",
+  });
+  if (!row) return;
+  const ids = splitCsv(row.accountId);
+  const logins = splitCsv(row.accountLogin);
+  const seen = new Set(logins.map((l) => l.toLowerCase()));
+  accounts.forEach((a, i) => {
+    const id = String(a.accountId || "");
+    const login = String(a.login || "");
+    if (id && !ids.includes(id)) ids.push(id);
+    if (login && !seen.has(login.toLowerCase())) {
+      logins.push(login);
+      seen.add(login.toLowerCase());
+    }
+    row.units.push({
+      accountId: id,
+      login,
+      contentId: String((contentIds && contentIds[i]) || ""),
+    });
+  });
+  row.accountId = ids.join(",");
+  row.accountLogin = logins.join(", ");
+  await row.save();
+}
+
 // Auto-refiller: top up markets that sold out (or were shorted at listing
 // time) WITHOUT delisting anything. Stock sources in order: free spare
 // accounts (assigned but not tied to any active listing), then the 50%
@@ -979,12 +1024,18 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
           accs = await reserveAccountsForPublish(accs, set, DS_CLAIM_TAG);
         if (accs.length) {
           // reserve → add → (on throw, into the surrounding catch) release.
-          await withReservationRollback(accs, set, () =>
+          const added = await withReservationRollback(accs, set, () =>
             mp.digisellerAddContent(
               L.plati.externalId,
               accs.map((a) => digisellerDeliveryCode(a.login, a.password)),
             ),
           );
+          await recordFedUnits(
+            "digiseller",
+            L.plati.externalId,
+            accs,
+            (added && added.contentIds) || [],
+          ).catch(() => {});
           task.listing.plati.qty =
             (Number(task.listing.plati.qty) || 0) + accs.length;
           actions.push("plati +" + accs.length);
@@ -1012,6 +1063,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
             ),
           );
           await mp.ggselFinalizeStock(L.ggsel.externalId).catch(() => {});
+          // GGSel returns no per-unit id (and rejects every unit delete), so
+          // only the account is recorded — enough for the guardian to see it.
+          await recordFedUnits("ggsel", L.ggsel.externalId, accs, []).catch(
+            () => {},
+          );
           task.listing.ggsel.qty =
             (Number(task.listing.ggsel.qty) || 0) + accs.length;
           actions.push("ggsel +" + accs.length);
