@@ -800,7 +800,13 @@ async function retryMissingSecondaries(task) {
   const L = task.listing || {};
   const platiMissing = !(L.plati && L.plati.externalId);
   const ggselMissing = !(L.ggsel && L.ggsel.externalId);
-  if (!platiMissing && !ggselMissing) return null;
+  // ZeusX was added after this retry existed, so it was only ever attempted in
+  // the same second as the initial publish: a task listed before ZeusX was
+  // switched on, or whose ZeusX publish failed once, never got an offer there
+  // again (24 live tasks were in exactly that state, most with no error to
+  // explain it). It retries on the same terms as the other secondaries.
+  const zeusxMissing = !(L.zeusx && L.zeusx.externalId);
+  if (!platiMissing && !ggselMissing && !zeusxMissing) return null;
 
   const gfRow = await MarketplaceListing.findOne({
     marketplace: "gameflip",
@@ -826,6 +832,12 @@ async function retryMissingSecondaries(task) {
     }
     if (!cat) cat = String(af.ggselCategoryId || "");
     if (cat) targets.push("ggsel:" + cat);
+  }
+  if (zeusxMissing && af.zeusxAuto) {
+    const mapped =
+      zeusxGameMapped(af, task.game) ||
+      !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
+    if (mapped) targets.push("zeusx");
   }
   if (!targets.length) return null;
 
@@ -864,6 +876,23 @@ async function retryMissingSecondaries(task) {
           retried.push("plati");
         } catch (err) {
           task.listing.plati = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
+      } else if (t === "zeusx") {
+        try {
+          const r = await publishZeusxShare({
+            ...base,
+            accounts,
+            game: task.game,
+          });
+          task.listing.zeusx = { ...r, error: "" };
+          retried.push("zeusx");
+        } catch (err) {
+          task.listing.zeusx = {
             externalId: "",
             url: "",
             qty: 0,
