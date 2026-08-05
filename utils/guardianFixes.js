@@ -412,7 +412,7 @@ async function fixRetire(f, listing) {
   const res = await detachAccountFromListing(
     listing,
     { _id: f.accountId, login: f.accountLogin },
-    { reason: "suspended on Twitch", republish: true },
+    { reason: "suspended on Twitch", republish: true, hardRepublish: true },
   );
   if (!res.detached.length) {
     throw httpError(
