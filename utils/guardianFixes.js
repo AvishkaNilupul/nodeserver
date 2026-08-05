@@ -114,6 +114,24 @@ function fixPlanFor(f, listing) {
         }
       }
       return null;
+    case "account-gone":
+      // The login is gone from Twitch, so every platform has the same remedy:
+      // get it off the listing, whatever "off" means there (Gameflip delists and
+      // republishes from healthy stock, Digiseller drops the delivery unit,
+      // GGSel/FunPay hand it back to the auto-feed). The suspension sweep does
+      // this by itself — the button exists for the cases where its surgery
+      // could not finish, e.g. the marketplace was down at the time.
+      if (active && (f.accountId || f.accountLogin)) {
+        return {
+          action: "retire",
+          label: "Take off sale",
+          hint:
+            "Remove this deleted account from the listing and let a fresh one " +
+            "take its place — on Gameflip the offer is relisted with a live " +
+            "account, elsewhere the auto-feed refills the unit.",
+        };
+      }
+      return null;
     case "claim-mismatch":
       if (active && f.accountId) {
         return {
@@ -384,6 +402,35 @@ async function fixDetach(f, listing) {
   );
 }
 
+// Retire a deleted (suspended) account from a live listing, using the same
+// per-marketplace surgery the suspension sweep and the drop-archive "mark sold"
+// flow perform. Partial success is reported rather than thrown: on Gameflip the
+// offer can come down cleanly and still fail to republish when no unsold account
+// holds the bundle, and taking it off sale is the part that protects the buyer.
+async function fixRetire(f, listing) {
+  const { detachAccountFromListing } = require("./listingDetach");
+  const res = await detachAccountFromListing(
+    listing,
+    { _id: f.accountId, login: f.accountLogin },
+    { reason: "suspended on Twitch", republish: true },
+  );
+  if (!res.detached.length) {
+    throw httpError(
+      409,
+      res.warnings.join(" ") ||
+        "Could not take the account off this listing — remove it on the " +
+          "marketplace manually.",
+    );
+  }
+  return (
+    "Retired " +
+    (f.accountLogin || f.accountId) +
+    " (gone from Twitch): " +
+    res.detached.join("; ") +
+    (res.warnings.length ? " — " + res.warnings.join("; ") : "")
+  );
+}
+
 async function fixRefeed(f, listing) {
   const fed = await guardian.feedOne(String(listing._id));
   if (fed > 0) {
@@ -428,6 +475,7 @@ async function fixFinding(id) {
   if (plan.action === "replace") message = await fixReplace(f, listing);
   else if (plan.action === "reserve") message = await fixReserve(f, listing);
   else if (plan.action === "detach") message = await fixDetach(f, listing);
+  else if (plan.action === "retire") message = await fixRetire(f, listing);
   else message = await fixRefeed(f, listing);
 
   f.status = "resolved";

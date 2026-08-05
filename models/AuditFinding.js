@@ -8,7 +8,9 @@ const mongoose = require("mongoose");
 const auditFindingSchema = new mongoose.Schema(
   {
     // duplicate-account | claim-mismatch | redeemed-drops | dead-token |
-    // stock-unknown | restocked | restock-failed
+    // account-gone | stock-unknown | restocked | restock-failed
+    // `account-gone` is deliberately separate from `dead-token`: a dead token can
+    // be re-authed, an account Twitch has deleted can only be taken off sale.
     type: { type: String, required: true, index: true },
     severity: {
       type: String,

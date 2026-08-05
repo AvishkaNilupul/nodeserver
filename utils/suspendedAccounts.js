@@ -337,6 +337,111 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
   return { evicted, configs: touched.size };
 }
 
+/* ------------------------- 2b. retire from listings ----------------------- */
+
+// Does this listing row still sell `id`/`login`? Both the top-level pair (a
+// Gameflip auto-delivery offer, a FunPay pool line) and `units` (Digiseller /
+// GGSel per-unit bookkeeping) count. Pure so the matching is testable.
+function listingRefsAccount(row, id, login) {
+  const wantId = String(id || "");
+  const wantLogin = lower(login);
+  const ids = String(row.accountId || "")
+    .split(",")
+    .map((s) => s.trim());
+  if (wantId && ids.includes(wantId)) return true;
+  const logins = String(row.accountLogin || "")
+    .split(",")
+    .map((s) => lower(s));
+  if (wantLogin && logins.includes(wantLogin)) return true;
+  for (const u of row.units || []) {
+    if (!u) continue;
+    if (wantId && String(u.accountId || "") === wantId) return true;
+    if (wantLogin && lower(u.login) === wantLogin) return true;
+  }
+  return false;
+}
+
+// How many listings one sweep may repair. Each one can mean a delist plus a
+// republish against a live marketplace, so the work is bounded and the rest is
+// picked up by the next tick.
+const LISTING_RETIRE_CAP = 40;
+
+// Take suspended accounts off the listings that are still SELLING them. Marking
+// an account suspended keeps it out of every future selection, but a listing
+// published before that is already on sale with its credentials baked in — a
+// buyer pays and receives a login Twitch has deleted. Each marketplace needs its
+// own surgery, so this reuses the same per-account detach the drop-archive
+// "mark sold" flow performs (delist + republish from healthy stock on Gameflip,
+// drop the delivery unit on Digiseller, hand it to the auto-feed on GGSel).
+async function retireFromLiveListings({ onProgress } = {}) {
+  // Lazy: listingDetach pulls in the guardian and the fulfillers, and this
+  // module is loaded by utils/autoFarmer at require time.
+  const { detachAccountFromListing } = require("./listingDetach");
+  const progress = typeof onProgress === "function" ? onProgress : () => {};
+  const accounts = await BotAccount.find(
+    { lastScanStatus: "suspended" },
+    { login: 1 },
+  ).lean();
+  const report = { listings: 0, detached: 0, notes: [], warnings: [] };
+  if (!accounts.length) return report;
+
+  const byId = new Map(accounts.map((a) => [String(a._id), a]));
+  const byLogin = new Map();
+  for (const a of accounts) {
+    if (a.login) byLogin.set(lower(a.login), a);
+  }
+
+  const live = await MarketplaceListing.find(
+    { status: "active" },
+    { accountId: 1, accountLogin: 1, units: 1 },
+  ).lean();
+
+  for (const candidate of live) {
+    if (report.listings >= LISTING_RETIRE_CAP) break;
+    const bad = [];
+    for (const raw of String(candidate.accountId || "").split(",")) {
+      const a = byId.get(raw.trim());
+      if (a) bad.push(a);
+    }
+    for (const raw of String(candidate.accountLogin || "").split(",")) {
+      const a = byLogin.get(lower(raw));
+      if (a) bad.push(a);
+    }
+    for (const u of candidate.units || []) {
+      const a =
+        byId.get(String((u && u.accountId) || "")) ||
+        byLogin.get(lower(u && u.login));
+      if (a) bad.push(a);
+    }
+    const unique = [...new Map(bad.map((a) => [String(a._id), a])).values()];
+    if (!unique.length) continue;
+
+    report.listings++;
+    for (const acc of unique) {
+      // Re-read every time: a detach rewrites the row's account fields (and can
+      // delist it outright), so acting on a stale copy would put the previous
+      // account back or operate on a listing that is no longer on sale.
+      const row = await MarketplaceListing.findById(candidate._id).lean();
+      if (!row || row.status !== "active") break;
+      if (!listingRefsAccount(row, acc._id, acc.login)) continue;
+      const res = await detachAccountFromListing(row, acc, {
+        reason: "suspended on Twitch",
+        republish: true,
+      });
+      for (const d of res.detached) {
+        report.detached++;
+        progress(acc.login + ": " + d);
+        report.notes.push(acc.login + ": " + d);
+      }
+      for (const w of res.warnings) {
+        progress("warning — " + w);
+        report.warnings.push(w);
+      }
+    }
+  }
+  return report;
+}
+
 /* --------------------------------- 3. purge ------------------------------- */
 
 // Which suspended BotAccounts may be deleted outright, and which must be kept
@@ -563,6 +668,9 @@ async function sweep({
   const pool = await classifyPoolAccounts({ limit, onProgress: progress });
   const released = await releaseSuspendedAssignments({ onProgress: progress });
   const evicted = await evictSuspendedFromConfigs({ onProgress: progress });
+  // Before any purge: a suspended account that is still on sale somewhere has to
+  // come off that listing, or a buyer pays for a login that no longer exists.
+  const retired = await retireFromLiveListings({ onProgress: progress });
   const purged = purge
     ? await purgeSuspended({ dryRun, onProgress: progress })
     : null;
@@ -588,7 +696,19 @@ async function sweep({
           : ""),
     ).catch(() => {});
   }
-  return { bots, pool, released, evicted, purged, purgedPool };
+  if (retired.detached) {
+    await sendTelegram(
+      "🛑 Took " +
+        retired.detached +
+        " suspended account(s) off " +
+        retired.listings +
+        " live listing(s) — a buyer would have received a deleted login." +
+        (retired.warnings.length
+          ? " " + retired.warnings.length + " need(s) a manual look."
+          : ""),
+    ).catch(() => {});
+  }
+  return { bots, pool, released, evicted, retired, purged, purgedPool };
 }
 
 module.exports = {
@@ -600,6 +720,8 @@ module.exports = {
   classifyPoolAccounts,
   releaseSuspendedAssignments,
   evictSuspendedFromConfigs,
+  listingRefsAccount,
+  retireFromLiveListings,
   purgePlanFor,
   listedAccountRefs,
   purgeSuspended,
