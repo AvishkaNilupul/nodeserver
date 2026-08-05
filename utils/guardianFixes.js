@@ -29,6 +29,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const fpFulfiller = require("./funpayFulfiller");
 const guardian = require("./marketplaceGuardian");
 const mp = require("./marketplaces");
+const accountState = require("./twitchAccountState");
 const {
   reserveSetOnAccount,
   releaseSetForAccounts,
@@ -174,7 +175,7 @@ async function claimFreshAccount(set, notAccountId) {
     const a = await BotAccount.findById(c.accountId, {
       lastScanStatus: 1,
     }).lean();
-    if (a && a.lastScanStatus === "token_invalid") {
+    if (a && accountState.isUnusableScanStatus(a.lastScanStatus)) {
       spare.push(c.accountId);
       continue;
     }

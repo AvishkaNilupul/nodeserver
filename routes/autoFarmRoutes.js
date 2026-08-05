@@ -7,6 +7,7 @@ const autoFarmer = require("../utils/autoFarmer");
 const settings = require("../utils/settings");
 const hosts = require("../utils/botHosts");
 const botFactory = require("../utils/botFactory");
+const suspendedAccounts = require("../utils/suspendedAccounts");
 
 const router = express.Router();
 
@@ -108,6 +109,11 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
       patch.perMarketStock = clamp(b.perMarketStock, 1, 10);
     if ("maxAutoBots" in b) patch.maxAutoBots = clamp(b.maxAutoBots, 1, 50);
     if ("minHoursLeft" in b) patch.minHoursLeft = clamp(b.minHoursLeft, 0, 168);
+    // Permanently delete accounts Twitch has deleted. Irreversible, so it is an
+    // explicit opt-in; the classify/release half of the sweep always runs.
+    if ("purgeSuspended" in b) patch.purgeSuspended = !!b.purgeSuspended;
+    if ("suspendCheckLimit" in b)
+      patch.suspendCheckLimit = clamp(b.suspendCheckLimit, 0, 100000);
     // Multi-market category ids: numeric strings, empty = unset/auto.
     if ("platiCategoryId" in b)
       patch.platiCategoryId = String(b.platiCategoryId || "").replace(
@@ -384,5 +390,26 @@ router.post("/auto-farm/rescan", requireSuperadmin, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Run the suspended-account sweep on demand, without waiting for a tick.
+// `dryRun` reports what a purge WOULD delete and touches nothing; `purge` is the
+// irreversible one and must be asked for explicitly even when the setting is on.
+router.post(
+  "/auto-farm/suspended-sweep",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const b = req.body || {};
+      const report = await suspendedAccounts.sweep({
+        purge: !!b.purge,
+        dryRun: !!b.dryRun,
+        limit: Math.max(0, Math.floor(Number(b.limit) || 0)),
+      });
+      res.json({ ok: true, ...report });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 module.exports = router;

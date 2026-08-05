@@ -50,12 +50,26 @@ const availableAccountSchema = new mongoose.Schema(
     // its stored password is the fix, which is why these are surfaced by
     // /account-pool/export-needs-auth alongside dead tokens.
     lastCheckAt: { type: Date, default: null },
+    //
+    // "suspended" is the one verdict that is final: Twitch no longer has the
+    // account at all (utils/twitchAccountState.js). Unlike a dead token or a
+    // failed integrity gate there is nothing to re-auth, so these rows are not
+    // supply — 71 of them were still sitting here as `available`/`ok` on prod,
+    // getting claimed and deployed into bots that could never farm anything.
     lastCheckStatus: {
       type: String,
-      enum: ["", "ok", "token_invalid", "integrity_failed", "error"],
+      enum: [
+        "",
+        "ok",
+        "token_invalid",
+        "integrity_failed",
+        "error",
+        "suspended",
+      ],
       default: "",
     },
     lastCheckError: { type: String, default: "" },
+    suspendedAt: { type: Date, default: null },
     dropCount: { type: Number, default: 0 },
 
     source: { type: String, default: "" },

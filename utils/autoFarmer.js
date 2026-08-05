@@ -24,6 +24,7 @@ const botWaker = require("./botWaker");
 const mp = require("./marketplaces");
 const settings = require("./settings");
 const { sendTelegram } = require("./telegram");
+const suspendedAccounts = require("./suspendedAccounts");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
@@ -131,7 +132,8 @@ function resolveFarmHost(af) {
 }
 
 // Ready = claimable right now with a working token. integrity_failed /
-// token_invalid accounts can't farm, so they don't count as supply.
+// token_invalid / suspended accounts can't farm, so they don't count as supply
+// (the enum whitelist below excludes all three).
 function readyPoolQuery() {
   return {
     status: "available",
@@ -142,6 +144,23 @@ function readyPoolQuery() {
 
 async function countReadyPool() {
   return AvailableAccount.countDocuments(readyPoolQuery());
+}
+
+// How many of a task's assigned accounts can actually still farm and be sold.
+// assignedAccounts is a login list that intentionally keeps accounts whose
+// tokens died — they hold farmed drops and re-auth revives them — but a
+// suspended account never comes back, so it must not be counted toward target.
+// Unknown logins (no BotAccount row yet, e.g. mid-deploy) count as usable so a
+// timing gap can never inflate a backfill. `suspended` is the lowercased login
+// set from suspendedAccounts.suspendedLoginSet(), read once per sweep rather
+// than per task — 684 of prod's 3,998 logins carry capitals, so every comparison
+// has to be case-folded.
+function usableAssignedCount(task, suspended) {
+  const logins = (task.assignedAccounts || [])
+    .map((x) => String(x || "").toLowerCase())
+    .filter(Boolean);
+  if (!suspended || !suspended.size) return logins.length;
+  return logins.filter((l) => !suspended.has(l)).length;
 }
 
 // Case-insensitive MarketResearch lookup (campaign names and research rows
@@ -2488,9 +2507,29 @@ async function runOnce() {
         results.push({ game: c.game, error: e.message });
       }
     }
-    // Reap dead-token accounts out of task assignments FIRST, so the freed
-    // slots are refilled with healthy accounts by the backfill sweep below on
-    // this same tick (and the owner is nudged to re-auth the farmed ones).
+    // Suspension sweep runs before the dead-token reaper, because the reaper
+    // cannot tell the two apart and its "keep it, the owner will re-auth" rule is
+    // exactly wrong for an account Twitch has deleted: it holds its task slot and
+    // its container seat forever, backfill reads the task as full and adds
+    // nobody, and the owner is nudged to re-auth something that no longer exists.
+    // Classifying them first is what turns "waiting for accounts" back into an
+    // actual refill, and leaves the reaper the accounts it was written for.
+    // Deletion is opt-in (af.purgeSuspended) — classify and release are
+    // reversible, purging is not.
+    if (!af.dryRun) {
+      try {
+        await suspendedAccounts.sweep({
+          purge: af.purgeSuspended === true,
+          limit: Number(af.suspendCheckLimit) || 0,
+          onProgress: (m) => progress(m),
+        });
+      } catch (e) {
+        progress("Suspension sweep failed: " + e.message, "warn");
+      }
+    }
+    // Reap dead-token accounts out of task assignments, so the freed slots are
+    // refilled with healthy accounts by the backfill sweep below on this same
+    // tick (and the owner is nudged to re-auth the farmed ones).
     if (!af.dryRun) {
       try {
         const r = await reapDeadTokenAssignments(af, progress);
@@ -2797,7 +2836,7 @@ async function reapDeadTokenAssignments(af, progress) {
     return { unassigned: 0, reauth: 0 };
   }
   const BotAccount = require("../models/BotAccount");
-  const DEAD = ["token_invalid", "error"];
+  const DEAD = ["token_invalid", "error", "suspended"];
   const tasks = await AutoFarmTask.find({ status: "active" });
   let unassigned = 0;
   const reauthByGame = new Map();
@@ -2808,7 +2847,7 @@ async function reapDeadTokenAssignments(af, progress) {
     if (!logins.length) continue;
     const dead = await BotAccount.find(
       { login: { $in: logins }, lastScanStatus: { $in: DEAD } },
-      { _id: 1, login: 1 },
+      { _id: 1, login: 1, lastScanStatus: 1 },
     ).lean();
     if (!dead.length) continue;
     // Which of these dead accounts hold real, unsold, unconnected drops FOR THIS
@@ -2837,7 +2876,12 @@ async function reapDeadTokenAssignments(af, progress) {
     const weightLogins = new Set();
     let heldForReauth = 0;
     for (const a of dead) {
-      if (keepIds.has(String(a._id))) heldForReauth++;
+      // Holding drops only earns a reprieve if a re-auth could actually recover
+      // them. An account Twitch has deleted is never coming back, so keeping it
+      // pins the slot forever and nudging the owner to re-mint its token asks for
+      // something impossible — it is dead weight no matter what it farmed.
+      const reauthable = a.lastScanStatus !== "suspended";
+      if (reauthable && keepIds.has(String(a._id))) heldForReauth++;
       else weightLogins.add(String(a.login).toLowerCase());
     }
     if (weightLogins.size) {
@@ -2897,6 +2941,9 @@ async function backfillActiveTasks(af, host, progress) {
     demandScore: -1,
     executedAt: 1,
   });
+  const suspendedLogins = await suspendedAccounts
+    .suspendedLoginSet()
+    .catch(() => new Set());
   // Fresh accounts cannot finish a drop that ends in a few hours, so a task
   // whose campaign is inside the same time gate that blocks new farming is not
   // worth spending on either.
@@ -2939,7 +2986,14 @@ async function backfillActiveTasks(af, host, progress) {
       ),
       af.maxPerGame * SALES_CAP_MULT_MAX,
     );
-    const have = (task.assignedAccounts || []).length;
+    // Count only accounts that can still farm. A suspended account (Twitch
+    // deleted it — see utils/twitchAccountState.js) stays in assignedAccounts
+    // because its farmed drops are still in the archive, and counting it as
+    // supply is what silently starved listing on prod: 583 suspended accounts
+    // held slots across the active tasks, every task read as at-target, backfill
+    // added nobody, and no live account ever held a full bundle to list while
+    // 1,471 healthy accounts sat idle in the pool.
+    const have = usableAssignedCount(task, suspendedLogins);
     const missing = target - have;
     if (missing < 1) continue;
 

@@ -18,6 +18,14 @@ const AUTO_FARM_DEFAULTS = {
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
+  // Suspended-account retirement (utils/suspendedAccounts.js). Classifying and
+  // releasing runs every tick and is reversible, so it has no switch; the
+  // permanent delete does, and ships OFF. Turning it on removes every account
+  // Twitch has deleted that is unsold and not on a listing, plus its drop rows.
+  purgeSuspended: false,
+  // Cap on how many bad-token accounts are re-probed per tick (0 = all). A first
+  // sweep faces thousands of rows; a cap spreads them over several ticks.
+  suspendCheckLimit: 0,
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,

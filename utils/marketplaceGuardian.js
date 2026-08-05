@@ -29,6 +29,7 @@ const ggFulfiller = require("./ggselFulfiller");
 const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
 const { sendTelegram } = require("./telegram");
+const accountState = require("./twitchAccountState");
 
 const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
@@ -229,8 +230,9 @@ async function runChecks(rows, seenKeys) {
     const acc = accMap.get(id);
     if (!acc) continue;
     for (const row of listings) {
-      // 4. Dead token — credentials likely changed; delivery may not work.
-      if (acc.lastScanStatus === "token_invalid") {
+      // 4. Dead token — credentials likely changed; delivery may not work. A
+      // suspended account is the terminal case of the same problem.
+      if (accountState.isUnusableScanStatus(acc.lastScanStatus)) {
         await flag({
           type: "dead-token",
           severity: "medium",
