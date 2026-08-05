@@ -29,6 +29,7 @@ const {
   revealPassword,
 } = require("../utils/renters");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
 const { decrypt, encrypt } = require("../utils/secretBox");
 const {
@@ -958,24 +959,6 @@ router.post(
         "i",
       );
 
-      // Buyer safety: never hand a renter an account that a live listing has
-      // promised to deliver.
-      const listed = await MarketplaceListing.findOne({
-        status: "active",
-        accountLogin: { $regex: "(^|[,\\s])" + lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([,\\s]|$)", $options: "i" },
-      }).lean();
-      if (listed) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "This account is attached to an active marketplace listing (" +
-            listed.marketplace +
-            " " +
-            (listed.externalId || "") +
-            ") — delist or replace it there first.",
-        });
-      }
-
       // Already on THIS renter's inventory? Nothing to move.
       const mine = await RenterAccount.findOne({
         renter: renter._id,
@@ -989,6 +972,46 @@ router.post(
       }
 
       const notes = [];
+
+      // Pull the account off any ACTIVE marketplace listing that still promises
+      // to deliver it — but only this one account, never the whole listing. On
+      // a multi-account offer the other accounts keep selling; on a single-
+      // account offer it goes off sale. This replaces the old hard block: an
+      // account someone bought (and now rents farming for) can be reclaimed
+      // here without the operator having to delist by hand first.
+      const acctRow = await BotAccount.findOne(
+        { $or: [{ clientSecret: token }, { login: loginRe }] },
+        { _id: 1, login: 1 },
+      ).lean();
+      const listingFilter = [
+        {
+          accountLogin: {
+            $regex:
+              "(^|[,\\s])" +
+              lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
+              "([,\\s]|$)",
+            $options: "i",
+          },
+        },
+      ];
+      if (acctRow) {
+        listingFilter.push({
+          accountId: new RegExp("(^|,\\s*)" + String(acctRow._id) + "(\\s*,|$)"),
+        });
+      }
+      const liveListings = await MarketplaceListing.find({
+        status: "active",
+        $or: listingFilter,
+      });
+      for (const row of liveListings) {
+        const r = await detachAccountFromListing(
+          row,
+          { _id: acctRow && acctRow._id, login: (acctRow && acctRow.login) || username },
+          { reason: "reclaimed for a renter", republish: false },
+        );
+        for (const d of r.detached) notes.push("Pulled off " + d + ".");
+        for (const w of r.warnings) notes.push("⚠ " + w);
+      }
 
       // Pull it out of an operator bot, if it lives on one.
       const botHit = await BotAccount.findOne({

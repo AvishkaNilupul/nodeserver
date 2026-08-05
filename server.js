@@ -46,6 +46,8 @@ const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
+const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
+const twitchFollowRunner = require("./utils/twitchFollowRunner");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const japaneseRoutes = require("./routes/japaneseRoutes");
@@ -54,6 +56,7 @@ const dropScanner = require("./utils/dropScanner");
 const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
+const zeusxTokenRefresher = require("./utils/zeusxTokenRefresher");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -564,6 +567,7 @@ app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, epicAccountRoutes);
+app.use(enforce2fa, twitchFollowRoutes);
 app.use(enforce2fa, japaneseRoutes);
 
 // =========================
@@ -607,6 +611,9 @@ mongoose
     // Watch live Gameflip auto-delivery listings: mark sales and relist the
     // next unit of multi-quantity chains. No-op without Gameflip listings.
     gameflipFulfiller.start();
+    // Keep the ZeusX seller token fresh from its (reusable) refresh token so the
+    // auto-lister never dies on an expired token. No-op without ZeusX keys.
+    zeusxTokenRefresher.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();
@@ -628,6 +635,9 @@ mongoose
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
     renterExpiry.start();
+    // Twitch follow-bot: resumes any pending/running follow job that was
+    // in flight when the server last stopped (see utils/twitchFollowRunner).
+    twitchFollowRunner.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

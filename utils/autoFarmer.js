@@ -392,6 +392,26 @@ function hoursLeft(endAt) {
   return (new Date(endAt).getTime() - Date.now()) / 3600000;
 }
 
+// Games the operator wants farmed even when a campaign is inside the ends-soon
+// window — e.g. multi-day esports events (Esports World Cup) whose per-day
+// campaigns are each shorter than minHoursLeft, so the time gate would
+// otherwise skip every one of them. Configured via af.forceGames (list of game
+// names); matched case/format-insensitively so "Rainbow Six Siege" catches any
+// label drift. Only bypasses the TIME gate — demand/host/capacity gates still
+// apply, so a forced game with no demand or no free accounts still won't farm.
+function normForce(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+function isForcedGame(game, af) {
+  const list = af && Array.isArray(af.forceGames) ? af.forceGames : [];
+  if (!list.length) return false;
+  const g = normForce(game);
+  return list.some((f) => normForce(f) === g);
+}
+
 // How many accounts a game deserves. External market demand (Gameflip/GGSel/
 // Plati via MarketResearch) is blended with OUR OWN sales history: every
 // recent sale of this game's items (connection flips + reserved drops) adds
@@ -1136,9 +1156,11 @@ async function processCampaign(c, ctx) {
   }
   const demandScore = research ? Number(research.demandScore || 0) : null;
 
-  // 2) Time gate.
+  // 2) Time gate. Forced games (af.forceGames — e.g. EWC daily R6 drops) skip
+  // this: their campaigns are deliberately short, so the ends-soon rule would
+  // otherwise skip every one.
   const hrs = hoursLeft(c.endAt);
-  if (hrs < af.minHoursLeft) {
+  if (hrs < af.minHoursLeft && !isForcedGame(game, af)) {
     await record({
       decision: "skip_ends_soon",
       status: "skipped",
@@ -2466,6 +2488,25 @@ async function runOnce() {
         results.push({ game: c.game, error: e.message });
       }
     }
+    // Reap dead-token accounts out of task assignments FIRST, so the freed
+    // slots are refilled with healthy accounts by the backfill sweep below on
+    // this same tick (and the owner is nudged to re-auth the farmed ones).
+    if (!af.dryRun) {
+      try {
+        const r = await reapDeadTokenAssignments(af, progress);
+        if (r.unassigned) {
+          progress(
+            "Dead-token reaper: unassigned " +
+              r.unassigned +
+              " account(s); " +
+              r.reauth +
+              " farmed account(s) awaiting re-auth.",
+          );
+        }
+      } catch (e) {
+        progress("Dead-token reaper failed: " + e.message, "warn");
+      }
+    }
     // Backfill sweep: top up under-target tasks from whatever the pool has.
     if (!af.dryRun && hostOnline) {
       try {
@@ -2718,6 +2759,109 @@ async function runOnce() {
   }
 }
 
+// Dead-token reaper + re-auth alert. A Twitch token that has died can no longer
+// farm, yet its account still occupies a slot in a task's assignedAccounts —
+// which holds `have` at target so backfillActiveTasks never tops the task up
+// with a live farmer, and the task quietly stops producing sellable stock (this
+// is exactly why farmed campaigns were sitting unlisted). This UN-ASSIGNS the
+// dead accounts that hold NOTHING for the task's game (pure dead weight —
+// backfill then refills the freed slots with healthy accounts on the SAME tick),
+// while KEEPING dead accounts that already farmed drops for this game assigned
+// (their stock is real and becomes sellable the instant the token is re-minted)
+// and surfacing those via Telegram so the owner runs the device-auth tool.
+// Never deletes a BotAccount or a drop — every account stays re-authable; and it
+// only edits task.assignedAccounts (no bot-config surgery). Off only when
+// af.reapDeadAssignments === false.
+let lastReauthAlertAt = 0;
+async function reapDeadTokenAssignments(af, progress) {
+  if (af.dryRun || af.reapDeadAssignments === false) {
+    return { unassigned: 0, reauth: 0 };
+  }
+  const BotAccount = require("../models/BotAccount");
+  const DEAD = ["token_invalid", "error"];
+  const tasks = await AutoFarmTask.find({ status: "active" });
+  let unassigned = 0;
+  const reauthByGame = new Map();
+  for (const task of tasks) {
+    const logins = (task.assignedAccounts || []).map((u) =>
+      String(u).toLowerCase(),
+    );
+    if (!logins.length) continue;
+    const dead = await BotAccount.find(
+      { login: { $in: logins }, lastScanStatus: { $in: DEAD } },
+      { _id: 1, login: 1 },
+    ).lean();
+    if (!dead.length) continue;
+    // Which of these dead accounts hold real, unsold, unconnected drops FOR THIS
+    // game — those are farmed progress worth preserving for re-auth. One
+    // aggregation per task keeps the Atlas round-trips low.
+    const deadIds = dead.map((a) => a._id);
+    let keepIds = new Set();
+    try {
+      const holders = await DropLog.aggregate([
+        {
+          $match: {
+            account: { $in: deadIds },
+            game: task.game,
+            itemKey: { $ne: "" },
+            connected: { $ne: true },
+            soldAt: null,
+          },
+        },
+        { $group: { _id: "$account" } },
+      ]);
+      keepIds = new Set(holders.map((h) => String(h._id)));
+    } catch {
+      // If the holdings check fails, keep everyone (never unassign blind).
+      keepIds = new Set(deadIds.map((id) => String(id)));
+    }
+    const weightLogins = new Set();
+    let heldForReauth = 0;
+    for (const a of dead) {
+      if (keepIds.has(String(a._id))) heldForReauth++;
+      else weightLogins.add(String(a.login).toLowerCase());
+    }
+    if (weightLogins.size) {
+      task.assignedAccounts = (task.assignedAccounts || []).filter(
+        (u) => !weightLogins.has(String(u).toLowerCase()),
+      );
+      await task.save();
+      unassigned += weightLogins.size;
+      progress(
+        "Reaped " +
+          weightLogins.size +
+          " dead-token account(s) from " +
+          task.game +
+          " — backfill will replace them.",
+      );
+    }
+    if (heldForReauth) {
+      reauthByGame.set(
+        task.game,
+        (reauthByGame.get(task.game) || 0) + heldForReauth,
+      );
+    }
+  }
+  const reauthTotal = [...reauthByGame.values()].reduce((a, b) => a + b, 0);
+  // Nudge at most once every 12h: enough to prompt a re-auth run, not spam.
+  if (reauthTotal > 0 && Date.now() - lastReauthAlertAt > 12 * 3600 * 1000) {
+    lastReauthAlertAt = Date.now();
+    const lines = [...reauthByGame.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([g, n]) => "• " + g + ": " + n)
+      .join("\n");
+    await tg(
+      "🔑 Re-auth needed — " +
+        reauthTotal +
+        " farmed account(s) can't be listed until their Twitch token is re-minted:\n" +
+        lines +
+        "\n\nExport /account-pool/export-needs-auth?source=all → device-auth tool.",
+    );
+  }
+  return { unassigned, reauth: reauthTotal };
+}
+
 // Backfill: active tasks whose account count is below their tier target get
 // topped up as the pool refills — "the more accounts I add to the pool, the
 // more it fetches to fill the gaps". Respects the reserve floor and container
@@ -2738,7 +2882,10 @@ async function backfillActiveTasks(af, host, progress) {
   // whose campaign is inside the same time gate that blocks new farming is not
   // worth spending on either.
   const worthTopping = tasks.filter(
-    (t) => !t.campaignEndAt || hoursLeft(t.campaignEndAt) >= af.minHoursLeft,
+    (t) =>
+      !t.campaignEndAt ||
+      hoursLeft(t.campaignEndAt) >= af.minHoursLeft ||
+      isForcedGame(t.game, af),
   );
   if (worthTopping.length < tasks.length) {
     progress(
@@ -2994,6 +3141,7 @@ module.exports = {
   completeEndedTasks,
   reapRetiredBots,
   recycleSoldOutAccounts,
+  reapDeadTokenAssignments,
   expireStalePlans,
   repackAutoBots,
   // exported for tests

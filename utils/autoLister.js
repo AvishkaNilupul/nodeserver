@@ -681,9 +681,17 @@ function zeusxGameMapped(af, game) {
   return Object.keys(map).some((k) => k === key || key.includes(k) || k.includes(key));
 }
 
-// ZeusX has no auto-delivery API, so its share is listed as a coordinated
-// offer: the accounts are reserved (never sold twice on another market) and
-// handed over in ZeusX chat, then marked sold from the Drop Archive.
+// ZeusX share. Two modes, chosen by the zeusxAutoDeliver switch:
+//
+//  • OFF (default): one "Coordinated" offer for the whole share (quantity N).
+//    Accounts are reserved so they're never sold twice on another market, then
+//    handed over by hand in ZeusX chat and marked sold from the Drop Archive.
+//
+//  • ON: native ZeusX "Automatic" delivery — ZeusX carries the credential and
+//    hands it to the buyer the instant they pay (no chat, no manual step, like
+//    the Gameflip/FunPay auto-delivery here). ZeusX only accepts ONE credential
+//    per offer (game_account is a single object — verified live), so each
+//    reserved account becomes its own single-stock listing.
 async function publishZeusxShare({
   set,
   title,
@@ -693,37 +701,91 @@ async function publishZeusxShare({
   accounts,
   game,
 }) {
+  const autoDeliver = !!settings.getAutoFarm().zeusxAutoDeliver;
   accounts = await reserveAccountsForPublish(accounts, set, ZX_CLAIM_TAG);
   if (!accounts.length) {
     throw new Error(
       "no account still held the full bundle unclaimed at publish time",
     );
   }
-  return withReservationRollback(accounts, set, async () => {
-    const r = await mp.zeusxPublish({
-      title,
-      description,
-      priceUsd: price,
-      quantity: accounts.length,
-      game,
-      coverImagePath: img,
+
+  if (!autoDeliver) {
+    return withReservationRollback(accounts, set, async () => {
+      const r = await mp.zeusxPublish({
+        title,
+        description,
+        priceUsd: price,
+        quantity: accounts.length,
+        game,
+        coverImagePath: img,
+      });
+      await MarketplaceListing.create({
+        set: set._id,
+        marketplace: "zeusx",
+        externalId: r.externalId,
+        url: r.url || "",
+        title,
+        description,
+        price,
+        status: "active",
+        origin: "auto",
+        note: "auto-farm: " + accounts.length + " account(s), manual hand-over",
+        accountLogin: accounts.map((a) => a.login).join(", "),
+        qtyTarget: accounts.length,
+      });
+      return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
     });
-    await MarketplaceListing.create({
-      set: set._id,
-      marketplace: "zeusx",
-      externalId: r.externalId,
-      url: r.url || "",
-      title,
-      description,
-      price,
-      status: "active",
-      origin: "auto",
-      note: "auto-farm: " + accounts.length + " account(s), manual hand-over",
-      accountLogin: accounts.map((a) => a.login).join(", "),
-      qtyTarget: accounts.length,
-    });
-    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
-  });
+  }
+
+  // Automatic: one instant-delivery listing per reserved account. A single
+  // account failing to list frees only its own reservation and never sinks the
+  // rest of the share; the whole share throwing (nothing listed) rolls every
+  // reservation back.
+  const listed = [];
+  for (const acc of accounts) {
+    try {
+      const r = await mp.zeusxPublish({
+        title,
+        description,
+        priceUsd: price,
+        game,
+        coverImagePath: img,
+        autoDeliverAccounts: [
+          { login: acc.login, password: acc.password, email: "" },
+        ],
+      });
+      await MarketplaceListing.create({
+        set: set._id,
+        marketplace: "zeusx",
+        externalId: r.externalId,
+        url: r.url || "",
+        title,
+        description,
+        price,
+        status: "active",
+        origin: "auto",
+        note: "auto-farm: automatic delivery — " + acc.login,
+        autoDeliver: true,
+        accountId: String(acc.accountId),
+        accountLogin: acc.login,
+        qtyTarget: 1,
+      });
+      listed.push({ acc, r });
+    } catch (e) {
+      await releaseReservedForSet([acc], set).catch(() => {});
+      console.error("zeusx auto-delivery listing failed for", acc.login, "-", e.message);
+    }
+  }
+  if (!listed.length) {
+    // Everything failed — release the whole share so nothing is stranded.
+    await releaseReservedForSet(accounts, set).catch(() => {});
+    throw new Error("ZeusX auto-delivery: no account could be listed");
+  }
+  return {
+    externalId: listed[0].r.externalId,
+    url: listed[0].r.url || "",
+    qty: listed.length,
+  };
 }
 
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
@@ -1709,6 +1771,17 @@ async function onCampaignEnded(taskId) {
   mySet.price = price;
   await mySet.save();
 
+  // Rebuild the cover from the stacked set so the Gameflip photo shows every
+  // item in the grown bundle, not the pre-stack picture with items missing.
+  // Best-effort: a failed image build falls back to the text/price-only reprice
+  // rather than blocking the markup. Temp file is cleaned up after the reprice.
+  let stackedImg = "";
+  try {
+    stackedImg = await buildSetGridImage(mySet);
+  } catch {
+    stackedImg = "";
+  }
+
   // Find the live Gameflip row by SET rather than by the id recorded on the
   // task: after the first sale the relist chain publishes a successor with a
   // brand-new external id, so the task's own id is stale and only the set still
@@ -1731,18 +1804,25 @@ async function onCampaignEnded(taskId) {
   const row = isAutoOwned(found) ? found : null;
   const heldBack = Math.max(0, Number(task.listing.heldBack) || 0);
   if (row) {
-    await mp.gameflipReprice(row.externalId, {
-      priceUsd: price,
-      title,
-      description,
-    });
-    row.title = title;
-    row.description = description;
-    row.price = price;
-    // Release the held-back accounts into the chain: they sell at the new
-    // marked-up price — the whole point of saving them for after the event.
-    row.qtyRemaining = (Number(row.qtyRemaining) || 0) + heldBack;
-    await row.save();
+    try {
+      await mp.gameflipReprice(row.externalId, {
+        priceUsd: price,
+        title,
+        description,
+        imagePath: stackedImg,
+      });
+      row.title = title;
+      row.description = description;
+      row.price = price;
+      // Release the held-back accounts into the chain: they sell at the new
+      // marked-up price — the whole point of saving them for after the event.
+      row.qtyRemaining = (Number(row.qtyRemaining) || 0) + heldBack;
+      await row.save();
+    } finally {
+      if (stackedImg) await fsp.unlink(stackedImg).catch(() => {});
+    }
+  } else if (stackedImg) {
+    await fsp.unlink(stackedImg).catch(() => {});
   }
 
   // Stacking regenerated title/description, but the reprice above only touched

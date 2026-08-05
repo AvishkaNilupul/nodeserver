@@ -37,6 +37,13 @@ const AUTO_FARM_DEFAULTS = {
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }
   zeusxAuto: false,
   zeusxGames: {},
+  // Deliver ZeusX sales automatically (native "Automatic" delivery: the account
+  // credential rides on the offer and ZeusX hands it to the buyer the instant
+  // they pay). ZeusX only carries ONE credential per offer, so each farmed
+  // account becomes its own single-stock listing. OFF => the legacy behaviour:
+  // one "Coordinated" offer for the whole share, handed over by hand and marked
+  // sold from the Drop Archive. Only matters when zeusxAuto is also on.
+  zeusxAutoDeliver: false,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign
@@ -70,6 +77,14 @@ const AUTO_FARM_DEFAULTS = {
   // recycled). See utils/recycleEligibility.js + recycleSoldOutAccounts.
   recycleSoldAccounts: false,
   recycleCooldownDays: 14,
+  // Reap dead-token accounts out of a task's assignedAccounts each tick so the
+  // backfill sweep can refill the freed slots with healthy farmers (a dead
+  // token can't farm, so left in place it silently pins the task at target and
+  // it stops producing sellable stock). Only accounts holding NO drops for the
+  // task's game are unassigned; ones that already farmed drops are kept and the
+  // owner is nudged by Telegram to re-mint their token. Never deletes anything.
+  // ON by default. See reapDeadTokenAssignments in utils/autoFarmer.js.
+  reapDeadAssignments: true,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

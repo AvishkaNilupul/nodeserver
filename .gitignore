@@ -50,3 +50,9 @@ config/botHosts.json
 config/botHosts.json.bak*
 utils/settings.json
 .env.bak*
+
+# Ad-hoc watch/diagnostic scratch scripts written straight onto the server
+_TEMP_*
+
+# Top-level Python virtualenv (marketplace service is run from here on prod)
+/.venv

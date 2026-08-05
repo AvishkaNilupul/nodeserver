@@ -40,6 +40,13 @@ const { fetchInventory, itemKeyFor } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 const { stopFarmingGame } = require("./farmControl");
 
+// Marketplace claim tags: a DropLog reserved with one of these is merely
+// LISTED for sale, not sold to a buyer yet. Any other soldToUsername value
+// (a shop username, "manual", a bulk-order tag, an operator name) means the
+// game actually SOLD. Farming must stop on sold/connected games, but a
+// listed-but-unsold game must keep farming so its stock keeps stacking.
+const MARKET_CLAIM_TAGS = ["gameflip", "ggsel", "digiseller", "funpay", "zeusx"];
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 // How long a worker whose host just went unreachable waits before re-probing.
 const HOST_DOWN_BACKOFF_MS =
@@ -395,14 +402,39 @@ async function scanAccount(acc, worker) {
   );
   if (twitchId) acc.twitchId = twitchId;
   if (login && !acc.login) acc.login = login;
-  // A sold account whose buyer has connected a game shouldn't keep farming
-  // that game. Remove it from the account's bot-config FavouriteGames (the
-  // account keeps farming its other games); best-effort, never fails a scan.
+  // Once a game on this account is SOLD to a buyer or CONNECTED (buyer took
+  // delivery), farming it again is wasted and could interfere with the buyer,
+  // so remove just that game from the account's bot-config FavouriteGames
+  // (the account keeps farming its OTHER games). A game that is only LISTED
+  // for sale (reserved under a marketplace tag) is deliberately left farming
+  // so its stock keeps stacking. Renter-farmed accounts never reach here: they
+  // live in RenterAccount and are handled by renterDropScanner, which does not
+  // stop farming; a rented operator account has an empty configFile, so
+  // stopFarmingGame no-ops on it. Best-effort, never fails a scan.
+  // The outer soldAt guard is the account-level shadow — set on the first
+  // reservation of any kind, so every truly-sold account passes it.
   if (acc.soldAt) {
-    const connectedGames = [
-      ...new Set(drops.filter((d) => d.connected && d.game).map((d) => d.game)),
-    ];
-    for (const game of connectedGames) {
+    // Connected: buyer linked/redeemed the drop (strongest "sold + used").
+    const connectedGames = drops
+      .filter((d) => d.connected && d.game)
+      .map((d) => d.game);
+    // Real-sold: this account holds a reserved drop whose tag is NOT a
+    // marketplace listing tag — i.e. delivered through the Shop, a bulk order,
+    // or a manual/hand sale. (Listed-but-unsold rows carry a market tag and
+    // are intentionally excluded so they keep farming.)
+    let realSoldGames = [];
+    try {
+      realSoldGames = await DropLog.distinct("game", {
+        account: acc._id,
+        soldAt: { $ne: null },
+        soldToUsername: { $nin: MARKET_CLAIM_TAGS },
+        game: { $ne: "" },
+      });
+    } catch {
+      /* keep going with just the connected set */
+    }
+    const stopGames = [...new Set([...connectedGames, ...realSoldGames])];
+    for (const game of stopGames) {
       try {
         const r = await stopFarmingGame(acc, game);
         if (r.changed) {
