@@ -277,13 +277,17 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
 
 // Which suspended BotAccounts may be deleted outright, and which must be kept
 // for the record. Pure so the rules are testable without a database.
-//   sold/reserved  -> KEEP. A buyer received this login; the row is the only
-//                     evidence behind a refund or dispute.
-//   on a live listing -> KEEP. Something is still selling against it; deleting
-//                     the row would strand the listing's audit trail.
-//   otherwise      -> DELETE. It cannot farm, cannot be sold, and cannot be
-//                     re-authed.
-function purgePlanFor(acc, listedRefs) {
+//   sold/reserved     -> KEEP. A buyer received this login; the row is the only
+//                        evidence behind a refund or dispute.
+//   sold/reserved drop-> KEEP. An "everything" account is sold once PER GAME, so
+//                        the real sale lives on DropLog and BotAccount.soldAt is
+//                        only a shadow of it (see models/DropLog.js) — checking
+//                        the account alone would delete a per-game sale whole.
+//   on a listing      -> KEEP. Something is still selling against it; deleting
+//                        the row would strand the listing's audit trail.
+//   otherwise         -> DELETE. It cannot farm, cannot be sold, and cannot be
+//                        re-authed.
+function purgePlanFor(acc, listedRefs, soldDropIds) {
   if (!acc || acc.lastScanStatus !== "suspended") {
     return { action: "keep", reason: "not confirmed suspended" };
   }
@@ -292,6 +296,9 @@ function purgePlanFor(acc, listedRefs) {
   }
   if (acc.soldPurchaseId || acc.soldBulkOrderId) {
     return { action: "keep", reason: "attached to an order" };
+  }
+  if (soldDropIds && soldDropIds.has(String(acc._id))) {
+    return { action: "keep", reason: "holds a sold or reserved drop" };
   }
   if (
     listedRefs &&
@@ -304,26 +311,42 @@ function purgePlanFor(acc, listedRefs) {
 
 // Every account id AND login referenced by any marketplace listing, whatever its
 // status. Deliberately unfiltered: a delisted or errored row is still the audit
-// trail for whatever was sold against it.
+// trail for whatever was sold against it. `units` matters as much as the
+// top-level pair — that is where Digiseller/GGSel record the account behind each
+// delivered unit, so reading only accountId/accountLogin would miss every
+// quantity-fed listing and delete the accounts underneath it.
 async function listedAccountRefs() {
   const rows = await MarketplaceListing.find(
     {},
-    { accountId: 1, accountLogin: 1 },
+    { accountId: 1, accountLogin: 1, units: 1 },
   ).lean();
   const out = new Set();
-  const add = (field, tx) => {
-    for (const v of String(field || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)) {
-      out.add(tx(v));
-    }
-  };
   for (const r of rows) {
-    add(r.accountId, (v) => v);
-    add(r.accountLogin, lower);
+    if (r.accountId) out.add(String(r.accountId).trim());
+    if (r.accountLogin) out.add(lower(r.accountLogin));
+    for (const u of r.units || []) {
+      if (u && u.accountId) out.add(String(u.accountId).trim());
+      if (u && u.login) out.add(lower(u.login));
+    }
   }
+  out.delete("");
   return out;
+}
+
+// Accounts (of either collection) holding at least one drop that is sold or
+// reserved to a marketplace. Those drops are somebody's purchase record.
+async function soldDropAccountIds(ids) {
+  if (!ids.length) return new Set();
+  const rows = await DropLog.aggregate([
+    {
+      $match: {
+        account: { $in: ids },
+        $or: [{ soldAt: { $ne: null } }, { soldToUsername: { $gt: "" } }],
+      },
+    },
+    { $group: { _id: "$account" } },
+  ]);
+  return new Set(rows.map((r) => String(r._id)));
 }
 
 // Permanently delete the suspended accounts that are safe to delete, together
@@ -343,10 +366,11 @@ async function purgeSuspended({ dryRun = false, onProgress } = {}) {
       lastScanStatus: 1,
     },
   ).lean();
+  const soldDrops = await soldDropAccountIds(rows.map((r) => r._id));
   const doomed = [];
   const kept = [];
   for (const acc of rows) {
-    const plan = purgePlanFor(acc, listed);
+    const plan = purgePlanFor(acc, listed, soldDrops);
     (plan.action === "delete" ? doomed : kept).push({ acc, plan });
   }
   const report = {
@@ -395,43 +419,65 @@ async function purgeSuspended({ dryRun = false, onProgress } = {}) {
   return report;
 }
 
-// Pool rows are pure supply — no sale history, no listings hang off them — so a
-// confirmed-gone row has no reason to exist. Deleting rather than flagging also
-// frees the unique usernameLower index, so re-importing the same name later is
-// not blocked by a dead row.
+// Pool rows are supply, so a confirmed-gone one has no reason to exist — and
+// deleting rather than flagging frees the unique usernameLower index, so
+// re-importing the same name later is not blocked by a dead row. A pool account
+// can still have been checked, farmed and sold from before it was ever wired
+// into a bot, so the same sold/reserved and listing guards apply here.
 async function purgeSuspendedPool({ dryRun = false, onProgress } = {}) {
-  const n = await AvailableAccount.countDocuments({
-    lastCheckStatus: "suspended",
-  });
-  if (dryRun || !n) {
-    if (onProgress && n) {
-      onProgress("Suspended pool purge (dry run): " + n + " row(s) deletable.");
+  const rows = await AvailableAccount.find(
+    { lastCheckStatus: "suspended" },
+    { usernameLower: 1 },
+  ).lean();
+  if (!rows.length) return { suspended: 0, deleted: 0, dryRun: !!dryRun };
+  const listed = await listedAccountRefs();
+  const soldDrops = await soldDropAccountIds(rows.map((r) => r._id));
+  const ids = rows
+    .filter(
+      (r) =>
+        !soldDrops.has(String(r._id)) &&
+        !listed.has(String(r._id)) &&
+        !listed.has(lower(r.usernameLower)),
+    )
+    .map((r) => r._id);
+  const report = {
+    suspended: rows.length,
+    deletable: ids.length,
+    kept: rows.length - ids.length,
+    deleted: 0,
+    deletedDrops: 0,
+    dryRun: !!dryRun,
+  };
+  if (dryRun || !ids.length) {
+    if (onProgress) {
+      onProgress(
+        "Suspended pool purge (" +
+          (dryRun ? "dry run" : "nothing to do") +
+          "): " +
+          ids.length +
+          " row(s) deletable, " +
+          report.kept +
+          " kept for the record.",
+      );
     }
-    return { suspended: n, deleted: 0, dryRun: !!dryRun };
+    return report;
   }
-  const ids = (
-    await AvailableAccount.find(
-      { lastCheckStatus: "suspended" },
-      { _id: 1 },
-    ).lean()
-  ).map((r) => r._id);
   const drops = await DropLog.deleteMany({ account: { $in: ids } });
+  report.deletedDrops = drops.deletedCount || 0;
   const res = await AvailableAccount.deleteMany({ _id: { $in: ids } });
+  report.deleted = res.deletedCount || 0;
   if (onProgress) {
     onProgress(
       "Purged " +
-        (res.deletedCount || 0) +
+        report.deleted +
         " suspended account-pool row(s) and " +
-        (drops.deletedCount || 0) +
-        " of their drop rows.",
+        report.deletedDrops +
+        " of their drop rows; kept " +
+        report.kept +
+        ".",
     );
   }
-  return {
-    suspended: n,
-    deleted: res.deletedCount || 0,
-    deletedDrops: drops.deletedCount || 0,
-    dryRun: false,
-  };
+  return report;
 }
 
 /* --------------------------------- sweep --------------------------------- */
@@ -487,6 +533,7 @@ module.exports = {
   releaseSuspendedAssignments,
   evictSuspendedFromConfigs,
   purgePlanFor,
+  listedAccountRefs,
   purgeSuspended,
   purgeSuspendedPool,
   sweep,

@@ -149,7 +149,8 @@ async function countReadyPool() {
 // How many of a task's assigned accounts can actually still farm and be sold.
 // assignedAccounts is a login list that intentionally keeps accounts whose
 // tokens died — they hold farmed drops and re-auth revives them — but a
-// suspended account never comes back, so it must not be counted toward target.
+// suspended account never comes back, so it must never count toward target,
+// whether or not the release phase has reached it yet.
 // Unknown logins (no BotAccount row yet, e.g. mid-deploy) count as usable so a
 // timing gap can never inflate a backfill. `suspended` is the lowercased login
 // set from suspendedAccounts.suspendedLoginSet(), read once per sweep rather
@@ -2986,13 +2987,14 @@ async function backfillActiveTasks(af, host, progress) {
       ),
       af.maxPerGame * SALES_CAP_MULT_MAX,
     );
-    // Count only accounts that can still farm. A suspended account (Twitch
-    // deleted it — see utils/twitchAccountState.js) stays in assignedAccounts
-    // because its farmed drops are still in the archive, and counting it as
-    // supply is what silently starved listing on prod: 583 suspended accounts
-    // held slots across the active tasks, every task read as at-target, backfill
-    // added nobody, and no live account ever held a full bundle to list while
-    // 1,471 healthy accounts sat idle in the pool.
+    // Count only accounts that can still farm. The sweep above normally has
+    // already unassigned the suspended ones, but this is the check that must not
+    // be wrong: counting a dead account as supply is what silently starved
+    // listing on prod — 583 suspended accounts held slots across the active
+    // tasks, every task read as at-target, backfill added nobody, and no live
+    // account ever held a full bundle to list while 1,471 healthy accounts sat
+    // idle in the pool. A row that failed to save, or one classified after the
+    // release phase, must not be able to reproduce that.
     const have = usableAssignedCount(task, suspendedLogins);
     const missing = target - have;
     if (missing < 1) continue;

@@ -72,6 +72,18 @@ test("only a confirmed-suspended row is ever a delete candidate", () => {
   assert.equal(purgePlanFor(null, refs).action, "keep");
 });
 
+test("a per-game sale on the drop keeps the account, not just soldAt", () => {
+  // An "everything" account is sold once per game, so the reservation lives on
+  // DropLog and BotAccount.soldAt is only a shadow of it — an account whose
+  // Overwatch drops went to a buyer can still have soldAt null.
+  const gone = { _id: "acc1", login: "a", lastScanStatus: "suspended" };
+  assert.equal(purgePlanFor(gone, new Set(), new Set(["acc1"])).action, "keep");
+  assert.equal(
+    purgePlanFor(gone, new Set(), new Set(["other"])).action,
+    "delete",
+  );
+});
+
 test("sale and listing evidence outlives the account", () => {
   const gone = { _id: "1", login: "Buyer1", lastScanStatus: "suspended" };
   assert.equal(
