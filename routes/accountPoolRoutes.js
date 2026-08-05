@@ -39,7 +39,8 @@ function publicAccount(a) {
     hasAuth:
       !!a.clientSecret &&
       a.lastCheckStatus !== "token_invalid" &&
-      a.lastCheckStatus !== "integrity_failed",
+      a.lastCheckStatus !== "integrity_failed" &&
+      a.lastCheckStatus !== "suspended",
     twitchId: a.twitchId || "",
     status: a.status,
     claimedAt: a.claimedAt,
@@ -99,6 +100,10 @@ router.get("/account-pool/export-needs-auth", requireSuperadmin, async (req, res
       // integrity_failed belongs here alongside dead tokens: the token
       // authenticates but no bot can use it, and re-running the account through
       // device-auth (which is what this export feeds) is precisely the remedy.
+      // A row confirmed gone from Twitch is excluded even when it has no token
+      // at all: there is nothing left to device-auth, so exporting it only sends
+      // the operator to log into an account that no longer exists.
+      filter.lastCheckStatus = { $ne: "suspended" };
       filter.$or = [
         { clientSecret: "" },
         { lastCheckStatus: "token_invalid" },

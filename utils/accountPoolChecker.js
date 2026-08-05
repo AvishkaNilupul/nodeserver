@@ -28,6 +28,7 @@ const AvailableAccount = require("../models/AvailableAccount");
 const dropScanner = require("./dropScanner");
 const botHosts = require("./botHosts");
 const { fetchInventory, fetchDropCampaigns } = require("./twitchInventory");
+const accountState = require("./twitchAccountState");
 
 const CHECK_DELAY_MS = Number(process.env.ACCOUNT_POOL_CHECK_DELAY_MS) || 1200;
 
@@ -132,6 +133,20 @@ async function checkOne(id, host) {
           ? "integrity_failed"
           : "error";
     acc.lastCheckError = (e.message || String(e)).slice(0, 300);
+    // A rejected token says nothing about whether the account still exists, and
+    // the two need opposite handling: a dead token is re-authable and belongs in
+    // the needs-auth export, a suspended account is gone for good and must stop
+    // being counted as supply. One token-less query separates them; anything
+    // short of a definite "gone" leaves the verdict untouched.
+    if (acc.lastCheckStatus === "token_invalid") {
+      const seen = await accountState.probeAccount(acc.usernameLower);
+      if (seen === accountState.GONE) {
+        acc.lastCheckStatus = "suspended";
+        acc.suspendedAt = acc.suspendedAt || now;
+        acc.lastCheckError =
+          "Account no longer exists on Twitch (suspended or deleted)";
+      }
+    }
     await acc.save();
     return;
   }

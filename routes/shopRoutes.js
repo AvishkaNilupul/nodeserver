@@ -9,6 +9,7 @@ const { decrypt } = require("../utils/secretBox");
 const { getBalance, adjustBalance } = require("../utils/admins");
 const { sendTelegram } = require("../utils/telegram");
 const BalanceLog = require("../models/BalanceLog");
+const accountState = require("../utils/twitchAccountState");
 const {
   AVAILABLE_DROP,
   reserveSetOnAccount,
@@ -114,11 +115,12 @@ async function sellableAccountMap(ids) {
   for (const a of accs) {
     // Accounts without a stored password can't be delivered, so they're
     // excluded from the sellable pool. Same for a dead Twitch token: the
-    // credentials likely changed, so the delivered login may not work.
+    // credentials likely changed, so the delivered login may not work — and a
+    // suspended account has nothing behind the login at all.
     if (
       a.credPassword &&
       String(a.credPassword).length > 0 &&
-      a.lastScanStatus !== "token_invalid"
+      !accountState.isUnusableScanStatus(a.lastScanStatus)
     ) {
       map.set(String(a._id), a);
     }

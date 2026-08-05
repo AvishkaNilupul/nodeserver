@@ -31,6 +31,7 @@ const settings = require("./settings");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
+const accountState = require("./twitchAccountState");
 
 const fsp = require("fs/promises");
 
@@ -377,8 +378,10 @@ function filterVerifiedHolders(rows, accById, { needByKey, assignedLower }) {
     }
     if (!acc.password) continue; // buyer needs a usable password
     // A dead token means the credentials likely changed — the drops are on
-    // the account but the delivered login may not work. Never sell those.
-    if (acc.scanStatus === "token_invalid") continue;
+    // the account but the delivered login may not work. Never sell those. A
+    // suspended account is worse still: there is nothing on the other end of
+    // the login at all.
+    if (accountState.isUnusableScanStatus(acc.scanStatus)) continue;
     // Holds at least the required number of copies of EVERY promised item.
     const enough = (r.items || []).every(
       (it) => (it.count || 0) >= (needByKey.get(it.k) || 1),

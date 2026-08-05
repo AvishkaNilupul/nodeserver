@@ -18,6 +18,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const SaleSignal = require("../models/SaleSignal");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const { sameGame } = require("../utils/gameLabel");
+const accountState = require("../utils/twitchAccountState");
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -123,13 +124,19 @@ const FILE_RE = /^config(_\d{1,3})?\.json$/;
 // from every cross-account / search / inventory view and from the main account
 // list, and surfaced only in the dedicated "Bad tokens" tab (from where they
 // can be pulled out of the bot config files with /bad-tokens/purge).
-const BAD_STATUS = "token_invalid";
+//
+// "suspended" belongs here too, and every use below is a set membership test for
+// that reason: it is a strictly worse token_invalid (the account is gone from
+// Twitch, not merely locked out), so treating it as anything other than trash
+// would quietly promote these accounts back into the searches the operator uses
+// to build orders.
+const BAD_STATUSES = accountState.UNUSABLE_SCAN_STATUSES;
 
 // _ids of the bad-token accounts, used to keep their drops out of the
 // aggregations below. Small list (hundreds at most) so $nin stays cheap.
 async function badAccountIds() {
   const rows = await BotAccount.find(
-    { lastScanStatus: BAD_STATUS },
+    { lastScanStatus: { $in: BAD_STATUSES } },
     { _id: 1 },
   ).lean();
   return rows.map((r) => r._id);
@@ -322,12 +329,14 @@ router.get("/drops-archive/accounts", requireSuperadmin, async (req, res) => {
       q.$or = [{ login: re }, { credUsername: re }, { configFile: re }];
     }
     const status = String(req.query.status || "").trim();
-    if (["ok", "token_invalid", "error", "pending"].includes(status)) {
+    if (
+      ["ok", "token_invalid", "error", "pending", "suspended"].includes(status)
+    ) {
       q.lastScanStatus = status;
     } else {
       // Bad-token accounts have their own tab; keep them out of the main list
       // (and therefore out of the "search" the operator uses to build orders).
-      q.lastScanStatus = { $ne: BAD_STATUS };
+      q.lastScanStatus = { $nin: BAD_STATUSES };
     }
     const limit = Math.min(Number(req.query.limit) || 1000, 5000);
     const load = async () => {
@@ -358,7 +367,7 @@ router.get("/drops-archive/accounts", requireSuperadmin, async (req, res) => {
 // they appear nowhere else in the archive.
 router.get("/drops-archive/bad-tokens", requireSuperadmin, async (req, res) => {
   try {
-    const q = { lastScanStatus: BAD_STATUS };
+    const q = { lastScanStatus: { $in: BAD_STATUSES } };
     const search = String(req.query.search || "").trim();
     if (search) {
       const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
@@ -394,7 +403,9 @@ router.post(
   requireSuperadmin,
   async (req, res) => {
     try {
-      const bad = await BotAccount.find({ lastScanStatus: BAD_STATUS }).lean();
+      const bad = await BotAccount.find({
+        lastScanStatus: { $in: BAD_STATUSES },
+      }).lean();
       if (!bad.length) {
         return res.json({
           success: true,
@@ -1475,7 +1486,7 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         poolDrops,
         poolItems,
       ] = await Promise.all([
-        BotAccount.countDocuments({ lastScanStatus: { $ne: BAD_STATUS } }),
+        BotAccount.countDocuments({ lastScanStatus: { $nin: BAD_STATUSES } }),
         DropLog.countDocuments(dropMatch),
         DropLog.aggregate([
           { $match: dropMatch },

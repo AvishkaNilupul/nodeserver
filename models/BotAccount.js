@@ -44,13 +44,21 @@ const botAccountSchema = new mongoose.Schema(
     // Scan bookkeeping. Indexed because the scanner picks the oldest-scanned
     // account each tick and the progress view sorts/filters on it.
     lastScanAt: { type: Date, default: null, index: true },
+    // "suspended" is token_invalid's terminal twin: Twitch rejects the token AND
+    // the account no longer exists at all (utils/twitchAccountState.js proves it
+    // with the public user query). The distinction is the point — a token_invalid
+    // account is re-authable and its farmed drops are still worth keeping
+    // assigned, a suspended one never comes back, so it must free its slot and
+    // stop being counted as supply.
     lastScanStatus: {
       type: String,
-      enum: ["pending", "ok", "token_invalid", "error"],
+      enum: ["pending", "ok", "token_invalid", "error", "suspended"],
       default: "pending",
       index: true,
     },
     lastScanError: { type: String, default: "" },
+    // When the account was confirmed gone from Twitch.
+    suspendedAt: { type: Date, default: null },
     dropCount: { type: Number, default: 0 },
 
     // Farming progress, captured from the same inventory fetch the drop scan

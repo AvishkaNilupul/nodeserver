@@ -38,6 +38,7 @@ const SaleSignal = require("../models/SaleSignal");
 const botHosts = require("./botHosts");
 const { fetchInventory, itemKeyFor } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
+const accountState = require("./twitchAccountState");
 const { stopFarmingGame } = require("./farmControl");
 
 // Marketplace claim tags: a DropLog reserved with one of these is merely
@@ -386,6 +387,20 @@ async function scanAccount(acc, worker) {
     acc.lastScanAt = now;
     acc.lastScanStatus = e.code === "token_invalid" ? "token_invalid" : "error";
     acc.lastScanError = (e.message || String(e)).slice(0, 300);
+    // Twitch rejects a suspended account's token with the same 401 as an expired
+    // one, so the rejection alone cannot tell "re-auth this" from "this account
+    // does not exist any more". One extra token-less query settles it, and only a
+    // definite `gone` upgrades the verdict — an UNKNOWN (rate limit, 5xx) leaves
+    // token_invalid standing, exactly as before.
+    if (acc.lastScanStatus === "token_invalid" && (acc.login || "")) {
+      const seen = await accountState.probeAccount(acc.login);
+      if (seen === accountState.GONE) {
+        acc.lastScanStatus = "suspended";
+        acc.suspendedAt = acc.suspendedAt || now;
+        acc.lastScanError =
+          "Account no longer exists on Twitch (suspended or deleted)";
+      }
+    }
     await acc.save();
     worker.errors++;
     state.sessionErrors++;
@@ -686,6 +701,9 @@ async function getProgress() {
           errored: {
             $sum: { $cond: [{ $eq: ["$lastScanStatus", "error"] }, 1, 0] },
           },
+          suspended: {
+            $sum: { $cond: [{ $eq: ["$lastScanStatus", "suspended"] }, 1, 0] },
+          },
         },
       },
     ]),
@@ -700,6 +718,7 @@ async function getProgress() {
   const ok = tallies ? tallies.ok : 0;
   const tokenInvalid = tallies ? tallies.tokenInvalid : 0;
   const errored = tallies ? tallies.errored : 0;
+  const suspended = tallies ? tallies.suspended : 0;
   const anyScanning = workers.some((w) => w.scanning);
   const firstScanning = workers.find((w) => w.scanning);
   // Roll the per-lane workers up to one entry per machine for the UI.
@@ -751,6 +770,7 @@ async function getProgress() {
       ok,
       tokenInvalid,
       error: errored,
+      suspended,
       totalDrops,
     },
     session: {
