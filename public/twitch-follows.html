@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Twitch follows</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;--purple:#7c3aed;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;--purple:#a78bfa;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; max-width: 780px; }
+
+  .layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 20px; margin-top: 22px; }
+  @media (max-width: 1080px) { .layout { grid-template-columns: 1fr; } }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+  .card h2 { font-size: 14.5px; font-weight: 700; margin-bottom: 12px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+
+  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .field label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .field .hint { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  input[type=text], input[type=number] { padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 14px; outline: none; font-family: inherit; }
+  input[type=text]:focus, input[type=number]:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,.12); }
+
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > button { flex: 0 0 auto; }
+
+  .btn { padding: 10px 16px; border-radius: 10px; border: none; background: var(--accent); color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .btn:hover { filter: brightness(1.05); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-ghost { background: var(--surface); color: var(--ink); border: 1px solid var(--line); }
+  .btn-ghost:hover { background: var(--surface-2); }
+  .btn-danger { background: var(--red); color: #fff; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 5px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
+  .chip.selected { background: #eef2ff; border-color: #c7d2fe; color: var(--accent); font-weight: 600; }
+  .chip.on { background: #ecfdf5; border-color: #a7f3d0; color: var(--green); }
+  .chip.warn { background: #fef3c7; border-color: #fde68a; color: var(--yellow); }
+  .chip.off { background: #fee2e2; border-color: #fecaca; color: var(--red); }
+
+  .toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .toggle input { display: none; }
+  .toggle .knob { width: 34px; height: 20px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; position: relative; transition: background .15s; }
+  .toggle .knob::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: #fff; border-radius: 50%; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  .toggle input:checked + .knob { background: var(--accent); border-color: var(--accent); }
+  .toggle input:checked + .knob::after { transform: translateX(14px); }
+
+  .preview { background: var(--surface-2); border: 1px dashed var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13px; color: var(--muted); }
+  .preview.error { border-color: #fecaca; background: #fef2f2; color: var(--red); }
+  .preview.ok { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
+  html[data-theme="dark"] .preview.ok { color: var(--green); background: rgba(52,211,153,.10); }
+  html[data-theme="dark"] .preview.error { color: var(--red); background: rgba(248,113,113,.10); }
+
+  .job { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; background: var(--surface); }
+  .job.active { border-color: #c7d2fe; box-shadow: 0 4px 12px rgba(79,70,229,.08); }
+  .job .top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .job .name { font-weight: 700; font-size: 14px; }
+  .job .sub { font-size: 12px; color: var(--muted); }
+  .job .bar { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 8px 0; }
+  .job .bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+  .job .meta { display: flex; gap: 10px; font-size: 11.5px; color: var(--muted); flex-wrap: wrap; }
+  .job .meta b { color: var(--ink); font-weight: 600; }
+  .job .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+  .job .err { font-size: 12px; color: var(--red); margin-top: 6px; }
+
+  .empty { text-align: center; color: var(--muted); padding: 30px 10px; font-size: 13px; }
+
+  .fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  .fleet .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; min-width: 130px; }
+  .fleet .tile b { font-size: 20px; font-weight: 700; display: block; line-height: 1.1; }
+  .fleet .tile span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .fleet .tile.hero b { color: var(--accent); }
+  .fleet .tile .sub { font-size: 11.5px; color: var(--muted); margin-top: 4px; text-transform: none; letter-spacing: 0; }
+  .fleet .tile.hostbox { flex: 1 1 auto; min-width: 220px; }
+  .fleet .tile.hostbox .rows { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .fleet .tile.hostbox .row { font-size: 12.5px; padding: 3px 9px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
+  .fleet .tile.hostbox .row b { display: inline; font-size: 12.5px; color: var(--ink); margin-right: 4px; }
+
+  .modal { position: fixed; inset: 0; background: rgba(15,23,42,.55); display: none; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+  .modal.open { display: flex; }
+  .modal .box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; max-width: 780px; width: 100%; max-height: 88vh; overflow-y: auto; }
+  .modal .box h3 { margin-bottom: 6px; }
+  .modal .close { float: right; cursor: pointer; color: var(--muted); background: none; border: none; font-size: 20px; }
+  .log { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12.5px; }
+  .log th, .log td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+  .log th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .log td.status-ok { color: var(--green); font-weight: 600; }
+  .log td.status-failed { color: var(--red); font-weight: 600; }
+  .log td.status-skipped { color: var(--yellow); font-weight: 600; }
+  .log td.status-already_following { color: var(--purple); font-weight: 600; }
+
+  .status-pill { padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  .status-pill.pending { background: var(--surface-2); color: var(--muted); }
+  .status-pill.running { background: #eef2ff; color: var(--accent); }
+  .status-pill.done { background: #ecfdf5; color: var(--green); }
+  .status-pill.cancelled { background: #fef3c7; color: var(--yellow); }
+  .status-pill.failed { background: #fee2e2; color: var(--red); }
+</style>
+</head>
+<body>
+
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+    <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+    <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+    <a href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
+    <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
+    <a class="active" href="/twitch-follows.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg> Twitch follows</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <h1>Twitch follows</h1>
+  <div class="sub">Route the farming fleet at a channel to add followers. The runner spreads follows over hours with jittered pacing so the traffic doesn't look like a synchronised bot burst, and every account it uses is logged — so re-running the same channel later will only draw from accounts that haven't already followed.</div>
+
+  <div class="fleet" id="fleetBar">
+    <div class="tile"><b>…</b><span>loading</span></div>
+  </div>
+
+  <div class="layout">
+    <div class="card">
+      <h2>New job</h2>
+
+      <div class="field">
+        <label for="channelInput">Twitch channel</label>
+        <div class="row">
+          <input type="text" id="channelInput" placeholder="https://twitch.tv/shroud  or  shroud" autocomplete="off" />
+          <button class="btn btn-ghost" id="resolveBtn">Check</button>
+        </div>
+        <div class="hint">Paste a channel URL or just the login. Click Check to see how many accounts are still available for this channel.</div>
+      </div>
+
+      <div id="channelPreview" class="preview" style="display:none;"></div>
+
+      <div class="field" style="margin-top:14px;">
+        <label for="countInput">How many follows to deliver</label>
+        <input type="number" id="countInput" min="1" step="1" value="50" />
+        <div class="hint">Job stops when this many succeed OR the eligible-account pool runs out.</div>
+      </div>
+
+      <div class="field">
+        <label>Speed preset</label>
+        <div id="speedPresets" class="chips">
+          <span class="chip" data-preset="stealthPlus">Stealth+ · warm-up &amp; noise</span>
+          <span class="chip selected" data-preset="stealth">Stealth</span>
+          <span class="chip" data-preset="normal">Normal</span>
+          <span class="chip" data-preset="fast">Fast</span>
+          <span class="chip" data-preset="burst">Burst · aggressive</span>
+        </div>
+        <div class="hint" id="speedPresetHint">Stealth: 4h spread, 1 worker. Best for &lt;100 follows on a small channel.</div>
+      </div>
+
+      <div class="field">
+        <label for="spreadInput">Spread over (hours)</label>
+        <input type="number" id="spreadInput" min="0.01" step="0.25" value="4" />
+        <div class="hint">Longer spread = more human-looking. Average delay per follow = spread ÷ count ÷ workers. Min 0.01h (~36s).</div>
+      </div>
+
+      <div class="field">
+        <label for="concurrencyInput">Concurrent workers</label>
+        <input type="number" id="concurrencyInput" min="1" max="5" step="1" value="1" />
+        <div class="hint">Parallel sub-loops per job. Each picks its own account and follows independently, so N workers ≈ N× throughput. Max 5.</div>
+      </div>
+
+      <div class="field">
+        <label>Egress hosts (optional)</label>
+        <div id="hostChips" class="chips"><span class="chip">loading…</span></div>
+        <div class="hint">Leave all off to let each account use its own farming host (best for integrity). Pick specific hosts to force egress through them.</div>
+      </div>
+
+      <div class="field">
+        <label class="toggle">
+          <input type="checkbox" id="integrityOnly" checked />
+          <span class="knob"></span>
+          <span>Only use accounts whose last scan was OK</span>
+        </label>
+        <div class="hint">Off = broader pool, but higher chance of dead-token failures inflating the failure counter.</div>
+      </div>
+
+      <div class="field">
+        <label class="toggle">
+          <input type="checkbox" id="stealthPlus" />
+          <span class="knob"></span>
+          <span>Stealth+ warm-up &amp; notification variance</span>
+        </label>
+        <div class="hint">Before each follow, the account simulates a channel-page visit (3 GQL queries a browser would fire) and randomises the notification-bell state so the fleet doesn't uniformly look like a bot service. Adds ~2-3s per follow.</div>
+      </div>
+
+      <div class="field">
+        <label for="hostHourlyCap">Per-host hourly cap (optional)</label>
+        <input type="number" id="hostHourlyCap" min="0" step="1" value="0" />
+        <div class="hint">Max follows per egress host per hour. 0 = no cap. Guards a single residential IP (Pi) from bursting one target too fast.</div>
+      </div>
+
+      <button class="btn" id="createBtn" style="width:100%;margin-top:8px;">Start follow job</button>
+    </div>
+
+    <div class="card">
+      <h2>Active + recent jobs</h2>
+      <div id="jobs"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+</main>
+
+<div class="modal" id="detailModal">
+  <div class="box">
+    <button class="close" onclick="closeDetail()">×</button>
+    <h3 id="detailTitle">Job</h3>
+    <div id="detailBody"></div>
+  </div>
+</div>
+
+<script>
+  function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? '' : 'dark';
+    if (next) document.documentElement.setAttribute('data-theme', 'dark');
+    else document.documentElement.removeAttribute('data-theme');
+    try { localStorage.setItem('theme', next || 'light'); } catch(e){}
+    document.querySelectorAll('[data-theme-toggle] .t-moon').forEach(el => el.style.display = next ? 'none' : '');
+    document.querySelectorAll('[data-theme-toggle] .t-sun').forEach(el => el.style.display = next ? '' : 'none');
+  }
+  (function initThemeIcons(){
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    document.querySelectorAll('[data-theme-toggle] .t-moon').forEach(el => el.style.display = dark ? 'none' : '');
+    document.querySelectorAll('[data-theme-toggle] .t-sun').forEach(el => el.style.display = dark ? '' : 'none');
+  })();
+
+  document.getElementById('logoutBtn').onclick = () => {
+    fetch('/admin-logout', { method: 'POST' }).finally(() => location.href = '/admin-login.html');
+  };
+
+  const state = {
+    hosts: [],
+    selectedHosts: new Set(),
+    lastResolved: null,
+  };
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path, {
+      credentials: 'same-origin',
+      headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+      ...opts,
+    });
+    let data;
+    try { data = await res.json(); } catch { data = { success: false, message: 'bad response' }; }
+    if (!res.ok || data.success === false) {
+      throw new Error(data.message || 'HTTP ' + res.status);
+    }
+    return data;
+  }
+
+  async function loadHosts() {
+    try {
+      const { hosts } = await api('/admin/twitch-follow/hosts');
+      state.hosts = hosts || [];
+      renderHostChips();
+    } catch (err) {
+      document.getElementById('hostChips').innerHTML = '<span class="chip off">' + err.message + '</span>';
+    }
+  }
+
+  function renderHostChips() {
+    const el = document.getElementById('hostChips');
+    if (!state.hosts.length) { el.innerHTML = '<span class="chip">no hosts</span>'; return; }
+    el.innerHTML = '';
+    for (const h of state.hosts) {
+      const chip = document.createElement('span');
+      chip.className = 'chip' + (state.selectedHosts.has(h.id) ? ' selected' : '');
+      chip.textContent = h.label + (h.transport && h.transport !== 'local' ? ' · ' + h.transport : '');
+      chip.onclick = () => {
+        if (state.selectedHosts.has(h.id)) state.selectedHosts.delete(h.id);
+        else state.selectedHosts.add(h.id);
+        renderHostChips();
+      };
+      el.appendChild(chip);
+    }
+  }
+
+  async function resolveChannel() {
+    const raw = document.getElementById('channelInput').value.trim();
+    const box = document.getElementById('channelPreview');
+    box.style.display = '';
+    box.className = 'preview';
+    box.textContent = 'Checking…';
+    if (!raw) { box.className = 'preview error'; box.textContent = 'Enter a channel URL or login.'; return; }
+    try {
+      const qs = new URLSearchParams({
+        channel: raw,
+        integrityOnly: document.getElementById('integrityOnly').checked ? '1' : '0',
+      });
+      if (state.selectedHosts.size) qs.set('hosts', [...state.selectedHosts].join(','));
+      const data = await api('/admin/twitch-follow/preview?' + qs.toString());
+      state.lastResolved = data.channel;
+      box.className = 'preview ok';
+      box.innerHTML =
+        '<b>' + escapeHtml(data.channel.displayName) + '</b> ' +
+        '<span style="opacity:.7;">@' + escapeHtml(data.channel.login) + ' · id ' + escapeHtml(data.channel.id) + '</span><br>' +
+        '<b>' + data.available + '</b> accounts available · ' +
+        '<b>' + data.alreadyFollowed + '</b> already followed · ' +
+        data.totalAccounts + ' total in fleet';
+    } catch (err) {
+      state.lastResolved = null;
+      box.className = 'preview error';
+      box.textContent = err.message;
+    }
+  }
+
+  async function createJob() {
+    const btn = document.getElementById('createBtn');
+    btn.disabled = true; btn.textContent = 'Starting…';
+    try {
+      const body = {
+        channel: document.getElementById('channelInput').value.trim(),
+        count: parseInt(document.getElementById('countInput').value, 10),
+        spreadHours: parseFloat(document.getElementById('spreadInput').value),
+        concurrency: parseInt(document.getElementById('concurrencyInput').value, 10) || 1,
+        hosts: [...state.selectedHosts],
+        integrityOnly: document.getElementById('integrityOnly').checked,
+        stealthPlus: document.getElementById('stealthPlus').checked,
+        hostHourlyCap: parseInt(document.getElementById('hostHourlyCap').value, 10) || 0,
+      };
+      await api('/admin/twitch-follow/jobs', { method: 'POST', body: JSON.stringify(body) });
+      document.getElementById('countInput').value = 50;
+      document.getElementById('channelPreview').style.display = 'none';
+      await loadJobs();
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Start follow job';
+    }
+  }
+
+  async function loadJobs() {
+    try {
+      const { jobs } = await api('/admin/twitch-follow/jobs?limit=30');
+      const el = document.getElementById('jobs');
+      if (!jobs.length) { el.innerHTML = '<div class="empty">No jobs yet — create one on the left.</div>'; return; }
+      el.innerHTML = jobs.map(renderJob).join('');
+      el.querySelectorAll('[data-cancel]').forEach(b => b.onclick = () => cancelJob(b.dataset.cancel));
+      el.querySelectorAll('[data-detail]').forEach(b => b.onclick = () => openDetail(b.dataset.detail));
+      el.querySelectorAll('[data-verify]').forEach(b => b.onclick = () => verifyJob(b.dataset.verify, b));
+    } catch (err) {
+      document.getElementById('jobs').innerHTML = '<div class="empty" style="color:var(--red);">' + err.message + '</div>';
+    }
+  }
+
+  function renderJob(j) {
+    const pct = Math.min(100, Math.round(((j.delivered || 0) / (j.requestedCount || 1)) * 100));
+    const active = j.status === 'running' || j.status === 'pending';
+    const started = j.startedAt ? new Date(j.startedAt).toLocaleString() : '—';
+    const next = j.nextAttemptAt && active ? new Date(j.nextAttemptAt) : null;
+    const nextStr = next ? etaFrom(next) : '';
+    const verifyLine = j.lastVerifiedAt
+      ? '<div class="meta" style="margin-top:4px;color:var(--muted);">'
+        + '<b style="color:var(--green);">' + (j.verifiedStillFollowing || 0) + '</b> still following · '
+        + '<b style="color:var(--red);">' + (j.verifiedDropped || 0) + '</b> dropped by twitch'
+        + ((j.verifiedCheckFailed || 0) > 0 ? ' · <b style="color:var(--yellow);">' + j.verifiedCheckFailed + '</b> check failed' : '')
+        + ' · verified ' + new Date(j.lastVerifiedAt).toLocaleTimeString()
+        + '</div>'
+      : '';
+    const canVerify = (j.delivered || 0) > 0 && !active;
+    const stealthBadge = j.stealthPlus ? ' <span class="chip on" style="font-size:10px;padding:2px 7px;">stealth+</span>' : '';
+    return '<div class="job' + (active ? ' active' : '') + '">' +
+      '<div class="top">' +
+        '<div class="name">' + escapeHtml(j.channelDisplayName || j.channelLogin) + ' <span style="color:var(--muted);font-weight:500;">@' + escapeHtml(j.channelLogin) + '</span>' + stealthBadge + '</div>' +
+        '<span class="status-pill ' + j.status + '">' + j.status + '</span>' +
+        '<div style="margin-left:auto;color:var(--muted);font-size:12px;">' + started + '</div>' +
+      '</div>' +
+      '<div class="bar"><span style="width:' + pct + '%"></span></div>' +
+      '<div class="meta">' +
+        '<b>' + j.delivered + '</b>/' + j.requestedCount + ' delivered · ' +
+        '<b>' + j.failed + '</b> failed · ' +
+        '<b>' + j.skipped + '</b> skipped' +
+        (nextStr ? ' · next in ' + nextStr : '') +
+      '</div>' +
+      verifyLine +
+      (j.lastError ? '<div class="err">' + escapeHtml(j.lastError) + '</div>' : '') +
+      '<div class="actions">' +
+        (canVerify ? '<button class="btn btn-ghost" data-verify="' + j._id + '">Verify follows stick</button>' : '') +
+        '<button class="btn btn-ghost" data-detail="' + j._id + '">Details</button>' +
+        (active ? '<button class="btn btn-danger" data-cancel="' + j._id + '">Cancel</button>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  function etaFrom(date) {
+    const s = Math.max(0, Math.round((date.getTime() - Date.now()) / 1000));
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ' + (s % 60) + 's';
+    return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+
+  async function cancelJob(id) {
+    if (!confirm('Cancel this job? Any follows already made will stay.')) return;
+    try { await api('/admin/twitch-follow/jobs/' + id + '/cancel', { method: 'POST' }); await loadJobs(); }
+    catch (err) { alert(err.message); }
+  }
+
+  async function verifyJob(id, btn) {
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Checking…';
+    try {
+      const { result } = await api('/admin/twitch-follow/jobs/' + id + '/verify', { method: 'POST' });
+      const dropRate = result.total ? (result.dropped / (result.dropped + result.stillFollowing || 1) * 100).toFixed(1) : '0';
+      alert(
+        'Verify complete for ' + result.total + ' follows:\n\n' +
+        '  ' + result.stillFollowing + ' still following\n' +
+        '  ' + result.dropped + ' silently dropped by twitch (' + dropRate + '% drop rate)\n' +
+        '  ' + result.checkFailed + ' check itself failed\n' +
+        (result.droppedSample && result.droppedSample.length
+          ? '\nFirst dropped accounts: ' + result.droppedSample.map(d => d.login + '(' + d.host + ')').join(', ')
+          : '')
+      );
+      await loadJobs();
+    } catch (err) {
+      alert('Verify failed: ' + err.message);
+    } finally {
+      btn.disabled = false; btn.textContent = orig;
+    }
+  }
+
+  async function openDetail(id) {
+    document.getElementById('detailModal').classList.add('open');
+    document.getElementById('detailTitle').textContent = 'Loading…';
+    document.getElementById('detailBody').innerHTML = '';
+    try {
+      const { job, logs } = await api('/admin/twitch-follow/jobs/' + id);
+      document.getElementById('detailTitle').textContent = (job.channelDisplayName || job.channelLogin) + ' — ' + job.status;
+      let body =
+        '<div class="meta" style="font-size:13px;margin:8px 0 4px;">' +
+          '<b>' + job.delivered + '</b>/' + job.requestedCount + ' delivered · ' +
+          '<b>' + job.failed + '</b> failed · ' +
+          '<b>' + job.skipped + '</b> skipped · ' +
+          'avg gap ' + Math.round(job.avgGapMs / 1000) + 's ±' + Math.round(job.jitter * 100) + '%' +
+        '</div>';
+      if (job.lastError) body += '<div class="err" style="color:var(--red);margin-bottom:8px;">' + escapeHtml(job.lastError) + '</div>';
+      if (job.lastMessage) body += '<div style="color:var(--muted);font-size:12.5px;margin-bottom:8px;">' + escapeHtml(job.lastMessage) + '</div>';
+      body += '<table class="log"><thead><tr><th>When</th><th>Account</th><th>Host</th><th>Status</th><th>Note</th></tr></thead><tbody>';
+      for (const l of logs) {
+        body += '<tr>' +
+          '<td>' + new Date(l.at).toLocaleTimeString() + '</td>' +
+          '<td>' + escapeHtml(l.botLogin || String(l.botAccountId).slice(-6)) + '</td>' +
+          '<td>' + escapeHtml(l.host || '') + '</td>' +
+          '<td class="status-' + l.status + '">' + l.status + '</td>' +
+          '<td style="color:var(--muted);">' + escapeHtml(l.error || '') + '</td>' +
+        '</tr>';
+      }
+      body += '</tbody></table>';
+      document.getElementById('detailBody').innerHTML = body;
+    } catch (err) {
+      document.getElementById('detailBody').innerHTML = '<div class="err" style="color:var(--red);">' + err.message + '</div>';
+    }
+  }
+
+  function closeDetail() {
+    document.getElementById('detailModal').classList.remove('open');
+  }
+  document.getElementById('detailModal').addEventListener('click', (e) => {
+    if (e.target.id === 'detailModal') closeDetail();
+  });
+
+  function escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  const PRESETS = {
+    stealthPlus: { spread: 12, workers: 1, stealthPlus: true, hostHourlyCap: 8, hint: 'Stealth+: 12h spread, 1 worker, warm-up + notification variance + 8/host/hr cap. Highest deliverability, smallest fingerprint. Slowest.' },
+    stealth: { spread: 4, workers: 1, stealthPlus: false, hostHourlyCap: 0, hint: 'Stealth: 4h spread, 1 worker. Best for <100 follows on a small channel.' },
+    normal:  { spread: 1, workers: 2, stealthPlus: false, hostHourlyCap: 0, hint: 'Normal: 1h spread, 2 workers. Reasonable middle ground.' },
+    fast:    { spread: 0.25, workers: 3, stealthPlus: false, hostHourlyCap: 0, hint: 'Fast: 15min spread, 3 workers. Faster delivery, still jittered.' },
+    burst:   { spread: 0.05, workers: 5, stealthPlus: false, hostHourlyCap: 0, hint: 'Burst: ~3min spread, 5 workers. Highest risk of pattern detection — use only on throwaway channels or when you accept the risk.' },
+  };
+  function applyPreset(name) {
+    const p = PRESETS[name];
+    if (!p) return;
+    document.getElementById('spreadInput').value = p.spread;
+    document.getElementById('concurrencyInput').value = p.workers;
+    document.getElementById('stealthPlus').checked = !!p.stealthPlus;
+    document.getElementById('hostHourlyCap').value = p.hostHourlyCap || 0;
+    document.getElementById('speedPresetHint').textContent = p.hint;
+    document.querySelectorAll('#speedPresets .chip').forEach(c => {
+      c.classList.toggle('selected', c.dataset.preset === name);
+    });
+  }
+  document.querySelectorAll('#speedPresets .chip').forEach(c => {
+    c.onclick = () => applyPreset(c.dataset.preset);
+  });
+
+  document.getElementById('resolveBtn').onclick = resolveChannel;
+  document.getElementById('createBtn').onclick = createJob;
+  document.getElementById('channelInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') resolveChannel(); });
+
+  async function loadFleet() {
+    try {
+      const data = await api('/admin/twitch-follow/fleet');
+      const el = document.getElementById('fleetBar');
+      const hostRows = Object.entries(data.hostBreakdown || {})
+        .sort((a,b) => b[1] - a[1])
+        .map(([h,n]) => '<span class="row"><b>' + n + '</b>' + escapeHtml(h) + '</span>')
+        .join('');
+      el.innerHTML =
+        '<div class="tile hero"><b>' + data.ready + '</b><span>Ready to follow</span>' +
+          '<div class="sub">integrity-OK, enabled, unsold</div></div>' +
+        '<div class="tile"><b>' + data.pool + '</b><span>Broader pool</span>' +
+          '<div class="sub">any live token (integrity off)</div></div>' +
+        '<div class="tile"><b>' + data.total + '</b><span>Fleet total</span>' +
+          '<div class="sub">every BotAccount doc</div></div>' +
+        (hostRows ? '<div class="tile hostbox"><span>Ready by host</span><div class="rows">' + hostRows + '</div></div>' : '');
+    } catch (err) {
+      document.getElementById('fleetBar').innerHTML = '<div class="tile"><b style="color:var(--red);font-size:14px;">' + escapeHtml(err.message) + '</b><span>fleet stats</span></div>';
+    }
+  }
+
+  loadHosts();
+  loadJobs();
+  loadFleet();
+  setInterval(() => { loadJobs(); loadFleet(); }, 5000);
+</script>
+</body>
+</html>

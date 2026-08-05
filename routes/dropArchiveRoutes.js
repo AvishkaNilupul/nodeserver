@@ -5,6 +5,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
+const AvailableAccount = require("../models/AvailableAccount");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const scanner = require("../utils/dropScanner");
 const { cacheImage } = require("../utils/imageCache");
@@ -15,12 +16,8 @@ const {
 } = require("../utils/poolPasswords");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const SaleSignal = require("../models/SaleSignal");
-const mp = require("../utils/marketplaces");
-const guardian = require("../utils/marketplaceGuardian");
-const gfFulfiller = require("../utils/gameflipFulfiller");
-const { buildSetGridImage } = require("../utils/setImage");
+const { detachAccountFromListing } = require("../utils/listingDetach");
 const { sameGame } = require("../utils/gameLabel");
-const fsp = require("fs").promises;
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -188,15 +185,49 @@ async function shadowDuplicateIds() {
   return ids;
 }
 
-// The full set of account _ids excluded from stock/count/inventory views:
-// dead tokens plus shadow duplicates. Used everywhere a $nin filter guards an
-// aggregation, so every view agrees on what counts as real, sellable stock.
+// _ids of pool (AvailableAccount) rows whose Twitch login is ALSO deployed in a
+// bot. The account pool is scanned ahead of deployment
+// (utils/accountPoolChecker.js), so once a pool account is wired into a bot the
+// SAME Twitch login exists twice — the deployed BotAccount and the leftover
+// pool AvailableAccount — and its drops get logged under BOTH. That shows the
+// login twice in the item drill-down (once as "pool", once with its container)
+// and double-counts it in the "in pool" tallies. This defers the pool copy to
+// its deployed sibling: the mirror image of shadowDuplicateIds (which defers an
+// idle BotAccount to a deployed one), using the same "configFile set = deployed"
+// rule markDeployedPoolAccountsClaimed uses to flip these very rows to claimed.
+// Only ever returns AvailableAccount ids, so it can never hide deployed/sellable
+// stock. Computed live from two small collections — nothing stored, so turning
+// this off later fully restores the old numbers.
+async function poolShadowIds() {
+  const deployedLogins = await BotAccount.distinct("login", {
+    login: { $nin: ["", null] },
+    configFile: { $nin: ["", null] },
+  });
+  const lowers = [
+    ...new Set(
+      deployedLogins.map((l) => String(l || "").toLowerCase()).filter(Boolean),
+    ),
+  ];
+  if (!lowers.length) return [];
+  const dups = await AvailableAccount.find(
+    { usernameLower: { $in: lowers } },
+    { _id: 1 },
+  ).lean();
+  return dups.map((d) => d._id);
+}
+
+// The full set of account _ids excluded from stock/count/inventory views: dead
+// tokens, shadow duplicates (idle BotAccount twins), and pool shadows (pool
+// AvailableAccount copies of an already-deployed login). Used everywhere a $nin
+// filter guards an aggregation, so every view agrees on what counts as real,
+// sellable stock and no Twitch account is shown or counted twice.
 async function excludedAccountIds() {
-  const [bad, shadow] = await Promise.all([
+  const [bad, shadow, poolShadow] = await Promise.all([
     badAccountIds(),
     shadowDuplicateIds(),
+    poolShadowIds(),
   ]);
-  return bad.concat(shadow);
+  return bad.concat(shadow, poolShadow);
 }
 
 // Cached wrapper: excludedAccountIds() runs two aggregations and is called by
@@ -716,25 +747,6 @@ router.get(
   },
 );
 
-// Remove one account from a listing row's comma-separated account fields.
-async function detachAccountFromRow(listing, accountId, login) {
-  const ids = String(listing.accountId || "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .filter((x) => x !== String(accountId));
-  const lower = String(login || "").trim().toLowerCase();
-  const logins = String(listing.accountLogin || "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .filter((x) => !lower || x.toLowerCase() !== lower);
-  await MarketplaceListing.updateOne(
-    { _id: listing._id },
-    { $set: { accountId: ids.join(","), accountLogin: logins.join(", ") } },
-  );
-}
-
 // Does this listing's set sell the given game? Uses sameGame() so formatting
 // drift between the DropLog label and a DropSet item label can't make this
 // silently miss and leave a sold account in a live same-game listing.
@@ -835,100 +847,13 @@ router.post(
       }).lean();
       for (const row of listings) {
         if (!(await listingSellsGame(row, gameLabel))) continue;
-        const label = row.marketplace + " " + row.externalId;
-        try {
-          if (row.marketplace === "gameflip" && row.autoDeliver) {
-            // The live Gameflip listing carries this account's credentials in
-            // its delivery code — it must come down, then the chain continues
-            // with a fresh account if one exists.
-            await mp.gameflipDelist(row.externalId).catch(() => {});
-            await MarketplaceListing.updateOne(
-              { _id: row._id },
-              {
-                $set: {
-                  status: "delisted",
-                  note: "account sold manually — delisted",
-                },
-              },
-            );
-            detached.push(label + " (delisted)");
-            const set = row.set
-              ? await DropSet.findById(row.set).lean()
-              : null;
-            if (set) {
-              let img = "";
-              try {
-                img = await buildSetGridImage(set);
-              } catch {
-                img = "";
-              }
-              try {
-                const fresh = await gfFulfiller.publishAutoDelivery({
-                  set,
-                  title: row.title,
-                  description: row.description,
-                  priceUsd: row.price,
-                  imagePath: img,
-                  qtyRemaining: Number(row.qtyRemaining) || 0,
-                  origin: row.origin,
-                });
-                detached.push(
-                  "republished on gameflip as " +
-                    fresh.externalId +
-                    " with " +
-                    (fresh.accountLogin || "a fresh account"),
-                );
-              } catch (e) {
-                warnings.push(
-                  label +
-                    " was delisted but could not be republished: " +
-                    e.message,
-                );
-              } finally {
-                if (img) await fsp.unlink(img).catch(() => {});
-              }
-            }
-          } else if (
-            row.marketplace === "digiseller" &&
-            (row.units || []).some(
-              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
-            )
-          ) {
-            const unit = (row.units || []).find(
-              (u) => u && String(u.accountId) === String(acc._id) && u.contentId,
-            );
-            await mp.digisellerRemoveContent(row.externalId, unit.contentId);
-            await MarketplaceListing.updateOne(
-              { _id: row._id },
-              { $pull: { units: { contentId: String(unit.contentId) } } },
-            );
-            await detachAccountFromRow(row, acc._id, acc.login);
-            detached.push(label + " (delivery unit removed)");
-            try {
-              await guardian.feedOne(String(row._id));
-            } catch {
-              /* auto-feed refills on its next pass */
-            }
-          } else if (
-            row.marketplace === "digiseller" ||
-            row.marketplace === "ggsel"
-          ) {
-            await detachAccountFromRow(row, acc._id, acc.login);
-            detached.push(label + " (detached)");
-            try {
-              await guardian.feedOne(String(row._id));
-            } catch {
-              /* auto-feed refills on its next pass */
-            }
-          } else {
-            warnings.push(
-              label +
-                " still references this account — remove it there manually",
-            );
-          }
-        } catch (e) {
-          warnings.push(label + ": " + e.message);
-        }
+        const r = await detachAccountFromListing(
+          row,
+          { _id: acc._id, login: acc.login },
+          { reason: "sold manually" },
+        );
+        detached.push(...r.detached);
+        warnings.push(...r.warnings);
       }
 
       bustDropCache();
@@ -1535,7 +1460,12 @@ router.get("/drops-archive/overview", requireSuperadmin, async (req, res) => {
         account: { $nin: badIds },
         accountModel: { $ne: "AvailableAccount" },
       };
-      const poolMatch = { accountModel: "AvailableAccount" };
+      // badIds carries the pool-shadow ids too, so a pool copy of an already
+      // deployed login is not counted here (it's counted once, as deployed).
+      const poolMatch = {
+        accountModel: "AvailableAccount",
+        account: { $nin: badIds },
+      };
       const [
         accounts,
         totalDrops,
