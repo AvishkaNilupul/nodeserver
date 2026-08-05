@@ -97,6 +97,20 @@ function requireKeys(marketplace) {
   return keys;
 }
 
+// Why a delist call failed, when the failure means the listing is not on sale
+// anyway: "gone" (the platform has no such listing) or "sold" (a buyer already
+// took it). Both satisfy the intent of delisting, so the caller should resolve
+// its row instead of leaving it active with an error — four rows on prod sat
+// stuck for weeks that way, holding their accounts reserved out of stock.
+// Returns "" for anything genuinely transient, notably Gameflip's "pending
+// sale", where the sale has not resolved and retrying is right.
+function delistOutcome(message) {
+  const m = String(message || "").toLowerCase();
+  if (/\(sold\)|already sold/.test(m)) return "sold";
+  if (/not found|http_status":\s*404/.test(m)) return "gone";
+  return "";
+}
+
 function apiError(prefix, e) {
   const detail =
     (e.response &&
@@ -3210,6 +3224,7 @@ async function zeusxMyListings(pageIndex) {
 module.exports = {
   MARKETPLACES,
   FIELDS,
+  delistOutcome,
   setKeys,
   keyStatus,
   gameflipTest,
