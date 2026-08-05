@@ -77,6 +77,14 @@ const AUTO_FARM_DEFAULTS = {
   // recycled). See utils/recycleEligibility.js + recycleSoldOutAccounts.
   recycleSoldAccounts: false,
   recycleCooldownDays: 14,
+  // Reap dead-token accounts out of a task's assignedAccounts each tick so the
+  // backfill sweep can refill the freed slots with healthy farmers (a dead
+  // token can't farm, so left in place it silently pins the task at target and
+  // it stops producing sellable stock). Only accounts holding NO drops for the
+  // task's game are unassigned; ones that already farmed drops are kept and the
+  // owner is nudged by Telegram to re-mint their token. Never deletes anything.
+  // ON by default. See reapDeadTokenAssignments in utils/autoFarmer.js.
+  reapDeadAssignments: true,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
