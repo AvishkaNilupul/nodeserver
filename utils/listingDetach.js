@@ -15,6 +15,8 @@
 //                 republished with a fresh account to keep the sale slot).
 //   digiseller  — one delivery "unit" (contentId) per account.
 //   ggsel       — row-tracked; the guardian auto-feed reconciles the platform.
+//   zeusx       — either one credential baked into the offer (automatic
+//                 delivery) or a bare quantity we hand over in chat.
 //
 // On the quantity platforms a unit whose content_id we never recorded cannot be
 // deleted (see utils/listingRepublish.js). Detaching our bookkeeping alone would
@@ -35,6 +37,20 @@ function splitCsv(v) {
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+// What removing `login` means for a ZeusX offer. Pure so the decision is
+// testable without ZeusX: "delist" takes the whole offer down (its credentials
+// are the account's, or it has nothing left to sell), "shrink" leaves it on sale
+// with one unit fewer. Exported for tests.
+function zeusxDetachPlan({ autoDeliver, logins, login }) {
+  const kept = (logins || []).filter(
+    (x) => !login || String(x).toLowerCase() !== String(login).toLowerCase(),
+  );
+  if (autoDeliver)
+    return { action: "delist", kept: [], reason: "auto-deliver" };
+  if (!kept.length) return { action: "delist", kept, reason: "emptied" };
+  return { action: "shrink", kept, quantity: kept.length };
 }
 
 // Remove one account from a listing row's comma-separated account fields.
@@ -221,6 +237,61 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       } catch {
         /* auto-feed refills on its next pass */
       }
+    } else if (row.marketplace === "zeusx") {
+      // ZeusX sells one of two ways (see publishZeusxShare):
+      //   automatic — ZeusX holds this one account's credentials and hands them
+      //     over on payment, so the offer must come down whole, exactly like
+      //     Gameflip. The auto-lister's missing-secondary retry republishes it
+      //     from live stock on a later sweep.
+      //   coordinated — the offer is just a quantity we hand over in chat, and
+      //     the accounts behind it live only in our row. One account leaving is
+      //     one unit fewer on sale; an emptied offer goes off sale rather than
+      //     promising stock we cannot deliver.
+      const plan = zeusxDetachPlan({
+        autoDeliver: row.autoDeliver,
+        logins: splitCsv(row.accountLogin),
+        login,
+      });
+      const keptLogins = plan.kept;
+      if (plan.action === "delist" && plan.reason === "auto-deliver") {
+        await mp.zeusxDelist(row.externalId);
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          {
+            $set: {
+              status: "delisted",
+              note: "account " + reason + " — delisted",
+            },
+          },
+        );
+        detached.push(label + " (delisted)");
+      } else if (plan.action === "delist") {
+        await mp.zeusxDelist(row.externalId);
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          {
+            $set: {
+              accountId: "",
+              accountLogin: "",
+              status: "delisted",
+              note: "account " + reason + " — no accounts left, off sale",
+            },
+          },
+        );
+        detached.push(label + " (delisted — last account removed)");
+      } else {
+        // Shrink the offer BEFORE our row, so a failed update leaves the row
+        // still matching what ZeusX is selling.
+        await mp.zeusxUpdateOffer(row.externalId, {
+          quantity: plan.quantity,
+        });
+        await detachAccountFromRow(row, accId, login);
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          { $set: { qtyTarget: keptLogins.length } },
+        );
+        detached.push(label + " (quantity now " + keptLogins.length + ")");
+      }
     } else {
       warnings.push(
         label + " still references this account — remove it there manually",
@@ -233,4 +304,8 @@ async function detachAccountFromListing(row, acc, opts = {}) {
   return { detached, warnings };
 }
 
-module.exports = { detachAccountFromRow, detachAccountFromListing };
+module.exports = {
+  detachAccountFromRow,
+  detachAccountFromListing,
+  zeusxDetachPlan,
+};
