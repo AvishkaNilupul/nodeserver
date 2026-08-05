@@ -154,31 +154,30 @@ async function classifyBotAccounts({ limit = 0, onProgress } = {}) {
   };
 }
 
-// Same for the account pool, plus the case the bad-status filter cannot see: a
-// row that is `available` with a perfectly good "ok" token. A token minted before
-// the ban still authenticates, so 71 rows on prod sat here as available/ok while
-// the accounts behind them no longer existed — backfill claimed them, deployed
-// them into bots and they farmed nothing. Anything claimable is therefore probed
-// on its own merit, at most once a day per row (existsProbeAt) and at most
-// POOL_PROBE_CAP rows a sweep, so feeding in thousands of fresh accounts cannot
-// turn a ten-minute tick into thousands of Twitch calls.
+// Same for the account pool, and here the row's own status is no evidence at all.
+// A token minted before the ban still authenticates, so a dead account sits
+// happily as `ok`; and `claimed` is not a reprieve either — 83 rows on prod were
+// claimed with a clean check and every one of the 30 sampled was gone, because
+// the row was claimed before the account died and nothing ever looked again.
+// Every row is therefore probed on its own merit, oldest answer first, bounded by
+// existsProbeAt (a row is re-probed once a day at most) and by POOL_PROBE_CAP per
+// sweep, so a pool of thousands is covered over a few ticks instead of turning
+// one tick into thousands of Twitch calls.
 async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
   const stale = new Date(Date.now() - PROBE_TTL_MS);
-  const q = AvailableAccount.find(
+  const rows = await AvailableAccount.find(
     {
       $or: [
         { lastCheckStatus: { $in: PROBE_CHECK_STATUSES } },
-        {
-          status: "available",
-          $or: [{ existsProbeAt: null }, { existsProbeAt: { $lt: stale } }],
-        },
+        { existsProbeAt: null },
+        { existsProbeAt: { $lt: stale } },
       ],
     },
     { usernameLower: 1 },
   )
+    .sort({ existsProbeAt: 1 })
     .limit(limit > 0 ? limit : POOL_PROBE_CAP)
     .lean();
-  const rows = await q;
   if (!rows.length) return { probed: 0, suspended: 0, alive: 0, unknown: 0 };
   const verdicts = await accountState.probeAccounts(
     rows.map((r) => r.usernameLower),
