@@ -248,6 +248,67 @@ async function publishAutoDelivery({
   });
 }
 
+// How long to wait before trying a failed relist again: 5 minutes doubling per
+// consecutive failure, capped at 12 hours. A transient 429 or timeout is back on
+// the market within minutes, while a chain nothing can fulfil settles into two
+// attempts a day instead of one a minute. Pure — exported for tests.
+const RELIST_RETRY_BASE_MS = 5 * 60 * 1000;
+const RELIST_RETRY_MAX_MS = 12 * 60 * 60 * 1000;
+function relistRetryDelayMs(attempts) {
+  const n = Math.max(1, Number(attempts) || 1);
+  return Math.min(RELIST_RETRY_MAX_MS, RELIST_RETRY_BASE_MS * 2 ** (n - 1));
+}
+
+// A relist failure that means "there is no stock left to sell" is not going to
+// fix itself: the units the chain still owes are unsellable until the farmer
+// produces another account holding the whole bundle. The operator has to know,
+// because the alternative is silence while the debt sits there.
+function isOutOfStockError(message) {
+  return /out of stock/i.test(String(message || ""));
+}
+
+// The attempt at which an out-of-stock chain is escalated to the owner. Late
+// enough that a sale racing the watcher (the account claimed a second earlier)
+// resolves itself first, early enough to be same-hour news.
+const RELIST_ALERT_AT_ATTEMPT = 3;
+
+// Record a failed relist: keep the reason, count the attempt and push the next
+// one out by the backoff. Called from both relist paths so a chain can never be
+// left with a stale deadline.
+async function noteRelistFailure(row, err) {
+  const attempts = (Number(row.relistAttempts) || 0) + 1;
+  const message = (err && err.message) || String(err);
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    {
+      $set: {
+        lastError: ("auto-relist failed: " + message).slice(0, 400),
+        relistAttempts: attempts,
+        relistRetryAt: new Date(Date.now() + relistRetryDelayMs(attempts)),
+      },
+    },
+  ).catch(() => {});
+  console.error(
+    "gameflip relist failed (attempt " +
+      attempts +
+      ", next in " +
+      Math.round(relistRetryDelayMs(attempts) / 60000) +
+      "m):",
+    message,
+  );
+  if (attempts === RELIST_ALERT_AT_ATTEMPT && isOutOfStockError(message)) {
+    await sendTelegram(
+      "⚠️ Gameflip chain out of stock\n\n" +
+        (row.title || "(untitled listing)") +
+        "\n" +
+        (Number(row.qtyRemaining) || 0) +
+        " unit(s) still owed, but no unsold account holds the whole bundle — " +
+        "the chain is paused until the farmer produces one." +
+        (row.url ? "\n\n" + row.url : ""),
+    ).catch(() => {});
+  }
+}
+
 // One watcher pass: mark sold listings sold and relist the next unit of any
 // chain that still has quantity left.
 async function syncOnce() {
@@ -362,15 +423,7 @@ async function syncOnce() {
       });
       relisted++;
     } catch (e) {
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        {
-          $set: {
-            lastError: ("auto-relist failed: " + e.message).slice(0, 400),
-          },
-        },
-      ).catch(() => {});
-      console.error("gameflip auto-relist failed:", e.message);
+      await noteRelistFailure(row, e);
     } finally {
       if (img) await fsp.unlink(img).catch(() => {});
     }
@@ -379,12 +432,25 @@ async function syncOnce() {
   // marked sold by then, so the loop above never looks at it again: a single
   // transient error (Gameflip's 429 limiter, a timeout) silently ended a chain
   // that still owed units, leaving the stock unlisted and its accounts idle.
+  //
+  // Only rows whose backoff has elapsed are due, oldest deadline first. Without
+  // both of those a chain that can NEVER be fulfilled (nothing unsold holds the
+  // bundle any more) was republished-attempted every single tick — thousands of
+  // identical errors an hour — and, because the lane is capped at a handful of
+  // rows, five such chains would sit at the head of it forever and starve the
+  // genuinely transient failures the retry exists for.
   const stalled = await MarketplaceListing.find({
     marketplace: "gameflip",
     status: "sold",
     qtyRemaining: { $gt: 0 },
     lastError: /^auto-relist failed/,
+    $or: [
+      { relistRetryAt: null },
+      { relistRetryAt: { $exists: false } },
+      { relistRetryAt: { $lte: new Date() } },
+    ],
   })
+    .sort({ relistRetryAt: 1 })
     .limit(5)
     .lean();
   for (const row of stalled) {
@@ -410,19 +476,18 @@ async function syncOnce() {
       // never double-list the same units.
       await MarketplaceListing.updateOne(
         { _id: row._id },
-        { $set: { qtyRemaining: 0, lastError: "" } },
-      ).catch(() => {});
-      relisted++;
-    } catch (e) {
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
         {
           $set: {
-            lastError: ("auto-relist failed: " + e.message).slice(0, 400),
+            qtyRemaining: 0,
+            lastError: "",
+            relistAttempts: 0,
+            relistRetryAt: null,
           },
         },
       ).catch(() => {});
-      console.error("gameflip relist retry failed:", e.message);
+      relisted++;
+    } catch (e) {
+      await noteRelistFailure(row, e);
     } finally {
       if (img) await fsp.unlink(img).catch(() => {});
     }
@@ -461,4 +526,8 @@ module.exports = {
   publishAutoDelivery,
   syncOnce,
   start,
+  // exported for tests
+  relistRetryDelayMs,
+  isOutOfStockError,
+  RELIST_RETRY_MAX_MS,
 };
