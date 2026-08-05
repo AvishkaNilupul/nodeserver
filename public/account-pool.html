@@ -145,6 +145,7 @@
     <button class="tab active" id="tabAvailable" data-status="available">Available</button>
     <button class="tab" id="tabClaimed" data-status="claimed">Claimed</button>
     <button class="tab" id="tabAll" data-status="all">All</button>
+    <button class="tab" id="tabSuspended" data-status="suspended">Suspended</button>
   </div>
 
   <div class="panel">
@@ -311,6 +312,9 @@ or JSON:
   $("tabAvailable").addEventListener("click", (e) => setTab("available", e.target));
   $("tabClaimed").addEventListener("click", (e) => setTab("claimed", e.target));
   $("tabAll").addEventListener("click", (e) => setTab("all", e.target));
+  // Gone from Twitch. Only rows that are sale evidence survive the sweep's purge,
+  // and none of them are stock, so the other tabs leave them out.
+  $("tabSuspended").addEventListener("click", (e) => setTab("suspended", e.target));
   $("search").addEventListener("input", render);
   $("refreshBtn").addEventListener("click", load);
 
