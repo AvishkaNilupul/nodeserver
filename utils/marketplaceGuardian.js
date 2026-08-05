@@ -108,6 +108,7 @@ const CONDITION_TYPES = [
   "claim-mismatch",
   "redeemed-drops",
   "dead-token",
+  "account-gone",
   "stock-unknown",
 ];
 
@@ -230,24 +231,33 @@ async function runChecks(rows, seenKeys) {
     const acc = accMap.get(id);
     if (!acc) continue;
     for (const row of listings) {
-      // 4. Dead token — credentials likely changed; delivery may not work. A
-      // suspended account is the terminal case of the same problem.
-      if (accountState.isUnusableScanStatus(acc.lastScanStatus)) {
+      // 4. Dead token — credentials likely changed; delivery MAY not work. A
+      // suspended account is a different alarm, not a worse token: the login is
+      // gone from Twitch, so delivery certainly fails and "the password may have
+      // changed" reads as something a re-auth could fix. The suspension sweep
+      // takes these off their listings on its own, so a finding that stays open
+      // means that surgery could not be completed and needs a human.
+      const gone = acc.lastScanStatus === "suspended";
+      if (gone || accountState.isUnusableScanStatus(acc.lastScanStatus)) {
         await flag({
-          type: "dead-token",
-          severity: "medium",
+          type: gone ? "account-gone" : "dead-token",
+          severity: gone ? "high" : "medium",
           marketplace: row.marketplace,
           listing: row._id,
           accountId: id,
           accountLogin: acc.login || "",
-          dedupeKey: "token:" + id + ":" + row._id,
+          dedupeKey: (gone ? "gone:" : "token:") + id + ":" + row._id,
           message:
             "Account " +
             (acc.login || id) +
             " in a live " +
             row.marketplace +
-            " listing has an invalid Twitch token — the password may have " +
-            "changed, so the delivered login may not work.",
+            " listing " +
+            (gone
+              ? "no longer exists on Twitch (suspended or deleted) — a buyer " +
+                "cannot use it. Replace the unit or delist."
+              : "has an invalid Twitch token — the password may have " +
+                "changed, so the delivered login may not work."),
         });
       }
     }
