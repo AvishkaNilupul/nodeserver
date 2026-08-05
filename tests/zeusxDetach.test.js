@@ -55,3 +55,18 @@ test("an unrelated login leaves the offer exactly as it was", () => {
   assert.strictEqual(p.action, "shrink");
   assert.strictEqual(p.quantity, 2);
 });
+
+// Digiseller's refusal to delete a unit a buyer already took is a success case,
+// not a failure: the credentials are spent, so only our tracking needs clearing.
+test("Digiseller's sold-content refusal is recognised", () => {
+  const { isSoldContentError } = require("../utils/listingDetach");
+  const live =
+    'Digiseller remove content: {"retval":-1,"retdesc":"Validation error",' +
+    '"errors":[{"code":"content-2","message":[{"locale":"en-US","value":' +
+    '"Can\'t delete sold content"},{"locale":"ru-RU","value":' +
+    '"Нельзя удалять проданное содержимое"}]}],"content":null}';
+  assert.ok(isSoldContentError(new Error(live)));
+  assert.ok(isSoldContentError("Нельзя удалять проданное содержимое"));
+  assert.ok(!isSoldContentError(new Error("Digiseller remove content: 500")));
+  assert.ok(!isSoldContentError(null));
+});

@@ -53,6 +53,22 @@ function zeusxDetachPlan({ autoDeliver, logins, login }) {
   return { action: "shrink", kept, quantity: kept.length };
 }
 
+// Digiseller refuses to delete a delivery unit a buyer has already taken
+// ("Can't delete sold content" / код content-2). That refusal is good news: the
+// unit is spent, so nobody else can be handed those credentials and the only
+// thing left to do is stop tracking it. Treating it as a failure instead makes
+// the suspension sweep retry the same product every pass and, with
+// hardRepublish, throw away a perfectly good product's URL over a unit that is
+// no longer on sale. Exported for tests.
+function isSoldContentError(err) {
+  const msg = String((err && err.message) || err || "");
+  return (
+    /content-2/.test(msg) ||
+    /can'?t delete sold content/i.test(msg) ||
+    /проданное содержимое/i.test(msg)
+  );
+}
+
 // Remove one account from a listing row's comma-separated account fields.
 async function detachAccountFromRow(listing, accountId, login) {
   const ids = splitCsv(listing.accountId).filter(
@@ -193,13 +209,24 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       const unit = (row.units || []).find(
         (u) => u && String(u.accountId) === accId && u.contentId,
       );
-      await mp.digisellerRemoveContent(row.externalId, unit.contentId);
+      let sold = false;
+      try {
+        await mp.digisellerRemoveContent(row.externalId, unit.contentId);
+      } catch (e) {
+        if (!isSoldContentError(e)) throw e;
+        sold = true;
+      }
       await MarketplaceListing.updateOne(
         { _id: row._id },
         { $pull: { units: { contentId: String(unit.contentId) } } },
       );
       await detachAccountFromRow(row, accId, login);
-      detached.push(label + " (delivery unit removed)");
+      detached.push(
+        label +
+          (sold
+            ? " (delivery unit already sold — reference dropped)"
+            : " (delivery unit removed)"),
+      );
       try {
         await guardian.feedOne(String(row._id));
       } catch {
@@ -308,4 +335,5 @@ module.exports = {
   detachAccountFromRow,
   detachAccountFromListing,
   zeusxDetachPlan,
+  isSoldContentError,
 };
