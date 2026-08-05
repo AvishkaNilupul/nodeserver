@@ -15,11 +15,18 @@
 //                 republished with a fresh account to keep the sale slot).
 //   digiseller  — one delivery "unit" (contentId) per account.
 //   ggsel       — row-tracked; the guardian auto-feed reconciles the platform.
+//
+// On the quantity platforms a unit whose content_id we never recorded cannot be
+// deleted (see utils/listingRepublish.js). Detaching our bookkeeping alone would
+// then leave the credentials on sale while the row claims the listing is clean —
+// tolerable when the account merely changed hands, fatal when the account no
+// longer exists. `hardRepublish` is how the caller says which case it has.
 const MarketplaceListing = require("../models/MarketplaceListing");
 const DropSet = require("../models/DropSet");
 const mp = require("./marketplaces");
 const guardian = require("./marketplaceGuardian");
 const gfFulfiller = require("./gameflipFulfiller");
+const { republishQtyListing } = require("./listingRepublish");
 const { buildSetGridImage } = require("./setImage");
 const fsp = require("fs").promises;
 
@@ -52,6 +59,11 @@ async function detachAccountFromRow(listing, accountId, login) {
 //   republish — after delisting a gameflip auto-delivery offer, publish a fresh
 //               one so the sale slot survives. Default true (mark-sold's
 //               behaviour); pass false to just take it down.
+//   hardRepublish — when the account's Plati/GGSel unit cannot be deleted
+//               individually, replace the whole product instead of only
+//               detaching the row. Default false: it costs the product's URL and
+//               its sales stats, so only a caller that knows the credentials are
+//               unusable (the suspension sweep, the "account gone" fix) asks.
 // Returns { detached: string[], warnings: string[] } — human-readable notes for
 // the caller to surface. Never throws for expected marketplace failures; those
 // become warnings so a partial detach still reports what it could do.
@@ -182,7 +194,28 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       row.marketplace === "ggsel"
     ) {
       await detachAccountFromRow(row, accId, login);
+      if (opts.hardRepublish) {
+        const res = await republishQtyListing(row, { reason });
+        for (const w of res.warnings) warnings.push(w);
+        if (res.delisted) {
+          detached.push(
+            label +
+              (res.replacement
+                ? " (replaced by " + res.replacement.externalId + ")"
+                : " (delisted)"),
+          );
+        }
+        return { detached, warnings };
+      }
       detached.push(label + " (detached)");
+      warnings.push(
+        label +
+          ": " +
+          (login || "the account") +
+          "'s delivery unit stays on the product — neither platform can delete a " +
+          "unit whose id we never recorded, so remove it there manually if it " +
+          "must not reach a buyer.",
+      );
       try {
         await guardian.feedOne(String(row._id));
       } catch {

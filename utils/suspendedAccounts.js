@@ -427,6 +427,9 @@ async function retireFromLiveListings({ onProgress } = {}) {
       const res = await detachAccountFromListing(row, acc, {
         reason: "suspended on Twitch",
         republish: true,
+        // The login is gone, so a unit we cannot delete individually is worth
+        // less than the product it sits in: replace the whole product.
+        hardRepublish: true,
       });
       for (const d of res.detached) {
         report.detached++;
