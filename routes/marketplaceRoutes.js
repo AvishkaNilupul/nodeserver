@@ -1154,9 +1154,28 @@ router.delete(
           await mp.zeusxDelist(row.externalId);
         }
       } catch (err) {
-        row.lastError = err.message.slice(0, 400);
-        await row.save();
-        return res.json({ success: false, message: err.message });
+        // Already gone or already sold is not a failed delist: the listing is off
+        // sale, which is what was asked. Resolving the row here is what keeps it
+        // from sitting active with an error forever, holding an account reserved.
+        const outcome = mp.delistOutcome(err.message);
+        if (!outcome) {
+          row.lastError = err.message.slice(0, 400);
+          await row.save();
+          return res.json({ success: false, message: err.message });
+        }
+        // Sold: the buyer holds that account, so it is NOT handed back to stock.
+        if (outcome === "sold") {
+          row.status = "sold";
+          row.qtyRemaining = 0;
+          row.lastError = "";
+          await row.save();
+          return res.json({
+            success: true,
+            message: "Already sold on the marketplace — marked sold here",
+          });
+        }
+        row.note =
+          (row.note ? row.note + " " : "") + "gone from the marketplace";
       }
       row.status = "delisted";
       row.lastError = "";
