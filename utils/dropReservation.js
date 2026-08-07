@@ -21,6 +21,37 @@ function setKeys(set) {
   return [...new Set((set.items || []).map((i) => i.itemKey).filter(Boolean))];
 }
 
+// Pure rule behind the guard below: may this claim take the set, given the
+// reservation rows already held for it on the same credentials? Only the owner
+// re-reserving its own drops (`reclaim`) may proceed through a live one.
+function claimAllowed(heldRows, opts = {}) {
+  if (opts.reclaim) return true;
+  return !(heldRows || []).some((r) => r && r.soldAt);
+}
+
+// Every login that names the same Twitch account as `accountId`: the pool has
+// been fed the same account twice in places, so one Twitch login can have more
+// than one BotAccount row (and therefore its own, separate drop rows). A
+// reservation only means "these credentials are committed" if it covers all of
+// them.
+async function twinAccountIds(accountId) {
+  const me = await BotAccount.findById(accountId, { login: 1 }).lean();
+  const login = String((me && me.login) || "").trim();
+  if (!login) return [String(accountId)];
+  const rows = await BotAccount.find(
+    {
+      login: new RegExp(
+        "^" + login.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+        "i",
+      ),
+    },
+    { _id: 1 },
+  ).lean();
+  const ids = rows.map((r) => String(r._id));
+  if (!ids.includes(String(accountId))) ids.push(String(accountId));
+  return ids;
+}
+
 // Atomically reserve every one of `set`'s drops on one account. Marks only the
 // unconnected + unreserved rows for the set's itemKeys. If a concurrent claim
 // leaves any of the set's keys unreserved-by-us, the partial reservation is
@@ -38,6 +69,30 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
     soldSetId: String(opts.soldSetId || set._id || ""),
     soldBulkOrderId: opts.soldBulkOrderId || "",
   };
+  // A drop-grain check alone is not enough for a sale that hands over WHOLE
+  // CREDENTIALS: a bot that keeps farming the same campaign adds fresh copies
+  // of the set's items, and those unreserved copies would let a second
+  // marketplace claim an account whose login is already committed to a live
+  // listing for this very set — both buyers then get the same account. So one
+  // set is claimable once per account (across its duplicate rows); a different
+  // set on the same account stays sellable, which is the point of per-game
+  // reservation. `opts.reclaim` is the one exception: the guardian's
+  // claim-mismatch fix re-reserves the drops of a listing that already owns
+  // them.
+  if (!opts.reclaim) {
+    const twins = await twinAccountIds(accountId);
+    const held = await DropLog.find(
+      {
+        account: { $in: twins },
+        soldSetId: stamp.soldSetId,
+        soldAt: { $ne: null },
+      },
+      { soldAt: 1, soldToUsername: 1 },
+    )
+      .limit(1)
+      .lean();
+    if (!claimAllowed(held, opts)) return false;
+  }
   await DropLog.updateMany(
     { account: accountId, itemKey: { $in: keys }, ...AVAILABLE_DROP },
     { $set: stamp },
@@ -179,6 +234,8 @@ async function releaseByBulkOrder(soldBulkOrderId) {
 module.exports = {
   AVAILABLE_DROP,
   setKeys,
+  claimAllowed,
+  twinAccountIds,
   reserveSetOnAccount,
   releaseAccountsForTag,
   releaseSetForAccounts,

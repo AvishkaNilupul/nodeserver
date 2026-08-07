@@ -10,15 +10,25 @@ const assert = require("node:assert");
 const { fixPlanFor } = require("../utils/guardianFixes");
 
 const DS = (units = []) => ({
-  _id: "l1", marketplace: "digiseller", externalId: "5972936",
-  status: "active", qtyTarget: 10, units,
+  _id: "l1",
+  marketplace: "digiseller",
+  externalId: "5972936",
+  status: "active",
+  qtyTarget: 10,
+  units,
 });
 const finding = (over = {}) => ({
-  status: "open", type: "dead-token", accountId: "acc1", ...over,
+  status: "open",
+  type: "dead-token",
+  accountId: "acc1",
+  ...over,
 });
 
 test("dead-token on Digiseller offers a fix when the unit was recorded", () => {
-  const plan = fixPlanFor(finding(), DS([{ accountId: "acc1", contentId: "299264577" }]));
+  const plan = fixPlanFor(
+    finding(),
+    DS([{ accountId: "acc1", contentId: "299264577" }]),
+  );
   assert.ok(plan);
   assert.strictEqual(plan.action, "replace");
   assert.strictEqual(plan.label, "Replace unit");
@@ -34,17 +44,31 @@ test("dead-token on Digiseller offers NOTHING when the unit was never recorded",
 });
 
 test("a recorded unit with no content_id is not targetable", () => {
-  assert.strictEqual(fixPlanFor(finding(), DS([{ accountId: "acc1", contentId: "" }])), null);
+  assert.strictEqual(
+    fixPlanFor(finding(), DS([{ accountId: "acc1", contentId: "" }])),
+    null,
+  );
 });
 
 test("GGSel dead-token never offers a fix — its API rejects every delete", () => {
-  const gg = { _id: "l2", marketplace: "ggsel", externalId: "102582094",
-    status: "active", qtyTarget: 10, units: [{ accountId: "acc1", contentId: "15450067" }] };
+  const gg = {
+    _id: "l2",
+    marketplace: "ggsel",
+    externalId: "102582094",
+    status: "active",
+    qtyTarget: 10,
+    units: [{ accountId: "acc1", contentId: "15450067" }],
+  };
   assert.strictEqual(fixPlanFor(finding(), gg), null);
 });
 
 test("FunPay dead-token keeps its existing replace path", () => {
-  const fp = { _id: "l3", marketplace: "funpay", externalId: "73358473", status: "active" };
+  const fp = {
+    _id: "l3",
+    marketplace: "funpay",
+    externalId: "73358473",
+    status: "active",
+  };
   const plan = fixPlanFor(finding(), fp);
   assert.ok(plan);
   assert.strictEqual(plan.action, "replace");
@@ -62,10 +86,44 @@ test("a finding that is not open is never fixed", () => {
   assert.strictEqual(fixPlanFor(finding({ status: "resolved" }), lst), null);
 });
 
-test("duplicate-account still has no automated plan", () => {
-  // Documents current behaviour: these need a human to pick which side to drop.
-  assert.strictEqual(
-    fixPlanFor(finding({ type: "duplicate-account" }), DS([])),
-    null,
-  );
+test("duplicate-account offers dedupe once both listings are known", () => {
+  const dup = finding({
+    type: "duplicate-account",
+    accountLogin: "jhono5c2v9",
+  });
+  const gf = {
+    _id: "l9",
+    marketplace: "gameflip",
+    externalId: "6434f071",
+    status: "active",
+  };
+  const plan = fixPlanFor(dup, null, [DS([]), gf]);
+  assert.ok(plan);
+  assert.strictEqual(plan.action, "dedupe");
+});
+
+test("duplicate-account is not fixable once only one listing is still live", () => {
+  const dup = finding({
+    type: "duplicate-account",
+    accountLogin: "jhono5c2v9",
+  });
+  const gone = { _id: "l9", marketplace: "gameflip", status: "delisted" };
+  assert.strictEqual(fixPlanFor(dup, null, [DS([]), gone]), null);
+  // …and with no listings recorded at all (findings raised before this shipped).
+  assert.strictEqual(fixPlanFor(dup, null, []), null);
+});
+
+test("duplicate-account needs an account to act on", () => {
+  const dup = finding({
+    type: "duplicate-account",
+    accountId: "",
+    accountLogin: "",
+  });
+  const gf = {
+    _id: "l9",
+    marketplace: "gameflip",
+    externalId: "6434f071",
+    status: "active",
+  };
+  assert.strictEqual(fixPlanFor(dup, null, [DS([]), gf]), null);
 });

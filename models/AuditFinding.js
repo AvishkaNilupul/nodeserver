@@ -25,6 +25,14 @@ const auditFindingSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    // Extra listings a finding spans (duplicate-account names two or more of
+    // them; `listing` above stays the single primary reference).
+    listings: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "MarketplaceListing",
+      },
+    ],
     accountId: { type: String, default: "" },
     accountLogin: { type: String, default: "" },
     message: { type: String, default: "" },

@@ -65,6 +65,7 @@ async function upsertFinding(f) {
         severity: f.severity || "medium",
         marketplace: f.marketplace || "",
         listing: f.listing || null,
+        listings: f.listings || [],
         accountId: f.accountId || "",
         accountLogin: f.accountLogin || "",
         message: f.message || "",
@@ -147,6 +148,27 @@ async function runChecks(rows, seenKeys) {
     found++;
   };
 
+  // The login recorded next to `id` on any of `listings`: units carry the pair
+  // directly, and the top-level CSVs are positional (accountId[i] <-> the i-th
+  // login).
+  const loginForId = (listings, id) => {
+    for (const l of listings) {
+      for (const u of l.units || []) {
+        if (u && String(u.accountId) === String(id) && u.login) {
+          return String(u.login);
+        }
+      }
+      const ids = accountIdsOf(l);
+      const logins = String(l.accountLogin || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const at = ids.indexOf(String(id));
+      if (at >= 0 && logins[at]) return logins[at];
+    }
+    return "";
+  };
+
   // Account -> the active listings it is attached to (by id and by login so
   // manually-fed accounts are caught too).
   const byAccount = new Map();
@@ -167,12 +189,22 @@ async function runChecks(rows, seenKeys) {
 
   // 1. Same account on more than one live listing / platform.
   const dupSeen = new Set();
+  const dupPairs = new Set();
   const dupCheck = async (key, listings, label) => {
     if (listings.length < 2) return;
     const uniq = [...new Set(listings.map((l) => String(l._id)))];
     if (uniq.length < 2) return;
     if (dupSeen.has(key)) return;
     dupSeen.add(key);
+    // The by-id and by-login passes see the same conflict whenever both rows
+    // track the account with its id, and raised two findings for it. One
+    // real-world conflict, one finding: the by-id pass runs first and its
+    // accountId makes the fix actionable, so the by-login twin is dropped
+    // (and any earlier duplicate auto-resolves for not being seen again).
+    const pairKey =
+      uniq.slice().sort().join(",") + "|" + String(label || key).toLowerCase();
+    if (dupPairs.has(pairKey)) return;
+    dupPairs.add(pairKey);
     const where = listings
       .map((l) => l.marketplace + " " + (l.externalId || ""))
       .join(", ");
@@ -182,6 +214,10 @@ async function runChecks(rows, seenKeys) {
       dedupeKey: "dup:" + key,
       accountId: byAccount.has(key) ? key : "",
       accountLogin: label,
+      // The conflicting rows, so the Integrity tab can offer the one-click fix
+      // (this finding is about an account, not about one listing, so `listing`
+      // alone cannot say where the account has to come off).
+      listings: uniq,
       message:
         "Account " +
         (label || key) +
@@ -206,7 +242,10 @@ async function runChecks(rows, seenKeys) {
     return m;
   };
   for (const [id, listings] of byAccount) {
-    const login = (listings[0].accountLogin || "").split(",")[0].trim();
+    // The login that goes with THIS account id, not simply the first login on
+    // the first listing: a Plati/GGSel row tracks several accounts, so taking
+    // listings[0]'s first login named the wrong account in the finding.
+    const login = loginForId(listings, id);
     for (const [setId, ls] of bySet(listings)) {
       await dupCheck(id + "|" + setId, ls, login);
     }

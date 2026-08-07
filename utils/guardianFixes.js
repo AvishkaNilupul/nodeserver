@@ -18,6 +18,10 @@
 //                      severity "likely a completed sale" findings).
 //   refeed             run the auto-feed for one listing right now
 //                      (restock-failed / stock-unknown).
+//   dedupe             one account on two live listings for the same set: take
+//                      it off the listing that claimed it LAST (the earlier
+//                      claim is the one a buyer may already have paid for) and
+//                      let that listing refill from healthy stock.
 //
 // fixPlanFor() is the pure "is this finding fixable, and how" gate — the
 // findings API uses it to label buttons, and fixFinding() re-derives it
@@ -48,6 +52,22 @@ function splitIds(s) {
     .filter(Boolean);
 }
 
+// When `accountId`/`login` was attached to `row`: a Plati/GGSel unit records it
+// per unit, everything else claimed the account when the row was created.
+function claimedAtOn(row, accountId, login) {
+  const lower = String(login || "")
+    .trim()
+    .toLowerCase();
+  const unit = (row.units || []).find(
+    (u) =>
+      u &&
+      ((accountId && String(u.accountId) === String(accountId)) ||
+        (lower && String(u.login || "").toLowerCase() === lower)),
+  );
+  const at = (unit && unit.addedAt) || row.createdAt;
+  return at ? new Date(at).getTime() : 0;
+}
+
 function isQtyListing(lst) {
   return (
     (lst.marketplace === "digiseller" || lst.marketplace === "ggsel") &&
@@ -56,8 +76,10 @@ function isQtyListing(lst) {
 }
 
 // Pure: which fix (if any) applies to a finding. `listing` is the joined
-// MarketplaceListing row (or null when the finding has none / it was deleted).
-function fixPlanFor(f, listing) {
+// MarketplaceListing row (or null when the finding has none / it was deleted);
+// `listings` are the joined rows of f.listings, for findings that span several
+// (duplicate-account).
+function fixPlanFor(f, listing, listings) {
   if (!f || f.status !== "open") return null;
   const lst = listing || null;
   const active = !!(lst && lst.status === "active");
@@ -101,7 +123,8 @@ function fixPlanFor(f, listing) {
       // every delete shape is rejected (404 / INVALID_OPERATION).
       if (active && f.accountId && lst.marketplace === "digiseller") {
         const unit = (lst.units || []).find(
-          (u) => u && String(u.accountId) === String(f.accountId) && u.contentId,
+          (u) =>
+            u && String(u.accountId) === String(f.accountId) && u.contentId,
         );
         if (unit) {
           return {
@@ -132,6 +155,21 @@ function fixPlanFor(f, listing) {
         };
       }
       return null;
+    case "duplicate-account": {
+      // The account, not one listing, is the subject here: the fix needs every
+      // row it is live on, which the guardian records on the finding.
+      const live = (listings || []).filter((l) => l && l.status === "active");
+      if (live.length < 2) return null;
+      if (!f.accountId && !f.accountLogin) return null;
+      return {
+        action: "dedupe",
+        label: "Free the newer listing",
+        hint:
+          "Keep the listing that claimed this account first and take it off " +
+          "the later one(s), which then refill from healthy stock — so only " +
+          "one buyer can ever receive these credentials.",
+      };
+    }
     case "claim-mismatch":
       if (active && f.accountId) {
         return {
@@ -164,7 +202,9 @@ async function swapOnListing(listing, badId, badLogin, fresh) {
   const ids = splitIds(listing.accountId).filter(
     (x) => x !== String(badId || ""),
   );
-  const badLower = String(badLogin || "").trim().toLowerCase();
+  const badLower = String(badLogin || "")
+    .trim()
+    .toLowerCase();
   const logins = splitIds(listing.accountLogin).filter(
     (x) => !badLower || x.toLowerCase() !== badLower,
   );
@@ -275,11 +315,15 @@ async function fixReplace(f, listing) {
   const fresh = await claimFreshAccount(set, f.accountId);
   let upd;
   try {
-    upd = await mp.funpayUpdateSecrets(listing.externalId, listing.externalNode, {
-      removeLogins: badLogins,
-      addLines: fresh ? [fresh.line] : [],
-      activate: listing.status === "active",
-    });
+    upd = await mp.funpayUpdateSecrets(
+      listing.externalId,
+      listing.externalNode,
+      {
+        removeLogins: badLogins,
+        addLines: fresh ? [fresh.line] : [],
+        activate: listing.status === "active",
+      },
+    );
   } catch (e) {
     if (fresh) await fpFulfiller.releaseAccounts([fresh.accountId]);
     throw e;
@@ -340,8 +384,9 @@ async function fixReplace(f, listing) {
       "'s line from FunPay " +
       listing.externalId +
       "; no unsold account holds this bundle, so nothing replaced it" +
-      (upd.pool === 0 ? " — the offer is now off sale (empty pool)." :
-        " (pool now " + upd.pool + " line(s)).");
+      (upd.pool === 0
+        ? " — the offer is now off sale (empty pool)."
+        : " (pool now " + upd.pool + " line(s)).");
   }
   if (f.type === "dead-token") {
     msg +=
@@ -356,14 +401,16 @@ async function fixReplace(f, listing) {
 async function fixReserve(f, listing) {
   const set = await DropSet.findById(listing.set).lean();
   if (!set) throw httpError(400, "The listing's drop set no longer exists");
-  const tag =
-    guardian.CLAIM_TAGS[listing.marketplace] || listing.marketplace;
+  const tag = guardian.CLAIM_TAGS[listing.marketplace] || listing.marketplace;
   // Clear any partial rows we already hold so the re-reserve is all-or-
   // nothing (reserveSetOnAccount only counts rows it stamped this instant).
   await releaseSetForAccounts([f.accountId], String(set._id), tag);
   const ok = await reserveSetOnAccount(f.accountId, set, {
     soldToUsername: tag,
     soldSetId: String(set._id),
+    // This listing is the rightful owner of these drops — re-reserving its own
+    // set is not the double-claim the reservation guard is there to stop.
+    reclaim: true,
   });
   if (ok) {
     return (
@@ -431,6 +478,79 @@ async function fixRetire(f, listing) {
   );
 }
 
+// One account, two live listings for the same set. The earliest claim is the
+// one a buyer may already have paid against, so it keeps the account; every
+// later listing gives it up through the normal per-marketplace surgery (Gameflip
+// relists from live stock, a Plati/GGSel unit is deleted and auto-fed again).
+// The later listing's drop reservation goes back too, but only the one held
+// under ITS tag — the keeper's claim is never touched.
+async function fixDedupe(f, listings) {
+  const live = (listings || []).filter((l) => l && l.status === "active");
+  if (live.length < 2) {
+    throw httpError(
+      409,
+      "Only one of these listings is still active — nothing to separate.",
+    );
+  }
+  const login = String(f.accountLogin || "").trim();
+  const ordered = live
+    .map((l) => ({ row: l, at: claimedAtOn(l, f.accountId, login) }))
+    .sort((a, b) => a.at - b.at);
+  const keeper = ordered[0].row;
+  const { detachAccountFromListing } = require("./listingDetach");
+  const notes = [];
+  const warnings = [];
+  for (const { row } of ordered.slice(1)) {
+    // Each row may track the account under its own BotAccount row: the same
+    // login has been fed into the pool twice in places, and that is how the
+    // same credentials reached two listings in the first place.
+    const idOnRow =
+      splitIds(row.accountId).find((x) =>
+        f.accountId ? x === String(f.accountId) : false,
+      ) ||
+      (row.units || [])
+        .filter(
+          (u) =>
+            u &&
+            login &&
+            String(u.login || "").toLowerCase() === login.toLowerCase(),
+        )
+        .map((u) => String(u.accountId))[0] ||
+      String(f.accountId || "");
+    const res = await detachAccountFromListing(
+      row,
+      { _id: idOnRow, login },
+      { reason: "already on sale in another listing", republish: true },
+    );
+    for (const w of res.warnings) warnings.push(w);
+    for (const d of res.detached) notes.push(d);
+    if (res.detached.length && row.set) {
+      const tag = guardian.CLAIM_TAGS[row.marketplace] || row.marketplace;
+      await releaseSetForAccounts([idOnRow], String(row.set), tag).catch(
+        () => {},
+      );
+    }
+  }
+  if (!notes.length) {
+    throw httpError(
+      409,
+      warnings.join(" ") ||
+        "Could not take the account off the later listing — remove it on the " +
+          "marketplace manually.",
+    );
+  }
+  return (
+    (login || f.accountId) +
+    " now sells only through " +
+    keeper.marketplace +
+    " " +
+    (keeper.externalId || keeper._id) +
+    " (its earliest claim): " +
+    notes.join("; ") +
+    (warnings.length ? " — " + warnings.join("; ") : "")
+  );
+}
+
 async function fixRefeed(f, listing) {
   const fed = await guardian.feedOne(String(listing._id));
   if (fed > 0) {
@@ -464,7 +584,10 @@ async function fixFinding(id) {
   const listing = f.listing
     ? await MarketplaceListing.findById(f.listing).lean()
     : null;
-  const plan = fixPlanFor(f, listing);
+  const spans = (f.listings || []).length
+    ? await MarketplaceListing.find({ _id: { $in: f.listings } }).lean()
+    : [];
+  const plan = fixPlanFor(f, listing, spans);
   if (!plan) {
     throw httpError(
       400,
@@ -476,6 +599,7 @@ async function fixFinding(id) {
   else if (plan.action === "reserve") message = await fixReserve(f, listing);
   else if (plan.action === "detach") message = await fixDetach(f, listing);
   else if (plan.action === "retire") message = await fixRetire(f, listing);
+  else if (plan.action === "dedupe") message = await fixDedupe(f, spans);
   else message = await fixRefeed(f, listing);
 
   f.status = "resolved";
@@ -500,4 +624,4 @@ async function fixFinding(id) {
   return { message, action: plan.action };
 }
 
-module.exports = { fixPlanFor, fixFinding };
+module.exports = { fixPlanFor, fixFinding, claimedAtOn };

@@ -1317,7 +1317,16 @@ router.get(
       // Join the referenced listings once, so the tab can group findings per
       // listing and label which ones have a one-click fix.
       const listingIds = [
-        ...new Set(rows.map((f) => String(f.listing || "")).filter(Boolean)),
+        ...new Set(
+          rows
+            .flatMap((f) => [
+              String(f.listing || ""),
+              // duplicate-account findings name every row the account is live
+              // on; fixPlanFor needs them to offer the one-click fix.
+              ...(f.listings || []).map(String),
+            ])
+            .filter(Boolean),
+        ),
       ];
       const listings = listingIds.length
         ? await MarketplaceListing.find(
@@ -1329,6 +1338,7 @@ router.get(
               url: 1,
               status: 1,
               qtyTarget: 1,
+              createdAt: 1,
               // fixPlanFor needs these to decide whether a dead-token unit on
               // a Digiseller product can actually be targeted individually.
               units: 1,
@@ -1357,7 +1367,13 @@ router.get(
                   qtyTarget: lst.qtyTarget,
                 }
               : null,
-            fix: guardianFixes.fixPlanFor(f, lst),
+            fix: guardianFixes.fixPlanFor(
+              f,
+              lst,
+              (f.listings || [])
+                .map((id) => lmap.get(String(id)))
+                .filter(Boolean),
+            ),
             accountId: f.accountId,
             accountLogin: f.accountLogin,
             message: f.message,
