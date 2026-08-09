@@ -310,6 +310,63 @@ router.get("/renter-drops", requireSuperadmin, async (req, res) => {
   }
 });
 
+// Look up a Twitch account's stored client token by login, across everything
+// the server already knows: the operator's bot index, other renters'
+// inventories, and the account pool. Lets the manual-add form skip the token
+// field when the account is already on the server. Never returns the token
+// itself — only where it was found; the add route resolves it server-side.
+router.get("/renters/account-token", requireSuperadmin, async (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim();
+    if (!username) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Username required" });
+    }
+    const found = await findStoredToken(username);
+    res.json({
+      success: true,
+      found: !!found,
+      source: found ? found.source : null,
+    });
+  } catch (err) {
+    console.error("account token lookup error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Shared login → stored-token resolver (used by the lookup above and by
+// manual-add when the token field is left empty).
+async function findStoredToken(username) {
+  const lower = username.toLowerCase();
+  const loginRe = new RegExp(
+    "^" + lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+    "i",
+  );
+  const bot = await BotAccount.findOne(
+    { login: loginRe, clientSecret: { $nin: ["", null] } },
+    { clientSecret: 1 },
+  ).lean();
+  if (bot) return { token: bot.clientSecret, source: "your bot index" };
+  const rent = await RenterAccount.findOne(
+    { login: loginRe, clientSecret: { $nin: ["", null] } },
+    { clientSecret: 1, renter: 1 },
+  ).lean();
+  if (rent) {
+    const owner = await Renter.findById(rent.renter, { username: 1 }).lean();
+    return {
+      token: rent.clientSecret,
+      source: owner ? "renter " + owner.username : "another renter",
+    };
+  }
+  const pool = await AvailableAccount.findOne(
+    { usernameLower: lower, clientSecret: { $nin: ["", null] } },
+    { clientSecret: 1 },
+  ).lean();
+  if (pool) return { token: pool.clientSecret, source: "the account pool" };
+  return null;
+}
+
 // CREATE a renter. Either share an existing config (botHost/botFile) or, with
 // newBotHost, provision a fresh config slot on that host in the same step.
 router.post("/renters", requireSuperadmin, async (req, res) => {
@@ -1004,7 +1061,17 @@ router.post(
       const body = req.body || {};
       const username = String(body.username || "").trim();
       const password = String(body.password || "");
-      const token = String(body.token || body.clientSecret || "").trim();
+      let token = String(body.token || body.clientSecret || "").trim();
+      // No token pasted? Use the one the server already stores for this login
+      // (bot index / other renters / account pool).
+      let tokenNote = "";
+      if (username && !token) {
+        const stored = await findStoredToken(username);
+        if (stored) {
+          token = stored.token;
+          tokenNote = "Used the client token already stored (" + stored.source + ").";
+        }
+      }
       // Optional per-account farming window ("farm this one for 15 days").
       const farmDays = Math.floor(Number(body.farmDays));
       const farmUntil = body.farmUntil
@@ -1020,7 +1087,9 @@ router.post(
       if (!username || !token) {
         return res.status(400).json({
           success: false,
-          message: "Username and client token are required",
+          message: username
+            ? "No stored client token found for that username — paste it manually"
+            : "Username is required",
         });
       }
       const renter = await Renter.findById(req.params.id);
@@ -1069,6 +1138,7 @@ router.post(
       }
 
       const notes = [];
+      if (tokenNote) notes.push(tokenNote);
 
       // Pull the account off any ACTIVE marketplace listing that still promises
       // to deliver it — but only this one account, never the whole listing. On
