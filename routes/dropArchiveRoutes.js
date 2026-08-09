@@ -2350,11 +2350,62 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
 });
 
 // Delete a set.
+//
+// Reservations are keyed on soldSetId, so deleting a set that still owns any
+// strands them: the drops read as unavailable forever and no code path can
+// free them, because every release needs the set that made them. Live prod
+// carries 16,445 unredeemed drops frozen this way behind six deleted sets,
+// and two of those sets still have ACTIVE listings selling a product whose
+// definition is gone.
+//
+// They cannot simply be released here — a marketplace reservation looks the
+// same whether the unit is still on the shelf or already sold and waiting for
+// the buyer to redeem, and freeing the latter hands that account to a second
+// buyer. So deletion is refused while anything is outstanding: delisting
+// releases the unsold drops through the paths that do know which is which,
+// and the set then deletes cleanly. Redeemed reservations are settled history
+// and never block.
 router.delete(
   "/drops-archive/sets/:id",
   requireSuperadmin,
   async (req, res) => {
     try {
+      const live = await MarketplaceListing.find({
+        set: req.params.id,
+        status: "active",
+      })
+        .select("marketplace externalId")
+        .lean();
+      if (live.length) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Delist first: " +
+            live.length +
+            " live listing(s) still sell this set (" +
+            live
+              .slice(0, 4)
+              .map((l) => l.marketplace + " " + l.externalId)
+              .join(", ") +
+            (live.length > 4 ? ", …" : "") +
+            "). Deleting it now would freeze their reserved drops forever.",
+        });
+      }
+      const frozen = await DropLog.countDocuments({
+        soldSetId: String(req.params.id),
+        soldAt: { $ne: null },
+        connected: { $ne: true },
+      });
+      if (frozen) {
+        return res.status(409).json({
+          success: false,
+          message:
+            frozen +
+            " unredeemed drop(s) are still reserved for this set. Release " +
+            "them (or let the sales they belong to complete) before " +
+            "deleting it, or they can never be sold again.",
+        });
+      }
       await DropSet.findByIdAndDelete(req.params.id);
       res.json({ success: true });
     } catch (err) {

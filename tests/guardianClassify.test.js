@@ -16,6 +16,7 @@ function logs(specs) {
     name: s.name || s.key,
     soldAt: s.by === null || s.by === undefined ? null : new Date(),
     soldToUsername: s.by || "",
+    soldSetId: s.forSet || "",
     connected: !!s.connected,
   }));
 }
@@ -293,4 +294,54 @@ test("a copy redeemed under someone else's tag still burns the unit", () => {
     "ggsel",
   );
   assert.equal(r.redeemed.delivered, false);
+});
+
+// A conflict says "another listing holds these drops", but WHICH one decides
+// what the owner does about it: a rival claim on the SAME set is two listings
+// double-selling one unit, while a claim from a DIFFERENT set means this set
+// was edited to include drops the account had already committed elsewhere.
+// Live prod's two remaining conflicts are both the second kind, and reporting
+// them without naming the product left nothing to act on.
+test("a conflict carries the set that actually holds the drops", () => {
+  const r = classify(
+    ["gw4", "charity"],
+    logs([
+      { key: "gw4", by: "ggsel", forSet: "setA" },
+      { key: "charity", by: "digiseller", forSet: "setB" },
+    ]),
+    "ggsel",
+  );
+  assert.equal(r.reservation.kind, "conflict");
+  assert.equal(r.reservation.otherTag, "digiseller");
+  assert.equal(r.reservation.otherSet, "setB");
+  assert.equal(r.reservation.held, 1);
+  assert.equal(r.reservation.total, 2);
+});
+
+test("the reported clash is the one that names a rival, not the first gap", () => {
+  // "a" is merely unreserved; the actionable fact is that "b" is held by ggsel.
+  const r = classify(
+    ["a", "b"],
+    logs([
+      { key: "a", by: null },
+      { key: "b", by: "ggsel", forSet: "setB" },
+    ]),
+    "gameflip",
+  );
+  assert.equal(r.reservation.kind, "conflict");
+  assert.equal(r.reservation.otherTag, "ggsel");
+  assert.equal(r.reservation.otherSet, "setB");
+});
+
+test("a unit with no rival claim reports no rival set", () => {
+  const r = classify(
+    ["a", "b"],
+    logs([
+      { key: "a", by: "ggsel", forSet: "setA" },
+      { key: "b", by: null },
+    ]),
+    "ggsel",
+  );
+  assert.equal(r.reservation.kind, "partial");
+  assert.equal(r.reservation.otherSet, "");
 });

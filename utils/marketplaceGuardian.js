@@ -74,13 +74,21 @@ function summarizeDrops(rows, tag) {
     const s = out.get(d.itemKey) || {
       held: false,
       otherTag: "",
+      otherSet: "",
       connected: false,
       connectedForeign: false,
       name: "",
     };
     const by = reservedBy(d);
     if (by === tag) s.held = true;
-    else if (by && !s.otherTag) s.otherTag = by;
+    else if (by && !s.otherTag) {
+      s.otherTag = by;
+      // WHICH product holds it decides what the owner has to do, so carry the
+      // set id: a rival claim on the same set is two listings double-selling
+      // one unit, while a claim from a different set means this set was edited
+      // to include drops the account had already committed to another product.
+      s.otherSet = String(d.soldSetId || "");
+    }
     if (d.connected) {
       s.connected = true;
       if (by !== tag) s.connectedForeign = true;
@@ -96,13 +104,15 @@ function classifyUnit(uniqKeys, drops) {
   const held = uniqKeys.filter((k) => at(k) && at(k).held).length;
   let reservation = null;
   if (held !== uniqKeys.length) {
-    const otherTag = uniqKeys
-      .map((k) => (at(k) && !at(k).held ? at(k).otherTag : ""))
-      .find(Boolean);
+    const clash = uniqKeys
+      .map((k) => (at(k) && !at(k).held ? at(k) : null))
+      .find((s) => s && s.otherTag);
+    const otherTag = clash ? clash.otherTag : "";
     reservation = {
       kind: otherTag ? "conflict" : held ? "partial" : "released",
       held,
       total: uniqKeys.length,
+      otherSet: clash ? clash.otherSet : "",
       // Never farmed here, so no reservation can conjure it: the unit cannot
       // deliver what the listing advertises.
       absent: uniqKeys.filter((k) => !drops.has(k)).length,
@@ -241,6 +251,7 @@ const CONDITION_TYPES = [
   "dead-token",
   "account-gone",
   "stock-unknown",
+  "orphaned-reservation",
 ];
 
 async function autoResolveStale(seenKeys) {
@@ -417,6 +428,7 @@ async function runChecks(rows, seenKeys) {
         itemKey: 1,
         soldAt: 1,
         soldToUsername: 1,
+        soldSetId: 1,
         connected: 1,
         name: 1,
       },
@@ -438,7 +450,23 @@ async function runChecks(rows, seenKeys) {
       // 2. Per-game reservation: every one of this set's drops on each
       // attached account should be reserved by THIS listing's tag.
       if (reservation) {
-        const { kind, held, total, absent, otherTag } = reservation;
+        const { kind, held, total, absent, otherTag, otherSet } = reservation;
+        // Naming the product that holds the drops is the difference between a
+        // finding the owner can act on and one they have to go dig out by
+        // hand. A set id with no set behind it is itself the answer: the drops
+        // are frozen by a product that no longer exists.
+        const rival =
+          otherSet && String(otherSet) !== String(row.set)
+            ? setMap.get(String(otherSet)) ||
+              (await DropSet.findById(otherSet, { name: 1 }).lean())
+            : null;
+        const rivalName = otherSet
+          ? String(otherSet) === String(row.set)
+            ? "this same set"
+            : rival
+              ? '"' + rival.name + '"'
+              : "a set that has since been DELETED"
+          : "";
         await flag({
           type: "claim-mismatch",
           // Only a cross-tag conflict or a wholly-unreserved unit is about to
@@ -458,9 +486,16 @@ async function runChecks(rows, seenKeys) {
                 label +
                 " on a live " +
                 row.marketplace +
-                " listing: this game's drops are reserved as \"" +
+                " listing: " +
+                (total - held) +
+                " of this set's " +
+                total +
+                ' drops are reserved as "' +
                 otherTag +
-                '" — another listing grabbed the same drops.'
+                '"' +
+                (rivalName ? " for " + rivalName : "") +
+                " — the same drops are committed twice, so whichever sells " +
+                "first leaves the other buyer with nothing."
               : kind === "released"
                 ? "Account " +
                   label +
@@ -516,7 +551,58 @@ async function runChecks(rows, seenKeys) {
       });
     }
   }
+
+  // 4. Drops reserved for a set that no longer exists. Every release is keyed
+  // on soldSetId, so once the set is gone nothing can ever hand these back:
+  // they read as unavailable to every listing, forever, and until now did so
+  // completely silently. Reporting is all the guardian may do — a reservation
+  // looks the same whether the unit is still on the shelf or already sold and
+  // awaiting redemption, and freeing the latter would sell it twice.
+  found += await reportOrphanedReservations(flag);
   return found;
+}
+
+// Reservations whose set has been deleted, grouped by set: one finding each,
+// carrying the count so the size of the frozen inventory is visible.
+async function reportOrphanedReservations(flag) {
+  const referenced = await DropLog.distinct("soldSetId", {
+    soldAt: { $ne: null },
+    connected: { $ne: true },
+    soldSetId: { $nin: [null, ""] },
+  });
+  if (!referenced.length) return 0;
+  const alive = new Set(
+    (await DropSet.find({ _id: { $in: referenced } }, { _id: 1 }).lean()).map(
+      (s) => String(s._id),
+    ),
+  );
+  let n = 0;
+  for (const id of referenced) {
+    if (alive.has(String(id))) continue;
+    const frozen = await DropLog.countDocuments({
+      soldSetId: id,
+      soldAt: { $ne: null },
+      connected: { $ne: true },
+    });
+    if (!frozen) continue;
+    await flag({
+      type: "orphaned-reservation",
+      // Unsellable stock, but nothing is being mis-delivered to a buyer.
+      severity: "medium",
+      marketplace: "",
+      dedupeKey: "orphan-set:" + id,
+      message:
+        frozen +
+        " unredeemed drop(s) are still reserved for a drop set that was " +
+        "deleted (" +
+        id +
+        "). Nothing can sell or release them — the release path needs the " +
+        "set that made the reservation. Recover them from the Drop Archive " +
+        "once you have confirmed no buyer is waiting on them.",
+    });
+    n++;
+  }
+  return n;
 }
 
 // ------------------------------------------------------------------
