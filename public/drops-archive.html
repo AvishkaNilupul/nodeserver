@@ -2635,11 +2635,61 @@
               (a.container || a.configFile
                 ? '<span class="chip off">In bot config</span>'
                 : '<span class="chip">Removed from bots</span>') +
+              " " +
+              (a.hasPassword
+                ? '<button class="btn-ghost btn-sm" onclick="badCreds(\'' +
+                  esc(a.id) +
+                  "','" +
+                  esc(a.login || "") +
+                  '\', this)">Creds</button>'
+                : '<span style="color:var(--muted)">no password stored</span>') +
+              '<span id="badcreds-' +
+              esc(a.id) +
+              '"></span>' +
               "</td>" +
               "</tr>",
           )
           .join("");
       }
+
+      // Reveal the stored credentials for a dead account so it can be
+      // re-authed (the password/email stay on the server even after the
+      // account is pulled off the bots).
+      window.badCreds = async (id, login, btn) => {
+        const slot = $("badcreds-" + id);
+        if (!slot) return;
+        if (slot.innerHTML) {
+          slot.innerHTML = "";
+          if (btn) btn.textContent = "Creds";
+          return;
+        }
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "…";
+        }
+        try {
+          const d = await api("/drops-archive/accounts/" + id + "/password");
+          const acc = badAccounts.find((x) => String(x.id) === String(id)) || {};
+          slot.innerHTML =
+            ' <code id="badcredtxt-' +
+            esc(id) +
+            '">' +
+            esc(login) +
+            ":" +
+            esc(d.password || "") +
+            "</code>" +
+            (acc.credEmail ? " · <code>" + esc(acc.credEmail) + "</code>" : "") +
+            ' <button class="btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById(\'badcredtxt-' +
+            esc(id) +
+            "').textContent)\">Copy</button>";
+        } catch (e) {
+          slot.textContent = " " + e.message;
+        }
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "Hide";
+        }
+      };
 
       let badSearchTimer;
       $("badSearch").addEventListener("input", () => {
