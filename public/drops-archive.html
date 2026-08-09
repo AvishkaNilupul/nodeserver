@@ -1486,6 +1486,8 @@
             <option value="ok">Scanned OK</option>
             <option value="pending">Not scanned yet</option>
             <option value="error">Error</option>
+            <option value="token_invalid">Token invalid (re-auth)</option>
+            <option value="suspended">Suspended / gone from Twitch</option>
           </select>
           <select id="setSelect">
             <option value="">Pick a set to scan…</option>
@@ -1765,6 +1767,8 @@
         if (s === "token_invalid")
           return '<span class="chip off">Token invalid</span>';
         if (s === "error") return '<span class="chip off">Error</span>';
+        if (s === "suspended")
+          return '<span class="chip off">Suspended</span>';
         return '<span class="chip">Pending</span>';
       }
       function badge(state) {
@@ -2624,6 +2628,10 @@
               esc(timeAgo(a.lastScanAt)) +
               "</td>" +
               "<td>" +
+              (a.lastScanStatus === "suspended"
+                ? '<span class="chip off">Suspended — gone from Twitch</span>'
+                : '<span class="chip warn">Token invalid — needs re-auth</span>') +
+              " " +
               (a.container || a.configFile
                 ? '<span class="chip off">In bot config</span>'
                 : '<span class="chip">Removed from bots</span>') +
