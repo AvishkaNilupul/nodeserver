@@ -19,6 +19,17 @@ function normUsername(u) {
   return String(u || "").trim();
 }
 
+// Normalise a games list (array or comma-separated string) into a clean,
+// bounded string array — the shape stored on Renter.farmGames.
+function normGames(v) {
+  const list = Array.isArray(v) ? v : String(v || "").split(",");
+  return list
+    .map((g) => String(g).trim())
+    .filter(Boolean)
+    .slice(0, 50)
+    .map((g) => g.slice(0, 100));
+}
+
 // A lease is expired when accessEnd is set and in the past.
 function isExpired(renter) {
   return !!(renter && renter.accessEnd && new Date(renter.accessEnd) <= new Date());
@@ -41,6 +52,7 @@ function sanitizeRenter(renter) {
     status: renter.status,
     botHost: renter.botHost || "",
     botFile: renter.botFile || "",
+    farmGames: Array.isArray(renter.farmGames) ? renter.farmGames : [],
     maxAccounts: Number(renter.maxAccounts) || 0,
     accessStart: renter.accessStart || null,
     accessEnd: renter.accessEnd || null,
@@ -63,6 +75,7 @@ async function createRenter({
   displayName,
   botHost,
   botFile,
+  farmGames,
   maxAccounts,
   accessStart,
   accessEnd,
@@ -92,6 +105,7 @@ async function createRenter({
     displayName: String(displayName || "").slice(0, 80),
     botHost: String(botHost || ""),
     botFile: String(botFile || ""),
+    farmGames: normGames(farmGames),
     maxAccounts: Math.max(0, Math.floor(Number(maxAccounts) || 0)),
     accessStart: accessStart ? new Date(accessStart) : null,
     accessEnd: accessEnd ? new Date(accessEnd) : null,
@@ -147,6 +161,7 @@ function revealPassword(renter) {
 
 module.exports = {
   MIN_PASSWORD,
+  normGames,
   isExpired,
   isBlocked,
   sanitizeRenter,
