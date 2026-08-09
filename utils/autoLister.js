@@ -602,7 +602,9 @@ async function publishPlatiShare({
       url: r.url || "",
       title,
       description,
-      price,
+      // What Plati actually charges: the connector lifts anything under the
+      // platform floor, so the published price can differ from the model's.
+      price: r.price || price,
       status: "active",
       origin: "auto",
       note: "auto-farm: " + accounts.length + " account(s)",
@@ -681,7 +683,9 @@ function zeusxGameMapped(af, game) {
     .trim()
     .toLowerCase();
   if (!key) return false;
-  return Object.keys(map).some((k) => k === key || key.includes(k) || k.includes(key));
+  return Object.keys(map).some(
+    (k) => k === key || key.includes(k) || k.includes(key),
+  );
 }
 
 // ZeusX share. Two modes, chosen by the zeusxAutoDeliver switch:
@@ -736,7 +740,11 @@ async function publishZeusxShare({
         accountLogin: accounts.map((a) => a.login).join(", "),
         qtyTarget: accounts.length,
       });
-      return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
+      return {
+        externalId: r.externalId,
+        url: r.url || "",
+        qty: accounts.length,
+      };
     });
   }
 
@@ -776,7 +784,12 @@ async function publishZeusxShare({
       listed.push({ acc, r });
     } catch (e) {
       await releaseReservedForSet([acc], set).catch(() => {});
-      console.error("zeusx auto-delivery listing failed for", acc.login, "-", e.message);
+      console.error(
+        "zeusx auto-delivery listing failed for",
+        acc.login,
+        "-",
+        e.message,
+      );
     }
   }
   if (!listed.length) {

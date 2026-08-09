@@ -700,7 +700,9 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               url: r.url || "",
               title,
               description,
-              price: priceUsd,
+              // Plati lifts anything under its platform floor; record what it
+              // actually charges, not what was asked for.
+              price: r.price || priceUsd,
               status: "active",
               note: dsNote,
               autoDeliver: true,
@@ -945,7 +947,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           url: r.url || "",
           title,
           description,
-          price: priceUsd,
+          price: r.price || priceUsd,
           status: "active",
           note: r.note || "",
         });

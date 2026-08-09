@@ -907,13 +907,29 @@ async function digisellerTest() {
   return { ok: true, detail: "Token issued — connection OK" };
 }
 
-// Create a "unique product with fixed price". Returns { externalId, url }.
-async function digisellerPublish({ title, description, priceUsd, categories }) {
-  const token = await digisellerToken();
+// Plati enforces a ~100 RUB platform floor, about $1.28. Pricing under it is
+// not merely rejected per listing: publishing below the floor is what got the
+// whole seller account BLOCKED ("продавец товара заблокирован"), taking every
+// Plati stock read and the entire auto-feed for the marketplace down with it.
+// So the floor is enforced here, at the connector, where no caller can skip
+// it — the shared price model targets Gameflip's $0.75 floor and knows nothing
+// about which marketplace it is about to publish to.
+const DS_MIN_PRICE_USD = 1.28;
+
+function digisellerFloorPrice(priceUsd) {
   const price = Math.round(Number(priceUsd) * 100) / 100;
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("Digiseller needs a price above 0");
   }
+  return Math.max(DS_MIN_PRICE_USD, price);
+}
+
+// Create a "unique product with fixed price". Returns { externalId, url, price }
+// — `price` is what was actually charged, which may have been lifted to the
+// platform floor, so the caller records what Plati really has.
+async function digisellerPublish({ title, description, priceUsd, categories }) {
+  const token = await digisellerToken();
+  const price = digisellerFloorPrice(priceUsd);
   // Digiseller rejects products that aren't placed in a marketplace catalog
   // category (owner: 1 = Plati.Market, 3 = GGsell).
   const cats = (Array.isArray(categories) ? categories : [])
@@ -967,12 +983,67 @@ async function digisellerPublish({ title, description, priceUsd, categories }) {
     return {
       externalId: String(productId),
       url: "https://plati.market/itm/" + productId,
+      price,
       note:
         "Product created (hidden until it has content). Add delivery text/stock" +
         " in Digiseller, or it stays unsellable.",
     };
   } catch (e) {
     throw dsApiError("Digiseller create", e);
+  }
+}
+
+// Bulk-set prices on existing products. Digiseller runs this asynchronously:
+// the POST returns a task id and the work lands later, so poll the task rather
+// than assuming success. Prices are in each product's own base currency (USD
+// for everything we publish) and are floored, since an under-floor price is
+// what blocks the account. Returns { total, ok, failed, errors }.
+async function digisellerRepriceProducts(updates) {
+  const rows = (Array.isArray(updates) ? updates : [])
+    .filter((u) => u && u.productId)
+    .map((u) => ({
+      product_id: Number(u.productId),
+      ProductId: Number(u.productId),
+      price: digisellerFloorPrice(u.priceUsd),
+    }));
+  if (!rows.length) return { total: 0, ok: 0, failed: 0, errors: [] };
+  const token = await digisellerToken();
+  try {
+    const r = await axios.post(
+      DS_API + "/product/edit/prices?token=" + encodeURIComponent(token),
+      rows,
+      { headers: { "Content-Type": "application/json" }, timeout: 60000 },
+    );
+    const taskId = typeof r.data === "string" ? r.data : (r.data || {}).TaskId;
+    if (!taskId) {
+      throw new Error(
+        "no task id in response: " + JSON.stringify(r.data).slice(0, 200),
+      );
+    }
+    // Status 3 = finished. Poll briefly; a large batch takes a few seconds.
+    for (let i = 0; i < 30; i++) {
+      await new Promise((res) => setTimeout(res, 2000));
+      const s = await axios.get(
+        DS_API +
+          "/product/edit/UpdateProductsTaskStatus?taskId=" +
+          encodeURIComponent(taskId) +
+          "&token=" +
+          encodeURIComponent(token),
+        { timeout: 20000 },
+      );
+      const d = s.data || {};
+      if (Number(d.Status) === 3) {
+        return {
+          total: Number(d.TotalCount) || rows.length,
+          ok: Number(d.SuccessCount) || 0,
+          failed: Number(d.ErrorCount) || 0,
+          errors: d.ErrorsDescriptions || [],
+        };
+      }
+    }
+    throw new Error("price update task " + taskId + " did not finish in time");
+  } catch (e) {
+    throw dsApiError("Digiseller reprice", e);
   }
 }
 
@@ -3436,6 +3507,9 @@ module.exports = {
   digisellerCategories,
   digisellerCategoryAttributes,
   digisellerPublish,
+  digisellerRepriceProducts,
+  digisellerFloorPrice,
+  DS_MIN_PRICE_USD,
   digisellerUploadImage,
   digisellerAddContent,
   digisellerRemoveContent,
