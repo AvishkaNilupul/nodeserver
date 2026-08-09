@@ -405,6 +405,17 @@
         try { const d = await api("/renters/"+id); renderModal(d.renter, d.submissions||[], d.bot||{}, d.accounts||[]); $("overlay").classList.add("show"); CURRENT=id; }
         catch(e){ toast(e.message); }
       };
+      // Remove one renter account (a dead one): pulled off the bot + deleted
+      // from the renter's inventory. Their farmed drops stay in the archive.
+      window.delAcct = async (id, login)=>{
+        if(!confirm("Remove "+(login||"this account")+" from this renter? It is pulled off the bot and deleted from their inventory (farmed drops stay in the archive).")) return;
+        try {
+          const d = await api("/renter-accounts/"+id, { method:"DELETE" });
+          toast(d.note || "Account removed");
+          await Promise.all([loadRenters(), loadRentBots(), loadRentAccs()]);
+          if (CURRENT) openRenter(CURRENT);
+        } catch(e){ toast(e.message); }
+      };
       // Rescan one renter account now (clears a stale token_invalid, verifies a fix).
       window.scanAcct = async (id, btn)=>{
         if (btn){ btn.disabled = true; btn.textContent = "Scanning…"; }
@@ -534,7 +545,8 @@
           '</div><div class="acts">'+(SCAN_BADGE[a.status]||SCAN_BADGE.pending)+
           '<button class="btn ghost sm" onclick="showCreds(\''+a.id+'\', this)">Creds</button>'+
           '<button class="btn ghost sm" onclick="scanAcct(\''+a.id+'\', this)">Scan</button>'+
-          '<button class="btn ghost sm" onclick="setFarm(\''+a.id+'\')">Farm days</button></div>'+
+          '<button class="btn ghost sm" onclick="setFarm(\''+a.id+'\')">Farm days</button>'+
+          '<button class="btn danger sm" onclick="delAcct(\''+a.id+'\',\''+esc(a.login||"")+'\')">Remove</button></div>'+
           '<div class="credslot" id="creds-'+a.id+'"></div></div>').join("")+'</div>';
       }
       // Reveal one account's live login / token / password. Superadmin-only data:
