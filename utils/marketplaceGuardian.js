@@ -63,30 +63,59 @@ function reservedBy(log) {
 // depending on ownership: drops redeemed while still reserved to this listing
 // are a delivered sale, the very same drops redeemed under someone else's tag
 // are a burned unit.
-function classifyUnit(uniqKeys, logs, tag) {
-  const held = uniqKeys.filter((k) => reservedBy(logs.get(k)) === tag).length;
+// An account can hold SEVERAL copies of the same drop, and reserving a unit
+// only marks the copies it needs. Collapse each item's copies into one verdict
+// that prefers the copy reserved for THIS listing, so a spare unreserved copy
+// sitting next to a reserved one cannot make a properly reserved unit look
+// released.
+function summarizeDrops(rows, tag) {
+  const out = new Map();
+  for (const d of rows) {
+    const s = out.get(d.itemKey) || {
+      held: false,
+      otherTag: "",
+      connected: false,
+      connectedForeign: false,
+      name: "",
+    };
+    const by = reservedBy(d);
+    if (by === tag) s.held = true;
+    else if (by && !s.otherTag) s.otherTag = by;
+    if (d.connected) {
+      s.connected = true;
+      if (by !== tag) s.connectedForeign = true;
+      s.name = s.name || d.name || "item";
+    }
+    out.set(d.itemKey, s);
+  }
+  return out;
+}
+
+function classifyUnit(uniqKeys, drops) {
+  const at = (k) => drops.get(k) || null;
+  const held = uniqKeys.filter((k) => at(k) && at(k).held).length;
   let reservation = null;
   if (held !== uniqKeys.length) {
     const otherTag = uniqKeys
-      .map((k) => reservedBy(logs.get(k)))
-      .find((t) => t && t !== tag);
+      .map((k) => (at(k) && !at(k).held ? at(k).otherTag : ""))
+      .find(Boolean);
     reservation = {
       kind: otherTag ? "conflict" : held ? "partial" : "released",
       held,
       total: uniqKeys.length,
       // Never farmed here, so no reservation can conjure it: the unit cannot
       // deliver what the listing advertises.
-      absent: uniqKeys.filter((k) => !logs.has(k)).length,
+      absent: uniqKeys.filter((k) => !drops.has(k)).length,
       otherTag: otherTag || "",
     };
   }
-  const conn = uniqKeys.map((k) => logs.get(k)).filter((d) => d && d.connected);
+  const conn = uniqKeys.map(at).filter((s) => s && s.connected);
   return {
     reservation,
     redeemed: conn.length
       ? {
-          items: [...new Set(conn.map((d) => d.name || "item"))],
-          delivered: conn.every((d) => reservedBy(d) === tag),
+          items: [...new Set(conn.map((s) => s.name || "item"))],
+          delivered: !conn.some((s) => s.connectedForeign),
         }
       : null,
   };
@@ -395,16 +424,16 @@ async function runChecks(rows, seenKeys) {
     const logsByAcc = new Map();
     for (const d of logs) {
       const k = String(d.account);
-      if (!logsByAcc.has(k)) logsByAcc.set(k, new Map());
-      logsByAcc.get(k).set(d.itemKey, d);
+      if (!logsByAcc.has(k)) logsByAcc.set(k, []);
+      logsByAcc.get(k).push(d);
     }
 
     for (const accId of ids) {
-      const km = logsByAcc.get(accId) || new Map();
+      const km = summarizeDrops(logsByAcc.get(accId) || [], tag);
       const acc = accMap.get(accId);
       const label = (acc && acc.login) || accId;
 
-      const { reservation, redeemed } = classifyUnit(uniqKeys, km, tag);
+      const { reservation, redeemed } = classifyUnit(uniqKeys, km);
 
       // 2. Per-game reservation: every one of this set's drops on each
       // attached account should be reserved by THIS listing's tag.
@@ -522,7 +551,7 @@ async function clearFinalizeFinding(row) {
   );
 }
 
-async function feedListing(row, seenKeys) {
+async function feedListing(row, seenKeys, refusals) {
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
   let read;
@@ -537,14 +566,18 @@ async function feedListing(row, seenKeys) {
   if (remaining === null) {
     const key = "stock:" + row._id;
     seenKeys.add(key);
+    // A platform refusing the read outright (a blocked seller, a revoked key)
+    // takes the WHOLE market offline, so it is reported once per marketplace
+    // below rather than once per listing — one blocked seller raising a high
+    // on each of 159 listings buries every other finding in the tab.
+    if (refusals && platformRefusedRead(read.reason)) {
+      const r = refusals.get(row.marketplace) || { n: 0, reason: read.reason };
+      r.n++;
+      refusals.set(row.marketplace, r);
+    }
     await upsertFinding({
       type: "stock-unknown",
-      // A platform refusing the read outright (a blocked seller, a revoked
-      // key) takes the whole market offline and needs a human on it — it is
-      // not the same as one listing whose stock momentarily didn't parse, and
-      // reporting both as "low" is what let a blocked Digiseller seller sit
-      // behind a routine-looking auto-feed warning.
-      severity: platformRefusedRead(read.reason) ? "high" : "low",
+      severity: "low",
       marketplace: row.marketplace,
       listing: row._id,
       dedupeKey: key,
@@ -885,6 +918,29 @@ async function notifyPass() {
   }
 }
 
+// A marketplace that refused every stock read is ONE problem — the account is
+// blocked or the key is revoked — so it gets one high finding naming how much
+// of the market it took down, instead of one per affected listing.
+async function reportRefusals(refusals, seenKeys) {
+  for (const [marketplace, r] of refusals) {
+    const key = "platform-refused:" + marketplace;
+    seenKeys.add(key);
+    await upsertFinding({
+      type: "stock-unknown",
+      severity: "high",
+      marketplace,
+      dedupeKey: key,
+      message:
+        marketplace +
+        " refused every stock read this pass (" +
+        r.n +
+        " listing(s) skipped) — " +
+        r.reason +
+        ". Auto-feed for this marketplace is down until the account is restored.",
+    });
+  }
+}
+
 // ------------------------------------------------------------------
 // One guardian pass
 // ------------------------------------------------------------------
@@ -902,14 +958,16 @@ async function runOnce() {
       .limit(500)
       .lean();
     const seenKeys = new Set();
+    const refusals = new Map();
     let fed = 0;
     for (const row of rows) {
       try {
-        fed += await feedListing(row, seenKeys);
+        fed += await feedListing(row, seenKeys, refusals);
       } catch (e) {
         console.error("guardian feed error:", e.message);
       }
     }
+    await reportRefusals(refusals, seenKeys);
     const found = await runChecks(rows, seenKeys);
     await autoResolveStale(seenKeys);
     const open = await AuditFinding.countDocuments({ status: "open" });
@@ -974,6 +1032,7 @@ module.exports = {
   start,
   feedOne,
   classifyUnit,
+  summarizeDrops,
   nothingToFeedReason,
   CLAIM_TAGS,
 };

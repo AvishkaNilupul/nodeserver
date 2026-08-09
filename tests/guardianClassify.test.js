@@ -2,29 +2,31 @@ const test = require("node:test");
 const assert = require("node:assert");
 const {
   classifyUnit,
+  summarizeDrops,
   nothingToFeedReason,
 } = require("../utils/marketplaceGuardian");
 
-// Build the itemKey -> DropLog map classifyUnit takes. Each spec is
-// { key, by, connected }: `by` is the claim tag holding the drop (null = free,
-// undefined key = the account never farmed it).
+// Build the DropLog rows for one account. Each spec is { key, by, connected }:
+// `by` is the claim tag holding that copy (null = free, a key absent from the
+// list = the account never farmed it). Several specs may share a key, which is
+// how an account holding multiple copies of a drop is expressed.
 function logs(specs) {
-  const m = new Map();
-  for (const s of specs) {
-    m.set(s.key, {
-      itemKey: s.key,
-      name: s.name || s.key,
-      soldAt: s.by === null || s.by === undefined ? null : new Date(),
-      soldToUsername: s.by || "",
-      connected: !!s.connected,
-    });
-  }
-  return m;
+  return specs.map((s) => ({
+    itemKey: s.key,
+    name: s.name || s.key,
+    soldAt: s.by === null || s.by === undefined ? null : new Date(),
+    soldToUsername: s.by || "",
+    connected: !!s.connected,
+  }));
+}
+
+function classify(keys, rows, tag) {
+  return classifyUnit(keys, summarizeDrops(rows, tag));
 }
 
 test("a unit holding the whole set under its own tag raises nothing", () => {
   const keys = ["a", "b"];
-  const r = classifyUnit(
+  const r = classify(
     keys,
     logs([
       { key: "a", by: "ggsel" },
@@ -37,7 +39,7 @@ test("a unit holding the whole set under its own tag raises nothing", () => {
 });
 
 test("drops reserved by another platform are a conflict", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b"],
     logs([
       { key: "a", by: "gameflip" },
@@ -53,7 +55,7 @@ test("drops reserved by another platform are a conflict", () => {
 // keys the set had when it was reserved, and adding items made them all look
 // under-reserved.
 test("a set that gained drops after reservation is partial, not a conflict", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b", "c"],
     logs([
       { key: "a", by: "zeusx" },
@@ -70,7 +72,7 @@ test("a set that gained drops after reservation is partial, not a conflict", () 
 });
 
 test("partial counts drops the account never farmed separately", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b", "c"],
     logs([
       { key: "a", by: "zeusx" },
@@ -84,7 +86,7 @@ test("partial counts drops the account never farmed separately", () => {
 });
 
 test("a unit holding none of the set reads as released, not partial", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b"],
     logs([
       { key: "a", by: null },
@@ -97,7 +99,7 @@ test("a unit holding none of the set reads as released, not partial", () => {
 });
 
 test("a conflict outranks a partial shortfall", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b", "c"],
     logs([
       { key: "a", by: "funpay" },
@@ -113,7 +115,7 @@ test("a conflict outranks a partial shortfall", () => {
 // The 11 false highs: FunPay/ZeusX completed sales. Ownership, not the
 // marketplace name, is what says the buyer redeemed it.
 test("drops redeemed while still reserved to this listing are a delivered sale", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b"],
     logs([
       { key: "a", by: "funpay", connected: true },
@@ -126,7 +128,7 @@ test("drops redeemed while still reserved to this listing are a delivered sale",
 });
 
 test("drops redeemed under another tag are a burned unit", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a"],
     logs([{ key: "a", by: "ggsel", connected: true }]),
     "funpay",
@@ -135,7 +137,7 @@ test("drops redeemed under another tag are a burned unit", () => {
 });
 
 test("drops redeemed while reserved by nobody are a burned unit", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a"],
     logs([{ key: "a", by: null, connected: true }]),
     "funpay",
@@ -144,7 +146,7 @@ test("drops redeemed while reserved by nobody are a burned unit", () => {
 });
 
 test("one drop redeemed outside the listing burns the whole unit", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b"],
     logs([
       { key: "a", by: "funpay", connected: true },
@@ -156,7 +158,7 @@ test("one drop redeemed outside the listing burns the whole unit", () => {
 });
 
 test("redeemed item names are de-duplicated for the message", () => {
-  const r = classifyUnit(
+  const r = classify(
     ["a", "b"],
     logs([
       { key: "a", by: "funpay", connected: true, name: "chest" },
@@ -168,7 +170,7 @@ test("redeemed item names are de-duplicated for the message", () => {
 });
 
 test("unredeemed drops raise no redeemed finding", () => {
-  const r = classifyUnit(["a"], logs([{ key: "a", by: "ggsel" }]), "ggsel");
+  const r = classify(["a"], logs([{ key: "a", by: "ggsel" }]), "ggsel");
   assert.equal(r.redeemed, null);
 });
 
@@ -224,4 +226,71 @@ test("holders excluded for none of the known reasons are short on copies", () =>
     "4 account(s) hold this bundle but none can be delivered: " +
       "1 suspended or dead-token, 3 short of the copies the set asks for",
   );
+});
+
+// An account can hold several copies of the same drop; reserving a unit marks
+// only the copies it needs. Picking an arbitrary copy per item made properly
+// reserved units look released, which is what turned one guardian pass into
+// ~90 phantom "could be sold again elsewhere" alarms.
+test("a reserved copy beats a spare free copy of the same drop", () => {
+  const r = classify(
+    ["a"],
+    logs([
+      { key: "a", by: "ggsel" },
+      { key: "a", by: null },
+      { key: "a", by: null },
+    ]),
+    "ggsel",
+  );
+  assert.equal(r.reservation, null);
+});
+
+test("a spare free copy does not mask another platform's claim", () => {
+  const r = classify(
+    ["a"],
+    logs([
+      { key: "a", by: null },
+      { key: "a", by: "digiseller" },
+    ]),
+    "ggsel",
+  );
+  assert.equal(r.reservation.kind, "conflict");
+  assert.equal(r.reservation.otherTag, "digiseller");
+});
+
+test("our own reserved copy outranks another platform's copy", () => {
+  const r = classify(
+    ["a"],
+    logs([
+      { key: "a", by: "digiseller" },
+      { key: "a", by: "ggsel" },
+    ]),
+    "ggsel",
+  );
+  assert.equal(r.reservation, null);
+});
+
+test("one redeemed copy still reports the unit as redeemed", () => {
+  const r = classify(
+    ["a"],
+    logs([
+      { key: "a", by: "ggsel", connected: true, name: "Cape" },
+      { key: "a", by: "ggsel" },
+    ]),
+    "ggsel",
+  );
+  assert.deepEqual(r.redeemed.items, ["Cape"]);
+  assert.equal(r.redeemed.delivered, true);
+});
+
+test("a copy redeemed under someone else's tag still burns the unit", () => {
+  const r = classify(
+    ["a"],
+    logs([
+      { key: "a", by: "ggsel" },
+      { key: "a", by: "digiseller", connected: true, name: "Cape" },
+    ]),
+    "ggsel",
+  );
+  assert.equal(r.redeemed.delivered, false);
 });
