@@ -31,9 +31,16 @@ const renterSchema = new mongoose.Schema(
       index: true,
     },
 
-    // The one bot slot this renter owns. A config file dedicated to them.
+    // The bot slot this renter uses. A config file may be dedicated to one
+    // renter or SHARED by several (fewer containers, less RAM) — sharing-aware
+    // control lives in utils/renterBotOps.js.
     botHost: { type: String, default: "" },
     botFile: { type: String, default: "" },
+
+    // The game(s) this renter's accounts are armed to farm. Applied as the
+    // FavouriteGames default for every account added for them, and used for
+    // account-scoped games writes on a shared bot. Empty = follow the config.
+    farmGames: { type: [String], default: [] },
 
     // How many accounts they may have on their bot (config accounts + pending
     // submissions must stay at or below this).
@@ -59,12 +66,11 @@ const renterSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// One config file is never assigned to two renters (isolation guarantee). The
-// partial filter (botFile greater than the empty string = any non-empty string)
-// keeps unassigned renters from colliding on botFile "".
-renterSchema.index(
-  { botHost: 1, botFile: 1 },
-  { unique: true, partialFilterExpression: { botFile: { $gt: "" } } },
-);
+// Lookup index for "who is on this config". Deliberately NOT unique: a config
+// may be shared by several renters (the old one-renter-per-config unique index
+// is dropped at startup — see server.js).
+// The explicit name avoids clashing with the old unique index (same key
+// pattern) while both briefly exist during the startup migration.
+renterSchema.index({ botHost: 1, botFile: 1 }, { name: "botHost_botFile_shared" });
 
 module.exports = mongoose.model("Renter", renterSchema);

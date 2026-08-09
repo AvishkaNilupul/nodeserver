@@ -140,7 +140,11 @@
         <div class="grid3" style="margin-top:12px">
           <div><label class="fld">Username</label><input id="cU" autocapitalize="none" spellcheck="false" /></div>
           <div><label class="fld">Password</label><input id="cP" /></div>
-          <div style="display:flex;align-items:flex-end"><div class="muted" style="font-size:12px;line-height:1.4">Create the renter, then add their bot from <b>Manage → Create bot</b>.</div></div>
+          <div style="display:flex;align-items:flex-end"><div class="muted" style="font-size:12px;line-height:1.4">Pick an existing bot below to share it (several renters on one container = less RAM), or leave it and create a fresh bot from <b>Manage → Create bot</b>.</div></div>
+        </div>
+        <div class="grid3" style="margin-top:12px">
+          <div><label class="fld">Bot <span class="muted">(optional — shared allowed)</span></label><select id="cBot" class="selin" style="width:100%"><option value="">No bot yet</option></select></div>
+          <div style="grid-column:span 2"><label class="fld">Games to farm <span class="muted">(comma-separated — their accounts are armed with these)</span></label><input id="cGames" placeholder="e.g. Rust, VALORANT" /></div>
         </div>
         <div class="grid4" style="margin-top:12px">
           <div><label class="fld">Account limit</label><input id="cMax" type="number" min="0" value="50" /></div>
@@ -218,20 +222,40 @@
         return '<select id="'+id+'" style="width:auto;min-width:120px">'+opts.join("")+'</select>';
       }
 
+      // ---- bot picker (create form + assign-existing) ----
+      let BOTS = [];
+      function botOptionLabel(b){
+        const who = (b.renters||[]).length ? " — shared with "+b.renters.join(", ") : " — free";
+        return (b.hostLabel||b.host)+" · "+b.file+who;
+      }
+      async function loadBotPicker(){
+        try {
+          const d = await api("/renters/bots");
+          BOTS = d.bots || [];
+          const sel = $("cBot");
+          if(sel){
+            sel.innerHTML = '<option value="">No bot yet</option>'+BOTS.map((b,i)=>'<option value="'+i+'">'+esc(botOptionLabel(b))+'</option>').join("");
+          }
+        } catch(e){ /* picker stays empty */ }
+      }
+
       // ---- create ----
       $("cBtn").addEventListener("click", async ()=>{
         const username=$("cU").value.trim(), password=$("cP").value;
         if(!username||!password) return toast("Username and password required");
+        const pick = BOTS[parseInt($("cBot").value,10)] || null;
         $("cBtn").disabled=true;
         try {
           const d = await api("/renters", { method:"POST", body: JSON.stringify({
             username, password,
+            botHost: pick ? pick.host : "", botFile: pick ? pick.file : "",
+            farmGames: $("cGames").value,
             maxAccounts: parseInt($("cMax").value,10)||0,
             accessStart: $("cStart").value||null, accessEnd: $("cEnd").value||null,
           })});
           $("cResult").innerHTML = '<div class="credbox">Renter <b>'+esc(d.renter.username)+'</b> created. Open <b>Manage → Create bot</b> to give them a bot. Share the login: <code>'+location.origin+'/renter-login.html</code> — username <code>'+esc(d.renter.username)+'</code>, and the password you set.</div>';
-          $("cU").value=""; $("cP").value="";
-          await loadRenters();
+          $("cU").value=""; $("cP").value=""; $("cGames").value=""; $("cBot").value="";
+          await Promise.all([loadRenters(), loadBotPicker(), loadRentBots()]);
         } catch(e){ toast(e.message); }
         $("cBtn").disabled=false;
       });
@@ -303,7 +327,7 @@
               : '<span class="badge wait">Unknown</span>';
             return '<div class="row">'+
               '<div><div class="nm">'+esc(b.username)+' '+(b.status==="suspended"?'<span class="badge suspended">Suspended</span>':'')+'</div>'+
-                '<div class="meta">'+esc(b.hostLabel||b.host)+' · '+esc(b.file)+' · '+b.accounts+' account(s) · '+b.drops+' drop(s)'+
+                '<div class="meta">'+esc(b.hostLabel||b.host)+' · '+esc(b.file)+(b.sharedBy>1?' · <b>shared ×'+b.sharedBy+'</b>':'')+' · '+b.accounts+' account(s) · '+b.drops+' drop(s)'+
                 (b.tokenIssues?' · <span class="tokwarn">⚠ '+b.tokenIssues+' token issue'+(b.tokenIssues>1?'s':'')+'</span>':'')+'</div></div>'+
               '<div class="meta">'+runPill+'</div>'+
               '<div class="meta mono">'+esc(b.container||"")+'</div>'+
@@ -361,7 +385,7 @@
       }
 
       window.setSusp = async (id, suspend)=>{
-        if(suspend && !confirm("Suspend this renter? Their access is blocked and their bot is stopped.")) return;
+        if(suspend && !confirm("Suspend this renter? Their access is blocked and their farming stops (a shared bot keeps running for the other renters).")) return;
         try { const d = await api("/renters/"+id+"/"+(suspend?"suspend":"unsuspend"),{method:"POST"});
           toast(suspend?("Suspended"+(d.botStopped?" · bot stopped":"")):"Unsuspended"); await Promise.all([loadRenters(), loadRentBots()]); if(CURRENT===id) openRenter(id); }
         catch(e){ toast(e.message); }
@@ -540,7 +564,7 @@
           '<div class="grid3" style="margin-top:6px">'+
             '<div><label class="fld">Account limit</label><input id="eMax" type="number" min="0" value="'+r.maxAccounts+'"/></div>'+
             '<div><label class="fld">Display name</label><input id="eName" value="'+esc(r.displayName||"")+'"/></div>'+
-            '<div></div>'+
+            '<div><label class="fld">Games to farm <span class="muted">(armed on their accounts)</span></label><input id="eGames" placeholder="e.g. Rust, VALORANT" value="'+esc((r.farmGames||[]).join(", "))+'"/></div>'+
           '</div>'+
           '<div class="grid3" style="margin-top:12px">'+
             '<div><label class="fld">Access start</label><input id="eStart" type="date" value="'+(r.accessStart?new Date(r.accessStart).toISOString().slice(0,10):"")+'"/></div>'+
@@ -549,7 +573,7 @@
           '</div>'+
           '<div class="credbox" style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
             '<b>Bot</b> '+botStatusHtml(bot)+
-            '<span class="muted">'+(bot&&bot.assigned?esc((bot.hostLabel||"")+" · "+(bot.file||"")+" · "+(bot.accounts||0)+" account(s)"):"no bot yet")+'</span>'+
+            '<span class="muted">'+(bot&&bot.assigned?esc((bot.hostLabel||"")+" · "+(bot.file||"")+" · "+(bot.accounts||0)+" account(s)")+((bot.sharedWith||[]).length?' · <b>shared with '+esc(bot.sharedWith.join(", "))+'</b>':''):"no bot yet")+'</span>'+
             (bot&&bot.assigned?
               '<span style="flex:1"></span>'+
               '<button class="btn sm" onclick="renterBot(\''+r.id+'\',\'start\')">Start</button>'+
@@ -559,7 +583,10 @@
               :
               '<span style="flex:1"></span>'+
               '<span class="muted" style="font-size:12px">Host</span>'+hostSelectHtml("eBotHost")+
-              '<button class="btn sm" onclick="createRenterBot(\''+r.id+'\')">Create bot</button>'
+              '<button class="btn sm" onclick="createRenterBot(\''+r.id+'\')">Create bot</button>'+
+              '<span class="muted" style="font-size:12px">or share</span>'+
+              '<select id="eAssignBot" style="width:auto;min-width:150px"><option value="">existing bot…</option>'+BOTS.map((b,i)=>'<option value="'+i+'">'+esc(botOptionLabel(b))+'</option>').join("")+'</select>'+
+              '<button class="btn ghost sm" onclick="assignBot(\''+r.id+'\')">Assign</button>'
             )+
           '</div>'+
           '<div id="botLogBox"></div>'+
@@ -649,10 +676,20 @@
         catch(e){ toast(e.message); }
       };
       window.saveRenter = async (id)=>{
-        try { await api("/renters/"+id, { method:"PUT", body: JSON.stringify({
+        try { const d = await api("/renters/"+id, { method:"PUT", body: JSON.stringify({
           maxAccounts: parseInt($("eMax").value,10)||0, displayName: $("eName").value,
+          farmGames: $("eGames").value,
           accessStart: $("eStart").value||null, accessEnd: $("eEnd").value||null,
-        })}); toast("Saved"); await loadRenters(); openRenter(id); }
+        })}); toast(d.gamesApplied?"Saved — games armed on their accounts":"Saved"); await loadRenters(); openRenter(id); }
+        catch(e){ toast(e.message); }
+      };
+      window.assignBot = async (id)=>{
+        const pick = BOTS[parseInt(($("eAssignBot")||{}).value,10)];
+        if(!pick){ toast("Pick a bot to assign"); return; }
+        const who = (pick.renters||[]).length ? " It is shared with "+pick.renters.join(", ")+"." : "";
+        if(!confirm("Assign "+pick.file+" on "+(pick.hostLabel||pick.host)+" to this renter?"+who)) return;
+        try { await api("/renters/"+id, { method:"PUT", body: JSON.stringify({ botHost: pick.host, botFile: pick.file }) });
+          toast("Bot assigned"); await Promise.all([loadRenters(), loadRentBots(), loadBotPicker()]); openRenter(id); }
         catch(e){ toast(e.message); }
       };
       window.resetPw = async (id)=>{ const password=prompt("New password (min 8 chars):"); if(!password) return;
@@ -686,7 +723,7 @@
 
       (async function init(){
         try { const me = await api("/shop/me"); $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); } catch(e){}
-        await loadHosts(); await loadApprovals(); await loadRenters(); await loadRentBots(); await loadRentedDrops(); await loadRentAccs();
+        await loadHosts(); await loadBotPicker(); await loadApprovals(); await loadRenters(); await loadRentBots(); await loadRentedDrops(); await loadRentAccs();
       })();
     </script>
     <script src="/theme.js"></script>

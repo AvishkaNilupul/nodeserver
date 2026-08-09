@@ -589,6 +589,13 @@ mongoose
   .connect(config.MONGO_URI)
   .then(() => {
     console.log("MongoDB connected");
+    // Bot configs may now be shared by several renters, so the old
+    // one-renter-per-config unique index must go (Mongoose only ever creates
+    // indexes, it never drops one whose options changed). No-op once dropped.
+    mongoose.connection.db
+      .collection("renters")
+      .dropIndex("botHost_1_botFile_1")
+      .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
     });

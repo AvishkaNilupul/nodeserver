@@ -27,14 +27,19 @@ const {
   setPassword,
   sanitizeRenter,
   revealPassword,
+  normGames,
 } = require("../utils/renters");
+const {
+  otherSharers,
+  stopRenterFarming,
+  startRenterFarming,
+  applyRenterGames,
+} = require("../utils/renterBotOps");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
 const { decrypt, encrypt } = require("../utils/secretBox");
 const {
-  startConfigContainer,
-  stopConfigContainer,
   restartConfigContainer,
   containerForFile,
   validFile,
@@ -61,21 +66,26 @@ async function pendingByRenter() {
 }
 
 // Validate + normalise a bot assignment. Empty = unassigned (allowed). Throws a
-// friendly error for an unknown host, a bad file name, or a config already
-// rented to someone else.
-async function resolveAssignment(botHost, botFile, excludeRenterId) {
+// friendly error for an unknown host or a bad file name. A config already
+// rented to someone else is ALLOWED — that is a shared bot (several renters on
+// one container); the picker shows who is on it so sharing is always a
+// deliberate choice.
+async function resolveAssignment(botHost, botFile) {
   botHost = String(botHost || "");
   botFile = String(botFile || "");
   if (!botFile) return { botHost: botHost || "", botFile: "" };
   if (!hosts.resolveHost(botHost)) throw new Error("Unknown host");
   if (!validFile(botFile)) throw new Error("Invalid config file");
-  const clash = await Renter.findOne({ botHost, botFile });
-  if (clash && String(clash._id) !== String(excludeRenterId || "")) {
-    throw new Error(
-      "That bot is already assigned to " + clash.username,
-    );
-  }
   return { botHost, botFile };
+}
+
+// FavouriteGames default for accounts added to this renter: their own armed
+// games when set, else whatever the config farms.
+async function renterDefaultGames(renter, host) {
+  if (Array.isArray(renter.farmGames) && renter.farmGames.length) {
+    return renter.farmGames.slice();
+  }
+  return getConfigGames(host, renter.botFile);
 }
 
 async function renterListView(r, pmap) {
@@ -123,11 +133,16 @@ router.get("/renters/bots", requireSuperadmin, async (req, res) => {
       { botFile: { $gt: "" } },
       { botHost: 1, botFile: 1, username: 1 },
     ).lean();
-    const amap = new Map(
-      assigned.map((a) => [a.botHost + "|" + a.botFile, a.username]),
-    );
+    const amap = new Map();
+    for (const a of assigned) {
+      const k = a.botHost + "|" + a.botFile;
+      if (!amap.has(k)) amap.set(k, []);
+      amap.get(k).push(a.username);
+    }
     out.forEach((o) => {
-      o.assignedTo = amap.get(o.host + "|" + o.file) || null;
+      const names = amap.get(o.host + "|" + o.file) || [];
+      o.assignedTo = names[0] || null;
+      o.renters = names;
     });
     res.json({ success: true, bots: out });
   } catch (err) {
@@ -187,6 +202,13 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
       return states;
     }
 
+    // How many renters share each config, so the overview can flag shared bots.
+    const shareCount = new Map();
+    for (const r of renters) {
+      const k = (r.botHost || "") + "|" + r.botFile;
+      shareCount.set(k, (shareCount.get(k) || 0) + 1);
+    }
+
     const bots = [];
     for (const r of renters) {
       const host = hosts.resolveHost(r.botHost);
@@ -215,6 +237,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         accounts: accMap.get(String(r._id)) || 0,
         tokenIssues: badMap.get(String(r._id)) || 0,
         drops: dropMap.get(String(r._id)) || 0,
+        sharedBy: shareCount.get((r.botHost || "") + "|" + r.botFile) || 1,
       });
     }
     res.json({ success: true, bots });
@@ -297,6 +320,7 @@ router.post("/renters", requireSuperadmin, async (req, res) => {
       displayName: b.displayName,
       botHost,
       botFile,
+      farmGames: b.farmGames,
       maxAccounts: b.maxAccounts,
       accessStart: b.accessStart || null,
       accessEnd: b.accessEnd || null,
@@ -384,10 +408,15 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       const { botHost, botFile } = await resolveAssignment(
         b.botHost !== undefined ? b.botHost : r.botHost,
         b.botFile !== undefined ? b.botFile : r.botFile,
-        r._id,
       );
       r.botHost = botHost;
       r.botFile = botFile;
+    }
+    let gamesChanged = false;
+    if (b.farmGames !== undefined) {
+      const list = normGames(b.farmGames);
+      gamesChanged = JSON.stringify(list) !== JSON.stringify(r.farmGames || []);
+      r.farmGames = list;
     }
     if (b.displayName !== undefined) r.displayName = String(b.displayName).slice(0, 80);
     if (b.notes !== undefined) r.notes = String(b.notes).slice(0, 500);
@@ -404,7 +433,23 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       if (!r.accessEnd || r.accessEnd > new Date()) r.botStoppedAt = null;
     }
     await r.save();
-    res.json({ success: true, renter: sanitizeRenter(r) });
+    // Arm the new games on their existing accounts right away (best effort —
+    // an offline host doesn't fail the save; the list still applies to any
+    // account added later).
+    let gamesApplied = null;
+    if (gamesChanged && r.botFile) {
+      const host = hosts.resolveHost(r.botHost);
+      if (host) {
+        try {
+          const out = await applyRenterGames(r, host, r.farmGames);
+          await restartConfigContainer(host, r.botFile).catch(() => {});
+          gamesApplied = out.scope;
+        } catch (e) {
+          console.error("renter games apply:", e.message);
+        }
+      }
+    }
+    res.json({ success: true, renter: sanitizeRenter(r), gamesApplied });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
@@ -444,7 +489,10 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
       const host = hosts.resolveHost(r.botHost);
       if (host) {
         try {
-          await stopConfigContainer(host, r.botFile);
+          // Shared-bot aware: alone on the config the container is stopped;
+          // sharing it, only this renter's accounts are pulled so the other
+          // renters keep farming.
+          await stopRenterFarming(r, host);
           botStopped = true;
           r.botStoppedAt = new Date();
         } catch (e) {
@@ -549,12 +597,14 @@ async function renterBotStatus(renter) {
   } catch {
     running = null;
   }
+  const sharers = await otherSharers(renter);
   return {
     assigned: true,
     running,
     accounts,
     hostLabel: host.label,
     file: renter.botFile,
+    sharedWith: sharers.map((s) => s.username),
   };
 }
 
@@ -625,12 +675,15 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
         .status(400)
         .json({ success: false, message: "Renter's host is unknown" });
     }
+    // Shared-bot aware: on a config with other active renters, start/stop
+    // moves only THIS renter's accounts in or out of the config instead of
+    // touching the container everyone shares.
     if (action === "start") {
-      await startConfigContainer(host, r.botFile);
+      await startRenterFarming(r, host);
       r.botStoppedAt = null;
       await r.save();
     } else if (action === "stop") {
-      await stopConfigContainer(host, r.botFile);
+      await stopRenterFarming(r, host);
       r.botStoppedAt = new Date();
       await r.save();
     } else {
@@ -1159,7 +1212,7 @@ router.post(
           (poolRow && poolRow.uniqueId) ||
           "",
       ).trim();
-      const games = await getConfigGames(host, renter.botFile);
+      const games = await renterDefaultGames(renter, host);
       const acct = {
         ClientSecret: token,
         UniqueId: uniqueId || crypto.randomBytes(16).toString("hex"),
@@ -1334,7 +1387,7 @@ router.post(
       let skipReason = "";
       const tokensText = String((req.body && req.body.tokens) || "");
       if (tokensText.trim()) {
-        const games = await getConfigGames(host, renter.botFile);
+        const games = await renterDefaultGames(renter, host);
         const parsed = parseAccounts(tokensText, games);
         if (!parsed.length) {
           return res.status(400).json({
@@ -1386,11 +1439,12 @@ router.post(
       sub.added = tokensText.trim() ? added : sub.count;
       await sub.save();
 
-      // Start the renter's bot.
+      // Start the renter's farming (shared-bot aware: a running shared
+      // container is restarted so the new accounts load).
       let botStarted = false;
       let startNote = "";
       try {
-        await startConfigContainer(host, renter.botFile);
+        await startRenterFarming(renter, host);
         botStarted = true;
         renter.botStoppedAt = null;
         await renter.save();
@@ -1594,7 +1648,7 @@ async function movePoolAccountToRenter(renter, host, doc) {
   }
 
   // Write into the renter's bot config (also creates the RenterAccount row).
-  const games = await getConfigGames(host, renter.botFile);
+  const games = await renterDefaultGames(renter, host);
   const acct = {
     ClientSecret: token,
     UniqueId: doc.uniqueId || crypto.randomBytes(16).toString("hex"),

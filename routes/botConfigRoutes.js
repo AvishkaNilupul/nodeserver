@@ -1722,11 +1722,19 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
   if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
     data.TwitchSettings.TwitchUsers = [];
   }
-  data.TwitchSettings.TwitchUsers.push(...accounts);
+  // Skip tokens already in the config — on a shared bot an account can have
+  // been synced in by another path, and a duplicate entry double-farms it.
+  const present = new Set(
+    data.TwitchSettings.TwitchUsers.filter(
+      (u) => u && typeof u === "object",
+    ).map((u) => u.ClientSecret),
+  );
+  const fresh = accounts.filter((a) => a && !present.has(a.ClientSecret));
+  data.TwitchSettings.TwitchUsers.push(...fresh);
   const total = data.TwitchSettings.TwitchUsers.length;
   await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
   await upsertRenterAccounts(accounts, host, file, renterId);
-  return { added: accounts.length, total };
+  return { added: fresh.length, total };
 }
 
 // Pull ONE account out of a config, matched by ClientSecret or (case-insensitive)

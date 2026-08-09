@@ -18,10 +18,10 @@ const RenterAccount = require("../models/RenterAccount");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
 const {
-  stopConfigContainer,
   removeAccountFromConfig,
   restartConfigContainer,
 } = require("../routes/botConfigRoutes");
+const { stopRenterFarming } = require("./renterBotOps");
 
 const INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
 // How close to accessEnd the "expiring soon" heads-up fires.
@@ -151,20 +151,31 @@ async function sweepOnce() {
     const host = hosts.resolveHost(r.botHost);
     if (!host) continue;
     try {
-      await stopConfigContainer(host, r.botFile);
+      // Shared-bot aware: alone on the config the container is stopped; when
+      // other active renters share it, only this renter's accounts are pulled
+      // so the others keep farming.
+      const out = await stopRenterFarming(r, host);
       r.botStoppedAt = new Date();
       await r.save();
       console.log(
-        "[renterExpiry] stopped bot for expired renter " + r.username,
+        "[renterExpiry] stopped farming for expired renter " + r.username,
       );
       await sendTelegram(
         "⏰ Renter lease ended: " +
           r.username +
-          " — bot " +
-          r.botFile +
-          " on " +
-          (host.label || r.botHost) +
-          " was stopped.",
+          " — " +
+          (out.mode === "stopped"
+            ? "bot " +
+              r.botFile +
+              " on " +
+              (host.label || r.botHost) +
+              " was stopped."
+            : out.removed +
+              " account(s) pulled off shared bot " +
+              r.botFile +
+              " on " +
+              (host.label || r.botHost) +
+              " (other renters keep farming)."),
       );
     } catch (e) {
       // Host offline / no container — try again next tick (botStoppedAt stays

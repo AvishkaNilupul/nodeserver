@@ -23,14 +23,16 @@ const { parseAccountList } = require("../utils/parseAccountList");
 const { fetchInventory } = require("../utils/twitchInventory");
 const {
   containerForFile,
-  startConfigContainer,
-  stopConfigContainer,
   getConfigGames,
-  setConfigGames,
   getAccountGames,
   setAccountGames,
   restartConfigContainer,
 } = require("./botConfigRoutes");
+const {
+  stopRenterFarming,
+  startRenterFarming,
+  applyRenterGames,
+} = require("../utils/renterBotOps");
 
 const router = express.Router();
 
@@ -79,7 +81,11 @@ router.get("/renter/me", requireRenter, async (req, res) => {
     let running = null; // null = unknown (host offline / not assigned)
     let games = [];
     if (r.botFile && host) {
-      games = await getConfigGames(host, r.botFile);
+      // Their own armed games when set; else the config's (dedicated bots).
+      games =
+        Array.isArray(r.farmGames) && r.farmGames.length
+          ? r.farmGames
+          : await getConfigGames(host, r.botFile);
       try {
         const states = await hosts.dockerPs(host);
         const st = states[containerForFile(r.botFile)];
@@ -341,10 +347,13 @@ async function botControl(action, req, res) {
       .json({ success: false, message: "No bot assigned yet." });
   }
   try {
+    // Shared-bot aware: when other renters share this config, start/stop only
+    // moves THIS renter's accounts in or out of it — never the container the
+    // others are farming on.
     if (action === "start") {
-      await startConfigContainer(bot.host, bot.file);
+      await startRenterFarming(req.renter, bot.host);
     } else {
-      await stopConfigContainer(bot.host, bot.file);
+      await stopRenterFarming(req.renter, bot.host);
     }
     // Keep the expiry-sweep stamp truthful (it means "a stop already happened
     // and is still in effect"): a renter starting their own bot must clear it,
@@ -396,7 +405,16 @@ router.post("/renter/games", renterBotControlLimiter, requireRenter, async (req,
       .json({ success: false, message: "No bot assigned yet." });
   }
   try {
-    const games = await setConfigGames(bot.host, bot.file, req.body && req.body.games);
+    // Shared-bot aware: alone on the config this sets the whole config's games
+    // (old behaviour); on a shared bot it is scoped to their own accounts so
+    // one renter can never overwrite another renter's games. The list is also
+    // remembered as their armed games for any account added later.
+    const out = await applyRenterGames(req.renter, bot.host, req.body && req.body.games);
+    const games = out.games;
+    req.renter.farmGames = games;
+    await req.renter
+      .save()
+      .catch((e) => console.error("renter farmGames save:", e.message));
     let restarted = false;
     try {
       const states = await hosts.dockerPs(bot.host);
