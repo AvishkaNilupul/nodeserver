@@ -1046,6 +1046,76 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
   }
 });
 
+// REMOVE one renter account (e.g. a dead one): pulled out of its bot config
+// (with a restart so the change takes effect if the container is running) and
+// deleted from the renter's inventory. The renter's farmed drops (RenterDrop)
+// are kept — they are history, not the account.
+router.delete(
+  "/renter-accounts/:id",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad account id" });
+      }
+      const acc = await RenterAccount.findById(req.params.id);
+      if (!acc)
+        return res.status(404).json({ success: false, message: "Not found" });
+
+      let pulled = false;
+      let note = "";
+      if (acc.configFile) {
+        const host = hosts.resolveHost(acc.host);
+        if (host) {
+          try {
+            const removed = await removeAccountFromConfig(host, acc.configFile, {
+              clientSecret: acc.clientSecret,
+              login: acc.login,
+            });
+            if (removed) {
+              pulled = true;
+              try {
+                const states = await hosts.dockerPs(host);
+                const st = states[containerForFile(acc.configFile)];
+                if (st && /^running/i.test(st.state || "")) {
+                  await restartConfigContainer(host, acc.configFile);
+                }
+              } catch {
+                note = "Removed, but the bot could not be restarted.";
+              }
+            }
+          } catch (e) {
+            // Host offline: refuse rather than leave a ghost entry farming in
+            // the config with no matching inventory row.
+            return res.status(502).json({
+              success: false,
+              message:
+                "The bot host is unreachable — try again when it is online (" +
+                e.message +
+                ")",
+            });
+          }
+        }
+      }
+      await RenterAccount.deleteOne({ _id: acc._id });
+      res.json({
+        success: true,
+        pulled,
+        note:
+          note ||
+          (pulled
+            ? "Account removed and pulled off the bot."
+            : "Account removed."),
+      });
+    } catch (err) {
+      console.error("renter account delete error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 // MANUAL ADD — operator types one account (username + password + client token)
 // straight into a renter's bot. If that Twitch account is already farming
 // anywhere on the server — an operator bot config or another renter's bot — it
