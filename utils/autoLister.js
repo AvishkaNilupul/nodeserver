@@ -602,7 +602,9 @@ async function publishPlatiShare({
       url: r.url || "",
       title,
       description,
-      price,
+      // What Plati actually charges: the connector lifts anything under the
+      // platform floor, so the published price can differ from the model's.
+      price: r.price || price,
       status: "active",
       origin: "auto",
       note: "auto-farm: " + accounts.length + " account(s)",
