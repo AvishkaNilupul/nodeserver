@@ -234,7 +234,10 @@
           BOTS = d.bots || [];
           const sel = $("cBot");
           if(sel){
-            sel.innerHTML = '<option value="">No bot yet</option>'+BOTS.map((b,i)=>'<option value="'+i+'">'+esc(botOptionLabel(b))+'</option>').join("");
+            const hostsList = HOSTS.length ? HOSTS : [{id:"local",label:"Server"}];
+            sel.innerHTML = '<option value="">No bot yet</option>'+
+              hostsList.map(h=>'<option value="new:'+esc(h.id)+'">➕ Create a new bot on '+esc(h.label||h.id)+'</option>').join("")+
+              BOTS.map((b,i)=>'<option value="'+i+'">'+esc(botOptionLabel(b))+'</option>').join("");
           }
         } catch(e){ /* picker stays empty */ }
       }
@@ -243,17 +246,23 @@
       $("cBtn").addEventListener("click", async ()=>{
         const username=$("cU").value.trim(), password=$("cP").value;
         if(!username||!password) return toast("Username and password required");
-        const pick = BOTS[parseInt($("cBot").value,10)] || null;
+        const botVal = $("cBot").value;
+        const newHost = botVal.indexOf("new:")===0 ? botVal.slice(4) : "";
+        const pick = newHost ? null : (BOTS[parseInt(botVal,10)] || null);
         $("cBtn").disabled=true;
         try {
           const d = await api("/renters", { method:"POST", body: JSON.stringify({
             username, password,
+            newBotHost: newHost,
             botHost: pick ? pick.host : "", botFile: pick ? pick.file : "",
             farmGames: $("cGames").value,
             maxAccounts: parseInt($("cMax").value,10)||0,
             accessStart: $("cStart").value||null, accessEnd: $("cEnd").value||null,
           })});
-          $("cResult").innerHTML = '<div class="credbox">Renter <b>'+esc(d.renter.username)+'</b> created. Open <b>Manage → Create bot</b> to give them a bot. Share the login: <code>'+location.origin+'/renter-login.html</code> — username <code>'+esc(d.renter.username)+'</code>, and the password you set.</div>';
+          const botNote = d.renter.botFile
+            ? 'Bot: <b>'+esc(d.renter.botFile)+'</b>'+(newHost?' (newly created)':' (shared)')+'.'
+            : 'Open <b>Manage → Create bot</b> to give them a bot.';
+          $("cResult").innerHTML = '<div class="credbox">Renter <b>'+esc(d.renter.username)+'</b> created. '+botNote+' Share the login: <code>'+location.origin+'/renter-login.html</code> — username <code>'+esc(d.renter.username)+'</code>, and the password you set.</div>';
           $("cU").value=""; $("cP").value=""; $("cGames").value=""; $("cBot").value="";
           await Promise.all([loadRenters(), loadBotPicker(), loadRentBots()]);
         } catch(e){ toast(e.message); }

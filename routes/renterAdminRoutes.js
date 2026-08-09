@@ -28,6 +28,7 @@ const {
   sanitizeRenter,
   revealPassword,
   normGames,
+  MIN_PASSWORD,
 } = require("../utils/renters");
 const {
   otherSharers,
@@ -309,11 +310,54 @@ router.get("/renter-drops", requireSuperadmin, async (req, res) => {
   }
 });
 
-// CREATE a renter.
+// CREATE a renter. Either share an existing config (botHost/botFile) or, with
+// newBotHost, provision a fresh config slot on that host in the same step.
 router.post("/renters", requireSuperadmin, async (req, res) => {
   try {
     const b = req.body || {};
-    const { botHost, botFile } = await resolveAssignment(b.botHost, b.botFile);
+    let botHost = "";
+    let botFile = "";
+    if (b.newBotHost) {
+      // Validate the renter details BEFORE provisioning, so a bad username
+      // doesn't leave an orphaned empty config slot behind.
+      const uname = String(b.username || "").trim();
+      if (!/^[A-Za-z0-9_.-]{3,32}$/.test(uname)) {
+        return res.status(400).json({
+          success: false,
+          message: "Username must be 3–32 chars: letters, numbers, and . _ - only",
+        });
+      }
+      if (await Renter.exists({ usernameLower: uname.toLowerCase() })) {
+        return res.status(400).json({
+          success: false,
+          message: "A renter with that username already exists",
+        });
+      }
+      if (String(b.password || "").length < MIN_PASSWORD) {
+        return res.status(400).json({
+          success: false,
+          message: "Password must be at least " + MIN_PASSWORD + " characters",
+        });
+      }
+      const host = hosts.resolveHost(b.newBotHost);
+      if (!host) {
+        return res.status(400).json({ success: false, message: "Unknown host" });
+      }
+      let slot;
+      try {
+        slot = await provisionEmptyConfig(host);
+      } catch (e) {
+        return res.status(e.unreachable ? 502 : 500).json({
+          success: false,
+          offline: !!e.unreachable,
+          message: e.message || "Could not create the bot",
+        });
+      }
+      botHost = host.id;
+      botFile = slot.file;
+    } else {
+      ({ botHost, botFile } = await resolveAssignment(b.botHost, b.botFile));
+    }
     const renter = await createRenter({
       username: b.username,
       password: b.password,
