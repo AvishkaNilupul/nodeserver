@@ -1750,6 +1750,20 @@ async function ggselResolveCategoryId(game) {
   return "";
 }
 
+// The single-offer payload is the only one carrying the real attached-unit
+// counts, and it also gates the autoselling flip and the activate that puts a
+// fed offer back on sale — so a momentary 504 from GGSel's gateway must not
+// read as "this offer is unreadable".
+async function ggselReadOffer(keys, offerId) {
+  const r = await withNetRetries(() =>
+    axios.get(GG_API + "/offers/" + Number(offerId), {
+      headers: ggHeaders(keys),
+      timeout: 20000,
+    }),
+  );
+  return (r.data && r.data.data) || r.data || {};
+}
+
 // GGSel serves /offers 100 rows at a time behind a `pagination` block. An
 // unpaginated scan therefore only ever sees the newest 100 offers, so every
 // older one looks like "no such offer" — which is indistinguishable, to the
@@ -1783,28 +1797,15 @@ async function ggselFindOfferInList(keys, offerId) {
 // contract. ggselOfferStock keeps the number-or-null shape callers expect.
 async function ggselOfferStockDetailed(offerId) {
   const keys = requireKeys("ggsel");
-  let singleErr = null;
-  // The single-offer read is the only source carrying the real stock counts,
-  // so a transient blip must not silently degrade to the list scan (which
-  // knows only the advertised `quantity`). Retry it first.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
-        headers: ggHeaders(keys),
-        timeout: 20000,
-      });
-      const v = ggselStockField((r.data && r.data.data) || r.data);
-      if (v !== null) return { stock: v, reason: "" };
-      singleErr = null;
-      break;
-    } catch (e) {
-      singleErr = e;
-      if (!isTransientNetError(e) || attempt === 2) break;
-      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-    }
-  }
   const errText = (e) =>
     e.response ? "HTTP " + e.response.status : e.message || String(e);
+  let singleErr = null;
+  try {
+    const v = ggselStockField(await ggselReadOffer(keys, offerId));
+    if (v !== null) return { stock: v, reason: "" };
+  } catch (e) {
+    singleErr = e;
+  }
   try {
     const row = await ggselFindOfferInList(keys, offerId);
     const v = ggselStockField(row);
@@ -1846,11 +1847,7 @@ async function ggselEnableAutoselling(offerId) {
   const keys = requireKeys("ggsel");
   let offer;
   try {
-    const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
-      headers: ggHeaders(keys),
-      timeout: 20000,
-    });
-    offer = (r.data && r.data.data) || r.data || {};
+    offer = await ggselReadOffer(keys, offerId);
   } catch (e) {
     throw apiError("GGSel offer read", e);
   }
@@ -1875,11 +1872,7 @@ async function ggselFinalizeStock(offerId) {
   const keys = requireKeys("ggsel");
   let offer;
   try {
-    const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
-      headers: ggHeaders(keys),
-      timeout: 20000,
-    });
-    offer = (r.data && r.data.data) || r.data || {};
+    offer = await ggselReadOffer(keys, offerId);
   } catch (e) {
     throw apiError("GGSel offer read", e);
   }
