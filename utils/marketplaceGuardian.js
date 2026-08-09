@@ -48,6 +48,50 @@ let running = false;
 let freshFindings = [];
 let freshFeeds = [];
 
+// Which claim tag holds this drop, or null when it is free. A drop the
+// account never farmed has no row at all and is likewise unheld.
+function reservedBy(log) {
+  return log && log.soldAt ? log.soldToUsername || "" : null;
+}
+
+// Pure: how one attached account stands against the set its listing sells.
+// `logs` maps itemKey -> that account's DropLog row; a key with no row is a
+// drop the account never farmed. `tag` is the listing's claim tag.
+//
+// Both answers hinge on WHO holds each drop rather than on which marketplace
+// the listing is on, because the same on-disk state means opposite things
+// depending on ownership: drops redeemed while still reserved to this listing
+// are a delivered sale, the very same drops redeemed under someone else's tag
+// are a burned unit.
+function classifyUnit(uniqKeys, logs, tag) {
+  const held = uniqKeys.filter((k) => reservedBy(logs.get(k)) === tag).length;
+  let reservation = null;
+  if (held !== uniqKeys.length) {
+    const otherTag = uniqKeys
+      .map((k) => reservedBy(logs.get(k)))
+      .find((t) => t && t !== tag);
+    reservation = {
+      kind: otherTag ? "conflict" : held ? "partial" : "released",
+      held,
+      total: uniqKeys.length,
+      // Never farmed here, so no reservation can conjure it: the unit cannot
+      // deliver what the listing advertises.
+      absent: uniqKeys.filter((k) => !logs.has(k)).length,
+      otherTag: otherTag || "",
+    };
+  }
+  const conn = uniqKeys.map((k) => logs.get(k)).filter((d) => d && d.connected);
+  return {
+    reservation,
+    redeemed: conn.length
+      ? {
+          items: [...new Set(conn.map((d) => d.name || "item"))],
+          delivered: conn.every((d) => reservedBy(d) === tag),
+        }
+      : null,
+  };
+}
+
 function accountIdsOf(row) {
   return String(row.accountId || "")
     .split(",")
@@ -277,72 +321,94 @@ async function runChecks(rows, seenKeys) {
     const ids = accountIdsOf(row);
     if (!keys.length || !ids.length) continue;
 
-    // 2. Per-game reservation: every one of this set's drops on each attached
-    // account should be reserved by THIS listing's tag. If a key isn't reserved
-    // (could be sold again) or is reserved by another platform (a real
-    // conflict on the same drops), flag it.
     const tag = CLAIM_TAGS[row.marketplace] || row.marketplace;
-    const resv = await DropLog.find(
-      { account: { $in: ids }, itemKey: { $in: keys }, soldAt: { $ne: null } },
-      { account: 1, itemKey: 1, soldToUsername: 1 },
+    const uniqKeys = [...new Set(keys)];
+    const logs = await DropLog.find(
+      { account: { $in: ids }, itemKey: { $in: keys } },
+      {
+        account: 1,
+        itemKey: 1,
+        soldAt: 1,
+        soldToUsername: 1,
+        connected: 1,
+        name: 1,
+      },
     ).lean();
-    const resByAcc = new Map();
-    for (const d of resv) {
+    const logsByAcc = new Map();
+    for (const d of logs) {
       const k = String(d.account);
-      if (!resByAcc.has(k)) resByAcc.set(k, new Map());
-      resByAcc.get(k).set(d.itemKey, d.soldToUsername || "");
-    }
-    for (const accId of ids) {
-      const km = resByAcc.get(accId) || new Map();
-      const mine = keys.filter((k) => km.get(k) === tag).length;
-      if (mine === keys.length) continue; // fully reserved for this game
-      const acc = accMap.get(accId);
-      const otherTag = keys.map((k) => km.get(k)).find((t) => t && t !== tag);
-      await flag({
-        type: "claim-mismatch",
-        severity: "high",
-        marketplace: row.marketplace,
-        listing: row._id,
-        accountId: accId,
-        accountLogin: (acc && acc.login) || "",
-        dedupeKey: "claim:" + accId + ":" + row._id,
-        message:
-          "Account " +
-          ((acc && acc.login) || accId) +
-          " on a live " +
-          row.marketplace +
-          " listing: this game's drops are " +
-          (otherTag
-            ? 'reserved as "' +
-              otherTag +
-              '" — another listing grabbed the same drops.'
-            : "not fully reserved, so they could be sold again elsewhere."),
-      });
+      if (!logsByAcc.has(k)) logsByAcc.set(k, new Map());
+      logsByAcc.get(k).set(d.itemKey, d);
     }
 
-    const redeemed = await DropLog.find(
-      { account: { $in: ids }, itemKey: { $in: keys }, connected: true },
-      { account: 1, name: 1 },
-    ).lean();
-    const byAcc = new Map();
-    for (const d of redeemed) {
-      const k = String(d.account);
-      if (!byAcc.has(k)) byAcc.set(k, []);
-      byAcc.get(k).push(d.name || "item");
-    }
-    // On quantity listings (Plati / GGSel) the platform hands the delivery
-    // codes out itself, and delivered accounts stay attached to the row — so
-    // redeemed drops there usually just mean a completed sale whose buyer
-    // already connected the game. Flag it lower and say so, instead of
-    // raising a false "buyer would be burned" alarm after every sale.
-    const qtyListing =
-      (row.marketplace === "digiseller" || row.marketplace === "ggsel") &&
-      Number(row.qtyTarget) > 0;
-    for (const [accId, items] of byAcc) {
+    for (const accId of ids) {
+      const km = logsByAcc.get(accId) || new Map();
       const acc = accMap.get(accId);
+      const label = (acc && acc.login) || accId;
+
+      const { reservation, redeemed } = classifyUnit(uniqKeys, km, tag);
+
+      // 2. Per-game reservation: every one of this set's drops on each
+      // attached account should be reserved by THIS listing's tag.
+      if (reservation) {
+        const { kind, held, total, absent, otherTag } = reservation;
+        await flag({
+          type: "claim-mismatch",
+          // Only a cross-tag conflict or a wholly-unreserved unit is about to
+          // burn a buyer. A unit that holds SOME of the set is the ordinary
+          // result of adding drops to a set after units were reserved — the
+          // new drops are merely unclaimed, which is worth fixing but is not
+          // an emergency, and calling it one buried the real conflicts.
+          severity: kind === "partial" ? "medium" : "high",
+          marketplace: row.marketplace,
+          listing: row._id,
+          accountId: accId,
+          accountLogin: (acc && acc.login) || "",
+          dedupeKey: "claim:" + accId + ":" + row._id,
+          message:
+            kind === "conflict"
+              ? "Account " +
+                label +
+                " on a live " +
+                row.marketplace +
+                " listing: this game's drops are reserved as \"" +
+                otherTag +
+                '" — another listing grabbed the same drops.'
+              : kind === "released"
+                ? "Account " +
+                  label +
+                  " on a live " +
+                  row.marketplace +
+                  " listing holds no reservation for this game's drops — " +
+                  "they were released and could be sold again elsewhere."
+                : "Account " +
+                  label +
+                  " on a live " +
+                  row.marketplace +
+                  " listing covers only " +
+                  held +
+                  " of this set's " +
+                  total +
+                  " drops — the set gained drops after the unit was " +
+                  "reserved." +
+                  (absent
+                    ? " " +
+                      absent +
+                      " of them were never farmed on this account, so a " +
+                      "buyer would not receive them; the rest can be " +
+                      "re-reserved."
+                    : " Re-reserve to cover the whole set, or they could be " +
+                      "sold again elsewhere."),
+        });
+      }
+
+      // 3. Redeemed drops: the set's items are already connected on this
+      // account, so they can no longer be delivered to anyone new.
+      if (!redeemed) continue;
+      const delivered = redeemed.delivered;
       await flag({
         type: "redeemed-drops",
-        severity: qtyListing ? "low" : "high",
+        severity: delivered ? "low" : "high",
         marketplace: row.marketplace,
         listing: row._id,
         accountId: accId,
@@ -350,12 +416,12 @@ async function runChecks(rows, seenKeys) {
         dedupeKey: "redeemed:" + accId + ":" + row._id,
         message:
           "Account " +
-          ((acc && acc.login) || accId) +
+          label +
           " in a live " +
           row.marketplace +
           " listing already redeemed: " +
-          [...new Set(items)].slice(0, 5).join(", ") +
-          (qtyListing
+          redeemed.items.slice(0, 5).join(", ") +
+          (delivered
             ? " — likely a completed sale (the buyer connected it). Only " +
               "act if this unit was never sold."
             : " — the buyer could not redeem these. Replace the account or " +
@@ -377,6 +443,24 @@ async function runChecks(rows, seenKeys) {
 function platformRefusedRead(reason) {
   return /заблокирован|blocked|suspended|HTTP 40[13]|access denied|auth-0|недостаточно прав|refused the read/i.test(
     String(reason || ""),
+  );
+}
+
+// A finalize failure is recorded one-shot (it describes a moment, not a
+// standing condition), so autoResolveStale never sweeps it — a single GGSel
+// 504 left a high finding open indefinitely. A later finalize that actually
+// succeeded is proof the offer is fine, so close it there, mirroring how a
+// successful restock closes "restock-err:".
+async function clearFinalizeFinding(row) {
+  await AuditFinding.updateMany(
+    { dedupeKey: "autosell-sync:" + row._id, status: "open" },
+    {
+      $set: {
+        status: "resolved",
+        resolution: "auto-resolved: a later finalize succeeded",
+        resolvedAt: new Date(),
+      },
+    },
   );
 }
 
@@ -431,6 +515,7 @@ async function feedListing(row, seenKeys) {
             "guardian: re-activated stuck-paused ggsel offer " + row.externalId,
           );
         }
+        if (!fin.pending) await clearFinalizeFinding(row);
       } catch (e) {
         console.error(
           "guardian ggsel reconcile error " + row.externalId + ": " + e.message,
@@ -597,6 +682,7 @@ async function feedListing(row, seenKeys) {
             " in stock",
         );
       }
+      if (!fin.pending) await clearFinalizeFinding(row);
     } catch (e) {
       await upsertFinding({
         type: "restock-failed",
@@ -818,4 +904,11 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { runOnce, status, start, feedOne, CLAIM_TAGS };
+module.exports = {
+  runOnce,
+  status,
+  start,
+  feedOne,
+  classifyUnit,
+  CLAIM_TAGS,
+};
