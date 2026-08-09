@@ -1,6 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { classifyUnit } = require("../utils/marketplaceGuardian");
+const {
+  classifyUnit,
+  nothingToFeedReason,
+} = require("../utils/marketplaceGuardian");
 
 // Build the itemKey -> DropLog map classifyUnit takes. Each spec is
 // { key, by, connected }: `by` is the claim tag holding the drop (null = free,
@@ -167,4 +170,58 @@ test("redeemed item names are de-duplicated for the message", () => {
 test("unredeemed drops raise no redeemed finding", () => {
   const r = classifyUnit(["a"], logs([{ key: "a", by: "ggsel" }]), "ggsel");
   assert.equal(r.redeemed, null);
+});
+
+// "Nothing to feed" when the drops were genuinely never farmed reads
+// differently from the same message when 15 accounts hold them but are all
+// suspended — only the first is fixed by farming more.
+test("no holders at all keeps the plain nothing-to-feed wording", () => {
+  assert.equal(
+    nothingToFeedReason({
+      holders: 0,
+      suspended: 0,
+      noPassword: 0,
+      deleted: 0,
+    }),
+    "",
+  );
+});
+
+test("holders blocked by suspension are named as such", () => {
+  assert.equal(
+    nothingToFeedReason({
+      holders: 15,
+      suspended: 10,
+      noPassword: 2,
+      deleted: 3,
+    }),
+    "15 account(s) hold this bundle but none can be delivered: " +
+      "10 suspended or dead-token, 2 with no stored password, 3 deleted",
+  );
+});
+
+test("only the causes that apply are listed", () => {
+  assert.equal(
+    nothingToFeedReason({
+      holders: 5,
+      suspended: 5,
+      noPassword: 0,
+      deleted: 0,
+    }),
+    "5 account(s) hold this bundle but none can be delivered: " +
+      "5 suspended or dead-token",
+  );
+});
+
+test("holders excluded for none of the known reasons are short on copies", () => {
+  assert.equal(
+    nothingToFeedReason({
+      holders: 4,
+      suspended: 1,
+      noPassword: 0,
+      deleted: 0,
+    }),
+    "4 account(s) hold this bundle but none can be delivered: " +
+      "1 suspended or dead-token, 3 short of the copies the set asks for",
+  );
 });

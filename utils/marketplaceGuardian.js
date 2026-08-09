@@ -92,6 +92,64 @@ function classifyUnit(uniqKeys, logs, tag) {
   };
 }
 
+// Pure: turn a stuck listing's stock census into the sentence explaining it.
+// "Nothing to feed" has two completely different meanings — the drops were
+// never farmed, or they were farmed onto accounts that can't be sold — and
+// only the first is fixed by farming more.
+function nothingToFeedReason(c) {
+  if (!c.holders) return "";
+  const parts = [];
+  if (c.suspended) parts.push(c.suspended + " suspended or dead-token");
+  if (c.noPassword) parts.push(c.noPassword + " with no stored password");
+  if (c.deleted) parts.push(c.deleted + " deleted");
+  const other = c.holders - c.suspended - c.noPassword - c.deleted;
+  if (other > 0) parts.push(other + " short of the copies the set asks for");
+  if (!parts.length) return "";
+  return (
+    c.holders +
+    " account(s) hold this bundle but none can be delivered: " +
+    parts.join(", ")
+  );
+}
+
+// The census behind nothingToFeedReason: accounts carrying every one of the
+// set's drops free and unconnected, broken down by what makes them unsellable.
+async function censusForSet(set) {
+  const keys = [
+    ...new Set((set.items || []).map((i) => i.itemKey).filter(Boolean)),
+  ];
+  const empty = { holders: 0, suspended: 0, noPassword: 0, deleted: 0 };
+  if (!keys.length) return empty;
+  const rows = await DropLog.aggregate([
+    {
+      $match: {
+        itemKey: { $in: keys },
+        connected: { $ne: true },
+        soldAt: null,
+      },
+    },
+    { $group: { _id: { a: "$account", k: "$itemKey" } } },
+    { $group: { _id: "$_id.a", n: { $sum: 1 } } },
+    { $match: { n: keys.length } },
+  ]);
+  if (!rows.length) return empty;
+  const ids = rows.map((r) => r._id);
+  const accs = await BotAccount.find(
+    { _id: { $in: ids } },
+    { credPassword: 1, lastScanStatus: 1 },
+  ).lean();
+  const c = {
+    ...empty,
+    holders: ids.length,
+    deleted: ids.length - accs.length,
+  };
+  for (const a of accs) {
+    if (accountState.isUnusableScanStatus(a.lastScanStatus)) c.suspended++;
+    else if (!(a.credPassword && String(a.credPassword).length)) c.noPassword++;
+  }
+  return c;
+}
+
 function accountIdsOf(row) {
   return String(row.accountId || "")
     .split(",")
@@ -531,6 +589,10 @@ async function feedListing(row, seenKeys) {
   if (!claimed.length) {
     const key = "restock-empty:" + row._id;
     seenKeys.add(key);
+    // Say WHICH kind of empty. Reporting "no unsold account holds this
+    // bundle" when 15 accounts hold it and are merely suspended sends the
+    // owner off to farm drops they already have.
+    const reason = nothingToFeedReason(await censusForSet(set));
     await upsertFinding({
       type: "restock-failed",
       severity: "medium",
@@ -545,7 +607,9 @@ async function feedListing(row, seenKeys) {
         need +
         " unit(s) below its target of " +
         target +
-        " but no unsold account holds this bundle — nothing to feed.",
+        (reason
+          ? " — " + reason + "."
+          : " but no unsold account holds this bundle — nothing to feed."),
     });
     return 0;
   }
@@ -910,5 +974,6 @@ module.exports = {
   start,
   feedOne,
   classifyUnit,
+  nothingToFeedReason,
   CLAIM_TAGS,
 };
