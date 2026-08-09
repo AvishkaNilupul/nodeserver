@@ -1048,7 +1048,9 @@ async function digisellerAddContent(productId, lines) {
     // 2026-07-29: every list/get shape 404s, and GET on /product/content is
     // 405). So an id we fail to record here can never be targeted again.
     const contentIds = Array.isArray(d.content)
-      ? d.content.map((c) => (c && c.content_id != null ? String(c.content_id) : ""))
+      ? d.content.map((c) =>
+          c && c.content_id != null ? String(c.content_id) : "",
+        )
       : [];
     return { added: content.length, contentIds };
   } catch (e) {
@@ -1088,9 +1090,12 @@ async function digisellerRemoveContent(productId, contentId) {
 // the product, but the TOKEN-authenticated read returns it regardless
 // (verified live 2026-07-28: public read shows only show_rest, the token read
 // shows num_in_stock). Reading with the seller token is what lets the guardian
-// auto-feed digiseller listings. Returns a number, or null when it genuinely
-// can't be determined.
-async function digisellerProductStock(productId) {
+// auto-feed digiseller listings.
+//
+// Returns { stock, reason }: `stock` is the unit count, or null when it could
+// not be determined, in which case `reason` says why in a form fit to show an
+// operator. Callers that only need the number use digisellerProductStock.
+async function digisellerProductStockDetailed(productId) {
   let qs = "";
   try {
     const token = await digisellerToken();
@@ -1099,44 +1104,69 @@ async function digisellerProductStock(productId) {
     // Keys unavailable — fall back to the public read (may carry no stock).
     qs = "";
   }
+  const how = qs ? "authenticated read" : "public read — no seller token";
   try {
     const r = await axios.get(
       DS_API + "/products/" + encodeURIComponent(productId) + "/data" + qs,
       { headers: { Accept: "application/json" }, timeout: 20000 },
     );
     const d = r.data || {};
+    // Digiseller answers errors with HTTP 200 and a { retval, retdesc }
+    // envelope carrying no product. Without this check the `|| d` fallback
+    // below reads the envelope itself, finds no stock field, and reports a
+    // hard account-level failure ("продавец товара заблокирован" — the seller
+    // is blocked) as a benign "this product has no stock field", which is what
+    // hid a blocked seller behind a low-severity auto-feed warning.
+    if (d.retval !== undefined && String(d.retval) !== "0") {
+      const reason = "Digiseller refused the read: " + dsErrorText(d);
+      console.error(
+        "digiseller stock unreadable for product " +
+          productId +
+          ": " +
+          reason +
+          " (" +
+          how +
+          ")",
+      );
+      return { stock: null, reason };
+    }
     const p = d.product || d.content || d;
     // Only trust real numeric stock fields: booleans coerce to 0/1 and
     // num_in_lock counts locked (not sellable) units, so both would make the
     // auto-feeder misjudge stock and over-feed accounts.
     for (const f of ["num_in_stock", "in_stock", "count_goods"]) {
       const raw = p && p[f];
+      if (raw === null || raw === undefined) continue;
       if (typeof raw === "boolean") continue;
       const v = Number(raw);
-      if (Number.isFinite(v)) return v;
+      if (Number.isFinite(v)) return { stock: v, reason: "" };
     }
-    // Authenticated read still carried no stock figure — only expected on the
+    // The read succeeded but carried no stock figure — only expected on the
     // public fallback (no seller token) or an unusual product type.
+    const reason =
+      "response had no num_in_stock/in_stock/count_goods (" + how + ")";
     console.error(
-      "digiseller stock unreadable for product " +
-        productId +
-        ": response had no num_in_stock/in_stock/count_goods" +
-        (qs ? " (authenticated read)" : " (public read — no seller token)"),
+      "digiseller stock unreadable for product " + productId + ": " + reason,
     );
-    return null;
+    return { stock: null, reason };
   } catch (e) {
     // A genuine transport/API failure is a different problem from the above and
     // must not look the same in the logs.
+    const reason =
+      "request failed: " +
+      (e.response ? "HTTP " + e.response.status : e.message || String(e));
     console.error(
       "digiseller stock request failed for product " +
         productId +
         ": " +
-        (e.response
-          ? "HTTP " + e.response.status
-          : e.message || String(e)),
+        reason,
     );
-    return null;
+    return { stock: null, reason };
   }
+}
+
+async function digisellerProductStock(productId) {
+  return (await digisellerProductStockDetailed(productId)).stock;
 }
 
 // Disable sales for a product (soft delist).
@@ -1500,7 +1530,10 @@ async function ggselPublish({
 // stock and its catalog placement. (Digiseller has no equivalent: every
 // /product/edit/* path 404s while /product/create/* answers, so a Digiseller
 // product's text can only be changed by republishing it.)
-async function ggselUpdateOffer(offerId, { title, description, priceRub } = {}) {
+async function ggselUpdateOffer(
+  offerId,
+  { title, description, priceRub } = {},
+) {
   const keys = requireKeys("ggsel");
   const body = {};
   if (title) {
@@ -1530,10 +1563,36 @@ async function ggselUpdateOffer(offerId, { title, description, priceRub } = {}) 
 // Remaining sellable units of an offer. Tries the single-offer endpoint and
 // falls back to scanning the offer list. Returns a number or null when the
 // response doesn't carry a recognisable stock field.
+//
+// Field semantics, verified live 2026-08-09 against the seller API:
+//   in_stock_products_count           unsold units attached to an autoselling
+//                                     offer — the real remaining stock, and
+//                                     the figure ggselFinalizeStock syncs from.
+//   in_stock_splitted_products_count  the same, for offers that sell "splitted"
+//                                     products (has_splitted_products).
+//   quantity                          the ADVERTISED sellable count. It is the
+//                                     only stock-ish field the LIST endpoint
+//                                     carries, but on an autoselling offer it
+//                                     lags the real stock until a finalize
+//                                     re-syncs it — so it is the fallback, not
+//                                     the first choice.
+// `available_quantity` and `products_count` were checked here before and are
+// on neither payload, so this only ever matched `quantity`.
 function ggselStockField(o) {
   if (!o || typeof o !== "object") return null;
-  for (const f of ["available_quantity", "products_count", "quantity"]) {
-    const v = Number(o[f]);
+  const fields = o.has_splitted_products
+    ? [
+        "in_stock_splitted_products_count",
+        "in_stock_products_count",
+        "quantity",
+      ]
+    : ["in_stock_products_count", "quantity"];
+  for (const f of fields) {
+    const raw = o[f];
+    // null coerces to 0 and a boolean to 0/1 — either would read as "empty"
+    // and make the auto-feeder over-feed accounts into a full offer.
+    if (raw === null || raw === undefined || typeof raw === "boolean") continue;
+    const v = Number(raw);
     if (Number.isFinite(v)) return v;
   }
   return null;
@@ -1604,7 +1663,11 @@ const GG_LEAF_MAX_DEPTH = 4;
 
 async function ggselLeafCategory(node, keys) {
   let cur = node;
-  for (let depth = 0; cur && cur.has_children && depth < GG_LEAF_MAX_DEPTH; depth++) {
+  for (
+    let depth = 0;
+    cur && cur.has_children && depth < GG_LEAF_MAX_DEPTH;
+    depth++
+  ) {
     let rows = [];
     try {
       const r = await axios.get(GG_API + "/categories?parent_id=" + cur.id, {
@@ -1687,29 +1750,87 @@ async function ggselResolveCategoryId(game) {
   return "";
 }
 
-async function ggselOfferStock(offerId) {
-  const keys = requireKeys("ggsel");
-  try {
-    const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
-      headers: ggHeaders(keys),
-      timeout: 20000,
-    });
-    const v = ggselStockField((r.data && r.data.data) || r.data);
-    if (v !== null) return v;
-  } catch {
-    /* fall through to the list scan */
-  }
-  try {
-    const r = await axios.get(GG_API + "/offers", {
-      headers: ggHeaders(keys),
-      timeout: 20000,
-    });
+// GGSel serves /offers 100 rows at a time behind a `pagination` block. An
+// unpaginated scan therefore only ever sees the newest 100 offers, so every
+// older one looks like "no such offer" — which is indistinguishable, to the
+// caller, from a genuinely unreadable stock. That is what made the guardian
+// report "could not read remaining stock" for long-lived listings forever.
+// Walk the pages until the offer turns up. The page cap is a guard against a
+// malformed pagination block, not an expected limit.
+const GG_OFFERS_PAGE_SIZE = 100;
+const GG_OFFERS_MAX_PAGES = 50;
+
+async function ggselFindOfferInList(keys, offerId) {
+  for (let page = 1; page <= GG_OFFERS_MAX_PAGES; page++) {
+    const r = await axios.get(
+      GG_API + "/offers?page=" + page + "&limit=" + GG_OFFERS_PAGE_SIZE,
+      { headers: ggHeaders(keys), timeout: 20000 },
+    );
     const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
     const row = rows.find((o) => String(o && o.id) === String(offerId));
-    return ggselStockField(row);
-  } catch {
-    return null;
+    if (row) return row;
+    const pg = (r.data && r.data.pagination) || {};
+    const more =
+      pg.has_next_page === undefined
+        ? rows.length === GG_OFFERS_PAGE_SIZE
+        : !!pg.has_next_page;
+    if (!more) return null;
   }
+  return null;
+}
+
+// Returns { stock, reason } — see digisellerProductStockDetailed for the
+// contract. ggselOfferStock keeps the number-or-null shape callers expect.
+async function ggselOfferStockDetailed(offerId) {
+  const keys = requireKeys("ggsel");
+  let singleErr = null;
+  // The single-offer read is the only source carrying the real stock counts,
+  // so a transient blip must not silently degrade to the list scan (which
+  // knows only the advertised `quantity`). Retry it first.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await axios.get(GG_API + "/offers/" + Number(offerId), {
+        headers: ggHeaders(keys),
+        timeout: 20000,
+      });
+      const v = ggselStockField((r.data && r.data.data) || r.data);
+      if (v !== null) return { stock: v, reason: "" };
+      singleErr = null;
+      break;
+    } catch (e) {
+      singleErr = e;
+      if (!isTransientNetError(e) || attempt === 2) break;
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    }
+  }
+  const errText = (e) =>
+    e.response ? "HTTP " + e.response.status : e.message || String(e);
+  try {
+    const row = await ggselFindOfferInList(keys, offerId);
+    const v = ggselStockField(row);
+    if (v !== null) return { stock: v, reason: "" };
+    const reason =
+      (row
+        ? "the offer's list row carried no stock field"
+        : "no such offer in the seller's offer list") +
+      (singleErr
+        ? " (single-offer read failed: " + errText(singleErr) + ")"
+        : "");
+    console.error(
+      "ggsel stock unreadable for offer " + offerId + ": " + reason,
+    );
+    return { stock: null, reason };
+  } catch (e) {
+    const reason = "request failed: " + errText(e);
+    console.error(
+      "ggsel stock request failed for offer " + offerId + ": " + reason,
+    );
+    return { stock: null, reason };
+  }
+}
+
+async function ggselOfferStock(offerId) {
+  return (await ggselOfferStockDetailed(offerId)).stock;
 }
 
 // Products can only be attached to an autoselling offer — GGSel rejects
@@ -2163,7 +2284,9 @@ function fpFormValues(html) {
     const tag = m[0];
     const name = /name="([^"]+)"/.exec(tag);
     if (!name) continue;
-    const type = ((/type="([^"]+)"/.exec(tag) || [])[1] || "text").toLowerCase();
+    const type = (
+      (/type="([^"]+)"/.exec(tag) || [])[1] || "text"
+    ).toLowerCase();
     if (type === "submit" || type === "button" || type === "file") continue;
     const val = /value="([^"]*)"/.exec(tag);
     if (type === "checkbox" || type === "radio") {
@@ -2537,7 +2660,12 @@ async function funpayUpdateSecrets(
     .map((s) => s.trim())
     .filter(Boolean);
   const prefixes = removeLogins
-    .map((l) => String(l || "").trim().toLowerCase() + ":")
+    .map(
+      (l) =>
+        String(l || "")
+          .trim()
+          .toLowerCase() + ":",
+    )
     .filter((p) => p.length > 1);
   const kept = [];
   const removedLines = [];
@@ -2621,7 +2749,9 @@ function zxData(what, r) {
   if (body.isSuccess === false) {
     const err = body.error || {};
     const out = new Error(
-      what + ": " + String(err.description || err.message || "failed").slice(0, 300),
+      what +
+        ": " +
+        String(err.description || err.message || "failed").slice(0, 300),
     );
     out.__zeusx = true;
     throw out;
@@ -2658,7 +2788,10 @@ async function zeusxRefreshAccessToken() {
   try {
     const r = await axios.post(
       ZX_API + "/user/exchange-token",
-      { access_token: keys.accessToken || "", refresh_token: keys.refreshToken },
+      {
+        access_token: keys.accessToken || "",
+        refresh_token: keys.refreshToken,
+      },
       {
         headers: {
           Origin: "https://zeusx.com",
@@ -2674,7 +2807,9 @@ async function zeusxRefreshAccessToken() {
     throw zxError("ZeusX refresh", e);
   }
   if (body.isSuccess === false) {
-    throw new Error("ZeusX refresh: " + JSON.stringify(body.error || {}).slice(0, 200));
+    throw new Error(
+      "ZeusX refresh: " + JSON.stringify(body.error || {}).slice(0, 200),
+    );
   }
   const data = body.data || body;
   const access = data.access_token || data.accessToken || data.token;
@@ -2706,7 +2841,8 @@ async function zeusxTest() {
     const me = zxData("ZeusX", r) || {};
     return {
       ok: true,
-      detail: "Signed in as " + (me.username || me.display_name || me.id || "seller"),
+      detail:
+        "Signed in as " + (me.username || me.display_name || me.id || "seller"),
     };
   } catch (e) {
     throw zxError("ZeusX test", e);
@@ -2820,14 +2956,14 @@ function zxDescriptionHtml(description) {
 //                    attributes: [{ base_attribute_id, base_attribute_value }] } }
 function zeusxGameConfig(game) {
   const { loadSettings: load } = require("./settings");
-  const af = (load().autoFarm || {});
+  const af = load().autoFarm || {};
   const map = af.zeusxGames || {};
-  const key = String(game || "").trim().toLowerCase();
+  const key = String(game || "")
+    .trim()
+    .toLowerCase();
   if (!key) return null;
   if (map[key]) return map[key];
-  const hit = Object.keys(map).find(
-    (k) => key.includes(k) || k.includes(key),
-  );
+  const hit = Object.keys(map).find((k) => key.includes(k) || k.includes(key));
   return hit ? map[hit] : null;
 }
 
@@ -2838,14 +2974,17 @@ function zeusxOfferUrl(offer) {
   const slug = offer && offer.slug;
   const gameId = offer && offer.game_id;
   const category = String(
-    (offer && (offer.service_category_name || offer.cache_sc_service_category_name)) ||
+    (offer &&
+      (offer.service_category_name || offer.cache_sc_service_category_name)) ||
       "",
   )
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "-");
   const gameSlug = String(
-    (offer && (offer.service_category_base_name || offer.cache_scb_base_name)) || "",
+    (offer &&
+      (offer.service_category_base_name || offer.cache_scb_base_name)) ||
+      "",
   )
     .trim()
     .toLowerCase()
@@ -2853,10 +2992,20 @@ function zeusxOfferUrl(offer) {
     .replace(/(^-|-$)/g, "");
   if (slug && gameId && gameSlug && category) {
     return (
-      "https://zeusx.com/game/" + gameSlug + "/" + gameId + "/" + category + "/" + slug
+      "https://zeusx.com/game/" +
+      gameSlug +
+      "/" +
+      gameId +
+      "/" +
+      category +
+      "/" +
+      slug
     );
   }
-  return "https://zeusx.com/offer/" + ((offer && offer.offer_code) || (offer && offer.id) || "");
+  return (
+    "https://zeusx.com/offer/" +
+    ((offer && offer.offer_code) || (offer && offer.id) || "")
+  );
 }
 
 // ZeusX's game catalog. The site loads it as a static JSON blob (the same one
@@ -2869,7 +3018,10 @@ const ZX_MENU_TTL_MS = 6 * 60 * 60 * 1000;
 let zxMenuCache = { at: 0, bases: [] };
 
 async function zeusxMenu() {
-  if (zxMenuCache.bases.length && Date.now() - zxMenuCache.at < ZX_MENU_TTL_MS) {
+  if (
+    zxMenuCache.bases.length &&
+    Date.now() - zxMenuCache.at < ZX_MENU_TTL_MS
+  ) {
     return zxMenuCache.bases;
   }
   const r = await axios.get(ZX_MENU_URL, { timeout: 20000 });
@@ -2945,9 +3097,7 @@ function zxMatchScore(queryTokens, name) {
   // Every word of the candidate must be in the query, or "Rust" would match
   // "Rust Console" as readily as itself. Sequel numbers and edition words are
   // exempt: sellers write "Overwatch" for "Overwatch 2".
-  const core = cand.filter(
-    (w) => !ZX_EDITION_WORDS.has(w) && !/^\d+$/.test(w),
-  );
+  const core = cand.filter((w) => !ZX_EDITION_WORDS.has(w) && !/^\d+$/.test(w));
   if (!core.every((w) => q.has(w))) score -= 0.34;
   for (const w of cand) {
     if (q.has(w)) continue;
@@ -3162,17 +3312,23 @@ async function zeusxPublish({
 async function zeusxOffer(offerId) {
   const keys = requireKeys("zeusx");
   try {
-    const r = await axios.get(ZX_API + "/offer/" + encodeURIComponent(offerId), {
-      headers: zxHeaders(keys),
-      timeout: 20000,
-    });
+    const r = await axios.get(
+      ZX_API + "/offer/" + encodeURIComponent(offerId),
+      {
+        headers: zxHeaders(keys),
+        timeout: 20000,
+      },
+    );
     return zxData("ZeusX offer", r) || {};
   } catch (e) {
     throw zxError("ZeusX offer", e);
   }
 }
 
-async function zeusxUpdateOffer(offerId, { title, description, priceUsd, quantity } = {}) {
+async function zeusxUpdateOffer(
+  offerId,
+  { title, description, priceUsd, quantity } = {},
+) {
   const keys = requireKeys("zeusx");
   const current = await zeusxOffer(offerId);
   const offer = {
@@ -3259,7 +3415,9 @@ async function zeusxMyListings(pageIndex) {
   const keys = requireKeys("zeusx");
   try {
     const r = await axios.get(
-      ZX_API + "/offer/my-sales-listing?pageIndex=" + (parseInt(pageIndex, 10) || 0),
+      ZX_API +
+        "/offer/my-sales-listing?pageIndex=" +
+        (parseInt(pageIndex, 10) || 0),
       { headers: zxHeaders(keys), timeout: 20000 },
     );
     return zxData("ZeusX listings", r) || { sales: [] };
@@ -3289,6 +3447,7 @@ module.exports = {
   digisellerAddContent,
   digisellerRemoveContent,
   digisellerProductStock,
+  digisellerProductStockDetailed,
   digisellerDelist,
   g2gTest,
   g2gServices,
@@ -3306,6 +3465,8 @@ module.exports = {
   ggselUpdateOffer,
   ggselAddProducts,
   ggselOfferStock,
+  ggselOfferStockDetailed,
+  ggselStockField,
   ggselResolveCategoryId,
   ggselTitle,
   ggselEnableAutoselling,

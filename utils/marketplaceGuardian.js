@@ -369,23 +369,40 @@ async function runChecks(rows, seenKeys) {
 // ------------------------------------------------------------------
 // Auto-feed (Plati / GGSel quantity listings)
 // ------------------------------------------------------------------
+
+// Did the marketplace refuse the stock read outright, rather than merely
+// answer with something we couldn't parse? A refusal is account-wide (the
+// seller is blocked, the key was revoked or lost its rights), so it hits every
+// listing on that market at once and only a human can clear it.
+function platformRefusedRead(reason) {
+  return /заблокирован|blocked|suspended|HTTP 40[13]|access denied|auth-0|недостаточно прав|refused the read/i.test(
+    String(reason || ""),
+  );
+}
+
 async function feedListing(row, seenKeys) {
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
-  let remaining = null;
+  let read;
   if (row.marketplace === "ggsel") {
-    remaining = await mp.ggselOfferStock(row.externalId);
+    read = await mp.ggselOfferStockDetailed(row.externalId);
   } else if (row.marketplace === "digiseller") {
-    remaining = await mp.digisellerProductStock(row.externalId);
+    read = await mp.digisellerProductStockDetailed(row.externalId);
   } else {
     return 0;
   }
+  const remaining = read.stock;
   if (remaining === null) {
     const key = "stock:" + row._id;
     seenKeys.add(key);
     await upsertFinding({
       type: "stock-unknown",
-      severity: "low",
+      // A platform refusing the read outright (a blocked seller, a revoked
+      // key) takes the whole market offline and needs a human on it — it is
+      // not the same as one listing whose stock momentarily didn't parse, and
+      // reporting both as "low" is what let a blocked Digiseller seller sit
+      // behind a routine-looking auto-feed warning.
+      severity: platformRefusedRead(read.reason) ? "high" : "low",
       marketplace: row.marketplace,
       listing: row._id,
       dedupeKey: key,
@@ -394,7 +411,8 @@ async function feedListing(row, seenKeys) {
         row.marketplace +
         " listing " +
         row.externalId +
-        " — auto-feed skipped this pass.",
+        " — auto-feed skipped this pass." +
+        (read.reason ? " " + row.marketplace + " said: " + read.reason : ""),
     });
     return 0;
   }
