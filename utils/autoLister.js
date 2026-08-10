@@ -975,6 +975,24 @@ async function recordFedUnits(marketplace, externalId, accounts, contentIds) {
   await row.save();
 }
 
+// Is this market's listing still live? The Gameflip refill branch gets this
+// for free (it loads the row with status:"active"), but the Plati/GGSel
+// branches addressed the platform by id alone, so a task kept refilling a
+// listing that had since been delisted — every sweep re-read stock for a
+// product the platform had already dropped, logging an unreadable-stock error
+// on a loop with no live listing left to feed. A task can outlive any one of
+// its per-market listings, so each market is checked on its own.
+async function listingIsLive(marketplace, externalId) {
+  if (!externalId) return false;
+  const row = await MarketplaceListing.findOne({
+    marketplace,
+    externalId: String(externalId),
+  })
+    .select("status")
+    .lean();
+  return !!row && row.status === "active";
+}
+
 // Auto-refiller: top up markets that sold out (or were shorted at listing
 // time) WITHOUT delisting anything. Stock sources in order: free spare
 // accounts (assigned but not tied to any active listing), then the 50%
@@ -1046,7 +1064,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- Plati (Digiseller): live stock read, then add codes to the product.
-  if (L.plati && L.plati.externalId) {
+  if (
+    L.plati &&
+    L.plati.externalId &&
+    (await listingIsLive("digiseller", L.plati.externalId))
+  ) {
     try {
       const stock = await mp.digisellerProductStock(L.plati.externalId);
       if (stock !== null && stock < per) {
@@ -1078,7 +1100,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- GGSel: live stock read, add products, resync sellable quantity.
-  if (L.ggsel && L.ggsel.externalId) {
+  if (
+    L.ggsel &&
+    L.ggsel.externalId &&
+    (await listingIsLive("ggsel", L.ggsel.externalId))
+  ) {
     try {
       const stock = await mp.ggselOfferStock(L.ggsel.externalId);
       if (stock !== null && stock < per) {
@@ -1989,6 +2015,7 @@ module.exports = {
   retryMissingSecondaries,
   isAutoOwned,
   // exported for tests
+  listingIsLive,
   buildTitle,
   buildDescription,
   derivePrice,

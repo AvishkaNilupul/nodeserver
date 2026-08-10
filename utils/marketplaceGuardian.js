@@ -623,6 +623,15 @@ async function reportOrphanedReservations(flag) {
   return n;
 }
 
+// Consecutive passes on which a given GGSel offer needed re-activating. A
+// healthy heal fires once and the offer stays active (entry deleted); an offer
+// that GGSel keeps re-pausing climbs until it crosses the threshold and gets a
+// finding instead of an endless run of "re-activated" log lines. Keyed by
+// externalId and process-local — a restart re-learns the streak within a few
+// passes, which is the right trade for not persisting churn to the DB.
+const reactivateStreak = new Map();
+const REACTIVATE_LOOP_THRESHOLD = 3;
+
 // ------------------------------------------------------------------
 // Auto-feed (Plati / GGSel quantity listings)
 // ------------------------------------------------------------------
@@ -631,8 +640,16 @@ async function reportOrphanedReservations(flag) {
 // answer with something we couldn't parse? A refusal is account-wide (the
 // seller is blocked, the key was revoked or lost its rights), so it hits every
 // listing on that market at once and only a human can clear it.
+//
+// The match is deliberately tight: it names the account-level failure modes
+// (blocked seller, revoked/rights-less key, HTTP 401/403) and nothing else.
+// In particular it does NOT match the generic "refused the read" prefix that
+// digisellerProductStockDetailed prefixes onto EVERY unreadable-product error
+// ("товар не найден" — a deleted SKU). One dead product is a single-listing
+// problem, not an account outage, and treating it as a platform-wide refusal
+// raised a "whole marketplace is down" finding off one stale SKU.
 function platformRefusedRead(reason) {
-  return /заблокирован|blocked|suspended|HTTP 40[13]|access denied|auth-0|недостаточно прав|refused the read/i.test(
+  return /заблокирован|blocked|suspended|HTTP 401|HTTP 403|access denied|auth-0|недостаточно прав/i.test(
     String(reason || ""),
   );
 }
@@ -709,6 +726,38 @@ async function feedListing(row, seenKeys, refusals) {
           console.log(
             "guardian: re-activated stuck-paused ggsel offer " + row.externalId,
           );
+          // A re-activation that has to happen again every pass is not a
+          // heal, it is a loop: GGSel accepts batch_activate (HTTP 2xx) and
+          // the offer is paused again by the next tick, so the "success" log
+          // repeated forever and nothing ever escalated. Count consecutive
+          // re-activations per offer and raise a finding once the same offer
+          // needs it repeatedly — the heal keeps running, it just stops being
+          // silent. The counter is cleared below the moment a pass finds the
+          // offer already active.
+          const n = (reactivateStreak.get(row.externalId) || 0) + 1;
+          reactivateStreak.set(row.externalId, n);
+          if (n >= REACTIVATE_LOOP_THRESHOLD) {
+            const key = "reactivate-loop:" + row._id;
+            if (seenKeys) seenKeys.add(key);
+            await upsertFinding({
+              type: "restock-failed",
+              severity: "medium",
+              marketplace: row.marketplace,
+              listing: row._id,
+              dedupeKey: key,
+              message:
+                "ggsel offer " +
+                row.externalId +
+                " has needed re-activation on " +
+                n +
+                " consecutive passes — GGSel accepts the activate call but the" +
+                " offer keeps returning to paused, so it is off sale between" +
+                " passes. Needs a look on the GGSel side.",
+            });
+          }
+        } else {
+          // Already active — whatever caused the earlier pauses has cleared.
+          reactivateStreak.delete(row.externalId);
         }
         if (!fin.pending) await clearFinalizeFinding(row);
       } catch (e) {
@@ -1190,5 +1239,6 @@ module.exports = {
   classifyUnit,
   summarizeDrops,
   nothingToFeedReason,
+  platformRefusedRead,
   CLAIM_TAGS,
 };
