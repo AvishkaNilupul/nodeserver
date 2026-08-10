@@ -189,20 +189,6 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     const badMap = new Map(accAgg.map((a) => [String(a._id), a.bad || 0]));
     const dropMap = new Map(dropAgg.map((a) => [String(a._id), a.n]));
 
-    // One dockerPs per host, reused across every bot on that host.
-    const psCache = new Map();
-    async function getPs(host) {
-      if (psCache.has(host.id)) return psCache.get(host.id);
-      let states = null;
-      try {
-        states = await hosts.dockerPs(host);
-      } catch {
-        states = null; // host offline / unreachable
-      }
-      psCache.set(host.id, states);
-      return states;
-    }
-
     // How many renters share each config, so the overview can flag shared bots.
     const shareCount = new Map();
     for (const r of renters) {
@@ -213,18 +199,8 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     const bots = [];
     for (const r of renters) {
       const host = hosts.resolveHost(r.botHost);
-      let running = null;
-      let online = false;
       let hostLabel = r.botHost;
-      if (host) {
-        hostLabel = host.label;
-        const states = await getPs(host);
-        if (states) {
-          online = true;
-          const st = states[containerForFile(r.botFile)];
-          running = !!(st && /^running/i.test(st.state || ""));
-        }
-      }
+      if (host) hostLabel = host.label;
       bots.push({
         renterId: String(r._id),
         username: r.username,
@@ -233,8 +209,12 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         hostLabel,
         file: r.botFile,
         container: containerForFile(r.botFile),
-        online,
-        running,
+        // Deliberately absent, not false: this response never talks to a host,
+        // so "is it running" is UNKNOWN here rather than "offline". The page
+        // paints these rows immediately and fills the real state in from
+        // /renter-bots/live, which is the call that pays for SSH.
+        online: null,
+        running: null,
         accounts: accMap.get(String(r._id)) || 0,
         tokenIssues: badMap.get(String(r._id)) || 0,
         drops: dropMap.get(String(r._id)) || 0,
@@ -244,6 +224,53 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
     res.json({ success: true, bots });
   } catch (err) {
     console.error("renter-bots list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Live container state for the rented bots — the half of /renter-bots that has
+// to shell out to each host.
+//
+// Split off deliberately. Deriving Running/Stopped means `docker ps -a` on the
+// host, and these bots live on a Raspberry Pi reached over Tailscale: measured
+// 2026-08-11 at 2975ms on a cold SSH master. Folded into the list endpoint that
+// cost was paid before the page could paint anything at all, so the whole
+// renters page felt broken while it waited on a home internet connection.
+//
+// Hosts are queried CONCURRENTLY (the list endpoint used to walk them in
+// sequence), so the response costs one slow host, not the sum of them.
+router.get("/renter-bots/live", requireSuperadmin, async (req, res) => {
+  try {
+    const renters = await Renter.find({ botFile: { $gt: "" } }, { botHost: 1, botFile: 1 })
+      .lean();
+    const hostIds = [
+      ...new Set(renters.map((r) => r.botHost || "").filter(Boolean)),
+    ];
+    const psByHost = new Map();
+    await Promise.all(
+      hostIds.map(async (id) => {
+        const host = hosts.resolveHost(id);
+        if (!host) return psByHost.set(id, null);
+        try {
+          psByHost.set(id, await hosts.dockerPs(host));
+        } catch {
+          psByHost.set(id, null); // host offline / unreachable
+        }
+      }),
+    );
+    const live = renters.map((r) => {
+      const states = psByHost.get(r.botHost || "");
+      let running = null;
+      const online = !!states;
+      if (states) {
+        const st = states[containerForFile(r.botFile)];
+        running = !!(st && /^running/i.test(st.state || ""));
+      }
+      return { renterId: String(r._id), online, running };
+    });
+    res.json({ success: true, live });
+  } catch (err) {
+    console.error("renter-bots live error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });

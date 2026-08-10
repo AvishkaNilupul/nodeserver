@@ -192,7 +192,15 @@ function sshBaseArgs(host) {
     "-o",
     "ControlPath=" + SSH_CONTROL_PATH,
     "-o",
-    "ControlPersist=60",
+    // How long the multiplexed master lingers after the last command. This was
+    // 60s, which is shorter than the gap between visits to a page: opening
+    // /renters.html a minute after the previous look always paid the full cold
+    // handshake again. Measured on the Pi over Tailscale 2026-08-11: 2975ms
+    // cold vs 565ms on a warm master. Ten minutes keeps the socket alive across
+    // a normal working session; ServerAliveInterval below still tears down a
+    // master whose link actually died, so a longer persist cannot wedge later
+    // commands.
+    "ControlPersist=600",
     // Kill a session whose link has died instead of holding the slot until the
     // command timeout fires — with multiplexing, one wedged master would
     // otherwise stall every later command queued behind it.
