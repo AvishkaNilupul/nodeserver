@@ -63,6 +63,9 @@
       .btn.sm { padding: 7px 11px; font-size: 12.5px; }
       .btn.warn { background: var(--surface); color: var(--yellow); border: 1px solid var(--line); }
       .muted { color: var(--muted); }
+      /* Placeholder shown in place of a section that hasn't been fetched yet. */
+      .lazyidle { display:flex; gap:10px; align-items:center; padding:16px; flex-wrap:wrap; }
+      .lazyidle .muted { font-size:12.5px; }
       .sect { margin-top: 26px; }
       .sect > .shdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
       .rows { display: flex; flex-direction: column; gap: 10px; }
@@ -174,7 +177,13 @@
             <button class="btn ghost sm" id="refreshAccs">Refresh</button>
           </div>
         </div>
-        <div class="card"><div id="rentAccs"></div></div>
+        <div class="card">
+          <div id="accsIdle" class="lazyidle">
+            <button class="btn sm" id="loadAccsBtn">Load renter accounts</button>
+            <span class="muted">Not loaded — managing renters doesn't need them.</span>
+          </div>
+          <div id="rentAccs"></div>
+        </div>
       </div>
 
       <div class="sect">
@@ -185,7 +194,13 @@
             <button class="btn ghost sm" id="refreshDrops">Refresh</button>
           </div>
         </div>
-        <div class="card"><div id="rentDrops"></div></div>
+        <div class="card">
+          <div id="dropsIdle" class="lazyidle">
+            <button class="btn sm" id="loadDropsBtn">Load drops archive</button>
+            <span class="muted">Thousands of rows — loaded only when you ask.</span>
+          </div>
+          <div id="rentDrops"></div>
+        </div>
       </div>
 
       <div class="sect">
@@ -412,7 +427,7 @@
         try {
           const d = await api("/renter-accounts/"+id, { method:"DELETE" });
           toast(d.note || "Account removed");
-          await Promise.all([loadRenters(), loadRentBots(), loadRentAccs()]);
+          await Promise.all([loadRenters(), loadRentBots(), ACCS_LOADED ? loadRentAccs() : null]);
           if (CURRENT) openRenter(CURRENT);
         } catch(e){ toast(e.message); }
       };
@@ -529,7 +544,7 @@
         try {
           const d = await api("/renter-accounts/"+id+"/farm", { method:"POST", body: JSON.stringify({ days }) });
           toast(d.farmUntil ? "Farms until "+fmtDate(d.farmUntil) : "Farming window cleared");
-          loadRentAccs();
+          if (ACCS_LOADED) loadRentAccs();
         } catch(e){ toast(e.message); }
       };
       const SCAN_BADGE = {
@@ -750,23 +765,45 @@
         try{ await api("/renters/"+id,{method:"DELETE"}); toast("Deleted"); closeModal(); await Promise.all([loadRenters(), loadRentBots()]); }catch(e){ toast(e.message); } };
 
       // chrome
+      // Whether the on-demand sections have been pulled in this page view. The
+      // global Refresh and the filter dropdowns must not silently re-fetch a
+      // section the operator never opened — that would undo the point of the
+      // Load buttons.
+      var ACCS_LOADED = false, DROPS_LOADED = false;
+      function revealLazy(idleId, flag){
+        const el = $(idleId); if (el) el.style.display = "none";
+        return flag;
+      }
+      $("loadAccsBtn").addEventListener("click", async ()=>{
+        ACCS_LOADED = revealLazy("accsIdle", true);
+        await loadRentAccs();
+      });
+      $("loadDropsBtn").addEventListener("click", async ()=>{
+        DROPS_LOADED = revealLazy("dropsIdle", true);
+        await loadRentedDrops();
+      });
+
       $("logoutBtn").addEventListener("click", async ()=>{ try{ await fetch("/admin-logout",{method:"POST",credentials:"same-origin"}); }catch(e){} location.href="/admin-login.html"; });
-      $("refreshBtn").addEventListener("click", ()=>{ loadApprovals(); loadRenters(); loadRentBots(); loadRentedDrops(); loadRentAccs(); });
+      $("refreshBtn").addEventListener("click", ()=>{ loadApprovals(); loadRenters(); loadRentBots(); if(DROPS_LOADED) loadRentedDrops(); if(ACCS_LOADED) loadRentAccs(); });
       $("refreshBots").addEventListener("click", ()=> loadRentBots());
-      $("refreshDrops").addEventListener("click", ()=> loadRentedDrops());
-      $("refreshAccs").addEventListener("click", loadRentAccs);
-      $("accFilter").addEventListener("change", loadRentAccs);
+      $("refreshDrops").addEventListener("click", ()=>{ DROPS_LOADED = revealLazy("dropsIdle", true); loadRentedDrops(); });
+      $("refreshAccs").addEventListener("click", ()=>{ ACCS_LOADED = revealLazy("accsIdle", true); loadRentAccs(); });
+      $("accFilter").addEventListener("change", ()=>{ if(ACCS_LOADED) loadRentAccs(); });
       $("accReveal").addEventListener("click", ()=>{
         ACC_SHOW = !ACC_SHOW;
         $("accReveal").textContent = ACC_SHOW ? "Hide secrets" : "Show secrets";
         renderRentAccs();
       });
-      $("dropFilter").addEventListener("change", ()=> loadRentedDrops());
+      $("dropFilter").addEventListener("change", ()=>{ if(DROPS_LOADED) loadRentedDrops(); });
       document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeModal(); });
 
       (async function init(){
         try { const me = await api("/shop/me"); $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); } catch(e){}
-        await loadHosts(); await loadBotPicker(); await loadApprovals(); await loadRenters(); await loadRentBots(); await loadRentedDrops(); await loadRentAccs();
+        // Only what managing renters actually needs. The accounts and drops
+        // sections are thousands of rows between them and used far less often,
+        // so they stay behind their Load buttons instead of blocking this page
+        // every time it opens.
+        await loadHosts(); await loadBotPicker(); await loadApprovals(); await loadRenters(); await loadRentBots();
       })();
     </script>
     <script src="/theme.js"></script>
