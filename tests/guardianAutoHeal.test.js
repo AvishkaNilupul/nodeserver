@@ -10,7 +10,11 @@ const test = require("node:test");
 const assert = require("node:assert");
 
 const { pickDuplicateLoser } = require("../utils/guardianFixes");
-const { healEligibility, MAX_ATTEMPTS } = require("../utils/guardianAutoHeal");
+const {
+  healEligibility,
+  isStaleSupplyFinding,
+  MAX_ATTEMPTS,
+} = require("../utils/guardianAutoHeal");
 
 const L = (over = {}) => ({
   _id: "a",
@@ -92,4 +96,43 @@ test("a finding stops being retried once its attempts are spent", () => {
 test("only open findings are healed", () => {
   assert.strictEqual(healEligibility(f({ status: "needs-human" })).ok, false);
   assert.strictEqual(healEligibility(f({ status: "resolved" })).ok, false);
+});
+
+// ------------------------------------------------------------- supply triage
+// stock-unknown / restock-failed are never "healed": the guardian's auto-feed
+// already retries them every pass, so a heal would repeat a call that is
+// already failing. They are escalated instead, once they stop looking routine.
+const hoursAgo = (h) => new Date(Date.now() - h * 3600 * 1000).toISOString();
+const supply = (over = {}) => ({
+  status: "open",
+  type: "restock-failed",
+  detectedAt: hoursAgo(9),
+  ...over,
+});
+
+test("a supply finding stuck for hours is escalated", () => {
+  assert.strictEqual(isStaleSupplyFinding(supply()), true);
+  assert.strictEqual(isStaleSupplyFinding(supply({ type: "stock-unknown" })), true);
+});
+
+test("a recent supply finding is left to the auto-feed", () => {
+  // The feed retries every 5 minutes; a fresh shortage is normal operation,
+  // not something to put in front of a human.
+  assert.strictEqual(isStaleSupplyFinding(supply({ detectedAt: hoursAgo(1) })), false);
+});
+
+test("escalation never touches a non-supply type", () => {
+  // account-gone has a real mechanical fix — it must go through the healer,
+  // not be quietly reclassified as someone else's problem.
+  assert.strictEqual(
+    isStaleSupplyFinding(supply({ type: "account-gone" })),
+    false,
+  );
+});
+
+test("an already-escalated finding is not escalated twice", () => {
+  assert.strictEqual(
+    isStaleSupplyFinding(supply({ status: "needs-human" })),
+    false,
+  );
 });

@@ -1365,6 +1365,8 @@ router.get(
             message: f.message,
             status: f.status,
             resolution: f.resolution,
+            healAttempts: f.healAttempts || 0,
+            healLastError: f.healLastError || "",
             detectedAt: f.detectedAt,
             lastSeenAt: f.lastSeenAt,
           };

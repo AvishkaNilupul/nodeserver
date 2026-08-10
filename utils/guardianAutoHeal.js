@@ -39,6 +39,18 @@ const HEALABLE_TYPES = [
   "dead-token",
 ];
 
+// Supply-side findings: the guardian's own auto-feed already retries these on
+// every pass, so "healing" one would just repeat a call that is already being
+// made and failing. They are not broken bookkeeping — they are a marketplace
+// that will not answer, or a bundle with no farmed stock behind it — and no
+// amount of retrying invents an account. What they DO need is triage: one that
+// has been failing for hours is not the same as one raised a minute ago, and
+// leaving both as plain "open" is what makes the tab look stuck.
+const SUPPLY_TYPES = ["stock-unknown", "restock-failed"];
+
+// How long a supply finding may keep failing before it is escalated to a human.
+const STALE_MS = Number(process.env.AUTO_HEAL_STALE_MS || 6 * 60 * 60 * 1000);
+
 const MAX_PER_PASS = Number(process.env.AUTO_HEAL_MAX_PER_PASS || 10);
 const MAX_ATTEMPTS = Number(process.env.AUTO_HEAL_MAX_ATTEMPTS || 3);
 // One guardian tick is 5 minutes; a finding must outlive one to be healed.
@@ -90,6 +102,53 @@ async function noteFailure(f, message) {
   }
   await AuditFinding.updateOne({ _id: f._id }, { $set: update });
   return attempts >= MAX_ATTEMPTS;
+}
+
+// Pure: has a supply-side finding been failing long enough to stop looking
+// routine? `now` is injected so the rule is testable. Exported for tests.
+function isStaleSupplyFinding(f, now = Date.now()) {
+  if (!f || f.status !== "open") return false;
+  if (!SUPPLY_TYPES.includes(f.type)) return false;
+  const age = now - new Date(f.detectedAt || f.createdAt || now).getTime();
+  return age >= STALE_MS;
+}
+
+// Escalate supply findings the auto-feed has been failing to clear for hours.
+// Nothing is "fixed" here — the point is to stop a standing shortage from
+// sitting in the same bucket as a problem the healer is actively working on, so
+// the operator can see at a glance which rows actually want their hands.
+async function triageSupplyFindings(now = Date.now()) {
+  const rows = await AuditFinding.find({
+    status: "open",
+    type: { $in: SUPPLY_TYPES },
+  })
+    .limit(200)
+    .lean();
+  const escalated = [];
+  for (const f of rows) {
+    if (!isStaleSupplyFinding(f, now)) continue;
+    const hours = Math.round(
+      (now - new Date(f.detectedAt || f.createdAt || now).getTime()) / 3600000,
+    );
+    await AuditFinding.updateOne(
+      { _id: f._id },
+      {
+        $set: {
+          status: "needs-human",
+          resolution:
+            "auto-heal: the auto-feed has been retrying this for " +
+            hours +
+            "h without success — it needs stock or a platform fix, not another retry.",
+          healLastError: String(f.message || "").slice(0, 500),
+          healLastAttemptAt: new Date(),
+        },
+      },
+    );
+    escalated.push(
+      "[" + f.type + " " + (f.marketplace || "-") + "] stuck " + hours + "h",
+    );
+  }
+  return escalated;
 }
 
 // Heal what can be healed. Returns a summary the guardian folds into its pass
@@ -154,13 +213,41 @@ async function healOpenFindings() {
     }
   }
 
-  return { healed, failed, skipped, parked, dry, notes };
+  // Supply-side findings are not healed, only triaged — see SUPPLY_TYPES. A dry
+  // run must not reclassify anything either, so it only reports.
+  let escalated = [];
+  if (dry) {
+    const rows = await AuditFinding.find({
+      status: "open",
+      type: { $in: SUPPLY_TYPES },
+    })
+      .limit(200)
+      .lean();
+    const stale = rows.filter((f) => isStaleSupplyFinding(f, now));
+    escalated = stale.map((f) => "WOULD escalate [" + f.type + "]");
+  } else {
+    escalated = await triageSupplyFindings(now);
+  }
+  for (const note of escalated) notes.push("NEEDS-HUMAN " + note);
+
+  return {
+    healed,
+    failed,
+    skipped,
+    parked,
+    escalated: escalated.length,
+    dry,
+    notes,
+  };
 }
 
 module.exports = {
   healOpenFindings,
   healEligibility,
+  isStaleSupplyFinding,
+  triageSupplyFindings,
   HEALABLE_TYPES,
+  SUPPLY_TYPES,
   MAX_PER_PASS,
   MAX_ATTEMPTS,
 };

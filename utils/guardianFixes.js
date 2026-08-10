@@ -58,8 +58,13 @@ function isQtyListing(lst) {
 
 // Pure: which fix (if any) applies to a finding. `listing` is the joined
 // MarketplaceListing row (or null when the finding has none / it was deleted).
+// "needs-human" counts as actionable: the auto-healer exhausted its own
+// attempts, but the remedy it was reaching for is still the right one and an
+// operator may well succeed where it failed (the marketplace came back, stock
+// arrived). Withholding the button there would leave the row with no way
+// forward at all.
 function fixPlanFor(f, listing) {
-  if (!f || f.status !== "open") return null;
+  if (!f || (f.status !== "open" && f.status !== "needs-human")) return null;
   const lst = listing || null;
   const active = !!(lst && lst.status === "active");
   switch (f.type) {
@@ -599,7 +604,7 @@ async function fixRefeed(f, listing) {
 async function fixFinding(id) {
   const f = await AuditFinding.findById(id);
   if (!f) throw httpError(404, "Finding not found");
-  if (f.status !== "open") {
+  if (f.status !== "open" && f.status !== "needs-human") {
     throw httpError(400, "Finding is not open — reopen it first");
   }
   const listing = f.listing

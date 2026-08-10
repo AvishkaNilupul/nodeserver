@@ -1023,7 +1023,10 @@ async function notifyPass() {
   // What the healer repaired by itself. Reported separately from the findings
   // digest so "fixed itself" never reads as "needs your attention"; anything it
   // gave up on is called out, because those are the only ones left for a human.
-  if (freshHeals && (freshHeals.healed || freshHeals.parked)) {
+  if (
+    freshHeals &&
+    (freshHeals.healed || freshHeals.parked || freshHeals.escalated)
+  ) {
     const lines = (freshHeals.notes || [])
       .slice(0, NOTIFY_LINES)
       .map((n) => "• " + n);
@@ -1036,6 +1039,9 @@ async function notifyPass() {
         " issue(s)" +
         (freshHeals.parked
           ? ", " + freshHeals.parked + " need(s) a human"
+          : "") +
+        (freshHeals.escalated
+          ? ", " + freshHeals.escalated + " escalated (stuck)"
           : "") +
         "\n\n" +
         lines.join("\n"),
@@ -1121,8 +1127,12 @@ async function runOnce() {
       autoHealed: healResult ? healResult.healed : 0,
       autoHealFailed: healResult ? healResult.failed : 0,
       autoHealParked: healResult ? healResult.parked : 0,
+      autoHealEscalated: healResult ? healResult.escalated || 0 : 0,
     };
-    if (healResult && (healResult.healed || healResult.parked)) {
+    if (
+      healResult &&
+      (healResult.healed || healResult.parked || healResult.escalated)
+    ) {
       freshHeals = healResult;
     }
     notifyPass().catch((e) =>

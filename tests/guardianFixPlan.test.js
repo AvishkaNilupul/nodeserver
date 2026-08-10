@@ -62,6 +62,17 @@ test("a finding that is not open is never fixed", () => {
   assert.strictEqual(fixPlanFor(finding({ status: "resolved" }), lst), null);
 });
 
+test("a needs-human finding keeps its fix button", () => {
+  // The auto-healer parks a finding it could not fix. The remedy is still the
+  // right one — the operator may succeed where it failed (platform came back,
+  // stock arrived) — so withholding the button would leave the row with no way
+  // forward at all.
+  const lst = DS([{ accountId: "acc1", contentId: "299264577" }]);
+  const plan = fixPlanFor(finding({ status: "needs-human" }), lst);
+  assert.ok(plan);
+  assert.strictEqual(plan.action, "replace");
+});
+
 test("duplicate-account offers the dedupe fix", () => {
   // Used to need a human to pick which side to drop; pickDuplicateLoser now
   // makes that call (see guardianAutoHeal.test.js), so the button exists.

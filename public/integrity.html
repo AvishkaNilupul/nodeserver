@@ -444,6 +444,16 @@
         letter-spacing: 0.03em;
       }
 
+      /* The auto-healer tried this one and gave up, so it is the only status
+         that still wants the operator's hands. Coloured like a high-severity
+         chip rather than the muted grey the other terminal statuses use. */
+      .statuschip.needshuman {
+        color: var(--amber);
+        border: 1px solid var(--amber);
+        border-radius: 999px;
+        padding: 1px 7px;
+      }
+
       .toast {
         position: fixed;
         bottom: 22px;
@@ -668,6 +678,7 @@
           <button class="btn" id="btnRefresh">Refresh</button>
           <select id="statusFilter">
             <option value="open">Open findings</option>
+            <option value="needs-human">Needs a human</option>
             <option value="ignored">Ignored</option>
             <option value="resolved">Resolved / activity log</option>
             <option value="">Everything</option>
@@ -876,12 +887,21 @@
         return true;
       }
 
+      // A finding still describing a live problem. "needs-human" is one the
+      // auto-healer tried and gave up on, so it is MORE deserving of the
+      // operator's attention than an untouched one — it must stay actionable
+      // everywhere an open finding is, or parked rows would silently vanish
+      // from the tab.
+      function isLive(f) {
+        return f && (f.status === "open" || f.status === "needs-human");
+      }
+
       function renderSummary() {
         var counts = { high: 0, medium: 0, low: 0, info: 0 };
         var fixable = 0;
         DATA.forEach(function (f) {
           counts[f.severity] = (counts[f.severity] || 0) + 1;
-          if (f.fix && f.status === "open") fixable++;
+          if (f.fix && isLive(f)) fixable++;
         });
         var chip = function (sev, label) {
           if (!counts[sev]) return "";
@@ -1002,7 +1022,7 @@
             : "#" + esc(lst.externalId)
           : "";
         var open = list.filter(function (f) {
-          return f.status === "open";
+          return isLive(f);
         });
         var fixable = open.filter(function (f) {
           return f.fix;
@@ -1059,7 +1079,7 @@
 
       function rowHtml(f) {
         var acts = "";
-        if (f.status === "open") {
+        if (isLive(f)) {
           if (f.fix) {
             acts +=
               '<button class="btn btn-sm btn-primary" title="' +
@@ -1103,7 +1123,15 @@
           esc(rel(f.lastSeenAt)) +
           "</span>" +
           (f.status !== "open"
-            ? '<span class="statuschip">' + esc(f.status) + "</span>"
+            ? '<span class="statuschip' +
+              (f.status === "needs-human" ? " needshuman" : "") +
+              '"' +
+              (f.status === "needs-human" && f.healLastError
+                ? ' title="auto-heal gave up: ' + esc(f.healLastError) + '"'
+                : "") +
+              ">" +
+              esc(f.status === "needs-human" ? "needs you" : f.status) +
+              "</span>"
             : "") +
           "</div>" +
           '<div class="fbody">' +
@@ -1175,7 +1203,7 @@
 
       async function bulkAct(key, action) {
         var ids = DATA.filter(function (f) {
-          return groupOf(f) === key && f.status === "open" && matches(f);
+          return groupOf(f) === key && isLive(f) && matches(f);
         }).map(function (f) {
           return f.id;
         });
@@ -1216,7 +1244,7 @@
       async function fixAll(key) {
         var items = DATA.filter(function (f) {
           return (
-            groupOf(f) === key && f.status === "open" && f.fix && matches(f)
+            groupOf(f) === key && isLive(f) && f.fix && matches(f)
           );
         });
         if (!items.length) return;
