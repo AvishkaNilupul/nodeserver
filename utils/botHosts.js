@@ -14,13 +14,17 @@
 // identical to the local ones, so the routes can stay host-agnostic.
 //
 // A host may also declare `"runtime": "native"` for machines that can't run
-// Docker (e.g. an Android phone with Termux). Native hosts run their bots as
-// plain processes managed by a `botctl` shell script that lives in the host's
-// bot directory (installed by scripts/android-bot-setup.sh). botctl speaks the
-// same vocabulary as docker — ps / start / stop / restart / rm / logs / stats /
-// policy — so every docker* function here simply dispatches to it and the
-// routes stay unchanged. Native hosts have no compose file (composeName
-// returns null); bots are discovered from the config_NN.json files directly.
+// Docker. Native hosts run their bots as plain processes managed by a `botctl`
+// shell script in the host's bot directory; botctl speaks the same vocabulary
+// as docker — ps / start / stop / restart / rm / logs / stats / policy — so
+// every docker* function here simply dispatches to it and the routes stay
+// unchanged. Native hosts have no compose file (composeName returns null); bots
+// are discovered from the config_NN.json files directly.
+//
+// NO host currently uses this. It was built for an Android/Termux phone host,
+// retired 2026-08-11 (its accounts moved to the Pi). The branches are kept
+// because they are generic and inert without a `native` host in the config —
+// but nothing exercises them, so treat them as untested if one comes back.
 
 const fs = require("fs");
 const fsp = require("fs/promises");
@@ -618,7 +622,7 @@ async function composeWrite(host, name, text) {
 const isNative = (host) => host.runtime === "native";
 
 // Run `botctl <args>` in the host's bot directory. botctl is a plain sh
-// script, so this works on anything with a POSIX shell (Termux included).
+// script, so this works on anything with a POSIX shell.
 async function botctl(host, args, { timeout = EXEC_TIMEOUT } = {}) {
   const script =
     "sh " +

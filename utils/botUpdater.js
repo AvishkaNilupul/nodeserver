@@ -390,7 +390,8 @@ async function latestArmAsset(repo) {
     : null;
 }
 
-// Native (non-Docker) host rollout — an Android/Termux phone. There's no image
+// Native (non-Docker) host rollout. No host uses this today (the Android/Termux
+// phone it was written for was retired 2026-08-11). There's no image
 // to build; fetch the latest published arm64 Console release, swap it into the
 // host's app dir (keeping the old one for rollback), and restart each running
 // bot on it via botctl (through the host abstraction — dockerPs/composeUp/etc.
