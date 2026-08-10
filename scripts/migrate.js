@@ -197,7 +197,16 @@ async function main() {
   console.log("Migration complete");
 }
 
-main().catch((err) => {
-  console.error("Migration failed:", err);
-  process.exit(1);
-});
+// Only run when invoked directly (`node scripts/migrate.js`). Without this
+// guard, merely require()ing the file executes a live import against whatever
+// MONGO_URI points at — which is exactly what happened on 2026-08-11, when a
+// copy of this script sitting in models/ was picked up by code that enumerated
+// that directory and inserted 7 legacy rows into production. That duplicate is
+// gone; this guard makes the class of accident impossible rather than
+// relying on the file staying put.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Migration failed:", err);
+    process.exit(1);
+  });
+}
