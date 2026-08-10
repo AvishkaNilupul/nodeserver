@@ -24,6 +24,7 @@
 // server-side before acting so a stale button can't do the wrong thing.
 const AuditFinding = require("../models/AuditFinding");
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const fpFulfiller = require("./funpayFulfiller");
@@ -129,6 +130,26 @@ function fixPlanFor(f, listing) {
             "Remove this deleted account from the listing and let a fresh one " +
             "take its place — on Gameflip the offer is relisted with a live " +
             "account, elsewhere the auto-feed refills the unit.",
+        };
+      }
+      return null;
+    case "duplicate-account":
+      // The same account is sellable on 2+ live listings, so whoever buys
+      // second gets credentials someone else already owns. There is no button
+      // for this today, which is why every duplicate reaches a human. The
+      // remedy is asymmetric on purpose: ONE listing keeps the account (the one
+      // that actually reserved it, see pickDuplicateLoser) and the others give
+      // it up, so the fix never takes the whole game off sale when a refill
+      // exists. A finding with no accountId can't be acted on — the row-level
+      // login match is ambiguous across platforms.
+      if (f.accountId || f.accountLogin) {
+        return {
+          action: "dedupe",
+          label: "Resolve duplicate",
+          hint:
+            "Keep the listing that reserved this account and pull it off the " +
+            "others, refilling them from free stock. A listing left with " +
+            "nothing to sell goes off sale.",
         };
       }
       return null;
@@ -388,8 +409,128 @@ async function fixReserve(f, listing) {
   );
 }
 
-async function fixDetach(f, listing) {
-  await swapOnListing(listing, f.accountId, f.accountLogin, null);
+// Pure: of the live listings that all sell the same account, which one KEEPS it
+// and which must give it up. Split out from fixDedupe so the tie-breaking is
+// testable without a database.
+//
+// The keeper is the listing the account is genuinely committed to. In order:
+//   1. it holds the account under its own claim tag (a real reservation beats
+//      an incidental row reference),
+//   2. it already delivered units the platform can't take back (digiseller /
+//      ggsel rows carrying a recorded contentId) — pulling those is either
+//      impossible or throws away a sold unit,
+//   3. it is the oldest listing (stable, and the one most likely to have sales
+//      history / a ranked URL worth keeping).
+// Everything else is a loser and gives the account up. Exported for tests.
+function pickDuplicateLoser(listings, { reservedListingId = "" } = {}) {
+  const live = (listings || []).filter((l) => l && l.status === "active");
+  if (live.length < 2) return { keep: live[0] || null, losers: [] };
+  const score = (l) => {
+    let s = 0;
+    if (reservedListingId && String(l._id) === String(reservedListingId)) s += 100;
+    if ((l.units || []).some((u) => u && u.contentId)) s += 10;
+    return s;
+  };
+  const sorted = [...live].sort((a, b) => {
+    const d = score(b) - score(a);
+    if (d) return d;
+    const at = new Date(a.createdAt || 0).getTime();
+    const bt = new Date(b.createdAt || 0).getTime();
+    if (at !== bt) return at - bt; // older first
+    return String(a._id).localeCompare(String(b._id)); // deterministic
+  });
+  return { keep: sorted[0], losers: sorted.slice(1) };
+}
+
+// duplicate-account: the same account is on 2+ live listings, so a second buyer
+// would be handed credentials that are already sold. Keep it on exactly one
+// listing and pull it off the rest with the same per-marketplace surgery the
+// suspension sweep uses; each stripped listing is then refilled from free stock,
+// and only a listing left with nothing to sell goes off sale.
+async function fixDedupe(f) {
+  const { detachAccountFromListing } = require("./listingDetach");
+  const accId = String(f.accountId || "");
+  const login = String(f.accountLogin || "").trim();
+  const or = [];
+  if (accId) or.push({ accountId: new RegExp("(^|,)\\s*" + accId + "\\s*(,|$)") });
+  if (login) {
+    or.push({
+      accountLogin: new RegExp(
+        "(^|,)\\s*" + login.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*(,|$)",
+        "i",
+      ),
+    });
+  }
+  if (!or.length) throw httpError(400, "Finding has no account to de-duplicate");
+  const listings = await MarketplaceListing.find({ status: "active", $or: or }).lean();
+  if (listings.length < 2) {
+    // The duplicate cleared on its own between the sweep and this fix.
+    return (
+      "No duplicate remains — " +
+      (login || accId) +
+      " is on " +
+      listings.length +
+      " live listing(s) now."
+    );
+  }
+  // Which listing actually reserved this account? Its claim tag is the strongest
+  // signal of ownership, so that listing keeps the account.
+  let reservedListingId = "";
+  for (const l of listings) {
+    const tag = guardian.CLAIM_TAGS[l.marketplace] || l.marketplace;
+    const set = l.set ? await DropSet.findById(l.set).lean() : null;
+    if (!set) continue;
+    const keys = [...new Set((set.items || []).map((i) => i.itemKey).filter(Boolean))];
+    if (!keys.length) continue;
+    const held = await DropLog.countDocuments({
+      account: accId || null,
+      itemKey: { $in: keys },
+      soldAt: { $ne: null },
+      soldToUsername: tag,
+    });
+    if (held > 0) {
+      reservedListingId = String(l._id);
+      break;
+    }
+  }
+  const { keep, losers } = pickDuplicateLoser(listings, { reservedListingId });
+  if (!keep || !losers.length) {
+    throw httpError(409, "Could not decide which listing should keep the account");
+  }
+  const notes = [];
+  const warns = [];
+  for (const loser of losers) {
+    const res = await detachAccountFromListing(
+      loser,
+      { _id: accId, login },
+      { reason: "sold on another listing", republish: true, hardRepublish: false },
+    );
+    if (res.detached.length) notes.push(...res.detached);
+    if (res.warnings.length) warns.push(...res.warnings);
+  }
+  if (!notes.length) {
+    throw httpError(
+      409,
+      warns.join(" ") ||
+        "Could not pull the account off the duplicate listing(s) — resolve manually.",
+    );
+  }
+  return (
+    "Kept " +
+    (login || accId) +
+    " on " +
+    keep.marketplace +
+    " " +
+    (keep.externalId || keep._id) +
+    " and pulled it off " +
+    losers.length +
+    " duplicate listing(s): " +
+    notes.join("; ") +
+    (warns.length ? " — " + warns.join("; ") : "")
+  );
+}
+
+async function fixDetach(f, listing) {  await swapOnListing(listing, f.accountId, f.accountLogin, null);
   return (
     "Detached " +
     (f.accountLogin || f.accountId) +
@@ -476,6 +617,7 @@ async function fixFinding(id) {
   else if (plan.action === "reserve") message = await fixReserve(f, listing);
   else if (plan.action === "detach") message = await fixDetach(f, listing);
   else if (plan.action === "retire") message = await fixRetire(f, listing);
+  else if (plan.action === "dedupe") message = await fixDedupe(f);
   else message = await fixRefeed(f, listing);
 
   f.status = "resolved";
@@ -500,4 +642,4 @@ async function fixFinding(id) {
   return { message, action: plan.action };
 }
 
-module.exports = { fixPlanFor, fixFinding };
+module.exports = { fixPlanFor, fixFinding, pickDuplicateLoser };
