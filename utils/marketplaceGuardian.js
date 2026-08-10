@@ -47,6 +47,8 @@ let running = false;
 // row. Reset at the start of every pass.
 let freshFindings = [];
 let freshFeeds = [];
+// Auto-heal summary for the pass, so the digest can report what was repaired.
+let freshHeals = null;
 
 // Which claim tag holds this drop, or null when it is free. A drop the
 // account never farmed has no row at all and is likewise unheld.
@@ -233,7 +235,18 @@ async function upsertFinding(f) {
   if (returned) {
     await AuditFinding.updateOne(
       { _id: prev._id },
-      { $set: { status: "open", resolution: "", resolvedAt: null } },
+      {
+        $set: {
+          status: "open",
+          resolution: "",
+          resolvedAt: null,
+          // A condition that cleared and came back is a fresh problem, so give
+          // the healer its full attempt budget again rather than leaving it
+          // exhausted from the previous episode.
+          healAttempts: 0,
+          healLastError: "",
+        },
+      },
     );
   }
   if (isNew || returned) {
@@ -257,7 +270,12 @@ const CONDITION_TYPES = [
 async function autoResolveStale(seenKeys) {
   await AuditFinding.updateMany(
     {
-      status: "open",
+      // needs-human rows are included on purpose: a finding the healer parked
+      // still describes a condition, and when that condition goes away (someone
+      // fixed it by hand, the listing sold out, the account came back) it must
+      // clear like any other — otherwise the tab keeps showing a problem that
+      // no longer exists and the parked row is immortal.
+      status: { $in: ["open", "needs-human"] },
       dedupeKey: { $nin: [...seenKeys] },
       $or: [
         { type: { $in: CONDITION_TYPES } },
@@ -1002,6 +1020,27 @@ async function notifyPass() {
         "\n\nReview them in the app under More → Integrity.",
     );
   }
+  // What the healer repaired by itself. Reported separately from the findings
+  // digest so "fixed itself" never reads as "needs your attention"; anything it
+  // gave up on is called out, because those are the only ones left for a human.
+  if (freshHeals && (freshHeals.healed || freshHeals.parked)) {
+    const lines = (freshHeals.notes || [])
+      .slice(0, NOTIFY_LINES)
+      .map((n) => "• " + n);
+    if ((freshHeals.notes || []).length > NOTIFY_LINES) {
+      lines.push("…and " + (freshHeals.notes.length - NOTIFY_LINES) + " more");
+    }
+    await sendTelegram(
+      "🔧 AUTO-HEAL fixed " +
+        freshHeals.healed +
+        " issue(s)" +
+        (freshHeals.parked
+          ? ", " + freshHeals.parked + " need(s) a human"
+          : "") +
+        "\n\n" +
+        lines.join("\n"),
+    );
+  }
 }
 
 // A marketplace that refused every stock read is ONE problem — the account is
@@ -1036,6 +1075,7 @@ async function runOnce() {
   const startedAt = new Date();
   freshFindings = [];
   freshFeeds = [];
+  freshHeals = null;
   try {
     const rows = await MarketplaceListing.find({
       status: "active",
@@ -1056,6 +1096,20 @@ async function runOnce() {
     await reportRefusals(refusals, seenKeys);
     const found = await runChecks(rows, seenKeys);
     await autoResolveStale(seenKeys);
+    // Repair what this pass (and earlier ones) turned up. Runs last so it acts
+    // on a settled picture: conditions that cleared by themselves have already
+    // been auto-resolved and are never "fixed" with needless marketplace calls.
+    // Isolated because a healer failure must not cost us the pass's detection.
+    let healResult = null;
+    try {
+      // Required lazily: guardianAutoHeal -> guardianFixes -> this module, so a
+      // top-level require would be a cycle and hand the healer a half-built
+      // exports object.
+      const { healOpenFindings } = require("./guardianAutoHeal");
+      healResult = await healOpenFindings();
+    } catch (e) {
+      console.error("guardian auto-heal error:", e.message);
+    }
     const open = await AuditFinding.countDocuments({ status: "open" });
     lastRun = {
       at: startedAt,
@@ -1064,7 +1118,13 @@ async function runOnce() {
       accountsFed: fed,
       issuesDetected: found,
       openFindings: open,
+      autoHealed: healResult ? healResult.healed : 0,
+      autoHealFailed: healResult ? healResult.failed : 0,
+      autoHealParked: healResult ? healResult.parked : 0,
     };
+    if (healResult && (healResult.healed || healResult.parked)) {
+      freshHeals = healResult;
+    }
     notifyPass().catch((e) =>
       console.error("guardian notify error:", e.message),
     );

@@ -32,11 +32,17 @@ const auditFindingSchema = new mongoose.Schema(
     dedupeKey: { type: String, required: true, unique: true, index: true },
     status: {
       type: String,
-      enum: ["open", "resolved", "ignored"],
+      enum: ["open", "resolved", "ignored", "needs-human"],
       default: "open",
       index: true,
     },
     resolution: { type: String, default: "" },
+    // Auto-heal bookkeeping (utils/guardianAutoHeal.js). A finding the healer
+    // could not fix carries its attempt count so it is retried a bounded number
+    // of times and then parked as "needs-human" rather than retried forever.
+    healAttempts: { type: Number, default: 0 },
+    healLastError: { type: String, default: "" },
+    healLastAttemptAt: { type: Date, default: null },
     detectedAt: { type: Date, default: Date.now },
     lastSeenAt: { type: Date, default: Date.now },
     resolvedAt: { type: Date, default: null },

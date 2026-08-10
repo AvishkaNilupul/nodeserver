@@ -62,10 +62,18 @@ test("a finding that is not open is never fixed", () => {
   assert.strictEqual(fixPlanFor(finding({ status: "resolved" }), lst), null);
 });
 
-test("duplicate-account still has no automated plan", () => {
-  // Documents current behaviour: these need a human to pick which side to drop.
-  assert.strictEqual(
-    fixPlanFor(finding({ type: "duplicate-account" }), DS([])),
-    null,
+test("duplicate-account offers the dedupe fix", () => {
+  // Used to need a human to pick which side to drop; pickDuplicateLoser now
+  // makes that call (see guardianAutoHeal.test.js), so the button exists.
+  const plan = fixPlanFor(finding({ type: "duplicate-account" }), DS([]));
+  assert.ok(plan);
+  assert.strictEqual(plan.action, "dedupe");
+});
+
+test("duplicate-account with no account at all is still not actionable", () => {
+  const plan = fixPlanFor(
+    { status: "open", type: "duplicate-account" },
+    DS([]),
   );
+  assert.strictEqual(plan, null);
 });
