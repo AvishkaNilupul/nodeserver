@@ -25,6 +25,8 @@
 // retired 2026-08-11 (its accounts moved to the Pi). The branches are kept
 // because they are generic and inert without a `native` host in the config —
 // but nothing exercises them, so treat them as untested if one comes back.
+// The `botctl` script itself is no longer in this repo either; recover it from
+// git history (scripts/botctl, removed in the same commit) to set one up.
 
 const fs = require("fs");
 const fsp = require("fs/promises");
