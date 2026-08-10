@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RedeemHub</string>
+    <string name="error_title">Can\'t reach the server</string>
+    <string name="error_body">Check your internet connection and try again.</string>
+    <string name="error_retry">Retry</string>
+</resources>

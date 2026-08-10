@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.App" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorAccent">@color/accent</item>
+    </style>
+
+    <!-- Launch theme: shown instantly while the activity (and WebView) starts. -->
+    <style name="Theme.App.Splash" parent="Theme.App">
+        <item name="android:windowBackground">@drawable/splash</item>
+    </style>
+</resources>

@@ -56,3 +56,19 @@ _TEMP_*
 
 # Top-level Python virtualenv (marketplace service is run from here on prod)
 /.venv
+
+# ---- Seller Android app (android/) ----
+# The APK SIGNING KEY and its plaintext password must never reach GitHub: a
+# pushed key stays in history forever and lets anyone with repo access sign
+# releases as us. The rest here is generated build output (~49MB). Listed by
+# path rather than ignoring android/ wholesale, so real project source added
+# later is still tracked.
+android/keystore/
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+# The new-project-wizard default location for the same secrets
+android/key.properties
+*.jks
+*.keystore
