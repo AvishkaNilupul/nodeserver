@@ -189,8 +189,46 @@ async function healOpenFindings() {
       : null;
     const plan = fixPlanFor(f, listing);
     if (!plan) {
-      // Nothing mechanical applies. Don't burn an attempt on it — a later pass
-      // may find the listing back in a fixable state.
+      // Nothing mechanical applies right now. Usually transient — the listing
+      // was delisted or refilled since detection — so no attempt is burned and
+      // a later pass may find it fixable again.
+      //
+      // But a HEALABLE_TYPE that never produces a plan is a hole in the fix
+      // table, not a transient state, and silently skipping it every five
+      // minutes is exactly what makes the tab look stuck with an error nobody
+      // fixes. After STALE_MS of being claimed-but-unfixable, say so out loud
+      // and hand it over.
+      const age = now - new Date(f.detectedAt || f.createdAt || now).getTime();
+      if (age >= STALE_MS && !dry) {
+        await AuditFinding.updateOne(
+          { _id: f._id },
+          {
+            $set: {
+              status: "needs-human",
+              resolution:
+                "auto-heal: this finding's type is auto-healable but no fix " +
+                "applies to its listing (" +
+                ((listing && listing.marketplace) || "listing missing") +
+                "), and it has stood for " +
+                Math.round(age / 3600000) +
+                "h — it needs a human or a new fix path.",
+              healLastError: "no fix plan applies",
+              healLastAttemptAt: new Date(),
+            },
+          },
+        );
+        parked += 1;
+        notes.push(
+          "NEEDS-HUMAN [" +
+            f.type +
+            " " +
+            (f.marketplace || "-") +
+            "] no fix path after " +
+            Math.round(age / 3600000) +
+            "h",
+        );
+        continue;
+      }
       skipped += 1;
       continue;
     }

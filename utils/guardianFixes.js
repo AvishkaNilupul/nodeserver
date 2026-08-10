@@ -88,6 +88,22 @@ function fixPlanFor(f, listing) {
             "account on this listing so the finding clears.",
         };
       }
+      // Gameflip bakes the account's credentials into the live offer, so there
+      // is no unit to detach and no pool line to pull: the offer itself is what
+      // still promises spent drops. Taking it down and republishing from healthy
+      // stock is the only way to stop the next buyer receiving an account whose
+      // drops are already connected — and without this branch the finding had no
+      // plan at all and sat open forever.
+      if (lst.marketplace === "gameflip" && lst.autoDeliver) {
+        return {
+          action: "retire",
+          label: "Relist from fresh stock",
+          hint:
+            "These drops are already redeemed, so this offer cannot deliver " +
+            "them. Take it down and republish with an account that still holds " +
+            "the set.",
+        };
+      }
       return null;
     case "dead-token":
       if (active && f.accountId && lst.marketplace === "funpay") {
@@ -555,10 +571,21 @@ async function fixDetach(f, listing) {  await swapOnListing(listing, f.accountId
 // holds the bundle, and taking it off sale is the part that protects the buyer.
 async function fixRetire(f, listing) {
   const { detachAccountFromListing } = require("./listingDetach");
+  // Two findings share this action and they are not the same situation. An
+  // account-gone login no longer exists on Twitch, so the account is worthless
+  // and a hard republish is right. A redeemed-drops account is perfectly alive —
+  // only its drops for this set are spent — so it must not be written off as
+  // suspended, and the reason is recorded honestly because it ends up in the
+  // listing's audit trail.
+  const spent = f.type === "redeemed-drops";
   const res = await detachAccountFromListing(
     listing,
     { _id: f.accountId, login: f.accountLogin },
-    { reason: "suspended on Twitch", republish: true, hardRepublish: true },
+    {
+      reason: spent ? "drops already redeemed" : "suspended on Twitch",
+      republish: true,
+      hardRepublish: !spent,
+    },
   );
   if (!res.detached.length) {
     throw httpError(
@@ -571,7 +598,7 @@ async function fixRetire(f, listing) {
   return (
     "Retired " +
     (f.accountLogin || f.accountId) +
-    " (gone from Twitch): " +
+    (spent ? " (drops already redeemed): " : " (gone from Twitch): ") +
     res.detached.join("; ") +
     (res.warnings.length ? " — " + res.warnings.join("; ") : "")
   );

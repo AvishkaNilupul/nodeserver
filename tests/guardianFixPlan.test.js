@@ -62,8 +62,7 @@ test("a finding that is not open is never fixed", () => {
   assert.strictEqual(fixPlanFor(finding({ status: "resolved" }), lst), null);
 });
 
-test("a needs-human finding keeps its fix button", () => {
-  // The auto-healer parks a finding it could not fix. The remedy is still the
+test("a needs-human finding keeps its fix button", () => {  // The auto-healer parks a finding it could not fix. The remedy is still the
   // right one — the operator may succeed where it failed (platform came back,
   // stock arrived) — so withholding the button would leave the row with no way
   // forward at all.
@@ -87,4 +86,34 @@ test("duplicate-account with no account at all is still not actionable", () => {
     DS([]),
   );
   assert.strictEqual(plan, null);
+});
+
+// Gameflip bakes credentials into the offer, so redeemed-drops there has no
+// unit to detach and no pool line to pull. Before this branch existed the
+// finding produced no plan at all and sat open forever — the healer claimed the
+// type, then skipped it every pass.
+const GF = (over = {}) => ({
+  _id: "l2",
+  marketplace: "gameflip",
+  externalId: "2637de0a",
+  status: "active",
+  autoDeliver: true,
+  qtyTarget: 0,
+  units: [],
+  ...over,
+});
+
+test("redeemed-drops on Gameflip relists from fresh stock", () => {
+  const plan = fixPlanFor(finding({ type: "redeemed-drops" }), GF());
+  assert.ok(plan, "gameflip redeemed-drops must have a plan");
+  assert.strictEqual(plan.action, "retire");
+});
+
+test("redeemed-drops on a manual Gameflip offer is left alone", () => {
+  // Without auto-delivery there are no baked-in credentials to replace, so
+  // taking the offer down would cost a sale slot for nothing.
+  assert.strictEqual(
+    fixPlanFor(finding({ type: "redeemed-drops" }), GF({ autoDeliver: false })),
+    null,
+  );
 });
