@@ -146,7 +146,7 @@
           <div style="display:flex;align-items:flex-end"><div class="muted" style="font-size:12px;line-height:1.4">Pick an existing bot below to share it (several renters on one container = less RAM), or leave it and create a fresh bot from <b>Manage → Create bot</b>.</div></div>
         </div>
         <div class="grid3" style="margin-top:12px">
-          <div><label class="fld">Bot <span class="muted">(optional — shared allowed)</span></label><select id="cBot" class="selin" style="width:100%"><option value="">No bot yet</option></select></div>
+          <div><label class="fld">Bot <span class="muted">(optional — shared allowed)</span></label><select id="cBot" class="selin" style="width:100%"><option value="">No bot yet</option></select><div id="cBotNote" class="muted" style="font-size:12px;margin-top:5px"></div></div>
           <div style="grid-column:span 2"><label class="fld">Games to farm <span class="muted">(comma-separated — their accounts are armed with these)</span></label><input id="cGames" placeholder="e.g. Rust, VALORANT" /></div>
         </div>
         <div class="grid4" style="margin-top:12px">
@@ -165,7 +165,7 @@
 
       <div class="sect">
         <div class="shdr"><h2>Rented bots <span class="muted" id="scanStat" style="font-size:12.5px;font-weight:500"></span></h2><button class="btn ghost sm" id="refreshBots">Refresh</button></div>
-        <div class="rows" id="rentBots"></div>
+        <div class="rows" id="rentBots"><div class="muted" style="padding:6px 2px">Loading…</div></div>
       </div>
 
       <div class="sect">
@@ -205,7 +205,7 @@
 
       <div class="sect">
         <div class="shdr"><h2>Renters</h2></div>
-        <div class="rows" id="renters"></div>
+        <div class="rows" id="renters"><div class="muted" style="padding:6px 2px">Loading…</div></div>
       </div>
     </main>
 
@@ -243,19 +243,37 @@
         const who = (b.renters||[]).length ? " — shared with "+b.renters.join(", ") : " — free";
         return (b.hostLabel||b.host)+" · "+b.file+who;
       }
+      // Fill the Bot dropdown. Reading the hosts' config directories is remote
+      // work that can take seconds (and fails outright when a host is off), so
+      // the picker says which of the three states it is in rather than sitting
+      // on "No bot yet" — that option is a real choice, and leaving it alone
+      // while the list loaded made a working picker look like a broken one.
       async function loadBotPicker(){
+        const sel = $("cBot"), note = $("cBotNote");
+        if(sel){ sel.disabled = true; sel.innerHTML = '<option value="">Loading bots…</option>'; }
+        if(note) note.innerHTML = "";
         try {
           const d = await api("/renters/bots");
           BOTS = d.bots || [];
-          const sel = $("cBot");
           if(sel){
             const hostsList = HOSTS.length ? HOSTS : [{id:"local",label:"Server"}];
             sel.innerHTML = '<option value="">No bot yet</option>'+
               hostsList.map(h=>'<option value="new:'+esc(h.id)+'">➕ Create a new bot on '+esc(h.label||h.id)+'</option>').join("")+
               BOTS.map((b,i)=>'<option value="'+i+'">'+esc(botOptionLabel(b))+'</option>').join("");
+            sel.disabled = false;
           }
-        } catch(e){ /* picker stays empty */ }
+          // A host we couldn't reach still has bots on it; say so instead of
+          // presenting a short list as the whole fleet.
+          const off = d.offlineHosts || [];
+          if(note && off.length){
+            note.innerHTML = '<span class="tokwarn">⚠ '+esc(off.map(h=>h.label||h.id).join(", "))+' unreachable</span> — bots there aren’t listed. '+retryLink();
+          }
+        } catch(e){
+          if(sel){ sel.innerHTML = '<option value="">No bot yet</option>'; sel.disabled = false; }
+          if(note) note.innerHTML = '<span class="tokwarn">Couldn’t load the bot list</span> — '+esc(e.message)+'. '+retryLink();
+        }
       }
+      function retryLink(){ return '<a href="#" onclick="event.preventDefault();loadBotPicker()">Retry</a>'; }
 
       // ---- create ----
       $("cBtn").addEventListener("click", async ()=>{
@@ -830,12 +848,22 @@
       document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeModal(); });
 
       (async function init(){
-        try { const me = await api("/shop/me"); $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); } catch(e){}
+        // Header identity is independent of the page data — fill it in whenever
+        // it lands instead of blocking the first data paint on it.
+        api("/shop/me").then(me=>{ $("meName").textContent = me.username||"Admin"; $("meAvatar").textContent=(me.username||"A").slice(0,2).toUpperCase(); }).catch(()=>{});
         // Only what managing renters actually needs. The accounts and drops
         // sections are thousands of rows between them and used far less often,
         // so they stay behind their Load buttons instead of blocking this page
         // every time it opens.
-        await loadHosts(); await loadBotPicker(); await loadApprovals(); await loadRenters(); await loadRentBots();
+        //
+        // Hosts must load before the bot picker (it builds the host options),
+        // but the rest are independent. These used to await one after another,
+        // so "Rented bots" (last in line) only started after the other four
+        // finished — the page paid the SUM of all five round-trips. Fetch the
+        // independent ones concurrently so it costs the slowest call, not their
+        // total.
+        await loadHosts();
+        await Promise.all([loadBotPicker(), loadApprovals(), loadRenters(), loadRentBots()]);
       })();
     </script>
     <script src="/theme.js"></script>

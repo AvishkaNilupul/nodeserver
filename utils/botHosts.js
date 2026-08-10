@@ -296,16 +296,16 @@ function remotePath(host, file) {
 const READ_RETRIES = 2;
 const READ_RETRY_DELAY_MS = 1500;
 
-async function retryRead(fn) {
+async function retryRead(fn, retries = READ_RETRIES) {
   let last;
-  for (let attempt = 0; attempt <= READ_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (e) {
       // A real answer from the far side (missing file, bad path) is final.
       if (!e || !e.unreachable) throw e;
       last = e;
-      if (attempt < READ_RETRIES) {
+      if (attempt < retries) {
         await new Promise((r) => setTimeout(r, READ_RETRY_DELAY_MS));
       }
     }
@@ -313,14 +313,25 @@ async function retryRead(fn) {
   throw last;
 }
 
-async function readdir(host) {
+// List a host's bot directory.
+//
+// The defaults are the patient ones above — right for anything that must not
+// lose a config to a momentary flap. A caller that is merely populating a
+// picker can pass a smaller budget instead: a host that is genuinely OFF never
+// answers, so patience there costs the full 3 attempts x 20s connect timeout
+// (63s measured with the phone host down on 2026-08-11) and every caller behind
+// it waits out that proof. `timeout` is enforced by killing the ssh process, so
+// it bounds the wall clock regardless of ConnectTimeout.
+async function readdir(host, opts) {
+  const { timeout = SHORT_TIMEOUT, retries = READ_RETRIES } =
+    opts && typeof opts === "object" ? opts : {};
   if (host.transport === "local") {
     return fsp.readdir(host.dir);
   }
   return retryRead(async () => {
     try {
       const { stdout } = await sshRun(host, "ls -1 -- " + shq(host.dir), {
-        timeout: SHORT_TIMEOUT,
+        timeout,
       });
       return stdout
         .split("\n")
@@ -334,7 +345,7 @@ async function readdir(host) {
       }
       throw e;
     }
-  });
+  }, retries);
 }
 
 async function readFile(host, file) {

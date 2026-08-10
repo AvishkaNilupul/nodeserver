@@ -49,7 +49,7 @@ async function enforceSingleHome(hosts, host, file, text) {
   healing = true;
   const healed = [];
   try {
-    const files = (await hosts.readdir(host, host.dir))
+    const files = (await hosts.readdir(host))
       .map((f) => f.name || f)
       .filter((f) => CONFIG_RE.test(f) && f !== file);
     if (!files.length) return [];

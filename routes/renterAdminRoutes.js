@@ -89,8 +89,22 @@ async function renterDefaultGames(renter, host) {
   return getConfigGames(host, renter.botFile);
 }
 
-async function renterListView(r, pmap) {
-  const used = await RenterAccount.countDocuments({ renter: r._id });
+// Accounts held per renter. One grouped query for the whole list — this used to
+// be a countDocuments per renter inside the map, and against the Atlas shared
+// tier (which serialises concurrent queries) ten renters cost ~1.7s of the
+// page's load for a number that one aggregate answers in one round trip.
+async function usedByRenter(ids) {
+  const rows = await RenterAccount.aggregate([
+    ...(ids ? [{ $match: { renter: { $in: ids } } }] : []),
+    { $group: { _id: "$renter", n: { $sum: 1 } } },
+  ]);
+  return new Map(rows.map((r) => [String(r._id), r.n]));
+}
+
+async function renterListView(r, pmap, umap) {
+  const used = umap
+    ? umap.get(String(r._id)) || 0
+    : await RenterAccount.countDocuments({ renter: r._id });
   const p = pmap.get(String(r._id)) || { batches: 0, accounts: 0 };
   return {
     ...sanitizeRenter(r),
@@ -103,11 +117,14 @@ async function renterListView(r, pmap) {
 // LIST renters.
 router.get("/renters", requireSuperadmin, async (req, res) => {
   try {
-    const [renters, pmap] = await Promise.all([
+    const [renters, pmap, umap] = await Promise.all([
       Renter.find({}).sort({ createdAt: -1 }).lean(),
       pendingByRenter(),
+      usedByRenter(null),
     ]);
-    const out = await Promise.all(renters.map((r) => renterListView(r, pmap)));
+    const out = await Promise.all(
+      renters.map((r) => renterListView(r, pmap, umap)),
+    );
     res.json({ success: true, renters: out });
   } catch (err) {
     console.error("renters list error:", err.message);
@@ -116,19 +133,50 @@ router.get("/renters", requireSuperadmin, async (req, res) => {
 });
 
 // Bot picker: every config file across hosts + who (if anyone) rents it.
+//
+// Listing a directory is the whole job here, so the only real cost is talking to
+// the hosts — and both halves of that used to be paid the slowest possible way:
+//
+//   * Hosts were walked ONE AFTER ANOTHER. They are independent machines, so
+//     the endpoint charged the SUM of them for no reason.
+//   * A host that is simply switched off never answers, and the default read is
+//     deliberately patient (3 attempts at a 20s connect timeout) because the Pi
+//     flaps under load. Measured on prod 2026-08-11 with the phone host down:
+//     local 1ms, pi 496ms, phone 63106ms — 63s of an endpoint that had 500ms of
+//     work to do, and the renters page awaited it before loading anything else.
+//
+// So: ask every host at once, and give each a budget appropriate to a picker.
+// A host that misses it is reported as offline rather than silently dropped —
+// the page says so, instead of showing a short list as if those bots no longer
+// existed.
+const PICKER_READ_TIMEOUT_MS = 8000;
+
 router.get("/renters/bots", requireSuperadmin, async (req, res) => {
   try {
+    const perHost = await Promise.all(
+      hosts.listHosts().map(async (meta) => {
+        const host = hosts.resolveHost(meta.id);
+        try {
+          const files = (
+            await hosts.readdir(host, {
+              timeout: PICKER_READ_TIMEOUT_MS,
+              retries: 0,
+            })
+          )
+            .filter((f) => validFile(f))
+            .sort();
+          return { meta, files, online: true };
+        } catch {
+          return { meta, files: [], online: false };
+        }
+      }),
+    );
     const out = [];
-    for (const meta of hosts.listHosts()) {
-      const host = hosts.resolveHost(meta.id);
-      let files = [];
-      try {
-        files = (await hosts.readdir(host)).filter((f) => validFile(f)).sort();
-      } catch {
-        files = [];
-      }
-      for (const file of files)
-        out.push({ host: meta.id, hostLabel: meta.label, file });
+    const offline = [];
+    for (const h of perHost) {
+      if (!h.online) offline.push({ id: h.meta.id, label: h.meta.label });
+      for (const file of h.files)
+        out.push({ host: h.meta.id, hostLabel: h.meta.label, file });
     }
     const assigned = await Renter.find(
       { botFile: { $gt: "" } },
@@ -145,7 +193,7 @@ router.get("/renters/bots", requireSuperadmin, async (req, res) => {
       o.assignedTo = names[0] || null;
       o.renters = names;
     });
-    res.json({ success: true, bots: out });
+    res.json({ success: true, bots: out, offlineHosts: offline });
   } catch (err) {
     console.error("renters bots error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
