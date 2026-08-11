@@ -117,6 +117,34 @@ test("finalize reports an activation that did not stick", async () => {
     true,
     "a still-paused offer after activate must be reported as stuck",
   );
+  assert.strictEqual(
+    fin.activationStatus,
+    "paused",
+    "the status it stuck AT must be reported, not just that it stuck",
+  );
+});
+
+// "paused" and "draft" are not interchangeable: paused is an offer that was
+// live and came off sale, draft is one that was published and never went live.
+// Reporting a draft offer as paused sends whoever triages it looking for the
+// wrong thing — which is what happened with 102669379.
+test("a stuck draft offer is reported as draft, not paused", async () => {
+  const SPLITTED_DRAFT = { ...SPLITTED_PAUSED, status: "draft" };
+  const { mp } = loadMarketplaces(SPLITTED_DRAFT, {
+    afterActivate: { ...SPLITTED_DRAFT, status: "draft" },
+  });
+  const fin = await mp.ggselFinalizeStock(102669379);
+
+  assert.strictEqual(
+    fin.activationStuck,
+    true,
+    "a still-draft offer after activate is just as stuck as a paused one",
+  );
+  assert.strictEqual(
+    fin.activationStatus,
+    "draft",
+    "a draft offer must not be reported as paused",
+  );
 });
 
 test("a genuinely empty offer is still pending", async () => {

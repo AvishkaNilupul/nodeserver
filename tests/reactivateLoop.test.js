@@ -234,7 +234,13 @@ test("a stuck activation is reported on the first pass", async () => {
     findingSink: sink,
     listingStatus: "active",
     finalizeResults: [
-      { stock: 5, reactivated: true, pending: false, activationStuck: true },
+      {
+        stock: 5,
+        reactivated: true,
+        pending: false,
+        activationStuck: true,
+        activationStatus: "paused",
+      },
     ],
   });
 
@@ -248,5 +254,45 @@ test("a stuck activation is reported on the first pass", async () => {
     1,
     "an activation verified as stuck must raise on the first pass",
   );
-  assert.match(String(raised[0].message), /still paused immediately after/);
+  assert.match(String(raised[0].message), /still reads paused immediately/);
+});
+
+// The finding text is the only thing a human sees when triaging this, so it has
+// to name the status the offer is actually in. 102669379 sat in DRAFT while the
+// message said "paused", which points the reader at the wrong problem: a paused
+// offer was live and came off sale, a draft one never went live at all.
+test("the finding names the real status, and draft says why it matters", async () => {
+  const sink = { upserts: [], updates: [] };
+  const { guardian } = loadGuardian({
+    findingSink: sink,
+    listingStatus: "active",
+    finalizeResults: [
+      {
+        stock: 3,
+        reactivated: true,
+        pending: false,
+        activationStuck: true,
+        activationStatus: "draft",
+      },
+    ],
+  });
+
+  await runPasses(guardian, 1);
+
+  const raised = sink.upserts.filter((u) =>
+    String(u.dedupeKey).startsWith("reactivate-loop:"),
+  );
+  assert.strictEqual(raised.length, 1, "a stuck draft offer must raise");
+  const msg = String(raised[0].message);
+  assert.match(msg, /still reads draft immediately/);
+  assert.doesNotMatch(
+    msg,
+    /still reads paused/,
+    "a draft offer must never be described as paused",
+  );
+  assert.match(
+    msg,
+    /never went live/,
+    "draft is worth explaining — it is not something this end can retry",
+  );
 });

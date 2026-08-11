@@ -787,10 +787,18 @@ async function feedListing(row, seenKeys, refusals) {
               message: fin.activationStuck
                 ? "ggsel offer " +
                   row.externalId +
-                  " is still paused immediately after GGSel accepted the" +
-                  " activate call, so it is stocked but off sale. GGSel is" +
-                  " rejecting the activation without reporting an error —" +
-                  " needs a look on the GGSel side."
+                  " still reads " +
+                  (fin.activationStatus || "paused/draft") +
+                  " immediately after GGSel accepted the activate call, so it" +
+                  " is stocked but off sale. GGSel is rejecting the activation" +
+                  " without reporting an error — needs a look on the GGSel" +
+                  " side." +
+                  (fin.activationStatus === "draft"
+                    ? " A draft offer was published but never went live at" +
+                      " all, which usually means something incomplete on the" +
+                      " listing itself (moderation, a missing required field)" +
+                      " rather than anything this end can retry."
+                    : "")
                 : "ggsel offer " +
                   row.externalId +
                   " has needed re-activation on " +

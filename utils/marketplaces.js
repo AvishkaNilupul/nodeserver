@@ -1981,6 +1981,7 @@ async function ggselFinalizeStock(offerId) {
   // stocked offer that isn't "active" is off sale. This is the critical step.
   let reactivated = false;
   let activationStuck = false;
+  let activationStatus = "";
   if (offer.status === "paused" || offer.status === "draft") {
     try {
       await axios.post(
@@ -1993,21 +1994,30 @@ async function ggselFinalizeStock(offerId) {
       throw apiError("GGSel reactivate", e);
     }
     // batch_activate answering 2xx does NOT mean the offer went live: GGSel
-    // accepts the call and can leave the offer paused, which is how one offer
+    // accepts the call and leaves the offer off sale, which is how one offer
     // was "successfully re-activated" 466 times while sitting off sale the
     // whole time. Read the status back so a caller can tell a real activation
     // from an accepted-but-ignored one. Best-effort: a failed verify read must
     // not turn a probably-fine activation into a thrown error, so it just
     // leaves activationStuck false.
+    //
+    // Report WHICH status it stuck at, not just that it stuck. The two mean
+    // different things: "paused" is an offer that was live and got taken off
+    // sale, "draft" is one that was published and never went live at all
+    // (offer 102669379, observed live 2026-08-11). A reader chasing a "still
+    // paused" message for a draft offer is looking for the wrong thing.
     try {
       const after = await ggselReadOffer(keys, offerId);
       const status = String((after && after.status) || "");
-      if (status === "paused" || status === "draft") activationStuck = true;
+      if (status === "paused" || status === "draft") {
+        activationStuck = true;
+        activationStatus = status;
+      }
     } catch {
       /* verify is advisory — leave activationStuck false */
     }
   }
-  return { stock, reactivated, quantitySynced, activationStuck };
+  return { stock, reactivated, quantitySynced, activationStuck, activationStatus };
 }
 
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).
