@@ -1947,7 +1947,17 @@ async function ggselFinalizeStock(offerId) {
   } catch (e) {
     throw apiError("GGSel offer read", e);
   }
-  const stock = Number(offer.in_stock_products_count) || 0;
+  // Read stock the same way every other caller does. This used to read only
+  // in_stock_products_count, which is 0 on an offer that sells "splitted"
+  // products — its units live in in_stock_splitted_products_count. Such an
+  // offer therefore always took the pending early return below and could NEVER
+  // be re-activated or have its quantity synced: stocked, paused, and off sale
+  // indefinitely, with the guardian's self-heal unable to touch it.
+  // ggselStockField encodes the verified field precedence (splitted first when
+  // has_splitted_products, then the plain count, then advertised quantity), so
+  // using it keeps this in step with ggselOfferStockDetailed instead of
+  // disagreeing with the gate that decides whether to call this at all.
+  const stock = Number(ggselStockField(offer)) || 0;
   // Nothing settled yet — GGSel attaches products through an async job, so
   // right after an add the count can still read 0. Not an error; the next
   // guardian tick re-runs this once the job lands.
@@ -1970,6 +1980,7 @@ async function ggselFinalizeStock(offerId) {
   // offer published but never activated sits as "draft" — either way a
   // stocked offer that isn't "active" is off sale. This is the critical step.
   let reactivated = false;
+  let activationStuck = false;
   if (offer.status === "paused" || offer.status === "draft") {
     try {
       await axios.post(
@@ -1981,8 +1992,22 @@ async function ggselFinalizeStock(offerId) {
     } catch (e) {
       throw apiError("GGSel reactivate", e);
     }
+    // batch_activate answering 2xx does NOT mean the offer went live: GGSel
+    // accepts the call and can leave the offer paused, which is how one offer
+    // was "successfully re-activated" 466 times while sitting off sale the
+    // whole time. Read the status back so a caller can tell a real activation
+    // from an accepted-but-ignored one. Best-effort: a failed verify read must
+    // not turn a probably-fine activation into a thrown error, so it just
+    // leaves activationStuck false.
+    try {
+      const after = await ggselReadOffer(keys, offerId);
+      const status = String((after && after.status) || "");
+      if (status === "paused" || status === "draft") activationStuck = true;
+    } catch {
+      /* verify is advisory — leave activationStuck false */
+    }
   }
-  return { stock, reactivated, quantitySynced };
+  return { stock, reactivated, quantitySynced, activationStuck };
 }
 
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).

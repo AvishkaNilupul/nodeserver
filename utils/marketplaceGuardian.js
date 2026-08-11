@@ -672,6 +672,37 @@ async function clearFinalizeFinding(row) {
   );
 }
 
+// The reactivate-loop finding is raised from the self-heal branch, not from a
+// check, so autoResolveStale never sweeps it: its type is "restock-failed"
+// (not a CONDITION_TYPE) and its dedupeKey is "reactivate-loop:", not the
+// "restock-empty:" prefix the sweep whitelists. Left to that, the finding
+// would outlive the condition forever — the same immortal-finding bug already
+// fixed twice in this file (the 504 "autosell-sync:" row, and the archived
+// offer that produced 38 identical rows). So it is resolved explicitly, the
+// way clearFinalizeFinding does, the moment a pass proves the offer is active.
+//
+// Resolving here rather than adding the prefix to autoResolveStale's $or is
+// deliberate: feedOne() runs feedListing with a throwaway seenKeys Set and
+// never calls autoResolveStale, so a sweep-based clear would leave the finding
+// open on that path.
+async function clearReactivateLoopFinding(row) {
+  await AuditFinding.updateMany(
+    {
+      dedupeKey: "reactivate-loop:" + row._id,
+      status: { $in: ["open", "needs-human"] },
+    },
+    {
+      $set: {
+        status: "resolved",
+        resolution:
+          "auto-resolved: the offer was found already active — GGSel is no " +
+          "longer re-pausing it",
+        resolvedAt: new Date(),
+      },
+    },
+  );
+}
+
 async function feedListing(row, seenKeys, refusals) {
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
@@ -736,7 +767,15 @@ async function feedListing(row, seenKeys, refusals) {
           // offer already active.
           const n = (reactivateStreak.get(row.externalId) || 0) + 1;
           reactivateStreak.set(row.externalId, n);
-          if (n >= REACTIVATE_LOOP_THRESHOLD) {
+          // Two independent signals that the activation isn't taking:
+          //   - activationStuck: finalize re-read the offer right after
+          //     batch_activate and it was STILL paused/draft. Direct proof,
+          //     available on the very first pass.
+          //   - n >= threshold: the offer went active but was paused again
+          //     before the next tick. Only visible across passes.
+          // Either one means the offer is off sale despite a "successful"
+          // heal, so either one raises the finding.
+          if (fin.activationStuck || n >= REACTIVATE_LOOP_THRESHOLD) {
             const key = "reactivate-loop:" + row._id;
             if (seenKeys) seenKeys.add(key);
             await upsertFinding({
@@ -745,19 +784,39 @@ async function feedListing(row, seenKeys, refusals) {
               marketplace: row.marketplace,
               listing: row._id,
               dedupeKey: key,
-              message:
-                "ggsel offer " +
-                row.externalId +
-                " has needed re-activation on " +
-                n +
-                " consecutive passes — GGSel accepts the activate call but the" +
-                " offer keeps returning to paused, so it is off sale between" +
-                " passes. Needs a look on the GGSel side.",
+              message: fin.activationStuck
+                ? "ggsel offer " +
+                  row.externalId +
+                  " is still paused immediately after GGSel accepted the" +
+                  " activate call, so it is stocked but off sale. GGSel is" +
+                  " rejecting the activation without reporting an error —" +
+                  " needs a look on the GGSel side."
+                : "ggsel offer " +
+                  row.externalId +
+                  " has needed re-activation on " +
+                  n +
+                  " consecutive passes — GGSel accepts the activate call but" +
+                  " the offer keeps returning to paused, so it is off sale" +
+                  " between passes. Needs a look on the GGSel side.",
             });
           }
-        } else {
-          // Already active — whatever caused the earlier pauses has cleared.
+        } else if (!fin.pending) {
+          // Verified active: finalize read the offer, found it neither paused
+          // nor draft, and had nothing to re-activate. Whatever was pausing it
+          // has stopped, so drop the streak and close any standing finding.
+          //
+          // The !fin.pending guard matters. reactivated is ALSO false on the
+          // pending early return, where finalize saw in_stock_products_count
+          // <= 0 and returned WITHOUT ever reading offer.status. That is not
+          // evidence of health. And the two stock reads disagree by design:
+          // the upstream gate uses ggselStockField, which prefers
+          // in_stock_splitted_products_count on a splitted offer, while
+          // finalize reads only in_stock_products_count. So a splitted offer
+          // can be stocked upstream, reach this branch, come back pending, and
+          // — without this guard — wipe its streak every pass, making the loop
+          // detection permanently unreachable for that whole class of offer.
           reactivateStreak.delete(row.externalId);
+          await clearReactivateLoopFinding(row);
         }
         if (!fin.pending) await clearFinalizeFinding(row);
       } catch (e) {
@@ -932,6 +991,14 @@ async function feedListing(row, seenKeys, refusals) {
             " in stock",
         );
       }
+      // Deliberately does NOT touch reactivateStreak. A re-activation here is
+      // the expected end of a feed — enabling autoselling on a then-empty
+      // offer pauses it, so the offer we just filled is *supposed* to need
+      // activating, exactly once, right now. The streak counts the pathological
+      // case instead: an offer needing re-activation on consecutive passes when
+      // nothing fed it (the need <= 0 self-heal branch above). Counting this
+      // call site would make every normal restock look like a loop; clearing it
+      // would reset a genuine streak the moment a feed landed mid-loop.
       if (!fin.pending) await clearFinalizeFinding(row);
     } catch (e) {
       await upsertFinding({
