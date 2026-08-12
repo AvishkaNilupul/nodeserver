@@ -105,7 +105,12 @@
   .modal > header .x:hover { background:var(--surface-2); opacity:1; }
   .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
   .mbody label.lbl { font-size:11px; color:var(--muted); font-weight:600; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
-  .mbody textarea, .mbody input[type="text"] { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody textarea, .mbody input[type="text"], .mbody select { width:100%; padding:10px 12px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13.5px; font-family:inherit; outline:none; }
+  .mbody select:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .radios { display:flex; flex-direction:column; gap:8px; }
+  .radios label { display:flex; align-items:center; gap:9px; font-size:13.5px; cursor:pointer; }
+  .radios label.off { opacity:.5; cursor:default; }
+  .radios input[type="radio"] { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
   .mbody textarea { min-height:200px; resize:vertical; font-family:ui-monospace,monospace; font-size:12.5px; line-height:1.5; }
   .mbody textarea:focus, .mbody input:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
   .mbody .hint { font-size:12px; color:var(--muted); line-height:1.55; }
@@ -158,6 +163,7 @@
       </div>
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn-ghost btn-sm" id="scanBtn" title="Check every account in this set against Twitch">Scan (check live)</button>
+        <button class="btn-ghost btn-sm" id="moveSetBtn" title="Move accounts into another stash set — stays out of the Account Pool">Move &rarr; another set</button>
         <button class="btn-ghost btn-sm" id="moveSelBtn" disabled title="Move only the checked accounts into the Account Pool">Move selected &rarr; pool</button>
         <button class="btn-sm" id="moveAllBtn" title="Move the whole set into the Account Pool">Move set &rarr; pool</button>
         <button class="btn-sm" id="importSetBtn">Import into set</button>
@@ -242,6 +248,37 @@ or JSON:
     <footer>
       <button class="btn-ghost" id="importCancel">Cancel</button>
       <button id="importSubmit">Import</button>
+    </footer>
+  </div>
+</div>
+
+<!-- move to another set modal -->
+<div class="modal-bg" id="moveSetBg">
+  <div class="modal" style="max-width:480px;">
+    <header><b>Move to another set</b><button class="x" id="moveSetClose">&times;</button></header>
+    <div class="mbody">
+      <div>
+        <label class="lbl">What to move</label>
+        <div class="radios">
+          <label id="mvSelLbl"><input type="radio" name="mvscope" value="sel" /> <span id="mvSelText">Selected accounts</span></label>
+          <label id="mvAllLbl"><input type="radio" name="mvscope" value="all" /> <span id="mvAllText">Every account in this set</span></label>
+        </div>
+      </div>
+      <div>
+        <label class="lbl">Destination set</label>
+        <select id="mvTarget"></select>
+      </div>
+      <div id="mvNewWrap" style="display:none;">
+        <label class="lbl">New set name</label>
+        <input type="text" id="mvNewName" placeholder="e.g. aging &mdash; batch 1" />
+      </div>
+      <div class="hint">
+        They keep their added date, password/token and last live-check result &mdash; only which set holds them changes. Nothing goes into the Account Pool, so this can't put an account in front of a bot. If the destination already holds the same username, the two rows are merged rather than duplicated.
+      </div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="moveSetCancel">Cancel</button>
+      <button id="moveSetSubmit">Move</button>
     </footer>
   </div>
 </div>
@@ -610,6 +647,91 @@ or JSON:
     } catch (e) { toast(e.message, true); }
   }
 
+  // -------------------------------------------------- move to another set
+  //
+  // Shuffling accounts between stash sets — the way you split the automator's
+  // landing set into batches you can age separately. Never touches the pool.
+  function mvScope() {
+    var picked = document.querySelector('input[name="mvscope"]:checked');
+    return picked ? picked.value : "all";
+  }
+  async function openMoveSet() {
+    if (!current) return;
+    if (!accounts.length) return toast("This set is empty", true);
+    // Re-read the set list so a set created elsewhere shows up as a destination.
+    try {
+      var data = await api("/account-stash/sets");
+      sets = data.sets || [];
+    } catch (e) { return toast(e.message, true); }
+
+    var others = sets.filter(function(s){ return s.id !== current.id; });
+    document.getElementById("mvTarget").innerHTML =
+      others.map(function(s){
+        return '<option value="' + s.id + '">' + esc(s.name) + ' · ' + s.total + '</option>';
+      }).join("") +
+      '<option value="__new__">+ Create a new set…</option>';
+    document.getElementById("mvTarget").value = others.length ? others[0].id : "__new__";
+    toggleMvNew();
+
+    var n = selectedIds().length;
+    document.getElementById("mvSelText").textContent = n
+      ? "Selected accounts (" + n + ")"
+      : "Selected accounts — none ticked";
+    document.getElementById("mvAllText").textContent = "Every account in this set (" + accounts.length + ")";
+    var selRadio = document.querySelector('input[name="mvscope"][value="sel"]');
+    selRadio.disabled = n === 0;
+    document.getElementById("mvSelLbl").className = n === 0 ? "off" : "";
+    // Default to the safer, narrower scope whenever there's a selection to honour.
+    if (n) selRadio.checked = true;
+    else document.querySelector('input[name="mvscope"][value="all"]').checked = true;
+
+    document.getElementById("mvNewName").value = "";
+    document.getElementById("moveSetBg").classList.add("show");
+  }
+  function closeMoveSet(){ document.getElementById("moveSetBg").classList.remove("show"); }
+  function toggleMvNew() {
+    var isNew = document.getElementById("mvTarget").value === "__new__";
+    document.getElementById("mvNewWrap").style.display = isNew ? "" : "none";
+    if (isNew) setTimeout(function(){ document.getElementById("mvNewName").focus(); }, 50);
+  }
+  document.getElementById("moveSetBtn").addEventListener("click", openMoveSet);
+  document.getElementById("moveSetClose").addEventListener("click", closeMoveSet);
+  document.getElementById("moveSetCancel").addEventListener("click", closeMoveSet);
+  document.getElementById("mvTarget").addEventListener("change", toggleMvNew);
+  document.getElementById("moveSetSubmit").addEventListener("click", async function(){
+    if (!current) return;
+    var target = document.getElementById("mvTarget").value;
+    var body = {};
+    if (target === "__new__") {
+      var name = document.getElementById("mvNewName").value.trim();
+      if (!name) return toast("Name the new set first", true);
+      body.targetSetName = name;
+    } else {
+      body.targetSetId = target;
+    }
+    var scope = mvScope();
+    if (scope === "sel") {
+      var ids = selectedIds();
+      if (!ids.length) return toast("Nothing selected", true);
+      body.ids = ids;
+    }
+    var btn = this; btn.disabled = true;
+    try {
+      var data = await api("/account-stash/sets/" + current.id + "/move-to-set", {
+        method: "POST", body: JSON.stringify(body),
+      });
+      var parts = [];
+      if (data.moved) parts.push(data.moved + " moved");
+      if (data.merged) parts.push(data.merged + " merged into existing rows");
+      if (data.stayed) parts.push(data.stayed + " stayed put");
+      toast((parts.join(", ") || "Nothing moved") + " → " + data.targetSetName);
+      closeMoveSet();
+      if (scope === "sel") selection = {};
+      await refreshCurrent();
+    } catch (e) { toast(e.message, true); }
+    finally { btn.disabled = false; }
+  });
+
   // -------------------------------------------------- reveal / delete account
   async function revealAccount(id) {
     try {
@@ -633,7 +755,7 @@ or JSON:
   }
 
   // close modals on backdrop click
-  ["setBg","importBg","revealBg"].forEach(function(id){
+  ["setBg","importBg","moveSetBg","revealBg"].forEach(function(id){
     document.getElementById(id).addEventListener("click", function(e){ if (e.target === this) this.classList.remove("show"); });
   });
 

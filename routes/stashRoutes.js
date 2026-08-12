@@ -20,6 +20,7 @@ const BotAccount = require("../models/BotAccount");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const stashChecker = require("../utils/stashChecker");
 const { parseAccountList } = require("../utils/parseAccountList");
+const { planStashMove } = require("../utils/stashMovePlan");
 const { encrypt, decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -451,6 +452,151 @@ router.post("/account-stash/sets/:id/move-to-pool", requireSuperadmin, async (re
     });
   } catch (err) {
     console.error("stash move-to-pool error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ---------------------------------------------------- move between sets
+
+// Re-parent accounts from one stash set into another — e.g. peel a batch off the
+// automator's landing set ("browser-automator") into a set you want to age on
+// its own. Pure bookkeeping inside the stash: nothing enters the Account Pool,
+// no bot/scanner code is involved, and createdAt is left alone so an account's
+// stash age survives the move.
+//
+// The {setId, usernameLower} unique index means the destination may already hold
+// a row for the same username. That isn't an error: we fill the destination
+// row's missing fields from the source row (same never-clobber rule as import)
+// and drop the now-redundant source row, so the account ends up in exactly one
+// set. Moving during a scan is safe — utils/stashChecker.js walks accounts by
+// _id, so a row that changed sets still gets its result written.
+router.post("/account-stash/sets/:id/move-to-set", requireSuperadmin, async (req, res) => {
+  try {
+    const src = await StashSet.findById(req.params.id);
+    if (!src) return res.status(404).json({ success: false, message: "Not found" });
+
+    const body = req.body || {};
+
+    // Destination is either an existing set id, or a name to create/reuse so the
+    // operator can split a batch off without leaving the page first.
+    let target = null;
+    if (body.targetSetId) {
+      if (!mongoose.Types.ObjectId.isValid(String(body.targetSetId))) {
+        return res.status(400).json({ success: false, message: "Invalid destination set" });
+      }
+      target = await StashSet.findById(body.targetSetId);
+      if (!target) return res.status(404).json({ success: false, message: "Destination set not found" });
+    } else if (String(body.targetSetName || "").trim()) {
+      const name = String(body.targetSetName).trim();
+      const nameLower = name.toLowerCase();
+      target = await StashSet.findOne({ nameLower });
+      if (!target) {
+        try {
+          target = await StashSet.create({ name, nameLower, note: "" });
+        } catch (err) {
+          // Race with a concurrent create of the same name — re-fetch.
+          if (err && err.code === 11000) target = await StashSet.findOne({ nameLower });
+          else throw err;
+        }
+      }
+    }
+    if (!target) return res.status(400).json({ success: false, message: "Pick a destination set" });
+    if (String(target._id) === String(src._id)) {
+      return res.status(400).json({ success: false, message: "That's the set they're already in" });
+    }
+
+    // A missing/absent `ids` means the whole set. An `ids` array that survives
+    // validation empty means "nothing selected" — we do NOT fall back to moving
+    // the whole set, since that's the one mistake nobody could undo by hand.
+    const filter = { setId: src._id };
+    if (Array.isArray(body.ids)) {
+      const valid = body.ids.filter((x) => mongoose.Types.ObjectId.isValid(String(x)));
+      if (!valid.length) {
+        return res.status(400).json({ success: false, message: "No valid accounts selected" });
+      }
+      filter._id = { $in: valid };
+    }
+
+    const sourceAccounts = await StashAccount.find(filter);
+    if (!sourceAccounts.length) {
+      return res.json({
+        success: true,
+        moved: 0,
+        merged: 0,
+        stayed: 0,
+        targetSetId: target._id,
+        targetSetName: target.name,
+      });
+    }
+
+    const lowers = sourceAccounts.map((a) => a.usernameLower || a.username.toLowerCase());
+    const clashes = await StashAccount.find({ setId: target._id, usernameLower: { $in: lowers } });
+
+    const plan = planStashMove({
+      accounts: sourceAccounts,
+      // hasEmail is decided here, where the key is: "" and an undecryptable
+      // value both mean "no email stored", so a copy may fill it.
+      existing: clashes.map((c) => ({
+        _id: c._id,
+        usernameLower: c.usernameLower,
+        clientSecret: c.clientSecret,
+        uniqueId: c.uniqueId,
+        twitchId: c.twitchId,
+        hasPassword: c.hasPassword,
+        hasEmail: !!decrypt(c.email),
+        lastCheckStatus: c.lastCheckStatus,
+      })),
+      targetSetId: target._id,
+    });
+
+    const ops = [];
+    for (const m of plan.merges) {
+      if (Object.keys(m.set).length) {
+        ops.push({ updateOne: { filter: { _id: m.destId }, update: { $set: m.set } } });
+      }
+      ops.push({ deleteOne: { filter: { _id: m.sourceId } } });
+    }
+    for (const r of plan.reparent) {
+      ops.push({ updateOne: { filter: { _id: r.id }, update: { $set: r.set } } });
+    }
+    const moveIds = plan.reparent.map((r) => r.id);
+    const mergedSourceIds = plan.merges.map((m) => m.sourceId);
+
+    let partial = false;
+    for (let i = 0; i < ops.length; i += 500) {
+      try {
+        await StashAccount.bulkWrite(ops.slice(i, i + 500), { ordered: false });
+      } catch (err) {
+        // A concurrent ingest can insert the same username into the destination
+        // between our read above and this write. Only that row is refused; it
+        // stays where it is rather than failing the whole move.
+        const dupKey = err && (err.code === 11000 || (err.writeErrors || []).length);
+        if (!dupKey) throw err;
+        partial = true;
+      }
+    }
+
+    // Report what actually landed rather than what we intended, so a partial
+    // write can never be announced as a clean move.
+    const moved = moveIds.length
+      ? await StashAccount.countDocuments({ _id: { $in: moveIds }, setId: target._id })
+      : 0;
+    const mergedLeftBehind = mergedSourceIds.length
+      ? await StashAccount.countDocuments({ _id: { $in: mergedSourceIds } })
+      : 0;
+    const merged = mergedSourceIds.length - mergedLeftBehind;
+
+    res.json({
+      success: true,
+      moved,
+      merged,
+      stayed: sourceAccounts.length - moved - merged,
+      partial,
+      targetSetId: target._id,
+      targetSetName: target.name,
+    });
+  } catch (err) {
+    console.error("stash move-to-set error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
