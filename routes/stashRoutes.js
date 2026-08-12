@@ -20,6 +20,7 @@ const BotAccount = require("../models/BotAccount");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const stashChecker = require("../utils/stashChecker");
 const { parseAccountList } = require("../utils/parseAccountList");
+const { planStashMove } = require("../utils/stashMovePlan");
 const { encrypt, decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -451,6 +452,205 @@ router.post("/account-stash/sets/:id/move-to-pool", requireSuperadmin, async (re
     });
   } catch (err) {
     console.error("stash move-to-pool error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ---------------------------------------------------- move between sets
+
+// Re-parent accounts from one stash set into another — e.g. peel a batch off the
+// automator's landing set ("browser-automator") into a set you want to age on
+// its own. Pure bookkeeping inside the stash: nothing enters the Account Pool,
+// no bot/scanner code is involved, and createdAt is left alone so an account's
+// stash age survives the move.
+//
+// The {setId, usernameLower} unique index means the destination may already hold
+// a row for the same username. That isn't an error, and utils/stashMovePlan.js
+// decides which of the two ways it goes: a twin that's merely emptier gets the
+// source row's fields copied in (never clobbering, same rule as import) and the
+// redundant source row is dropped, whereas a twin holding DIFFERENT credentials
+// is left strictly alone and reported, because a login is not a unique identity
+// and deleting the source could destroy the only copy of a password or token.
+//
+// Deleting is the one irreversible step, so it happens in a second pass, only for
+// rows whose data is visibly present on the destination (see phase 2 below).
+//
+// Moving during a scan is safe — utils/stashChecker.js walks accounts by _id, so
+// a row that changed sets still gets its result written.
+router.post("/account-stash/sets/:id/move-to-set", requireSuperadmin, async (req, res) => {
+  try {
+    const src = await StashSet.findById(req.params.id);
+    if (!src) return res.status(404).json({ success: false, message: "Not found" });
+
+    const body = req.body || {};
+
+    // Destination is either an existing set id, or a name to create/reuse so the
+    // operator can split a batch off without leaving the page first.
+    let target = null;
+    if (body.targetSetId) {
+      if (!mongoose.Types.ObjectId.isValid(String(body.targetSetId))) {
+        return res.status(400).json({ success: false, message: "Invalid destination set" });
+      }
+      target = await StashSet.findById(body.targetSetId);
+      if (!target) return res.status(404).json({ success: false, message: "Destination set not found" });
+    } else if (String(body.targetSetName || "").trim()) {
+      const name = String(body.targetSetName).trim();
+      const nameLower = name.toLowerCase();
+      target = await StashSet.findOne({ nameLower });
+      if (!target) {
+        try {
+          target = await StashSet.create({ name, nameLower, note: "" });
+        } catch (err) {
+          // Race with a concurrent create of the same name — re-fetch.
+          if (err && err.code === 11000) target = await StashSet.findOne({ nameLower });
+          else throw err;
+        }
+      }
+    }
+    if (!target) return res.status(400).json({ success: false, message: "Pick a destination set" });
+    if (String(target._id) === String(src._id)) {
+      return res.status(400).json({ success: false, message: "That's the set they're already in" });
+    }
+
+    // A missing/absent `ids` means the whole set. An `ids` array that survives
+    // validation empty means "nothing selected" — we do NOT fall back to moving
+    // the whole set, since that's the one mistake nobody could undo by hand.
+    const filter = { setId: src._id };
+    if (Array.isArray(body.ids)) {
+      const valid = body.ids.filter((x) => mongoose.Types.ObjectId.isValid(String(x)));
+      if (!valid.length) {
+        return res.status(400).json({ success: false, message: "No valid accounts selected" });
+      }
+      filter._id = { $in: valid };
+    }
+
+    const sourceAccounts = await StashAccount.find(filter);
+    if (!sourceAccounts.length) {
+      return res.json({
+        success: true,
+        moved: 0,
+        merged: 0,
+        conflicts: [],
+        conflictCount: 0,
+        stayed: 0,
+        partial: false,
+        targetSetId: target._id,
+        targetSetName: target.name,
+      });
+    }
+
+    const lowers = sourceAccounts.map((a) => a.usernameLower || a.username.toLowerCase());
+    const clashes = await StashAccount.find({ setId: target._id, usernameLower: { $in: lowers } });
+
+    // Decryption happens here, not in the planner: stored passwords/emails use a
+    // random IV, so the same secret encrypts to two different strings and only
+    // the plaintext can tell "same credential" from "different credential".
+    const withPlain = (r) => ({
+      _id: r._id,
+      username: r.username,
+      usernameLower: r.usernameLower,
+      clientSecret: r.clientSecret,
+      uniqueId: r.uniqueId,
+      twitchId: r.twitchId,
+      password: r.password,
+      hasPassword: r.hasPassword,
+      passwordPlain: decrypt(r.password),
+      email: r.email,
+      emailPlain: decrypt(r.email),
+      lastCheckAt: r.lastCheckAt,
+      lastCheckStatus: r.lastCheckStatus,
+      lastCheckError: r.lastCheckError,
+      dropCount: r.dropCount,
+    });
+
+    const plan = planStashMove({
+      accounts: sourceAccounts.map(withPlain),
+      existing: clashes.map(withPlain),
+      targetSetId: target._id,
+    });
+
+    const runBatched = async (ops) => {
+      let partial = false;
+      for (let i = 0; i < ops.length; i += 500) {
+        try {
+          await StashAccount.bulkWrite(ops.slice(i, i + 500), { ordered: false });
+        } catch (err) {
+          // A concurrent ingest can insert the same username into the destination
+          // between our read above and this write. Only that row is refused; it
+          // stays where it is rather than failing the whole move.
+          const dupKey = err && (err.code === 11000 || (err.writeErrors || []).length);
+          if (!dupKey) throw err;
+          partial = true;
+        }
+      }
+      return partial;
+    };
+
+    // Phase 1 — copy the source rows' fields onto the destination rows, and
+    // re-parent everything that had no clash. Nothing is deleted yet.
+    const fillOps = [];
+    for (const m of plan.merges) {
+      if (Object.keys(m.set).length) {
+        fillOps.push({ updateOne: { filter: { _id: m.destId }, update: { $set: m.set } } });
+      }
+    }
+    for (const r of plan.reparent) {
+      fillOps.push({ updateOne: { filter: { _id: r.id }, update: { $set: r.set } } });
+    }
+    const partial = await runBatched(fillOps);
+
+    // Phase 2 — only now drop the redundant source rows, and only the ones whose
+    // data we can actually SEE on the destination row. Deleting is the one
+    // irreversible step here, so it never runs on the assumption that phase 1
+    // worked: a fill that didn't land leaves its source row alive and untouched.
+    const applied = (docVal, wantVal) => {
+      if (wantVal instanceof Date) {
+        return !!docVal && new Date(docVal).getTime() === wantVal.getTime();
+      }
+      return String(docVal == null ? "" : docVal) === String(wantVal == null ? "" : wantVal);
+    };
+    const destNow = new Map(
+      (await StashAccount.find({ _id: { $in: plan.merges.map((m) => m.destId) } }).lean()).map(
+        (d) => [String(d._id), d],
+      ),
+    );
+    const deletableSourceIds = plan.merges
+      .filter((m) => {
+        const dest = destNow.get(String(m.destId));
+        if (!dest) return false; // destination row vanished — keep the source row
+        return Object.entries(m.set).every(([k, v]) => applied(dest[k], v));
+      })
+      .map((m) => m.sourceId);
+    if (deletableSourceIds.length) {
+      await StashAccount.deleteMany({ _id: { $in: deletableSourceIds } });
+    }
+
+    // Report what actually landed rather than what we intended, so a partial
+    // write can never be announced as a clean move.
+    const moveIds = plan.reparent.map((r) => r.id);
+    const moved = moveIds.length
+      ? await StashAccount.countDocuments({ _id: { $in: moveIds }, setId: target._id })
+      : 0;
+    const mergedLeftBehind = deletableSourceIds.length
+      ? await StashAccount.countDocuments({ _id: { $in: deletableSourceIds } })
+      : 0;
+    const merged = deletableSourceIds.length - mergedLeftBehind;
+
+    res.json({
+      success: true,
+      moved,
+      merged,
+      // Same username, different credentials: both rows were left exactly as they
+      // were, and the operator is told which ones so they can look at them.
+      conflicts: plan.conflicts.map((c) => ({ username: c.username, fields: c.fields })),
+      conflictCount: plan.conflicts.length,
+      stayed: sourceAccounts.length - moved - merged - plan.conflicts.length,
+      partial,
+      targetSetId: target._id,
+      targetSetName: target.name,
+    });
+  } catch (err) {
+    console.error("stash move-to-set error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
