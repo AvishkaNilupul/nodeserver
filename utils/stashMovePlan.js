@@ -4,15 +4,47 @@
 //
 // models/StashAccount.js has a unique {setId, usernameLower} index, so a
 // destination set may already hold a row for a username we're moving. Those rows
-// can't both exist, and neither should be thrown away — so the source row's
-// fields are folded into the destination row (filling blanks only, never
-// clobbering, exactly like the paste-importer) and the source row is dropped.
+// can't both exist, and neither should be thrown away, so a clash goes one of
+// two ways:
+//
+//   * The two rows agree (or one is just emptier) — the source row's fields fill
+//     the destination's blanks, never clobbering, exactly like the paste-importer,
+//     and the redundant source row is dropped.
+//   * The two rows hold DIFFERENT credentials for the same username — a
+//     different password, token, uniqueId or twitch id. A Twitch login is not a
+//     unique identity (the ClientSecret is), so these may well be two different
+//     accounts that happen to share a name. Dropping the source row would
+//     destroy a credential that exists nowhere else, so we touch neither row and
+//     hand the clash back to the operator instead.
+//
 // Everything without a clash is simply re-parented, which preserves createdAt so
 // an account's stash age survives the move.
 //
-// `existing` rows carry a precomputed `hasEmail` because emails are stored
-// encrypted (utils/secretBox) and "" and an undecryptable value both count as
-// missing — the caller decrypts, this stays pure.
+// Passwords and emails are stored encrypted (utils/secretBox) with a random IV,
+// so two ciphertexts of the same secret don't match. The caller therefore passes
+// `passwordPlain`/`emailPlain` alongside the stored values: this function
+// compares plaintext but only ever copies the stored ciphertext, and stays pure.
+const CRED_FIELDS = ["clientSecret", "uniqueId", "twitchId"];
+
+// Which credentials the two rows disagree on. Both sides having a value that
+// differs is the dangerous case; one side being empty is just a blank to fill.
+function conflictingFields(a, dupe) {
+  const out = [];
+  for (const f of CRED_FIELDS) {
+    if (a[f] && dupe[f] && String(a[f]) !== String(dupe[f])) out.push(f);
+  }
+  // Presence comes from hasPassword, equality from the plaintext — so a password
+  // that no longer decrypts (a rotated key) counts as a disagreement rather than
+  // being quietly discarded.
+  if (a.hasPassword && dupe.hasPassword && a.passwordPlain !== dupe.passwordPlain) {
+    out.push("password");
+  }
+  if (a.emailPlain && dupe.emailPlain && a.emailPlain !== dupe.emailPlain) {
+    out.push("email");
+  }
+  return out;
+}
+
 function planStashMove({ accounts, existing, targetSetId }) {
   const byLower = new Map();
   for (const e of existing || []) {
@@ -21,6 +53,7 @@ function planStashMove({ accounts, existing, targetSetId }) {
 
   const reparent = [];
   const merges = [];
+  const conflicts = [];
   for (const a of accounts || []) {
     const lower = String(a.usernameLower || a.username || "").toLowerCase();
     const dupe = byLower.get(lower);
@@ -29,16 +62,30 @@ function planStashMove({ accounts, existing, targetSetId }) {
       continue;
     }
 
+    // Two different accounts wearing the same name: leave both alone. Nothing is
+    // filled either, so the destination row can't end up holding a credential
+    // from what might be a different account.
+    const fields = conflictingFields(a, dupe);
+    if (fields.length) {
+      conflicts.push({
+        sourceId: a._id,
+        destId: dupe._id,
+        username: a.username || lower,
+        fields,
+      });
+      continue;
+    }
+
     const set = {};
-    if (a.clientSecret && !dupe.clientSecret) set.clientSecret = a.clientSecret;
-    if (a.uniqueId && !dupe.uniqueId) set.uniqueId = a.uniqueId;
-    if (a.twitchId && !dupe.twitchId) set.twitchId = a.twitchId;
+    for (const f of CRED_FIELDS) {
+      if (a[f] && !dupe[f]) set[f] = a[f];
+    }
     // Ciphertext from both rows is under the same key, so it copies across as-is.
     if (a.hasPassword && !dupe.hasPassword) {
       set.password = a.password;
       set.hasPassword = true;
     }
-    if (a.email && !dupe.hasEmail) set.email = a.email;
+    if (a.emailPlain && !dupe.emailPlain) set.email = a.email;
     // Only carry a live-check result onto a destination row that has never been
     // checked, so a merge can never replace a fresher answer with a staler one.
     if (a.lastCheckStatus && !dupe.lastCheckStatus) {
@@ -50,7 +97,7 @@ function planStashMove({ accounts, existing, targetSetId }) {
     merges.push({ destId: dupe._id, sourceId: a._id, set });
   }
 
-  return { reparent, merges };
+  return { reparent, merges, conflicts };
 }
 
-module.exports = { planStashMove };
+module.exports = { planStashMove, conflictingFields };

@@ -465,11 +465,18 @@ router.post("/account-stash/sets/:id/move-to-pool", requireSuperadmin, async (re
 // stash age survives the move.
 //
 // The {setId, usernameLower} unique index means the destination may already hold
-// a row for the same username. That isn't an error: we fill the destination
-// row's missing fields from the source row (same never-clobber rule as import)
-// and drop the now-redundant source row, so the account ends up in exactly one
-// set. Moving during a scan is safe — utils/stashChecker.js walks accounts by
-// _id, so a row that changed sets still gets its result written.
+// a row for the same username. That isn't an error, and utils/stashMovePlan.js
+// decides which of the two ways it goes: a twin that's merely emptier gets the
+// source row's fields copied in (never clobbering, same rule as import) and the
+// redundant source row is dropped, whereas a twin holding DIFFERENT credentials
+// is left strictly alone and reported, because a login is not a unique identity
+// and deleting the source could destroy the only copy of a password or token.
+//
+// Deleting is the one irreversible step, so it happens in a second pass, only for
+// rows whose data is visibly present on the destination (see phase 2 below).
+//
+// Moving during a scan is safe — utils/stashChecker.js walks accounts by _id, so
+// a row that changed sets still gets its result written.
 router.post("/account-stash/sets/:id/move-to-set", requireSuperadmin, async (req, res) => {
   try {
     const src = await StashSet.findById(req.params.id);
@@ -523,7 +530,10 @@ router.post("/account-stash/sets/:id/move-to-set", requireSuperadmin, async (req
         success: true,
         moved: 0,
         merged: 0,
+        conflicts: [],
+        conflictCount: 0,
         stayed: 0,
+        partial: false,
         targetSetId: target._id,
         targetSetName: target.name,
       });
@@ -532,65 +542,109 @@ router.post("/account-stash/sets/:id/move-to-set", requireSuperadmin, async (req
     const lowers = sourceAccounts.map((a) => a.usernameLower || a.username.toLowerCase());
     const clashes = await StashAccount.find({ setId: target._id, usernameLower: { $in: lowers } });
 
+    // Decryption happens here, not in the planner: stored passwords/emails use a
+    // random IV, so the same secret encrypts to two different strings and only
+    // the plaintext can tell "same credential" from "different credential".
+    const withPlain = (r) => ({
+      _id: r._id,
+      username: r.username,
+      usernameLower: r.usernameLower,
+      clientSecret: r.clientSecret,
+      uniqueId: r.uniqueId,
+      twitchId: r.twitchId,
+      password: r.password,
+      hasPassword: r.hasPassword,
+      passwordPlain: decrypt(r.password),
+      email: r.email,
+      emailPlain: decrypt(r.email),
+      lastCheckAt: r.lastCheckAt,
+      lastCheckStatus: r.lastCheckStatus,
+      lastCheckError: r.lastCheckError,
+      dropCount: r.dropCount,
+    });
+
     const plan = planStashMove({
-      accounts: sourceAccounts,
-      // hasEmail is decided here, where the key is: "" and an undecryptable
-      // value both mean "no email stored", so a copy may fill it.
-      existing: clashes.map((c) => ({
-        _id: c._id,
-        usernameLower: c.usernameLower,
-        clientSecret: c.clientSecret,
-        uniqueId: c.uniqueId,
-        twitchId: c.twitchId,
-        hasPassword: c.hasPassword,
-        hasEmail: !!decrypt(c.email),
-        lastCheckStatus: c.lastCheckStatus,
-      })),
+      accounts: sourceAccounts.map(withPlain),
+      existing: clashes.map(withPlain),
       targetSetId: target._id,
     });
 
-    const ops = [];
+    const runBatched = async (ops) => {
+      let partial = false;
+      for (let i = 0; i < ops.length; i += 500) {
+        try {
+          await StashAccount.bulkWrite(ops.slice(i, i + 500), { ordered: false });
+        } catch (err) {
+          // A concurrent ingest can insert the same username into the destination
+          // between our read above and this write. Only that row is refused; it
+          // stays where it is rather than failing the whole move.
+          const dupKey = err && (err.code === 11000 || (err.writeErrors || []).length);
+          if (!dupKey) throw err;
+          partial = true;
+        }
+      }
+      return partial;
+    };
+
+    // Phase 1 — copy the source rows' fields onto the destination rows, and
+    // re-parent everything that had no clash. Nothing is deleted yet.
+    const fillOps = [];
     for (const m of plan.merges) {
       if (Object.keys(m.set).length) {
-        ops.push({ updateOne: { filter: { _id: m.destId }, update: { $set: m.set } } });
+        fillOps.push({ updateOne: { filter: { _id: m.destId }, update: { $set: m.set } } });
       }
-      ops.push({ deleteOne: { filter: { _id: m.sourceId } } });
     }
     for (const r of plan.reparent) {
-      ops.push({ updateOne: { filter: { _id: r.id }, update: { $set: r.set } } });
+      fillOps.push({ updateOne: { filter: { _id: r.id }, update: { $set: r.set } } });
     }
-    const moveIds = plan.reparent.map((r) => r.id);
-    const mergedSourceIds = plan.merges.map((m) => m.sourceId);
+    const partial = await runBatched(fillOps);
 
-    let partial = false;
-    for (let i = 0; i < ops.length; i += 500) {
-      try {
-        await StashAccount.bulkWrite(ops.slice(i, i + 500), { ordered: false });
-      } catch (err) {
-        // A concurrent ingest can insert the same username into the destination
-        // between our read above and this write. Only that row is refused; it
-        // stays where it is rather than failing the whole move.
-        const dupKey = err && (err.code === 11000 || (err.writeErrors || []).length);
-        if (!dupKey) throw err;
-        partial = true;
+    // Phase 2 — only now drop the redundant source rows, and only the ones whose
+    // data we can actually SEE on the destination row. Deleting is the one
+    // irreversible step here, so it never runs on the assumption that phase 1
+    // worked: a fill that didn't land leaves its source row alive and untouched.
+    const applied = (docVal, wantVal) => {
+      if (wantVal instanceof Date) {
+        return !!docVal && new Date(docVal).getTime() === wantVal.getTime();
       }
+      return String(docVal == null ? "" : docVal) === String(wantVal == null ? "" : wantVal);
+    };
+    const destNow = new Map(
+      (await StashAccount.find({ _id: { $in: plan.merges.map((m) => m.destId) } }).lean()).map(
+        (d) => [String(d._id), d],
+      ),
+    );
+    const deletableSourceIds = plan.merges
+      .filter((m) => {
+        const dest = destNow.get(String(m.destId));
+        if (!dest) return false; // destination row vanished — keep the source row
+        return Object.entries(m.set).every(([k, v]) => applied(dest[k], v));
+      })
+      .map((m) => m.sourceId);
+    if (deletableSourceIds.length) {
+      await StashAccount.deleteMany({ _id: { $in: deletableSourceIds } });
     }
 
     // Report what actually landed rather than what we intended, so a partial
     // write can never be announced as a clean move.
+    const moveIds = plan.reparent.map((r) => r.id);
     const moved = moveIds.length
       ? await StashAccount.countDocuments({ _id: { $in: moveIds }, setId: target._id })
       : 0;
-    const mergedLeftBehind = mergedSourceIds.length
-      ? await StashAccount.countDocuments({ _id: { $in: mergedSourceIds } })
+    const mergedLeftBehind = deletableSourceIds.length
+      ? await StashAccount.countDocuments({ _id: { $in: deletableSourceIds } })
       : 0;
-    const merged = mergedSourceIds.length - mergedLeftBehind;
+    const merged = deletableSourceIds.length - mergedLeftBehind;
 
     res.json({
       success: true,
       moved,
       merged,
-      stayed: sourceAccounts.length - moved - merged,
+      // Same username, different credentials: both rows were left exactly as they
+      // were, and the operator is told which ones so they can look at them.
+      conflicts: plan.conflicts.map((c) => ({ username: c.username, fields: c.fields })),
+      conflictCount: plan.conflicts.length,
+      stayed: sourceAccounts.length - moved - merged - plan.conflicts.length,
       partial,
       targetSetId: target._id,
       targetSetName: target.name,

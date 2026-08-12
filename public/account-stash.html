@@ -273,7 +273,7 @@ or JSON:
         <input type="text" id="mvNewName" placeholder="e.g. aging &mdash; batch 1" />
       </div>
       <div class="hint">
-        They keep their added date, password/token and last live-check result &mdash; only which set holds them changes. Nothing goes into the Account Pool, so this can't put an account in front of a bot. If the destination already holds the same username, the two rows are merged rather than duplicated.
+        They keep their added date, password/token and last live-check result &mdash; only which set holds them changes. Nothing goes into the Account Pool, so this can't put an account in front of a bot. If the destination already holds the same username, the two rows are merged rather than duplicated &mdash; unless their credentials actually differ, in which case both are left alone and listed for you.
       </div>
     </div>
     <footer>
@@ -723,11 +723,27 @@ or JSON:
       var parts = [];
       if (data.moved) parts.push(data.moved + " moved");
       if (data.merged) parts.push(data.merged + " merged into existing rows");
+      if (data.conflictCount) parts.push(data.conflictCount + " kept back");
       if (data.stayed) parts.push(data.stayed + " stayed put");
       toast((parts.join(", ") || "Nothing moved") + " → " + data.targetSetName);
       closeMoveSet();
       if (scope === "sel") selection = {};
       await refreshCurrent();
+      // A kept-back row is a decision the operator has to make, so say so plainly
+      // rather than letting it vanish with the toast.
+      if (data.conflictCount) {
+        var lines = (data.conflicts || []).slice(0, 25).map(function(c){
+          return "  • " + c.username + " — differs on: " + (c.fields || []).join(", ");
+        });
+        if (data.conflictCount > lines.length) lines.push("  • …and " + (data.conflictCount - lines.length) + " more");
+        alert(
+          data.conflictCount + " account(s) stayed in this set, untouched.\n\n" +
+          '"' + data.targetSetName + '" already holds a row with the same username but ' +
+          "different credentials, so these may be two different accounts sharing a name. " +
+          "Nothing was overwritten or deleted on either side.\n\n" + lines.join("\n") +
+          "\n\nCompare them with View, delete whichever is stale, then move again."
+        );
+      }
     } catch (e) { toast(e.message, true); }
     finally { btn.disabled = false; }
   });
