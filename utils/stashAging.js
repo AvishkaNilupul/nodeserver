@@ -233,10 +233,24 @@ async function refreshDirectory(token, host, policy) {
   if (Date.now() - directoryCache.at < DIRECTORY_TTL_MS && directoryCache.channels.length) {
     return directoryCache;
   }
-  const channels = await twitchWatch.discoverChannels(token, { host, limit: 80 });
+  const channels = await twitchWatch.discoverChannels(token, { host, limit: 90 });
   const dropGames = policy.avoidDropChannels
     ? await twitchWatch.activeDropGames(token, { host })
     : new Set();
+  // Loud, because the failure mode is quiet: an empty directory leaves every
+  // session logging "no live channel available" on a 90-minute retry, which
+  // reads like a scheduling quirk rather than a broken query.
+  if (!channels.length) {
+    console.error("[stashAging] channel discovery returned nothing — sessions cannot pick a channel");
+  } else {
+    const usable = channels.filter(
+      (c) => !policy.avoidDropChannels || !c.game || !dropGames.has(c.game.toLowerCase()),
+    ).length;
+    console.log(
+      "[stashAging] directory: " + channels.length + " live, " + usable +
+        " usable after excluding " + dropGames.size + " drop game(s)",
+    );
+  }
   directoryCache = { at: Date.now(), channels, dropGames };
   return directoryCache;
 }

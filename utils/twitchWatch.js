@@ -276,38 +276,68 @@ async function getCurrentUser(token, opts = {}) {
 // is actually on, instead of ageing a whole fleet against a hand-pinned list.
 // ---------------------------------------------------------------------------
 
-const DIRECTORY_QUERY =
-  "query($limit: Int!) { streams(first: $limit) { edges { node { " +
-  "  id viewersCount game { id name } broadcaster { id login displayName } " +
-  "} } } }";
+// Twitch rejects `first` above 30 outright — "argument 'first' value must be
+// between 1 and 30" — so a bigger page size doesn't return fewer results, it
+// returns an ERROR and therefore nothing at all. Verified against the live API.
+const DIRECTORY_PAGE_MAX = 30;
 
-// Returns [{ login, displayName, game, viewers }]. Never throws for an empty
-// directory — an empty list just means "couldn't pick anything this time".
+const DIRECTORY_QUERY =
+  "query($limit: Int!, $after: Cursor) { streams(first: $limit, after: $after) { edges { " +
+  "  cursor node { id viewersCount game { id name } broadcaster { id login displayName } } " +
+  "} } }";
+
+// Returns [{ login, displayName, game, viewers }], walking the cursor to build
+// a pool bigger than one page. An empty result means "couldn't pick anything
+// this time" and is not fatal to the caller — but it IS logged, because a
+// silently-empty directory is indistinguishable from "nothing is live" and
+// would leave every session parked forever with no clue why.
 async function discoverChannels(token, opts = {}) {
-  const limit = Math.max(1, Math.min(100, opts.limit || 60));
-  let parsed;
-  try {
-    ({ parsed } = await gqlRequest({
-      token,
-      clientId: opts.clientId,
-      host: opts.host || null,
-      body: [{ query: DIRECTORY_QUERY, variables: { limit } }],
-    }));
-  } catch {
-    return [];
-  }
-  if (parsed?.errors?.length) return [];
-  const edges = parsed?.data?.streams?.edges || [];
+  const want = Math.max(1, Math.min(200, opts.limit || 90));
   const out = [];
-  for (const e of edges) {
-    const n = e && e.node;
-    if (!n || !n.broadcaster || !n.broadcaster.login) continue;
-    out.push({
-      login: String(n.broadcaster.login).toLowerCase(),
-      displayName: n.broadcaster.displayName || n.broadcaster.login,
-      game: (n.game && n.game.name) || "",
-      viewers: Number(n.viewersCount) || 0,
-    });
+  const seen = new Set();
+  let after = null;
+
+  while (out.length < want) {
+    const limit = Math.min(DIRECTORY_PAGE_MAX, want - out.length);
+    let parsed;
+    try {
+      ({ parsed } = await gqlRequest({
+        token,
+        clientId: opts.clientId,
+        host: opts.host || null,
+        body: [{ query: DIRECTORY_QUERY, variables: { limit, after } }],
+      }));
+    } catch (e) {
+      console.error("[twitchWatch] directory request failed: " + (e.message || e));
+      break;
+    }
+    if (parsed?.errors?.length) {
+      console.error(
+        "[twitchWatch] directory query rejected: " +
+          parsed.errors.map((x) => x.message).join("; ").slice(0, 200),
+      );
+      break;
+    }
+    const edges = parsed?.data?.streams?.edges || [];
+    if (!edges.length) break;
+
+    for (const e of edges) {
+      const n = e && e.node;
+      if (!n || !n.broadcaster || !n.broadcaster.login) continue;
+      const login = String(n.broadcaster.login).toLowerCase();
+      if (seen.has(login)) continue;
+      seen.add(login);
+      out.push({
+        login,
+        displayName: n.broadcaster.displayName || n.broadcaster.login,
+        game: (n.game && n.game.name) || "",
+        viewers: Number(n.viewersCount) || 0,
+      });
+    }
+    after = edges[edges.length - 1].cursor;
+    if (!after) break;
+    // Gentle pace between pages — this runs on a shared token.
+    await sleep(300 + Math.floor(Math.random() * 200));
   }
   return out;
 }
