@@ -22,6 +22,7 @@
 // outbound writes are the account's own viewing telemetry and (via
 // twitchFollow) a follow on a channel it actually watched.
 const axios = require("axios");
+const twitchIdentity = require("./twitchIdentity");
 
 const GQL_URL = "https://gql.twitch.tv/gql";
 const DEFAULT_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
@@ -139,11 +140,16 @@ function http(host, req) {
   return isLocal(host) ? httpLocal(req) : httpViaHost(host, req);
 }
 
-async function gqlRequest({ token, clientId, body, host }) {
+// `identity` (from utils/twitchIdentity.headersFor) carries the per-account
+// device headers. Note it is spread BEFORE Client-Id/Authorization, so an
+// identity can never override which client we present as — the tokens are
+// bound to one client id through device-auth and swapping it breaks integrity.
+async function gqlRequest({ token, clientId, body, host, identity }) {
   const { status, text } = await http(host, {
     method: "POST",
     url: GQL_URL,
     headers: {
+      ...(identity || {}),
       "Content-Type": "application/json",
       "Client-Id": clientId || DEFAULT_CLIENT_ID,
       ...(token ? { Authorization: "OAuth " + cleanToken(token) } : {}),
@@ -177,7 +183,7 @@ const SETTINGS_RE =
   /https:\/\/(?:static\.twitchcdn\.net|assets\.twitch\.tv)\/config\/settings\.[0-9a-fA-F]+\.js/;
 const SPADE_RE = /"spade_url"\s*:\s*"([^"]+)"/;
 
-async function resolveSpadeUrl(host) {
+async function resolveSpadeUrl(host, identity) {
   if (SPADE_URL_OVERRIDE) return SPADE_URL_OVERRIDE;
   const key = host && host.id ? host.id : "local";
   const hit = spadeCache.get(key);
@@ -186,7 +192,7 @@ async function resolveSpadeUrl(host) {
   const home = await http(host, {
     method: "GET",
     url: HOME_URL,
-    headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" },
+    headers: { ...(identity || {}), Accept: "text/html" },
   });
   const settingsMatch = SETTINGS_RE.exec(home.text || "");
   if (!settingsMatch) return "";
@@ -194,7 +200,7 @@ async function resolveSpadeUrl(host) {
   const settings = await http(host, {
     method: "GET",
     url: settingsMatch[0],
-    headers: { "User-Agent": "Mozilla/5.0" },
+    headers: { ...(identity || {}) },
   });
   const spadeMatch = SPADE_RE.exec(settings.text || "");
   if (!spadeMatch) return "";
@@ -220,6 +226,7 @@ async function getStreamInfo(token, login, opts = {}) {
     token,
     clientId: opts.clientId,
     host: opts.host || null,
+    identity: opts.identity,
     body: [{ query: STREAM_INFO_QUERY, variables: { login: String(login).toLowerCase() } }],
   });
   if (parsed?.errors?.length) throw gqlError(parsed.errors);
@@ -253,6 +260,7 @@ async function getCurrentUser(token, opts = {}) {
     token,
     clientId: opts.clientId,
     host: opts.host || null,
+    identity: opts.identity,
     body: [{ query: CURRENT_USER_QUERY }],
   });
   if (parsed?.errors?.length) throw gqlError(parsed.errors);
@@ -305,6 +313,7 @@ async function discoverChannels(token, opts = {}) {
         token,
         clientId: opts.clientId,
         host: opts.host || null,
+        identity: opts.identity,
         body: [{ query: DIRECTORY_QUERY, variables: { limit, after } }],
       }));
     } catch (e) {
@@ -406,6 +415,7 @@ async function channelPageVisit(token, channelLogin, opts = {}) {
         token,
         clientId: opts.clientId,
         host: opts.host || null,
+        identity: opts.identity,
         body: [{ operationName: q.operationName, query: q.query, variables: q.vars }],
       });
     } catch {
@@ -425,6 +435,7 @@ async function requestPlaybackToken(token, channelLogin, opts = {}) {
       token,
       clientId: opts.clientId,
       host: opts.host || null,
+      identity: opts.identity,
       body: [
         {
           query: PLAYBACK_TOKEN_QUERY,
@@ -450,8 +461,11 @@ async function sendMinuteWatched(spadeUrl, payload, opts = {}) {
     method: "POST",
     url: spadeUrl,
     headers: {
+      // The account's own User-Agent, so its telemetry and its GraphQL agree
+      // about what device it is. A bare "Mozilla/5.0" — which is what this sent
+      // before — is a string no real browser has ever produced.
+      ...(opts.identity || {}),
       "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0",
     },
     body: "data=" + encodeURIComponent(encoded),
   });
@@ -507,6 +521,7 @@ async function watchSession(token, opts = {}) {
     onProgress,
     shouldStop,
     dryRun = false,
+    identitySeed,
   } = opts;
   if (!channelLogin) throw new Error("channelLogin required");
 
@@ -521,17 +536,26 @@ async function watchSession(token, opts = {}) {
     };
   }
 
-  const me = await getCurrentUser(tok, { host, clientId });
-  const info = await getStreamInfo(tok, channelLogin, { host, clientId });
+  // One device, one session id, held for the whole sitting — that is what a
+  // real app launch looks like. Every request below carries it, so the session
+  // hangs together as one device doing one thing rather than N anonymous calls.
+  const sessionId = twitchIdentity.newSessionId();
+  const identity = identitySeed
+    ? twitchIdentity.headersFor(identitySeed, sessionId)
+    : {};
+  const ctx = { host, clientId, identity };
+
+  const me = await getCurrentUser(tok, ctx);
+  const info = await getStreamInfo(tok, channelLogin, ctx);
   if (!info.live) {
     return { kind: "offline", minutesWatched: 0, channel: channelLogin, game: "", stopped: "offline" };
   }
 
   // Land on the page like a browser would, then ask for the playback token.
-  await channelPageVisit(tok, info.login, { host, clientId });
-  await requestPlaybackToken(tok, info.login, { host, clientId });
+  await channelPageVisit(tok, info.login, ctx);
+  await requestPlaybackToken(tok, info.login, ctx);
 
-  const spadeUrl = await resolveSpadeUrl(host).catch(() => "");
+  const spadeUrl = await resolveSpadeUrl(host, identity).catch(() => "");
   const payload = minuteWatchedPayload({
     channelId: info.id,
     channelLogin: info.login,
@@ -553,7 +577,7 @@ async function watchSession(token, opts = {}) {
 
     if (spadeUrl) {
       try {
-        if (await sendMinuteWatched(spadeUrl, payload, { host })) accepted++;
+        if (await sendMinuteWatched(spadeUrl, payload, { host, identity })) accepted++;
       } catch (e) {
         // A transport failure mid-session ends it early rather than throwing:
         // the minutes already banked are real and worth keeping.
@@ -576,7 +600,7 @@ async function watchSession(token, opts = {}) {
       // both useless and unlike a real viewer, who closes the tab.
       if (banked % 10 === 0) {
         try {
-          const still = await getStreamInfo(tok, info.login, { host, clientId });
+          const still = await getStreamInfo(tok, info.login, ctx);
           if (!still.live) {
             stopped = "channel-ended";
             break;

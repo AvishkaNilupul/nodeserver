@@ -33,6 +33,7 @@ const StashAccount = require("../models/StashAccount");
 const StashAgingLog = require("../models/StashAgingLog");
 const twitchWatch = require("./twitchWatch");
 const twitchFollow = require("./twitchFollow");
+const twitchIdentity = require("./twitchIdentity");
 const stashChecker = require("./stashChecker");
 const { promoteAccounts } = require("./stashPromote");
 const hosts = require("./botHosts");
@@ -150,6 +151,11 @@ function policyOf(set) {
   return {
     enabled: !!p.enabled,
     settleDays: p.settleDays ?? 2,
+    // Upper end of the settle window. A flat settleDays makes a whole intake
+    // batch start watching on the same day — the cohort itself becomes the
+    // pattern, however well each individual session is jittered. Drawing
+    // uniformly from [settleDays, settleDaysMax] spreads the wave instead.
+    settleDaysMax: p.settleDaysMax ?? 6,
     minDays: p.minDays ?? 14,
     minSessions: p.minSessions ?? 10,
     minWatchMinutes: p.minWatchMinutes ?? 240,
@@ -176,6 +182,28 @@ function nextSessionGap(policy) {
   if (Math.random() < 0.17) gap += jitter(DAY_MS, 0.5);
   // Never schedule closer than 20 minutes out, whatever the arithmetic says.
   return Math.max(20 * 60 * 1000, gap);
+}
+
+// When should this account next watch something?
+//
+// The gap above decides roughly how long to wait; this then slides the result
+// into the account's own waking hours. Without it, sessions land uniformly
+// across the 24h clock, which no person does — an account reliably watching at
+// 04:00 as often as 20:00 is a machine, no matter how well-jittered the gaps
+// between its sessions are.
+function scheduleNextSession(acc, policy) {
+  const target = new Date(Date.now() + nextSessionGap(policy));
+  const win = twitchIdentity.activeWindowFor(String(acc._id));
+  return twitchIdentity.nextWithinWindow(target, win);
+}
+
+// Uniform draw across the configured settle window, so an intake batch fans
+// out over days instead of graduating to warm-up in lockstep.
+function settleWaitMs(policy) {
+  const lo = Math.max(0, policy.settleDays);
+  const hi = Math.max(lo, policy.settleDaysMax);
+  if (hi <= 0) return 60 * 1000;
+  return Math.round((lo + Math.random() * (hi - lo)) * DAY_MS);
 }
 
 function sessionMinutes(policy, stage) {
@@ -229,13 +257,13 @@ function pickHost(policy) {
 let directoryCache = { at: 0, channels: [], dropGames: new Set() };
 const DIRECTORY_TTL_MS = 5 * 60 * 1000;
 
-async function refreshDirectory(token, host, policy) {
+async function refreshDirectory(token, host, policy, identity) {
   if (Date.now() - directoryCache.at < DIRECTORY_TTL_MS && directoryCache.channels.length) {
     return directoryCache;
   }
-  const channels = await twitchWatch.discoverChannels(token, { host, limit: 90 });
+  const channels = await twitchWatch.discoverChannels(token, { host, limit: 90, identity });
   const dropGames = policy.avoidDropChannels
-    ? await twitchWatch.activeDropGames(token, { host })
+    ? await twitchWatch.activeDropGames(token, { host, identity })
     : new Set();
   // Loud, because the failure mode is quiet: an empty directory leaves every
   // session logging "no live channel available" on a 90-minute retry, which
@@ -260,7 +288,7 @@ async function refreshDirectory(token, host, policy) {
 // A stable handful of channels per account is the point: it makes each
 // account's history read like a person with a few haunts, where uniform-random
 // draws across a fleet this size would be a fingerprint in their own right.
-async function ensureTaste(acc, policy, token, host) {
+async function ensureTaste(acc, policy, token, host, identity) {
   const taste = Array.isArray(acc.aging?.taste) ? acc.aging.taste.slice() : [];
   if (taste.length >= policy.tasteSize) return taste;
 
@@ -274,7 +302,7 @@ async function ensureTaste(acc, policy, token, host) {
     return taste;
   }
 
-  const { channels, dropGames } = await refreshDirectory(token, host, policy);
+  const { channels, dropGames } = await refreshDirectory(token, host, policy, identity);
   // Shuffle so two accounts topping up from the same cached directory don't
   // both take the top entries.
   const shuffled = channels.slice();
@@ -297,7 +325,7 @@ async function ensureTaste(acc, policy, token, host) {
 // Choose a live channel from the account's taste, checking liveness rather than
 // assuming it. Returns { login, refreshedTaste } — the taste list may come back
 // with a dead slot swapped out.
-async function pickLiveChannel(taste, policy, token, host) {
+async function pickLiveChannel(taste, policy, token, host, identity) {
   const order = taste.slice();
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -305,7 +333,7 @@ async function pickLiveChannel(taste, policy, token, host) {
   }
   for (const login of order) {
     try {
-      const info = await twitchWatch.getStreamInfo(token, login, { host });
+      const info = await twitchWatch.getStreamInfo(token, login, { host, identity });
       if (info.live) return { login: info.login, taste };
     } catch (e) {
       if (e.code === "token_invalid" || e.code === "integrity_failed") throw e;
@@ -315,7 +343,7 @@ async function pickLiveChannel(taste, policy, token, host) {
 
   // Everyone in the taste list is offline. Pull one live replacement from the
   // directory and rotate out the least recently useful slot (the first one).
-  const { channels, dropGames } = await refreshDirectory(token, host, policy);
+  const { channels, dropGames } = await refreshDirectory(token, host, policy, identity);
   for (const ch of channels) {
     if (taste.includes(ch.login)) continue;
     if (policy.avoidDropChannels && ch.game && dropGames.has(ch.game.toLowerCase())) continue;
@@ -366,9 +394,8 @@ async function handleNew(acc, set, _policy) {
 // and the verdict from a manual Scan are the same verdict.
 async function handleVerify(acc, set, policy) {
   if (policy.dryRun) {
-    const ms = Math.max(0, policy.settleDays) * DAY_MS;
     await setStage(acc, set._id, "settle", "Dry run — verification skipped", {
-      nextEligibleAt: new Date(Date.now() + (ms > 0 ? jitter(ms, 0.3) : 60 * 1000)),
+      nextEligibleAt: new Date(Date.now() + settleWaitMs(policy)),
     });
     return;
   }
@@ -414,14 +441,14 @@ async function handleVerify(acc, set, policy) {
   // settleDays 0 means "don't settle" — come back on the next tick. It must NOT
   // fall through to a default the way an unset value would; `settleMs || 1h`
   // read an explicit zero as "unset" and sat on the account for an hour.
-  const settleMs = Math.max(0, policy.settleDays) * DAY_MS;
-  const settleWait = settleMs > 0 ? jitter(settleMs, 0.2) : 60 * 1000;
+  const settleWait = settleWaitMs(policy);
+  const settleDaysActual = (settleWait / DAY_MS).toFixed(1);
   await setStage(
     acc,
     set._id,
     "settle",
-    settleMs > 0
-      ? "Settling for " + policy.settleDays + " day(s) before first session"
+    settleWait > 5 * 60 * 1000
+      ? "Settling " + settleDaysActual + " day(s) before first session"
       : "No settle window configured — first session next tick",
     { strikes: 0, lastError: "", nextEligibleAt: new Date(Date.now() + settleWait) },
   );
@@ -457,7 +484,7 @@ async function handleSession(acc, set, policy) {
     acc.aging.lastSessionAt = new Date();
     acc.aging.lastChannel = planned;
     acc.aging.lastSessionKind = "dry";
-    acc.aging.nextEligibleAt = new Date(Date.now() + nextSessionGap(policy));
+    acc.aging.nextEligibleAt = scheduleNextSession(acc, policy);
     await acc.save();
     await logEvent(acc, set._id, {
       kind: "session",
@@ -473,11 +500,19 @@ async function handleSession(acc, set, policy) {
   }
 
   // ---- taste + channel
+  //
+  // The lookups that precede a session use the same device headers the session
+  // itself will, so picking a channel and then watching it read as one device
+  // doing one continuous thing rather than unrelated anonymous calls.
+  const identity = twitchIdentity.headersFor(
+    String(acc._id),
+    twitchIdentity.newSessionId(),
+  );
   let taste;
   let channel = "";
   try {
-    taste = await ensureTaste(acc, policy, token, host);
-    const picked = await pickLiveChannel(taste, policy, token, host);
+    taste = await ensureTaste(acc, policy, token, host, identity);
+    const picked = await pickLiveChannel(taste, policy, token, host, identity);
     channel = picked.login;
     taste = picked.taste;
   } catch (err) {
@@ -522,6 +557,7 @@ async function handleSession(acc, set, policy) {
       channelLogin: channel,
       minutes,
       host,
+      identitySeed: String(acc._id),
       onProgress: (p) => {
         live.minutesDone = p.minute;
       },
@@ -565,7 +601,7 @@ async function handleSession(acc, set, policy) {
     acc.aging.stage = fresh.aging.stage;
     acc.aging.nextEligibleAt = null;
   } else {
-    acc.aging.nextEligibleAt = new Date(Date.now() + nextSessionGap(policy));
+    acc.aging.nextEligibleAt = scheduleNextSession(acc, policy);
   }
   await acc.save();
 
@@ -590,14 +626,14 @@ async function handleSession(acc, set, policy) {
   // account doesn't follow anyone or climb another rung.
   if (interrupted) return;
 
-  await maybeFollow(acc, set, policy, result.channel || channel, host, token);
+  await maybeFollow(acc, set, policy, result.channel || channel, host, token, identity);
   await maybeAdvanceAfterSession(acc, set, policy);
 }
 
 // Follow a channel this account actually watched. Watch-then-follow is a
 // coherent history; follows floating free of any viewing are not. Rate is
 // deliberately low — followTarget over the whole aging window, not per session.
-async function maybeFollow(acc, set, policy, channelLogin, host, token) {
+async function maybeFollow(acc, set, policy, channelLogin, host, token, identity) {
   if (policy.followTarget <= 0) return;
   if ((acc.aging.follows || 0) >= policy.followTarget) return;
   if (acc.aging.stage === "warmup") return; // warm-up watches only
@@ -609,10 +645,11 @@ async function maybeFollow(acc, set, policy, channelLogin, host, token) {
   if (Math.random() > remainingFollows / remainingSessions) return;
 
   try {
-    const info = await twitchWatch.getStreamInfo(token, channelLogin, { host });
+    const info = await twitchWatch.getStreamInfo(token, channelLogin, { host, identity });
     if (!info.id) return;
     await twitchFollow.followChannel(token, info.id, {
       host,
+      identity,
       channelLogin: info.login,
       warmUp: true,
       randomizeNotifications: true,

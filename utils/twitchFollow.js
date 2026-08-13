@@ -29,12 +29,13 @@ function transportError(message, cause) {
   return err;
 }
 
-async function gqlRequest({ token, clientId, body, host }) {
+async function gqlRequest({ token, clientId, body, host, identity }) {
   if (host && host.transport && host.transport !== "local") {
-    return gqlViaHost({ token, clientId, body, host });
+    return gqlViaHost({ token, clientId, body, host, identity });
   }
   const res = await axios.post(GQL_URL, body, {
     headers: {
+      ...(identity || {}),
       "Content-Type": "application/json",
       "Client-Id": clientId,
       Authorization: "OAuth " + token,
@@ -46,11 +47,18 @@ async function gqlRequest({ token, clientId, body, host }) {
   return { status: res.status, parsed };
 }
 
-async function gqlViaHost({ token, clientId, body, host }) {
+async function gqlViaHost({ token, clientId, body, host, identity }) {
   const { runShell, shq } = require("./botHosts");
+  // Identity headers first so Client-Id / Authorization always win — the tokens
+  // are bound to one client id via device-auth and an identity must never be
+  // able to change it.
+  const idHeaders = Object.entries(identity || {})
+    .map(([k, v]) => " -H " + shq(k + ": " + v))
+    .join("");
   const cmd =
     "curl -sS --max-time 20 -X POST " +
     shq(GQL_URL) +
+    idHeaders +
     " -H " +
     shq("Content-Type: application/json") +
     " -H " +
@@ -168,6 +176,7 @@ async function resolveChannel(loginOrUrl, opts = {}) {
     token: tok,
     clientId,
     host: opts.host || null,
+    identity: opts.identity,
     body: [{ query: CHANNEL_QUERY, variables: { login } }],
   });
   if (parsed?.errors?.length) throw gqlError(parsed.errors);
@@ -236,7 +245,7 @@ function sleep(ms) {
 // just clicked into it. Failures here are intentionally swallowed — the
 // warm-up is a signal booster, not a gate; a follow that fires after a
 // failed warm-up is still better than one that fires with no warm-up.
-async function warmUpChannelVisit(token, channelLogin, { clientId, host } = {}) {
+async function warmUpChannelVisit(token, channelLogin, { clientId, host, identity } = {}) {
   if (!channelLogin) return;
   const cid = clientId || DEFAULT_CLIENT_ID;
   for (const q of WARM_UP_QUERIES) {
@@ -246,6 +255,7 @@ async function warmUpChannelVisit(token, channelLogin, { clientId, host } = {}) 
         token,
         clientId: cid,
         host: host || null,
+        identity,
         body: [{ operationName: q.operationName, query: q.query, variables }],
       });
     } catch {
@@ -289,6 +299,7 @@ async function followChannel(token, channelId, opts = {}) {
     await warmUpChannelVisit(tok, opts.channelLogin, {
       clientId,
       host: opts.host || null,
+      identity: opts.identity,
     });
   }
 
@@ -303,6 +314,7 @@ async function followChannel(token, channelId, opts = {}) {
     token: tok,
     clientId,
     host: opts.host || null,
+    identity: opts.identity,
     body: [
       {
         query: FOLLOW_MUTATION,

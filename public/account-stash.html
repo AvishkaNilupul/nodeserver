@@ -448,7 +448,8 @@ or JSON:
       <div>
         <label class="lbl">Session shape</label>
         <div class="grid2">
-          <div class="fld"><label>Settle days</label><input type="number" id="agSettle" min="0" max="60" /><div class="fhint">Do nothing at all for this long after landing.</div></div>
+          <div class="fld"><label>Settle days (min)</label><input type="number" id="agSettle" min="0" max="60" /><div class="fhint">Do nothing at all for at least this long after landing.</div></div>
+          <div class="fld"><label>Settle days (max)</label><input type="number" id="agSettleMax" min="0" max="90" /><div class="fhint">Actual wait is drawn from this range, so a whole batch doesn&#39;t start on the same day.</div></div>
           <div class="fld"><label>Sessions / week</label><input type="number" id="agPerWeek" min="1" max="50" /><div class="fhint">Average. Each gap is jittered &plusmn;45%.</div></div>
           <div class="fld"><label>Shortest session (min)</label><input type="number" id="agMinLen" min="1" max="600" /></div>
           <div class="fld"><label>Longest session (min)</label><input type="number" id="agMaxLen" min="1" max="600" /></div>
@@ -1216,6 +1217,7 @@ or JSON:
     document.getElementById("agMinSessions").value = p.minSessions;
     document.getElementById("agMinMinutes").value = p.minWatchMinutes;
     document.getElementById("agSettle").value = p.settleDays;
+    document.getElementById("agSettleMax").value = p.settleDaysMax;
     document.getElementById("agPerWeek").value = p.sessionsPerWeek;
     document.getElementById("agMinLen").value = p.minSessionMinutes;
     document.getElementById("agMaxLen").value = p.maxSessionMinutes;
@@ -1242,7 +1244,7 @@ or JSON:
       avoidDropChannels: document.getElementById("agAvoidDrops").checked,
       autoGraduate: document.getElementById("agAutoGrad").checked,
       minDays: num("agMinDays"), minSessions: num("agMinSessions"), minWatchMinutes: num("agMinMinutes"),
-      settleDays: num("agSettle"), sessionsPerWeek: num("agPerWeek"),
+      settleDays: num("agSettle"), settleDaysMax: num("agSettleMax"), sessionsPerWeek: num("agPerWeek"),
       minSessionMinutes: num("agMinLen"), maxSessionMinutes: num("agMaxLen"),
       tasteSize: num("agTaste"), followTarget: num("agFollows"), maxConcurrent: num("agConc"),
       channelPool: document.getElementById("agChannels").value.split(",").map(function(s){ return s.trim(); }).filter(Boolean),

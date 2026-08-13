@@ -427,6 +427,7 @@ router.get("/account-stash/sets/:id/scan/status", requireSuperadmin, (req, res) 
 
 const NUMERIC_POLICY_FIELDS = [
   "settleDays",
+  "settleDaysMax",
   "minDays",
   "minSessions",
   "minWatchMinutes",

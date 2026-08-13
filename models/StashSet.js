@@ -29,6 +29,12 @@ const agingPolicySchema = new mongoose.Schema(
     // creation is its own signal; real ones have a gap.
     settleDays: { type: Number, default: 2, min: 0, max: 60 },
 
+    // Upper end of the settle window; the actual wait is drawn uniformly from
+    // [settleDays, settleDaysMax]. A flat value makes a whole intake batch
+    // leave settle on the same day, so the cohort becomes the pattern however
+    // well each session is jittered.
+    settleDaysMax: { type: Number, default: 6, min: 0, max: 90 },
+
     // Graduation gate. All three must be satisfied before an account is
     // considered mature (age is necessary but not sufficient — an account
     // that sat untouched for a month has no history to show for it).
