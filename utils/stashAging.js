@@ -62,6 +62,12 @@ const MAX_STRIKES = 5;
 // lease can never expire under a session that is still legitimately running.
 const LEASE_BUFFER_MS = 15 * 60 * 1000;
 
+// Upper bound on claims per tick. Bookkeeping rungs finish instantly and give
+// their slot straight back, so without a budget one tick could loop for
+// minutes draining a large set. Anything left over is simply picked up next
+// tick — the ladder is measured in days, so this costs nothing.
+const MAX_CLAIMS_PER_TICK = 40;
+
 // Stages the tick loop will pick up. `mature` is included because an account
 // with autoGraduate on still needs one more visit to be promoted.
 const DUE_STAGES = ["new", "verify", "settle", "warmup", "active", "mature"];
@@ -346,8 +352,9 @@ async function handleNew(acc, set, _policy) {
 // and the verdict from a manual Scan are the same verdict.
 async function handleVerify(acc, set, policy) {
   if (policy.dryRun) {
+    const ms = Math.max(0, policy.settleDays) * DAY_MS;
     await setStage(acc, set._id, "settle", "Dry run — verification skipped", {
-      nextEligibleAt: new Date(Date.now() + jitter(policy.settleDays * DAY_MS || 60000, 0.3)),
+      nextEligibleAt: new Date(Date.now() + (ms > 0 ? jitter(ms, 0.3) : 60 * 1000)),
     });
     return;
   }
@@ -390,17 +397,19 @@ async function handleVerify(acc, set, policy) {
     return;
   }
 
+  // settleDays 0 means "don't settle" — come back on the next tick. It must NOT
+  // fall through to a default the way an unset value would; `settleMs || 1h`
+  // read an explicit zero as "unset" and sat on the account for an hour.
   const settleMs = Math.max(0, policy.settleDays) * DAY_MS;
+  const settleWait = settleMs > 0 ? jitter(settleMs, 0.2) : 60 * 1000;
   await setStage(
     acc,
     set._id,
     "settle",
-    "Settling for " + policy.settleDays + " day(s) before first session",
-    {
-      strikes: 0,
-      lastError: "",
-      nextEligibleAt: new Date(Date.now() + jitter(settleMs || 60 * 60 * 1000, 0.2)),
-    },
+    settleMs > 0
+      ? "Settling for " + policy.settleDays + " day(s) before first session"
+      : "No settle window configured — first session next tick",
+    { strikes: 0, lastError: "", nextEligibleAt: new Date(Date.now() + settleWait) },
   );
 }
 
@@ -799,13 +808,28 @@ async function tick() {
     const bySetId = new Map(sets.map((s) => [String(s._id), s]));
     const setIds = sets.map((s) => s._id);
 
-    // Per-set in-flight counts, so one busy set can't consume the global budget.
-    const perSet = new Map();
-    for (const sid of inFlight.values()) {
-      perSet.set(sid, (perSet.get(sid) || 0) + 1);
-    }
+    let claimsThisTick = 0;
+    while (
+      inFlight.size < MAX_GLOBAL_CONCURRENT &&
+      claimsThisTick < MAX_CLAIMS_PER_TICK
+    ) {
+      // Per-set in-flight counts, recomputed from inFlight on EVERY iteration
+      // rather than tracked in a local counter.
+      //
+      // This matters more than it looks. The caps exist to bound concurrent
+      // watch SESSIONS — work that runs for tens of minutes. But most rungs of
+      // the ladder are bookkeeping that finishes in milliseconds (new→verify,
+      // settle→warmup). With a local counter those instant transitions held a
+      // slot for the rest of the tick, so a set could only ever advance
+      // maxConcurrent rows per minute no matter how trivial the work: a
+      // 179-account set would take an hour just to walk everyone to `settle`.
+      // Re-deriving from inFlight gives a finished handler its slot straight
+      // back, so bookkeeping drains fast while real sessions still hold theirs.
+      const perSet = new Map();
+      for (const sid of inFlight.values()) {
+        perSet.set(sid, (perSet.get(sid) || 0) + 1);
+      }
 
-    while (inFlight.size < MAX_GLOBAL_CONCURRENT) {
       // Only consider sets with room left under their own cap.
       const roomySetIds = setIds.filter((id) => {
         const s = bySetId.get(String(id));
@@ -828,8 +852,8 @@ async function tick() {
         continue;
       }
       const policy = policyOf(set);
-      perSet.set(String(acc.setId), (perSet.get(String(acc.setId)) || 0) + 1);
       inFlight.set(String(acc._id), String(acc.setId));
+      claimsThisTick++;
 
       // Fire and forget: a session runs for tens of minutes, so awaiting it
       // here would stall every other set. The lease is what keeps it exclusive.
