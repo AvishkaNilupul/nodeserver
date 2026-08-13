@@ -50,18 +50,118 @@
   .btn-danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
   .btn-danger:hover { background: #fef2f2; border-color:#fecaca; opacity:1; }
 
-  .setgrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
-  .setcard { background: var(--surface); border:1px solid var(--line); border-radius: 16px; padding: 18px; display:flex; flex-direction:column; gap:14px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
-  .setcard h3 { font-size: 16px; font-weight: 700; display:flex; align-items:center; gap:8px; }
-  .setcard .note { color: var(--muted); font-size: 12.5px; line-height:1.5; min-height: 18px; }
-  .setcard .metrics { display:flex; gap:8px; flex-wrap:wrap; }
-  .metric { background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:6px 10px; text-align:center; flex:1; min-width:56px; }
-  .metric b { font-size:16px; display:block; }
-  .metric span { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
-  .metric.live b { color: var(--green); }
-  .metric.dead b { color: var(--red); }
-  .setcard .actions { display:flex; gap:8px; flex-wrap:wrap; }
-  .setcard .actions .spacer { flex:1; }
+  /* Sets render as a dense list rather than cards: with a dozen-plus sets the
+     card grid pushed everything below the fold, and a set is really a row of
+     counts, not a tile. */
+  .setlist { margin-top: 18px; background: var(--surface); border:1px solid var(--line); border-radius:16px; overflow:hidden; box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
+  .setrow { display:flex; align-items:center; gap:16px; padding:13px 18px; border-bottom:1px solid var(--line); }
+  .setrow:last-child { border-bottom:none; }
+  .setrow:hover { background: var(--surface-2); }
+  .setrow .main { min-width:0; flex:1 1 240px; }
+  .setrow .main b { font-size:14.5px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .setrow .main .note { color:var(--muted); font-size:12px; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .setrow .nums { display:flex; gap:14px; flex-shrink:0; }
+  .setrow .nums div { text-align:center; min-width:40px; }
+  .setrow .nums b { font-size:15px; display:block; line-height:1.2; }
+  .setrow .nums span { font-size:9.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .setrow .acts { display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; }
+  .setlist .headrow { padding:9px 18px; background:var(--surface-2); font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  @media (max-width: 860px) {
+    .setrow { flex-wrap:wrap; }
+    .setrow .acts { width:100%; justify-content:flex-start; }
+    .setlist .headrow { display:none; }
+  }
+
+  /* Detail-view tabs — keeps the accounts table and the aging screen from
+     fighting for the same vertical space. */
+  .tabs { display:flex; gap:4px; margin:18px 0 0; border-bottom:1px solid var(--line); }
+  .tab { background:none; border:none; padding:10px 16px; color:var(--muted); font-weight:600; font-size:13.5px; border-bottom:2px solid transparent; border-radius:0; }
+  .tab:hover { color:var(--ink); background:none; opacity:1; }
+  .tab.on { color:var(--accent); border-bottom-color:var(--accent); }
+  .tab .count { display:inline-block; margin-left:6px; background:var(--surface-2); border:1px solid var(--line); border-radius:999px; padding:1px 7px; font-size:11px; color:var(--muted); }
+
+  /* Ladder stage chips. Colour tracks progress along the ladder so a table of
+     accounts reads at a glance: grey = not started, amber = in progress,
+     green = ready, red = needs a human. */
+  .stage { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.02em; background:var(--surface-2); color:var(--muted); white-space:nowrap; }
+  .stage.new { background:#f1f5f9; color:#64748b; }
+  .stage.verify, .stage.settle { background:#eff6ff; color:#2563eb; }
+  .stage.warmup { background:#fff7ed; color:#c2410c; }
+  .stage.active { background:#fffbeb; color:var(--yellow); }
+  .stage.mature { background:#ecfdf5; color:var(--green); }
+  .stage.paused { background:#f5f3ff; color:#7c3aed; }
+  .stage.dead { background:#fef2f2; color:var(--red); }
+  html[data-theme="dark"] .stage.new { background:rgba(148,163,184,.14); color:#94a3b8; }
+  html[data-theme="dark"] .stage.verify, html[data-theme="dark"] .stage.settle { background:rgba(96,165,250,.14); color:#60a5fa; }
+  html[data-theme="dark"] .stage.warmup { background:rgba(251,146,60,.14); color:#fb923c; }
+  html[data-theme="dark"] .stage.active { background:rgba(251,191,36,.14); color:#fbbf24; }
+  html[data-theme="dark"] .stage.mature { background:rgba(52,211,153,.14); color:#34d399; }
+  html[data-theme="dark"] .stage.paused { background:rgba(167,139,250,.16); color:#a78bfa; }
+  html[data-theme="dark"] .stage.dead { background:rgba(248,113,113,.14); color:#f87171; }
+
+  /* The ladder diagram on the aging tab — the "this then that" flow. */
+  .ladder { display:flex; align-items:stretch; gap:0; flex-wrap:wrap; margin:4px 0 2px; }
+  .rung { flex:1 1 96px; min-width:96px; position:relative; padding:10px 8px 10px 18px; background:var(--surface-2); border:1px solid var(--line); border-right:none; }
+  .rung:first-child { border-radius:10px 0 0 10px; padding-left:12px; }
+  .rung:last-child { border-radius:0 10px 10px 0; border-right:1px solid var(--line); }
+  .rung .rname { font-size:11.5px; font-weight:700; text-transform:capitalize; }
+  .rung .rdesc { font-size:10.5px; color:var(--muted); line-height:1.35; margin-top:2px; }
+  .rung .rcount { position:absolute; top:8px; right:9px; font-size:11px; font-weight:700; color:var(--accent); }
+  .rung.hasN { background:var(--surface); box-shadow: inset 0 0 0 1.5px var(--accent); }
+  @media (max-width:720px){
+    .ladder{flex-direction:column;}
+    /* flex:none so a stacked rung is only as tall as its two lines of text —
+       the row layout's flex-grow makes them all stretch to the tallest. */
+    .rung{flex:none; border-right:1px solid var(--line); border-bottom:none; border-radius:0 !important; padding-left:12px;}
+    .rung:first-child{border-radius:10px 10px 0 0 !important;}
+    .rung:last-child{border-bottom:1px solid var(--line); border-radius:0 0 10px 10px !important;}
+  }
+
+  /* Live session cards + activity feed. */
+  .sessions { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:10px; }
+  .sess { background:var(--surface-2); border:1px solid var(--line); border-radius:12px; padding:11px 13px; }
+  .sess .top { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; }
+  .sess .sub2 { font-size:11.5px; color:var(--muted); margin:4px 0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mini { height:6px; background:var(--line); border-radius:999px; overflow:hidden; }
+  .mini > i { display:block; height:100%; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width .4s; }
+  .feed { max-height:420px; overflow-y:auto; }
+  .feedrow { display:flex; gap:10px; padding:9px 4px; border-bottom:1px solid var(--line); font-size:12.5px; align-items:flex-start; }
+  .feedrow:last-child { border-bottom:none; }
+  .feedrow .when { color:var(--muted); font-size:11px; white-space:nowrap; flex-shrink:0; width:64px; }
+  .feedrow .who { font-weight:700; flex-shrink:0; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .feedrow .what { color:var(--muted); min-width:0; line-height:1.45; }
+  .feedrow.bad .what { color:var(--red); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--muted); flex-shrink:0; margin-top:5px; }
+  .dot.session { background:var(--accent); }
+  .dot.stage { background:#8b5cf6; }
+  .dot.follow { background:var(--green); }
+  .dot.graduate { background:var(--green); }
+  .dot.error { background:var(--red); }
+  .dot.verify { background:#2563eb; }
+
+  /* The accounts table gained Stage / Progress / Ready, so it needs tighter
+     gutters than the default to still fit a laptop screen without the panel
+     scrolling sideways. */
+  #tbl th, #tbl td { padding-left:10px; padding-right:10px; }
+  #tbl td:last-child, #tbl th:last-child { padding-right:14px; }
+
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:16px 18px; margin-bottom:16px; box-shadow:0 1px 2px rgba(16,24,40,0.04); }
+  .card > h4 { font-size:13px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .card > h4 .spacer { flex:1; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:13px; }
+  .fld label { font-size:10.5px; color:var(--muted); font-weight:600; display:block; margin-bottom:5px; text-transform:uppercase; letter-spacing:.03em; }
+  .fld input[type="number"], .fld input[type="text"], .fld select { width:100%; padding:8px 10px; border-radius:9px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13px; font-family:inherit; outline:none; }
+  .fld input:focus, .fld select:focus { border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px rgba(79,70,229,.12); }
+  .fld .fhint { font-size:10.5px; color:var(--muted); margin-top:4px; line-height:1.4; }
+  .toggles { display:flex; flex-direction:column; gap:11px; }
+  .tg { display:flex; align-items:flex-start; gap:10px; font-size:13px; cursor:pointer; }
+  .tg input { width:17px; height:17px; accent-color:var(--accent); cursor:pointer; flex-shrink:0; margin-top:1px; }
+  .tg .tgt b { display:block; font-size:13px; }
+  .tg .tgt span { display:block; font-size:11.5px; color:var(--muted); line-height:1.45; margin-top:2px; }
+  .banner { border-radius:11px; padding:10px 14px; font-size:12.5px; line-height:1.5; margin-bottom:14px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); }
+  .banner.warn { background:#fffbeb; border-color:#fde68a; color:#92400e; }
+  html[data-theme="dark"] .banner.warn { background:rgba(251,191,36,.10); border-color:rgba(251,191,36,.3); color:#fbbf24; }
+  .banner b { color:inherit; }
 
   .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin: 20px 0 14px; }
   .search { flex:1; min-width: 220px; max-width: 420px; position:relative; }
@@ -147,7 +247,7 @@
         <button class="btn-sm" id="newSetBtn">New set</button>
       </div>
     </div>
-    <div class="setgrid" id="setGrid"><div class="empty">Loading&hellip;</div></div>
+    <div class="setlist" id="setGrid"><div class="empty">Loading&hellip;</div></div>
   </section>
 
   <!-- ============ SET DETAIL VIEW ============ -->
@@ -175,25 +275,66 @@
       <div class="bar"><i id="scanFill"></i></div>
     </div>
 
-    <div class="toolbar">
-      <div class="search">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
-        <input id="search" type="text" placeholder="Search by username&hellip;" />
-      </div>
-      <div class="stats" id="detailStats"></div>
+    <div class="tabs">
+      <button class="tab on" id="tabAccounts" data-tab="accounts">Accounts</button>
+      <button class="tab" id="tabAging" data-tab="aging">Aging<span class="count" id="tabAgingCount">off</span></button>
     </div>
 
-    <div class="panel">
-      <div style="overflow-x:auto;">
-        <table id="tbl">
-          <thead>
-            <tr>
-              <th style="width:36px;"><input type="checkbox" id="selAll" title="Select all" /></th>
-              <th>Username</th><th>Ready</th><th>Live check</th><th>Drops</th><th>Added</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="tbody"><tr><td colspan="7" class="empty">Loading&hellip;</td></tr></tbody>
-        </table>
+    <!-- ---------- accounts tab ---------- -->
+    <div id="paneAccounts">
+      <div class="toolbar">
+        <div class="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
+          <input id="search" type="text" placeholder="Search by username&hellip;" />
+        </div>
+        <div class="stats" id="detailStats"></div>
+      </div>
+
+      <div class="panel">
+        <div style="overflow-x:auto;">
+          <table id="tbl">
+            <thead>
+              <tr>
+                <th style="width:36px;"><input type="checkbox" id="selAll" title="Select all" /></th>
+                <th>Username</th><th>Stage</th><th>Progress</th><th>Ready</th><th>Live check</th><th>Drops</th><th>Added</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="tbody"><tr><td colspan="9" class="empty">Loading&hellip;</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------- aging tab ---------- -->
+    <div id="paneAging" style="display:none;">
+      <div id="agingOffBanner" class="banner" style="display:none;margin-top:16px;">
+        Aging is <b>off</b> for this set &mdash; nothing here touches these accounts. Turn it on to walk them through
+        settle &rarr; warm-up &rarr; active &rarr; mature before they go to the pool.
+      </div>
+      <div id="agingDryBanner" class="banner warn" style="display:none;margin-top:16px;">
+        <b>Dry run is on.</b> The runner keeps the real schedule and writes the timeline, but sends nothing to Twitch.
+        Sessions below are plans, not real watch time. Turn dry run off when you're happy with the flow.
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h4>
+          The flow
+          <span class="spacer"></span>
+          <button class="btn-ghost btn-sm" id="previewBtn" title="Project the whole schedule without waiting for it">Preview schedule</button>
+          <button class="btn-sm" id="agingCfgBtn">Configure</button>
+        </h4>
+        <div class="ladder" id="ladder"></div>
+        <div class="fhint" style="font-size:11px;color:var(--muted);margin-top:9px;line-height:1.5;" id="policyLine"></div>
+      </div>
+
+      <div class="card">
+        <h4>Running now <span class="count" id="liveCount">0</span><span class="spacer"></span><span style="font-size:11px;color:var(--muted);font-weight:500" id="liveNote"></span></h4>
+        <div class="sessions" id="sessions"><div class="empty" style="padding:18px;">Nothing running right now.</div></div>
+      </div>
+
+      <div class="card">
+        <h4>Activity<span class="spacer"></span><span style="font-size:11px;color:var(--muted);font-weight:500">newest first</span></h4>
+        <div class="feed" id="feed"><div class="empty" style="padding:18px;">No aging activity yet.</div></div>
       </div>
     </div>
   </section>
@@ -283,6 +424,79 @@ or JSON:
   </div>
 </div>
 
+<!-- aging config modal -->
+<div class="modal-bg" id="agingBg">
+  <div class="modal" style="max-width:720px;">
+    <header><b>Aging &mdash; <span id="agingSetName"></span></b><button class="x" id="agingClose">&times;</button></header>
+    <div class="mbody">
+      <div class="toggles">
+        <label class="tg"><input type="checkbox" id="agEnabled" /><span class="tgt"><b>Age accounts in this set</b><span>Off means the runner never looks at this set. Existing sets stay off until you switch them on.</span></span></label>
+        <label class="tg"><input type="checkbox" id="agDryRun" /><span class="tgt"><b>Dry run</b><span>Keeps the real schedule and writes the timeline, but sends nothing to Twitch. Leave this on until the flow looks right.</span></span></label>
+        <label class="tg"><input type="checkbox" id="agAvoidDrops" /><span class="tgt"><b>Avoid channels with active drops</b><span>The important one. Sessions on drop-enabled channels produce the same history the farm already makes, so they cost requests and buy nothing.</span></span></label>
+        <label class="tg"><input type="checkbox" id="agAutoGrad" /><span class="tgt"><b>Move to the Account Pool automatically when mature</b><span>Uses the same placement rules as the manual button. Off means matured accounts wait for you.</span></span></label>
+      </div>
+
+      <div>
+        <label class="lbl">Graduation gates &mdash; all three must pass</label>
+        <div class="grid2">
+          <div class="fld"><label>Min age (days)</label><input type="number" id="agMinDays" min="0" max="365" /><div class="fhint">Counted from when the account landed in the stash.</div></div>
+          <div class="fld"><label>Min sessions</label><input type="number" id="agMinSessions" min="0" max="500" /></div>
+          <div class="fld"><label>Min watch minutes</label><input type="number" id="agMinMinutes" min="0" max="100000" /></div>
+        </div>
+      </div>
+
+      <div>
+        <label class="lbl">Session shape</label>
+        <div class="grid2">
+          <div class="fld"><label>Settle days</label><input type="number" id="agSettle" min="0" max="60" /><div class="fhint">Do nothing at all for this long after landing.</div></div>
+          <div class="fld"><label>Sessions / week</label><input type="number" id="agPerWeek" min="1" max="50" /><div class="fhint">Average. Each gap is jittered &plusmn;45%.</div></div>
+          <div class="fld"><label>Shortest session (min)</label><input type="number" id="agMinLen" min="1" max="600" /></div>
+          <div class="fld"><label>Longest session (min)</label><input type="number" id="agMaxLen" min="1" max="600" /></div>
+          <div class="fld"><label>Channels per account</label><input type="number" id="agTaste" min="1" max="12" /><div class="fhint">Its stable "taste" — a few haunts, not uniform-random picks.</div></div>
+          <div class="fld"><label>Follows (whole window)</label><input type="number" id="agFollows" min="0" max="50" /><div class="fhint">Only channels it actually watched. 0 disables.</div></div>
+        </div>
+      </div>
+
+      <div>
+        <label class="lbl">Where sessions run from</label>
+        <div class="grid2">
+          <div class="fld"><label>Concurrent sessions (this set)</label><input type="number" id="agConc" min="1" max="25" /></div>
+          <div class="fld"><label>Egress hosts</label><select id="agHosts" multiple size="3" style="height:auto;"></select><div class="fhint">None selected = local only.</div></div>
+        </div>
+        <div class="fld" style="margin-top:13px;"><label>Pinned channels (optional, comma separated)</label><input type="text" id="agChannels" placeholder="leave empty to discover live channels automatically" /><div class="fhint">Empty is the intended mode. A pinned list ages the whole set against the same few channels.</div></div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="agingCancel">Cancel</button>
+      <button id="agingSave">Save</button>
+    </footer>
+  </div>
+</div>
+
+<!-- schedule preview modal -->
+<div class="modal-bg" id="previewBg">
+  <div class="modal" style="max-width:560px;">
+    <header><b>Projected schedule</b><button class="x" id="previewClose">&times;</button></header>
+    <div class="mbody"><div id="previewBody"></div></div>
+    <footer><button class="btn-ghost" id="previewDone">Close</button></footer>
+  </div>
+</div>
+
+<!-- per-account timeline modal -->
+<div class="modal-bg" id="flowBg">
+  <div class="modal" style="max-width:620px;">
+    <header><b id="flowTitle">Account flow</b><button class="x" id="flowClose">&times;</button></header>
+    <div class="mbody"><div id="flowBody"></div></div>
+    <footer>
+      <button class="btn-ghost btn-danger" id="flowReset" title="Clear aging bookkeeping and start the ladder over">Reset ladder</button>
+      <span style="flex:1"></span>
+      <button class="btn-ghost" id="flowPause">Pause</button>
+      <button class="btn-ghost" id="flowResume">Resume</button>
+      <button id="flowRunNow" title="Run this account's next step immediately">Run now</button>
+    </footer>
+  </div>
+</div>
+
 <!-- reveal modal -->
 <div class="modal-bg" id="revealBg">
   <div class="modal">
@@ -346,27 +560,53 @@ or JSON:
       renderSets();
     } catch (e) { toast(e.message, true); }
   }
+  // Sets render as a list: with a dozen-plus sets the old card grid pushed
+  // everything below the fold. Every set and every action is still here.
+  function agingBadge(s) {
+    var a = s.aging || {};
+    var c = s.agingCounts || {};
+    if (!a.enabled) return '<span class="chip">aging off</span>';
+    var bits = [];
+    if (c.running) bits.push(c.running + " watching");
+    if (c.inLadder) bits.push(c.inLadder + " ageing");
+    if (c.mature) bits.push(c.mature + " ready");
+    var label = bits.length ? bits.join(" · ") : "aging on";
+    return '<span class="chip ' + (c.mature ? "on" : "warn") + '">' + esc(label) + '</span>' +
+      (a.dryRun ? ' <span class="chip">dry run</span>' : "");
+  }
   function renderSets() {
     var grid = document.getElementById("setGrid");
     if (!sets.length) {
       grid.innerHTML = '<div class="empty">No sets yet. Create one to start stashing accounts.</div>';
       return;
     }
-    grid.innerHTML = sets.map(function(s){
+    var head =
+      '<div class="setrow headrow">' +
+        '<div class="main">Set</div>' +
+        '<div class="nums">' +
+          '<div>Total</div><div>Live</div><div>Dead</div><div>New</div>' +
+        '</div>' +
+        '<div class="acts" style="width:280px;"></div>' +
+      '</div>';
+    grid.innerHTML = head + sets.map(function(s){
       return '' +
-        '<div class="setcard">' +
-          '<h3>' + esc(s.name) + (s.scanning ? ' <span class="chip warn">scanning</span>' : '') + '</h3>' +
-          '<div class="note">' + (s.note ? esc(s.note) : '<i style="opacity:.6">No note</i>') + '</div>' +
-          '<div class="metrics">' +
-            '<div class="metric"><b>' + s.total + '</b><span>Total</span></div>' +
-            '<div class="metric live"><b>' + s.live + '</b><span>Live</span></div>' +
-            '<div class="metric dead"><b>' + s.dead + '</b><span>Dead</span></div>' +
-            '<div class="metric"><b>' + s.unchecked + '</b><span>New</span></div>' +
+        '<div class="setrow">' +
+          '<div class="main">' +
+            '<b>' + esc(s.name) +
+              (s.scanning ? ' <span class="chip warn">scanning</span>' : '') +
+              agingBadge(s) +
+            '</b>' +
+            '<div class="note">' + (s.note ? esc(s.note) : '<i style="opacity:.55">No note</i>') + '</div>' +
           '</div>' +
-          '<div class="actions">' +
+          '<div class="nums">' +
+            '<div><b>' + s.total + '</b><span>Total</span></div>' +
+            '<div><b style="color:var(--green)">' + s.live + '</b><span>Live</span></div>' +
+            '<div><b style="color:var(--red)">' + s.dead + '</b><span>Dead</span></div>' +
+            '<div><b>' + s.unchecked + '</b><span>New</span></div>' +
+          '</div>' +
+          '<div class="acts">' +
             '<button class="btn-sm" data-open="' + s.id + '">Open</button>' +
             '<button class="btn-ghost btn-sm" data-move="' + s.id + '" title="Move whole set into the Account Pool">Move &rarr; pool</button>' +
-            '<span class="spacer"></span>' +
             '<button class="btn-ghost btn-sm" data-edit="' + s.id + '" title="Rename / note">Edit</button>' +
             '<button class="btn-danger btn-sm" data-del="' + s.id + '" title="Delete set and its accounts">Delete</button>' +
           '</div>' +
@@ -437,11 +677,17 @@ or JSON:
       document.getElementById("detailName").textContent = current.name;
       document.getElementById("detailNote").textContent = current.note || "";
       renderAccounts();
+      // Always land on Accounts; the aging tab pulls its own data when opened.
+      switchTab("accounts");
+      // Pre-load the policy anyway so the tab's badge is accurate before you
+      // click it.
+      loadAging();
       startScanPollingIfNeeded();
     } catch (e) { toast(e.message, true); }
   }
   function backToSets() {
     stopScanPolling();
+    stopAgingPolling();
     current = null;
     detailView.style.display = "none";
     setsView.style.display = "";
@@ -461,21 +707,51 @@ or JSON:
     var t = searchTerm.toLowerCase();
     return accounts.filter(function(a){ return a.username.toLowerCase().indexOf(t) !== -1; });
   }
+  // What this account is still short of before it can graduate. Reading "3d ·
+  // 2 sessions" beats a bare progress bar, because it tells you which gate is
+  // actually holding it up.
+  function readyCell(a) {
+    var g = a.aging || {};
+    if (g.stage === "dead") return '<span style="color:var(--red)">—</span>';
+    if (g.stage === "paused") return '<span style="color:var(--muted)">paused</span>';
+    if (g.mature || g.stage === "mature") return '<span style="color:var(--green);font-weight:600">ready</span>';
+    var gaps = g.gaps;
+    if (!gaps) return '<span style="color:var(--muted)">—</span>';
+    var bits = [];
+    if (gaps.days) bits.push(gaps.days + "d");
+    if (gaps.sessions) bits.push(gaps.sessions + " sess");
+    if (gaps.minutes) bits.push(gaps.minutes + "m");
+    return bits.length
+      ? '<span style="color:var(--muted)">' + esc(bits.join(" · ")) + '</span>'
+      : '<span style="color:var(--green);font-weight:600">ready</span>';
+  }
+  function progressCell(a) {
+    var g = a.aging || {};
+    if (!g.sessions && !g.watchMinutes) return '<span style="color:var(--muted)">—</span>';
+    var kind = g.lastSessionKind === "presence"
+      ? ' <span title="Only browser-shaped queries went through — no watch time accrued" style="cursor:help;color:var(--yellow)">&#9888;</span>'
+      : "";
+    return '<span class="mono" style="font-size:12px">' + g.sessions + ' × · ' + g.watchMinutes + 'm' +
+      (g.follows ? ' · ' + g.follows + 'f' : '') + '</span>' + kind;
+  }
   function renderAccounts() {
     var rows = filteredAccounts();
     var tbody = document.getElementById("tbody");
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">' + (accounts.length ? "No matches." : "No accounts in this set yet. Use Import into set.") + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">' + (accounts.length ? "No matches." : "No accounts in this set yet. Use Import into set.") + '</td></tr>';
     } else {
       tbody.innerHTML = rows.map(function(a){
+        var g = a.aging || {};
         return '<tr>' +
           '<td><input type="checkbox" data-sel="' + a.id + '"' + (selection[a.id] ? " checked" : "") + ' /></td>' +
           '<td><b>' + esc(a.username) + '</b></td>' +
-          '<td>' + (a.hasAuth ? '<span class="chip on">Ready</span>' : (a.hasPassword ? '<span class="chip warn">Needs auth</span>' : '<span class="chip">No token</span>')) + '</td>' +
+          '<td><span class="stage ' + esc(g.stage || "new") + '">' + esc(g.stage || "new") + '</span></td>' +
+          '<td>' + progressCell(a) + '</td>' +
+          '<td>' + readyCell(a) + '</td>' +
           '<td>' + statusChip(a) + (a.lastCheckError ? ' <span title="' + esc(a.lastCheckError) + '" style="cursor:help;color:var(--muted)">&#9432;</span>' : '') + '</td>' +
           '<td class="mono">' + (a.dropCount || 0) + '</td>' +
           '<td>' + fmtDate(a.createdAt) + '</td>' +
-          '<td style="text-align:right;"><button class="btn-ghost btn-sm" data-reveal="' + a.id + '">View</button> <button class="btn-danger btn-sm" data-delacc="' + a.id + '">Delete</button></td>' +
+          '<td style="text-align:right;white-space:nowrap;"><button class="btn-ghost btn-sm" data-flow="' + a.id + '" title="This account\'s aging timeline">Flow</button> <button class="btn-ghost btn-sm" data-reveal="' + a.id + '">View</button> <button class="btn-danger btn-sm" data-delacc="' + a.id + '">Delete</button></td>' +
         '</tr>';
       }).join("");
     }
@@ -500,6 +776,7 @@ or JSON:
     var sel = e.target.closest("input[data-sel]");
     if (sel) { if (sel.checked) selection[sel.dataset.sel] = true; else delete selection[sel.dataset.sel]; updateMoveSelBtn(); syncSelAll(); return; }
     var b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.flow) return openFlow(b.dataset.flow);
     if (b.dataset.reveal) return revealAccount(b.dataset.reveal);
     if (b.dataset.delacc) return deleteAccount(b.dataset.delacc);
   });
@@ -600,13 +877,31 @@ or JSON:
   }
   document.addEventListener("visibilitychange", function(){
     if (!current) return;
-    if (document.hidden) stopScanPolling();
-    else startScanPolling();
+    if (document.hidden) { stopScanPolling(); stopAgingPolling(); }
+    else {
+      startScanPolling();
+      if (activeTab === "aging") { pollAging(); startAgingPolling(); }
+    }
   });
 
   // -------------------------------------------------- move to pool
+  // How many of the accounts about to move haven't finished the ladder. The
+  // move itself is never blocked — you asked for these accounts, and this
+  // button predates aging entirely — but it's worth saying so first.
+  function immatureAmong(ids) {
+    if (!current || !current.aging || !current.aging.enabled) return 0;
+    var pool = ids && ids.length
+      ? accounts.filter(function(a){ return ids.indexOf(a.id) !== -1; })
+      : accounts;
+    return pool.filter(function(a){ return !(a.aging && a.aging.mature); }).length;
+  }
   async function doMove(ids, label) {
     if (!current) return;
+    var immature = immatureAmong(ids);
+    if (immature && !confirm(
+      immature + " of these account(s) haven't finished aging yet.\n\n" +
+      "Moving them now is allowed — they just go to the pool with less history than the policy asked for.\n\nMove anyway?"
+    )) return;
     try {
       var body = ids && ids.length ? { ids: ids } : {};
       var data = await api("/account-stash/sets/" + current.id + "/move-to-pool", { method:"POST", body: JSON.stringify(body) });
@@ -617,6 +912,7 @@ or JSON:
       toast("Moved to pool: " + (parts.join(", ") || "nothing new") + " · " + data.removedFromStash + " removed from stash");
       selection = {};
       await refreshCurrent();
+      renderAgingHeader();
     } catch (e) { toast(e.message, true); }
   }
   document.getElementById("moveAllBtn").addEventListener("click", function(){
@@ -770,8 +1066,295 @@ or JSON:
     catch (e) { toast(e.message, true); }
   }
 
+  // ==================================================================
+  // AGING
+  //
+  // The tab is a live view of utils/stashAging.js: which rung each account
+  // sits on, what's watching right now, and what just happened. Polling only
+  // runs while the tab is actually open and the document is visible, so an
+  // idle browser tab costs nothing.
+  // ==================================================================
+  var agingPolicy = null;
+  var agingHosts = [];
+  var agingLimits = {};
+  var agingTimer = null;
+  var activeTab = "accounts";
+
+  // The ladder, in order, with the one-line explanation of each rung. This is
+  // the "this then that" the whole feature is built around.
+  var RUNGS = [
+    { key:"verify",  desc:"Token proven against Twitch" },
+    { key:"settle",  desc:"Deliberately idle after landing" },
+    { key:"warmup",  desc:"First short watches, no follows" },
+    { key:"active",  desc:"Full sessions, follows begin" },
+    { key:"mature",  desc:"Gates passed — pool ready" }
+  ];
+
+  function switchTab(name) {
+    activeTab = name;
+    document.getElementById("tabAccounts").className = "tab" + (name === "accounts" ? " on" : "");
+    document.getElementById("tabAging").className = "tab" + (name === "aging" ? " on" : "");
+    document.getElementById("paneAccounts").style.display = name === "accounts" ? "" : "none";
+    document.getElementById("paneAging").style.display = name === "aging" ? "" : "none";
+    if (name === "aging") { loadAging(); startAgingPolling(); }
+    else stopAgingPolling();
+  }
+  document.getElementById("tabAccounts").addEventListener("click", function(){ switchTab("accounts"); });
+  document.getElementById("tabAging").addEventListener("click", function(){ switchTab("aging"); });
+
+  async function loadAging() {
+    if (!current) return;
+    try {
+      var d = await api("/account-stash/sets/" + current.id + "/aging");
+      agingPolicy = d.policy || {};
+      agingHosts = d.hosts || [];
+      agingLimits = d.limits || {};
+      renderAgingHeader();
+      await pollAging();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function renderAgingHeader() {
+    var p = agingPolicy || {};
+    document.getElementById("agingOffBanner").style.display = p.enabled ? "none" : "";
+    document.getElementById("agingDryBanner").style.display = (p.enabled && p.dryRun) ? "" : "none";
+
+    // Per-rung population, counted from the accounts already loaded for this
+    // set — no extra request needed.
+    var counts = {};
+    accounts.forEach(function(a){
+      var s = (a.aging && a.aging.stage) || "new";
+      counts[s] = (counts[s] || 0) + 1;
+    });
+    document.getElementById("ladder").innerHTML = RUNGS.map(function(r){
+      var n = counts[r.key] || 0;
+      return '<div class="rung' + (n ? " hasN" : "") + '">' +
+        (n ? '<span class="rcount">' + n + '</span>' : '') +
+        '<div class="rname">' + r.key + '</div>' +
+        '<div class="rdesc">' + r.desc + '</div>' +
+      '</div>';
+    }).join("");
+
+    var parked = (counts.paused || 0) + (counts.dead || 0);
+    document.getElementById("policyLine").innerHTML = p.enabled
+      ? esc(
+          "Gates: " + p.minDays + "d old · " + p.minSessions + " sessions · " + p.minWatchMinutes + "m watched. " +
+          "Cadence: ~" + p.sessionsPerWeek + "/week, " + p.minSessionMinutes + "–" + p.maxSessionMinutes + "m each, " +
+          p.tasteSize + " channels per account" + (p.followTarget ? ", " + p.followTarget + " follows" : ", no follows") + ". " +
+          (p.avoidDropChannels ? "Skipping drop-enabled channels. " : "NOT skipping drop channels — sessions will look like farming. ") +
+          (p.autoGraduate ? "Matured accounts move to the pool automatically." : "Matured accounts wait for you to move them.")
+        ) + (parked ? ' <b style="color:var(--red)">' + parked + " parked (paused/dead) — check the Accounts tab.</b>" : "")
+      : "";
+
+    var tc = document.getElementById("tabAgingCount");
+    tc.textContent = p.enabled ? ((counts.mature || 0) ? (counts.mature + " ready") : "on") : "off";
+  }
+
+  function fmtAgo(d) {
+    if (!d) return "";
+    var s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s/60) + "m";
+    if (s < 86400) return Math.floor(s/3600) + "h";
+    return Math.floor(s/86400) + "d";
+  }
+
+  async function pollAging() {
+    if (!current || activeTab !== "aging") return;
+    try {
+      var d = await api("/account-stash/sets/" + current.id + "/aging/status?limit=40");
+      var live = d.live || { sessions: [] };
+      var sess = live.sessions || [];
+
+      document.getElementById("liveCount").textContent = sess.length;
+      document.getElementById("liveNote").textContent =
+        (live.claimed > sess.length ? (live.claimed - sess.length) + " starting · " : "") +
+        live.globalRunning + " running across all sets (cap " + live.maxConcurrent + ")";
+
+      document.getElementById("sessions").innerHTML = sess.length
+        ? sess.map(function(s){
+            var pct = s.minutesTarget ? Math.round((s.minutesDone / s.minutesTarget) * 100) : 0;
+            return '<div class="sess">' +
+              '<div class="top"><span class="stage ' + esc(s.stage) + '">' + esc(s.stage) + '</span> ' + esc(s.username) + '</div>' +
+              '<div class="sub2">watching <b>' + esc(s.channel) + '</b> · ' + esc(s.host) + '</div>' +
+              '<div class="mini"><i style="width:' + pct + '%"></i></div>' +
+              '<div class="sub2" style="margin:6px 0 0">' + s.minutesDone + ' / ' + s.minutesTarget + ' min</div>' +
+            '</div>';
+          }).join("")
+        : '<div class="empty" style="padding:18px;">Nothing running right now.</div>';
+
+      var feed = d.feed || [];
+      document.getElementById("feed").innerHTML = feed.length
+        ? feed.map(function(f){
+            return '<div class="feedrow' + (f.ok ? "" : " bad") + '">' +
+              '<span class="dot ' + esc(f.kind) + '"></span>' +
+              '<span class="when">' + esc(fmtAgo(f.createdAt)) + ' ago</span>' +
+              '<span class="who">' + esc(f.username || "—") + '</span>' +
+              '<span class="what">' + (f.dryRun ? '<span class="chip">dry</span> ' : '') + esc(f.message) + '</span>' +
+            '</div>';
+          }).join("")
+        : '<div class="empty" style="padding:18px;">No aging activity yet.</div>';
+    } catch (e) { /* transient — next poll picks it up */ }
+  }
+  function startAgingPolling() {
+    stopAgingPolling();
+    if (document.hidden) return;
+    agingTimer = setInterval(pollAging, 5000);
+  }
+  function stopAgingPolling() { if (agingTimer) { clearInterval(agingTimer); agingTimer = null; } }
+
+  // ---- config modal
+  function openAgingCfg() {
+    if (!current || !agingPolicy) return;
+    var p = agingPolicy;
+    document.getElementById("agingSetName").textContent = current.name;
+    document.getElementById("agEnabled").checked = !!p.enabled;
+    document.getElementById("agDryRun").checked = !!p.dryRun;
+    document.getElementById("agAvoidDrops").checked = !!p.avoidDropChannels;
+    document.getElementById("agAutoGrad").checked = !!p.autoGraduate;
+    document.getElementById("agMinDays").value = p.minDays;
+    document.getElementById("agMinSessions").value = p.minSessions;
+    document.getElementById("agMinMinutes").value = p.minWatchMinutes;
+    document.getElementById("agSettle").value = p.settleDays;
+    document.getElementById("agPerWeek").value = p.sessionsPerWeek;
+    document.getElementById("agMinLen").value = p.minSessionMinutes;
+    document.getElementById("agMaxLen").value = p.maxSessionMinutes;
+    document.getElementById("agTaste").value = p.tasteSize;
+    document.getElementById("agFollows").value = p.followTarget;
+    document.getElementById("agConc").value = p.maxConcurrent;
+    document.getElementById("agChannels").value = (p.channelPool || []).join(", ");
+    document.getElementById("agHosts").innerHTML = agingHosts.map(function(h){
+      return '<option value="' + esc(h.id) + '"' + ((p.hostIds || []).indexOf(h.id) !== -1 ? " selected" : "") + '>' + esc(h.label || h.id) + '</option>';
+    }).join("");
+    document.getElementById("agingBg").classList.add("show");
+  }
+  function closeAgingCfg(){ document.getElementById("agingBg").classList.remove("show"); }
+  document.getElementById("agingCfgBtn").addEventListener("click", openAgingCfg);
+  document.getElementById("agingClose").addEventListener("click", closeAgingCfg);
+  document.getElementById("agingCancel").addEventListener("click", closeAgingCfg);
+
+  document.getElementById("agingSave").addEventListener("click", async function(){
+    if (!current) return;
+    var num = function(id){ return Number(document.getElementById(id).value); };
+    var body = {
+      enabled: document.getElementById("agEnabled").checked,
+      dryRun: document.getElementById("agDryRun").checked,
+      avoidDropChannels: document.getElementById("agAvoidDrops").checked,
+      autoGraduate: document.getElementById("agAutoGrad").checked,
+      minDays: num("agMinDays"), minSessions: num("agMinSessions"), minWatchMinutes: num("agMinMinutes"),
+      settleDays: num("agSettle"), sessionsPerWeek: num("agPerWeek"),
+      minSessionMinutes: num("agMinLen"), maxSessionMinutes: num("agMaxLen"),
+      tasteSize: num("agTaste"), followTarget: num("agFollows"), maxConcurrent: num("agConc"),
+      channelPool: document.getElementById("agChannels").value.split(",").map(function(s){ return s.trim(); }).filter(Boolean),
+      hostIds: Array.prototype.slice.call(document.getElementById("agHosts").selectedOptions).map(function(o){ return o.value; })
+    };
+    // Leaving dry run with auto-graduate already on means live sessions AND
+    // automatic pool moves start at once — worth one explicit confirmation.
+    if (body.enabled && !body.dryRun && body.autoGraduate &&
+        !confirm("This will run real sessions AND move matured accounts into the Account Pool automatically. Continue?")) return;
+    var btn = this; btn.disabled = true;
+    try {
+      var d = await api("/account-stash/sets/" + current.id + "/aging", { method:"PUT", body: JSON.stringify(body) });
+      agingPolicy = d.policy;
+      toast("Aging saved" + (d.scheduled ? " · " + d.scheduled + " account(s) queued" : ""));
+      closeAgingCfg();
+      await refreshCurrent();
+      renderAgingHeader();
+      pollAging();
+    } catch (e) { toast(e.message, true); }
+    finally { btn.disabled = false; }
+  });
+
+  // ---- schedule preview
+  document.getElementById("previewBtn").addEventListener("click", async function(){
+    if (!current) return;
+    try {
+      var d = await api("/account-stash/sets/" + current.id + "/aging/preview");
+      var pr = d.projection || {};
+      document.getElementById("previewBody").innerHTML =
+        '<div class="banner">A fresh account in this set reaches the pool in about <b>' + pr.projectedDays + ' days</b>. ' +
+        'The gate holding it up longest is <b>' + esc(pr.binding) + '</b>.</div>' +
+        '<div class="grid2" style="margin-bottom:14px;">' +
+          '<div class="fld"><label>Sessions</label><div style="font-size:15px;font-weight:700">' + pr.projectedSessions + '</div></div>' +
+          '<div class="fld"><label>Watch minutes</label><div style="font-size:15px;font-weight:700">' + pr.projectedMinutes + '</div></div>' +
+          '<div class="fld"><label>Avg gap</label><div style="font-size:15px;font-weight:700">' + pr.avgGapHours + 'h</div></div>' +
+          '<div class="fld"><label>Follows</label><div style="font-size:15px;font-weight:700">' + pr.projectedFollows + '</div></div>' +
+        '</div>' +
+        '<div class="feed">' + (d.timeline || []).map(function(t){
+          return '<div class="feedrow"><span class="dot stage"></span><span class="when">day ' + t.day + '</span><span class="what">' + esc(t.label) + '</span></div>';
+        }).join("") + '</div>';
+      document.getElementById("previewBg").classList.add("show");
+    } catch (e) { toast(e.message, true); }
+  });
+  document.getElementById("previewClose").addEventListener("click", function(){ document.getElementById("previewBg").classList.remove("show"); });
+  document.getElementById("previewDone").addEventListener("click", function(){ document.getElementById("previewBg").classList.remove("show"); });
+
+  // ---- per-account flow drawer
+  var flowId = null;
+  async function openFlow(id) {
+    flowId = id;
+    try {
+      var d = await api("/account-stash/" + id + "/aging/timeline");
+      var a = d.account || {}; var g = a.aging || {};
+      document.getElementById("flowTitle").textContent = a.username || "Account flow";
+      var gaps = g.gaps || {};
+      document.getElementById("flowBody").innerHTML =
+        '<div class="grid2" style="margin-bottom:14px;">' +
+          '<div class="fld"><label>Stage</label><div><span class="stage ' + esc(g.stage) + '">' + esc(g.stage) + '</span></div></div>' +
+          '<div class="fld"><label>Age</label><div style="font-size:15px;font-weight:700">' + g.ageDays + 'd</div></div>' +
+          '<div class="fld"><label>Sessions</label><div style="font-size:15px;font-weight:700">' + g.sessions + '</div></div>' +
+          '<div class="fld"><label>Watched</label><div style="font-size:15px;font-weight:700">' + g.watchMinutes + 'm</div></div>' +
+          '<div class="fld"><label>Follows</label><div style="font-size:15px;font-weight:700">' + g.follows + '</div></div>' +
+          '<div class="fld"><label>Next due</label><div style="font-size:13px;font-weight:600">' + (g.nextEligibleAt ? new Date(g.nextEligibleAt).toLocaleString() : "—") + '</div></div>' +
+        '</div>' +
+        (g.taste && g.taste.length ? '<div class="banner">Watches: <b>' + g.taste.map(esc).join("</b>, <b>") + '</b></div>' : '') +
+        (!g.mature && (gaps.days || gaps.sessions || gaps.minutes)
+          ? '<div class="banner">Still needs ' +
+              [gaps.days ? gaps.days + " more day(s)" : null,
+               gaps.sessions ? gaps.sessions + " more session(s)" : null,
+               gaps.minutes ? gaps.minutes + " more watch minute(s)" : null].filter(Boolean).join(", ") + '.</div>'
+          : (g.mature ? '<div class="banner" style="color:var(--green)">Aged enough — ready for the Account Pool.</div>' : '')) +
+        (g.lastError ? '<div class="banner warn">Last error: ' + esc(g.lastError) + (g.strikes ? ' (' + g.strikes + ' strike(s))' : '') + '</div>' : '') +
+        '<div class="feed">' + ((d.events || []).length
+          ? d.events.map(function(f){
+              return '<div class="feedrow' + (f.ok ? "" : " bad") + '">' +
+                '<span class="dot ' + esc(f.kind) + '"></span>' +
+                '<span class="when">' + esc(fmtAgo(f.createdAt)) + ' ago</span>' +
+                '<span class="what">' + (f.dryRun ? '<span class="chip">dry</span> ' : '') + esc(f.message) + '</span>' +
+              '</div>';
+            }).join("")
+          : '<div class="empty" style="padding:18px;">Nothing has happened to this account yet.</div>') + '</div>';
+      document.getElementById("flowBg").classList.add("show");
+    } catch (e) { toast(e.message, true); }
+  }
+  document.getElementById("flowClose").addEventListener("click", function(){ document.getElementById("flowBg").classList.remove("show"); });
+  async function flowAction(action, confirmMsg) {
+    if (!flowId) return;
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    try {
+      await api("/account-stash/" + flowId + "/aging/" + action, { method:"POST" });
+      toast("Done");
+      await openFlow(flowId);
+      await refreshCurrent();
+      renderAgingHeader();
+    } catch (e) { toast(e.message, true); }
+  }
+  document.getElementById("flowPause").addEventListener("click", function(){ flowAction("pause"); });
+  document.getElementById("flowResume").addEventListener("click", function(){ flowAction("resume"); });
+  document.getElementById("flowReset").addEventListener("click", function(){
+    flowAction("reset", "Reset this account's aging bookkeeping and start the ladder over? Its real Twitch history isn't affected.");
+  });
+  document.getElementById("flowRunNow").addEventListener("click", async function(){
+    if (!flowId) return;
+    try {
+      var d = await api("/account-stash/" + flowId + "/aging/run-now", { method:"POST" });
+      toast(d.started ? "Started — watch the Aging tab" : (d.message || "Already running"));
+      if (d.started) { document.getElementById("flowBg").classList.remove("show"); switchTab("aging"); }
+    } catch (e) { toast(e.message, true); }
+  });
+
   // close modals on backdrop click
-  ["setBg","importBg","moveSetBg","revealBg"].forEach(function(id){
+  ["setBg","importBg","moveSetBg","revealBg","agingBg","previewBg","flowBg"].forEach(function(id){
     document.getElementById(id).addEventListener("click", function(e){ if (e.target === this) this.classList.remove("show"); });
   });
 
