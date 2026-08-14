@@ -432,6 +432,9 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
         soldToAdminId: buyerId,
         soldToUsername: buyerUsername,
         soldSetId: String(set._id),
+        // A Shop order is a buyer paying, so it counts as demand.
+        realSale: true,
+        marketplace: "shop",
       });
       if (ok) {
         account = await BotAccount.findById(c.accountId);

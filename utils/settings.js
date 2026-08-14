@@ -40,6 +40,13 @@ const AUTO_FARM_DEFAULTS = {
   platiCategoryId: "34187",
   platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
   ggselCategoryId: "",
+  // FunPay category ("node") per game, for market research only — FunPay has
+  // no cross-game search, so a game is invisible there until its node is
+  // known. The research scanner already learns nodes from our own FunPay
+  // listings (each one records the node it was published to), so this is only
+  // needed for games we have not published there yet.
+  //   { "overwatch 2": "2430", "rainbow six siege": "1813" }
+  funpayNodes: {},
   // ZeusX auto-listing. Off unless the owner turns it on; a game only
   // lists when zeusxGames has its category, e.g.
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }

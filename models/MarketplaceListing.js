@@ -94,6 +94,19 @@ const marketplaceListingSchema = new mongoose.Schema(
     // guardian keeps available on the platform, topping the listing up with
     // freshly claimed accounts as units sell. 0 disables auto-feeding.
     qtyTarget: { type: Number, default: 0 },
+    // Units this listing has SOLD, cumulative. On a quantity listing the
+    // platform never tells us "a sale happened" — it just reports less stock
+    // than we left there, so the guardian infers sales from the drop and adds
+    // them here (see recordQuantitySale in utils/saleLearning.js). Doubles as
+    // the sequence number that keeps each unit's SaleSignal distinct.
+    unitsSold: { type: Number, default: 0 },
+    // Remaining stock as of the end of the last guardian pass (what we read,
+    // plus whatever we fed afterwards). null = never read. The next pass
+    // subtracts the fresh reading from this to learn how many units sold in
+    // between; without the "plus what we fed" part a top-up would read as
+    // negative sales, and without persisting it at all a failed feed would
+    // make the same shortfall count as a new sale on every single pass.
+    lastStock: { type: Number, default: null },
   },
   { timestamps: true },
 );

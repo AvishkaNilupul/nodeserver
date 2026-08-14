@@ -64,6 +64,12 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
   // Sale training data for the auto-farmer: one signal per game in the sold
   // set. Deduped per (account, set, game) so refund + re-sell of the same
   // set doesn't double count. Best-effort — never blocks the sale.
+  //
+  // This function serves two very different callers and the signal has to say
+  // which one it was. A Shop order or a bulk order is a real purchase
+  // ("listing_sold"); a fulfiller or the auto-lister claiming stock to put on a
+  // shelf is not ("drop_reserved"), and only the former may count as demand.
+  // Callers that represent a paying buyer pass opts.realSale.
   try {
     const games = [
       ...new Set((set.items || []).map((i) => i.game).filter(Boolean)),
@@ -87,7 +93,9 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
             name: set.name || "",
             login: "",
             account: accountId,
-            source: "drop_reserved",
+            source: opts.realSale ? "listing_sold" : "drop_reserved",
+            marketplace: opts.realSale ? opts.marketplace || "shop" : "",
+            priceUsd: Number(opts.priceUsd) || 0,
             at: now,
           },
         },

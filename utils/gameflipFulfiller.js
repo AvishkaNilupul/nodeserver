@@ -17,6 +17,7 @@ const { availableAccountsForSet } = require("../routes/shopRoutes");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
+const { recordListingSale } = require("./saleLearning");
 const { sendTelegram } = require("./telegram");
 const {
   reserveSetOnAccount,
@@ -387,6 +388,23 @@ async function syncOnce() {
     );
     if (!claimed) continue;
     sold++;
+    // Demand learning: this poller is the only thing that ever learns a
+    // Gameflip listing was bought, and for years it kept that to itself. One
+    // signal per game in the bundle, carrying the price the buyer actually
+    // paid. Best-effort — a learning write must never break the relist chain.
+    try {
+      const soldSet = await DropSet.findById(row.set).lean();
+      if (soldSet) {
+        await recordListingSale({
+          listing: row,
+          set: soldSet,
+          units: 1,
+          priceUsd: Number(row.price) || 0,
+        });
+      }
+    } catch (e) {
+      console.error("gameflip sale learning error:", e.message);
+    }
     // A marketplace sale is the one event an operator always wants pushed to
     // their phone — the poller is the only thing that knows it happened.
     sendTelegram(
