@@ -603,7 +603,35 @@
           s = "Last scan " + new Date(st.lastRun).toLocaleString();
         }
         if (st.lastError) s += " · error: " + st.lastError;
-        s += " · rescans every " + (st.intervalHours || 12) + "h.";
+        // Say what the scanner ACTUALLY does. It used to read "rescans every
+        // 1h", which is wrong and was genuinely misleading: it wakes hourly and
+        // rescans only the games whose own freshness window has expired, so a
+        // pass that scans nothing is the normal, healthy case rather than a
+        // sign it is stuck.
+        s += " · checks hourly, rescanning only games that are due";
+        if (st.lastDue) {
+          s +=
+            " (last pass: " +
+            st.lastDue.due +
+            " of " +
+            st.lastDue.known +
+            " due)";
+        }
+        var f = st.freshnessHours;
+        if (f) {
+          s +=
+            " · a game is due after " +
+            f.endingSoon +
+            "h if its campaign ends soon, " +
+            f.active +
+            "h while running, " +
+            f.seller +
+            "h if it sells, " +
+            f.idle +
+            "h otherwise.";
+        } else {
+          s += ".";
+        }
         $("statusLine").textContent = s;
       }
 
