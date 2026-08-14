@@ -58,6 +58,29 @@ async function main() {
     .lean();
   console.log("drop_reserved rows to classify:", rows.length);
 
+  // Who took each (account, set), for every reserved drop, in ONE aggregation.
+  // The obvious shape — a distinct() per signal row — is 1900+ sequential
+  // round trips against a shared Atlas tier that serialises queries, which
+  // took over ten minutes and printed nothing while it ran. This is the same
+  // answer in one trip.
+  const buyerRows = await DropLog.aggregate([
+    { $match: { soldAt: { $ne: null } } },
+    {
+      $group: {
+        _id: { account: "$account", set: "$soldSetId" },
+        buyers: { $addToSet: "$soldToUsername" },
+      },
+    },
+  ]);
+  const buyersOf = new Map();
+  for (const r of buyerRows) {
+    buyersOf.set(
+      String(r._id.account) + "|" + String(r._id.set || ""),
+      r.buyers,
+    );
+  }
+  console.log("account+set groups with reserved drops:", buyersOf.size);
+
   const promote = [];
   let stock = 0;
   let unresolved = 0;
@@ -76,15 +99,12 @@ async function main() {
     // them. Any drop of this account+set stamped with a non-stock buyer means
     // this signal came from a real order.
     const setId = key.split(":")[2] || "";
-    const buyers = await DropLog.distinct("soldToUsername", {
-      account: r.account,
-      soldSetId: setId,
-      soldAt: { $ne: null },
-    });
-    if (buyers.some((b) => !isStockTag(b))) {
+    const buyers = buyersOf.get(String(r.account) + "|" + setId) || [];
+    const real = buyers.filter((b) => !isStockTag(b));
+    if (real.length) {
       promote.push({
         id: r._id,
-        why: "buyer " + buyers.filter((b) => !isStockTag(b)).join("/"),
+        why: "buyer " + real.join("/"),
         game: r.game,
       });
     } else {
