@@ -15,13 +15,18 @@ const crypto = require("crypto");
 const { requireSuperadmin } = require("../middleware/auth");
 const StashSet = require("../models/StashSet");
 const StashAccount = require("../models/StashAccount");
-const AvailableAccount = require("../models/AvailableAccount");
-const BotAccount = require("../models/BotAccount");
-const accountPoolChecker = require("../utils/accountPoolChecker");
+const StashAgingLog = require("../models/StashAgingLog");
+// AvailableAccount / BotAccount / accountPoolChecker are no longer required
+// here: everything that touches the Account Pool now goes through
+// utils/stashPromote.js, so the manual button and the aging runner's
+// auto-graduate share one implementation of the placement rules.
 const stashChecker = require("../utils/stashChecker");
+const stashAging = require("../utils/stashAging");
+const { promoteAccounts } = require("../utils/stashPromote");
 const { parseAccountList } = require("../utils/parseAccountList");
 const { planStashMove } = require("../utils/stashMovePlan");
 const { encrypt, decrypt } = require("../utils/secretBox");
+const botHosts = require("../utils/botHosts");
 
 const router = express.Router();
 
@@ -46,7 +51,40 @@ function publicAccount(a) {
     source: a.source || "",
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
+    aging: publicAging(a),
   };
+}
+
+// The aging half of an account row. Always present (even for sets that never
+// switched aging on) so the page can render one shape; `stage` simply reads
+// "new" for anything the runner has never looked at.
+function publicAging(a, policy) {
+  const g = a.aging || {};
+  const ageDays = a.createdAt
+    ? Math.floor((Date.now() - new Date(a.createdAt).getTime()) / 86400000)
+    : 0;
+  const out = {
+    stage: g.stage || "new",
+    sessions: g.sessions || 0,
+    watchMinutes: g.watchMinutes || 0,
+    follows: g.follows || 0,
+    taste: Array.isArray(g.taste) ? g.taste : [],
+    lastSessionAt: g.lastSessionAt || null,
+    lastChannel: g.lastChannel || "",
+    lastSessionKind: g.lastSessionKind || "",
+    nextEligibleAt: g.nextEligibleAt || null,
+    strikes: g.strikes || 0,
+    lastError: g.lastError || "",
+    maturedAt: g.maturedAt || null,
+    ageDays,
+  };
+  // Only computable with a policy in hand — the set-detail endpoint has one,
+  // so it can tell you exactly what each account is still short of.
+  if (policy) {
+    out.gaps = stashAging.maturityGaps(a, policy);
+    out.mature = g.stage === "mature" || stashAging.isMature(a, policy);
+  }
+  return out;
 }
 
 // Reused by both the raw-string and JSON import paths, and by move-to-pool.
@@ -142,10 +180,38 @@ async function setWithCounts(set) {
           },
         },
         unchecked: { $sum: { $cond: [{ $eq: ["$lastCheckStatus", ""] }, 1, 0] } },
+        // Aging ladder census, folded into the SAME aggregation rather than a
+        // second round trip — prod Mongo is an Atlas shared tier that
+        // serialises concurrent queries, so cutting round trips matters more
+        // than keeping each one minimal.
+        aging: {
+          $sum: {
+            $cond: [
+              { $in: ["$aging.stage", ["verify", "settle", "warmup", "active"]] },
+              1,
+              0,
+            ],
+          },
+        },
+        mature: { $sum: { $cond: [{ $eq: ["$aging.stage", "mature"] }, 1, 0] } },
+        parked: {
+          $sum: { $cond: [{ $in: ["$aging.stage", ["paused", "dead"]] }, 1, 0] },
+        },
+        watchMinutes: { $sum: { $ifNull: ["$aging.watchMinutes", 0] } },
       },
     },
   ]);
-  const c = counts[0] || { total: 0, live: 0, dead: 0, unchecked: 0 };
+  const c = counts[0] || {
+    total: 0,
+    live: 0,
+    dead: 0,
+    unchecked: 0,
+    aging: 0,
+    mature: 0,
+    parked: 0,
+    watchMinutes: 0,
+  };
+  const live = stashAging.liveStatus(set._id);
   return {
     id: set._id,
     name: set.name,
@@ -155,9 +221,24 @@ async function setWithCounts(set) {
     dead: c.dead,
     unchecked: c.unchecked,
     scanning: stashChecker.isScanning(set._id),
+    aging: publicPolicy(set),
+    agingCounts: {
+      inLadder: c.aging || 0,
+      mature: c.mature || 0,
+      parked: c.parked || 0,
+      watchMinutes: c.watchMinutes || 0,
+      running: live.running,
+      claimed: live.claimed,
+    },
     createdAt: set.createdAt,
     updatedAt: set.updatedAt,
   };
+}
+
+// A set's aging policy, normalised through the runner so the page and the
+// runner can never disagree about what a blank field defaults to.
+function publicPolicy(set) {
+  return stashAging.policyOf(set);
 }
 
 // ---------------------------------------------------------------- sets
@@ -230,10 +311,17 @@ router.get("/account-stash/sets/:id/accounts", requireSuperadmin, async (req, re
     const set = await StashSet.findById(req.params.id);
     if (!set) return res.status(404).json({ success: false, message: "Not found" });
     const accounts = await StashAccount.find({ setId: set._id }).sort({ createdAt: -1 }).lean();
+    // With the set's policy in hand every row can also report what it's still
+    // short of, which is what the detail table's "Ready in" column shows.
+    const policy = stashAging.policyOf(set);
     res.json({
       success: true,
       set: await setWithCounts(set),
-      accounts: accounts.map(publicAccount),
+      accounts: accounts.map((a) => ({
+        ...publicAccount(a),
+        aging: publicAging(a, policy),
+      })),
+      live: stashAging.liveStatus(set._id),
     });
   } catch (err) {
     console.error("stash accounts list error:", err.message);
@@ -294,6 +382,11 @@ router.post("/account-stash/sets/:id/import", requireSuperadmin, async (req, res
             hasPassword: !!item.password,
             email: item.email ? encrypt(item.email) : "",
             source: "stash-import",
+            // bulkWrite bypasses Mongoose defaults, so the aging subdocument
+            // is written explicitly here. Without it an imported account would
+            // land with no `aging` field and the runner would have to infer
+            // one; being explicit keeps every row the same shape.
+            aging: { stage: "new", nextEligibleAt: new Date() },
           },
         },
       });
@@ -325,6 +418,388 @@ router.get("/account-stash/sets/:id/scan/status", requireSuperadmin, (req, res) 
   res.json({ success: true, ...stashChecker.statusFor(req.params.id) });
 });
 
+// ----------------------------------------------------------------- aging
+//
+// Everything below drives utils/stashAging.js. Note what is NOT here: there is
+// no endpoint that forces an account onto a later rung of the ladder. Stages
+// are earned by elapsed time and banked sessions, and letting the UI skip them
+// would make the whole thing decorative.
+
+const NUMERIC_POLICY_FIELDS = [
+  "settleDays",
+  "settleDaysMax",
+  "minDays",
+  "minSessions",
+  "minWatchMinutes",
+  "sessionsPerWeek",
+  "minSessionMinutes",
+  "maxSessionMinutes",
+  "tasteSize",
+  "followTarget",
+  "maxConcurrent",
+];
+const BOOL_POLICY_FIELDS = [
+  "enabled",
+  "avoidDropChannels",
+  "autoGraduate",
+  "dryRun",
+];
+
+router.get("/account-stash/sets/:id/aging", requireSuperadmin, async (req, res) => {
+  try {
+    const set = await StashSet.findById(req.params.id);
+    if (!set) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({
+      success: true,
+      policy: stashAging.policyOf(set),
+      live: stashAging.liveStatus(set._id),
+      hosts: botHosts.listHosts().map((h) => ({ id: h.id, label: h.label })),
+      limits: {
+        warmupSessions: stashAging.WARMUP_SESSIONS,
+        maxStrikes: stashAging.MAX_STRIKES,
+        globalMaxConcurrent: stashAging.MAX_GLOBAL_CONCURRENT,
+      },
+    });
+  } catch (err) {
+    console.error("stash aging read error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.put("/account-stash/sets/:id/aging", requireSuperadmin, async (req, res) => {
+  try {
+    const set = await StashSet.findById(req.params.id);
+    if (!set) return res.status(404).json({ success: false, message: "Not found" });
+    const body = req.body || {};
+    if (!set.aging) set.aging = {};
+
+    for (const f of NUMERIC_POLICY_FIELDS) {
+      if (body[f] == null) continue;
+      const n = Number(body[f]);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ success: false, message: f + " must be a non-negative number" });
+      }
+      set.aging[f] = n;
+    }
+    for (const f of BOOL_POLICY_FIELDS) {
+      if (body[f] == null) continue;
+      set.aging[f] = !!body[f];
+    }
+    if (Array.isArray(body.channelPool)) {
+      set.aging.channelPool = body.channelPool
+        .map((c) => String(c || "").trim().toLowerCase().replace(/^@+/, ""))
+        .filter(Boolean)
+        .slice(0, 100);
+    }
+    if (Array.isArray(body.hostIds)) {
+      // Only ids that actually resolve — a typo'd host would otherwise silently
+      // fall back to local and look like it was honoured.
+      const known = new Set(botHosts.listHosts().map((h) => h.id));
+      set.aging.hostIds = body.hostIds.map(String).filter((h) => known.has(h));
+    }
+
+    // A session window with min above max would make randInt degenerate; fix it
+    // here rather than letting the runner quietly clamp on every session.
+    if (set.aging.minSessionMinutes > set.aging.maxSessionMinutes) {
+      const lo = set.aging.maxSessionMinutes;
+      set.aging.maxSessionMinutes = set.aging.minSessionMinutes;
+      set.aging.minSessionMinutes = lo;
+    }
+
+    await set.save();
+
+    // Switching a set on: give every account that has never been scheduled a
+    // wake time so the runner picks it up on the next tick instead of leaving
+    // it stranded with a null nextEligibleAt. Staggered across the next hour so
+    // enabling a 200-account set doesn't produce a thundering herd.
+    let scheduled = 0;
+    if (set.aging.enabled) {
+      const pending = await StashAccount.find({
+        setId: set._id,
+        $and: [
+          { $or: [{ "aging.stage": { $exists: false } }, { "aging.stage": "new" }] },
+          { $or: [{ "aging.nextEligibleAt": null }, { "aging.nextEligibleAt": { $exists: false } }] },
+        ],
+      })
+        .select("_id")
+        .lean();
+      const ops = pending.map((p) => ({
+        updateOne: {
+          filter: { _id: p._id },
+          update: {
+            $set: {
+              "aging.stage": "new",
+              "aging.nextEligibleAt": new Date(Date.now() + Math.floor(Math.random() * 3600000)),
+            },
+          },
+        },
+      }));
+      if (ops.length) await StashAccount.bulkWrite(ops, { ordered: false });
+      scheduled = ops.length;
+    }
+
+    res.json({ success: true, policy: stashAging.policyOf(set), scheduled });
+  } catch (err) {
+    console.error("stash aging update error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Live progress for the aging panel — what's watching right now, plus the most
+// recent events across the whole set.
+router.get("/account-stash/sets/:id/aging/status", requireSuperadmin, async (req, res) => {
+  try {
+    const setId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(setId)) {
+      return res.status(400).json({ success: false, message: "Bad set id" });
+    }
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 30));
+    const feed = await StashAgingLog.find({ setId })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    res.json({
+      success: true,
+      live: stashAging.liveStatus(setId),
+      feed: feed.map((f) => ({
+        id: f._id,
+        accountId: f.accountId,
+        username: f.username,
+        kind: f.kind,
+        message: f.message,
+        channel: f.channel || "",
+        minutes: f.minutes || 0,
+        host: f.host || "",
+        kindDetail: f.kindDetail || "",
+        ok: f.ok !== false,
+        dryRun: !!f.dryRun,
+        createdAt: f.createdAt,
+      })),
+    });
+  } catch (err) {
+    console.error("stash aging status error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// One account's full story, for the timeline drawer.
+router.get("/account-stash/:id/aging/timeline", requireSuperadmin, async (req, res) => {
+  try {
+    const acc = await StashAccount.findById(req.params.id).lean();
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    const set = await StashSet.findById(acc.setId).lean();
+    const policy = set ? stashAging.policyOf(set) : null;
+    const events = await StashAgingLog.find({ accountId: acc._id })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean();
+    res.json({
+      success: true,
+      account: { ...publicAccount(acc), aging: publicAging(acc, policy) },
+      policy,
+      events: events.map((f) => ({
+        id: f._id,
+        kind: f.kind,
+        message: f.message,
+        fromStage: f.fromStage || "",
+        toStage: f.toStage || "",
+        channel: f.channel || "",
+        minutes: f.minutes || 0,
+        host: f.host || "",
+        kindDetail: f.kindDetail || "",
+        ok: f.ok !== false,
+        dryRun: !!f.dryRun,
+        createdAt: f.createdAt,
+      })),
+    });
+  } catch (err) {
+    console.error("stash aging timeline error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Run one account's next step immediately. This is the canary: rather than
+// assuming the watch pipeline works because nothing threw, point it at one real
+// account and read the session row it produces — in particular whether it comes
+// back "watched" (minute-watched accepted) or "presence" (no watch time).
+router.post("/account-stash/:id/aging/run-now", requireSuperadmin, async (req, res) => {
+  try {
+    const acc = await StashAccount.findById(req.params.id).select("_id setId").lean();
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    const set = await StashSet.findById(acc.setId).lean();
+    if (!set) return res.status(404).json({ success: false, message: "Set not found" });
+    if (!set.aging || !set.aging.enabled) {
+      return res.status(400).json({
+        success: false,
+        message: "Aging is off for this set — turn it on first",
+      });
+    }
+    const result = await stashAging.runNow(acc._id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("stash aging run-now error:", err.message);
+    res.status(500).json({ success: false, message: err.message || "Server error" });
+  }
+});
+
+// Pause / resume one account. Resume deliberately returns it to `new` only when
+// it never got started; an account that was mid-ladder goes back to where it
+// was so a pause doesn't cost it its progress.
+router.post("/account-stash/:id/aging/:action", requireSuperadmin, async (req, res) => {
+  try {
+    const action = String(req.params.action || "");
+    if (!["pause", "resume", "reset"].includes(action)) {
+      return res.status(404).json({ success: false, message: "Unknown action" });
+    }
+    const acc = await StashAccount.findById(req.params.id);
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    if (!acc.aging) acc.aging = {};
+    const from = acc.aging.stage || "new";
+
+    if (action === "pause") {
+      acc.aging.stage = "paused";
+      acc.aging.nextEligibleAt = null;
+    } else if (action === "resume") {
+      // Where a resumed account rejoins the ladder depends on what it has
+      // actually done, not just on how many sessions it banked.
+      //
+      // This used to drop straight into `warmup`, which quietly skipped BOTH
+      // verification and the settle window. Combined with the token-race that
+      // parked fresh automator accounts, it meant a resumed account could be
+      // watching Twitch minutes after signup with a token nobody had checked —
+      // the exact opposite of what settle exists to prevent.
+      if (!acc.clientSecret) {
+        acc.aging.stage = "new";
+      } else if (acc.lastCheckStatus !== "ok") {
+        // Never verified, or the last check failed. Start at verify and let
+        // the ladder put it through settle properly afterwards.
+        acc.aging.stage = "verify";
+      } else if ((acc.aging.sessions || 0) >= stashAging.WARMUP_SESSIONS) {
+        acc.aging.stage = "active";
+      } else if ((acc.aging.sessions || 0) > 0) {
+        acc.aging.stage = "warmup";
+      } else {
+        // Verified but never watched — it was paused during settle, so send it
+        // back through verify, which re-draws a fresh settle window for it.
+        acc.aging.stage = "verify";
+      }
+      acc.aging.strikes = 0;
+      acc.aging.lastError = "";
+      acc.aging.nextEligibleAt = new Date();
+    } else {
+      // Full reset: back to the bottom of the ladder, counters cleared. The
+      // account's real Twitch history obviously isn't undone — this only resets
+      // our bookkeeping.
+      acc.aging = {
+        stage: "new",
+        nextEligibleAt: new Date(),
+        taste: [],
+        sessions: 0,
+        watchMinutes: 0,
+        follows: 0,
+        strikes: 0,
+        lastError: "",
+      };
+    }
+    await acc.save();
+    await StashAgingLog.create({
+      accountId: acc._id,
+      setId: acc.setId,
+      username: acc.username,
+      kind: "note",
+      fromStage: from,
+      toStage: acc.aging.stage,
+      message: "Operator " + action + " (" + from + " → " + acc.aging.stage + ")",
+    });
+    res.json({ success: true, aging: publicAging(acc) });
+  } catch (err) {
+    console.error("stash aging action error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Project the schedule forward without waiting for it. Pure arithmetic on the
+// policy — no Twitch requests, nothing written — so you can see the shape of a
+// 14-day plan in a second rather than in 14 days. This is the answer to "what
+// will this actually do", which dry-run mode alone can't give you because
+// dry-run still runs on the real clock.
+router.get("/account-stash/sets/:id/aging/preview", requireSuperadmin, async (req, res) => {
+  try {
+    const set = await StashSet.findById(req.params.id).lean();
+    if (!set) return res.status(404).json({ success: false, message: "Not found" });
+    const policy = stashAging.policyOf(set);
+
+    const avgGapMs = (7 * 86400000) / Math.max(1, policy.sessionsPerWeek);
+    const avgSession = (policy.minSessionMinutes + policy.maxSessionMinutes) / 2;
+
+    // How long until the three gates all pass, starting from a fresh account.
+    const daysForSessions =
+      policy.settleDays + (policy.minSessions * avgGapMs) / 86400000;
+    const sessionsForMinutes = Math.ceil(policy.minWatchMinutes / Math.max(1, avgSession));
+    const daysForMinutes =
+      policy.settleDays + (sessionsForMinutes * avgGapMs) / 86400000;
+    const projectedDays = Math.ceil(
+      Math.max(policy.minDays, daysForSessions, daysForMinutes),
+    );
+
+    // Which gate is the one actually holding graduation up — the useful thing
+    // to know when a set is ageing slower than expected.
+    let binding = "calendar age";
+    if (daysForSessions >= projectedDays) binding = "session count";
+    if (daysForMinutes >= projectedDays) binding = "watch minutes";
+
+    const timeline = [];
+    timeline.push({ day: 0, label: "Lands in the set, token verified" });
+    timeline.push({
+      day: policy.settleDays,
+      label: "Settle window ends — first warm-up session",
+    });
+    timeline.push({
+      day: Math.round(policy.settleDays + (stashAging.WARMUP_SESSIONS * avgGapMs) / 86400000),
+      label:
+        "Warm-up complete (" +
+        stashAging.WARMUP_SESSIONS +
+        " short sessions) — full-length sessions and follows begin",
+    });
+    timeline.push({
+      day: projectedDays,
+      label:
+        "Matures — " +
+        policy.minSessions +
+        "+ sessions, " +
+        policy.minWatchMinutes +
+        "+ minutes, " +
+        policy.minDays +
+        "+ days old",
+    });
+    if (policy.autoGraduate) {
+      timeline.push({ day: projectedDays, label: "Auto-moved into the Account Pool" });
+    } else {
+      timeline.push({ day: projectedDays, label: "Waits for you to move it to the pool" });
+    }
+
+    res.json({
+      success: true,
+      policy,
+      projection: {
+        projectedDays,
+        binding,
+        avgGapHours: Math.round(avgGapMs / 3600000),
+        avgSessionMinutes: Math.round(avgSession),
+        projectedSessions: Math.max(policy.minSessions, sessionsForMinutes),
+        projectedMinutes: Math.round(
+          Math.max(policy.minSessions, sessionsForMinutes) * avgSession,
+        ),
+        projectedFollows: policy.followTarget,
+      },
+      timeline,
+    });
+  } catch (err) {
+    console.error("stash aging preview error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // --------------------------------------------------------- move to pool
 
 // Hand a whole set (or a selected subset) to the Account Pool, then remove the
@@ -351,105 +826,19 @@ router.post("/account-stash/sets/:id/move-to-pool", requireSuperadmin, async (re
       return res.json({ success: true, added: 0, merged: 0, alreadyInUse: [], removedFromStash: 0 });
     }
 
-    // Decrypt back to plaintext and normalize/merge exactly like an import.
-    const normalized = mergeNormalized(
-      stashAccounts.map((a) => ({
-        username: a.username,
-        clientSecret: a.clientSecret,
-        uniqueId: a.uniqueId,
-        twitchId: a.twitchId,
-        password: a.hasPassword ? decrypt(a.password) : "",
-        email: a.email ? decrypt(a.email) : "",
-      })),
-    );
+    // Informational only. Moving by hand is never blocked by the aging system —
+    // the operator asked for these accounts, and the manual button predates
+    // aging entirely. We just report how many hadn't finished their ladder so
+    // the page can say so before it happens.
+    const policy = stashAging.policyOf(set);
+    const notMatured = set.aging?.enabled
+      ? stashAccounts.filter(
+          (a) => a.aging?.stage !== "mature" && !stashAging.isMature(a, policy),
+        ).length
+      : 0;
 
-    const inUseAccounts = await BotAccount.find({}, { login: 1 }).lean();
-    const inUseSet = new Set(
-      inUseAccounts.filter((a) => String(a.login || "").trim()).map((a) => String(a.login).trim().toLowerCase()),
-    );
-
-    const lowers = normalized.map((n) => n.username.toLowerCase());
-    const existing = await AvailableAccount.find({ usernameLower: { $in: lowers } });
-    const existingByLower = new Map(existing.map((e) => [e.usernameLower, e]));
-
-    let added = 0;
-    let merged = 0;
-    const alreadyInUse = [];
-    const placedLowers = new Set();
-    const ops = [];
-    const toAutoCheck = [];
-
-    for (const item of normalized) {
-      const lower = item.username.toLowerCase();
-      if (inUseSet.has(lower)) {
-        alreadyInUse.push(item.username);
-        placedLowers.add(lower); // accounted for elsewhere -> ok to leave the stash
-        continue;
-      }
-      const found = existingByLower.get(lower);
-      if (found) {
-        const set$ = {};
-        if (item.clientSecret && !found.clientSecret) set$.clientSecret = item.clientSecret;
-        if (item.uniqueId && !found.uniqueId) set$.uniqueId = item.uniqueId;
-        if (item.twitchId && !found.twitchId) set$.twitchId = item.twitchId;
-        if (item.password && !found.hasPassword) {
-          set$.password = encrypt(item.password);
-          set$.hasPassword = true;
-        }
-        if (item.email && !decrypt(found.email)) set$.email = encrypt(item.email);
-        if (Object.keys(set$).length) {
-          ops.push({ updateOne: { filter: { _id: found._id }, update: { $set: set$ } } });
-          merged++;
-          if (set$.clientSecret) toAutoCheck.push(found._id);
-        }
-        placedLowers.add(lower); // row already in the pool -> ok to leave the stash
-        continue;
-      }
-      const newId = new mongoose.Types.ObjectId();
-      ops.push({
-        insertOne: {
-          document: {
-            _id: newId,
-            username: item.username,
-            usernameLower: lower,
-            clientSecret: item.clientSecret || "",
-            uniqueId: item.uniqueId || "",
-            twitchId: item.twitchId || "",
-            password: item.password ? encrypt(item.password) : "",
-            hasPassword: !!item.password,
-            email: item.email ? encrypt(item.email) : "",
-            status: "available",
-            source: "stash:" + set.name,
-          },
-        },
-      });
-      added++;
-      placedLowers.add(lower);
-      if (item.clientSecret) toAutoCheck.push(newId);
-    }
-
-    if (ops.length) await AvailableAccount.bulkWrite(ops, { ordered: false });
-    const autoChecking = toAutoCheck.length ? accountPoolChecker.enqueue(toAutoCheck) : 0;
-
-    // Remove from the stash only the accounts we actually placed in the pool.
-    const removeIds = stashAccounts
-      .filter((a) => placedLowers.has(a.username.toLowerCase()))
-      .map((a) => a._id);
-    let removedFromStash = 0;
-    if (removeIds.length) {
-      const del = await StashAccount.deleteMany({ _id: { $in: removeIds } });
-      removedFromStash = del.deletedCount || 0;
-    }
-
-    res.json({
-      success: true,
-      added,
-      merged,
-      alreadyInUse,
-      alreadyInUseCount: alreadyInUse.length,
-      autoChecking,
-      removedFromStash,
-    });
+    const result = await promoteAccounts(set, stashAccounts);
+    res.json({ success: true, ...result, notMatured });
   } catch (err) {
     console.error("stash move-to-pool error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });

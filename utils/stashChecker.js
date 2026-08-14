@@ -137,4 +137,7 @@ async function scanSet(setId) {
   return { started: true, already: false, total: ids.length };
 }
 
-module.exports = { scanSet, statusFor, isScanning };
+// checkOne is exported so utils/stashAging.js can gate an account's entry into
+// the aging ladder on the SAME verdict a manual scan produces. Duplicating the
+// integrity logic there would be how the two drift apart.
+module.exports = { scanSet, statusFor, isScanning, checkOne };

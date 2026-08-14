@@ -48,6 +48,7 @@ const radarRoutes = require("./routes/radarRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
+const stashAging = require("./utils/stashAging");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const japaneseRoutes = require("./routes/japaneseRoutes");
@@ -645,6 +646,11 @@ mongoose
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();
+    // Account aging: walks stashed accounts through settle -> warm-up ->
+    // active -> mature so they arrive in the pool with some history behind
+    // them. Every set is opted out until switched on individually, so this
+    // is a no-op on a fresh install (see utils/stashAging.js).
+    stashAging.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
