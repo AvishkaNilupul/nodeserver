@@ -660,11 +660,29 @@ router.post("/account-stash/:id/aging/:action", requireSuperadmin, async (req, r
       acc.aging.stage = "paused";
       acc.aging.nextEligibleAt = null;
     } else if (action === "resume") {
-      // Sessions banked already decide where it lands, so a resumed account
-      // rejoins at the right rung instead of starting over.
-      acc.aging.stage =
-        (acc.aging.sessions || 0) >= stashAging.WARMUP_SESSIONS ? "active" : "warmup";
-      if (!acc.clientSecret) acc.aging.stage = "new";
+      // Where a resumed account rejoins the ladder depends on what it has
+      // actually done, not just on how many sessions it banked.
+      //
+      // This used to drop straight into `warmup`, which quietly skipped BOTH
+      // verification and the settle window. Combined with the token-race that
+      // parked fresh automator accounts, it meant a resumed account could be
+      // watching Twitch minutes after signup with a token nobody had checked —
+      // the exact opposite of what settle exists to prevent.
+      if (!acc.clientSecret) {
+        acc.aging.stage = "new";
+      } else if (acc.lastCheckStatus !== "ok") {
+        // Never verified, or the last check failed. Start at verify and let
+        // the ladder put it through settle properly afterwards.
+        acc.aging.stage = "verify";
+      } else if ((acc.aging.sessions || 0) >= stashAging.WARMUP_SESSIONS) {
+        acc.aging.stage = "active";
+      } else if ((acc.aging.sessions || 0) > 0) {
+        acc.aging.stage = "warmup";
+      } else {
+        // Verified but never watched — it was paused during settle, so send it
+        // back through verify, which re-draws a fresh settle window for it.
+        acc.aging.stage = "verify";
+      }
       acc.aging.strikes = 0;
       acc.aging.lastError = "";
       acc.aging.nextEligibleAt = new Date();

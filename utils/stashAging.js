@@ -59,6 +59,13 @@ const WARMUP_SESSIONS = 3;
 // Consecutive failures before an account is parked for a human to look at.
 const MAX_STRIKES = 5;
 
+// How long a freshly-ingested account may sit without a token before the runner
+// stops waiting for one. Generous on purpose: the cost of waiting is one cheap
+// re-check every ten minutes, while the cost of giving up too early is a good
+// account parked in a stage only a human can clear.
+const TOKEN_GRACE_MS =
+  Number(process.env.STASH_AGING_TOKEN_GRACE_MS) || 24 * 60 * 60 * 1000;
+
 // Buffer added to the longest possible session when leasing an account, so a
 // lease can never expire under a session that is still legitimately running.
 const LEASE_BUFFER_MS = 15 * 60 * 1000;
@@ -375,11 +382,29 @@ async function setStage(acc, setId, toStage, message, extra) {
 // new -> verify (or paused, when there's nothing to verify with)
 async function handleNew(acc, set, _policy) {
   if (!acc.clientSecret) {
+    // A missing token is NOT automatically a dead end. The browser automator
+    // ingests in two phases: it saves the signup row first and POSTs the
+    // ClientSecret separately once device-auth completes, seconds to minutes
+    // later (see the "signup" / "token" branches of POST /account-stash/ingest).
+    // The runner can easily claim the row inside that window — observed doing
+    // so two seconds after creation — and parking it then stranded a perfectly
+    // good account in a terminal stage that only a human could clear.
+    //
+    // So: wait quietly while the account is young enough that a token could
+    // still be on its way, and only give up once it plainly isn't coming.
+    const ageMs = Date.now() - new Date(acc.createdAt).getTime();
+    if (ageMs < TOKEN_GRACE_MS) {
+      acc.aging.nextEligibleAt = new Date(Date.now() + jitter(10 * 60 * 1000, 0.4));
+      await acc.save();
+      return;
+    }
     await setStage(
       acc,
       set._id,
       "paused",
-      "No auth token stored — mint one with the token fetcher, then resume",
+      "No auth token after " +
+        Math.round(TOKEN_GRACE_MS / 3600000) +
+        "h — mint one with the token fetcher, then resume",
       { lastError: "No auth token stored for this account", nextEligibleAt: null },
     );
     return;
