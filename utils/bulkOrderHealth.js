@@ -222,6 +222,9 @@ async function claimAccount(candidate, order, setLike) {
     soldToUsername: "bulk:" + order.orderNo,
     soldSetId: order.setId || "",
     soldBulkOrderId: order.orderNo,
+    // A bulk order is a customer buying in quantity, so it counts as demand.
+    realSale: true,
+    marketplace: "bulk",
   });
   if (!ok) return null;
   return BotAccount.findById(candidate.accountId).lean();

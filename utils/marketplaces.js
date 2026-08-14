@@ -3531,6 +3531,9 @@ module.exports = {
   delistOutcome,
   setKeys,
   keyStatus,
+  // Live USD -> currency rate (cached ~6h). Used by the research scanner to
+  // bring FunPay's EUR-quoted pages back to USD.
+  usdRate,
   gameflipTest,
   gameflipPublish,
   gameflipListingStatus,

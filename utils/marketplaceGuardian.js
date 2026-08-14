@@ -30,6 +30,7 @@ const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
 const { sendTelegram } = require("./telegram");
 const accountState = require("./twitchAccountState");
+const { recordListingSale, unitsSoldSince } = require("./saleLearning");
 
 const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
@@ -743,6 +744,41 @@ async function feedListing(row, seenKeys, refusals) {
     });
     return 0;
   }
+  // Sale detection. Plati and GGSel deliver natively out of the stock pile and
+  // never tell us a purchase happened — the pile is simply smaller than what we
+  // left there. That difference is the only evidence these two markets ever
+  // give that a game sells, and until now it was read purely as "needs a
+  // top-up" and discarded. Done before the need<=0 return so a listing whose
+  // qtyTarget was lowered still reports its sales.
+  const soldUnits = unitsSoldSince(row.lastStock, remaining);
+  if (soldUnits > 0) {
+    const soldSet = await DropSet.findById(row.set).lean();
+    if (soldSet) {
+      await recordListingSale({
+        listing: row,
+        set: soldSet,
+        units: soldUnits,
+        priceUsd: Number(row.price) || 0,
+      });
+      console.log(
+        "guardian: " +
+          row.marketplace +
+          " listing " +
+          row.externalId +
+          " sold " +
+          soldUnits +
+          " unit(s) since the last pass",
+      );
+    }
+  }
+  // Baseline for the next pass. Set before any feed so that a feed which fails
+  // after the platform partially accepted it reads as "stock went up", i.e.
+  // zero sales — under-reporting, never inventing sales that did not happen.
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    { $set: { lastStock: remaining } },
+  ).catch(() => {});
+
   const need = target - remaining;
   if (need <= 0) {
     // Self-heal: a GGSel offer can be fully stocked yet still paused if a
@@ -1089,6 +1125,13 @@ async function feedListing(row, seenKeys, refusals) {
       target +
       " in stock).",
   });
+  // The units we just added are ours, not a buyer's — fold them into the
+  // baseline so the next pass measures the drop from the topped-up level.
+  // Without this every successful feed would hide that many real sales.
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    { $set: { lastStock: remaining + claimed.length } },
+  ).catch(() => {});
   return claimed.length;
 }
 

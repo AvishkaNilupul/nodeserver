@@ -824,8 +824,11 @@ router.post(
         { _id: acc._id, soldAt: null },
         { $set: stamp },
       ).catch(() => {});
-      // Demand learning: one signal per (account, game), same shape the
-      // automated sale paths write.
+      // Demand learning: one signal per (account, game). Recorded as
+      // "listing_sold" because that is what it is — the operator delivered to a
+      // paying buyer on a marketplace with no API. It used to be filed as
+      // "drop_reserved", which now means "stock was claimed" and is excluded
+      // from demand, so a hand-delivered sale would have stopped counting.
       const gameLabel = game || "Other rewards";
       await SaleSignal.updateOne(
         {
@@ -840,7 +843,9 @@ router.post(
             name: "manual sale",
             login: acc.login || "",
             account: acc._id,
-            source: "drop_reserved",
+            source: "listing_sold",
+            marketplace: String(body.marketplace || "").trim(),
+            priceUsd: Number(body.priceUsd) || 0,
             at: now,
           },
         },

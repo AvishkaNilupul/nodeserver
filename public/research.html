@@ -502,6 +502,10 @@
             <option value="opportunityScore">Sort: opportunity</option>
             <option value="demandScore">Sort: demand</option>
             <option value="soldRecent">Sort: recent Gameflip sales</option>
+            <option value="observedRevenue">Sort: revenue observed</option>
+            <option value="ownRevenue">Sort: our own revenue</option>
+            <option value="salesPerWeek">Sort: RU sales per week</option>
+            <option value="demandTrend">Sort: rising fastest</option>
             <option value="avgSoldPrice">Sort: avg sold price</option>
             <option value="competition">Sort: least competition</option>
             <option value="endAt">Sort: campaign ends soonest</option>
@@ -656,30 +660,76 @@
             "</div>"
           );
         }
+        var fp = m.funpay || {};
+        // "N sellers / M products" everywhere: rows are not rivals.
+        function rivals(x) {
+          return (
+            "sellers: " +
+            (x.sellers || 0) +
+            " (" +
+            (x.offers || 0) +
+            " products) from " +
+            money(x.lowest)
+          );
+        }
+        // Where our own money actually came from. This is the ONLY demand
+        // signal for ZeusX, Z2U and EpicNPC — none of them can be scouted, so
+        // what we sell there is all we can see of them.
+        var byMarket = r.ownByMarket || {};
+        var marketLines = Object.keys(byMarket)
+          .sort(function (a, b) {
+            return (byMarket[b].revenue || 0) - (byMarket[a].revenue || 0);
+          })
+          .map(function (k) {
+            return (
+              k +
+              ": " +
+              (byMarket[k].sales || 0) +
+              " sold, " +
+              money(byMarket[k].revenue)
+            );
+          });
+        if (!marketLines.length) marketLines = ["no recorded sales yet"];
         return (
-          '<td colspan="9"><div class="row" style="align-items:flex-start;padding:4px 0 8px">' +
+          '<td colspan="9"><div class="row" style="align-items:flex-start;padding:4px 0 8px;flex-wrap:wrap">' +
           block("Gameflip", [
             "sold last 30d: " + (gf.soldRecent || 0),
             "avg sold price: " + money(gf.avgSoldPrice),
             gf.lastSoldAt
               ? "last sale: " + new Date(gf.lastSoldAt).toLocaleDateString()
               : "last sale: —",
-            "competitors: " + (gf.active || 0) + " from " + money(gf.lowest),
+            rivals(gf),
           ]) +
           block("GGSel", [
             "lifetime sales: " + (gg.totalSold || 0),
-            "competitors: " + (gg.active || 0) + " from " + money(gg.lowest),
+            rivals(gg),
           ]) +
           block("Plati", [
             "lifetime sales: " + (pl.totalSold || 0),
-            "competitors: " + (pl.active || 0) + " from " + money(pl.lowest),
+            rivals(pl),
           ]) +
+          (fp.node
+            ? block("FunPay", [
+                "category node: " + esc(String(fp.node)),
+                rivals(fp),
+                "no sale counters published",
+              ])
+            : block("FunPay", [
+                "no category node known —",
+                "publish once, or set",
+                "autoFarm.funpayNodes",
+              ])) +
           block("You", [
             "farmed accounts: " + (r.farmedAccounts || 0),
             "farmed drops: " + (r.farmedItems || 0),
             "live listings: " + (r.ownActive || 0),
-            "sold: " + (r.ownSold || 0),
+            "sold (all time): " + (r.ownSold || 0),
+            "sold last 30d: " +
+              (r.ownSales || 0) +
+              " · " +
+              money(r.ownRevenue),
           ]) +
+          block("Your sales by market", marketLines) +
           '<div style="min-width:160px"><b>Search</b><div class="muted">"' +
           esc(r.term || "") +
           '"</div><div class="muted">scanned ' +
@@ -694,6 +744,15 @@
         if (k === "soldRecent") return (m.gameflip || {}).soldRecent || 0;
         if (k === "avgSoldPrice") return (m.gameflip || {}).avgSoldPrice || 0;
         if (k === "competition") return -(r.competitionScore || 0);
+        // null means "no history yet", which must sort below a real 0 rather
+        // than tying with it — a game we have never measured is not a game
+        // measured at zero.
+        if (k === "salesPerWeek") {
+          return r.salesPerWeek == null ? -1 : r.salesPerWeek;
+        }
+        if (k === "demandTrend") {
+          return r.demandTrend == null ? -Infinity : r.demandTrend;
+        }
         if (k === "endAt") {
           var d =
             r.campaign && r.campaign.active && r.campaign.endAt
@@ -727,18 +786,35 @@
         var html =
           "<table><thead><tr>" +
           "<th>Game</th><th>Campaign</th><th>Sold 30d (GF)</th>" +
-          "<th>Avg sold $</th><th>Sales (GG+Plati)</th><th>Competitors</th>" +
+          "<th>Revenue 30d</th><th>RU sales/wk</th><th>Sellers</th>" +
           "<th>Demand</th><th>Opportunity</th><th>Recommendation</th>" +
           "</tr></thead><tbody>";
         rows.forEach(function (r) {
           var m = r.markets || {};
           var gf = m.gameflip || {};
-          var comp =
-            (gf.active || 0) +
-            ((m.ggsel || {}).active || 0) +
-            ((m.plati || {}).active || 0);
+          // Distinct SELLERS, not listing rows: one seller can put the same
+          // bundle up twenty times, and counting rows made the emptiest
+          // markets look like the most contested ones.
+          var comp = r.sellers || 0;
+          // Units per week on GGSel+Plati once there is history to difference;
+          // those markets never date a sale, so before that all we have is the
+          // lifetime total.
           var sales =
-            ((m.ggsel || {}).totalSold || 0) + ((m.plati || {}).totalSold || 0);
+            r.salesPerWeek != null
+              ? r.salesPerWeek + "/wk"
+              : '<span class="muted">' +
+                (((m.ggsel || {}).totalSold || 0) +
+                  ((m.plati || {}).totalSold || 0)) +
+                " total</span>";
+          var trend =
+            r.demandTrend == null || Math.abs(r.demandTrend) < 8
+              ? ""
+              : '<span style="color:var(--' +
+                (r.demandTrend > 0 ? "green" : "red") +
+                ')"> ' +
+                (r.demandTrend > 0 ? "▲" : "▼") +
+                Math.abs(r.demandTrend) +
+                "</span>";
           html +=
             '<tr style="cursor:pointer" data-game="' +
             esc(r.game) +
@@ -759,7 +835,7 @@
             (gf.soldRecent || 0) +
             "</td>" +
             "<td>" +
-            money(gf.avgSoldPrice) +
+            money(r.observedRevenue) +
             "</td>" +
             "<td>" +
             sales +
@@ -769,6 +845,7 @@
             "</td>" +
             "<td>" +
             (r.demandScore || 0) +
+            trend +
             "</td>" +
             "<td><b>" +
             (r.opportunityScore || 0) +

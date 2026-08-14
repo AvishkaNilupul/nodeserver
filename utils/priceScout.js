@@ -7,7 +7,17 @@ const remoteHttp = require("./remoteHttp");
 
 const TIMEOUT = 12000;
 const CACHE_MS = 10 * 60 * 1000;
-const MAX_ROWS = 20;
+// How many rows to pull per market. This was 20, which was not a page size so
+// much as a ceiling on how much demand the research scanner could ever see:
+// its heaviest signal is the count of recent Gameflip sales, so every game with
+// 20+ sales in the window scored identically and the best games were
+// indistinguishable from merely good ones. Measured live, Gameflip returns 40
+// sold rows for a busy game at limit=100 and a GGSel search page carries ~36.
+// Plati caps itself at 20 whatever we ask (pagenum returns nothing), which is
+// fine — its value is the lifetime numsold counter, not the row count.
+const MAX_ROWS = 100;
+// Rows kept for display in the price-check modal, where a long list is noise.
+const SHOW_ROWS = 8;
 const UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
   "Chrome/126.0 Safari/537.36";
@@ -74,6 +84,10 @@ async function gameflipSearch(term, status, limit) {
       price: round2(Number(x.price) / 100),
       url: "https://gameflip.com/item/" + x.id,
       updated: x.updated || null,
+      // Who is selling it. One seller listing the same bundle 20 times is one
+      // competitor, not 20 — see competitionOf in utils/marketResearch.js.
+      seller: String(x.owner || ""),
+      sellerName: "",
       sold: undefined,
     }));
 }
@@ -99,6 +113,8 @@ async function platiScout(term) {
       title: String(x.name_eng || x.name || ""),
       price: round2(Number(x.price_usd)),
       url: String(x.url || "https://plati.market/itm/" + x.id),
+      seller: String(x.seller_id || ""),
+      sellerName: String(x.seller_name || ""),
       sold: Number(x.numsold) || 0,
     }));
 }
@@ -161,11 +177,79 @@ async function ggselScout(term) {
       title: String(o.name || ""),
       price: round2(price),
       url: "https://ggsel.net/en/catalog/product/" + (o.url || o.id_goods),
+      seller: String(o.id_seller || ""),
+      sellerName: String(o.seller_name || ""),
       sold: Number(o.cnt_sell) || 0,
     });
     if (rows.length >= MAX_ROWS) break;
   }
   return rows;
+}
+
+// FunPay has no API and no cross-game search, but it does not need one: each
+// game's Twitch-drop category ("node") is its own public page, and everything
+// on that page is that game's market. That makes it a cleaner signal than the
+// text searches the other markets need — no relevance filtering, no bleed from
+// unrelated products. The page is served without the golden_key, so this reads
+// as an anonymous visitor and never touches the seller session.
+//
+// Prices are shown in the page's own currency (EUR on /en/), so they are
+// converted to USD by the caller-supplied rate.
+const FP_ROW = /class="tc-item"/g;
+
+// Titles come out of raw HTML, so entities are still encoded ("Jynxzi&#039;s").
+// They matter because titles are one of the keys competition dedupes on.
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+}
+
+function fpField(chunk, re) {
+  const m = chunk.match(re);
+  return m ? decodeEntities(String(m[1])).trim() : "";
+}
+
+function parseFunpayRows(html, usdPerUnit) {
+  const text = String(html || "");
+  const out = [];
+  // Split on the row marker: each chunk holds exactly one offer's markup.
+  const parts = text.split(FP_ROW).slice(1);
+  for (const chunk of parts) {
+    const price = Number(fpField(chunk, /class="tc-price"[^>]*data-s="([0-9.]+)"/));
+    if (!(price > 0)) continue;
+    const title = fpField(chunk, /class="tc-desc-text">([\s\S]*?)<\/div>/)
+      .replace(/\s+/g, " ")
+      .trim();
+    out.push({
+      title,
+      price: round2(price * (Number(usdPerUnit) || 1)),
+      url: "",
+      seller: fpField(chunk, /\/users\/(\d+)\//),
+      sellerName: fpField(chunk, /class="media-user-name">([\s\S]*?)<\/div>/)
+        .replace(/\s+/g, " ")
+        .trim(),
+      // FunPay publishes no per-offer sale counter.
+      sold: undefined,
+    });
+    if (out.length >= MAX_ROWS) break;
+  }
+  return out;
+}
+
+async function funpayScout(nodeId, usdPerUnit) {
+  const node = String(nodeId || "").trim();
+  if (!node) return [];
+  const r = await remoteHttp.fetchText(
+    "https://funpay.com/en/lots/" + encodeURIComponent(node) + "/",
+    { timeout: TIMEOUT },
+  );
+  return parseFunpayRows(r.text, usdPerUnit);
 }
 
 // G2G's public storefront search needs the catalog service + brand (game);
@@ -193,6 +277,8 @@ async function g2gScout(term, serviceId, brandId) {
       title: String(x.title || ""),
       price: round2(Number(x.converted_unit_price)),
       url: "https://www.g2g.com/offer/" + (x.offer_id || x.offer_group || ""),
+      seller: String(x.seller_id || x.user_id || ""),
+      sellerName: String(x.username || ""),
       sold: undefined,
     }));
 }
@@ -202,7 +288,10 @@ async function runScout(key, fn) {
   if (hit) return hit;
   const listings = await fn();
   listings.sort((a, b) => a.price - b.price);
-  const data = { ...priceStats(listings), listings: listings.slice(0, 8) };
+  const data = {
+    ...priceStats(listings),
+    listings: listings.slice(0, SHOW_ROWS),
+  };
   cacheSet(key, data);
   return data;
 }
@@ -240,4 +329,7 @@ module.exports = {
   gameflipSoldScout,
   platiScout,
   ggselScout,
+  funpayScout,
+  g2gScout,
+  parseFunpayRows,
 };

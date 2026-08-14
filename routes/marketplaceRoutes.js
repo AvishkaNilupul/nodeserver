@@ -21,6 +21,7 @@ const mp = require("../utils/marketplaces");
 const epicnpc = require("../utils/epicnpcCatalog");
 const { buildG2gBulkFile } = require("../utils/g2gBulk");
 const { competitorPrices } = require("../utils/priceScout");
+const { recordListingSale } = require("../utils/saleLearning");
 const {
   buildSetGridImage,
   buildPromoCoverImage,
@@ -491,8 +492,11 @@ router.post(
   requireSuperadmin,
   async (req, res) => {
     try {
+      // The operator clicking "Scan now" is asking for a full refresh, not for
+      // the scheduler's view of what has gone stale — so this forces every
+      // game, while the hourly tick scans only what is due.
       const r = await Promise.race([
-        marketResearch.runScan(),
+        marketResearch.runScan({ all: true }),
         new Promise((resolve) =>
           setTimeout(() => resolve({ started: true, background: true }), 500),
         ),
@@ -1171,6 +1175,21 @@ router.delete(
           row.qtyRemaining = 0;
           row.lastError = "";
           await row.save();
+          // Finding out this way is still finding out it sold — the auto-farmer
+          // should learn from it exactly as it would from the sale poller.
+          try {
+            const soldSet = await DropSet.findById(row.set).lean();
+            if (soldSet) {
+              await recordListingSale({
+                listing: row,
+                set: soldSet,
+                units: 1,
+                priceUsd: Number(row.price) || 0,
+              });
+            }
+          } catch (e) {
+            console.error("delist sale learning error:", e.message);
+          }
           return res.json({
             success: true,
             message: "Already sold on the marketplace — marked sold here",

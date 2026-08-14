@@ -61,6 +61,24 @@ const SALES_WINDOW_MS = 45 * 86400000; // own-sales training window
 // Each of our own recent sales is worth this many demand points (log-damped
 // below). 5+ recent sales pushes any game to full allocation on its own.
 const INTERNAL_SALE_WEIGHT = 18;
+// What a "normal" sale is worth, USD. Own sales are scaled by how their price
+// compares to this, because unit counts alone cannot tell a good game from a
+// busy one: five sales at $18 is an order of magnitude better business than
+// twenty at $0.30, and the account cost of farming them is identical. The
+// factor is clamped hard in both directions — price is a tilt on demand, never
+// a substitute for the evidence that anyone is buying at all.
+const REFERENCE_SALE_USD = 2.5;
+const PRICE_FACTOR_MIN = 0.6;
+const PRICE_FACTOR_MAX = 2;
+
+// How much to scale a game's demand by what its sales are worth. Games we have
+// no price for (connection flips only) sit at 1 — unchanged, not punished.
+function priceFactor(avgPrice) {
+  const p = Number(avgPrice) || 0;
+  if (p <= 0) return 1;
+  const raw = p / REFERENCE_SALE_USD;
+  return Math.min(PRICE_FACTOR_MAX, Math.max(PRICE_FACTOR_MIN, raw));
+}
 
 // Skips that may be retried when conditions change (pool refills, a
 // container slot frees up, the Pi comes back online).
@@ -196,25 +214,75 @@ async function freshResearchForGame(game) {
   return doc;
 }
 
-// Own sales history — the training data. Counts SaleSignal rows (connection
-// flips seen by the 24h drop scanner + reserved-drop sales from orders) in
-// the window, per game.
+// Own sales history — the training data. Counts SaleSignal rows in the window
+// for one game, and ONLY the sources that mean a buyer paid:
+//
+//   connected    — the drop scanner watched a buyer link the account.
+//   listing_sold — a marketplace reported the purchase (Gameflip poller, a
+//                  delist that came back "already sold", a Plati/GGSel stock
+//                  count that dropped, a hand-delivered sale).
+//
+// "drop_reserved" is deliberately NOT counted. It is stamped every time stock
+// is CLAIMED for a listing — auto-lister publish, guardian restock — which is
+// shelf-filling, not selling. Counting it closed a loop where farming was its
+// own proof of demand: farm a game, stock it on four markets, collect four
+// "sales", earn full allocation and a raised cap, farm more. A game that had
+// never sold a single unit could hold itself at maximum allocation forever.
 async function internalSalesForGame(game) {
   const cutoff = new Date(Date.now() - SALES_WINDOW_MS);
   try {
-    // One SALE, not one drop row: a signal is written per drop, so a single
-    // sold account carrying a 50-item bundle used to read as 50 sales. That
-    // pinned every bundled game at full allocation and the maximum cap off one
-    // buyer, drowning out the games that really sell. Count the accounts the
-    // signals came from instead — an account sells once.
+    // One SALE, not one drop row. The two real sources need different
+    // collapsing, so the grouping key is per-source:
+    //   - "connected" writes one row PER DROP, so a single sold account
+    //     carrying a 50-item bundle would read as 50 sales — group those by
+    //     account, since an account sells once.
+    //   - "listing_sold" already writes one row per (listing, game, unit), and
+    //     a quantity listing does not know WHICH account the buyer received,
+    //     so account is null there. Grouping those by account would collapse
+    //     every anonymous unit sale on every listing into a single "sale";
+    //     they fall back to their dedupeKey, which is unique per unit.
+    // A Gameflip sale that the buyer then connects lands on the same account
+    // under both sources and is correctly counted once.
     const rows = await SaleSignal.aggregate([
-      { $match: { gameKey: String(game).toLowerCase(), at: { $gte: cutoff } } },
-      { $group: { _id: { $ifNull: ["$account", "$login"] } } },
-      { $count: "n" },
+      {
+        $match: {
+          gameKey: String(game).toLowerCase(),
+          at: { $gte: cutoff },
+          source: { $in: ["connected", "listing_sold"] },
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ["$account", "$dedupeKey"] },
+          // One sale can produce several rows (a Gameflip sale the buyer then
+          // connects). Take the best price any of them carries rather than
+          // summing, or the same money would be counted twice.
+          priceUsd: { $max: { $ifNull: ["$priceUsd", 0] } },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          revenue: { $sum: "$priceUsd" },
+          // How many of those sales we actually know a price for. A connection
+          // flip proves a sale but names no price, and dividing revenue by
+          // every sale would report a game as half-price purely because some
+          // of its evidence is priceless rather than free.
+          priced: { $sum: { $cond: [{ $gt: ["$priceUsd", 0] }, 1, 0] } },
+        },
+      },
     ]);
-    return (rows[0] && rows[0].n) || 0;
+    const r = rows[0] || { count: 0, revenue: 0, priced: 0 };
+    const count = r.count || 0;
+    const revenue = Math.round((r.revenue || 0) * 100) / 100;
+    return {
+      count,
+      revenue,
+      avgPrice: r.priced ? Math.round((revenue / r.priced) * 100) / 100 : 0,
+    };
   } catch {
-    return 0;
+    return { count: 0, revenue: 0, avgPrice: 0 };
   }
 }
 
@@ -432,11 +500,11 @@ function isForcedGame(game, af) {
   return list.some((f) => normForce(f) === g);
 }
 
-// How many accounts a game deserves. External market demand (Gameflip/GGSel/
-// Plati via MarketResearch) is blended with OUR OWN sales history: every
-// recent sale of this game's items (connection flips + reserved drops) adds
-// log-damped demand points. A game our own data proves sells never gets
-// skipped just because external scouts are quiet.
+// How many accounts a game deserves. External market demand (MarketResearch)
+// is blended with OUR OWN sales history: every recent PAID sale of this game's
+// items adds log-damped demand points, scaled by what those sales were worth.
+// A game our own data proves sells never gets skipped just because external
+// scouts are quiet.
 // Returns { target, tierNote, skip, effective } — skip=true means proven low demand.
 // Minimum accounts a campaign needs so EVERY enabled marketplace (gameflip +
 // plati + ggsel) can hold perMarketStock sellable accounts, doubled to keep
@@ -467,19 +535,48 @@ function marketStockFloor(af) {
 // a junk game still tops out at the base no matter how loud the market looks.
 const SALES_CAP_BONUS_PER_SALE = 2;
 const SALES_CAP_MULT_MAX = 2;
+
+// Callers used to pass a bare sale count and now pass { count, revenue,
+// avgPrice }. Accept both so a stale call site degrades to the old behaviour
+// (no price tilt) instead of reading NaN sales and skipping a good game.
+function salesOf(internalSales) {
+  if (internalSales && typeof internalSales === "object") {
+    return {
+      count: Math.max(0, Number(internalSales.count) || 0),
+      revenue: Math.max(0, Number(internalSales.revenue) || 0),
+      avgPrice: Math.max(0, Number(internalSales.avgPrice) || 0),
+    };
+  }
+  return {
+    count: Math.max(0, Number(internalSales) || 0),
+    revenue: 0,
+    avgPrice: 0,
+  };
+}
+
 function capForGame(af, internalSales = 0) {
   const base = Math.max(1, Number(af.maxPerGame) || 1);
-  const sales = Math.max(0, Number(internalSales) || 0);
+  const { count } = salesOf(internalSales);
   return Math.min(
-    base + Math.floor(sales * SALES_CAP_BONUS_PER_SALE),
+    base + Math.floor(count * SALES_CAP_BONUS_PER_SALE),
     base * SALES_CAP_MULT_MAX,
   );
 }
 
 function demandAllocation(research, af, internalSales = 0) {
   const cap = capForGame(af, internalSales);
+  const sales = salesOf(internalSales);
+  const pf = priceFactor(sales.avgPrice);
+  // Own sales are the strongest evidence there is, tilted by what they were
+  // worth: the same five sales count for more when each one is $18 than when
+  // each one is $0.30, because the accounts they cost us are the same either
+  // way.
   const salesBoost =
-    internalSales > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(internalSales) : 0;
+    sales.count > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(sales.count) * pf : 0;
+  const priceNote =
+    sales.avgPrice > 0
+      ? " at $" + sales.avgPrice.toFixed(2) + " avg"
+      : "";
   if (!research || research.scannedAt == null) {
     if (salesBoost >= DEMAND_HALF) {
       // No market data but our own sales history says it sells.
@@ -489,8 +586,10 @@ function demandAllocation(research, af, internalSales = 0) {
         target: full ? cap : Math.max(1, Math.ceil(cap / 2)),
         tierNote:
           "no external market data, but " +
-          internalSales +
-          " of our own recent sales — " +
+          sales.count +
+          " of our own recent sales" +
+          priceNote +
+          " — " +
           (full ? "full" : "half") +
           " allocation",
         effective: Math.round(salesBoost),
@@ -507,7 +606,9 @@ function demandAllocation(research, af, internalSales = 0) {
   const market = Number(research.demandScore || 0);
   const d = Math.round((market + salesBoost) * 10) / 10;
   const salesNote =
-    internalSales > 0 ? " incl. " + internalSales + " own sales" : "";
+    sales.count > 0
+      ? " incl. " + sales.count + " own sales" + priceNote
+      : "";
   if (d >= DEMAND_FULL) {
     return {
       cap,
@@ -1146,11 +1247,14 @@ async function processCampaign(c, ctx) {
   // when stale) blended with our own sales history (SaleSignal training data).
   const info = (ctx.infoMap && ctx.infoMap.get(key)) || {
     research: await freshResearchForGame(game),
-    internalSales: await internalSalesForGame(game),
+    sales: await internalSalesForGame(game),
   };
   const research = info.research;
-  const internalSales = info.internalSales || 0;
-  const alloc = demandAllocation(research, af, internalSales);
+  const sales = salesOf(info.sales);
+  // The task log records the plain count, which is what the AutoFarmTask
+  // schema has always stored and what every alert reads.
+  const internalSales = sales.count;
+  const alloc = demandAllocation(research, af, sales);
   if (alloc.skip) {
     await record({
       decision: "skip_low_demand",
@@ -2390,8 +2494,8 @@ async function runOnce() {
         "Researching " + c.game + " (markets + own sales history)\u2026",
       );
       const research = await freshResearchForGame(c.game);
-      const internalSales = await internalSalesForGame(c.game);
-      infoMap.set(c.campaignId, { research, internalSales });
+      const sales = await internalSalesForGame(c.game);
+      infoMap.set(c.campaignId, { research, sales });
       progress(
         c.game +
           ": " +
@@ -2400,8 +2504,10 @@ async function runOnce() {
               (research.demandScore != null ? research.demandScore : "?")
             : "no market data") +
           ", " +
-          internalSales +
-          " own sale(s) in 45d.",
+          sales.count +
+          " own sale(s) in 45d" +
+          (sales.revenue > 0 ? " worth $" + sales.revenue.toFixed(2) : "") +
+          ".",
       );
     }
 
@@ -2466,7 +2572,7 @@ async function runOnce() {
     const requests = [];
     for (const c of candidates) {
       const info = infoMap.get(c.campaignId);
-      const alloc = demandAllocation(info.research, af, info.internalSales);
+      const alloc = demandAllocation(info.research, af, info.sales);
       if (alloc.skip) {
         requests.push({ key: c.campaignId, want: 0, weight: 0 });
       } else {
@@ -3223,6 +3329,8 @@ module.exports = {
   fairShare,
   demandAllocation,
   capForGame,
+  salesOf,
+  internalSalesForGame,
   resolveFarmHost,
   isStranded,
 };
