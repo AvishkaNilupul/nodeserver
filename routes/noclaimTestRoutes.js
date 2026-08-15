@@ -70,8 +70,10 @@ async function sh(script, { timeout = 30000, input } = {}) {
 }
 
 // Build the bot config.json (BotSettings shape the C# bot reads). ClaimDrops is
-// hard-wired false — that's the whole point of this harness.
-function buildConfig({ clientSecret, login, game }) {
+// hard-wired false — that's the whole point of this harness. `id` must be the
+// account's REAL numeric Twitch user id: the watch payload does Int32.Parse on
+// it, so a non-numeric placeholder makes every watch throw a FormatException.
+function buildConfig({ clientSecret, login, game, id }) {
   const games = game ? [game] : [];
   return JSON.stringify(
     {
@@ -79,7 +81,7 @@ function buildConfig({ clientSecret, login, game }) {
         TwitchUsers: [
           {
             Login: login || "noclaim-test",
-            Id: "noclaimtest",
+            Id: String(id || ""),
             ClientSecret: clientSecret,
             Enabled: true,
             FavouriteGames: games,
@@ -159,6 +161,36 @@ router.post("/api/noclaim-test/start", requireSuperadmin, async (req, res) => {
         .json({ success: false, message: "ClientSecret is required." });
     }
 
+    // Resolve the account's REAL numeric Twitch id (the watch payload parses it
+    // as an int) — and validate the token upfront so a bad one fails fast with
+    // a clear message instead of a crash-looping container.
+    let twitchId = "";
+    let resolvedLogin = "";
+    try {
+      const info = await twitchInventory.fetchInventory(clientSecret);
+      twitchId = info.twitchId || "";
+      resolvedLogin = info.login || "";
+    } catch (err) {
+      if (err && err.code === "token_invalid") {
+        return res.status(400).json({
+          success: false,
+          message: "Twitch rejected the token (invalid/expired ClientSecret).",
+        });
+      }
+      return res.status(502).json({
+        success: false,
+        message:
+          "Couldn't reach Twitch to resolve the account (transient): " +
+          (err.message || "unknown"),
+      });
+    }
+    if (!twitchId) {
+      return res.status(400).json({
+        success: false,
+        message: "Twitch returned no numeric id for this token — can't farm.",
+      });
+    }
+
     // Refuse to stomp an in-flight provision.
     const busy = await sh(
       `[ -f ${hosts.shq(PROVISION_LOCK)} ] && echo busy || echo free`,
@@ -172,7 +204,12 @@ router.post("/api/noclaim-test/start", requireSuperadmin, async (req, res) => {
     }
 
     // 1) Write the config atomically via stdin (secret never appears in argv).
-    const config = buildConfig({ clientSecret, login, game });
+    const config = buildConfig({
+      clientSecret,
+      login: login || resolvedLogin,
+      game,
+      id: twitchId,
+    });
     await sh(
       `mkdir -p ${hosts.shq(CONFIG_DIR)} ${hosts.shq(LOG_DIR)} && ` +
         `cat > ${hosts.shq(CONFIG_FILE)} && chmod 600 ${hosts.shq(CONFIG_FILE)}`,
