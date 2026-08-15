@@ -199,8 +199,11 @@ router.post("/api/noclaim-test/start", requireSuperadmin, async (req, res) => {
         `else echo "image present, skipping build"; fi`,
       // replace any old container
       `docker rm -f ${hosts.shq(CONTAINER)} >/dev/null 2>&1 || true`,
-      // run the sandbox bot (no restart policy — it's a throwaway test)
-      `docker run -d --name ${hosts.shq(CONTAINER)} --restart no ` +
+      // run the sandbox bot (no restart policy — it's a throwaway test).
+      // --user 0:0: the branch Dockerfile drops to a non-root app user, which
+      // can't read the host-owned config.json mount (written 600 by avishka);
+      // root bypasses that while the token file stays 600 on disk.
+      `docker run -d --name ${hosts.shq(CONTAINER)} --restart no --user 0:0 ` +
         `-e INSIDE_DOCKER=true ` +
         `-v ${hosts.shq(CONFIG_DIR)}:/app/Configuration ` +
         `-v ${hosts.shq(LOG_DIR)}:/app/logs ` +
