@@ -512,28 +512,48 @@ router.get(
             const inv = await twitchInventory.fetchInventory(u.ClientSecret, {
               host,
             });
-            // Sellable = the buyer must still connect their own account to claim
-            // it (stateFor() -> "connect"): that is precisely the no-claim
-            // product. "connected"/"claimed" drops are already spoken for and
-            // must not be advertised.
-            const sellable = (inv.drops || []).filter(
-              (d) => d.state === "connect",
-            );
+            // What's sellable on a NO-CLAIM account, from two places:
+            //  1. inProgress drops the bot farmed to 100% but left UNCLAIMED
+            //     (percent>=100 && !claimed) — the core no-claim product, the
+            //     same items the Drops tab flags as farmedUnclaimed. These live
+            //     in inProgress, NOT drops[] (they were never claimed, so
+            //     buildDrops never sees them).
+            //  2. awarded event drops still needing the buyer to connect
+            //     (drops[] state==="connect") — games whose drops land here
+            //     instead. "connected"/"claimed" are already spoken for.
+            // Merge both, deduped by item name (an item can appear in one or the
+            // other), so the post/cover advertise the account's actual holdings.
+            const sellable = [];
+            const seen = new Set();
+            const add = (name, image, qty, g) => {
+              const key = String(name || "")
+                .trim()
+                .toLowerCase();
+              if (!key || seen.has(key)) return;
+              seen.add(key);
+              sellable.push({ name, image, qty: Math.max(1, qty || 1), game: g });
+            };
+            (inv.drops || [])
+              .filter((d) => d.state === "connect")
+              .forEach((d) => add(d.name, d.imageURL, d.count, d.game));
+            (inv.inProgress || [])
+              .filter((d) => d.percent >= 100 && !d.claimed)
+              .forEach((d) => add(d.name, d.imageURL, 1, d.game));
             const game = (sellable[0] && sellable[0].game) || cfgGame;
             const login = u.Login || inv.login || "";
             const post = buildSocialPost({
               game,
-              items: sellable.map((d) => ({ name: d.name, count: d.count })),
+              items: sellable.map((s) => ({ name: s.name, count: s.qty })),
             });
-            // Reuse the marketplace cover renderer as-is (drops -> its item
-            // shape), then move the temp file under public/ so the UI can <img>
-            // it. Empty set -> "" cover, which the UI simply omits.
+            // Reuse the marketplace cover renderer as-is, then move the temp
+            // file under public/ so the UI can <img> it. Empty set -> "" cover,
+            // which the UI simply omits.
             const coverUrl = await publishCover(
               await buildSetGridImage({
-                items: sellable.map((d) => ({
-                  name: d.name,
-                  image: d.imageURL,
-                  qty: d.count,
+                items: sellable.map((s) => ({
+                  name: s.name,
+                  image: s.image,
+                  qty: s.qty,
                 })),
               }),
               coverStem(id, login, i),
