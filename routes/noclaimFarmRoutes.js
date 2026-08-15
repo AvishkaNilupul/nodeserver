@@ -21,11 +21,15 @@
 // work when a row is expanded.
 // ---------------------------------------------------------------------------
 const express = require("express");
+const path = require("path");
+const fsp = require("fs/promises");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const hosts = require("../utils/botHosts");
 const settings = require("../utils/settings");
 const twitchInventory = require("../utils/twitchInventory");
+const { buildSocialPost } = require("../utils/socialPost");
+const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
 const { decrypt } = require("../utils/secretBox");
 
@@ -69,6 +73,34 @@ async function sh(script, { timeout = 30000, input } = {}) {
 const containerFor = (id) => CONTAINER_PREFIX + id;
 const botDir = (id) => BOTS_DIR + "/" + id;
 const configPath = (id) => botDir(id) + "/Configuration/config.json";
+
+// buildSetGridImage writes the cover to a temp file (it's built to feed the
+// marketplace uploaders a path); the social generator only needs to SHOW it in
+// the browser, so each cover is moved under public/ and served statically.
+// Live-only regenerated output — git-ignored like public/drop-images.
+const SOCIAL_COVER_DIR = path.join(__dirname, "..", "public", "noclaim-social");
+const SOCIAL_COVER_WEB = "/noclaim-social/";
+
+// One stable cover filename per (bot, account) so refreshing the tab overwrites
+// rather than piling up files; the returned URL is cache-busted so the operator
+// still sees the freshly regenerated image.
+function coverStem(id, login, i) {
+  const who =
+    String(login || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, "") || "acct" + i;
+  return "bot" + id + "-" + who;
+}
+
+async function publishCover(tmpPath, stem) {
+  if (!tmpPath) return ""; // empty set -> buildSetGridImage returns "" -> no cover
+  await fsp.mkdir(SOCIAL_COVER_DIR, { recursive: true });
+  const file = stem + (path.extname(tmpPath) || ".png");
+  // copy + unlink, not rename: os.tmpdir() is often a different mount (EXDEV).
+  await fsp.copyFile(tmpPath, path.join(SOCIAL_COVER_DIR, file));
+  await fsp.unlink(tmpPath).catch(() => {});
+  return SOCIAL_COVER_WEB + file + "?v=" + Date.now();
+}
 
 // Build one bot's config.json from a set of pool account docs.
 function buildConfig(accounts, game) {
@@ -424,6 +456,89 @@ router.get(
                 farmedUnclaimed: d.percent >= 100 && !d.claimed,
               })),
             };
+          } catch (e) {
+            out[i] = {
+              login: u.Login || "",
+              ok: false,
+              error:
+                e && e.code === "token_invalid" ? "token invalid" : e.message,
+            };
+          }
+        }
+      }
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, users.length) }, worker),
+      );
+      res.json({ success: true, accounts: out });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Per-bot social posts (lazy + slow — one Twitch inventory query per account).
+// For each account it turns the SELLABLE unclaimed drops into ready-to-paste
+// post copy + a grid cover image, for the operator to review and post BY HAND.
+// GENERATION ONLY: nothing here posts to X / Reddit / Discord / anywhere.
+// ---------------------------------------------------------------------------
+router.get(
+  "/api/noclaim-farm/bots/:id/social",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      const raw = await sh(
+        `[ -f ${hosts.shq(configPath(id))} ] && cat ${hosts.shq(configPath(id))} || echo ''`,
+        { timeout: 15000 },
+      );
+      if (!raw)
+        return res.status(404).json({ success: false, message: "No such bot." });
+      const cfg = JSON.parse(raw);
+      const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
+      const cfgGame = (cfg.FavouriteGames || [])[0] || "";
+      const host = pi();
+      // Same bounded fan-out as /drops (one GQL call per account, egressing via
+      // the Pi) so a full 70-account bot still responds.
+      const CONCURRENCY = 5;
+      const out = new Array(users.length);
+      let next = 0;
+      async function worker() {
+        while (next < users.length) {
+          const i = next++;
+          const u = users[i];
+          try {
+            const inv = await twitchInventory.fetchInventory(u.ClientSecret, {
+              host,
+            });
+            // Sellable = the buyer must still connect their own account to claim
+            // it (stateFor() -> "connect"): that is precisely the no-claim
+            // product. "connected"/"claimed" drops are already spoken for and
+            // must not be advertised.
+            const sellable = (inv.drops || []).filter(
+              (d) => d.state === "connect",
+            );
+            const game = (sellable[0] && sellable[0].game) || cfgGame;
+            const login = u.Login || inv.login || "";
+            const post = buildSocialPost({
+              game,
+              items: sellable.map((d) => ({ name: d.name, count: d.count })),
+            });
+            // Reuse the marketplace cover renderer as-is (drops -> its item
+            // shape), then move the temp file under public/ so the UI can <img>
+            // it. Empty set -> "" cover, which the UI simply omits.
+            const coverUrl = await publishCover(
+              await buildSetGridImage({
+                items: sellable.map((d) => ({
+                  name: d.name,
+                  image: d.imageURL,
+                  qty: d.count,
+                })),
+              }),
+              coverStem(id, login, i),
+            );
+            out[i] = { login, ok: true, game, count: sellable.length, post, coverUrl };
           } catch (e) {
             out[i] = {
               login: u.Login || "",

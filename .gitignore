@@ -46,6 +46,7 @@ __pycache__/
 
 # Runtime-generated assets & local host/settings config (live-only, not in git)
 public/drop-images/
+public/noclaim-social/
 config/botHosts.json
 config/botHosts.json.bak*
 utils/settings.json

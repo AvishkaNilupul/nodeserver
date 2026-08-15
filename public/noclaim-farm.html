@@ -249,6 +249,7 @@ function renderBotBody(id){
     '<div class="tabs">'+
       '<button class="tab '+(tab==='accounts'?'active':'')+'" data-tab="accounts">Accounts</button>'+
       '<button class="tab '+(tab==='drops'?'active':'')+'" data-tab="drops">Drops (live)</button>'+
+      '<button class="tab '+(tab==='social'?'active':'')+'" data-tab="social">Social post</button>'+
       '<button class="tab '+(tab==='logs'?'active':'')+'" data-tab="logs">Logs</button>'+
     '</div><div id="tabc-'+id+'"><div class="muted">Loading…</div></div>';
   body.querySelectorAll('.tab').forEach(function(t){
@@ -257,6 +258,7 @@ function renderBotBody(id){
   var c=$('tabc-'+id);
   if(tab==='accounts') loadAccounts(id,c);
   else if(tab==='drops') loadDrops(id,c);
+  else if(tab==='social') loadSocial(id,c);
   else loadLogs(id,c);
 }
 
@@ -294,6 +296,53 @@ async function loadDrops(id,c){
     h+='</tbody></table>';
     if(unclaimed) h+='<div class="chip off" style="display:inline-block;margin-top:10px;">✓ '+unclaimed+' drop(s) farmed &amp; left UNCLAIMED</div>';
     c.innerHTML=h;
+  }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+
+// Copy helper: navigator.clipboard where available (https / localhost), with a
+// throwaway-textarea + execCommand fallback so the button still works on plain
+// http. Generation tool only — this just fills the OS clipboard for the human.
+function copyToClipboard(txt){
+  function fallback(){
+    var ta=document.createElement('textarea'); ta.value=txt;
+    ta.style.position='fixed'; ta.style.left='-9999px'; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); toast('Copied to clipboard.'); }
+    catch(e){ toast('Copy failed — select the text manually.'); }
+    document.body.removeChild(ta);
+  }
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+    navigator.clipboard.writeText(txt).then(function(){toast('Copied to clipboard.');},fallback);
+  else fallback();
+}
+
+async function loadSocial(id,c){
+  c.innerHTML='<div class="muted">Generating post copy + cover for each account… (this can take a moment)</div>';
+  try{ var j=await api('/api/noclaim-farm/bots/'+id+'/social');
+    var rows=j.accounts||[];
+    if(!rows.length){ c.innerHTML='<div class="muted">No accounts.</div>'; return; }
+    var texts=[], h='';
+    rows.forEach(function(a,idx){
+      texts.push(a.ok?a.post.text:'');
+      if(!a.ok){
+        h+='<div class="panel" style="margin-bottom:12px;"><div class="hd"><b>'+esc(a.login||'account')+'</b>'+
+           '<span class="chip off" style="margin-left:auto;">'+esc(a.error||'error')+'</span></div></div>';
+        return;
+      }
+      var cover=a.coverUrl
+        ? '<img src="'+esc(a.coverUrl)+'" alt="cover" style="max-width:340px;width:100%;display:block;border:1px solid var(--line);border-radius:10px;margin-bottom:10px;">'
+        : '<div class="muted" style="margin-bottom:10px;">No cover — no unclaimed drops on this account yet.</div>';
+      h+='<div class="panel" style="margin-bottom:12px;">'+
+           '<div class="hd"><b>'+esc(a.login||'account')+'</b>'+
+             '<span class="chip'+(a.count>0?' on':'')+'">'+(a.count||0)+' unclaimed</span>'+
+             (a.game?'<span class="muted">'+esc(a.game)+'</span>':'')+
+             '<button class="btn ghost sm" data-copy="'+idx+'" style="margin-left:auto;">Copy</button></div>'+
+           '<div class="bd">'+cover+'<pre class="log">'+esc(a.post.text)+'</pre></div>'+
+         '</div>';
+    });
+    c.innerHTML=h;
+    c.querySelectorAll('button[data-copy]').forEach(function(btn){
+      btn.onclick=function(){ copyToClipboard(texts[+btn.getAttribute('data-copy')]||''); };
+    });
   }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
 }
 
