@@ -217,6 +217,56 @@
         outline: none;
         border-color: var(--accent);
       }
+      /* Searchable bundle picker (type-to-filter combobox). */
+      .combo {
+        position: relative;
+      }
+      .combo-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        z-index: 50;
+        max-height: 280px;
+        overflow-y: auto;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+        padding: 4px;
+      }
+      .combo-menu[hidden] {
+        display: none;
+      }
+      .combo-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .combo-item:hover,
+      .combo-item.active {
+        background: var(--surface-2);
+      }
+      .combo-item .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .combo-item .stock {
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .combo-empty {
+        padding: 10px;
+        color: var(--muted);
+        font-size: 13px;
+      }
       .row {
         display: grid;
         gap: 12px;
@@ -588,8 +638,16 @@
         <h2>Create an order</h2>
         <div class="row create-grid" style="margin-top: 12px">
           <div>
-            <label class="fld" for="setSel">Bundle (set)</label>
-            <select id="setSel"></select>
+            <label class="fld" for="setSearch">Bundle (set)</label>
+            <div class="combo" id="setCombo">
+              <input
+                id="setSearch"
+                type="text"
+                autocomplete="off"
+                placeholder="Type to search bundles…"
+              />
+              <div class="combo-menu" id="setMenu" hidden></div>
+            </div>
           </div>
           <div>
             <label class="fld" for="qtyInp">Quantity</label>
@@ -731,6 +789,109 @@
       }
 
       // ---------------------------------------------------------------- sets
+      // Searchable bundle picker: type to filter SETS, click or Enter to pick.
+      let SELECTED_SET_ID = "";
+      let FILTERED = [];
+      let ACTIVE_IDX = -1;
+
+      function setLabel(s) {
+        return s.name + " — " + s.stock + " in stock";
+      }
+
+      function closeSetMenu() {
+        $("setMenu").hidden = true;
+        ACTIVE_IDX = -1;
+      }
+
+      function renderSetMenu(q) {
+        const menu = $("setMenu");
+        const query = (q || "").trim().toLowerCase();
+        FILTERED = !query
+          ? SETS.slice()
+          : SETS.filter((s) => s.name.toLowerCase().includes(query));
+        if (!SETS.length) {
+          menu.innerHTML = '<div class="combo-empty">No sets found</div>';
+        } else if (!FILTERED.length) {
+          menu.innerHTML = '<div class="combo-empty">No match</div>';
+        } else {
+          menu.innerHTML = FILTERED.map(
+            (s, i) =>
+              '<div class="combo-item' +
+              (i === ACTIVE_IDX ? " active" : "") +
+              '" data-i="' +
+              i +
+              '"><span class="name">' +
+              esc(s.name) +
+              '</span><span class="stock">' +
+              s.stock +
+              " in stock</span></div>",
+          ).join("");
+        }
+        menu.hidden = false;
+      }
+
+      function scrollActiveIntoView() {
+        const el = $("setMenu").querySelector(".combo-item.active");
+        if (el) el.scrollIntoView({ block: "nearest" });
+      }
+
+      function chooseSet(s) {
+        SELECTED_SET_ID = s.id;
+        $("setSearch").value = setLabel(s);
+        closeSetMenu();
+      }
+
+      (function setupSetCombo() {
+        const inp = $("setSearch");
+        const menu = $("setMenu");
+        inp.addEventListener("input", () => {
+          // Typing invalidates any prior pick until an item is chosen again.
+          SELECTED_SET_ID = "";
+          ACTIVE_IDX = -1;
+          renderSetMenu(inp.value);
+        });
+        inp.addEventListener("focus", () => {
+          renderSetMenu(SELECTED_SET_ID ? "" : inp.value);
+        });
+        inp.addEventListener("keydown", (e) => {
+          if (menu.hidden && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+            renderSetMenu(inp.value);
+            return;
+          }
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            if (!FILTERED.length) return;
+            ACTIVE_IDX = Math.min(ACTIVE_IDX + 1, FILTERED.length - 1);
+            renderSetMenu(inp.value);
+            scrollActiveIntoView();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            if (!FILTERED.length) return;
+            ACTIVE_IDX = Math.max(ACTIVE_IDX - 1, 0);
+            renderSetMenu(inp.value);
+            scrollActiveIntoView();
+          } else if (e.key === "Enter") {
+            if (!menu.hidden && ACTIVE_IDX >= 0 && FILTERED[ACTIVE_IDX]) {
+              e.preventDefault();
+              chooseSet(FILTERED[ACTIVE_IDX]);
+            }
+          } else if (e.key === "Escape") {
+            closeSetMenu();
+          }
+        });
+        // mousedown (not click) so it fires before the input's blur closes it.
+        menu.addEventListener("mousedown", (e) => {
+          const item = e.target.closest(".combo-item");
+          if (!item) return;
+          e.preventDefault();
+          const s = FILTERED[Number(item.dataset.i)];
+          if (s) chooseSet(s);
+        });
+        document.addEventListener("click", (e) => {
+          if (!$("setCombo").contains(e.target)) closeSetMenu();
+        });
+      })();
+
       async function loadSets() {
         try {
           const d = await api("/bulk-orders/sets");
@@ -738,28 +899,20 @@
         } catch (e) {
           SETS = [];
         }
-        const sel = $("setSel");
-        if (!SETS.length) {
-          sel.innerHTML = '<option value="">No sets found</option>';
-          return;
-        }
-        sel.innerHTML = SETS.map(
-          (s) =>
-            '<option value="' +
-            s.id +
-            '">' +
-            esc(s.name) +
-            " — " +
-            s.stock +
-            " in stock</option>",
-        ).join("");
+        // Reset the picker whenever the list reloads (stock may have changed).
+        SELECTED_SET_ID = "";
+        $("setSearch").value = "";
+        $("setSearch").placeholder = SETS.length
+          ? "Type to search bundles…"
+          : "No sets found";
+        closeSetMenu();
       }
 
       // -------------------------------------------------------------- create
       $("createBtn").addEventListener("click", async () => {
-        const setId = $("setSel").value;
+        const setId = SELECTED_SET_ID;
         const qty = parseInt($("qtyInp").value, 10);
-        if (!setId) return toast("Pick a set first");
+        if (!setId) return toast("Pick a set from the list");
         if (!qty || qty < 1) return toast("Enter a quantity");
         const btn = $("createBtn");
         btn.disabled = true;
