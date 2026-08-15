@@ -263,9 +263,10 @@ function renderBotBody(id){
 async function loadAccounts(id,c){
   try{ var j=await api('/api/noclaim-farm/bots/'+id+'/accounts');
     if(!j.accounts.length){c.innerHTML='<div class="muted">No accounts.</div>';return;}
-    var h='<table><thead><tr><th>Login</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
+    var h='<table><thead><tr><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
     j.accounts.forEach(function(a){
-      h+='<tr><td>'+esc(a.login)+'</td><td class="mono">'+esc(a.twitchId)+'</td>'+
+      h+='<tr><td>'+esc(a.login)+'</td><td class="mono">'+(a.password?esc(a.password):'<span class="muted">—</span>')+'</td>'+
+         '<td class="mono">'+esc(a.twitchId)+'</td>'+
          '<td class="mono">'+esc(a.clientSecret)+'</td></tr>';
     });
     h+='</tbody></table>';

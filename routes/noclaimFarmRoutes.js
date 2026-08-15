@@ -27,6 +27,7 @@ const hosts = require("../utils/botHosts");
 const settings = require("../utils/settings");
 const twitchInventory = require("../utils/twitchInventory");
 const AvailableAccount = require("../models/AvailableAccount");
+const { decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
 
@@ -339,11 +340,32 @@ router.get(
         return res.status(404).json({ success: false, message: "No such bot." });
       const cfg = JSON.parse(raw);
       const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
-      // Surface the credential so the operator can list manually — this whole
+      // Join back to the pool by clientSecret to recover the login PASSWORD
+      // (the config only carries the token). Passwords are stored encrypted in
+      // the pool — decrypt here for the operator to list the account manually.
+      const secrets = users.map((u) => u.ClientSecret).filter(Boolean);
+      const pwMap = new Map();
+      if (secrets.length) {
+        const rows = await AvailableAccount.find(
+          { clientSecret: { $in: secrets } },
+          { clientSecret: 1, password: 1 },
+        ).lean();
+        for (const r of rows) {
+          let pw = "";
+          try {
+            pw = r.password ? decrypt(r.password) || "" : "";
+          } catch {
+            pw = "";
+          }
+          pwMap.set(r.clientSecret, pw);
+        }
+      }
+      // Surface the credentials so the operator can list manually — this whole
       // console is superadmin-only and the token already lives on the Pi.
       const accounts = users.map((u) => ({
         login: u.Login || "",
         twitchId: u.Id || "",
+        password: pwMap.get(u.ClientSecret) || "",
         clientSecret: u.ClientSecret || "",
       }));
       res.json({
