@@ -2459,8 +2459,17 @@ async function runOnce() {
     // re-announce an unchanged verdict on every tick, forever. Passing the prior
     // task down lets processCampaign tell a NEW decision from a repeat of one.
     const priorTasks = new Map();
+    let noClaimSkipped = 0;
     for (const c of live) {
       if (!c.game) continue;
+      // No-claim games (Overwatch, Rainbow Six) are handled by the standalone
+      // no-claim farming system — never farm or list them here. Skipping at the
+      // candidate stage means no NEW task is created; any already-active task
+      // for such a game is left to its normal lifecycle (leave existing as-is).
+      if (settings.isNoClaimGame(c.game)) {
+        noClaimSkipped++;
+        continue;
+      }
       const existing = await AutoFarmTask.findOne({
         game: c.game,
         campaignId: c.campaignId,
@@ -2484,6 +2493,13 @@ async function runOnce() {
         priorTasks.set(c.campaignId, existing);
       }
     }
+    if (noClaimSkipped)
+      progress(
+        "Skipped " +
+          noClaimSkipped +
+          " no-claim campaign(s) (Overwatch/Rainbow Six) — handled by the " +
+          "standalone no-claim farming system.",
+      );
     progress(candidates.length + " campaign(s) to decide this tick.");
 
     // Prefetch decision inputs once per candidate: live-refreshed market
@@ -3051,19 +3067,30 @@ async function backfillActiveTasks(af, host, progress) {
   const suspendedLogins = await suspendedAccounts
     .suspendedLoginSet()
     .catch(() => new Set());
+  // No-claim games (Overwatch/Rainbow Six) are handled by the standalone
+  // system: never spend more pool accounts topping up an old-system task for
+  // one (existing accounts stay put — leave as-is — they just don't grow).
+  const spendable = tasks.filter((t) => !settings.isNoClaimGame(t.game));
+  const noClaimTopSkipped = tasks.length - spendable.length;
+  if (noClaimTopSkipped)
+    progress(
+      "Backfill: skipping " +
+        noClaimTopSkipped +
+        " no-claim task(s) (Overwatch/Rainbow Six).",
+    );
   // Fresh accounts cannot finish a drop that ends in a few hours, so a task
   // whose campaign is inside the same time gate that blocks new farming is not
   // worth spending on either.
-  const worthTopping = tasks.filter(
+  const worthTopping = spendable.filter(
     (t) =>
       !t.campaignEndAt ||
       hoursLeft(t.campaignEndAt) >= af.minHoursLeft ||
       isForcedGame(t.game, af),
   );
-  if (worthTopping.length < tasks.length) {
+  if (worthTopping.length < spendable.length) {
     progress(
       "Backfill: skipping " +
-        (tasks.length - worthTopping.length) +
+        (spendable.length - worthTopping.length) +
         " task(s) whose campaign ends within " +
         af.minHoursLeft +
         "h.",

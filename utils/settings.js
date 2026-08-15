@@ -18,6 +18,13 @@ const AUTO_FARM_DEFAULTS = {
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
+  // Games that CANNOT be sold via the normal click-claim-then-sell flow
+  // (Overwatch, Rainbow Six): the auto-farmer must NOT farm OR list them — they
+  // are handled by the standalone no-claim farming system instead. These are
+  // loose keywords matched as a SUBSTRING of the normalised game label (see
+  // isNoClaimGame), so "overwatch" also catches "Overwatch 2" and "rainbow six"
+  // catches "Tom Clancy's Rainbow Six Siege". Editable from that tab.
+  noClaimGames: ["overwatch", "rainbow six"],
   // Suspended-account retirement (utils/suspendedAccounts.js). Classifying and
   // releasing runs every tick and is reversible, so it has no switch; the
   // permanent delete does, and ships OFF. Turning it on removes every account
@@ -152,6 +159,30 @@ async function setAutoFarm(patch) {
   return s.autoFarm;
 }
 
+// Normalise a game label for tolerant comparison ("Rainbow Six Siege",
+// "rainbow-six siege", "RainbowSix  Siege" all collapse to the same key).
+function normGameName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+// True when a game is on the no-claim list — i.e. it must be excluded from the
+// normal auto-farmer's farm + list paths and handled by the standalone no-claim
+// farming system instead. Single source of truth for both systems. Each entry
+// is a keyword matched as a SUBSTRING of the normalised label, so "rainbow six"
+// catches "Tom Clancy's Rainbow Six Siege" and "overwatch" catches "Overwatch 2".
+function isNoClaimGame(game) {
+  const list = getAutoFarm().noClaimGames || [];
+  const g = normGameName(game);
+  if (!g) return false;
+  return list.some((x) => {
+    const key = normGameName(x);
+    return key && g.includes(key);
+  });
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -159,4 +190,6 @@ module.exports = {
   setRequire2fa,
   getAutoFarm,
   setAutoFarm,
+  normGameName,
+  isNoClaimGame,
 };

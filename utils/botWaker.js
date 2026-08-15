@@ -27,6 +27,7 @@
 const hosts = require("./botHosts");
 const TwitchCampaign = require("../models/TwitchCampaign");
 const { botCompletion } = require("./farmCompletion");
+const settings = require("./settings");
 
 const REGISTRY = "parked-bots.json";
 
@@ -95,6 +96,9 @@ function wakeTrigger(games, parkedAt, campaigns, graceMs = 0) {
   const floor = since - (Number(graceMs) || 0);
   for (const c of campaigns || []) {
     if (!games.has(norm(c.game))) continue;
+    // No-claim games (Overwatch/Rainbow Six) are farmed by the standalone
+    // system now — a new campaign for one must never wake an old-system bot.
+    if (settings.isNoClaimGame(c.game)) continue;
     if (!c.startAt) return c;
     if (new Date(c.startAt).getTime() > floor) return c;
   }
