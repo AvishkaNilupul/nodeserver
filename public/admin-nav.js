@@ -119,6 +119,22 @@
           superOnly: true,
         },
         {
+          href: "/noclaim-farm.html",
+          label: "No-claim farming",
+          icon:
+            '<path d="M12 2v6M12 22v-6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 ' +
+            '12h6M22 12h-6M4.9 19.1l4.2-4.2M14.9 9.1l4.2-4.2"></path>',
+          superOnly: true,
+        },
+        {
+          href: "/noclaim-test.html",
+          label: "No-claim test",
+          icon:
+            '<path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 ' +
+            '2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>',
+          superOnly: true,
+        },
+        {
           href: "/drops-archive.html",
           label: "Drops archive",
           icon: ICONS.dropsArchive,
