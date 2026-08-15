@@ -31,6 +31,16 @@ const router = express.Router();
 
 const MAX_QTY = 1000;
 
+// The set picker computes live stock for every bundle via a full DropLog
+// aggregation (~4s). That is fine once, but the endpoint ran it uncached on
+// every page load, so under production DB contention it could exceed nginx's
+// 60s proxy_read_timeout and 504 — which the UI shows as "No sets found". Cache
+// the payload briefly (stock hints being a few seconds stale is harmless; the
+// create path re-validates availability atomically), mirroring the Shop's
+// listingsCache so a burst of loads runs the aggregation at most once per TTL.
+let setsCache = { at: 0, data: null };
+const SETS_TTL_MS = 15000;
+
 // ------------------------------------------------------------------ helpers
 
 async function makeOrderNo() {
@@ -201,7 +211,16 @@ async function orderPortalView(order) {
 // Every set + how many bulk units it can currently fill, for the create picker.
 router.get("/bulk-orders/sets", requireSuperadmin, async (req, res) => {
   try {
-    const sets = await DropSet.find({}).sort({ updatedAt: -1 }).lean();
+    if (setsCache.data && Date.now() - setsCache.at < SETS_TTL_MS) {
+      return res.json({ success: true, sets: setsCache.data });
+    }
+    // Custom sets are marketplace promo covers, not bulk-sellable account
+    // bundles (they are deliberately kept out of the Shop's buyable view), so
+    // they never belong in this picker — and dropping them keeps the payload
+    // and dropdown to the ~80 real bundles instead of 400+ rows.
+    const sets = await DropSet.find({ custom: { $ne: true } })
+      .sort({ updatedAt: -1 })
+      .lean();
     const stockMap = await stockForSets(sets);
     const out = sets.map((s) => {
       const st = stockMap.get(String(s._id)) || { stock: 0 };
@@ -219,6 +238,7 @@ router.get("/bulk-orders/sets", requireSuperadmin, async (req, res) => {
         stock: st.stock,
       };
     });
+    setsCache = { at: Date.now(), data: out };
     res.json({ success: true, sets: out });
   } catch (err) {
     console.error("bulk-orders sets error:", err.message);
