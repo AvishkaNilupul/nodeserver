@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>No-claim test</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .themebtn{cursor:pointer;}
+
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout:hover { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+
+  .banner { margin: 16px 0; padding: 12px 15px; border-radius: 12px; border:1px solid var(--line); background: var(--surface-2); font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .banner b { color: var(--ink); }
+
+  .grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px){ .grid { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+  .panel .hd { padding: 13px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .panel .hd b { font-size: 14.5px; }
+  .panel .bd { padding: 16px; }
+
+  label { display:block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 5px; text-transform: uppercase; letter-spacing: .03em; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=password], textarea { width:100%; padding: 10px 12px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; outline:none; font-family:inherit; }
+  input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+
+  .btn { border:none; border-radius: 10px; padding: 10px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer; font-family:inherit; }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
+  .btn.ghost:hover { background: var(--surface-2); }
+  .btn.danger { background: var(--surface); color: var(--red); border:1px solid var(--line); }
+  .btn.danger:hover { background:#fef2f2; border-color:#fecaca; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top: 14px; }
+
+  .chip { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border:1px solid var(--line); color: var(--muted); background: var(--surface-2); }
+  .chip.on { color: var(--green); background:#ecfdf5; border-color:transparent; }
+  .chip.off { color: var(--red); background:#fef2f2; border-color:transparent; }
+  .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
+
+  pre.log { margin:0; background:#0b0e14; color:#c8d3e6; border-radius: 10px; padding: 12px; font-size: 12px; line-height: 1.5; max-height: 340px; overflow:auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .logtabs { display:flex; gap:6px; margin-bottom:10px; }
+  .logtab { font-size:12.5px; padding:6px 12px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer; font-weight:600; }
+  .logtab.active { background:var(--accent); color:#fff; border-color:transparent; }
+
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align:left; padding: 8px 10px; border-bottom:1px solid var(--line); }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
+  .prog { height:7px; border-radius:999px; background:var(--surface-2); overflow:hidden; min-width:90px; }
+  .prog i { display:block; height:100%; background:var(--accent); }
+  .prog i.done { background: var(--green); }
+  .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width: 380px; }
+  .toast.show { opacity:1; transform:none; }
+  code { background: var(--surface-2); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+    <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
+    <a href="/twitch-inventory.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 18v3M7 8h.01M11 8h2"></path></svg> Twitch drops</a>
+    <a class="active" href="/noclaim-test.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg> No-claim test</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout themebtn" onclick="toggleTheme()" title="Toggle dark mode"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <h1>No-claim farming test</h1>
+  <div class="sub">Farms drops to 100% but never clicks <b>Claim</b> — the buyer connects and claims. Sandbox only.</div>
+
+  <div class="banner">
+    🧪 <b>Isolated test harness.</b> Runs <b>one</b> throwaway container on the <b>Raspberry Pi</b>
+    (<code>twitchbot-noclaimtest</code> in <code>/home/avishka/twitchbot-noclaim-test</code>) using the
+    <code>noclaim-test</code> build. It does <b>not</b> touch the real bot fleet, the account pool, the
+    scanner, or any listings. &nbsp;⚠️ Unclaimed drops can expire (often ~24h / campaign end), so treat
+    farmed accounts as time-sensitive.
+  </div>
+
+  <div class="grid">
+    <!-- LEFT: controls -->
+    <div class="panel">
+      <div class="hd"><b>Test account</b> <span class="chip" id="stateChip" style="margin-left:auto;">…</span></div>
+      <div class="bd">
+        <label for="clientSecret">Twitch ClientSecret (OAuth token)</label>
+        <input type="password" id="clientSecret" placeholder="the account's ClientSecret" autocomplete="off" spellcheck="false" />
+        <div class="hint">Same token you put in a bot config. Stored only in the Pi sandbox.</div>
+
+        <label for="login">Login <span style="text-transform:none;font-weight:400;">(optional, label only)</span></label>
+        <input type="text" id="login" placeholder="e.g. testaccount123" autocomplete="off" spellcheck="false" />
+
+        <label for="game">Game to farm <span style="text-transform:none;font-weight:400;">(optional)</span></label>
+        <input type="text" id="game" placeholder="exact Twitch game name, or blank = any live drop" autocomplete="off" spellcheck="false" />
+        <div class="hint">Blank farms whatever drop campaigns are live for the account.</div>
+
+        <div class="row">
+          <button class="btn primary" id="startBtn">Start test</button>
+          <button class="btn danger" id="stopBtn">Stop</button>
+          <button class="btn ghost" id="wipeBtn" title="Stop and delete the sandbox config + logs">Stop &amp; wipe</button>
+        </div>
+        <div class="hint" id="startHint" style="margin-top:10px;"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: monitor -->
+    <div style="display:flex;flex-direction:column;gap:18px;">
+      <div class="panel">
+        <div class="hd">
+          <b>Live check — is it farmed but unclaimed?</b>
+          <button class="btn ghost" id="invBtn" style="margin-left:auto;padding:7px 12px;">Check inventory</button>
+        </div>
+        <div class="bd" id="invBody">
+          <div class="hint">Runs a read-only Twitch inventory query on the entered token. Look for drops at
+            <b>100%</b> with an <span class="chip off" style="padding:1px 7px;">unclaimed</span> tag — that's the proof.</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="hd">
+          <b>Logs</b>
+          <div class="logtabs" style="margin-left:auto;margin-bottom:0;">
+            <button class="logtab active" id="tabProvision">Build / provision</button>
+            <button class="logtab" id="tabContainer">Bot</button>
+          </div>
+          <button class="btn ghost" id="logRefresh" style="padding:7px 12px;">Refresh</button>
+        </div>
+        <div class="bd">
+          <pre class="log" id="logView">Start a test to see output…</pre>
+          <div class="hint" style="margin-top:8px;">Auto-refreshing every 5s while running.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function toggleTheme(){ var d=document.documentElement; var dark=d.getAttribute('data-theme')==='dark'; if(dark){d.removeAttribute('data-theme');try{localStorage.setItem('theme','light')}catch(e){}}else{d.setAttribute('data-theme','dark');try{localStorage.setItem('theme','dark')}catch(e){}} syncThemeIcons(); }
+function syncThemeIcons(){ var dark=document.documentElement.getAttribute('data-theme')==='dark'; document.querySelectorAll('.t-moon').forEach(function(e){e.style.display=dark?'none':''}); document.querySelectorAll('.t-sun').forEach(function(e){e.style.display=dark?'':'none'}); }
+syncThemeIcons();
+document.getElementById('logoutBtn').onclick=function(){ fetch('/logout',{method:'POST'}).finally(function(){location.href='/admin-login.html';}); };
+
+var $ = function(id){ return document.getElementById(id); };
+var toastT;
+function toast(msg){ var t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(function(){t.classList.remove('show');},3200); }
+
+async function api(path, opts){
+  var r = await fetch(path, Object.assign({headers:{'Content-Type':'application/json'}}, opts||{}));
+  var j = {};
+  try { j = await r.json(); } catch(e){}
+  if(!r.ok || j.success===false){ throw new Error(j.message || ('HTTP '+r.status)); }
+  return j;
+}
+
+var logMode = 'provision';
+var lastLogs = { provision:'', container:'' };
+var pollT = null;
+
+function setState(s){
+  var chip = $('stateChip');
+  var txt, cls='chip';
+  if(s.provisioning){ txt='building…'; cls='chip warn'; }
+  else if(s.running){ txt='running'; cls='chip on'; }
+  else if(s.containerState==='exited'){ txt='stopped ('+(s.containerStatus||'exited')+')'; cls='chip off'; }
+  else if(s.hasConfig){ txt='idle'; cls='chip'; }
+  else { txt='no test'; cls='chip'; }
+  chip.className=cls; chip.textContent=txt;
+  $('startHint').textContent = s.imageBuilt ? '' : 'First run builds the Docker image on the Pi (a few minutes).';
+  return s;
+}
+
+async function refreshState(){
+  try { return setState(await api('/api/noclaim-test/state')); }
+  catch(e){ $('stateChip').className='chip off'; $('stateChip').textContent='error'; $('startHint').textContent=e.message; return {}; }
+}
+
+async function refreshLogs(){
+  try {
+    var j = await api('/api/noclaim-test/logs?tail=400');
+    lastLogs.provision = j.provision || '(no build output yet)';
+    lastLogs.container = j.container || '(no bot logs yet)';
+    renderLogs();
+  } catch(e){ /* leave last logs */ }
+}
+function renderLogs(){
+  $('logView').textContent = logMode==='provision' ? lastLogs.provision : lastLogs.container;
+}
+
+function startPoll(){ if(pollT) return; pollT=setInterval(tick, 5000); }
+function stopPoll(){ if(pollT){ clearInterval(pollT); pollT=null; } }
+async function tick(){
+  var s = await refreshState();
+  await refreshLogs();
+  if(!s.provisioning && !s.running) stopPoll();
+}
+
+$('startBtn').onclick = async function(){
+  var clientSecret = $('clientSecret').value.trim();
+  if(!clientSecret){ toast('Enter a ClientSecret first.'); return; }
+  this.disabled=true;
+  try{
+    var j = await api('/api/noclaim-test/start', { method:'POST', body: JSON.stringify({
+      clientSecret: clientSecret,
+      login: $('login').value.trim(),
+      game: $('game').value.trim()
+    })});
+    toast(j.message || 'Started.');
+    logMode='provision'; setLogTab();
+    startPoll(); tick();
+  }catch(e){ toast('Start failed: '+e.message); }
+  finally{ this.disabled=false; }
+};
+
+async function doStop(wipe){
+  try{
+    await api('/api/noclaim-test/stop'+(wipe?'?wipe=1':''), { method:'POST' });
+    toast(wipe?'Stopped & wiped.':'Stopped.');
+    await refreshState(); await refreshLogs();
+  }catch(e){ toast('Stop failed: '+e.message); }
+}
+$('stopBtn').onclick = function(){ doStop(false); };
+$('wipeBtn').onclick = function(){ if(confirm('Stop the test and delete its sandbox config + logs on the Pi?')) doStop(true); };
+
+function setLogTab(){
+  $('tabProvision').classList.toggle('active', logMode==='provision');
+  $('tabContainer').classList.toggle('active', logMode==='container');
+  renderLogs();
+}
+$('tabProvision').onclick=function(){ logMode='provision'; setLogTab(); };
+$('tabContainer').onclick=function(){ logMode='container'; setLogTab(); };
+$('logRefresh').onclick=refreshLogs;
+
+$('invBtn').onclick = async function(){
+  var body=$('invBody');
+  body.innerHTML='<div class="hint">Querying Twitch…</div>';
+  try{
+    var j = await api('/api/noclaim-test/inventory');
+    renderInventory(body, j);
+  }catch(e){ body.innerHTML='<div class="chip off" style="display:inline-block">'+escapeHtml(e.message)+'</div>'; }
+};
+
+function renderInventory(body, j){
+  var rows = (j.inProgress||[]);
+  var head = '<div style="margin-bottom:10px;font-size:12.5px;color:var(--muted);">Account <b style="color:var(--ink)">'+escapeHtml(j.login||'?')+'</b> — '+rows.length+' in-progress drop(s)</div>';
+  if(!rows.length){ body.innerHTML=head+'<div class="hint">No in-progress drops yet. Give it time to accumulate watch minutes.</div>'; return; }
+  var html = head + '<table><thead><tr><th>Drop</th><th>Game</th><th>Progress</th><th>Status</th></tr></thead><tbody>';
+  rows.forEach(function(d){
+    var pct = Math.max(0, Math.min(100, d.percent||0));
+    var done = pct>=100;
+    var status;
+    if(d.claimed){ status='<span class="chip on">claimed</span>'; }
+    else if(done){ status='<span class="chip off">unclaimed ✓ farmed</span>'; }
+    else { status='<span class="chip">farming</span>'; }
+    html += '<tr><td>'+escapeHtml(d.name||'')+'</td><td>'+escapeHtml(d.game||'')+'</td>'+
+      '<td><div style="display:flex;align-items:center;gap:8px;"><div class="prog"><i class="'+(done?'done':'')+'" style="width:'+pct+'%"></i></div><span style="font-size:11.5px;color:var(--muted)">'+pct+'%</span></div></td>'+
+      '<td>'+status+'</td></tr>';
+  });
+  html += '</tbody></table>';
+  var farmedUnclaimed = rows.filter(function(d){return d.farmedUnclaimed;}).length;
+  if(farmedUnclaimed){ html += '<div class="chip off" style="display:inline-block;margin-top:12px;">✓ '+farmedUnclaimed+' drop(s) farmed and left UNCLAIMED — no-claim mode working</div>'; }
+  body.innerHTML = html;
+}
+
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+// initial load
+(async function(){
+  var s = await refreshState();
+  await refreshLogs();
+  if(s.provisioning || s.running) startPoll();
+})();
+</script>
+</body>
+</html>
