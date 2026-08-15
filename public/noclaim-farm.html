@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>No-claim farming</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+  .nav .me .who b { font-size: 13.5px; display: block; } .nav .me .who span { font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 24px 28px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .banner { margin: 14px 0; padding: 11px 14px; border-radius: 12px; border:1px solid var(--line); background: var(--surface-2); font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .banner b { color: var(--ink); }
+
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin: 14px 0; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 9px 15px; }
+  .stat b { font-size: 18px; display:block; } .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 16px; }
+  .panel .hd { padding: 12px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .panel .hd b { font-size: 14.5px; } .panel .bd { padding: 14px 16px; }
+
+  label { display:block; font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing:.03em; }
+  input, select { padding: 9px 11px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; outline:none; font-family:inherit; }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .btn { border:none; border-radius: 10px; padding: 9px 15px; font-size: 13px; font-weight: 600; cursor: pointer; font-family:inherit; }
+  .btn.primary { background: var(--accent); color: #fff; } .btn.primary:hover{filter:brightness(1.06);}
+  .btn.ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); } .btn.ghost:hover{background:var(--surface-2);}
+  .btn.danger { background: var(--surface); color: var(--red); border:1px solid var(--line); } .btn.danger:hover{background:#fef2f2;border-color:#fecaca;}
+  .btn.sm { padding: 6px 11px; font-size: 12px; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  .chip { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border:1px solid var(--line); color: var(--muted); background: var(--surface-2); }
+  .chip.on { color: var(--green); background:#ecfdf5; border-color:transparent; }
+  .chip.off { color: var(--red); background:#fef2f2; border-color:transparent; }
+  .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
+
+  .bot { border:1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow:hidden; }
+  .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; }
+  .bot .row:hover { background: var(--surface-2); }
+  .bot .row .g { font-weight:600; } .bot .row .meta { color:var(--muted); font-size:12.5px; }
+  .bot .row .sp { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .bot .body { border-top:1px solid var(--line); padding: 12px 14px; display:none; background:var(--surface-2); }
+  .bot.open .body { display:block; }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; }
+  .tab { font-size:12px; padding:5px 11px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer; font-weight:600; }
+  .tab.active { background:var(--accent); color:#fff; border-color:transparent; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line); }
+  th { font-size:10.5px; text-transform:uppercase; color:var(--muted); }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size:11.5px; }
+  .prog { height:6px; border-radius:999px; background:var(--surface); overflow:hidden; min-width:70px; display:inline-block; vertical-align:middle;}
+  .prog i { display:block; height:100%; background:var(--accent); } .prog i.done{background:var(--green);}
+  pre.log { margin:0; background:#0b0e14; color:#c8d3e6; border-radius:9px; padding:11px; font-size:11.5px; line-height:1.5; max-height:280px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; }
+  .tagrow { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .tag { display:inline-flex; align-items:center; gap:6px; background:var(--surface-2); border:1px solid var(--line); border-radius:999px; padding:4px 10px; font-size:12.5px; }
+  .tag button { border:none; background:none; color:var(--muted); cursor:pointer; font-size:14px; line-height:1; }
+  .muted { color:var(--muted); font-size:12.5px; }
+  .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width:380px;}
+  .toast.show { opacity:1; transform:none; }
+  code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+    <a href="/bots.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg> Bots</a>
+    <a href="/noclaim-test.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg> No-claim test</a>
+    <a class="active" href="/noclaim-farm.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6M12 22v-6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 12h6M22 12h-6M4.9 19.1l4.2-4.2M14.9 9.1l4.2-4.2"></path></svg> No-claim farming</a>
+  </nav>
+  <div class="me">
+    <span class="av">--</span>
+    <div class="who"><b>Admin</b><span>Seller</span></div>
+    <button class="logout" onclick="toggleTheme()" title="Toggle dark mode"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>No-claim farming</h1>
+      <div class="sub">Standalone farming for games that can't be click-claimed (Overwatch, Rainbow Six). Farms unclaimed; you list manually.</div>
+    </div>
+    <div style="margin-left:auto;"><button class="btn ghost sm" id="refreshBtn">Refresh</button></div>
+  </div>
+
+  <div class="banner">
+    🧪 <b>Isolated.</b> Bots run the no-claim build in their own Pi dir (<code>/home/avishka/twitchbot-noclaim</code>), pull from the shared account pool (respecting the auto-farm reserve), and touch <b>no</b> listings / scanner / Drop Archive. ⚠️ Unclaimed drops can expire (~24h / campaign end) — list farmed accounts promptly.
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b id="stBots">–</b><span>Bots</span></div>
+    <div class="stat"><b id="stRunning">–</b><span>Running</span></div>
+    <div class="stat"><b id="stPool">–</b><span>Pool spendable</span></div>
+    <div class="stat"><b id="stImg">–</b><span>Image</span></div>
+  </div>
+
+  <!-- Create -->
+  <div class="panel">
+    <div class="hd"><b>New no-claim bot</b> <span class="muted" id="poolNote" style="margin-left:auto;"></span></div>
+    <div class="bd">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+        <div><label for="game">Game</label><select id="game" style="min-width:200px;"></select></div>
+        <div><label for="count">Accounts from pool</label><input id="count" type="number" min="1" max="70" value="5" style="width:120px;" /></div>
+        <button class="btn primary" id="createBtn">Create &amp; farm</button>
+      </div>
+      <div class="muted" id="createHint" style="margin-top:9px;"></div>
+    </div>
+  </div>
+
+  <!-- Bots -->
+  <div class="panel">
+    <div class="hd"><b>Bots</b> <span class="muted" id="botsCount" style="margin-left:auto;"></span></div>
+    <div class="bd"><div id="bots"><div class="muted">Loading…</div></div></div>
+  </div>
+
+  <!-- No-claim game list -->
+  <div class="panel">
+    <div class="hd"><b>No-claim games</b> <span class="muted" style="margin-left:auto;">excluded from the normal auto-farmer &amp; auto-lister</span></div>
+    <div class="bd">
+      <div class="tagrow" id="gamesTags"></div>
+      <div style="margin-top:11px;display:flex;gap:8px;">
+        <input id="newGame" placeholder="keyword e.g. overwatch, rainbow six" style="min-width:260px;" />
+        <button class="btn ghost sm" id="addGameBtn">Add</button>
+      </div>
+      <div class="muted" style="margin-top:8px;">Matched as a substring of the game name — "overwatch" also catches "Overwatch 2".</div>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function toggleTheme(){var d=document.documentElement,dark=d.getAttribute('data-theme')==='dark';if(dark){d.removeAttribute('data-theme');try{localStorage.setItem('theme','light')}catch(e){}}else{d.setAttribute('data-theme','dark');try{localStorage.setItem('theme','dark')}catch(e){}}ti();}
+function ti(){var dark=document.documentElement.getAttribute('data-theme')==='dark';document.querySelectorAll('.t-moon').forEach(e=>e.style.display=dark?'none':'');document.querySelectorAll('.t-sun').forEach(e=>e.style.display=dark?'':'none');}
+ti();
+document.getElementById('logoutBtn').onclick=function(){fetch('/logout',{method:'POST'}).finally(()=>location.href='/admin-login.html');};
+var $=function(id){return document.getElementById(id);};
+var toastT; function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),3400);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j={};try{j=await r.json();}catch(e){}if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
+
+var openBots = {}; // id -> {tab, loadedAccounts, loadedDrops}
+var pollT=null;
+
+async function loadState(){
+  try{
+    var j=await api('/api/noclaim-farm/state');
+    $('stBots').textContent=j.bots.length;
+    $('stRunning').textContent=j.bots.filter(b=>b.running).length;
+    $('stImg').textContent=j.imageBuilt?'ready':(j.provisioning?'building…':'none');
+    $('botsCount').textContent=j.bots.length+' bot'+(j.bots.length===1?'':'s')+(j.provisioning?' · building…':'');
+    renderBots(j.bots);
+    // keep polling only while something is building/running
+    var active=j.provisioning||j.bots.some(b=>b.running);
+    if(active&&!pollT) pollT=setInterval(loadState,6000);
+    if(!active&&pollT){clearInterval(pollT);pollT=null;}
+  }catch(e){ $('bots').innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+
+async function loadPool(){
+  try{ var j=await api('/api/noclaim-farm/pool');
+    $('stPool').textContent=j.spendable;
+    $('poolNote').textContent=j.ready+' ready · reserve '+j.reserve+' · '+j.spendable+' spendable';
+  }catch(e){ $('stPool').textContent='?'; }
+}
+
+function stChip(b){
+  if(b.running) return '<span class="chip on">running</span>';
+  if(b.containerState==='exited') return '<span class="chip off">stopped</span>';
+  if(b.containerState==='none') return '<span class="chip warn">building…</span>';
+  return '<span class="chip">'+esc(b.containerState||'?')+'</span>';
+}
+
+function renderBots(bots){
+  if(!bots.length){ $('bots').innerHTML='<div class="muted">No bots yet. Create one above.</div>'; return; }
+  var el=$('bots'); el.innerHTML='';
+  bots.forEach(function(b){
+    var open=!!openBots[b.id];
+    var wrap=document.createElement('div'); wrap.className='bot'+(open?' open':'');
+    wrap.innerHTML =
+      '<div class="row" data-id="'+b.id+'">'+
+        '<span class="g">'+esc(b.game||'(any)')+'</span>'+
+        '<span class="meta">bot #'+esc(b.id)+' · '+b.accounts+' account'+(b.accounts===1?'':'s')+'</span>'+
+        '<span class="sp">'+stChip(b)+
+          '<button class="btn ghost sm" data-act="stop" data-id="'+b.id+'">Stop</button>'+
+          '<button class="btn danger sm" data-act="release" data-id="'+b.id+'">Release</button>'+
+        '</span>'+
+      '</div>'+
+      '<div class="body" id="body-'+b.id+'">'+(open?'':'')+'</div>';
+    el.appendChild(wrap);
+    if(open) renderBotBody(b.id);
+  });
+  el.querySelectorAll('.row').forEach(function(row){
+    row.addEventListener('click',function(e){
+      if(e.target.closest('button')) return;
+      var id=row.getAttribute('data-id');
+      if(openBots[id]) delete openBots[id]; else openBots[id]={tab:'accounts'};
+      loadState();
+    });
+  });
+  el.querySelectorAll('button[data-act]').forEach(function(btn){
+    btn.addEventListener('click',async function(e){
+      e.stopPropagation();
+      var id=btn.getAttribute('data-id'), act=btn.getAttribute('data-act');
+      if(act==='release' && !confirm('Release bot #'+id+'? Stops it, returns its accounts to the pool, deletes its config.')) return;
+      btn.disabled=true;
+      try{ var j=await api('/api/noclaim-farm/bots/'+id+'/'+act,{method:'POST'});
+        toast(act==='release'?('Released — '+(j.released||0)+' account(s) back to pool.'):'Stopped.');
+        delete openBots[id]; await loadState(); await loadPool();
+      }catch(err){ toast(act+' failed: '+err.message); btn.disabled=false; }
+    });
+  });
+}
+
+function renderBotBody(id){
+  var body=$('body-'+id); if(!body) return;
+  var st=openBots[id]; var tab=st.tab||'accounts';
+  body.innerHTML =
+    '<div class="tabs">'+
+      '<button class="tab '+(tab==='accounts'?'active':'')+'" data-tab="accounts">Accounts</button>'+
+      '<button class="tab '+(tab==='drops'?'active':'')+'" data-tab="drops">Drops (live)</button>'+
+      '<button class="tab '+(tab==='logs'?'active':'')+'" data-tab="logs">Logs</button>'+
+    '</div><div id="tabc-'+id+'"><div class="muted">Loading…</div></div>';
+  body.querySelectorAll('.tab').forEach(function(t){
+    t.onclick=function(){ st.tab=t.getAttribute('data-tab'); renderBotBody(id); };
+  });
+  var c=$('tabc-'+id);
+  if(tab==='accounts') loadAccounts(id,c);
+  else if(tab==='drops') loadDrops(id,c);
+  else loadLogs(id,c);
+}
+
+async function loadAccounts(id,c){
+  try{ var j=await api('/api/noclaim-farm/bots/'+id+'/accounts');
+    if(!j.accounts.length){c.innerHTML='<div class="muted">No accounts.</div>';return;}
+    var h='<table><thead><tr><th>Login</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
+    j.accounts.forEach(function(a){
+      h+='<tr><td>'+esc(a.login)+'</td><td class="mono">'+esc(a.twitchId)+'</td>'+
+         '<td class="mono">'+esc(a.clientSecret)+'</td></tr>';
+    });
+    h+='</tbody></table>';
+    c.innerHTML=h;
+  }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+
+async function loadDrops(id,c){
+  c.innerHTML='<div class="muted">Querying Twitch for each account… (this can take a moment)</div>';
+  try{ var j=await api('/api/noclaim-farm/bots/'+id+'/drops');
+    var rows=j.accounts||[]; var unclaimed=0;
+    var h='<table><thead><tr><th>Account</th><th>Drop</th><th>Progress</th><th>Status</th></tr></thead><tbody>';
+    rows.forEach(function(a){
+      if(!a.ok){ h+='<tr><td>'+esc(a.login)+'</td><td colspan="3"><span class="chip off">'+esc(a.error||'error')+'</span></td></tr>'; return; }
+      if(!a.drops.length){ h+='<tr><td>'+esc(a.login)+'</td><td colspan="3" class="muted">no in-progress drops yet</td></tr>'; return; }
+      a.drops.forEach(function(d,i){
+        var pct=Math.max(0,Math.min(100,d.percent||0)), done=pct>=100;
+        var stat=d.claimed?'<span class="chip on">claimed</span>':(done?'<span class="chip off">unclaimed ✓</span>':'<span class="chip">farming</span>');
+        if(d.farmedUnclaimed) unclaimed++;
+        h+='<tr><td>'+(i===0?esc(a.login):'')+'</td><td>'+esc(d.name)+'</td>'+
+           '<td><span class="prog"><i class="'+(done?'done':'')+'" style="width:'+pct+'%"></i></span> '+pct+'%</td>'+
+           '<td>'+stat+'</td></tr>';
+      });
+    });
+    h+='</tbody></table>';
+    if(unclaimed) h+='<div class="chip off" style="display:inline-block;margin-top:10px;">✓ '+unclaimed+' drop(s) farmed &amp; left UNCLAIMED</div>';
+    c.innerHTML=h;
+  }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+
+async function loadLogs(id,c){
+  try{ var j=await api('/api/noclaim-farm/bots/'+id+'/logs?tail=200');
+    c.innerHTML='<pre class="log">'+esc(j.container||'(no logs yet)')+'</pre>';
+  }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+
+// --- no-claim game list ---
+var games=[];
+async function loadGames(){
+  try{ var j=await api('/api/noclaim-farm/games'); games=j.games||[]; renderGames(); fillGameSelect(); }catch(e){}
+}
+function renderGames(){
+  var el=$('gamesTags');
+  el.innerHTML = games.length ? games.map((g,i)=>'<span class="tag">'+esc(g)+'<button data-i="'+i+'">×</button></span>').join('') : '<span class="muted">none</span>';
+  el.querySelectorAll('button').forEach(function(b){ b.onclick=function(){ games.splice(+b.getAttribute('data-i'),1); saveGames(); }; });
+}
+function fillGameSelect(){
+  var sel=$('game'); var cur=sel.value;
+  sel.innerHTML = games.map(g=>'<option value="'+esc(g)+'">'+esc(g)+'</option>').join('');
+  if(cur) sel.value=cur;
+}
+async function saveGames(){
+  try{ var j=await api('/api/noclaim-farm/games',{method:'POST',body:JSON.stringify({games:games})}); games=j.games||[]; renderGames(); fillGameSelect(); toast('Saved.'); }
+  catch(e){ toast('Save failed: '+e.message); }
+}
+$('addGameBtn').onclick=function(){ var v=$('newGame').value.trim().toLowerCase(); if(!v)return; if(!games.includes(v))games.push(v); $('newGame').value=''; saveGames(); };
+
+$('createBtn').onclick=async function(){
+  var game=$('game').value, count=parseInt($('count').value,10)||0;
+  if(!game){ toast('Add a no-claim game first.'); return; }
+  this.disabled=true; $('createHint').textContent='Claiming accounts + starting on the Pi…';
+  try{ var j=await api('/api/noclaim-farm/bots',{method:'POST',body:JSON.stringify({game:game,count:count})});
+    toast(j.message||'Created.'); $('createHint').textContent='';
+    await loadState(); await loadPool();
+  }catch(e){ toast('Create failed: '+e.message); $('createHint').textContent=''; }
+  finally{ this.disabled=false; }
+};
+$('refreshBtn').onclick=function(){ loadState(); loadPool(); };
+
+(async function(){ await loadGames(); await loadPool(); await loadState(); })();
+</script>
+</body>
+</html>
