@@ -11,105 +11,144 @@
     </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Renters</title>
+    <title>Renters | RedeemHub</title>
     <style>
       :root {
-        --bg: #f6f7fb; --surface: #fff; --surface-2: #f8fafc; --line: #e7eaf0;
-        --ink: #0f172a; --muted: #6b7280; --accent: #4f46e5; --accent2: #6366f1;
-        --green: #059669; --red: #dc2626; --yellow: #b45309;
+        --bg: #f4f6f8; --surface: #ffffff; --surface-2: #f8fafb; --line: #dfe5ea;
+        --ink: #17212b; --muted: #687582; --accent: #3f51b5; --accent-soft: #eef1ff;
+        --green: #087f5b; --green-soft: #e7f6f0; --red: #c92a2a; --red-soft: #fff0f0;
+        --yellow: #a15c00; --yellow-soft: #fff7e6; --shadow: 0 8px 24px rgba(28, 39, 49, .06);
       }
       html[data-theme="dark"] {
-        --bg: #0e1014; --surface: #161a22; --surface-2: #1e232e; --line: #2a3140;
-        --ink: #e8ebf2; --muted: #9aa3b4; --green: #34d399; --red: #f87171;
-        --yellow: #fbbf24; color-scheme: dark;
+        --bg: #101419; --surface: #171d23; --surface-2: #1d252d; --line: #303a44;
+        --ink: #edf1f4; --muted: #9aa8b4; --accent: #9aa9ff; --accent-soft: #252b4a;
+        --green: #55d6a6; --green-soft: #17352b; --red: #ff8585; --red-soft: #3b2023;
+        --yellow: #f6c66f; --yellow-soft: #3b2d18; --shadow: 0 10px 28px rgba(0, 0, 0, .2);
+        color-scheme: dark;
       }
-      html[data-theme="dark"] .nav .links a.active { background: rgba(99,102,241,.2); }
       * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { font-family: "Inter","Segoe UI",Tahoma,sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
-      .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+      body { min-height: 100vh; font-family: Inter, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+      button, input, select, textarea { font: inherit; }
+      button { border: 0; cursor: pointer; }
+      .nav { width: 236px; height: 100vh; position: fixed; inset: 0 auto 0 0; z-index: 10; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
       .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-      .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,.32); }
-      .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
-      .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
-      .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
-      .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
-      .nav .links a:hover { background: var(--surface-2); }
-      .nav .links a.active { background: #eef2ff; color: var(--accent); }
+      .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: var(--accent); display: grid; place-items: center; box-shadow: 0 7px 14px rgba(63,81,181,.25); }
+      .nav .brand b { font-size: 15px; font-weight: 750; line-height: 1.15; }
+      .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; margin-top: 2px; }
+      .nav .links { padding: 12px; flex: 1; overflow-y: auto; }
+      .nav .links a { display: flex; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 9px; color: var(--muted); text-decoration: none; font-size: 13.5px; font-weight: 550; }
+      .nav .links a:hover { background: var(--surface-2); color: var(--ink); }
+      .nav .links a.active { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
       .nav .me { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--line); }
-      .nav .me .av { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg,#10b981,#059669); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+      .nav .me .av { width: 34px; height: 34px; border-radius: 10px; background: var(--green); color: #fff; display: grid; place-items: center; font-weight: 750; font-size: 12px; }
       .nav .me .who { flex: 1; min-width: 0; }
-      .nav .me .who b { font-size: 13px; display: block; }
-      .nav .me .who span { font-size: 11px; color: var(--muted); }
-      .nav .me .logout { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+      .nav .me .who b { display: block; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .nav .me .who span { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+      .nav .me .logout { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; }
       .nav .me .logout:hover { color: var(--red); border-color: var(--red); }
-      .page { flex: 1; overflow-y: auto; padding: 26px 30px 60px; }
-      h1 { font-size: 22px; font-weight: 800; }
-      .sub { color: var(--muted); font-size: 13.5px; margin-top: 3px; }
-      .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-      h2 { font-size: 15px; font-weight: 700; }
-      label.fld { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
-      input, select, textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); color: var(--ink); font-size: 13.5px; font-family: inherit; }
-      textarea { min-height: 90px; font-family: ui-monospace, Menlo, monospace; resize: vertical; }
-      input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
-      .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-      .grid4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
-      .btn { display: inline-block; border: 0; border-radius: 10px; padding: 10px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer; background: var(--accent); color: #fff; font-family: inherit; text-decoration: none; text-align: center; }
-      .btn:hover { filter: brightness(1.05); }
+      .page { min-height: 100vh; margin-left: 236px; padding: 30px 34px 64px; }
+      .page-inner { max-width: 1440px; margin: 0 auto; }
+      .page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+      .eyebrow { color: var(--accent); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+      h1 { margin-top: 5px; font-size: 32px; line-height: 1.1; letter-spacing: 0; }
+      .sub { color: var(--muted); font-size: 13px; line-height: 1.45; }
+      .page-header .sub { margin-top: 7px; }
+      .header-actions, .actions, .acts { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+      .header-actions { justify-content: flex-end; }
+      .btn { min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 8px; padding: 9px 13px; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 700; text-decoration: none; text-align: center; }
+      .btn:hover { filter: brightness(1.06); }
       .btn:disabled { opacity: .55; cursor: default; }
       .btn.ghost { background: var(--surface); color: var(--ink); border: 1px solid var(--line); }
       .btn.ghost:hover { background: var(--surface-2); filter: none; }
       .btn.danger { background: var(--surface); color: var(--red); border: 1px solid var(--line); }
-      .btn.danger:hover { border-color: var(--red); }
-      .btn.sm { padding: 7px 11px; font-size: 12.5px; }
+      .btn.danger:hover { border-color: var(--red); background: var(--red-soft); }
       .btn.warn { background: var(--surface); color: var(--yellow); border: 1px solid var(--line); }
-      .muted { color: var(--muted); }
-      /* Placeholder shown in place of a section that hasn't been fetched yet. */
-      .lazyidle { display:flex; gap:10px; align-items:center; padding:16px; flex-wrap:wrap; }
-      .lazyidle .muted { font-size:12.5px; }
-      .sect { margin-top: 26px; }
-      .sect > .shdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-      .rows { display: flex; flex-direction: column; gap: 10px; }
-      .row { background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 14px 16px; display: grid; grid-template-columns: 1.3fr 1.2fr 1fr auto; gap: 14px; align-items: center; }
-      .row .nm { font-weight: 700; font-size: 14px; }
-      .row .meta { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
-      .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-      .badge { font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); }
-      .badge.active { color: var(--green); border-color: var(--green); }
-      .badge.suspended { color: var(--red); border-color: var(--red); }
-      .badge.expired { color: var(--yellow); border-color: var(--yellow); }
-      .badge.wait { color: var(--muted); }
-      .approve-item { background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 13px 15px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-      .approve-item .lg { font-size: 12px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
-      .pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--yellow); color: var(--yellow); }
-      .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: none; align-items: flex-start; justify-content: center; padding: 34px 16px; z-index: 50; overflow-y: auto; }
-      .overlay.show { display: flex; }
-      .modal { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; width: 100%; max-width: 640px; padding: 22px; }
-      .modal .mh { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-      .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; z-index: 100; pointer-events: none; max-width: min(560px, 90vw); text-align: center; line-height: 1.4; }
-      .toast.show { opacity: .95; }
-      .credbox { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--accent); border-radius: 11px; font-size: 13px; }
-      .credbox code { font-family: ui-monospace, Menlo, monospace; }
-      .dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
-      .drop { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 11px; padding: 9px 11px; }
-      .drop img, .drop .ph { width: 36px; height: 36px; border-radius: 8px; object-fit: cover; background: var(--surface); border: 1px solid var(--line); display: grid; place-items: center; font-size: 10px; color: var(--muted); flex-shrink: 0; }
-      .drop .nm { flex: 1; min-width: 0; }
-      .drop .nm b { font-size: 13px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .drop .nm span { font-size: 11px; color: var(--muted); }
-      .drop .ct { font-weight: 800; color: var(--accent); }
+      .btn.warn:hover { background: var(--yellow-soft); }
+      .btn.sm { min-height: 31px; padding: 7px 10px; font-size: 11.5px; }
+      .icon-btn { width: 36px; min-width: 36px; padding: 0; }
+      .icon-btn svg, .btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+      .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 26px 0 22px; }
+      .metric { min-height: 102px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 17px; box-shadow: var(--shadow); }
+      .metric-top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+      .metric-label { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+      .metric-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; color: var(--accent); background: var(--accent-soft); }
+      .metric-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .metric-value { display: block; margin-top: 10px; font-size: 25px; line-height: 1; letter-spacing: 0; }
+      .metric-detail { display: block; margin-top: 7px; min-height: 16px; color: var(--muted); font-size: 11.5px; }
+      .metric.good .metric-icon { color: var(--green); background: var(--green-soft); }
+      .metric.warn .metric-icon { color: var(--yellow); background: var(--yellow-soft); }
+      .metric.alert .metric-icon { color: var(--red); background: var(--red-soft); }
+      .tabs { display: flex; align-items: center; gap: 3px; border-bottom: 1px solid var(--line); margin-bottom: 20px; overflow-x: auto; }
+      .tab-btn { flex: 0 0 auto; position: relative; padding: 10px 13px 12px; color: var(--muted); background: transparent; font-size: 12.5px; font-weight: 700; }
+      .tab-btn:hover { color: var(--ink); }
+      .tab-btn.active { color: var(--accent); }
+      .tab-btn.active::after { content: ""; position: absolute; right: 10px; bottom: -1px; left: 10px; height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; }
+      .view { display: none; }
+      .view.active { display: block; }
+      .overview-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(330px, .75fr); gap: 16px; align-items: start; }
+      .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+      .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 17px 18px 14px; border-bottom: 1px solid var(--line); }
+      .panel-header h2 { font-size: 14px; line-height: 1.25; }
+      .panel-header .sub { margin-top: 3px; font-size: 11.5px; }
+      .panel-body { padding: 15px 18px 18px; }
+      .panel-wide { margin-top: 16px; }
+      .panel-wide .panel-body { padding-top: 0; }
+      .form-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+      .span-2 { grid-column: span 2; }
+      .span-3 { grid-column: span 3; }
+      label.fld { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 750; }
+      input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink); padding: 9px 10px; font-size: 12.5px; }
+      input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-color: var(--accent); }
+      textarea { min-height: 100px; resize: vertical; }
       .selin { width: auto; min-width: 150px; display: inline-block; }
-      .mono { font-family: ui-monospace, Menlo, monospace; }
-      .tokwarn { color: var(--red); font-weight: 700; }
-      .logbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 12px; }
-      .logbar .live { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font-weight: 700; }
-      .logbar .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
-      .logwrap { margin-top: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 11px; padding: 11px 13px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto; }
-      /* Per-account credential reveal inside the Accounts list. The slot is a
-         flex child of .approve-item, so it needs a full-width basis to drop
-         onto its own line under the account instead of squeezing in beside it. */
+      .form-actions { display: flex; align-items: flex-end; gap: 8px; }
+      .form-actions .btn { width: 100%; }
+      .result { margin-top: 12px; }
+      .list { display: flex; flex-direction: column; }
+      .row { display: grid; grid-template-columns: minmax(180px, 1.3fr) minmax(150px, 1fr) minmax(120px, .8fr) auto; gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+      .row:last-child, .approve-item:last-child { border-bottom: 0; }
+      .row .nm { font-size: 13px; font-weight: 750; }
+      .row .meta, .approve-item .meta { margin-top: 4px; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+      .approve-item { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+      .approve-item .lg { margin-top: 5px; color: var(--muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .badge { display: inline-flex; align-items: center; gap: 4px; width: fit-content; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); font-size: 10.5px; font-weight: 800; white-space: nowrap; }
+      .badge.active { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--line)); background: var(--green-soft); }
+      .badge.suspended { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); background: var(--red-soft); }
+      .badge.expired { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, var(--line)); background: var(--yellow-soft); }
+      .badge.wait { color: var(--muted); background: var(--surface-2); }
+      .pill { display: inline-flex; margin-left: 5px; border: 1px solid var(--yellow); border-radius: 999px; padding: 3px 8px; color: var(--yellow); background: var(--yellow-soft); font-size: 10.5px; font-weight: 800; vertical-align: middle; }
+      .toolbar-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+      .inventory-panel .panel-body { padding-top: 0; }
+      .lazyidle { display: flex; align-items: center; gap: 10px; padding: 18px 0 3px; flex-wrap: wrap; }
+      .lazyidle .muted { font-size: 11.5px; }
+      .dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 9px; padding: 15px 0; }
+      .drop { display: flex; align-items: center; gap: 10px; min-width: 0; border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px; background: var(--surface-2); }
+      .drop img, .drop .ph { width: 35px; height: 35px; flex: 0 0 35px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); font-size: 10px; object-fit: cover; }
+      .drop .nm { min-width: 0; flex: 1; }
+      .drop .nm b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+      .drop .nm span { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10.5px; }
+      .drop .ct { color: var(--accent); font-size: 12px; font-weight: 800; }
+      .mono, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .muted { color: var(--muted); }
+      .tokwarn { color: var(--red); font-weight: 750; }
+      .credbox { padding: 12px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 12px; line-height: 1.45; }
+      .credline { width: 100%; margin-top: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.7; word-break: break-all; }
+      .credline b { color: var(--muted); font-family: inherit; }
       .credslot { flex-basis: 100%; }
-      .credline { width: 100%; margin-top: 9px; padding: 9px 11px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.7; word-break: break-all; }
-      .credline b { color: var(--muted); font-family: inherit; font-weight: 700; }
-      @media (max-width: 760px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } .row { grid-template-columns: 1fr; } }
+      .logbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 11px; }
+      .logbar .live { display: inline-flex; align-items: center; gap: 5px; color: var(--green); font-weight: 750; }
+      .logbar .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+      .logwrap { max-height: 340px; overflow: auto; margin-top: 8px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: #11171c; color: #d9e2e8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+      .overlay { position: fixed; inset: 0; z-index: 50; display: none; align-items: flex-start; justify-content: center; overflow-y: auto; padding: 32px 16px; background: rgba(15, 23, 42, .52); }
+      .overlay.show { display: flex; }
+      .modal { width: min(760px, 100%); padding: 22px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: 0 18px 60px rgba(0,0,0,.2); }
+      .modal .mh { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
+      .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+      .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+      .toast { position: fixed; left: 50%; bottom: 22px; z-index: 100; max-width: min(560px, 90vw); padding: 10px 16px; border-radius: 8px; background: var(--ink); color: var(--bg); font-size: 12.5px; line-height: 1.4; text-align: center; opacity: 0; pointer-events: none; transform: translate(-50%, 8px); transition: opacity .2s, transform .2s; }
+      .toast.show { opacity: .96; transform: translate(-50%, 0); }
+      @media (max-width: 1100px) { .overview-grid { grid-template-columns: 1fr; } .row { grid-template-columns: 1.2fr 1fr auto; } .row > :nth-child(3) { display: none; } }
+      @media (max-width: 760px) { .page { margin-left: 0; padding: 76px 15px 42px; } .page-header { flex-direction: column; } h1 { font-size: 27px; } .header-actions { width: 100%; justify-content: flex-start; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin: 20px 0 16px; } .metric { min-height: 92px; padding: 13px; } .metric-value { font-size: 22px; } .form-grid { grid-template-columns: 1fr 1fr; } .span-2, .span-3 { grid-column: span 2; } .panel-header, .panel-body { padding-left: 14px; padding-right: 14px; } .row { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; } .row .acts { width: 100%; justify-content: flex-start; } .toolbar-controls { width: 100%; } .toolbar-controls select { flex: 1; } .grid3, .grid4 { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
@@ -118,100 +157,71 @@
         <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
         <b>RedeemHub<span>Admin console</span></b>
       </div>
-      <nav class="links">
-        <a href="/admin.html">Inbox</a>
-        <a href="/orders">Orders</a>
-        <a href="/inventory">Inventory</a>
-      </nav>
+      <nav class="links"></nav>
       <div class="me">
         <span class="av" id="meAvatar">--</span>
-        <div class="who"><b id="meName">Admin</b><span id="meRole">Superadmin</span></div>
-        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Theme">
-          <svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-          <svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>
+        <div class="who"><b id="meName">Admin</b><span id="meRole">Super Admin</span></div>
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
+          <svg class="t-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+          <svg class="t-sun" style="display:none" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l1.41-1.41M19.07 4.93l-1.41 1.41"></path></svg>
         </button>
-        <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+        <button class="logout" id="logoutBtn" title="Log out" aria-label="Log out"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
       </div>
     </aside>
 
     <main class="page">
-      <h1>Renters</h1>
-      <p class="sub">Rent a standalone bot to an outside seller: create their own bot, cap how many accounts they can add, and set an access period. Their accounts and drops are a separate inventory — never mixed into your Drops Archive. Account submissions land in the approval queue below; nothing goes live until you approve it.</p>
-
-      <div class="card" style="margin-top:18px">
-        <h2>Add a renter</h2>
-        <div class="grid3" style="margin-top:12px">
-          <div><label class="fld">Username</label><input id="cU" autocapitalize="none" spellcheck="false" /></div>
-          <div><label class="fld">Password</label><input id="cP" /></div>
-          <div style="display:flex;align-items:flex-end"><div class="muted" style="font-size:12px;line-height:1.4">Pick an existing bot below to share it (several renters on one container = less RAM), or leave it and create a fresh bot from <b>Manage → Create bot</b>.</div></div>
-        </div>
-        <div class="grid3" style="margin-top:12px">
-          <div><label class="fld">Bot <span class="muted">(optional — shared allowed)</span></label><select id="cBot" class="selin" style="width:100%"><option value="">No bot yet</option></select><div id="cBotNote" class="muted" style="font-size:12px;margin-top:5px"></div></div>
-          <div style="grid-column:span 2"><label class="fld">Games to farm <span class="muted">(comma-separated — their accounts are armed with these)</span></label><input id="cGames" placeholder="e.g. Rust, VALORANT" /></div>
-        </div>
-        <div class="grid4" style="margin-top:12px">
-          <div><label class="fld">Account limit</label><input id="cMax" type="number" min="0" value="50" /></div>
-          <div><label class="fld">Access start</label><input id="cStart" type="date" /></div>
-          <div><label class="fld">Access end</label><input id="cEnd" type="date" /></div>
-          <div style="display:flex;align-items:flex-end"><button class="btn" id="cBtn" style="width:100%">Create renter</button></div>
-        </div>
-        <div id="cResult"></div>
-      </div>
-
-      <div class="sect">
-        <div class="shdr"><h2>Pending approvals <span class="pill" id="pendCount" style="display:none"></span></h2><button class="btn ghost sm" id="refreshBtn">Refresh</button></div>
-        <div class="rows" id="approvals"></div>
-      </div>
-
-      <div class="sect">
-        <div class="shdr"><h2>Rented bots <span class="muted" id="scanStat" style="font-size:12.5px;font-weight:500"></span></h2><button class="btn ghost sm" id="refreshBots">Refresh</button></div>
-        <div class="rows" id="rentBots"><div class="muted" style="padding:6px 2px">Loading…</div></div>
-      </div>
-
-      <div class="sect">
-        <div class="shdr">
-          <h2>Renter accounts <span class="muted" id="accTotal" style="font-size:13px;font-weight:600"></span></h2>
-          <div style="display:flex;gap:8px;align-items:center">
-            <select id="accFilter" class="selin"><option value="all">All renters</option></select>
-            <button class="btn ghost sm" id="accReveal">Show secrets</button>
-            <button class="btn ghost sm" id="refreshAccs">Refresh</button>
+      <div class="page-inner">
+        <header class="page-header">
+          <div><div class="eyebrow">Renting operations</div><h1>Renters</h1><p class="sub">Access, bot health, and isolated inventory in one workspace.</p></div>
+          <div class="header-actions">
+            <button class="btn ghost" id="newRenterBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>New renter</button>
+            <button class="btn icon-btn" id="refreshBtn" title="Refresh workspace" aria-label="Refresh workspace"><svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path></svg></button>
           </div>
-        </div>
-        <div class="card">
-          <div id="accsIdle" class="lazyidle">
-            <button class="btn sm" id="loadAccsBtn">Load renter accounts</button>
-            <span class="muted">Not loaded — managing renters doesn't need them.</span>
-          </div>
-          <div id="rentAccs"></div>
-        </div>
-      </div>
+        </header>
 
-      <div class="sect">
-        <div class="shdr">
-          <h2>Rented drops archive <span class="muted" id="dropTotal" style="font-size:13px;font-weight:600"></span></h2>
-          <div style="display:flex;gap:8px;align-items:center">
-            <select id="dropFilter" class="selin"><option value="all">All renters</option></select>
-            <button class="btn ghost sm" id="refreshDrops">Refresh</button>
-          </div>
-        </div>
-        <div class="card">
-          <div id="dropsIdle" class="lazyidle">
-            <button class="btn sm" id="loadDropsBtn">Load drops archive</button>
-            <span class="muted">Thousands of rows — loaded only when you ask.</span>
-          </div>
-          <div id="rentDrops"></div>
-        </div>
-      </div>
+        <section class="metrics" aria-label="Renting health">
+          <div class="metric" id="metricRentersCard"><div class="metric-top"><span class="metric-label">Renters</span><span class="metric-icon"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path></svg></span></div><strong class="metric-value" id="metricRenters">—</strong><span class="metric-detail" id="metricRentersDetail">Loading</span></div>
+          <div class="metric" id="metricBotsCard"><div class="metric-top"><span class="metric-label">Bots</span><span class="metric-icon"><svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path></svg></span></div><strong class="metric-value" id="metricBots">—</strong><span class="metric-detail" id="metricBotsDetail">Loading</span></div>
+          <div class="metric" id="metricPendingCard"><div class="metric-top"><span class="metric-label">Approvals</span><span class="metric-icon"><svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg></span></div><strong class="metric-value" id="metricPending">—</strong><span class="metric-detail" id="metricPendingDetail">Loading</span></div>
+          <div class="metric" id="metricIssuesCard"><div class="metric-top"><span class="metric-label">Token issues</span><span class="metric-icon"><svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"></circle><path d="M21 2l-9.6 9.6M15 8l3 3M18 5l3 3"></path></svg></span></div><strong class="metric-value" id="metricIssues">—</strong><span class="metric-detail" id="metricIssuesDetail">Loading</span></div>
+        </section>
 
-      <div class="sect">
-        <div class="shdr"><h2>Renters</h2></div>
-        <div class="rows" id="renters"><div class="muted" style="padding:6px 2px">Loading…</div></div>
+        <nav class="tabs" aria-label="Renting views"><button class="tab-btn active" data-view="overview">Overview</button><button class="tab-btn" data-view="accounts">Accounts</button><button class="tab-btn" data-view="drops">Drops</button></nav>
+
+        <section class="view active" id="viewOverview">
+          <div class="overview-grid">
+            <section class="panel" id="createPanel">
+              <div class="panel-header"><div><h2>Add a renter</h2><p class="sub">Create access and attach a bot in one step.</p></div></div>
+              <div class="panel-body"><div class="form-grid">
+                <div class="span-2"><label class="fld">Username</label><input id="cU" autocapitalize="none" spellcheck="false" autocomplete="off" /></div>
+                <div class="span-2"><label class="fld">Password</label><input id="cP" type="password" autocomplete="new-password" /></div>
+                <div class="span-2"><label class="fld">Account limit</label><input id="cMax" type="number" min="0" value="50" /></div>
+                <div class="span-3"><label class="fld">Bot <span class="muted">(optional, sharing allowed)</span></label><select id="cBot"><option value="">No bot yet</option></select><div id="cBotNote" class="sub" style="margin-top:5px"></div></div>
+                <div class="span-3"><label class="fld">Games to farm</label><input id="cGames" placeholder="Rust, VALORANT" /></div>
+                <div class="span-2"><label class="fld">Access start</label><input id="cStart" type="date" /></div>
+                <div class="span-2"><label class="fld">Access end</label><input id="cEnd" type="date" /></div>
+                <div class="span-2 form-actions"><button class="btn" id="cBtn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>Create renter</button></div>
+              </div><div id="cResult" class="result"></div></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header"><div><h2>Pending approvals <span class="pill" id="pendCount" style="display:none"></span></h2><p class="sub">Submitted accounts waiting for a decision.</p></div><button class="btn ghost sm icon-btn" id="refreshApprovals" title="Refresh approvals" aria-label="Refresh approvals"><svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path></svg></button></div>
+              <div class="panel-body"><div class="list" id="approvals"></div></div>
+            </section>
+          </div>
+
+          <section class="panel panel-wide"><div class="panel-header"><div><h2>Rented bots</h2><p class="sub" id="scanStat">Live state and scanner progress.</p></div><button class="btn ghost sm icon-btn" id="refreshBots" title="Refresh bots" aria-label="Refresh bots"><svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path></svg></button></div><div class="panel-body"><div class="list" id="rentBots"><div class="muted" style="padding:18px 0">Loading…</div></div></div></section>
+          <section class="panel panel-wide"><div class="panel-header"><div><h2>Renters</h2><p class="sub">Lease status, bot assignment, and account capacity.</p></div></div><div class="panel-body"><div class="list" id="renters"><div class="muted" style="padding:18px 0">Loading…</div></div></div></section>
+        </section>
+
+        <section class="view" id="viewAccounts"><section class="panel inventory-panel"><div class="panel-header"><div><h2>Renter accounts <span class="muted" id="accTotal"></span></h2><p class="sub">Credentials remain masked until explicitly revealed.</p></div><div class="toolbar-controls"><select id="accFilter" class="selin"><option value="all">All renters</option></select><button class="btn ghost sm" id="accReveal">Show secrets</button><button class="btn ghost sm icon-btn" id="refreshAccs" title="Refresh accounts" aria-label="Refresh accounts"><svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path></svg></button></div></div><div class="panel-body"><div id="accsIdle" class="lazyidle"><button class="btn sm" id="loadAccsBtn">Load renter accounts</button><span class="muted">Loaded on demand.</span></div><div id="rentAccs"></div></div></section></section>
+
+        <section class="view" id="viewDrops"><section class="panel inventory-panel"><div class="panel-header"><div><h2>Rented drops archive <span class="muted" id="dropTotal"></span></h2><p class="sub">Drops farmed by rented bots, kept separate from the main archive.</p></div><div class="toolbar-controls"><select id="dropFilter" class="selin"><option value="all">All renters</option></select><button class="btn ghost sm icon-btn" id="refreshDrops" title="Refresh drops" aria-label="Refresh drops"><svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path></svg></button></div></div><div class="panel-body"><div id="dropsIdle" class="lazyidle"><button class="btn sm" id="loadDropsBtn">Load drops archive</button><span class="muted">Loaded on demand.</span></div><div id="rentDrops"></div></div></section></section>
       </div>
     </main>
 
     <div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
     <div class="toast" id="toast"></div>
-
     <script src="/renters/core.js"></script>
     <script src="/renters/create.js"></script>
     <script src="/renters/approvals.js"></script>

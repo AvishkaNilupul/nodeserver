@@ -49,6 +49,8 @@
     try {
       const d = await api("/renters");
       const rs = d.renters || [];
+      const blocked = rs.filter((r) => r.status === "suspended" || r.expired).length;
+      RT.setMetric("Renters", rs.length, blocked ? blocked + " blocked or expired" : "All access active", blocked ? "warn" : "good");
       if (!rs.length) {
         $("renters").innerHTML = '<div class="muted" style="padding:6px 2px">No renters yet.</div>';
         return;
@@ -72,6 +74,7 @@
           '</div></div>';
       }).join("");
     } catch (e) {
+      RT.setMetric("Renters", "—", "Unavailable", "alert");
       $("renters").innerHTML = '<div class="muted">' + esc(e.message) + '</div>';
     }
   }

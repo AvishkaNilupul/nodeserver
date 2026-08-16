@@ -45,6 +45,7 @@
     try {
       var d = await api("/renter-submissions?status=pending");
       var s = d.submissions || [];
+      RT.setMetric("Pending", s.length, s.length ? "Needs review" : "Queue clear", s.length ? "warn" : "good");
       var pc = $("pendCount");
       if (pc) {
         pc.style.display = s.length ? "" : "none";
@@ -56,6 +57,7 @@
       }
       $("approvals").innerHTML = s.map(itemHtml).join("");
     } catch (e) {
+      RT.setMetric("Pending", "—", "Unavailable", "alert");
       $("approvals").innerHTML = '<div class="muted">' + esc(e.message) + "</div>";
     }
   }

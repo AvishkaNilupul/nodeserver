@@ -94,6 +94,7 @@
     if (dropsOpened) jobs.push(loadDrops());
     return Promise.all(jobs);
   });
+  bind("refreshApprovals", "click", () => reload("approvals"));
   bind("refreshBots", "click", () => reload("bots"));
   // A section Refresh doubles as a first open (original 839-840 hid the
   // placeholder and set the LOADED flag before fetching, whether or not the
@@ -118,6 +119,29 @@
   // the accounts filter selectable.
   bind("accFilter", "change", () => (accsOpened ? loadAccounts() : Promise.resolve()));
   bind("dropFilter", "change", () => (dropsOpened ? loadDrops() : Promise.resolve()));
+
+  // ---- workspace views ----------------------------------------------------
+
+  function activateView(name) {
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.view === name);
+    });
+    document.querySelectorAll(".view").forEach((view) => {
+      view.classList.toggle("active", view.id === "view" + name.charAt(0).toUpperCase() + name.slice(1));
+    });
+  }
+
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => activateView(btn.dataset.view || "overview"));
+  });
+
+  bind("newRenterBtn", "click", () => {
+    activateView("overview");
+    const panel = $("createPanel");
+    if (panel && typeof panel.scrollIntoView === "function") panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    const input = $("cU");
+    if (input) setTimeout(() => input.focus(), 250);
+  });
 
   // ---- logout -------------------------------------------------------------
 

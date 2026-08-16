@@ -85,6 +85,20 @@
     return show ? '<code>'+esc(v)+'</code>' : '<code>'+"\u2022".repeat(8)+'</code>';
   }
 
+  function setMetric(name, value, detail, tone){
+    const valueEl = $("metric" + name);
+    const detailEl = $("metric" + name + "Detail");
+    const card = $("metric" + name + "Card");
+    if (valueEl) valueEl.textContent = value == null ? "—" : String(value);
+    if (detailEl) detailEl.textContent = detail || "";
+    if (card) {
+      card.classList.remove("good");
+      card.classList.remove("warn");
+      card.classList.remove("alert");
+      if (tone === "good" || tone === "warn" || tone === "alert") card.classList.add(tone);
+    }
+  }
+
   function hostSelectHtml(id){
     const opts = state.HOSTS.map(h=>'<option value="'+esc(h.id)+'">'+esc(h.label||h.id)+'</option>');
     if(!opts.length) opts.push('<option value="local">Server</option>');
@@ -161,7 +175,7 @@
 
   window.RT = {
     $, esc, toast, api, fmtDate, remaining,
-    statusBadge, botStatusHtml, botPill, scanBadge, farmCell, secret, hostSelectHtml,
+    statusBadge, botStatusHtml, botPill, scanBadge, farmCell, secret, hostSelectHtml, setMetric,
     openModal, closeModal, modalEl, onClose,
     on,
     state,

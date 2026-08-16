@@ -30,6 +30,9 @@
     try {
       const d = await api("/renter-bots");
       const bots = d.bots || [];
+      const issues = bots.reduce((sum, b) => sum + (Number(b.tokenIssues) || 0), 0);
+      RT.setMetric("Bots", bots.length, bots.length ? "Checking live state" : "No bots assigned", bots.length ? "" : "warn");
+      RT.setMetric("Issues", issues, issues ? "Requires attention" : "All tokens healthy", issues ? "alert" : "good");
       if (!bots.length) {
         $("rentBots").innerHTML =
           '<div class="muted" style="padding:6px 2px">No rented bots yet. Create one from a renter’s <b>Manage</b> panel.</div>';
@@ -60,6 +63,8 @@
           '</div></div>';
       }).join("");
     } catch (e) {
+      RT.setMetric("Bots", "—", "Unavailable", "alert");
+      RT.setMetric("Issues", "—", "Unavailable", "alert");
       $("rentBots").innerHTML = '<div class="muted">' + esc(e.message) + '</div>';
     }
     loadScanStat();
@@ -74,15 +79,21 @@
   async function loadRentBotsLive() {
     try {
       const d = await api("/renter-bots/live");
+      const live = d.live || [];
+      const running = live.filter((b) => b && b.online && b.running === true).length;
+      const reachable = live.filter((b) => b && b.online).length;
+      RT.setMetric("Bots", live.length, running + " running · " + reachable + " reachable", running === live.length && live.length ? "good" : "warn");
       // Rows may have been re-rendered while we waited, so re-query and match
       // on dataset instead of building a selector out of a runtime id.
       const byId = new Map();
       document.querySelectorAll("[data-pill]").forEach((c) => byId.set(c.dataset.pill, c));
-      for (const l of (d.live || [])) {
+      for (const l of live) {
         const cell = byId.get(String(l.renterId));
         if (cell) cell.innerHTML = RT.botPill(l);
       }
     } catch (e) {
+      const value = $("metricBots") ? $("metricBots").textContent : "—";
+      RT.setMetric("Bots", value, "Live state unavailable", "warn");
       // Leaving the pills on "Checking…" forever would be a lie, so say the
       // check itself failed and let the operator retry with Refresh.
       document.querySelectorAll("[data-pill]").forEach((cell) => {
@@ -99,7 +110,7 @@
       const d = await api("/renter-scan/progress");
       const p = d.progress || {}, c = p.counts || {};
       if (!c.total) { el.textContent = ""; return; }
-      const bits = ["· scanner: " + (c.scannedWindow || 0) + "/" + c.total + " scanned", (c.due || 0) + " due"];
+      const bits = ["Scanner: " + (c.scannedWindow || 0) + "/" + c.total + " scanned", (c.due || 0) + " due"];
       if (c.paused) bits.push(c.paused + " paused (access ended)");
       if (c.tokenInvalid) bits.push(c.tokenInvalid + " token issue" + (c.tokenInvalid > 1 ? "s" : ""));
       if (p.scanning && p.currentLogin) bits.push("scanning " + p.currentLogin);

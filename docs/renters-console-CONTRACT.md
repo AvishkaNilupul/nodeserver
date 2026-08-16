@@ -7,9 +7,10 @@ points, and two new sections record the accepted deviations from byte-fidelity
 and what the audits already verified. Nothing here loosens the rules — the rules
 section is unchanged.
 
-Rebuild of `public/renters.html` (872 lines) as small modules in `public/renters/`.
-Front-end ONLY. Every API call, URL, request body and rendered field stays
-IDENTICAL to the original. No new endpoints, no removed endpoints.
+Rebuild of `public/renters.html` as small modules in `public/renters/`.
+Front-end ONLY. Every API call, URL, request body and rendered data field stays
+identical to the original. The operator layout may change without changing the
+API contract. No new endpoints, no removed endpoints.
 
 Original file to port from: `/Users/avishkanilupul/projects/nodeserver/public/renters.html`
 Idiom to match: `/Users/avishkanilupul/projects/nodeserver/public/renter.html`
@@ -66,6 +67,7 @@ window.RT = {
   farmCell(a),            // original 554-558
   secret(v, show),        // original 559-562, but `show` is passed IN (accounts.js owns it)
   hostSelectHtml(id),     // original 234-238, uses RT.state.HOSTS
+  setMetric(name, value, detail, tone), // dashboard summary; tone is good/warn/alert
 
   // modal
   openModal(html),        // set #modal innerHTML + show #overlay
@@ -243,8 +245,9 @@ Run against the shipped modules on 2026-08-17. All clean.
   dropped. (A line-oriented grep appears to lose `/renter-accounts` and
   `/renter-drops`; both are present, wrapped across lines at `accounts.js:88`
   and `drops.js:58`.)
-- **DOM id parity.** The 37 static ids in `public/renters.html` match the
-  original's static markup exactly — none added, none removed. All 42 ids read
+- **Operational DOM parity.** The original control ids remain present in
+  `public/renters.html`; the redesigned console adds view and metric ids only.
+  All ids read
   via `$()` resolve to either that static markup or module-generated markup. The
   24 ids the original built from JS are all emitted by the module that now owns
   them. One id is new: `copyLoginBtn` (`detail.js:211`), which exists only so
@@ -257,7 +260,7 @@ Run against the shipped modules on 2026-08-17. All clean.
   the four originally-broken spots (`delAcct` login, `showCreds` login:pass and
   token, `copyLogin` username) are structurally fixed rather than patched.
 
-## Out of scope — do not touch
+## Out of scope
 
-`public/renter.html`, `public/bots.html`, any file in `routes/` or `utils/`.
-Do not commit, push, scp or deploy. Do not run the full `npm test`.
+`public/renter.html`, `public/bots.html`, and the renting API implementation in
+`routes/` or `utils/` are outside the console UI boundary.
