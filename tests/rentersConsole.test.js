@@ -408,3 +408,11 @@ test("no timers are left running", async () => {
   await env.settle();
   assert.deepStrictEqual(env.timers.filter((t) => t.repeat), [], "a module started an interval at load");
 });
+
+test("Quick farm keeps account lookup and game search compact", () => {
+  assert.match(SRC.detail, /id="qUser"/, "Quick farm username field missing");
+  assert.match(SRC.detail, /id="qGame"[^>]*list="qGameOptions"/, "Quick farm game typeahead missing");
+  assert.match(SRC.detail, /renters\/game-search\?q=/, "Quick farm does not call game search");
+  assert.match(SRC.detail, /games\.slice\(0, 20\)/, "game suggestions are not capped");
+  assert.match(SRC.detail, /data-act="quickFarm"/, "Quick farm action missing");
+});

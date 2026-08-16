@@ -17,6 +17,8 @@ const BotAccount = require("../models/BotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
 const DropLog = require("../models/DropLog");
 const AutoFarmTask = require("../models/AutoFarmTask");
+const TwitchCampaign = require("../models/TwitchCampaign");
+const MarketResearch = require("../models/MarketResearch");
 const {
   poolAccountEligibility,
   pickCount,
@@ -44,6 +46,7 @@ const {
   listStacks,
   requireStack,
   stackKey,
+  chooseAvailableStack,
 } = require("../utils/renterBotStacks");
 const {
   restartConfigContainer,
@@ -166,87 +169,96 @@ router.get("/renters", requireSuperadmin, async (req, res) => {
 // existed.
 const PICKER_READ_TIMEOUT_MS = 8000;
 
+async function rentalStackOptions() {
+  const stacks = await listStacks();
+  const byHost = new Map();
+  for (const stack of stacks) {
+    if (!byHost.has(stack.host)) byHost.set(stack.host, []);
+    byHost.get(stack.host).push(stack);
+  }
+  const perHost = await Promise.all(
+    [...byHost.entries()].map(async ([hostId, hostStacks]) => {
+      const host = hosts.resolveHost(hostId);
+      const meta = hosts.listHosts().find((h) => h.id === hostId) || {
+        id: hostId,
+        label: hostId,
+      };
+      if (!host) return { meta, rows: [], online: false };
+      try {
+        const existing = new Set(
+          await hosts.readdir(host, {
+            timeout: PICKER_READ_TIMEOUT_MS,
+            retries: 0,
+          })
+        );
+        const files = hostStacks
+          .map((stack) => stack.file)
+          .filter((file) => existing.has(file));
+        const raws = await hosts.readFiles(host, files);
+        const rows = [];
+        for (const stack of hostStacks) {
+          const raw = raws[stack.file];
+          if (!raw || !raw.ok) continue;
+          try {
+            const data = JSON.parse(raw.text);
+            const users =
+              data && data.TwitchSettings &&
+              Array.isArray(data.TwitchSettings.TwitchUsers)
+                ? data.TwitchSettings.TwitchUsers
+                : [];
+            rows.push({ ...stack, accounts: users.length });
+          } catch {
+            /* an unreadable stack is not offered for assignment */
+          }
+        }
+        return { meta, rows, online: true };
+      } catch {
+        return { meta, rows: [], online: false };
+      }
+    }),
+  );
+  const out = [];
+  const offline = [];
+  for (const h of perHost) {
+    if (!h.online) offline.push({ id: h.meta.id, label: h.meta.label });
+    for (const stack of h.rows) {
+      const capacity = Math.max(1, Number(stack.capacity) || 10);
+      out.push({
+        host: h.meta.id,
+        hostLabel: h.meta.label,
+        file: stack.file,
+        capacity,
+        accounts: stack.accounts,
+        remaining: Math.max(0, capacity - stack.accounts),
+      });
+    }
+  }
+  const assigned = await Renter.find(
+    { botFile: { $gt: "" } },
+    { botHost: 1, botFile: 1, username: 1 },
+  ).lean();
+  const amap = new Map();
+  for (const a of assigned) {
+    const k = stackKey(a.botHost, a.botFile);
+    if (!amap.has(k)) amap.set(k, []);
+    amap.get(k).push(a.username);
+  }
+  out.forEach((o) => {
+    const names = amap.get(stackKey(o.host, o.file)) || [];
+    o.assignedTo = names[0] || null;
+    o.renters = names;
+  });
+  return { bots: out, offlineHosts: offline };
+}
+
+async function availableRentalStack() {
+  const options = await rentalStackOptions();
+  return chooseAvailableStack(options.bots);
+}
+
 router.get("/renters/bots", requireSuperadmin, async (req, res) => {
   try {
-    const stacks = await listStacks();
-    const byHost = new Map();
-    for (const stack of stacks) {
-      if (!byHost.has(stack.host)) byHost.set(stack.host, []);
-      byHost.get(stack.host).push(stack);
-    }
-    const perHost = await Promise.all(
-      [...byHost.entries()].map(async ([hostId, hostStacks]) => {
-        const host = hosts.resolveHost(hostId);
-        const meta = hosts.listHosts().find((h) => h.id === hostId) || {
-          id: hostId,
-          label: hostId,
-        };
-        if (!host) return { meta, rows: [], online: false };
-        try {
-          const existing = new Set(
-            await hosts.readdir(host, {
-              timeout: PICKER_READ_TIMEOUT_MS,
-              retries: 0,
-            })
-          );
-          const files = hostStacks
-            .map((stack) => stack.file)
-            .filter((file) => existing.has(file));
-          const raws = await hosts.readFiles(host, files);
-          const rows = [];
-          for (const stack of hostStacks) {
-            const raw = raws[stack.file];
-            if (!raw || !raw.ok) continue;
-            try {
-              const data = JSON.parse(raw.text);
-              const users =
-                data && data.TwitchSettings &&
-                Array.isArray(data.TwitchSettings.TwitchUsers)
-                  ? data.TwitchSettings.TwitchUsers
-                  : [];
-              rows.push({ ...stack, accounts: users.length });
-            } catch {
-              /* an unreadable stack is not offered for assignment */
-            }
-          }
-          return { meta, rows, online: true };
-        } catch {
-          return { meta, rows: [], online: false };
-        }
-      }),
-    );
-    const out = [];
-    const offline = [];
-    for (const h of perHost) {
-      if (!h.online) offline.push({ id: h.meta.id, label: h.meta.label });
-      for (const stack of h.rows) {
-        const capacity = Math.max(1, Number(stack.capacity) || 10);
-        out.push({
-          host: h.meta.id,
-          hostLabel: h.meta.label,
-          file: stack.file,
-          capacity,
-          accounts: stack.accounts,
-          remaining: Math.max(0, capacity - stack.accounts),
-        });
-      }
-    }
-    const assigned = await Renter.find(
-      { botFile: { $gt: "" } },
-      { botHost: 1, botFile: 1, username: 1 },
-    ).lean();
-    const amap = new Map();
-    for (const a of assigned) {
-      const k = stackKey(a.botHost, a.botFile);
-      if (!amap.has(k)) amap.set(k, []);
-      amap.get(k).push(a.username);
-    }
-    out.forEach((o) => {
-      const names = amap.get(stackKey(o.host, o.file)) || [];
-      o.assignedTo = names[0] || null;
-      o.renters = names;
-    });
-    res.json({ success: true, bots: out, offlineHosts: offline });
+    res.json({ success: true, ...(await rentalStackOptions()) });
   } catch (err) {
     console.error("renters bots error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -434,6 +446,42 @@ router.get("/renter-drops", requireSuperadmin, async (req, res) => {
     res.json({ success: true, total, items, renters });
   } catch (err) {
     console.error("renter-drops archive error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Small type-ahead used by Quick farm. It searches live/upcoming Twitch
+// campaigns first, then the known operator/renter archives and market research.
+// Only a short matching result set is returned; the page never downloads a
+// giant select list.
+router.get("/renters/game-search", requireSuperadmin, async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 80);
+    if (q.length < 2) return res.json({ success: true, games: [] });
+    const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const match = { game: re };
+    const [campaigns, research, operatorDrops, renterDrops] = await Promise.all([
+      TwitchCampaign.distinct("game", { active: true, ...match }),
+      MarketResearch.distinct("game", match),
+      DropLog.distinct("game", match),
+      RenterDrop.distinct("game", match),
+    ]);
+    const byLower = new Map();
+    for (const game of [...campaigns, ...research, ...operatorDrops, ...renterDrops]) {
+      const value = String(game || "").trim();
+      if (value) byLower.set(value.toLowerCase(), value);
+    }
+    const lower = q.toLowerCase();
+    const games = [...byLower.values()]
+      .sort((a, b) => {
+        const aStarts = a.toLowerCase().startsWith(lower) ? 0 : 1;
+        const bStarts = b.toLowerCase().startsWith(lower) ? 0 : 1;
+        return aStarts - bStarts || a.localeCompare(b);
+      })
+      .slice(0, 20);
+    res.json({ success: true, games });
+  } catch (err) {
+    console.error("renter game search error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -1257,6 +1305,8 @@ router.post(
   async (req, res) => {
     try {
       const body = req.body || {};
+      const quick = body.quick === true;
+      const requestedGames = normGames(body.games);
       const username = String(body.username || "").trim();
       const password = String(body.password || "");
       let token = String(body.token || body.clientSecret || "").trim();
@@ -1282,6 +1332,12 @@ router.post(
           .status(400)
           .json({ success: false, message: "Bad farm end date" });
       }
+      if (quick && !requestedGames.length) {
+        return res.status(400).json({ success: false, message: "Choose a game for Quick farm" });
+      }
+      if (quick && (!Number.isFinite(farmDays) || farmDays <= 0) && !body.farmUntil) {
+        return res.status(400).json({ success: false, message: "Choose a positive farming duration" });
+      }
       if (!username || !token) {
         return res.status(400).json({
           success: false,
@@ -1293,17 +1349,8 @@ router.post(
       const renter = await Renter.findById(req.params.id);
       if (!renter)
         return res.status(404).json({ success: false, message: "Not found" });
-      if (!renter.botFile) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Renter has no bot assigned" });
-      }
-      const host = hosts.resolveHost(renter.botHost);
-      if (!host) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Renter's host is unknown" });
-      }
+      let assignedStack = null;
+      let assignedForQuick = false;
       const used = await RenterAccount.countDocuments({ renter: renter._id });
       if (used + 1 > (Number(renter.maxAccounts) || 0)) {
         return res.status(400).json({
@@ -1333,6 +1380,37 @@ router.post(
           success: false,
           message: "That account is already in this renter's inventory",
         });
+      }
+
+      if (!renter.botFile && quick && body.autoAssign === true) {
+        assignedStack = await availableRentalStack();
+        if (!assignedStack) {
+          return res.status(409).json({
+            success: false,
+            message: "No available rental bot stack has room right now",
+          });
+        }
+        renter.botHost = assignedStack.host;
+        renter.botFile = assignedStack.file;
+        renter.botStoppedAt = null;
+        await renter.save();
+        assignedForQuick = true;
+      }
+      if (!renter.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter has no bot assigned" });
+      }
+      const host = hosts.resolveHost(renter.botHost);
+      if (!host) {
+        if (assignedForQuick) {
+          renter.botHost = "";
+          renter.botFile = "";
+          await renter.save().catch(() => {});
+        }
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter's host is unknown" });
       }
 
       const notes = [];
@@ -1369,7 +1447,9 @@ router.post(
           (poolRow && poolRow.uniqueId) ||
           "",
       ).trim();
-      const games = await renterDefaultGames(renter, host);
+      const games = requestedGames.length
+        ? requestedGames
+        : await renterDefaultGames(renter, host);
       const acct = {
         ClientSecret: token,
         UniqueId: uniqueId || crypto.randomBytes(16).toString("hex"),
@@ -1387,6 +1467,11 @@ router.post(
       try {
         await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
       } catch (e) {
+        if (assignedForQuick) {
+          renter.botHost = "";
+          renter.botFile = "";
+          await renter.save().catch(() => {});
+        }
         return res.status(botWriteStatus(e)).json({
           success: false,
           offline: !!e.unreachable,
@@ -1599,6 +1684,7 @@ router.post(
       // Restart the renter's bot so it picks the new account up (best effort —
       // a stopped bot stays stopped until the operator starts it).
       let restarted = false;
+      let started = false;
       try {
         const container = containerForFile(renter.botFile);
         const states = await hosts.dockerPs(host);
@@ -1606,9 +1692,12 @@ router.post(
         if (st && st.state === "running") {
           await restartConfigContainer(host, renter.botFile);
           restarted = true;
+        } else if (quick) {
+          await startRenterFarming(renter, host);
+          started = true;
         }
       } catch {
-        notes.push("Added, but the renter's bot could not be restarted.");
+        notes.push(quick ? "Added, but the renter's bot could not be started." : "Added, but the renter's bot could not be restarted.");
       }
 
       // Stamp the per-account lease on the row the config writer just created.
@@ -1623,12 +1712,18 @@ router.post(
       }
 
       notes.unshift("Added " + username + " to " + renter.botFile + ".");
+      if (assignedForQuick) notes.unshift("Assigned rental stack " + renter.botFile + " on " + host.label + ".");
       if (restarted) notes.push("Bot restarting.");
+      if (started) notes.push("Bot started.");
       res.json({
         success: true,
         moved: !!(botHit || otherRenterAcc),
         partial,
         restarted,
+        started,
+        assignedStack: assignedForQuick ? { host: host.id, file: renter.botFile } : null,
+        games,
+        farmUntil: farmUntil || null,
         note: notes.join(" "),
       });
     } catch (err) {

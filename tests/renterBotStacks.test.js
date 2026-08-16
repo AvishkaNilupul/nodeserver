@@ -5,6 +5,7 @@ const {
   hostId,
   stackKey,
   assertCapacity,
+  chooseAvailableStack,
 } = require("../utils/renterBotStacks");
 
 test("rental stack keys normalize the local host", () => {
@@ -31,5 +32,22 @@ test("a rental stack rejects additions beyond capacity", () => {
       err.used === 7 &&
       err.capacity === 10 &&
       err.requested === 4,
+  );
+});
+
+test("quick farming packs the fullest available remote stack", () => {
+  const picked = chooseAvailableStack([
+    { host: "local", file: "config_16.json", accounts: 8, remaining: 2 },
+    { host: "pi", file: "config_31.json", accounts: 3, remaining: 7 },
+    { host: "pi", file: "config_30.json", accounts: 7, remaining: 3 },
+    { host: "pi", file: "config_40.json", accounts: 10, remaining: 0 },
+  ]);
+  assert.equal(picked.file, "config_30.json");
+});
+
+test("quick farming returns null when every stack is full", () => {
+  assert.equal(
+    chooseAvailableStack([{ host: "pi", file: "config_30.json", remaining: 0 }]),
+    null,
   );
 });

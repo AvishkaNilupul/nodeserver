@@ -12,6 +12,7 @@ const {
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
 const { withFileLock } = require("../utils/fileLock");
+const { setUsersGamesBySecret } = require("../utils/renterBotOps");
 const {
   dedicatedConfigSet,
   registerStack,
@@ -1755,6 +1756,17 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
       stack.capacity,
     );
     data.TwitchSettings.TwitchUsers.push(...fresh);
+    // Per-account games need TwitchDropsBot's global favourites switch. Use
+    // the shared-bot-aware transform so enabling it cannot starve a co-tenant
+    // whose account previously farmed in wander mode.
+    for (const account of fresh) {
+      const games = Array.isArray(account.FavouriteGames)
+        ? account.FavouriteGames.filter(Boolean)
+        : [];
+      if (games.length) {
+        setUsersGamesBySecret(data, [account.ClientSecret], games);
+      }
+    }
     const total = data.TwitchSettings.TwitchUsers.length;
     await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
     await upsertRenterAccounts(accounts, host, file, renterId);

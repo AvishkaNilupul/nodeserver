@@ -143,6 +143,23 @@ function assertCapacity(current, additions, capacity) {
   };
 }
 
+// Pick a stack for the one-click farming flow. Prefer reachable remote hosts
+// (the Pi fleet) over the web server, then pack the fullest stack first so we
+// do not spread a handful of accounts across many running containers.
+function chooseAvailableStack(stacks) {
+  return (Array.isArray(stacks) ? stacks : [])
+    .filter((stack) => Number(stack.remaining) > 0)
+    .slice()
+    .sort((a, b) => {
+      const aLocal = hostId(a.host) === "local" ? 1 : 0;
+      const bLocal = hostId(b.host) === "local" ? 1 : 0;
+      if (aLocal !== bLocal) return aLocal - bLocal;
+      const used = (Number(b.accounts) || 0) - (Number(a.accounts) || 0);
+      if (used) return used;
+      return stackKey(a.host, a.file).localeCompare(stackKey(b.host, b.file));
+    })[0] || null;
+}
+
 async function dedicatedConfigSet() {
   const rows = await listStacks();
   return new Set(rows.map((row) => stackKey(row.host, row.file)));
@@ -157,5 +174,6 @@ module.exports = {
   listStacks,
   requireStack,
   assertCapacity,
+  chooseAvailableStack,
   dedicatedConfigSet,
 };

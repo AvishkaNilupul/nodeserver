@@ -139,6 +139,7 @@
     // Carrying tokenLookupFound over would let manualAdd() post an empty
     // token for a different username.
     cancelTokenLookup();
+    cancelQuickFarmLookups();
 
     const id = esc(r.id);
     const assigned = !!(bot && bot.assigned);
@@ -216,6 +217,17 @@
         '<button class="btn ghost sm" id="copyLoginBtn" data-act="copyLogin" data-id="' + id + '">Copy login</button></div>' +
       '<h2 style="font-size:14px;margin:18px 0 8px">Accounts <span class="muted" style="font-size:12px;font-weight:600">(' + num(accs.length) + ')</span></h2>' +
       accountRows(accs) +
+      '<div class="credbox" style="margin-top:10px;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))">' +
+        '<div style="font-weight:700;font-size:13px">Quick farm</div>' +
+        '<div class="grid3" style="margin-top:8px">' +
+          '<div><label class="fld">Twitch username</label><input id="qUser" autocapitalize="none" spellcheck="false" autocomplete="off" placeholder="username"/><div id="qUserInfo" class="sub" style="margin-top:4px"></div></div>' +
+          '<div><label class="fld">Game</label><input id="qGame" list="qGameOptions" autocomplete="off" placeholder="Type to search"/><datalist id="qGameOptions"></datalist><div id="qGameInfo" class="sub" style="margin-top:4px"></div></div>' +
+          '<div><label class="fld">Farm for</label><select id="qDays">' +
+            '<option value="1">1 day</option><option value="3">3 days</option><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option>' +
+          '</select></div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap"><button class="btn sm" id="qAddBtn" data-act="quickFarm" data-id="' + id + '">Start farming</button><span id="qFarmInfo" class="sub"></span></div>' +
+      '</div>' +
       '<div class="credbox" style="margin-top:10px">' +
         '<div style="font-weight:700;font-size:13px">Add account manually</div>' +
         '<div class="sub" style="margin:4px 0 8px">If this Twitch account is already on any bot (yours or another renter\'s), it is moved off there onto this renter\'s bot automatically — it never farms in two places.</div>' +
@@ -252,6 +264,7 @@
 
     // Per-open teardown: closeModal() runs it, so no lookup outlives the form.
     RT.onClose(cancelTokenLookup);
+    RT.onClose(cancelQuickFarmLookups);
   }
 
   // ---- stored-token lookup (as the username is typed) ----
@@ -288,6 +301,87 @@
           : 'Not found on the server — paste the client token.';
       } catch (e) { /* lookup is best effort */ }
     }, 400);
+  }
+
+  // ---- Quick farm lookups ----
+
+  let quickTokenTimer = null;
+  let quickGameTimer = null;
+
+  function cancelQuickFarmLookups() {
+    clearTimeout(quickTokenTimer);
+    clearTimeout(quickGameTimer);
+    quickTokenTimer = null;
+    quickGameTimer = null;
+  }
+
+  function quickTokenLookup() {
+    clearTimeout(quickTokenTimer);
+    const info = $("qUserInfo");
+    if (info) info.textContent = "";
+    const username = (val("qUser") || "").trim();
+    if (username.length < 3) return;
+    quickTokenTimer = setTimeout(async () => {
+      try {
+        const d = await api("/renters/account-token?username=" + encodeURIComponent(username));
+        if ((val("qUser") || "").trim() !== username || !$("qUserInfo")) return;
+        $("qUserInfo").innerHTML = d.found
+          ? '<span style="color:var(--ok,#3fb950)">Client token found · ' + esc(d.source) + '</span>'
+          : '<span style="color:#c0392b">No stored client token</span>';
+      } catch (e) { /* lookup is best effort; submit performs the authoritative check */ }
+    }, 350);
+  }
+
+  function quickGameLookup() {
+    clearTimeout(quickGameTimer);
+    const options = $("qGameOptions");
+    const info = $("qGameInfo");
+    if (options) options.innerHTML = "";
+    if (info) info.textContent = "";
+    const query = (val("qGame") || "").trim();
+    if (query.length < 2) return;
+    quickGameTimer = setTimeout(async () => {
+      try {
+        const d = await api("/renters/game-search?q=" + encodeURIComponent(query));
+        if ((val("qGame") || "").trim() !== query || !$("qGameOptions")) return;
+        const games = Array.isArray(d.games) ? d.games.slice(0, 20) : [];
+        $("qGameOptions").innerHTML = games.map((game) => '<option value="' + esc(game) + '"></option>').join("");
+        if ($("qGameInfo")) $("qGameInfo").textContent = games.length ? games.length + " matches" : "No matches";
+      } catch (e) { /* typed values remain valid even if suggestions are unavailable */ }
+    }, 300);
+  }
+
+  async function quickFarm(id) {
+    const username = (val("qUser") || "").trim();
+    const game = (val("qGame") || "").trim();
+    const farmDays = intVal("qDays");
+    if (!username) { toast("Username is required"); return; }
+    if (!game) { toast("Choose a game"); return; }
+    if (farmDays <= 0) { toast("Choose a farming duration"); return; }
+    const btn = $("qAddBtn");
+    const info = $("qFarmInfo");
+    if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
+    if (info) info.textContent = "Finding an available rental bot…";
+    try {
+      const d = await api("/renters/" + id + "/accounts/manual", {
+        method: "POST",
+        body: JSON.stringify({
+          username,
+          quick: true,
+          autoAssign: true,
+          games: [game],
+          farmDays,
+        }),
+      });
+      toast(d.note || "Farming started");
+      await RT.reloadMany(["renters", "bots"]);
+      const ok = await open(id);
+      if (!ok && btn) { btn.disabled = false; btn.textContent = "Start farming"; }
+    } catch (e) {
+      toast(e.message);
+      if (info) info.textContent = e.message;
+      if (btn) { btn.disabled = false; btn.textContent = "Start farming"; }
+    }
   }
 
   // ---- manual add ----
@@ -486,6 +580,7 @@
   RT.on("saveRenter", (el, ds) => { saveRenter(ds.id); });
   RT.on("createRenterBot", (el, ds) => { createRenterBot(ds.id); });
   RT.on("assignBot", (el, ds) => { assignBot(ds.id); });
+  RT.on("quickFarm", (el, ds) => { quickFarm(ds.id); });
   RT.on("manualAdd", (el, ds) => { manualAdd(ds.id); });
   RT.on("previewPool", (el, ds) => { previewPool(ds.id); });
   RT.on("addFromPool", (el, ds) => { addFromPool(ds.id); });
@@ -501,6 +596,8 @@
   // reason every button here is a data-act.
   document.addEventListener("input", (e) => {
     if (e.target && e.target.id === "mUser") tokenLookup();
+    if (e.target && e.target.id === "qUser") quickTokenLookup();
+    if (e.target && e.target.id === "qGame") quickGameLookup();
   });
 
   RT.detail = { open: open, reopen: reopen };
