@@ -34,6 +34,7 @@
   // Value of a modal field; "" when the modal isn't rendered.
   const val = (id) => { const el = $(id); return el ? el.value : ""; };
   const intVal = (id) => parseInt(val(id), 10) || 0;
+  let quickRenters = [];
 
   // <input type="date"> wants yyyy-mm-dd. toISOString() THROWS on an
   // unparseable date, which would take the whole modal down, so guard it.
@@ -49,6 +50,9 @@
     try {
       const d = await api("/renters");
       const rs = d.renters || [];
+      quickRenters = rs.slice();
+      const qOptions = $("qRenterOptions");
+      if (qOptions) qOptions.innerHTML = rs.map((r) => '<option value="' + esc(r.username) + '"></option>').join("");
       const blocked = rs.filter((r) => r.status === "suspended" || r.expired).length;
       RT.setMetric("Renters", rs.length, blocked ? blocked + " blocked or expired" : "All access active", blocked ? "warn" : "good");
       if (!rs.length) {
@@ -217,17 +221,6 @@
         '<button class="btn ghost sm" id="copyLoginBtn" data-act="copyLogin" data-id="' + id + '">Copy login</button></div>' +
       '<h2 style="font-size:14px;margin:18px 0 8px">Accounts <span class="muted" style="font-size:12px;font-weight:600">(' + num(accs.length) + ')</span></h2>' +
       accountRows(accs) +
-      '<div class="credbox" style="margin-top:10px;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))">' +
-        '<div style="font-weight:700;font-size:13px">Quick farm</div>' +
-        '<div class="grid3" style="margin-top:8px">' +
-          '<div><label class="fld">Twitch username</label><input id="qUser" autocapitalize="none" spellcheck="false" autocomplete="off" placeholder="username"/><div id="qUserInfo" class="sub" style="margin-top:4px"></div></div>' +
-          '<div><label class="fld">Game</label><input id="qGame" list="qGameOptions" autocomplete="off" placeholder="Type to search"/><datalist id="qGameOptions"></datalist><div id="qGameInfo" class="sub" style="margin-top:4px"></div></div>' +
-          '<div><label class="fld">Farm for</label><select id="qDays">' +
-            '<option value="1">1 day</option><option value="3">3 days</option><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option>' +
-          '</select></div>' +
-        '</div>' +
-        '<div style="display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap"><button class="btn sm" id="qAddBtn" data-act="quickFarm" data-id="' + id + '">Start farming</button><span id="qFarmInfo" class="sub"></span></div>' +
-      '</div>' +
       '<div class="credbox" style="margin-top:10px">' +
         '<div style="font-weight:700;font-size:13px">Add account manually</div>' +
         '<div class="sub" style="margin:4px 0 8px">If this Twitch account is already on any bot (yours or another renter\'s), it is moved off there onto this renter\'s bot automatically — it never farms in two places.</div>' +
@@ -351,7 +344,10 @@
     }, 300);
   }
 
-  async function quickFarm(id) {
+  async function quickFarm() {
+    const renterName = (val("qRenter") || "").trim().toLowerCase();
+    const renter = quickRenters.find((r) => String(r.username || "").toLowerCase() === renterName);
+    if (!renter) { toast("Choose a renter"); return; }
     const username = (val("qUser") || "").trim();
     const game = (val("qGame") || "").trim();
     const farmDays = intVal("qDays");
@@ -363,7 +359,7 @@
     if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
     if (info) info.textContent = "Finding an available rental bot…";
     try {
-      const d = await api("/renters/" + id + "/accounts/manual", {
+      const d = await api("/renters/" + encodeURIComponent(renter.id) + "/accounts/manual", {
         method: "POST",
         body: JSON.stringify({
           username,
@@ -375,8 +371,12 @@
       });
       toast(d.note || "Farming started");
       await RT.reloadMany(["renters", "bots"]);
-      const ok = await open(id);
-      if (!ok && btn) { btn.disabled = false; btn.textContent = "Start farming"; }
+      const user = $("qUser");
+      const gameInput = $("qGame");
+      if (user) user.value = "";
+      if (gameInput) gameInput.value = "";
+      if (info) info.textContent = d.note || "Farming started";
+      if (btn) { btn.disabled = false; btn.textContent = "Start farming"; }
     } catch (e) {
       toast(e.message);
       if (info) info.textContent = e.message;
@@ -580,7 +580,7 @@
   RT.on("saveRenter", (el, ds) => { saveRenter(ds.id); });
   RT.on("createRenterBot", (el, ds) => { createRenterBot(ds.id); });
   RT.on("assignBot", (el, ds) => { assignBot(ds.id); });
-  RT.on("quickFarm", (el, ds) => { quickFarm(ds.id); });
+  RT.on("quickFarm", () => { quickFarm(); });
   RT.on("manualAdd", (el, ds) => { manualAdd(ds.id); });
   RT.on("previewPool", (el, ds) => { previewPool(ds.id); });
   RT.on("addFromPool", (el, ds) => { addFromPool(ds.id); });

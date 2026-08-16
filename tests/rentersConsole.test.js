@@ -221,10 +221,11 @@ function contractMembers() {
 // data-act values the modules can emit (all are literals in the sources).
 function emittedActs() {
   const out = new Set();
-  for (const m of ORDER) {
+  const sources = ORDER.map((m) => SRC[m]).concat(PAGE);
+  for (const source of sources) {
     const re = /data-act="([A-Za-z0-9_-]+)"/g;
     let hit;
-    while ((hit = re.exec(SRC[m]))) out.add(hit[1]);
+    while ((hit = re.exec(source))) out.add(hit[1]);
   }
   return out;
 }
@@ -410,9 +411,10 @@ test("no timers are left running", async () => {
 });
 
 test("Quick farm keeps account lookup and game search compact", () => {
-  assert.match(SRC.detail, /id="qUser"/, "Quick farm username field missing");
-  assert.match(SRC.detail, /id="qGame"[^>]*list="qGameOptions"/, "Quick farm game typeahead missing");
+  assert.match(PAGE, /id="qUser"/, "Quick farm username field missing");
+  assert.match(PAGE, /id="qGame"[^>]*list="qGameOptions"/, "Quick farm game typeahead missing");
+  assert.match(SRC.detail, /id="qRenter"|qRenterOptions/, "Quick farm renter selector missing");
   assert.match(SRC.detail, /renters\/game-search\?q=/, "Quick farm does not call game search");
   assert.match(SRC.detail, /games\.slice\(0, 20\)/, "game suggestions are not capped");
-  assert.match(SRC.detail, /data-act="quickFarm"/, "Quick farm action missing");
+  assert.match(PAGE, /data-act="quickFarm"/, "Quick farm action missing");
 });
