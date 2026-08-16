@@ -180,6 +180,23 @@ function policyOf(set) {
   };
 }
 
+// The aging policy a freshly auto-created ingest set is born with.
+//
+// New accounts stream in through POST /account-stash/ingest with no operator in
+// the loop, so the set that receives them has to run itself: age every arrival
+// for real and hand it to the Account Pool once mature. That means opting out of
+// the two conservative global defaults above (dryRun on, autoGraduate off) — and
+// this is the ONLY place that does. It applies to ingest-auto-created sets only;
+// switching aging on for a hand-made set still takes a deliberate choice, so the
+// property the tests guard ("enabling aging sends nothing to Twitch by itself")
+// still holds everywhere a human is involved.
+//
+// Returned fresh each call so it can be handed straight to StashSet.create
+// without two sets ever sharing one mutable object.
+function ingestSetDefaults() {
+  return { enabled: true, dryRun: false, autoGraduate: true };
+}
+
 // Gap until this account's next session. sessionsPerWeek sets the average; the
 // jitter is wide (±45%) and there's a one-in-six chance of an extra idle day,
 // because a perfectly regular cadence is its own tell across a fleet.
@@ -1081,6 +1098,7 @@ module.exports = {
   liveStatus,
   runNow,
   policyOf,
+  ingestSetDefaults,
   isMature,
   maturityGaps,
   WARMUP_SESSIONS,

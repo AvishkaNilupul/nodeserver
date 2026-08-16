@@ -5,7 +5,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { policyOf, isMature, maturityGaps } = require("../utils/stashAging");
+const { policyOf, ingestSetDefaults, isMature, maturityGaps } = require("../utils/stashAging");
 
 const DAY = 86400000;
 const daysAgo = (d) => new Date(Date.now() - d * DAY);
@@ -39,6 +39,24 @@ test("dry run defaults ON, auto-graduate defaults OFF", () => {
   const p = policyOf({ aging: { enabled: true } });
   assert.equal(p.dryRun, true);
   assert.equal(p.autoGraduate, false);
+});
+
+test("ingest-created sets are born self-driving (live + auto-graduate)", () => {
+  // The one deliberate exception to the conservative defaults above. A set the
+  // ingest API auto-creates receives accounts with no operator in the loop, so
+  // it must age them for real and graduate them on its own. This is the exact
+  // policy findOrCreateIngestSet stamps onto a new set — and, read back through
+  // policyOf the way the runner reads it, it has to actually resolve to live +
+  // auto-graduate, not just look right as a literal.
+  assert.deepEqual(ingestSetDefaults(), {
+    enabled: true,
+    dryRun: false,
+    autoGraduate: true,
+  });
+  const p = policyOf({ aging: ingestSetDefaults() });
+  assert.equal(p.enabled, true);
+  assert.equal(p.dryRun, false);
+  assert.equal(p.autoGraduate, true);
 });
 
 test("avoiding drop-enabled channels is the default", () => {

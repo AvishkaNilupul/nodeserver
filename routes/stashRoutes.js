@@ -1125,6 +1125,10 @@ async function findOrCreateIngestSet(name) {
       name: raw,
       nameLower,
       note: "auto-created by /account-stash/ingest",
+      // Accounts arrive here through the ingest API with no operator in the
+      // loop, so the set has to drive itself: age every arrival for real and
+      // graduate it to the Account Pool once mature. See ingestSetDefaults().
+      aging: stashAging.ingestSetDefaults(),
     });
   } catch (err) {
     // Race: another concurrent request created the same set — re-fetch.
