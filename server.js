@@ -29,7 +29,6 @@ const orderRoutes = require("./routes/orderRoutes");
 const botConfigRoutes = require("./routes/botConfigRoutes");
 const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
-const noclaimTestRoutes = require("./routes/noclaimTestRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
@@ -389,10 +388,6 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
-app.get("/noclaim-test.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "noclaim-test.html"));
-});
-
 app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "noclaim-farm.html"));
 });
@@ -569,7 +564,6 @@ app.use(requireAdmin, enforce2fa, orderRoutes);
 app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
-app.use(enforce2fa, noclaimTestRoutes);
 app.use(enforce2fa, noclaimFarmRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
