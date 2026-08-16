@@ -1250,12 +1250,17 @@ async function runOnce() {
   freshFeeds = [];
   freshHeals = null;
   try {
+    // Uncapped on purpose. This was `.limit(500)` with no sort, the same shape
+    // of bug that silently froze the Gameflip sale sweep: natural order means a
+    // fixed tail is skipped on EVERY pass once the fleet outgrows the cap, so
+    // those listings are never fed or healed and nothing reports them missing.
+    // The scope was already at 490 of 500 when that was found — days of growth
+    // from losing rows quietly. A pass is bounded by the work it finds, not by
+    // an arbitrary page size.
     const rows = await MarketplaceListing.find({
       status: "active",
       autoDeliver: true,
-    })
-      .limit(500)
-      .lean();
+    }).lean();
     const seenKeys = new Set();
     const refusals = new Map();
     let fed = 0;

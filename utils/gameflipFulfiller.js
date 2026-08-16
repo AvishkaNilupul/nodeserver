@@ -310,16 +310,32 @@ async function noteRelistFailure(row, err) {
   }
 }
 
+// How many rows one pass may poll individually when the bulk status sweep is
+// unavailable. Only ever applies to that fallback: the normal path reads the
+// whole fleet in two calls and must never be capped.
+const FALLBACK_POLL_LIMIT = 100;
+
 // One watcher pass: mark sold listings sold and relist the next unit of any
 // chain that still has quantity left.
 async function syncOnce() {
+  // EVERY active auto-delivery row, uncapped: the two bulk status queries below
+  // answer for the whole fleet in two API calls, so one more row costs nothing
+  // unless Gameflip reports it in neither sweep.
+  //
+  // This used to be `.limit(100)` with no sort, which silently became a
+  // correctness bug the moment the fleet outgrew it: natural order meant the
+  // SAME tail fell off the end of every single tick, so those listings were
+  // never polled at all. Their sales were never seen, so `status` stayed
+  // "active", the relist below never ran, the units they still owed were never
+  // republished and their accounts stayed reserved out of the sellable pool —
+  // and because each relist publishes a BRAND-NEW row, a chain that crossed the
+  // cap died at its next sale. At 135 rows it hid 35 listings owing 171 units,
+  // 4 of which Gameflip had already marked sold.
   const rows = await MarketplaceListing.find({
     marketplace: "gameflip",
     status: "active",
     autoDeliver: true,
-  })
-    .limit(100)
-    .lean();
+  }).lean();
   let sold = 0;
   let relisted = 0;
   // One query for every sold listing we own, instead of one per row. Falls
@@ -335,7 +351,21 @@ async function syncOnce() {
     soldIds = null;
     liveIds = null;
   }
-  for (const row of rows) {
+  // In the degraded path every row costs its own status call, so bound the pass
+  // rather than firing the whole fleet into Gameflip's rate limiter (which
+  // stalls sale detection for everyone). Only this path is capped — never the
+  // bulk one above, which is what starved the tail before.
+  const due = soldIds && liveIds ? rows : rows.slice(0, FALLBACK_POLL_LIMIT);
+  if (due.length < rows.length) {
+    console.error(
+      "gameflip bulk sweep unavailable — polling " +
+        due.length +
+        " of " +
+        rows.length +
+        " rows this pass",
+    );
+  }
+  for (const row of due) {
     let status;
     try {
       // A row in neither sweep is unaccounted for (deleted, expired, still a
@@ -510,7 +540,7 @@ async function syncOnce() {
       if (img) await fsp.unlink(img).catch(() => {});
     }
   }
-  return { checked: rows.length, sold, relisted };
+  return { checked: due.length, sold, relisted };
 }
 
 // Background watcher so sales are picked up (and the next unit relisted)
