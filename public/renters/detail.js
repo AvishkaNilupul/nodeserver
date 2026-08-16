@@ -185,9 +185,9 @@
             '<button class="btn ghost sm" id="logBtn" data-act="modalLogs" data-id="' + id + '">Logs</button>'
           : '<span style="flex:1"></span>' +
             '<span class="muted" style="font-size:12px">Host</span>' + RT.hostSelectHtml("eBotHost") +
-            '<button class="btn sm" data-act="createRenterBot" data-id="' + id + '">Create bot</button>' +
+            '<button class="btn sm" data-act="createRenterBot" data-id="' + id + '">Create stack</button>' +
             '<span class="muted" style="font-size:12px">or share</span>' +
-            '<select id="eAssignBot" style="width:auto;min-width:150px"><option value="">existing bot…</option>' +
+            '<select id="eAssignBot" style="width:auto;min-width:150px"><option value="">rental stack…</option>' +
               // boot.js paints the renters list and the bot picker CONCURRENTLY
               // (deliberately), and the picker's host reads take seconds, so
               // RT.state.BOTS is routinely still empty when a modal is opened
@@ -196,8 +196,10 @@
               // so say which one it is, exactly as create.js does for #cBot.
               // Not selectable, so assignBot() can't be handed a bogus index.
               (bots.length
-                ? bots.map((b, i) => '<option value="' + i + '">' + esc(botOptionLabel(b)) + '</option>').join("")
-                : '<option value="" disabled>Loading bots…</option>') +
+                ? bots.map((b, i) => '<option value="' + i + '"' +
+                    ((Number(b.remaining) || 0) <= 0 ? " disabled" : "") + '>' +
+                    esc(botOptionLabel(b)) + '</option>').join("")
+                : '<option value="" disabled>Loading rental stacks…</option>') +
             '</select>' +
             '<button class="btn ghost sm" data-act="assignBot" data-id="' + id + '">Assign</button>') +
       '</div>' +
@@ -374,10 +376,10 @@
 
   async function createRenterBot(id) {
     const host = val("eBotHost") || "local";
-    if (!confirm("Create a new bot for this renter on " + host + "? It provisions a fresh config slot and starts once accounts are approved.")) return;
+    if (!confirm("Create a dedicated rental stack for this renter on " + host + "? It is isolated from normal bots and starts once accounts are approved.")) return;
     try {
       await api("/renters/" + id + "/create-bot", { method: "POST", body: JSON.stringify({ host }) });
-      toast("Bot created");
+      toast("Rental stack created");
       await RT.reloadMany(["renters", "bots"]);
       open(id);
     } catch (e) {
@@ -387,15 +389,15 @@
 
   async function assignBot(id) {
     const pick = (RT.state.BOTS || [])[parseInt(val("eAssignBot"), 10)];
-    if (!pick) { toast("Pick a bot to assign"); return; }
+    if (!pick) { toast("Pick a rental stack to assign"); return; }
     const who = (pick.renters || []).length ? " It is shared with " + pick.renters.join(", ") + "." : "";
-    if (!confirm("Assign " + pick.file + " on " + (pick.hostLabel || pick.host) + " to this renter?" + who)) return;
+    if (!confirm("Assign rental stack " + pick.file + " on " + (pick.hostLabel || pick.host) + " to this renter?" + who)) return;
     try {
       await api("/renters/" + id, {
         method: "PUT",
         body: JSON.stringify({ botHost: pick.host, botFile: pick.file }),
       });
-      toast("Bot assigned");
+      toast("Rental stack assigned");
       await RT.reloadMany(["renters", "bots", "botPicker"]);
       open(id);
     } catch (e) {

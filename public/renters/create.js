@@ -32,10 +32,13 @@
 
   // ---- bot picker (create form + assign-existing) ----
   function botOptionLabel(b) {
+    const capacity = Number(b.capacity) || 10;
+    const accounts = Number(b.accounts) || 0;
     const who = (b.renters || []).length
       ? " — shared with " + b.renters.join(", ")
       : " — free";
-    return (b.hostLabel || b.host) + " · " + b.file + who;
+    return (b.hostLabel || b.host) + " · " + b.file + " · " +
+      accounts + "/" + capacity + " accounts" + who;
   }
 
   function retryLink() {
@@ -62,8 +65,10 @@
           ? RT.state.HOSTS
           : [{ id: "local", label: "Server" }];
         sel.innerHTML = '<option value="">No bot yet</option>' +
-          hostsList.map((h) => '<option value="new:' + esc(h.id) + '">➕ Create a new bot on ' + esc(h.label || h.id) + "</option>").join("") +
-          RT.state.BOTS.map((b, i) => '<option value="' + i + '">' + esc(botOptionLabel(b)) + "</option>").join("");
+          hostsList.map((h) => '<option value="new:' + esc(h.id) + '">Create a dedicated rental stack on ' + esc(h.label || h.id) + "</option>").join("") +
+          RT.state.BOTS.map((b, i) => '<option value="' + i + '"' +
+            ((Number(b.remaining) || 0) <= 0 ? " disabled" : "") + '>' +
+            esc(botOptionLabel(b)) + "</option>").join("");
         sel.disabled = false;
       }
       // A host we couldn't reach still has bots on it; say so instead of
@@ -107,7 +112,7 @@
         }),
       });
       const botNote = d.renter.botFile
-        ? "Bot: <b>" + esc(d.renter.botFile) + "</b>" + (newHost ? " (newly created)" : " (shared)") + "."
+        ? "Rental stack: <b>" + esc(d.renter.botFile) + "</b>" + (newHost ? " (newly created)" : " (shared)") + "."
         : "Open <b>Manage → Create bot</b> to give them a bot.";
       $("cResult").innerHTML = '<div class="credbox">Renter <b>' + esc(d.renter.username) +
         "</b> created. " + botNote + " Share the login: <code>" +

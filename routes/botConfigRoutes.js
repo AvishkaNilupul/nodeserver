@@ -12,6 +12,12 @@ const {
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
 const { withFileLock } = require("../utils/fileLock");
+const {
+  dedicatedConfigSet,
+  registerStack,
+  requireStack,
+  assertCapacity,
+} = require("../utils/renterBotStacks");
 
 const router = express.Router();
 
@@ -20,13 +26,21 @@ const router = express.Router();
 // the bot-list endpoints can keep renter bots out of the operator's own view.
 async function getRentedConfigSet() {
   try {
-    const rows = await Renter.find(
-      { botFile: { $gt: "" } },
-      { botHost: 1, botFile: 1 },
-    ).lean();
-    return new Set(rows.map((r) => (r.botHost || "") + "|" + r.botFile));
+    return await dedicatedConfigSet();
   } catch {
-    return new Set();
+    // A transient registry read must not expose active renter configs on the
+    // normal Bots page. The renter assignments are the conservative fallback.
+    try {
+      const rows = await Renter.find(
+        { botFile: { $gt: "" } },
+        { botHost: 1, botFile: 1 },
+      ).lean();
+      return new Set(
+        rows.map((r) => (r.botHost || "local") + "|" + r.botFile),
+      );
+    } catch {
+      return new Set();
+    }
   }
 }
 
@@ -1719,6 +1733,7 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
   if (!validFile(file)) throw new Error("Invalid config file");
   if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
   return withFileLock(host, file, async () => {
+    const stack = await requireStack(host.id, file);
     const data = JSON.parse(await hosts.readFile(host, file));
     if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
       data.TwitchSettings = {};
@@ -1734,6 +1749,11 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
       ).map((u) => u.ClientSecret),
     );
     const fresh = accounts.filter((a) => a && !present.has(a.ClientSecret));
+    assertCapacity(
+      data.TwitchSettings.TwitchUsers.length,
+      fresh.length,
+      stack.capacity,
+    );
     data.TwitchSettings.TwitchUsers.push(...fresh);
     const total = data.TwitchSettings.TwitchUsers.length;
     await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
@@ -2024,6 +2044,7 @@ async function provisionEmptyConfig(host) {
       }
       throw new Error("Failed to update compose file: " + e.message);
     }
+    await registerStack(host.id, slot.file);
     return { host: host.id, file: slot.file, container: slot.container };
   });
 }

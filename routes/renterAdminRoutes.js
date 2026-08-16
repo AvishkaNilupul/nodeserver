@@ -41,6 +41,11 @@ const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
 const { decrypt, encrypt } = require("../utils/secretBox");
 const {
+  listStacks,
+  requireStack,
+  stackKey,
+} = require("../utils/renterBotStacks");
+const {
   restartConfigContainer,
   containerForFile,
   validFile,
@@ -54,6 +59,14 @@ const {
 
 const router = express.Router();
 
+function botWriteStatus(err) {
+  if (err && err.unreachable) return 502;
+  if (err && ["rental_stack_full", "not_rental_stack"].includes(err.code)) {
+    return 409;
+  }
+  return 500;
+}
+
 // Pending-account totals per renter, for the list view.
 async function pendingByRenter() {
   const rows = await RenterSubmission.aggregate([
@@ -66,18 +79,20 @@ async function pendingByRenter() {
   return map;
 }
 
-// Validate + normalise a bot assignment. Empty = unassigned (allowed). Throws a
-// friendly error for an unknown host or a bad file name. A config already
-// rented to someone else is ALLOWED — that is a shared bot (several renters on
-// one container); the picker shows who is on it so sharing is always a
-// deliberate choice.
+// Validate + normalise a bot assignment. Empty = unassigned (allowed). Only a
+// config registered as a dedicated rental stack may be selected; normal
+// operator bots are never valid targets even if a client posts one directly.
+// A stack already used by another renter is allowed, subject to its account
+// capacity when accounts are added.
 async function resolveAssignment(botHost, botFile) {
   botHost = String(botHost || "");
   botFile = String(botFile || "");
   if (!botFile) return { botHost: botHost || "", botFile: "" };
-  if (!hosts.resolveHost(botHost)) throw new Error("Unknown host");
+  const host = hosts.resolveHost(botHost);
+  if (!host) throw new Error("Unknown host");
   if (!validFile(botFile)) throw new Error("Invalid config file");
-  return { botHost, botFile };
+  await requireStack(host.id, botFile);
+  return { botHost: host.id, botFile };
 }
 
 // FavouriteGames default for accounts added to this renter: their own armed
@@ -132,7 +147,7 @@ router.get("/renters", requireSuperadmin, async (req, res) => {
   }
 });
 
-// Bot picker: every config file across hosts + who (if anyone) rents it.
+// Bot picker: dedicated rental stacks only + who (if anyone) rents each one.
 //
 // Listing a directory is the whole job here, so the only real cost is talking to
 // the hosts — and both halves of that used to be paid the slowest possible way:
@@ -153,21 +168,50 @@ const PICKER_READ_TIMEOUT_MS = 8000;
 
 router.get("/renters/bots", requireSuperadmin, async (req, res) => {
   try {
+    const stacks = await listStacks();
+    const byHost = new Map();
+    for (const stack of stacks) {
+      if (!byHost.has(stack.host)) byHost.set(stack.host, []);
+      byHost.get(stack.host).push(stack);
+    }
     const perHost = await Promise.all(
-      hosts.listHosts().map(async (meta) => {
-        const host = hosts.resolveHost(meta.id);
+      [...byHost.entries()].map(async ([hostId, hostStacks]) => {
+        const host = hosts.resolveHost(hostId);
+        const meta = hosts.listHosts().find((h) => h.id === hostId) || {
+          id: hostId,
+          label: hostId,
+        };
+        if (!host) return { meta, rows: [], online: false };
         try {
-          const files = (
+          const existing = new Set(
             await hosts.readdir(host, {
               timeout: PICKER_READ_TIMEOUT_MS,
               retries: 0,
             })
-          )
-            .filter((f) => validFile(f))
-            .sort();
-          return { meta, files, online: true };
+          );
+          const files = hostStacks
+            .map((stack) => stack.file)
+            .filter((file) => existing.has(file));
+          const raws = await hosts.readFiles(host, files);
+          const rows = [];
+          for (const stack of hostStacks) {
+            const raw = raws[stack.file];
+            if (!raw || !raw.ok) continue;
+            try {
+              const data = JSON.parse(raw.text);
+              const users =
+                data && data.TwitchSettings &&
+                Array.isArray(data.TwitchSettings.TwitchUsers)
+                  ? data.TwitchSettings.TwitchUsers
+                  : [];
+              rows.push({ ...stack, accounts: users.length });
+            } catch {
+              /* an unreadable stack is not offered for assignment */
+            }
+          }
+          return { meta, rows, online: true };
         } catch {
-          return { meta, files: [], online: false };
+          return { meta, rows: [], online: false };
         }
       }),
     );
@@ -175,8 +219,17 @@ router.get("/renters/bots", requireSuperadmin, async (req, res) => {
     const offline = [];
     for (const h of perHost) {
       if (!h.online) offline.push({ id: h.meta.id, label: h.meta.label });
-      for (const file of h.files)
-        out.push({ host: h.meta.id, hostLabel: h.meta.label, file });
+      for (const stack of h.rows) {
+        const capacity = Math.max(1, Number(stack.capacity) || 10);
+        out.push({
+          host: h.meta.id,
+          hostLabel: h.meta.label,
+          file: stack.file,
+          capacity,
+          accounts: stack.accounts,
+          remaining: Math.max(0, capacity - stack.accounts),
+        });
+      }
     }
     const assigned = await Renter.find(
       { botFile: { $gt: "" } },
@@ -184,12 +237,12 @@ router.get("/renters/bots", requireSuperadmin, async (req, res) => {
     ).lean();
     const amap = new Map();
     for (const a of assigned) {
-      const k = a.botHost + "|" + a.botFile;
+      const k = stackKey(a.botHost, a.botFile);
       if (!amap.has(k)) amap.set(k, []);
       amap.get(k).push(a.username);
     }
     out.forEach((o) => {
-      const names = amap.get(o.host + "|" + o.file) || [];
+      const names = amap.get(stackKey(o.host, o.file)) || [];
       o.assignedTo = names[0] || null;
       o.renters = names;
     });
@@ -1334,7 +1387,7 @@ router.post(
       try {
         await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
       } catch (e) {
-        return res.status(e.unreachable ? 502 : 500).json({
+        return res.status(botWriteStatus(e)).json({
           success: false,
           offline: !!e.unreachable,
           message:
@@ -1732,7 +1785,7 @@ router.post(
             );
             added = r.added;
           } catch (e) {
-            return res.status(e.unreachable ? 502 : 500).json({
+            return res.status(botWriteStatus(e)).json({
               success: false,
               offline: !!e.unreachable,
               message: "Could not write the accounts to the bot: " + (e.message || e),

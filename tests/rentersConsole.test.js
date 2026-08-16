@@ -360,6 +360,49 @@ test("masked account rows leak neither password nor token into markup", async ()
   assert.ok(!env.html("rentAccs").includes(HOSTILE.password), "revealed secret is not escaped");
 });
 
+test("bot picker shows dedicated stack capacity and disables full stacks", async () => {
+  const env = boot({
+    routes: {
+      "/renters/bots": {
+        bots: [
+          {
+            host: "pi",
+            hostLabel: "Raspberry Pi",
+            file: "config_30.json",
+            accounts: 7,
+            capacity: 10,
+            remaining: 3,
+            renters: ["tenant-a"],
+          },
+          {
+            host: "pi",
+            hostLabel: "Raspberry Pi",
+            file: "config_31.json",
+            accounts: 10,
+            capacity: 10,
+            remaining: 0,
+            renters: [],
+          },
+        ],
+      },
+    },
+  });
+  await env.settle();
+  await env.settle();
+  const html = env.html("cBot");
+  assert.ok(html.includes("7/10 accounts"), "available stack capacity is missing");
+  assert.ok(html.includes("shared with tenant-a"), "stack tenants are missing");
+  assert.match(
+    html,
+    /value="1" disabled[^>]*>[^<]*10\/10 accounts/,
+    "a full rental stack remains selectable",
+  );
+  assert.ok(
+    html.includes("Create a dedicated rental stack"),
+    "the create action does not describe the isolation boundary",
+  );
+});
+
 test("no timers are left running", async () => {
   const env = boot();
   await env.settle();
