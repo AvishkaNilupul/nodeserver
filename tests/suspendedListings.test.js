@@ -72,6 +72,47 @@ test("a deleted account can be taken off sale on every platform", () => {
   }
 });
 
+test("a dead-token auto-delivery listing is never left live without a fix", () => {
+  for (const marketplace of ["gameflip", "ggsel", "zeusx"]) {
+    const plan = fixPlanFor(gone({ type: "dead-token" }), {
+      _id: "l1",
+      marketplace,
+      externalId: "x",
+      status: "active",
+      autoDeliver: true,
+      units: [],
+    });
+    assert.ok(plan, marketplace + " should offer a fix");
+    assert.strictEqual(plan.action, "retire");
+  }
+});
+
+test("an old Digiseller row without a content id is retired and republished", () => {
+  const plan = fixPlanFor(gone({ type: "dead-token" }), {
+    _id: "l1",
+    marketplace: "digiseller",
+    externalId: "x",
+    status: "active",
+    autoDeliver: true,
+    units: [{ accountId: "acc1", contentId: "" }],
+  });
+  assert.ok(plan);
+  assert.strictEqual(plan.action, "retire");
+});
+
+test("Digiseller still replaces a precisely addressable dead-token unit", () => {
+  const plan = fixPlanFor(gone({ type: "dead-token" }), {
+    _id: "l1",
+    marketplace: "digiseller",
+    externalId: "x",
+    status: "active",
+    autoDeliver: true,
+    units: [{ accountId: "acc1", contentId: "content-1" }],
+  });
+  assert.ok(plan);
+  assert.strictEqual(plan.action, "replace");
+});
+
 test("nothing is offered once the listing is no longer on sale", () => {
   const plan = fixPlanFor(gone(), {
     _id: "l1",

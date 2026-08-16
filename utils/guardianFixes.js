@@ -135,6 +135,20 @@ function fixPlanFor(f, listing) {
           };
         }
       }
+      // When a marketplace cannot remove the bad unit precisely, leaving the
+      // offer live is not a valid resting state: a buyer can still receive
+      // credentials whose token is known to be unusable. Retire the offer and
+      // rebuild it from healthy stock. This also covers older Digiseller rows
+      // whose content id predates unit bookkeeping.
+      if (active && f.accountId && lst.autoDeliver) {
+        return {
+          action: "retire",
+          label: "Relist from fresh stock",
+          hint:
+            "This marketplace cannot remove the bad delivery unit safely. " +
+            "Take the offer down and republish it from healthy stock.",
+        };
+      }
       return null;
     case "account-gone":
       // The login is gone from Twitch, so every platform has the same remedy:
