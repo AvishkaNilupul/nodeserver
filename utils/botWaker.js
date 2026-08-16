@@ -96,9 +96,6 @@ function wakeTrigger(games, parkedAt, campaigns, graceMs = 0) {
   const floor = since - (Number(graceMs) || 0);
   for (const c of campaigns || []) {
     if (!games.has(norm(c.game))) continue;
-    // No-claim games (Overwatch/Rainbow Six) are farmed by the standalone
-    // system now — a new campaign for one must never wake an old-system bot.
-    if (settings.isNoClaimGame(c.game)) continue;
     if (!c.startAt) return c;
     if (new Date(c.startAt).getTime() > floor) return c;
   }
@@ -160,7 +157,18 @@ async function wakeFinishedBots(hostId, opts = {}) {
   const states = await hosts.dockerPs(host).catch(() => null);
   if (!states) return { woken: [], checked: 0 };
 
-  const campaigns = await liveCampaigns();
+  // No-claim games (Overwatch/Rainbow Six) are farmed by the standalone
+  // no-claim system now, so a new campaign for one must never RESUME a parked
+  // old-system bot. The filter belongs HERE and not inside wakeTrigger:
+  // stopFinishedBots calls the same helper to decide whether it is safe to
+  // PARK, and on that path a live no-claim campaign must still hold a bot that
+  // is assigned that game UP. Old-system containers were never un-assigned
+  // these games (twitchbotx32 on the Pi is 70 accounts of Rainbow Six), and
+  // parking through such a campaign loses its drops permanently — this very
+  // filter is what then refuses to wake the bot again.
+  const campaigns = (await liveCampaigns()).filter(
+    (c) => !settings.isNoClaimGame(c.game),
+  );
   const woken = [];
   let dirty = false;
 
