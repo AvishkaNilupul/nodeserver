@@ -12,7 +12,7 @@
 const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
-const { fetchInventory } = require("./twitchInventory");
+const { fetchInventory, itemKeyFor } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -45,12 +45,45 @@ function maskedLogin(acc) {
   return acc.login || (acc.clientSecret ? acc.clientSecret.slice(0, 6) : "");
 }
 
+// Derive a drop's TWO identities with the same fallback chains the operator
+// scanner uses. Twitch can hand back a reward carrying neither a benefit id nor
+// a drop id: utils/twitchInventory.js's buildDrops defaults the display NAME to
+// "Reward" but leaves `benefitId` undefined in that very same object, so an
+// identity-less drop still looks perfectly well-formed to this scanner. Without
+// a fallback each identity fails in a way that silently corrupts the inventory:
+//
+//   benefitId — the upsert key. Mongoose drops an `undefined` filter value, so
+//     { account, benefitId: undefined } casts down to just { account }: the
+//     $set lands on whichever unrelated drop the account already has (that row
+//     is overwritten, this drop is never inserted). Two such drops in one scan
+//     collide on the { account, benefitId } unique index instead, and the throw
+//     escapes the un-guarded upsert loop below — the account never gets its
+//     lastScanAt stamped, so it stays the most-stale row and nextDueAccount
+//     hands the rotation back to it forever.
+//   itemKey — the grouping key. /renter/drops and the superadmin renter-drops
+//     view both $group on the STORED "$itemKey" with no read-side recompute
+//     (routes/renterRoutes.js, routes/renterAdminRoutes.js), so every row
+//     written with "" merges into ONE bucket whose count is the sum of all of
+//     them: one over-counted mystery reward, and the rest vanish from the list.
+//
+// The chains mirror the operator side: itemKey falls back to the normalised
+// name|game (utils/dropScanner.js's `d.itemKey || itemKeyFor(d.name, d.game)`),
+// and benefitId walks benefit id -> drop id -> itemKey, extending models/
+// RenterDrop.js's "benefit id when available, otherwise the drop id" rule with a
+// last resort that is never empty (itemKeyFor always returns at least "|"), so
+// the upsert filter can no longer degenerate.
+function dropIdentity(d) {
+  const itemKey = d.itemKey || itemKeyFor(d.name, d.game);
+  return { benefitId: d.benefitId || d.dropId || itemKey, itemKey };
+}
+
 // Upsert one renter account's inventory drops into RenterDrop. Same upsert
 // semantics as dropScanner.upsertDrops but keyed to the renter as well.
 async function upsertDrops(accountId, renterId, login, drops) {
   const now = new Date();
   let newDrops = 0;
   for (const d of drops) {
+    const { benefitId, itemKey } = dropIdentity(d);
     const imageLocal = d.imageURL ? await cacheImage(d.imageURL) : "";
     const set = {
       renter: renterId,
@@ -61,7 +94,9 @@ async function upsertDrops(accountId, renterId, login, drops) {
       game: d.game,
       gameId: d.gameId,
       campaign: d.campaign || "",
-      itemKey: d.itemKey || "",
+      // Always store a key — the renter drop views group on this stored field
+      // and never recompute name|game, so a row written without it merges.
+      itemKey,
       count: d.count,
       awardedAt: d.awardedAt,
       connected: d.connected,
@@ -72,7 +107,7 @@ async function upsertDrops(accountId, renterId, login, drops) {
     };
     if (imageLocal) set.imageLocal = imageLocal;
     const r = await RenterDrop.updateOne(
-      { account: accountId, benefitId: d.benefitId },
+      { account: accountId, benefitId },
       { $set: set, $setOnInsert: { firstSeenAt: now } },
       { upsert: true },
     );
@@ -279,4 +314,5 @@ module.exports = {
   scanAccountNow,
   setEnabled,
   upsertDrops,
+  dropIdentity,
 };

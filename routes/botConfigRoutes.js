@@ -11,6 +11,7 @@ const {
   fillBotPasswordsFromPool,
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
+const { withFileLock } = require("../utils/fileLock");
 
 const router = express.Router();
 
@@ -1666,18 +1667,20 @@ router.delete(
 async function addAccountsToConfig(host, file, accounts) {
   if (!validFile(file)) throw new Error("Invalid config file");
   if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
-  const data = JSON.parse(await hosts.readFile(host, file));
-  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-    data.TwitchSettings = {};
-  }
-  if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
-    data.TwitchSettings.TwitchUsers = [];
-  }
-  data.TwitchSettings.TwitchUsers.push(...accounts);
-  const total = data.TwitchSettings.TwitchUsers.length;
-  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-  await upsertBotAccounts(accounts, host, file);
-  return { added: accounts.length, total };
+  return withFileLock(host, file, async () => {
+    const data = JSON.parse(await hosts.readFile(host, file));
+    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+      data.TwitchSettings = {};
+    }
+    if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
+      data.TwitchSettings.TwitchUsers = [];
+    }
+    data.TwitchSettings.TwitchUsers.push(...accounts);
+    const total = data.TwitchSettings.TwitchUsers.length;
+    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+    await upsertBotAccounts(accounts, host, file);
+    return { added: accounts.length, total };
+  });
 }
 
 // Renter counterpart of upsertBotAccounts: keep the renter's OWN account
@@ -1715,26 +1718,28 @@ async function upsertRenterAccounts(accounts, host, file, renterId) {
 async function addRenterAccountsToConfig(host, file, accounts, renterId) {
   if (!validFile(file)) throw new Error("Invalid config file");
   if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
-  const data = JSON.parse(await hosts.readFile(host, file));
-  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-    data.TwitchSettings = {};
-  }
-  if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
-    data.TwitchSettings.TwitchUsers = [];
-  }
-  // Skip tokens already in the config — on a shared bot an account can have
-  // been synced in by another path, and a duplicate entry double-farms it.
-  const present = new Set(
-    data.TwitchSettings.TwitchUsers.filter(
-      (u) => u && typeof u === "object",
-    ).map((u) => u.ClientSecret),
-  );
-  const fresh = accounts.filter((a) => a && !present.has(a.ClientSecret));
-  data.TwitchSettings.TwitchUsers.push(...fresh);
-  const total = data.TwitchSettings.TwitchUsers.length;
-  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-  await upsertRenterAccounts(accounts, host, file, renterId);
-  return { added: fresh.length, total };
+  return withFileLock(host, file, async () => {
+    const data = JSON.parse(await hosts.readFile(host, file));
+    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+      data.TwitchSettings = {};
+    }
+    if (!Array.isArray(data.TwitchSettings.TwitchUsers)) {
+      data.TwitchSettings.TwitchUsers = [];
+    }
+    // Skip tokens already in the config — on a shared bot an account can have
+    // been synced in by another path, and a duplicate entry double-farms it.
+    const present = new Set(
+      data.TwitchSettings.TwitchUsers.filter(
+        (u) => u && typeof u === "object",
+      ).map((u) => u.ClientSecret),
+    );
+    const fresh = accounts.filter((a) => a && !present.has(a.ClientSecret));
+    data.TwitchSettings.TwitchUsers.push(...fresh);
+    const total = data.TwitchSettings.TwitchUsers.length;
+    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+    await upsertRenterAccounts(accounts, host, file, renterId);
+    return { added: fresh.length, total };
+  });
 }
 
 // Pull ONE account out of a config, matched by ClientSecret or (case-insensitive)
@@ -1743,30 +1748,32 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
 // a renter's bot — so it never farms in two places at once.
 async function removeAccountFromConfig(host, file, { clientSecret, login }) {
   if (!validFile(file)) throw new Error("Invalid config file");
-  let data;
-  try {
-    data = JSON.parse(await hosts.readFile(host, file));
-  } catch (e) {
-    if (e.code === "ENOENT") return 0;
-    throw e;
-  }
-  const users =
-    data && data.TwitchSettings && Array.isArray(data.TwitchSettings.TwitchUsers)
-      ? data.TwitchSettings.TwitchUsers
-      : [];
-  const loginLower = String(login || "").toLowerCase();
-  const kept = users.filter((u) => {
-    if (!u || typeof u !== "object") return true;
-    if (clientSecret && u.ClientSecret === clientSecret) return false;
-    if (loginLower && String(u.Login || "").toLowerCase() === loginLower)
-      return false;
-    return true;
+  return withFileLock(host, file, async () => {
+    let data;
+    try {
+      data = JSON.parse(await hosts.readFile(host, file));
+    } catch (e) {
+      if (e.code === "ENOENT") return 0;
+      throw e;
+    }
+    const users =
+      data && data.TwitchSettings && Array.isArray(data.TwitchSettings.TwitchUsers)
+        ? data.TwitchSettings.TwitchUsers
+        : [];
+    const loginLower = String(login || "").toLowerCase();
+    const kept = users.filter((u) => {
+      if (!u || typeof u !== "object") return true;
+      if (clientSecret && u.ClientSecret === clientSecret) return false;
+      if (loginLower && String(u.Login || "").toLowerCase() === loginLower)
+        return false;
+      return true;
+    });
+    const removed = users.length - kept.length;
+    if (!removed) return 0;
+    data.TwitchSettings.TwitchUsers = kept;
+    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+    return removed;
   });
-  const removed = users.length - kept.length;
-  if (!removed) return 0;
-  data.TwitchSettings.TwitchUsers = kept;
-  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-  return removed;
 }
 
 // How many accounts a config currently holds (for renter quota accounting).
@@ -1805,6 +1812,16 @@ async function getConfigGames(host, file) {
 // always the renter's, never client input.
 async function setConfigGames(host, file, games) {
   if (!validFile(file)) throw new Error("Invalid config file");
+  return withFileLock(host, file, () =>
+    _setConfigGamesUnlocked(host, file, games),
+  );
+}
+
+// Unlocked core of setConfigGames. Exists so a caller ALREADY holding this
+// file's lock could set games without self-deadlocking on the non-reentrant
+// per-file lock. MUST only run inside withFileLock for the same (host, file);
+// public callers use setConfigGames, which takes the lock.
+async function _setConfigGamesUnlocked(host, file, games) {
   const list = parseGamesList(games).slice(0, 50).map((g) => g.slice(0, 100));
   const data = JSON.parse(await hosts.readFile(host, file));
   data.FavouriteGames = list;
@@ -1847,21 +1864,23 @@ async function getAccountGames(host, file, clientSecret) {
 // wasn't found in the config.
 async function setAccountGames(host, file, clientSecret, games) {
   if (!validFile(file)) throw new Error("Invalid config file");
-  const list = parseGamesList(games)
-    .slice(0, 50)
-    .map((g) => g.slice(0, 100));
-  const data = JSON.parse(await hosts.readFile(host, file));
-  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-    data.TwitchSettings = {};
-  }
-  const users = data.TwitchSettings.TwitchUsers;
-  if (!Array.isArray(users)) return null;
-  const u = users.find((x) => x && x.ClientSecret === clientSecret);
-  if (!u) return null;
-  u.FavouriteGames = list.slice();
-  if (list.length) data.TwitchSettings.OnlyFavouriteGames = true;
-  await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-  return list;
+  return withFileLock(host, file, async () => {
+    const list = parseGamesList(games)
+      .slice(0, 50)
+      .map((g) => g.slice(0, 100));
+    const data = JSON.parse(await hosts.readFile(host, file));
+    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+      data.TwitchSettings = {};
+    }
+    const users = data.TwitchSettings.TwitchUsers;
+    if (!Array.isArray(users)) return null;
+    const u = users.find((x) => x && x.ClientSecret === clientSecret);
+    if (!u) return null;
+    u.FavouriteGames = list.slice();
+    if (list.length) data.TwitchSettings.OnlyFavouriteGames = true;
+    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+    return list;
+  });
 }
 
 // Restart the container backing a config (so a games change takes effect on a
@@ -1949,51 +1968,64 @@ async function provisionEmptyConfig(host) {
       "js-yaml is not installed. Run `npm install` in the nodeserver directory and restart.",
     );
   }
-  const files = await hosts.readdir(host);
-  const composeFile = await hosts.composeName(host);
-  if (!composeFile && host.runtime !== "native") {
-    throw new Error("No docker compose file found in " + host.dir);
-  }
-  const slot = findNextSlot(files);
-  if (await hosts.exists(host, slot.file)) {
-    throw new Error("Target config already exists: " + slot.file);
-  }
-  const templateName = pickDefaultTemplate(files);
-  if (!templateName) {
-    throw new Error("No template config available to clone from");
-  }
-  let data;
-  try {
-    data = JSON.parse(await hosts.readFile(host, templateName));
-  } catch {
-    throw new Error("Template config is not valid JSON");
-  }
-  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-    data.TwitchSettings = {};
-  }
-  data.TwitchSettings.TwitchUsers = [];
-  if (data.KickSettings && typeof data.KickSettings === "object") {
-    data.KickSettings.KickUsers = [];
-  }
-  await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
-  try {
-    if (composeFile) {
-      const raw = await hosts.composeRead(host, composeFile);
-      const edited = addServiceToComposeText(raw, slot.container, slot.file);
-      if (!edited.exists) {
-        await hosts.composeWrite(host, composeFile, edited.text);
-      }
+  // Serialize provisioning per HOST (not per file): the race here is two
+  // concurrent provisions reading the same directory listing, both picking the
+  // same next slot, and both writing it. A host-scoped mutex makes the
+  // readdir → findNextSlot → write sequence atomic so the second provision sees
+  // the first's new config and advances to the next free slot. The sentinel key
+  // can never equal a real config filename (those match FILE_RE), so it never
+  // blocks a normal per-file config write.
+  return withFileLock(host, "provision.lock", async () => {
+    const files = await hosts.readdir(host);
+    const composeFile = await hosts.composeName(host);
+    if (!composeFile && host.runtime !== "native") {
+      throw new Error("No docker compose file found in " + host.dir);
     }
-  } catch (e) {
-    // Roll back the config so a failed compose edit doesn't orphan a config.
+    const slot = findNextSlot(files);
+    if (await hosts.exists(host, slot.file)) {
+      throw new Error("Target config already exists: " + slot.file);
+    }
+    const templateName = pickDefaultTemplate(files);
+    if (!templateName) {
+      throw new Error("No template config available to clone from");
+    }
+    let data;
     try {
-      await hosts.rename(host, slot.file, slot.file + ".rollback-" + Date.now());
+      data = JSON.parse(await hosts.readFile(host, templateName));
     } catch {
-      /* ignore */
+      throw new Error("Template config is not valid JSON");
     }
-    throw new Error("Failed to update compose file: " + e.message);
-  }
-  return { host: host.id, file: slot.file, container: slot.container };
+    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+      data.TwitchSettings = {};
+    }
+    data.TwitchSettings.TwitchUsers = [];
+    if (data.KickSettings && typeof data.KickSettings === "object") {
+      data.KickSettings.KickUsers = [];
+    }
+    await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
+    try {
+      if (composeFile) {
+        const raw = await hosts.composeRead(host, composeFile);
+        const edited = addServiceToComposeText(raw, slot.container, slot.file);
+        if (!edited.exists) {
+          await hosts.composeWrite(host, composeFile, edited.text);
+        }
+      }
+    } catch (e) {
+      // Roll back the config so a failed compose edit doesn't orphan a config.
+      try {
+        await hosts.rename(
+          host,
+          slot.file,
+          slot.file + ".rollback-" + Date.now(),
+        );
+      } catch {
+        /* ignore */
+      }
+      throw new Error("Failed to update compose file: " + e.message);
+    }
+    return { host: host.id, file: slot.file, container: slot.container };
+  });
 }
 
 module.exports = router;

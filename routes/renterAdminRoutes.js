@@ -1283,18 +1283,78 @@ router.post(
       }
 
       const notes = [];
+      let partial = false;
       if (tokenNote) notes.push(tokenNote);
 
-      // Pull the account off any ACTIVE marketplace listing that still promises
-      // to deliver it — but only this one account, never the whole listing. On
-      // a multi-account offer the other accounts keep selling; on a single-
-      // account offer it goes off sale. This replaces the old hard block: an
-      // account someone bought (and now rents farming for) can be reclaimed
-      // here without the operator having to delist by hand first.
+      // Look up where the account currently lives — READS ONLY. Nothing is torn
+      // down until the destination write below has succeeded. The identity
+      // fields come from whichever trace exists so the config entry can carry
+      // the Twitch Id / unique id TwitchDropsBot needs to watch drops.
       const acctRow = await BotAccount.findOne(
         { $or: [{ clientSecret: token }, { login: loginRe }] },
         { _id: 1, login: 1 },
       ).lean();
+      const botHit = await BotAccount.findOne({
+        configFile: { $nin: ["", null] },
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      });
+      const otherRenterAcc = await RenterAccount.findOne({
+        $or: [{ clientSecret: token }, { login: loginRe }],
+      });
+      const poolRow = await AvailableAccount.findOne({
+        usernameLower: lower,
+      }).lean();
+      const twitchId = String(
+        (botHit && botHit.twitchId) ||
+          (otherRenterAcc && otherRenterAcc.twitchId) ||
+          (poolRow && poolRow.twitchId) ||
+          "",
+      ).trim();
+      const uniqueId = String(
+        (botHit && botHit.uniqueId) ||
+          (otherRenterAcc && otherRenterAcc.uniqueId) ||
+          (poolRow && poolRow.uniqueId) ||
+          "",
+      ).trim();
+      const games = await renterDefaultGames(renter, host);
+      const acct = {
+        ClientSecret: token,
+        UniqueId: uniqueId || crypto.randomBytes(16).toString("hex"),
+        Login: username,
+        Id: twitchId,
+        Enabled: true,
+        FavouriteGames: games.slice(),
+      };
+
+      // DESTINATION FIRST. Write the account into the renter's bot BEFORE
+      // pulling it out of anywhere else. If this fails the account has not been
+      // touched at its source, so the operator can safely retry — the old
+      // source-first order could strand an account (delisted, removed from its
+      // bot, its RenterAccount row deleted) with nowhere left to land.
+      try {
+        await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+      } catch (e) {
+        return res.status(e.unreachable ? 502 : 500).json({
+          success: false,
+          offline: !!e.unreachable,
+          message:
+            "Could not write the account to the renter's bot: " +
+            (e.message || e),
+        });
+      }
+
+      const destHost = host;
+      const destFile = renter.botFile;
+
+      // The account is safely placed now, so tear down its old homes. A teardown
+      // failure no longer loses the account — it is already farming for the
+      // renter — so these WARN rather than abort; the worst case is the account
+      // farms in two places until the operator frees the source by hand.
+
+      // Pull the account off any ACTIVE marketplace listing that still promises
+      // to deliver it — but only this one account, never the whole listing. On
+      // a multi-account offer the other accounts keep selling; on a single-
+      // account offer it goes off sale.
       const listingFilter = [
         {
           accountLogin: {
@@ -1326,111 +1386,142 @@ router.post(
       }
 
       // Pull it out of an operator bot, if it lives on one.
-      const botHit = await BotAccount.findOne({
-        configFile: { $nin: ["", null] },
-        $or: [{ clientSecret: token }, { login: loginRe }],
-      });
       if (botHit) {
         const srcHost = hosts.resolveHost(botHit.host);
-        if (!srcHost) {
-          return res.status(409).json({
-            success: false,
-            message:
-              "Account is assigned to " +
+        const sameConfig =
+          !!srcHost &&
+          srcHost.id === destHost.id &&
+          botHit.configFile === destFile;
+        if (sameConfig) {
+          // Already in the destination config (shared file) — the entry stays
+          // (we just wrote it); only drop operator ownership so auto-farm and
+          // fulfilment won't grab it.
+          botHit.configFile = "";
+          botHit.container = "";
+          botHit.enabled = false;
+          await botHit.save();
+          notes.push(
+            "Took " +
+              (botHit.login ? botHit.login + " · " : "") +
+              "over from operator use on the shared config.",
+          );
+        } else if (!srcHost) {
+          partial = true;
+          notes.push(
+            "⚠ Still assigned to operator bot " +
               botHit.configFile +
               " on unknown host '" +
               botHit.host +
-              "' — free it manually first.",
-          });
-        }
-        let removed = 0;
-        try {
-          removed = await removeAccountFromConfig(srcHost, botHit.configFile, {
-            clientSecret: botHit.clientSecret,
-            login: botHit.login || username,
-          });
-        } catch (e) {
-          return res.status(e.unreachable ? 502 : 500).json({
-            success: false,
-            offline: !!e.unreachable,
-            message:
-              "Could not remove the account from " +
-              botHit.configFile +
-              " on " +
-              srcHost.label +
-              ": " +
-              (e.message || e),
-          });
-        }
-        if (removed) {
-          // Best effort: bounce the source bot so it stops farming the account.
+              "' — free it there manually.",
+          );
+        } else {
+          let removed = 0;
+          let removeErr = null;
           try {
-            await restartConfigContainer(srcHost, botHit.configFile);
-          } catch {
+            removed = await removeAccountFromConfig(srcHost, botHit.configFile, {
+              clientSecret: botHit.clientSecret,
+              login: botHit.login || username,
+            });
+          } catch (e) {
+            removeErr = e;
+          }
+          if (removeErr) {
+            partial = true;
             notes.push(
-              "Removed from " +
+              "⚠ Added to the renter, but could not remove it from operator bot " +
                 botHit.configFile +
                 " on " +
                 srcHost.label +
-                ", but that bot could not be restarted — restart it so the change takes effect.",
+                " (" +
+                (removeErr.message || removeErr) +
+                ") — it will farm in both until you free it there.",
+            );
+          } else {
+            if (removed) {
+              // Best effort: bounce the source bot so it stops farming it.
+              try {
+                await restartConfigContainer(srcHost, botHit.configFile);
+              } catch {
+                notes.push(
+                  "Removed from " +
+                    botHit.configFile +
+                    " on " +
+                    srcHost.label +
+                    ", but that bot could not be restarted — restart it so the change takes effect.",
+                );
+              }
+            }
+            botHit.configFile = "";
+            botHit.container = "";
+            botHit.enabled = false;
+            await botHit.save();
+            notes.push(
+              "Moved off operator bot " +
+                (botHit.login ? botHit.login + " · " : "") +
+                (removed ? "" : "(config entry was already gone) ") +
+                "on " +
+                srcHost.label +
+                ".",
             );
           }
         }
-        botHit.configFile = "";
-        botHit.container = "";
-        botHit.enabled = false;
-        await botHit.save();
-        notes.push(
-          "Moved off operator bot " +
-            (botHit.login ? botHit.login + " · " : "") +
-            (removed ? "" : "(config entry was already gone) ") +
-            "on " +
-            srcHost.label +
-            ".",
-        );
       }
 
       // Pull it off ANOTHER renter's bot, if it lives there.
-      const otherRenterAcc = await RenterAccount.findOne({
-        $or: [{ clientSecret: token }, { login: loginRe }],
-      });
       if (otherRenterAcc) {
-        if (otherRenterAcc.configFile) {
-          const srcHost = hosts.resolveHost(otherRenterAcc.host);
-          if (srcHost) {
+        const srcHost = otherRenterAcc.configFile
+          ? hosts.resolveHost(otherRenterAcc.host)
+          : null;
+        const sameConfig =
+          !!srcHost &&
+          srcHost.id === destHost.id &&
+          otherRenterAcc.configFile === destFile;
+        let keepRow = false;
+        if (otherRenterAcc.configFile && srcHost && !sameConfig) {
+          let removed = 0;
+          let removeErr = null;
+          try {
+            removed = await removeAccountFromConfig(
+              srcHost,
+              otherRenterAcc.configFile,
+              {
+                clientSecret: otherRenterAcc.clientSecret,
+                login: otherRenterAcc.login || username,
+              },
+            );
+          } catch (e) {
+            removeErr = e;
+          }
+          if (removeErr) {
+            // Its config entry may still be live — keep the row so the trail to
+            // it is not lost, and warn the operator to free it by hand.
+            partial = true;
+            keepRow = true;
+            notes.push(
+              "⚠ Added to the renter, but could not remove it from another renter's bot (" +
+                otherRenterAcc.configFile +
+                "): " +
+                (removeErr.message || removeErr) +
+                " — free it there manually.",
+            );
+          } else if (removed) {
             try {
-              const removed = await removeAccountFromConfig(
-                srcHost,
-                otherRenterAcc.configFile,
-                {
-                  clientSecret: otherRenterAcc.clientSecret,
-                  login: otherRenterAcc.login || username,
-                },
+              await restartConfigContainer(srcHost, otherRenterAcc.configFile);
+            } catch {
+              notes.push(
+                "Removed from the other renter's bot, but it could not be restarted — restart it so the change takes effect.",
               );
-              if (removed) {
-                try {
-                  await restartConfigContainer(srcHost, otherRenterAcc.configFile);
-                } catch {
-                  notes.push(
-                    "Removed from the other renter's bot, but it could not be restarted — restart it so the change takes effect.",
-                  );
-                }
-              }
-            } catch (e) {
-              return res.status(e.unreachable ? 502 : 500).json({
-                success: false,
-                offline: !!e.unreachable,
-                message:
-                  "Could not remove the account from another renter's bot (" +
-                  otherRenterAcc.configFile +
-                  "): " +
-                  (e.message || e),
-              });
             }
           }
         }
-        await RenterAccount.deleteOne({ _id: otherRenterAcc._id });
-        notes.push("Moved off another renter's bot.");
+        if (!keepRow) {
+          await RenterAccount.deleteOne({ _id: otherRenterAcc._id });
+          notes.push(
+            sameConfig
+              ? "Took over from another renter on the shared config."
+              : "Moved off another renter's bot.",
+          );
+        }
       }
 
       // Park the credentials in the account pool so the Creds reveal can always
@@ -1451,46 +1542,6 @@ router.post(
         { $set: poolSet, $setOnInsert: { usernameLower: lower } },
         { upsert: true },
       ).catch(() => {});
-
-      // Finally: write it into the renter's bot config. Reuse the Twitch user
-      // id and unique id already known for this account: TwitchDropsBot needs
-      // the Id to resolve time-based drops, and an account deployed without one
-      // throws instead of watching.
-      const poolRow = await AvailableAccount.findOne({
-        usernameLower: lower,
-      }).lean();
-      const twitchId = String(
-        (botHit && botHit.twitchId) ||
-          (otherRenterAcc && otherRenterAcc.twitchId) ||
-          (poolRow && poolRow.twitchId) ||
-          "",
-      ).trim();
-      const uniqueId = String(
-        (botHit && botHit.uniqueId) ||
-          (otherRenterAcc && otherRenterAcc.uniqueId) ||
-          (poolRow && poolRow.uniqueId) ||
-          "",
-      ).trim();
-      const games = await renterDefaultGames(renter, host);
-      const acct = {
-        ClientSecret: token,
-        UniqueId: uniqueId || crypto.randomBytes(16).toString("hex"),
-        Login: username,
-        Id: twitchId,
-        Enabled: true,
-        FavouriteGames: games.slice(),
-      };
-      try {
-        await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
-      } catch (e) {
-        return res.status(e.unreachable ? 502 : 500).json({
-          success: false,
-          offline: !!e.unreachable,
-          message:
-            "Could not write the account to the renter's bot: " +
-            (e.message || e),
-        });
-      }
 
       // Restart the renter's bot so it picks the new account up (best effort —
       // a stopped bot stays stopped until the operator starts it).
@@ -1523,6 +1574,7 @@ router.post(
       res.json({
         success: true,
         moved: !!(botHit || otherRenterAcc),
+        partial,
         restarted,
         note: notes.join(" "),
       });
@@ -1891,6 +1943,19 @@ async function movePoolAccountToRenter(renter, host, doc) {
   const username = String(doc.username || "").trim();
   const lower = username.toLowerCase();
 
+  // Build the config entry BEFORE claiming: renterDefaultGames reads the config
+  // off the host and can fail, and a failure here must not leave a claimed-but-
+  // unplaced account behind.
+  const games = await renterDefaultGames(renter, host);
+  const acct = {
+    ClientSecret: token,
+    UniqueId: doc.uniqueId || crypto.randomBytes(16).toString("hex"),
+    Login: username,
+    Id: String(doc.twitchId || ""),
+    Enabled: true,
+    FavouriteGames: games.slice(),
+  };
+
   // Guard 3: claim it in the pool so auto-farm's refiller can't redeploy it.
   const claimNote =
     "rented to " +
@@ -1906,17 +1971,20 @@ async function movePoolAccountToRenter(renter, host, doc) {
     throw new Error("was claimed by someone else");
   }
 
-  // Write into the renter's bot config (also creates the RenterAccount row).
-  const games = await renterDefaultGames(renter, host);
-  const acct = {
-    ClientSecret: token,
-    UniqueId: doc.uniqueId || crypto.randomBytes(16).toString("hex"),
-    Login: username,
-    Id: String(doc.twitchId || ""),
-    Enabled: true,
-    FavouriteGames: games.slice(),
-  };
-  await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+  // The account is now claimed. If writing it into the renter's config fails,
+  // RELEASE the claim before propagating — otherwise it is stranded: claimed
+  // (auto-farm's refiller skips it) yet in no config (farming nothing). The
+  // release is scoped to a claim that is still OURS (status + note unchanged)
+  // so it can't clobber a claim a concurrent move just took.
+  try {
+    await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+  } catch (e) {
+    await AvailableAccount.updateOne(
+      { _id: doc._id, status: "claimed", claimedNote: claimNote },
+      { $set: { status: "available" }, $unset: { claimedAt: "", claimedNote: "" } },
+    ).catch(() => {});
+    throw e;
+  }
 
   // Defensive auto-farm guards on any stray BotAccount trace. Eligibility
   // already excluded deployed/sellable/sold accounts, so for a picked account

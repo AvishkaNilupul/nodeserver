@@ -17,6 +17,7 @@ const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const hosts = require("./botHosts");
 const { isBlocked } = require("./renters");
+const { withFileLock } = require("./fileLock");
 
 // ---------------------------------------------------------------------------
 // Pure config transforms (parsed config JSON in, mutated in place)
@@ -64,18 +65,44 @@ function addUsersDedupe(data, entries) {
 }
 
 // Set FavouriteGames on ONLY the accounts whose ClientSecret is in `secrets`.
-// A non-empty list switches OnlyFavouriteGames on so it is honoured. Returns
-// how many accounts were updated.
+// A non-empty list switches the global OnlyFavouriteGames on so it is honoured;
+// because that switch is global, any wander-mode co-tenant (empty own + empty
+// root) is first pinned to the armed list so it isn't starved to zero games.
+// Returns how many of the targeted accounts were updated.
 function setUsersGamesBySecret(data, secrets, list) {
   const set = new Set(secrets);
+  const users = configUsers(data);
   let updated = 0;
-  for (const u of configUsers(data)) {
+  for (const u of users) {
     if (u && typeof u === "object" && set.has(u.ClientSecret)) {
       u.FavouriteGames = list.slice();
       updated += 1;
     }
   }
-  if (list.length && updated) data.TwitchSettings.OnlyFavouriteGames = true;
+  if (list.length && updated) {
+    // OnlyFavouriteGames is a GLOBAL switch, but we only armed A's accounts. A
+    // co-tenant in wander mode — empty own favourites AND an empty config root,
+    // i.e. currently farming everything because the flag was off — would drop
+    // to ZERO games the instant we turn the flag on: nothing to inherit, so
+    // gamesForUser() returns []. Pin those accounts to the list we're arming so
+    // they keep farming SOMETHING (their own renter can re-arm to override).
+    // This mirrors the whole-config path, which also stamps the list onto every
+    // account. Co-tenants that already carry their own games, or that inherit a
+    // non-empty root, are left untouched — the flag never starves them.
+    const rootGames = Array.isArray(data.FavouriteGames)
+      ? data.FavouriteGames.filter(Boolean)
+      : [];
+    if (!rootGames.length) {
+      for (const u of users) {
+        if (!u || typeof u !== "object" || set.has(u.ClientSecret)) continue;
+        const own = Array.isArray(u.FavouriteGames)
+          ? u.FavouriteGames.filter(Boolean)
+          : [];
+        if (!own.length) u.FavouriteGames = list.slice();
+      }
+    }
+    data.TwitchSettings.OnlyFavouriteGames = true;
+  }
   return updated;
 }
 
@@ -128,14 +155,22 @@ async function stopRenterFarming(renter, host) {
   const secrets = await renterSecrets(renter._id);
   let removed = 0;
   if (secrets.length) {
-    const data = JSON.parse(await hosts.readFile(host, renter.botFile));
-    removed = removeUsersBySecret(data, secrets);
+    // Lock the read→mutate→write so a co-tenant armed on the same shared config
+    // at the same instant can't clobber this removal (or vice versa). Container
+    // ops stay OUTSIDE the lock — they don't touch the config file.
+    removed = await withFileLock(host, renter.botFile, async () => {
+      const data = JSON.parse(await hosts.readFile(host, renter.botFile));
+      const n = removeUsersBySecret(data, secrets);
+      if (n) {
+        await hosts.writeFileAtomic(
+          host,
+          renter.botFile,
+          JSON.stringify(data, null, 2),
+        );
+      }
+      return n;
+    });
     if (removed) {
-      await hosts.writeFileAtomic(
-        host,
-        renter.botFile,
-        JSON.stringify(data, null, 2),
-      );
       await cfg()
         .restartConfigContainer(host, renter.botFile)
         .catch(() => {});
@@ -156,30 +191,37 @@ async function startRenterFarming(renter, host) {
   }).lean();
   let added = 0;
   if (rows.length) {
-    const data = JSON.parse(await hosts.readFile(host, renter.botFile));
-    const games =
-      Array.isArray(renter.farmGames) && renter.farmGames.length
-        ? renter.farmGames
-        : Array.isArray(data.FavouriteGames)
-          ? data.FavouriteGames.filter(Boolean)
-          : [];
-    added = addUsersDedupe(
-      data,
-      rows.map((a) => ({
-        ClientSecret: a.clientSecret,
-        UniqueId: a.uniqueId || "",
-        Login: a.login || "",
-        Id: a.twitchId || "",
-        Enabled: true,
-        FavouriteGames: games.slice(),
-      })),
-    );
-    if (added) {
-      await hosts.writeFileAtomic(
-        host,
-        renter.botFile,
-        JSON.stringify(data, null, 2),
+    // Lock the read→mutate→write: two renters re-armed on one shared config at
+    // once must not lose each other's re-added accounts.
+    added = await withFileLock(host, renter.botFile, async () => {
+      const data = JSON.parse(await hosts.readFile(host, renter.botFile));
+      const games =
+        Array.isArray(renter.farmGames) && renter.farmGames.length
+          ? renter.farmGames
+          : Array.isArray(data.FavouriteGames)
+            ? data.FavouriteGames.filter(Boolean)
+            : [];
+      const n = addUsersDedupe(
+        data,
+        rows.map((a) => ({
+          ClientSecret: a.clientSecret,
+          UniqueId: a.uniqueId || "",
+          Login: a.login || "",
+          Id: a.twitchId || "",
+          Enabled: true,
+          FavouriteGames: games.slice(),
+        })),
       );
+      if (n) {
+        await hosts.writeFileAtomic(
+          host,
+          renter.botFile,
+          JSON.stringify(data, null, 2),
+        );
+      }
+      return n;
+    });
+    if (added) {
       await RenterAccount.updateMany(
         { renter: renter._id, enabled: true },
         { $set: { configFile: renter.botFile, host: host.id } },
@@ -212,6 +254,9 @@ async function startRenterFarming(renter, host) {
 async function applyRenterGames(renter, host, games) {
   const others = await otherSharers(renter, { activeOnly: true });
   if (!others.length) {
+    // Alone on the config: the public setConfigGames takes the file lock itself.
+    // This branch holds NO lock, so that single acquisition can't self-deadlock
+    // (the per-file lock is non-reentrant).
     const list = await cfg().setConfigGames(host, renter.botFile, games);
     return { scope: "config", games: list };
   }
@@ -221,13 +266,17 @@ async function applyRenterGames(renter, host, games) {
     .slice(0, 50)
     .map((g) => g.slice(0, 100));
   const secrets = await renterSecrets(renter._id);
-  const data = JSON.parse(await hosts.readFile(host, renter.botFile));
-  setUsersGamesBySecret(data, secrets, list);
-  await hosts.writeFileAtomic(
-    host,
-    renter.botFile,
-    JSON.stringify(data, null, 2),
-  );
+  // Shared config: scope the write to this renter's accounts, under the file
+  // lock so a co-tenant's simultaneous games change can't clobber it.
+  await withFileLock(host, renter.botFile, async () => {
+    const data = JSON.parse(await hosts.readFile(host, renter.botFile));
+    setUsersGamesBySecret(data, secrets, list);
+    await hosts.writeFileAtomic(
+      host,
+      renter.botFile,
+      JSON.stringify(data, null, 2),
+    );
+  });
   return { scope: "own-accounts", games: list };
 }
 
