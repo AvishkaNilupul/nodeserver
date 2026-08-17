@@ -41,6 +41,14 @@ const dropSetSchema = new mongoose.Schema(
     coverServiceText: { type: String, default: "" },
     coverBullets: { type: [String], default: [] },
     coverImages: { type: [String], default: [] },
+    // Radar-created event bundles are restricted to the accounts that the
+    // auto-farmer actually assigned to that event's waves. Empty means the
+    // legacy, archive-wide stock behaviour.
+    accountScopeLogins: { type: [String], default: [] },
+    sourceType: { type: String, default: "" },
+    sourceEventKey: { type: String, default: "", index: true },
+    sourceEventName: { type: String, default: "" },
+    sourceCampaignIds: { type: [String], default: [] },
   },
   { timestamps: true },
 );

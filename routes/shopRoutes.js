@@ -33,13 +33,19 @@ function isSuper(req) {
 // DropLog (driven by the itemKey index) and does NOT join botaccounts — the
 // sellable/sold/password filtering is done in a second, _id-indexed query so we
 // avoid the expensive per-row $lookup + $strLenCP scan the old pipeline did.
-async function holdingsForKeys(keys) {
+async function holdingsForKeys(keys, accountIds = null) {
   if (!keys.length) return [];
   const total = keys.length;
   // Drops already connected/redeemed OR reserved for a set (per-game sold)
   // cannot be delivered again, so they never count as sellable stock.
   return DropLog.aggregate([
-    { $match: { itemKey: { $in: keys }, ...AVAILABLE_DROP } },
+    {
+      $match: {
+        itemKey: { $in: keys },
+        ...AVAILABLE_DROP,
+        ...(accountIds ? { account: { $in: accountIds } } : {}),
+      },
+    },
     {
       $group: {
         _id: { account: "$account", k: "$itemKey" },
@@ -56,6 +62,40 @@ async function holdingsForKeys(keys) {
     },
     { $match: { have: total } },
   ]);
+}
+
+function normalizeAccountScope(setOrLogins) {
+  const raw = Array.isArray(setOrLogins)
+    ? setOrLogins
+    : (setOrLogins && setOrLogins.accountScopeLogins) || [];
+  return [
+    ...new Set(
+      raw
+        .map((login) =>
+          String(login || "")
+            .trim()
+            .toLowerCase(),
+        )
+        .filter(Boolean),
+    ),
+  ];
+}
+
+async function accountIdsForScope(set) {
+  const scope = normalizeAccountScope(set);
+  if (!scope.length) return null;
+  const patterns = scope.map(
+    (login) =>
+      new RegExp(
+        "^" + login.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&") + "$",
+        "i",
+      ),
+  );
+  const accounts = await BotAccount.find(
+    { login: { $in: patterns } },
+    { _id: 1 },
+  ).lean();
+  return accounts.map((account) => account._id);
 }
 
 // How much still-connectable content each account carries, by account id.
@@ -141,7 +181,9 @@ async function availableAccountsForSet(set) {
       .filter((i) => i.itemKey)
       .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
   );
-  const rows = await holdingsForKeys(keys);
+  const accountIds = await accountIdsForScope(set);
+  if (accountIds && !accountIds.length) return [];
+  const rows = await holdingsForKeys(keys, accountIds);
   if (!rows.length) return [];
   const accMap = await sellableAccountMap(rows.map((r) => r._id));
   const out = [];
@@ -179,6 +221,55 @@ async function availableAccountsForSet(set) {
       String(a.login || "").localeCompare(String(b.login || "")),
   );
   return out;
+}
+
+function stockForSetFromHoldings(set, holdings) {
+  const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
+  if (!keys.length) return { stock: 0, topItems: [] };
+  const needByKey = new Map(
+    (set.items || [])
+      .filter((i) => i.itemKey)
+      .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
+  );
+  const scope = new Set(normalizeAccountScope(set));
+  let stock = 0;
+  let bestMin = -1;
+  let bestMap = null;
+  for (const row of holdings) {
+    if (
+      scope.size &&
+      !scope.has(
+        String(row.login || "")
+          .trim()
+          .toLowerCase(),
+      )
+    ) {
+      continue;
+    }
+    const counts = row.counts;
+    let ok = true;
+    let min = Infinity;
+    for (const key of keys) {
+      const count = counts.get(key) || 0;
+      if (count < (needByKey.get(key) || 1)) {
+        ok = false;
+        break;
+      }
+      if (count < min) min = count;
+    }
+    if (!ok) continue;
+    stock += 1;
+    if (min > bestMin) {
+      bestMin = min;
+      bestMap = counts;
+    }
+  }
+  return {
+    stock,
+    topItems: bestMap
+      ? keys.map((key) => ({ k: key, count: bestMap.get(key) || 0 }))
+      : [],
+  };
 }
 
 // Compute stock + delivery preview for MANY sets in a single DropLog
@@ -220,49 +311,16 @@ async function stockForSets(sets) {
   // Keep only sellable accounts; build id -> Map(key->count).
   const holdings = [];
   for (const r of rows) {
-    if (!accMap.has(String(r._id))) continue;
+    const account = accMap.get(String(r._id));
+    if (!account) continue;
     const m = new Map();
     for (const it of r.items) m.set(it.k, it.count || 0);
-    holdings.push(m);
+    holdings.push({ login: account.login || "", counts: m });
   }
   // For each set, count sellable accounts that hold all its keys and remember
   // the one with the most spare copies for the ×N preview.
   for (const set of sets) {
-    const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
-    if (!keys.length) {
-      result.set(String(set._id), { stock: 0, topItems: [] });
-      continue;
-    }
-    const needByKey = new Map(
-      (set.items || [])
-        .filter((i) => i.itemKey)
-        .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
-    );
-    let stock = 0;
-    let bestMin = -1;
-    let bestMap = null;
-    for (const m of holdings) {
-      let ok = true;
-      let min = Infinity;
-      for (const k of keys) {
-        const c = m.get(k) || 0;
-        if (c < (needByKey.get(k) || 1)) {
-          ok = false;
-          break;
-        }
-        if (c < min) min = c;
-      }
-      if (!ok) continue;
-      stock += 1;
-      if (min > bestMin) {
-        bestMin = min;
-        bestMap = m;
-      }
-    }
-    const topItems = bestMap
-      ? keys.map((k) => ({ k, count: bestMap.get(k) || 0 }))
-      : [];
-    result.set(String(set._id), { stock, topItems });
+    result.set(String(set._id), stockForSetFromHoldings(set, holdings));
   }
   return result;
 }
@@ -661,3 +719,5 @@ module.exports.availableAccountsForSet = availableAccountsForSet;
 // Live stock across many sets in one aggregation — reused by the bulk-order set
 // picker so it can show how many units each set can currently fill.
 module.exports.stockForSets = stockForSets;
+module.exports.normalizeAccountScope = normalizeAccountScope;
+module.exports.stockForSetFromHoldings = stockForSetFromHoldings;

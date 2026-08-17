@@ -39,6 +39,9 @@ const BAD_FOR_SUMMARY = new Set([
 // replacements still work even if the underlying DropSet was later deleted.
 function setLikeOf(order) {
   return {
+    accountScopeLogins: Array.isArray(order.accountScopeLogins)
+      ? order.accountScopeLogins
+      : [],
     items: (order.items || [])
       .filter((i) => i.itemKey)
       .map((i) => ({

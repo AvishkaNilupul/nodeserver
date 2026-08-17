@@ -2502,6 +2502,10 @@ Reliable Daily Rewards</textarea
 
       var listingsCache = [];
       var lsFilter = "all";
+      var requestedPublishSet =
+        new window.URLSearchParams(window.location.search).get("publishSet") ||
+        "";
+      var requestedPublishOpened = false;
       function renderShopListings() {
         var box = $("listings");
         if (!listingsCache.length) {
@@ -2537,6 +2541,17 @@ Reliable Daily Rewards</textarea
             var sets = j.sets || [];
             listingsCache = sets;
             renderShopListings();
+            if (requestedPublishSet && !requestedPublishOpened) {
+              var requested = sets.find(function (set) {
+                return set.id === requestedPublishSet;
+              });
+              if (requested) {
+                requestedPublishOpened = true;
+                setTimeout(function () {
+                  openPublishModal(requested);
+                }, 0);
+              }
+            }
             if (!sets.length) return;
             // Fetch live stock per set and patch the badges/meta. Each
             // fulfillment call runs heavy DB aggregations, so cap concurrency

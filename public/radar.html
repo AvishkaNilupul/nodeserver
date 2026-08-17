@@ -306,7 +306,7 @@
         padding: 14px 0;
         border-bottom: 1px solid var(--line);
       }
-      .event-row:last-child {
+      .event-block:last-child .event-row {
         border-bottom: 0;
       }
       .event-row.attention {
@@ -374,6 +374,11 @@
         border-color: color-mix(in srgb, var(--green) 35%, var(--line));
         background: color-mix(in srgb, var(--green) 9%, var(--surface));
       }
+      .badge.partially_farmed {
+        color: #b45309;
+        border-color: color-mix(in srgb, #d97706 35%, var(--line));
+        background: color-mix(in srgb, #f59e0b 9%, var(--surface));
+      }
       .badge.planned {
         color: var(--accent);
         border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
@@ -411,6 +416,123 @@
         font-size: 11.5px;
         margin-top: -7px;
         overflow-wrap: anywhere;
+      }
+      .event-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+      }
+      .event-detail {
+        display: none;
+        padding: 16px 0 18px 56px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-2);
+      }
+      .event-detail.open {
+        display: block;
+      }
+      .event-detail-loading {
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .event-detail-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+      .event-detail-stats {
+        display: flex;
+        gap: 22px;
+        flex-wrap: wrap;
+      }
+      .event-detail-stat b {
+        display: block;
+        font-size: 16px;
+      }
+      .event-detail-stat span {
+        color: var(--muted);
+        font-size: 10.5px;
+      }
+      .wave-list {
+        border-top: 1px solid var(--line);
+      }
+      .wave-row {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) auto auto auto;
+        gap: 10px;
+        align-items: center;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 12px;
+      }
+      .wave-row b {
+        overflow-wrap: anywhere;
+      }
+      .wave-meta {
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .event-items-title {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin: 16px 0 8px;
+      }
+      .event-items {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 18px;
+      }
+      .event-item {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) auto;
+        gap: 9px;
+        align-items: center;
+        min-width: 0;
+      }
+      .event-item img,
+      .event-item .item-ph {
+        width: 34px;
+        height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        object-fit: cover;
+        background: var(--surface);
+      }
+      .event-item .item-ph {
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .event-item-name {
+        min-width: 0;
+        font-size: 12px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      .event-item-name span {
+        display: block;
+        color: var(--muted);
+        font-size: 10.5px;
+        font-weight: 400;
+        margin-top: 2px;
+      }
+      .event-item-qty {
+        font-size: 11px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .event-errors {
+        color: var(--red);
+        font-size: 11.5px;
+        margin-top: 10px;
       }
       .event-empty {
         color: var(--muted);
@@ -548,6 +670,9 @@
         .event-reason {
           grid-column: 2 / -1;
         }
+        .event-detail {
+          padding-left: 54px;
+        }
       }
       @media (max-width: 620px) {
         .coverage-counts {
@@ -573,6 +698,26 @@
         .event-row > .btn {
           grid-column: 2;
           justify-self: start;
+        }
+        .event-actions {
+          grid-column: 2;
+          justify-content: flex-start;
+        }
+        .event-detail {
+          padding-left: 0;
+        }
+        .event-detail-top {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .wave-row {
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+        .wave-row .wave-meta:nth-last-child(-n + 2) {
+          display: none;
+        }
+        .event-items {
+          grid-template-columns: 1fr;
         }
       }
     </style>
@@ -920,6 +1065,7 @@
             farming: "Farming now",
             planned: "Planned",
             farmed: "Farmed",
+            partially_farmed: "Partially farmed",
             skipped: "Skipped",
             failed: "Failed",
             untracked: "Not tracked",
@@ -1035,7 +1181,9 @@
                 '" target="_blank" rel="noopener">Open</a>'
               : "";
             return (
-              '<div class="event-row' +
+              '<div class="event-block" data-event-block="' +
+              esc(event.id) +
+              '"><div class="event-row' +
               (eventNeedsAttention(event) ? " attention" : "") +
               '">' +
               eventArt(event) +
@@ -1071,13 +1219,189 @@
               (farm.archiveItems || 0) +
               "</b><span>Archive items</span></div>" +
               "</div>" +
+              '<div class="event-actions"><button class="btn btn-sm" data-event-details="' +
+              esc(event.id) +
+              '">Details</button>' +
               open +
+              "</div>" +
               reason +
-              "</div>"
+              '</div><div class="event-detail" id="event-detail-' +
+              esc(event.id) +
+              '"></div></div>'
             );
           })
           .join("");
       }
+
+      var eventPreviewCache = {};
+
+      function eventItemArt(item) {
+        if (item.image) {
+          return (
+            '<img src="' +
+            esc(item.image) +
+            '" alt="" loading="lazy" referrerpolicy="no-referrer">'
+          );
+        }
+        return (
+          '<div class="item-ph">' +
+          esc(
+            String(item.name || "?")
+              .charAt(0)
+              .toUpperCase(),
+          ) +
+          "</div>"
+        );
+      }
+
+      function renderEventPreview(id, preview) {
+        var box = $("event-detail-" + id);
+        if (!box) return;
+        var waves = preview.waves || [];
+        var items = preview.items || [];
+        var errors = preview.errors || [];
+        var waveRows = waves
+          .map(function (wave) {
+            var state = (wave.farm && wave.farm.state) || "untracked";
+            return (
+              '<div class="wave-row"><b>' +
+              esc(wave.label || wave.name || "Campaign") +
+              '</b><span class="badge ' +
+              esc(state) +
+              '">' +
+              esc(farmLabel(state)) +
+              '</span><span class="wave-meta">' +
+              (wave.farm && wave.farm.assignedAccounts
+                ? wave.farm.assignedAccounts + " assigned"
+                : "No accounts") +
+              '</span><span class="wave-meta">' +
+              (wave.error
+                ? "Rewards unresolved"
+                : (wave.items || []).length +
+                  " item" +
+                  ((wave.items || []).length === 1 ? "" : "s") +
+                  (wave.source ? " · " + esc(wave.source) : "")) +
+              "</span></div>"
+            );
+          })
+          .join("");
+        var itemRows = items
+          .map(function (item) {
+            var coverage = item.coverage || {};
+            return (
+              '<div class="event-item">' +
+              eventItemArt(item) +
+              '<div class="event-item-name">' +
+              esc(item.name || "Reward") +
+              "<span>" +
+              (coverage.accounts || 0) +
+              " assigned account" +
+              ((coverage.accounts || 0) === 1 ? "" : "s") +
+              " have enough</span></div>" +
+              '<div class="event-item-qty">' +
+              (Number(item.qty) > 1 ? item.qty + "x" : "1x") +
+              "</div></div>"
+            );
+          })
+          .join("");
+        var errorHtml = errors.length
+          ? '<div class="event-errors">' +
+            errors
+              .map(function (error) {
+                return esc(error.name + ": " + error.message);
+              })
+              .join("<br>") +
+            "</div>"
+          : "";
+        var actionLabel = preview.existingSetId
+          ? "Update listing draft"
+          : "Create listing draft";
+        box.innerHTML =
+          '<div class="event-detail-top"><div class="event-detail-stats">' +
+          '<div class="event-detail-stat"><b>' +
+          (preview.assignedAccounts || 0) +
+          "</b><span>Event farming accounts</span></div>" +
+          '<div class="event-detail-stat"><b>' +
+          (preview.listingReadyAccounts || 0) +
+          "</b><span>Complete bundle accounts</span></div>" +
+          '<div class="event-detail-stat"><b>' +
+          items.length +
+          "</b><span>Combined unique items</span></div></div>" +
+          '<button class="btn btn-sm" data-event-create="' +
+          esc(id) +
+          '"' +
+          (preview.canCreate ? "" : " disabled") +
+          ">" +
+          esc(actionLabel) +
+          "</button></div>" +
+          '<div class="wave-list">' +
+          waveRows +
+          "</div>" +
+          '<div class="event-items-title">Combined event bundle</div>' +
+          '<div class="event-items">' +
+          (itemRows ||
+            '<div class="event-detail-loading">No resolved rewards yet.</div>') +
+          "</div>" +
+          errorHtml;
+      }
+
+      function openEventPreview(id) {
+        var box = $("event-detail-" + id);
+        if (!box) return;
+        var opening = !box.classList.contains("open");
+        document.querySelectorAll(".event-detail.open").forEach(function (el) {
+          if (el !== box) el.classList.remove("open");
+        });
+        if (!opening) {
+          box.classList.remove("open");
+          return;
+        }
+        box.classList.add("open");
+        if (eventPreviewCache[id]) {
+          renderEventPreview(id, eventPreviewCache[id]);
+          return;
+        }
+        box.innerHTML =
+          '<div class="event-detail-loading"><span class="spin"></span>Resolving every wave and verifying event accounts…</div>';
+        api("/api/radar/events/" + encodeURIComponent(id) + "/listing-preview")
+          .then(function (preview) {
+            eventPreviewCache[id] = preview;
+            renderEventPreview(id, preview);
+          })
+          .catch(function (err) {
+            box.innerHTML =
+              '<div class="event-errors">' + esc(err.message) + "</div>";
+          });
+      }
+
+      function createEventListing(id, button) {
+        button.disabled = true;
+        button.innerHTML = '<span class="spin"></span>Verifying';
+        api("/api/radar/events/" + encodeURIComponent(id) + "/listing", {
+          method: "POST",
+        })
+          .then(function (result) {
+            window.location.href = result.listingsUrl;
+          })
+          .catch(function (err) {
+            toast(err.message || "Could not create listing", true);
+            button.disabled = false;
+            button.textContent = "Create listing draft";
+            delete eventPreviewCache[id];
+          });
+      }
+
+      $("eventList").addEventListener("click", function (event) {
+        var details = event.target.closest("[data-event-details]");
+        if (details) {
+          openEventPreview(details.dataset.eventDetails);
+          return;
+        }
+        var create = event.target.closest("[data-event-create]");
+        if (create && !create.disabled) {
+          createEventListing(create.dataset.eventCreate, create);
+        }
+      });
 
       function renderTwitch(rows) {
         var f = $("twFilter").value;

@@ -2051,6 +2051,15 @@ function publicSet(s) {
     coverServiceText: s.coverServiceText || "",
     coverBullets: Array.isArray(s.coverBullets) ? s.coverBullets : [],
     coverImages: Array.isArray(s.coverImages) ? s.coverImages : [],
+    accountScopeLogins: Array.isArray(s.accountScopeLogins)
+      ? s.accountScopeLogins
+      : [],
+    sourceType: s.sourceType || "",
+    sourceEventKey: s.sourceEventKey || "",
+    sourceEventName: s.sourceEventName || "",
+    sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
+      ? s.sourceCampaignIds
+      : [],
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -2083,6 +2092,11 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
           custom: !!s.custom,
           coverStyle: s.coverStyle || "grid",
           coverGame: s.coverGame || "",
+          sourceType: s.sourceType || "",
+          sourceEventName: s.sourceEventName || "",
+          sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
+            ? s.sourceCampaignIds
+            : [],
           updatedAt: s.updatedAt,
         })),
       };
@@ -2460,6 +2474,33 @@ router.delete(
 );
 
 // Fulfillment: which accounts can deliver the whole bundle, plus per-item stock.
+async function fulfillmentAccountScope(set) {
+  const logins = [
+    ...new Set(
+      (set.accountScopeLogins || [])
+        .map((login) =>
+          String(login || "")
+            .trim()
+            .toLowerCase(),
+        )
+        .filter(Boolean),
+    ),
+  ];
+  if (!logins.length) return null;
+  const patterns = logins.map(
+    (login) =>
+      new RegExp(
+        "^" + login.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&") + "$",
+        "i",
+      ),
+  );
+  const accounts = await BotAccount.find(
+    { login: { $in: patterns } },
+    { _id: 1 },
+  ).lean();
+  return accounts.map((account) => account._id);
+}
+
 router.get(
   "/drops-archive/sets/:id/fulfillment",
   requireSuperadmin,
@@ -2487,7 +2528,15 @@ router.get(
         });
       }
 
-      const badIds = await excludedAccountIds();
+      const [badIds, scopedIds] = await Promise.all([
+        excludedAccountIds(),
+        fulfillmentAccountScope(set),
+      ]);
+      const bad = new Set(badIds.map((id) => String(id)));
+      const allowedIds = scopedIds
+        ? scopedIds.filter((id) => !bad.has(String(id)))
+        : null;
+      const accountMatch = allowedIds ? { $in: allowedIds } : { $nin: badIds };
 
       // Per account: which of the set's items they hold and the count of each.
       // Connected/redeemed drops can't be delivered again, so they don't count
@@ -2498,7 +2547,7 @@ router.get(
           $match: {
             itemKey: { $in: keys },
             connected: { $ne: true },
-            account: { $nin: badIds },
+            account: accountMatch,
           },
         },
         {
@@ -2609,7 +2658,7 @@ router.get(
           $match: {
             itemKey: { $in: keys },
             connected: { $ne: true },
-            account: { $nin: badIds },
+            account: accountMatch,
           },
         },
         {

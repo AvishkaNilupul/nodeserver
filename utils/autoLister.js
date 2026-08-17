@@ -2026,6 +2026,7 @@ module.exports = {
   normLabel,
   looksLikeTitlePlaceholder,
   resolveCampaignItems,
+  campaignItems,
   filterVerifiedHolders,
   // reserve→publish rollback (release stranded reservations on publish failure)
   withReservationRollback,

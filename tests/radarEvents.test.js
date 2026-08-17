@@ -1,7 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { buildRadarEvents } = require("../utils/radarEvents");
+const { buildRadarEvents, splitEventWave } = require("../utils/radarEvents");
+const { mergeWaveItems } = require("../utils/radarEventListings");
 
 test("radar groups repeated Twitch campaign ids into one named event", () => {
   const events = buildRadarEvents(
@@ -51,6 +52,64 @@ test("a standalone Drops suffix remains part of its event name", () => {
     [],
   );
   assert.equal(event.name, "S&F Drops");
+});
+
+test("week campaigns roll up into one parent event and preserve wave labels", () => {
+  const events = buildRadarEvents(
+    [
+      {
+        campaignId: "busan-1",
+        game: "Overwatch",
+        name: "S4 Heroes of Busan Launch Week 1",
+      },
+      {
+        campaignId: "busan-2",
+        game: "Overwatch",
+        name: "S4 Heroes of Busan Launch - Week 2",
+      },
+    ],
+    [],
+    [],
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "S4 Heroes of Busan Launch");
+  assert.deepEqual(
+    events[0].waves.map((wave) => wave.label),
+    ["Week 1", "Week 2"],
+  );
+});
+
+test("explicit day and wave suffixes group, while season numbers stay", () => {
+  assert.deepEqual(splitEventWave("KORD BREACH S1 Day 1"), {
+    eventName: "KORD BREACH S1",
+    waveLabel: "Day 1",
+  });
+  assert.deepEqual(splitEventWave("KORD BREACH S1 (Wave II)"), {
+    eventName: "KORD BREACH S1",
+    waveLabel: "Wave II",
+  });
+  assert.deepEqual(splitEventWave("Season 4 Launch"), {
+    eventName: "Season 4 Launch",
+    waveLabel: "",
+  });
+  assert.deepEqual(splitEventWave("KORD BREACH S1"), {
+    eventName: "KORD BREACH S1",
+    waveLabel: "",
+  });
+});
+
+test("similar names and different games never merge", () => {
+  const events = buildRadarEvents(
+    [
+      { campaignId: "a", game: "Game A", name: "Launch Week 1" },
+      { campaignId: "b", game: "Game A", name: "Launch Party Week 2" },
+      { campaignId: "c", game: "Game B", name: "Launch Week 2" },
+    ],
+    [],
+    [],
+  );
+  assert.equal(events.length, 3);
 });
 
 test("active tasks and archive evidence produce operational farm coverage", () => {
@@ -119,4 +178,87 @@ test("completed, skipped, and unseen events remain distinguishable", () => {
     Skip: "skipped",
     Done: "farmed",
   });
+});
+
+test("assigned accounts do not hide a failed farming wave", () => {
+  const [event] = buildRadarEvents(
+    [{ campaignId: "failed", game: "A", name: "Failed event" }],
+    [
+      {
+        campaignId: "failed",
+        status: "failed",
+        assignedAccounts: ["AccountOne"],
+      },
+    ],
+    [],
+  );
+  assert.equal(event.farm.state, "failed");
+  assert.equal(event.waves[0].farm.state, "failed");
+  assert.equal(event.farm.assignedAccounts, 1);
+});
+
+test("a completed wave plus an unfarmed wave is partially farmed", () => {
+  const [event] = buildRadarEvents(
+    [
+      { campaignId: "w1", game: "A", name: "Launch Week 1" },
+      { campaignId: "w2", game: "A", name: "Launch Week 2" },
+    ],
+    [{ campaignId: "w1", status: "completed", assignedAccounts: ["One"] }],
+    [],
+  );
+  assert.equal(event.farm.state, "partially_farmed");
+  assert.equal(event.farm.assignedAccounts, 1);
+  assert.deepEqual(
+    event.waves.map((wave) => wave.farm.state),
+    ["farmed", "untracked"],
+  );
+});
+
+test("assigned accounts are deduplicated across event waves", () => {
+  const [event] = buildRadarEvents(
+    [
+      { campaignId: "w1", game: "A", name: "Launch Week 1" },
+      { campaignId: "w2", game: "A", name: "Launch Week 2" },
+    ],
+    [
+      {
+        campaignId: "w1",
+        status: "completed",
+        assignedAccounts: ["One", "Two"],
+      },
+      {
+        campaignId: "w2",
+        status: "completed",
+        assignedAccounts: ["one", "Three"],
+      },
+    ],
+    [],
+  );
+  assert.equal(event.farm.state, "farmed");
+  assert.equal(event.farm.assignedAccounts, 3);
+});
+
+test("event listing merges rewards and sums repeats across waves", () => {
+  const items = mergeWaveItems([
+    {
+      game: "Overwatch",
+      items: [
+        { name: "Busan Spray", itemKey: "busan spray|overwatch", qty: 1 },
+        { name: "Hero Skin", itemKey: "hero skin|overwatch", qty: 1 },
+      ],
+    },
+    {
+      game: "Overwatch",
+      items: [
+        { name: "Busan Spray", itemKey: "busan spray|overwatch", qty: 2 },
+      ],
+    },
+  ]);
+  assert.deepEqual(
+    Object.fromEntries(items.map((item) => [item.itemKey, item.qty])),
+    {
+      "busan spray|overwatch": 3,
+      "hero skin|overwatch": 1,
+    },
+  );
 });
