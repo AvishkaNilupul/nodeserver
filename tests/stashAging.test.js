@@ -5,7 +5,14 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { policyOf, ingestSetDefaults, isMature, maturityGaps } = require("../utils/stashAging");
+const {
+  policyOf,
+  ingestSetDefaults,
+  isMature,
+  maturityGaps,
+  needsLiveVerification,
+  tokenArrivalSchedule,
+} = require("../utils/stashAging");
 
 const DAY = 86400000;
 const daysAgo = (d) => new Date(Date.now() - d * DAY);
@@ -74,6 +81,56 @@ test("a zero is preserved rather than falling back to the default", () => {
   // become 3.
   assert.equal(policyOf({ aging: { enabled: true, followTarget: 0 } }).followTarget, 0);
   assert.equal(policyOf({ aging: { enabled: true, minDays: 0 } }).minDays, 0);
+});
+
+test("live aging re-verifies rows that only crossed verify in dry-run", () => {
+  const live = policyOf({ aging: { enabled: true, dryRun: false } });
+  assert.equal(
+    needsLiveVerification(
+      { lastCheckStatus: "", aging: { stage: "settle" } },
+      live,
+    ),
+    true,
+  );
+  assert.equal(
+    needsLiveVerification(
+      { lastCheckStatus: "ok", aging: { stage: "warmup" } },
+      live,
+    ),
+    false,
+  );
+  assert.equal(
+    needsLiveVerification(
+      { lastCheckStatus: "", aging: { stage: "warmup" } },
+      policyOf({ aging: { enabled: true, dryRun: true } }),
+    ),
+    false,
+  );
+});
+
+test("a token arrival wakes new and missing-token-paused ingest rows", () => {
+  const now = new Date("2026-08-18T00:00:00Z");
+  assert.deepEqual(tokenArrivalSchedule({ aging: { stage: "new" } }, now), {
+    "aging.stage": "new",
+    "aging.nextEligibleAt": now,
+    "aging.leaseUntil": null,
+    "aging.lastError": "",
+  });
+  assert.equal(
+    tokenArrivalSchedule({
+      aging: { stage: "paused", lastError: "Paused by operator" },
+    })["aging.stage"],
+    undefined,
+  );
+  assert.equal(
+    tokenArrivalSchedule({
+      aging: {
+        stage: "paused",
+        lastError: "No auth token stored for this account",
+      },
+    })["aging.stage"],
+    "new",
+  );
 });
 
 // ------------------------------------------------------------ the gates

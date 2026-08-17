@@ -354,7 +354,10 @@ router.post("/account-stash/sets/:id/import", requireSuperadmin, async (req, res
       if (found) {
         // Fill only what's missing; never overwrite or duplicate within a set.
         const set$ = {};
-        if (item.clientSecret && !found.clientSecret) set$.clientSecret = item.clientSecret;
+        if (item.clientSecret && !found.clientSecret) {
+          set$.clientSecret = item.clientSecret;
+          Object.assign(set$, stashAging.tokenArrivalSchedule(found));
+        }
         if (item.uniqueId && !found.uniqueId) set$.uniqueId = item.uniqueId;
         if (item.twitchId && !found.twitchId) set$.twitchId = item.twitchId;
         if (item.password && !found.hasPassword) {
@@ -471,6 +474,7 @@ router.put("/account-stash/sets/:id/aging", requireSuperadmin, async (req, res) 
     const set = await StashSet.findById(req.params.id);
     if (!set) return res.status(404).json({ success: false, message: "Not found" });
     const body = req.body || {};
+    const previousPolicy = stashAging.policyOf(set);
     if (!set.aging) set.aging = {};
 
     for (const f of NUMERIC_POLICY_FIELDS) {
@@ -513,6 +517,7 @@ router.put("/account-stash/sets/:id/aging", requireSuperadmin, async (req, res) 
     // it stranded with a null nextEligibleAt. Staggered across the next hour so
     // enabling a 200-account set doesn't produce a thundering herd.
     let scheduled = 0;
+    let requeuedForVerification = 0;
     if (set.aging.enabled) {
       const pending = await StashAccount.find({
         setId: set._id,
@@ -536,9 +541,35 @@ router.put("/account-stash/sets/:id/aging", requireSuperadmin, async (req, res) 
       }));
       if (ops.length) await StashAccount.bulkWrite(ops, { ordered: false });
       scheduled = ops.length;
+
+      // Accounts may have crossed verify while the set was in dry-run mode.
+      // When the operator makes the set live, put only those simulated rows
+      // back at verify; new API arrivals continue through the normal ladder.
+      if (previousPolicy.dryRun && !stashAging.policyOf(set).dryRun) {
+        const requeued = await StashAccount.updateMany(
+          {
+            setId: set._id,
+            lastCheckStatus: { $ne: "ok" },
+            "aging.stage": { $in: ["settle", "warmup", "active", "mature"] },
+          },
+          {
+            $set: {
+              "aging.stage": "verify",
+              "aging.nextEligibleAt": new Date(),
+              "aging.leaseUntil": null,
+            },
+          },
+        );
+        requeuedForVerification = requeued.modifiedCount || 0;
+      }
     }
 
-    res.json({ success: true, policy: stashAging.policyOf(set), scheduled });
+    res.json({
+      success: true,
+      policy: stashAging.policyOf(set),
+      scheduled,
+      requeuedForVerification,
+    });
   } catch (err) {
     console.error("stash aging update error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -1226,7 +1257,10 @@ router.post("/account-stash/ingest", requireIngestBearer, async (req, res) => {
     const existing = await StashAccount.findOne({ setId: set._id, usernameLower });
     if (existing) {
       const set$ = {};
-      if (clientSecret && !existing.clientSecret) set$.clientSecret = clientSecret;
+      if (clientSecret && !existing.clientSecret) {
+        set$.clientSecret = clientSecret;
+        Object.assign(set$, stashAging.tokenArrivalSchedule(existing));
+      }
       if (uniqueId && !existing.uniqueId) set$.uniqueId = uniqueId;
       if (twitchId && !existing.twitchId) set$.twitchId = twitchId;
       if (Object.keys(set$).length) {

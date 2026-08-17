@@ -197,6 +197,37 @@ function ingestSetDefaults() {
   return { enabled: true, dryRun: false, autoGraduate: true };
 }
 
+const LIVE_AGING_STAGES = new Set(["settle", "warmup", "active", "mature"]);
+
+// Dry-run is allowed to model the ladder without calling Twitch. Once a set
+// is live, though, no account may watch or graduate on a simulated verdict.
+function needsLiveVerification(acc, policy) {
+  const stage = acc?.aging?.stage || "new";
+  return (
+    !policy?.dryRun &&
+    LIVE_AGING_STAGES.has(stage) &&
+    acc?.lastCheckStatus !== "ok"
+  );
+}
+
+// The ingest API writes signup data and the Twitch token in separate requests.
+// Wake a row as soon as that second request lands instead of leaving it on the
+// no-token retry timer. A row paused specifically for a missing token resumes;
+// an operator-paused row stays paused.
+function tokenArrivalSchedule(acc, now = new Date()) {
+  const stage = acc?.aging?.stage || "new";
+  const missingTokenPause =
+    stage === "paused" &&
+    /no auth token/i.test(String(acc?.aging?.lastError || ""));
+  if (!["new", "verify"].includes(stage) && !missingTokenPause) return {};
+  return {
+    "aging.stage": "new",
+    "aging.nextEligibleAt": now,
+    "aging.leaseUntil": null,
+    "aging.lastError": "",
+  };
+}
+
 // Gap until this account's next session. sessionsPerWeek sets the average; the
 // jitter is wide (±45%) and there's a one-in-six chance of an extra idle day,
 // because a perfectly regular cadence is its own tell across a fleet.
@@ -870,6 +901,15 @@ async function processAccount(acc, set, policy) {
   // fill this in from the subdocument default, but every handler writes to
   // acc.aging directly and none of them should have to check first.
   if (!acc.aging) acc.aging = {};
+  if (needsLiveVerification(acc, policy)) {
+    return setStage(
+      acc,
+      set._id,
+      "verify",
+      "Live aging requires a successful token check",
+      { nextEligibleAt: new Date() },
+    );
+  }
   const stage = acc.aging.stage || "new";
   switch (stage) {
     case "new":
@@ -1099,6 +1139,8 @@ module.exports = {
   runNow,
   policyOf,
   ingestSetDefaults,
+  needsLiveVerification,
+  tokenArrivalSchedule,
   isMature,
   maturityGaps,
   WARMUP_SESSIONS,
