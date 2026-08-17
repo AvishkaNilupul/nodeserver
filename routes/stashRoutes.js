@@ -1225,6 +1225,7 @@ router.post("/account-stash/ingest", requireIngestBearer, async (req, res) => {
         uniqueId: "",
         twitchId: "",
         source,
+        aging: stashAging.ingestPendingSchedule(),
       });
       return res.json({
         success: true,

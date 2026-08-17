@@ -8,10 +8,12 @@ const assert = require("node:assert");
 const {
   policyOf,
   ingestSetDefaults,
+  ingestPendingSchedule,
   isMature,
   maturityGaps,
   needsLiveVerification,
   tokenArrivalSchedule,
+  INGEST_TOKEN_GRACE_MS,
 } = require("../utils/stashAging");
 
 const DAY = 86400000;
@@ -131,6 +133,19 @@ test("a token arrival wakes new and missing-token-paused ingest rows", () => {
     })["aging.stage"],
     "new",
   );
+});
+
+test("the credentials sync waits for the token sync before aging", () => {
+  const now = new Date("2026-08-18T00:00:00Z");
+  const pending = ingestPendingSchedule(now);
+  assert.equal(pending.stage, "new");
+  assert.equal(
+    pending.nextEligibleAt.getTime(),
+    now.getTime() + INGEST_TOKEN_GRACE_MS,
+  );
+
+  const tokenArrived = tokenArrivalSchedule({ aging: pending }, now);
+  assert.equal(tokenArrived["aging.nextEligibleAt"], now);
 });
 
 // ------------------------------------------------------------ the gates

@@ -197,6 +197,22 @@ function ingestSetDefaults() {
   return { enabled: true, dryRun: false, autoGraduate: true };
 }
 
+const configuredIngestGraceMs = Number(process.env.STASH_INGEST_TOKEN_GRACE_MS);
+const INGEST_TOKEN_GRACE_MS =
+  Number.isFinite(configuredIngestGraceMs) && configuredIngestGraceMs >= 0
+    ? configuredIngestGraceMs
+    : 10 * 60 * 1000;
+
+// Signup credentials and the Twitch token arrive as two separate API calls.
+// Keep the first call out of the runner long enough for the token sync to land,
+// avoiding a pointless missing-token pause between the two requests.
+function ingestPendingSchedule(now = new Date()) {
+  return {
+    stage: "new",
+    nextEligibleAt: new Date(now.getTime() + INGEST_TOKEN_GRACE_MS),
+  };
+}
+
 const LIVE_AGING_STAGES = new Set(["settle", "warmup", "active", "mature"]);
 
 // Dry-run is allowed to model the ladder without calling Twitch. Once a set
@@ -1139,6 +1155,7 @@ module.exports = {
   runNow,
   policyOf,
   ingestSetDefaults,
+  ingestPendingSchedule,
   needsLiveVerification,
   tokenArrivalSchedule,
   isMature,
@@ -1146,4 +1163,5 @@ module.exports = {
   WARMUP_SESSIONS,
   MAX_STRIKES,
   MAX_GLOBAL_CONCURRENT,
+  INGEST_TOKEN_GRACE_MS,
 };
