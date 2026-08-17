@@ -158,8 +158,9 @@
 
       main {
         flex: 1;
+        min-width: 0;
         padding: 30px 34px;
-        max-width: 980px;
+        max-width: 1180px;
       }
       h1 {
         font-size: 22px;
@@ -228,10 +229,204 @@
         flex-wrap: wrap;
         align-items: center;
       }
+      .coverage-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+      .coverage-counts {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(90px, 1fr));
+        border-block: 1px solid var(--line);
+        margin-bottom: 14px;
+      }
+      .coverage-count {
+        padding: 12px 14px;
+        min-width: 0;
+      }
+      .coverage-count + .coverage-count {
+        border-left: 1px solid var(--line);
+      }
+      .coverage-count b {
+        display: block;
+        font-size: 20px;
+        line-height: 1.1;
+      }
+      .coverage-count span {
+        display: block;
+        color: var(--muted);
+        font-size: 11.5px;
+        margin-top: 3px;
+      }
+      .event-toolbar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 4px;
+      }
+      .event-toolbar input {
+        width: min(300px, 100%);
+      }
+      .seg {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 3px;
+        background: var(--surface-2);
+        max-width: 100%;
+        overflow-x: auto;
+      }
+      .seg button {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        padding: 6px 9px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .seg button.active {
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+      }
+      .event-row {
+        display: grid;
+        grid-template-columns:
+          44px minmax(220px, 1.4fr) minmax(170px, 0.8fr)
+          minmax(250px, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .event-row:last-child {
+        border-bottom: 0;
+      }
+      .event-row.attention {
+        background: color-mix(in srgb, var(--red) 4%, transparent);
+      }
+      .event-art {
+        width: 42px;
+        height: 54px;
+        border-radius: 6px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        object-fit: cover;
+      }
+      .event-art.ph {
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 700;
+      }
+      .event-name {
+        min-width: 0;
+      }
+      .event-name b {
+        display: block;
+        font-size: 13.5px;
+        overflow-wrap: anywhere;
+      }
+      .event-name .game {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 3px;
+      }
+      .event-date {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+      .event-date strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .badges {
+        display: flex;
+        gap: 5px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        padding: 3px 7px;
+        border-radius: 999px;
+        font-size: 10.5px;
+        font-weight: 700;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        background: var(--surface-2);
+      }
+      .badge.live,
+      .badge.farming,
+      .badge.farmed {
+        color: var(--green);
+        border-color: color-mix(in srgb, var(--green) 35%, var(--line));
+        background: color-mix(in srgb, var(--green) 9%, var(--surface));
+      }
+      .badge.planned {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+        background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+      }
+      .badge.failed,
+      .badge.skipped,
+      .badge.untracked {
+        color: var(--red);
+        border-color: color-mix(in srgb, var(--red) 35%, var(--line));
+        background: color-mix(in srgb, var(--red) 7%, var(--surface));
+      }
+      .coverage-facts {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(48px, 1fr));
+        gap: 7px;
+      }
+      .coverage-fact {
+        min-width: 0;
+      }
+      .coverage-fact b {
+        display: block;
+        font-size: 13px;
+      }
+      .coverage-fact span {
+        display: block;
+        color: var(--muted);
+        font-size: 10.5px;
+        margin-top: 2px;
+        overflow-wrap: anywhere;
+      }
+      .event-reason {
+        grid-column: 2 / -1;
+        color: var(--muted);
+        font-size: 11.5px;
+        margin-top: -7px;
+        overflow-wrap: anywhere;
+      }
+      .event-empty {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 22px 0 8px;
+        text-align: center;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
         font-size: 13.5px;
+      }
+      #twList,
+      #epList {
+        max-width: 100%;
+        overflow-x: auto;
       }
       th,
       td {
@@ -330,6 +525,56 @@
           transform: rotate(360deg);
         }
       }
+      @media (max-width: 900px) {
+        main {
+          padding: 22px 18px;
+          max-width: none;
+        }
+        .event-toolbar,
+        .coverage-top {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .event-toolbar input {
+          width: 100%;
+        }
+        .event-row {
+          grid-template-columns: 42px minmax(0, 1fr) auto;
+        }
+        .event-date,
+        .coverage-facts {
+          grid-column: 2 / -1;
+        }
+        .event-reason {
+          grid-column: 2 / -1;
+        }
+      }
+      @media (max-width: 620px) {
+        .coverage-counts {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .coverage-count:nth-child(3) {
+          border-left: 0;
+        }
+        .coverage-count:nth-child(n + 3) {
+          border-top: 1px solid var(--line);
+        }
+        .coverage-facts {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .event-row {
+          grid-template-columns: 38px minmax(0, 1fr);
+          gap: 10px;
+        }
+        .event-art {
+          width: 38px;
+          height: 48px;
+        }
+        .event-row > .btn {
+          grid-column: 2;
+          justify-self: start;
+        }
+      }
     </style>
   </head>
   <body>
@@ -425,8 +670,8 @@
             stroke-linejoin="round"
           >
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-            <circle cx="12" cy="7" r="4"></circle></svg
-          >
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
           Twitch follows</a
         >
       </nav>
@@ -507,6 +752,46 @@
           >
         </div>
       </div>
+
+      <section class="card" id="eventCoverage">
+        <div class="coverage-top">
+          <div>
+            <h2>Event coverage</h2>
+            <p class="hint" id="eventCount">Loading farm status…</p>
+          </div>
+          <div class="seg" id="eventFilters" aria-label="Event coverage filter">
+            <button class="active" data-event-filter="all">All</button>
+            <button data-event-filter="attention">Needs attention</button>
+            <button data-event-filter="farming">Farming</button>
+            <button data-event-filter="farmed">Farmed</button>
+            <button data-event-filter="planned">Planned</button>
+          </div>
+        </div>
+        <div class="coverage-counts">
+          <div class="coverage-count">
+            <b id="eventLive">0</b><span>Live events</span>
+          </div>
+          <div class="coverage-count">
+            <b id="eventFarming">0</b><span>Farming now</span>
+          </div>
+          <div class="coverage-count">
+            <b id="eventFarmed">0</b><span>Farmed</span>
+          </div>
+          <div class="coverage-count">
+            <b id="eventAttention">0</b><span>Need attention</span>
+          </div>
+        </div>
+        <div class="event-toolbar">
+          <input
+            type="text"
+            id="eventSearch"
+            placeholder="Search event or game"
+            autocomplete="off"
+          />
+          <span class="muted" id="eventShown"></span>
+        </div>
+        <div id="eventList"><div class="event-empty">Loading…</div></div>
+      </section>
 
       <div class="card">
         <h2>Twitch drop campaigns</h2>
@@ -628,6 +913,172 @@
         );
       }
 
+      var eventFilter = "all";
+      function farmLabel(state) {
+        return (
+          {
+            farming: "Farming now",
+            planned: "Planned",
+            farmed: "Farmed",
+            skipped: "Skipped",
+            failed: "Failed",
+            untracked: "Not tracked",
+          }[state] || "Not tracked"
+        );
+      }
+
+      function eventNeedsAttention(event) {
+        var state = event.farm && event.farm.state;
+        return (
+          event.active &&
+          (state === "untracked" || state === "skipped" || state === "failed")
+        );
+      }
+
+      function eventMatchesFilter(event) {
+        var state = event.farm && event.farm.state;
+        if (eventFilter === "attention") return eventNeedsAttention(event);
+        if (eventFilter === "farming") return state === "farming";
+        if (eventFilter === "farmed") return state === "farmed";
+        if (eventFilter === "planned") return state === "planned";
+        return true;
+      }
+
+      function eventArt(event) {
+        if (event.image) {
+          return (
+            '<img class="event-art" src="' +
+            esc(event.image) +
+            '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">'
+          );
+        }
+        var initial = String(event.game || "?")
+          .trim()
+          .charAt(0)
+          .toUpperCase();
+        return '<div class="event-art ph">' + esc(initial || "?") + "</div>";
+      }
+
+      function renderEventCoverage(rows) {
+        rows = rows || [];
+        var live = rows.filter(function (event) {
+          return event.active;
+        }).length;
+        var farming = rows.filter(function (event) {
+          return event.farm && event.farm.state === "farming";
+        }).length;
+        var farmed = rows.filter(function (event) {
+          return event.farm && event.farm.state === "farmed";
+        }).length;
+        var attention = rows.filter(eventNeedsAttention).length;
+        var campaigns = rows.reduce(function (sum, event) {
+          return sum + (Number(event.campaignCount) || 0);
+        }, 0);
+        $("eventLive").textContent = live;
+        $("eventFarming").textContent = farming;
+        $("eventFarmed").textContent = farmed;
+        $("eventAttention").textContent = attention;
+        $("eventCount").textContent =
+          rows.length + " events · " + campaigns + " Twitch campaigns";
+
+        var query = $("eventSearch").value.trim().toLowerCase();
+        var visible = rows.filter(function (event) {
+          if (!eventMatchesFilter(event)) return false;
+          if (!query) return true;
+          return (
+            String(event.name || "")
+              .toLowerCase()
+              .includes(query) ||
+            String(event.game || "")
+              .toLowerCase()
+              .includes(query)
+          );
+        });
+        $("eventShown").textContent =
+          visible.length === rows.length
+            ? visible.length + " shown"
+            : visible.length + " of " + rows.length;
+
+        if (!visible.length) {
+          $("eventList").innerHTML =
+            '<div class="event-empty">No events match this view.</div>';
+          return;
+        }
+        $("eventList").innerHTML = visible
+          .map(function (event) {
+            var farm = event.farm || {};
+            var state = farm.state || "untracked";
+            var liveBadge = event.active
+              ? '<span class="badge live">' +
+                (event.status === "UPCOMING" ? "UPCOMING" : "LIVE") +
+                "</span>"
+              : '<span class="badge">ENDED</span>';
+            var campaignBadge =
+              Number(event.campaignCount) > 1
+                ? '<span class="badge">' +
+                  event.campaignCount +
+                  " campaigns</span>"
+                : "";
+            var dateLabel = event.active
+              ? event.status === "UPCOMING"
+                ? "Starts"
+                : "Live window"
+              : "Event window";
+            var dateValue =
+              fmtDate(event.startAt) + " – " + fmtDate(event.endAt);
+            var reason = farm.reason
+              ? '<div class="event-reason">' + esc(farm.reason) + "</div>"
+              : "";
+            var open = event.detailsURL
+              ? '<a class="btn btn-sm" href="' +
+                esc(event.detailsURL) +
+                '" target="_blank" rel="noopener">Open</a>'
+              : "";
+            return (
+              '<div class="event-row' +
+              (eventNeedsAttention(event) ? " attention" : "") +
+              '">' +
+              eventArt(event) +
+              '<div class="event-name"><b>' +
+              esc(event.name || "Unnamed event") +
+              '</b><div class="game">' +
+              esc(event.game || "Unknown game") +
+              '</div><div class="badges">' +
+              liveBadge +
+              '<span class="badge ' +
+              esc(state) +
+              '">' +
+              esc(farmLabel(state)) +
+              "</span>" +
+              campaignBadge +
+              "</div></div>" +
+              '<div class="event-date"><strong>' +
+              esc(dateLabel) +
+              "</strong><br>" +
+              esc(dateValue) +
+              "</div>" +
+              '<div class="coverage-facts">' +
+              '<div class="coverage-fact"><b>' +
+              (farm.bots || 0) +
+              "</b><span>Bots</span></div>" +
+              '<div class="coverage-fact"><b>' +
+              (farm.assignedAccounts || 0) +
+              "</b><span>Assigned</span></div>" +
+              '<div class="coverage-fact"><b>' +
+              (farm.archiveAccounts || 0) +
+              "</b><span>Archive accounts</span></div>" +
+              '<div class="coverage-fact"><b>' +
+              (farm.archiveItems || 0) +
+              "</b><span>Archive items</span></div>" +
+              "</div>" +
+              open +
+              reason +
+              "</div>"
+            );
+          })
+          .join("");
+      }
+
       function renderTwitch(rows) {
         var f = $("twFilter").value;
         rows = (rows || []).filter(function (c) {
@@ -732,11 +1183,14 @@
           var j = await api("/api/radar/list" + ended);
           lastData = j;
           renderStatus(j.status);
+          renderEventCoverage(j.events);
           renderTwitch(j.campaigns);
           renderEpic(j.epic);
         } catch (e) {
-          $("twList").innerHTML = $("epList").innerHTML =
-            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+          $("eventList").innerHTML =
+            $("twList").innerHTML =
+            $("epList").innerHTML =
+              '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
         }
       }
 
@@ -769,6 +1223,20 @@
         load();
       });
       $("btnRefresh").addEventListener("click", load);
+      $("eventSearch").addEventListener("input", function () {
+        if (lastData) renderEventCoverage(lastData.events);
+      });
+      $("eventFilters").addEventListener("click", function (e) {
+        var button = e.target.closest("[data-event-filter]");
+        if (!button) return;
+        eventFilter = button.dataset.eventFilter || "all";
+        $("eventFilters")
+          .querySelectorAll("[data-event-filter]")
+          .forEach(function (item) {
+            item.classList.toggle("active", item === button);
+          });
+        if (lastData) renderEventCoverage(lastData.events);
+      });
       $("twFilter").addEventListener("change", function () {
         if (lastData) renderTwitch(lastData.campaigns);
       });

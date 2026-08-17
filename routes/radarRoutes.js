@@ -3,8 +3,11 @@ const express = require("express");
 const { requireSuperadmin } = require("../middleware/auth");
 const TwitchCampaign = require("../models/TwitchCampaign");
 const EpicFreebie = require("../models/EpicFreebie");
+const AutoFarmTask = require("../models/AutoFarmTask");
+const DropLog = require("../models/DropLog");
 const campaignWatcher = require("../utils/campaignWatcher");
 const epicWatcher = require("../utils/epicWatcher");
+const { buildRadarEvents } = require("../utils/radarEvents");
 
 const router = express.Router();
 
@@ -22,9 +25,56 @@ router.get("/api/radar/list", requireSuperadmin, async (req, res) => {
         .limit(200)
         .lean(),
     ]);
+    const campaignIds = campaigns.map((campaign) => campaign.campaignId);
+    const campaignNames = [
+      ...new Set(campaigns.map((campaign) => campaign.name).filter(Boolean)),
+    ];
+    const [tasks, dropStats] = await Promise.all([
+      campaignIds.length
+        ? AutoFarmTask.find(
+            { campaignId: { $in: campaignIds } },
+            {
+              campaignId: 1,
+              status: 1,
+              decision: 1,
+              reason: 1,
+              assignedAccounts: 1,
+              bots: 1,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ).lean()
+        : [],
+      campaignNames.length
+        ? DropLog.aggregate([
+            { $match: { campaign: { $in: campaignNames } } },
+            {
+              $group: {
+                _id: { campaign: "$campaign", game: "$game" },
+                dropRows: { $sum: 1 },
+                totalCount: { $sum: { $ifNull: ["$count", 1] } },
+                accounts: { $addToSet: "$account" },
+                items: { $addToSet: "$itemKey" },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                campaign: "$_id.campaign",
+                game: "$_id.game",
+                dropRows: 1,
+                totalCount: 1,
+                accounts: 1,
+                items: 1,
+              },
+            },
+          ])
+        : [],
+    ]);
     res.json({
       success: true,
       campaigns,
+      events: buildRadarEvents(campaigns, tasks, dropStats),
       epic,
       status: {
         twitch: campaignWatcher.status(),
