@@ -20,6 +20,7 @@ const { detachAccountFromListing } = require("../utils/listingDetach");
 const { sameGame } = require("../utils/gameLabel");
 const accountState = require("../utils/twitchAccountState");
 const { paginateArchiveItems } = require("../utils/archivePagination");
+const { ARCHIVE_WARMUP_PLAN } = require("../utils/archiveWarmup");
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -2706,12 +2707,7 @@ router.get(
 // of "Loading…" for whoever opens the page first. Nothing else changes: this
 // just pays that cost in the background instead of on someone's click.
 function warmArchiveViews() {
-  const targets = [
-    "/drops-archive/overview",
-    "/drops-archive/by-game",
-    "/drops-archive/by-item",
-  ];
-  targets.forEach((path, index) => {
+  ARCHIVE_WARMUP_PLAN.forEach(({ path, delayMs }) => {
     const layer = router.stack.find(
       (l) => l.route && l.route.path === path && l.route.methods.get,
     );
@@ -2740,10 +2736,10 @@ function warmArchiveViews() {
         .catch((e) =>
           console.error("[dropsArchive] warm " + path + ":", e.message),
         );
-    }, index * 5000);
+    }, delayMs);
     timer.unref();
   });
 }
-setTimeout(warmArchiveViews, 15000).unref();
 
+router.warmArchiveViews = warmArchiveViews;
 module.exports = router;

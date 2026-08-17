@@ -605,6 +605,11 @@ mongoose
       .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
+      // Prime the item inventory as soon as Mongo and HTTP are ready. Cold
+      // archive aggregation takes tens of seconds on production-sized data, so
+      // delaying this until after the other dashboard rollups makes the first
+      // operator opening the page pay that full cost.
+      dropArchiveRoutes.warmArchiveViews();
     });
     // Begin the background drop-archive scanner (gentle, one account at a
     // time). Safe no-op until accounts are synced from the bot configs.
