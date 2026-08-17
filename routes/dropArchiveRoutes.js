@@ -19,6 +19,7 @@ const SaleSignal = require("../models/SaleSignal");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const { sameGame } = require("../utils/gameLabel");
 const accountState = require("../utils/twitchAccountState");
+const { paginateArchiveItems } = require("../utils/archivePagination");
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -46,20 +47,35 @@ const DROP_CACHE_TTL = 15000;
 // How long a fresh-enough entry may still be served while a refresh runs in the
 // background. Beyond this an entry is treated as gone and the caller waits.
 const DROP_CACHE_STALE_TTL = 10 * 60 * 1000;
+const DROP_CACHE_MAX_ENTRIES = 64;
 const dropCache = new Map(); // key -> { exp, staleExp, data }
 const inFlight = new Map(); // key -> Promise, so N viewers cause 1 recompute
 
 function dropCacheSet(key, data) {
   const now = Date.now();
+  // Map preserves insertion order. Refresh the key's position and evict the
+  // oldest entries so one-off item searches cannot grow this process forever.
+  dropCache.delete(key);
   dropCache.set(key, {
     exp: now + DROP_CACHE_TTL,
     staleExp: now + DROP_CACHE_STALE_TTL,
     data,
   });
+  while (dropCache.size > DROP_CACHE_MAX_ENTRIES) {
+    dropCache.delete(dropCache.keys().next().value);
+  }
 }
-function bustDropCache() {
-  dropCache.clear();
-  _exclCache = null;
+function bustDropCache(prefixes) {
+  if (!prefixes || !prefixes.length) {
+    dropCache.clear();
+  } else {
+    for (const key of dropCache.keys()) {
+      if (prefixes.some((prefix) => key.startsWith(prefix))) {
+        dropCache.delete(key);
+      }
+    }
+  }
+  if (!prefixes || prefixes.some((p) => p === "archive:")) _exclCache = null;
 }
 
 // Serve an expensive view without ever making two people pay for it at once.
@@ -111,7 +127,27 @@ async function cachedView(key, compute) {
 router.use((req, res, next) => {
   if (req.method === "GET" || req.method === "HEAD") return next();
   res.on("finish", () => {
-    if (res.statusCode < 400) bustDropCache();
+    if (res.statusCode >= 400) return;
+    const path = req.path;
+    if (path === "/drops-archive/scheduler") return;
+    if (/\/copied$/.test(path)) return bustDropCache(["accounts:"]);
+    if (/\/password$/.test(path)) {
+      return bustDropCache(["accounts:", "bad-tokens"]);
+    }
+    if (/\/mark-sold$/.test(path)) {
+      return bustDropCache(["by-item:", "sets:"]);
+    }
+    // Imports, syncs, scans, purges and account edits can change membership or
+    // rollups. Clear archive-related views, while leaving unrelated caches hot.
+    bustDropCache([
+      "overview",
+      "by-game",
+      "by-item:",
+      "accounts:",
+      "bad-tokens",
+      "sets:",
+      "archive:",
+    ]);
   });
   next();
 });
@@ -1738,7 +1774,9 @@ router.get("/drops-archive/by-item", requireSuperadmin, async (req, res) => {
       const hasMore = rows.length > LIMIT;
       return { success: true, items: rows.slice(0, LIMIT), hasMore };
     });
-    res.json(payload);
+    // Existing consumers receive the complete response. The archive page opts
+    // into paging so it only transfers and renders a small first viewport.
+    res.json(paginateArchiveItems(payload, req.query));
   } catch (err) {
     console.error("drops-archive by-item error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -2673,11 +2711,11 @@ function warmArchiveViews() {
     "/drops-archive/by-game",
     "/drops-archive/by-item",
   ];
-  for (const path of targets) {
+  targets.forEach((path, index) => {
     const layer = router.stack.find(
       (l) => l.route && l.route.path === path && l.route.methods.get,
     );
-    if (!layer) continue;
+    if (!layer) return;
     // Last handler in the chain = the route body, skipping requireSuperadmin.
     const handlers = layer.route.stack;
     const handler = handlers[handlers.length - 1].handle;
@@ -2691,15 +2729,20 @@ function warmArchiveViews() {
       json() {},
       send() {},
     };
-    const t = Date.now();
-    Promise.resolve(handler(req, res, () => {}))
-      .then(() =>
-        console.log(
-          "[dropsArchive] warmed " + path + " in " + (Date.now() - t) + "ms",
-        ),
-      )
-      .catch((e) => console.error("[dropsArchive] warm " + path + ":", e.message));
-  }
+    const timer = setTimeout(() => {
+      const t = Date.now();
+      Promise.resolve(handler(req, res, () => {}))
+        .then(() =>
+          console.log(
+            "[dropsArchive] warmed " + path + " in " + (Date.now() - t) + "ms",
+          ),
+        )
+        .catch((e) =>
+          console.error("[dropsArchive] warm " + path + ":", e.message),
+        );
+    }, index * 5000);
+    timer.unref();
+  });
 }
 setTimeout(warmArchiveViews, 15000).unref();
 

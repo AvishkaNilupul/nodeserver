@@ -1430,6 +1430,11 @@
           <span class="sub" id="itemCount"></span>
         </div>
         <div id="items"><div class="empty">Loading…</div></div>
+        <div style="display: flex; justify-content: center; margin-top: 14px">
+          <button class="btn-ghost btn-sm" id="loadMoreItems" hidden>
+            Load more
+          </button>
+        </div>
       </section>
 
       <!-- By game -->
@@ -1732,6 +1737,10 @@
         }
         if (!r.ok || (data && data.success === false))
           throw new Error((data && data.message) || "HTTP " + r.status);
+        const method = String((opts && opts.method) || "GET").toUpperCase();
+        if (method !== "GET" && url !== "/drops-archive/scheduler") {
+          invalidateClientViews();
+        }
         return data;
       }
 
@@ -1800,7 +1809,20 @@
 
       // -------- Tabs --------
       let activeTab = "items";
-      function switchTab(t) {
+      const viewLoaded = {
+        games: false,
+        accounts: false,
+        badtokens: false,
+        duplicates: false,
+      };
+      function invalidateClientViews() {
+        Object.keys(viewLoaded).forEach((key) => (viewLoaded[key] = false));
+        itemLoadedKey = "";
+        accountsLoadedKey = null;
+        badTokensLoadedKey = null;
+        gamesLoadedForFilter = false;
+      }
+      function switchTab(t, skipLoad) {
         activeTab = t;
         document
           .querySelectorAll(".tab")
@@ -1809,6 +1831,7 @@
           .querySelectorAll(".view")
           .forEach((v) => v.classList.remove("active"));
         $("view-" + t).classList.add("active");
+        if (skipLoad) return;
         if (t === "items") loadItems();
         else if (t === "games") loadGames();
         else if (t === "badtokens") loadBadTokens();
@@ -2014,33 +2037,76 @@
         $("gameMenu").classList.remove("show");
       }
 
-      async function loadItems() {
+      const ITEM_PAGE_SIZE = 80;
+      let itemLoadedKey = "";
+      let itemRequestId = 0;
+      async function loadItems(append, force) {
+        append = append === true;
         ensureGameFilter();
-        const search = encodeURIComponent($("itemSearch").value.trim());
-        const game = encodeURIComponent(currentGameFilter);
+        const rawSearch = $("itemSearch").value.trim();
+        const rawGame = currentGameFilter;
+        const key = rawGame + "\u0000" + rawSearch;
+        if (!append && !force && itemLoadedKey === key) return;
+        const offset = append ? lastItems.length : 0;
+        const search = encodeURIComponent(rawSearch);
+        const game = encodeURIComponent(rawGame);
+        const requestId = ++itemRequestId;
+        $("loadMoreItems").disabled = true;
+        if (append) $("loadMoreItems").textContent = "Loading…";
         let data;
         try {
           data = await api(
-            "/drops-archive/by-item?search=" + search + "&game=" + game,
+            "/drops-archive/by-item?search=" +
+              search +
+              "&game=" +
+              game +
+              "&limit=" +
+              ITEM_PAGE_SIZE +
+              "&offset=" +
+              offset,
           );
         } catch (e) {
+          if (requestId !== itemRequestId) return;
           lastItems = [];
           $("items").innerHTML =
             '<div class="empty">' + esc(e.message) + "</div>";
           $("itemCount").textContent = "";
+          $("loadMoreItems").hidden = true;
+          $("loadMoreItems").disabled = false;
+          $("loadMoreItems").textContent = "Load more";
           return;
         }
-        lastItems = data.items || [];
+        if (requestId !== itemRequestId) return;
+        const page = data.items || [];
+        lastItems = append ? lastItems.concat(page) : page;
+        itemLoadedKey = key;
+        const total = Number(data.total) || lastItems.length;
         $("itemCount").textContent = lastItems.length
-          ? lastItems.length + " distinct item(s)"
+          ? lastItems.length +
+            " of " +
+            total +
+            (data.truncated ? "+" : "") +
+            " distinct item(s)"
           : "";
-        renderItemsGrid();
+        renderItemsGrid(append, page);
+        $("loadMoreItems").hidden = !data.hasMore;
+        $("loadMoreItems").disabled = false;
+        $("loadMoreItems").textContent = "Load more";
       }
 
-      function renderItemsGrid() {
+      function renderItemsGrid(append, page) {
         if (!lastItems.length) {
           $("items").innerHTML =
             '<div class="empty">No items logged yet. Go to <b>Accounts</b> → Sync from bots, then let it scan.</div>';
+          return;
+        }
+        if (append) {
+          const grid = $("items").querySelector(".igrid");
+          if (grid)
+            grid.insertAdjacentHTML(
+              "beforeend",
+              page.map(itemCard).join(""),
+            );
           return;
         }
         $("items").innerHTML =
@@ -2095,11 +2161,12 @@
         const c = e.target.closest("[data-item]");
         if (c) openItem(c.dataset.item);
       });
+      $("loadMoreItems").addEventListener("click", () => loadItems(true));
 
       let itemSearchTimer = null;
       $("itemSearch").addEventListener("input", () => {
         clearTimeout(itemSearchTimer);
-        itemSearchTimer = setTimeout(loadItems, 300);
+        itemSearchTimer = setTimeout(() => loadItems(false, true), 300);
       });
 
       // Searchable game combo
@@ -2114,7 +2181,7 @@
           const first = $("gameMenu").querySelector(".combo-opt");
           if (first) {
             setGameFilter(first.dataset.gval);
-            loadItems();
+            loadItems(false, true);
           }
         } else if (e.key === "Escape") {
           setGameFilter(currentGameFilter);
@@ -2125,11 +2192,11 @@
         if (!o) return;
         e.preventDefault();
         setGameFilter(o.dataset.gval);
-        loadItems();
+        loadItems(false, true);
       });
       $("gameClear").addEventListener("click", () => {
         setGameFilter("");
-        loadItems();
+        loadItems(false, true);
         $("gameInput").focus();
       });
       document.addEventListener("click", (e) => {
@@ -2488,6 +2555,7 @@
 
       // -------- By game --------
       async function loadGames() {
+        if (viewLoaded.games) return;
         let data;
         try {
           data = await api("/drops-archive/by-game");
@@ -2499,6 +2567,7 @@
           return;
         }
         const games = data.games || [];
+        viewLoaded.games = true;
         if (!games.length) {
           $("gameRows").innerHTML =
             '<tr><td colspan="6" class="empty">No drops logged yet.</td></tr>';
@@ -2544,17 +2613,22 @@
         const tr = e.target.closest("[data-game]");
         if (!tr) return;
         gamesLoadedForFilter = false;
-        switchTab("items");
+        switchTab("items", true);
         ensureGameFilter().then(() => {
           setGameFilter(tr.dataset.game);
-          loadItems();
+          loadItems(false, true);
         });
       });
 
       // -------- Accounts --------
-      async function loadAccounts() {
-        const search = encodeURIComponent($("search").value.trim());
-        const status = encodeURIComponent($("statusFilter").value);
+      let accountsLoadedKey = null;
+      async function loadAccounts(force) {
+        const rawSearch = $("search").value.trim();
+        const rawStatus = $("statusFilter").value;
+        const accountKey = rawSearch + "\u0000" + rawStatus;
+        const search = encodeURIComponent(rawSearch);
+        const status = encodeURIComponent(rawStatus);
+        if (!force && accountsLoadedKey === accountKey) return;
         let data;
         try {
           // limit=5000 (server max) — the default 1000 silently truncated the
@@ -2576,6 +2650,8 @@
           return;
         }
         accounts = data.accounts || [];
+        accountsLoadedKey = accountKey;
+        viewLoaded.accounts = true;
         renderSetSelect();
         if (!accounts.length) {
           $("rows").innerHTML =
@@ -2587,8 +2663,12 @@
 
       // -------- Bad tokens (dead accounts) --------
       let badAccounts = [];
-      async function loadBadTokens() {
-        const search = encodeURIComponent($("badSearch").value.trim());
+      let badTokensLoadedKey = null;
+      async function loadBadTokens(force) {
+        const rawSearch = $("badSearch").value.trim();
+        const badKey = rawSearch;
+        const search = encodeURIComponent(rawSearch);
+        if (!force && badTokensLoadedKey === badKey) return;
         let data;
         try {
           data = await api("/drops-archive/bad-tokens?search=" + search);
@@ -2600,6 +2680,8 @@
           return;
         }
         badAccounts = data.accounts || [];
+        badTokensLoadedKey = badKey;
+        viewLoaded.badtokens = true;
         $("badCount").textContent =
           badAccounts.length +
           " dead account" +
@@ -2694,7 +2776,7 @@
       let badSearchTimer;
       $("badSearch").addEventListener("input", () => {
         clearTimeout(badSearchTimer);
-        badSearchTimer = setTimeout(loadBadTokens, 250);
+        badSearchTimer = setTimeout(() => loadBadTokens(true), 250);
       });
 
       // Bulk-remove every dead account from the bot config files. Their docs
@@ -2749,6 +2831,7 @@
         return esc(o.host) + ":" + esc(o.file);
       }
       async function loadDuplicates() {
+        if (viewLoaded.duplicates) return;
         let data;
         try {
           data = await api("/drops-archive/duplicates");
@@ -2760,6 +2843,7 @@
           return;
         }
         dupGroups = data.duplicates || [];
+        viewLoaded.duplicates = true;
         $("dupCount").textContent =
           dupGroups.length +
           " duplicate account" +
@@ -3270,9 +3354,9 @@
       });
 
       $("refreshBtn").addEventListener("click", () => {
+        invalidateClientViews();
         loadOverview();
         loadProgress();
-        gamesLoadedForFilter = false;
         switchTab(activeTab);
       });
       $("schedToggle").addEventListener("change", async (e) => {
@@ -3301,9 +3385,9 @@
       let searchTimer = null;
       $("search").addEventListener("input", () => {
         clearTimeout(searchTimer);
-        searchTimer = setTimeout(loadAccounts, 300);
+        searchTimer = setTimeout(() => loadAccounts(true), 300);
       });
-      $("statusFilter").addEventListener("change", loadAccounts);
+      $("statusFilter").addEventListener("change", () => loadAccounts(true));
 
       $("logoutBtn").addEventListener("click", async () => {
         try {
