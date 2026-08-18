@@ -724,8 +724,12 @@
       .detail-gallery .image-fallback {
         width: 100%;
         aspect-ratio: 1;
-        object-fit: cover;
-        border-radius: 6px;
+        /* contain (not cover) so tall/wide drop art — posters, banners, wraps —
+           shows in full instead of being cropped and cutting off the artwork. */
+        object-fit: contain;
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
         background: var(--surface-2);
       }
       .detail-gallery .placeholder {
