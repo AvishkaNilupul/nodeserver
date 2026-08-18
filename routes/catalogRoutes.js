@@ -622,9 +622,28 @@ async function adminOverview() {
         .lean(),
     ],
   );
-  const adminStock = await stockForSets(adminSets);
+  // Reuse the stock already computed for the (cached, boot-warmed) public
+  // catalog instead of re-running the whole-archive aggregation on every admin
+  // load — with ~200 listed sets that second aggregation took ~a minute and
+  // stalled this page. Only sets that are listed but hidden from the public
+  // catalog (publicCatalog:false) need a fresh, and much smaller, stock pass.
+  const publicStockById = new Map(
+    data.listings.map((listing) => [listing.id, listing.stock]),
+  );
+  const hiddenSets = adminSets.filter(
+    (set) => !publicStockById.has(String(set._id)),
+  );
+  const hiddenStock = hiddenSets.length
+    ? await stockForSets(hiddenSets)
+    : new Map();
+  const stockForAdminSet = (set) => {
+    const id = String(set._id);
+    return publicStockById.has(id)
+      ? publicStockById.get(id)
+      : hiddenStock.get(id)?.stock || 0;
+  };
   const adminListings = adminSets.map((set) => ({
-    ...publicListing(set, adminStock.get(String(set._id))?.stock || 0),
+    ...publicListing(set, stockForAdminSet(set)),
     visible: set.publicCatalog !== false,
     publicTitle: cleanText(set.publicTitle, 140),
     publicDescription: cleanText(set.publicDescription, 600),
