@@ -421,6 +421,21 @@ router.get("/account-stash/sets/:id/scan/status", requireSuperadmin, (req, res) 
   res.json({ success: true, ...stashChecker.statusFor(req.params.id) });
 });
 
+// Rescan ONE account. Same integrity-gated verdict a set-wide sweep produces,
+// so a stale "dead" from a transient Twitch hiccup can be cleared in one click
+// without waiting for the whole set to re-check.
+router.post("/account-stash/:id/rescan", requireSuperadmin, async (req, res) => {
+  try {
+    const acc = await StashAccount.findById(req.params.id);
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    await stashChecker.checkOne(acc);
+    res.json({ success: true, account: publicAccount(acc) });
+  } catch (err) {
+    console.error("stash single-rescan error:", err.message);
+    res.status(500).json({ success: false, message: err.message || "Server error" });
+  }
+});
+
 // ----------------------------------------------------------------- aging
 //
 // Everything below drives utils/stashAging.js. Note what is NOT here: there is
