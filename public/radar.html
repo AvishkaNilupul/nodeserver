@@ -869,10 +869,12 @@
     <main>
       <h1>Drops radar</h1>
       <div class="sub">
-        Background checkers poll Twitch's drops dashboard and Epic's weekly
-        free-games feed every 6 hours. New Twitch drop campaigns (farmable with
-        the bot fleet), campaigns going live, and every new Epic giveaway are
-        pushed to the super-admin Telegram chats automatically.
+        Background checkers poll Twitch's drops dashboard
+        <span id="introTwitchEvery">on a schedule</span> and Epic's weekly
+        free-games feed <span id="introEpicEvery">on a schedule</span>. New
+        Twitch drop campaigns (farmable with the bot fleet), campaigns going
+        live, and every new Epic giveaway are pushed to the super-admin Telegram
+        chats automatically.
       </div>
 
       <div class="card">
@@ -1034,13 +1036,21 @@
 
       function renderStatus(st) {
         if (!st) return;
+        var twH = (st.twitch && st.twitch.intervalHours) || 6;
+        var epH = (st.epic && st.epic.intervalHours) || 6;
         $("statusLine").textContent =
           watcherLine("Twitch", st.twitch) +
           " — " +
           watcherLine("Epic", st.epic) +
-          " Checks run every " +
-          ((st.twitch && st.twitch.intervalHours) || 6) +
+          " Twitch checks every " +
+          twH +
+          "h · Epic every " +
+          epH +
           "h.";
+        var twEvery = $("introTwitchEvery");
+        var epEvery = $("introEpicEvery");
+        if (twEvery) twEvery.textContent = "every " + twH + "h";
+        if (epEvery) epEvery.textContent = "every " + epH + "h";
       }
 
       function endCellFor(active, end) {
@@ -1105,6 +1115,21 @@
         return '<div class="event-art ph">' + esc(initial || "?") + "</div>";
       }
 
+      function emptyMessage() {
+        var query = $("eventSearch").value.trim();
+        if (query) return "No events match “" + esc(query) + "”.";
+        if (eventFilter === "farmed") {
+          return $("showEnded").checked
+            ? "No farmed events found."
+            : "No live or recently-finished events are fully farmed. " +
+                "Older farmed events have already ended — enable “show ended” to browse them.";
+        }
+        if (eventFilter === "attention") return "Nothing needs attention right now.";
+        if (eventFilter === "planned") return "No events are planned right now.";
+        if (eventFilter === "farming") return "No events are farming right now.";
+        return "No events match this view.";
+      }
+
       function renderEventCoverage(rows) {
         rows = rows || [];
         var live = rows.filter(function (event) {
@@ -1147,7 +1172,7 @@
 
         if (!visible.length) {
           $("eventList").innerHTML =
-            '<div class="event-empty">No events match this view.</div>';
+            '<div class="event-empty">' + emptyMessage() + "</div>";
           return;
         }
         $("eventList").innerHTML = visible

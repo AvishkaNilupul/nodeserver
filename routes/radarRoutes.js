@@ -90,6 +90,12 @@ async function dropStatsForCampaigns(campaigns) {
   ]);
 }
 
+// How long a fully-farmed event stays in the default (live-only) view after its
+// Twitch window closes. A drop you just finished farming is exactly when you
+// want to turn it into a listing, so it shouldn't vanish the instant it ends.
+const RECENT_FARMED_GRACE_HOURS = 48;
+const RECENT_FARMED_GRACE_MS = RECENT_FARMED_GRACE_HOURS * 60 * 60 * 1000;
+
 async function loadRadarData(
   showEnded,
   includeEpic = true,
@@ -118,6 +124,11 @@ async function loadRadarData(
     epicQuery,
   ]);
 
+  // `campaigns` is what the Twitch-dashboard table shows (live-only unless
+  // "show ended"). `eventCampaigns` is the broader set the event roll-up is
+  // built from — it additionally carries recently-ended campaigns so their
+  // fully-farmed events linger in the live view for the grace window.
+  let eventCampaigns = campaigns;
   if (showEnded) {
     const taskIds = [
       ...new Set(tasks.map((task) => task.campaignId).filter(Boolean)),
@@ -132,8 +143,20 @@ async function loadRadarData(
         .filter((task) => task.campaignId && !known.has(task.campaignId))
         .map(syntheticCampaign),
     );
+    eventCampaigns = campaigns;
   } else {
-    const campaignIds = campaigns.map((campaign) => campaign.campaignId);
+    const graceCutoff = new Date(Date.now() - RECENT_FARMED_GRACE_MS);
+    const recentlyEnded = await TwitchCampaign.find({
+      active: false,
+      endAt: { $gte: graceCutoff },
+    })
+      .sort({ endAt: -1 })
+      .limit(500)
+      .lean();
+    eventCampaigns = recentlyEnded.length
+      ? dedupeCampaigns([...campaigns, ...recentlyEnded])
+      : campaigns;
+    const campaignIds = eventCampaigns.map((campaign) => campaign.campaignId);
     tasks = campaignIds.length
       ? await AutoFarmTask.find(
           { campaignId: { $in: campaignIds } },
@@ -143,13 +166,22 @@ async function loadRadarData(
   }
 
   const dropStats = includeDropStats
-    ? await dropStatsForCampaigns(campaigns)
+    ? await dropStatsForCampaigns(eventCampaigns)
     : [];
+  let events = buildRadarEvents(eventCampaigns, tasks, dropStats);
+  if (!showEnded) {
+    // A grace-window campaign only earns a spot if its event is fully farmed
+    // (stock ready to list). Ended-and-unfarmed campaigns are dropped so the
+    // live view isn't cluttered with expired misses.
+    events = events.filter(
+      (event) => event.active || (event.farm && event.farm.state === "farmed"),
+    );
+  }
   return {
     campaigns,
     tasks,
     dropStats,
-    events: buildRadarEvents(campaigns, tasks, dropStats),
+    events,
     epic,
   };
 }
