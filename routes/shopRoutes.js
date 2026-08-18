@@ -81,15 +81,33 @@ function normalizeAccountScope(setOrLogins) {
   ];
 }
 
+function normalizeAccountScopeIds(setOrIds) {
+  const raw = Array.isArray(setOrIds)
+    ? setOrIds
+    : (setOrIds && setOrIds.accountScopeIds) || [];
+  return [
+    ...new Set(
+      raw
+        .map((id) => String(id || "").trim())
+        .filter((id) => /^[a-f0-9]{24}$/i.test(id)),
+    ),
+  ];
+}
+
 async function accountIdsForScope(set) {
+  const ids = normalizeAccountScopeIds(set);
+  if (ids.length) {
+    const accounts = await BotAccount.find(
+      { _id: { $in: ids } },
+      { _id: 1 },
+    ).lean();
+    return accounts.map((account) => account._id);
+  }
   const scope = normalizeAccountScope(set);
   if (!scope.length) return null;
   const patterns = scope.map(
     (login) =>
-      new RegExp(
-        "^" + login.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&") + "$",
-        "i",
-      ),
+      new RegExp("^" + login.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&") + "$", "i"),
   );
   const accounts = await BotAccount.find(
     { login: { $in: patterns } },
@@ -232,11 +250,16 @@ function stockForSetFromHoldings(set, holdings) {
       .map((i) => [i.itemKey, Math.max(1, Number(i.qty) || 1)]),
   );
   const scope = new Set(normalizeAccountScope(set));
+  const scopeIds = new Set(normalizeAccountScopeIds(set));
   let stock = 0;
   let bestMin = -1;
   let bestMap = null;
   for (const row of holdings) {
+    if (scopeIds.size && !scopeIds.has(String(row.accountId || ""))) {
+      continue;
+    }
     if (
+      !scopeIds.size &&
       scope.size &&
       !scope.has(
         String(row.login || "")
@@ -315,7 +338,11 @@ async function stockForSets(sets) {
     if (!account) continue;
     const m = new Map();
     for (const it of r.items) m.set(it.k, it.count || 0);
-    holdings.push({ login: account.login || "", counts: m });
+    holdings.push({
+      accountId: String(r._id),
+      login: account.login || "",
+      counts: m,
+    });
   }
   // For each set, count sellable accounts that hold all its keys and remember
   // the one with the most spare copies for the ×N preview.
@@ -720,4 +747,5 @@ module.exports.availableAccountsForSet = availableAccountsForSet;
 // picker so it can show how many units each set can currently fill.
 module.exports.stockForSets = stockForSets;
 module.exports.normalizeAccountScope = normalizeAccountScope;
+module.exports.normalizeAccountScopeIds = normalizeAccountScopeIds;
 module.exports.stockForSetFromHoldings = stockForSetFromHoldings;

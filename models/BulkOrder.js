@@ -87,6 +87,7 @@ const bulkOrderSchema = new mongoose.Schema(
     // Preserve a Radar event bundle's farming-account boundary for top-ups and
     // automatic warranty replacements after the source DropSet changes.
     accountScopeLogins: { type: [String], default: [] },
+    accountScopeIds: { type: [String], default: [] },
 
     qtyOrdered: { type: Number, default: 0 },
     // Informational only — bulk sales are paid off-site, no wallet is touched.

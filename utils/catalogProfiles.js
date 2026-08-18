@@ -105,7 +105,7 @@ async function buildCatalogProfilePlan({
     },
     { _id: 1, login: 1, credPassword: 1, lastScanStatus: 1 },
   ).lean();
-  const loginById = new Map(
+  const accountById = new Map(
     accounts
       .filter(
         (account) =>
@@ -113,13 +113,16 @@ async function buildCatalogProfilePlan({
           !accountState.isUnusableScanStatus(account.lastScanStatus) &&
           String(account.login || "").trim(),
       )
-      .map((account) => [String(account._id), String(account.login).trim()]),
+      .map((account) => [
+        String(account._id),
+        { id: String(account._id), login: String(account.login).trim() },
+      ]),
   );
   const profilesByGame = new Map();
   for (const row of rows) {
     const game = String(row._id.game || "").trim();
-    const login = loginById.get(String(row._id.account));
-    if (!game || !login) continue;
+    const account = accountById.get(String(row._id.account));
+    if (!game || !account) continue;
     const items = (row.items || [])
       .map((item) => ({
         itemKey: String(item.itemKey || "")
@@ -142,8 +145,10 @@ async function buildCatalogProfilePlan({
       items,
       totalRewards: Number(row.totalRewards) || 0,
       logins: [],
+      accountIds: [],
     };
-    profile.logins.push(login);
+    profile.logins.push(account.login);
+    profile.accountIds.push(account.id);
     profiles.set(signature, profile);
   }
 
@@ -164,6 +169,9 @@ async function buildCatalogProfilePlan({
       profile.logins = [...new Set(profile.logins)].sort((a, b) =>
         a.localeCompare(b),
       );
+      profile.accountIds = [...new Set(profile.accountIds)].sort((a, b) =>
+        a.localeCompare(b),
+      );
       profile.sourceEventKey = sourceEventKeyFor(
         profile.game,
         profile.signature,
@@ -177,7 +185,7 @@ async function buildCatalogProfilePlan({
         profile.items,
         profile.totalRewards,
       );
-      profile.stock = profile.logins.length;
+      profile.stock = profile.accountIds.length;
       profile.distinctRewards = profile.items.length;
       plan.push(profile);
     }

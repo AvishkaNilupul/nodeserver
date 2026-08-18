@@ -42,6 +42,9 @@ function setLikeOf(order) {
     accountScopeLogins: Array.isArray(order.accountScopeLogins)
       ? order.accountScopeLogins
       : [],
+    accountScopeIds: Array.isArray(order.accountScopeIds)
+      ? order.accountScopeIds
+      : [],
     items: (order.items || [])
       .filter((i) => i.itemKey)
       .map((i) => ({
@@ -221,14 +224,18 @@ async function activeListingLogins() {
 async function claimAccount(candidate, order, setLike) {
   // Per-game reservation: commit only this order's set's drops on the account
   // so its other games stay sellable.
-  const ok = await reserveSetOnAccount(candidate.accountId, setLike || setLikeOf(order), {
-    soldToUsername: "bulk:" + order.orderNo,
-    soldSetId: order.setId || "",
-    soldBulkOrderId: order.orderNo,
-    // A bulk order is a customer buying in quantity, so it counts as demand.
-    realSale: true,
-    marketplace: "bulk",
-  });
+  const ok = await reserveSetOnAccount(
+    candidate.accountId,
+    setLike || setLikeOf(order),
+    {
+      soldToUsername: "bulk:" + order.orderNo,
+      soldSetId: order.setId || "",
+      soldBulkOrderId: order.orderNo,
+      // A bulk order is a customer buying in quantity, so it counts as demand.
+      realSale: true,
+      marketplace: "bulk",
+    },
+  );
   if (!ok) return null;
   return BotAccount.findById(candidate.accountId).lean();
 }

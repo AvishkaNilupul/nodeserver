@@ -58,6 +58,9 @@ const dropSetSchema = new mongoose.Schema(
     // auto-farmer actually assigned to that event's waves. Empty means the
     // legacy, archive-wide stock behaviour.
     accountScopeLogins: { type: [String], default: [] },
+    // Generated catalog profiles use immutable account ids because historical
+    // BotAccount rows can share a login. IDs take precedence over login scope.
+    accountScopeIds: { type: [String], default: [] },
     sourceType: { type: String, default: "" },
     sourceEventKey: { type: String, default: "", index: true },
     sourceEventName: { type: String, default: "" },

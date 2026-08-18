@@ -310,6 +310,9 @@ router.post("/bulk-orders/create", requireSuperadmin, async (req, res) => {
         accountScopeLogins: Array.isArray(set.accountScopeLogins)
           ? set.accountScopeLogins
           : [],
+        accountScopeIds: Array.isArray(set.accountScopeIds)
+          ? set.accountScopeIds
+          : [],
         qtyOrdered: qty,
         price: Number(price) > 0 ? Number(price) : 0,
         buyerLabel: String(buyerLabel || "").slice(0, 200),

@@ -276,6 +276,7 @@ async function syncInventoryVariants({ apply = false, games = null } = {}) {
             bulkMinQty: Math.max(1, Math.min(5, row.profile.stock)),
             bulkDiscountPct: 6,
             accountScopeLogins: row.profile.logins,
+            accountScopeIds: row.profile.accountIds,
             sourceType: "catalog_profile",
             sourceEventKey: row.sourceEventKey,
             sourceEventName: row.profile.game,
