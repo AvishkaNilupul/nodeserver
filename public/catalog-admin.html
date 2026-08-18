@@ -841,35 +841,72 @@
           " bundles per game. Account identities stay private."
         );
       }
-      $("previewVariants").addEventListener("click", async () => {
-        $("previewVariants").disabled = true;
-        message("Previewing inventory bundles (no records changed)...");
-        try {
-          const d = await api("/catalog/admin/sync-variants", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ apply: false, ...variantTuning() }),
-          });
-          currentPlan = d.plan || [];
-          $("planTitle").textContent = "Inventory variant preview";
-          $("planNote").textContent =
-            variantNote(d) + " Preview only — nothing published yet.";
-          renderPlan();
-          message(
-            "Preview ready: " +
-              d.count +
-              " bundles across " +
-              d.games +
-              " games. No records changed.",
-          );
-        } catch (e) {
-          message(e.message, true);
-        } finally {
-          $("previewVariants").disabled = false;
+      // The sync runs in the background (it can take ~1 min), so start it, then
+      // poll for the result instead of holding one long request open.
+      let variantPolling = false;
+      function finishVariantJob(job) {
+        variantPolling = false;
+        $("previewVariants").disabled = false;
+        $("syncVariants").disabled = false;
+        if (job.error) {
+          message("Sync failed: " + job.error, true);
+          return;
         }
-      });
-      $("syncVariants").addEventListener("click", async () => {
+        const d = job.result || {};
+        const took = job.finishedAt
+          ? Math.round((job.finishedAt - job.startedAt) / 1000)
+          : 0;
+        currentPlan = d.plan || [];
+        $("planTitle").textContent = job.apply
+          ? "Inventory variant sync"
+          : "Inventory variant preview";
+        $("planNote").textContent =
+          variantNote(d) +
+          (job.apply ? "" : " Preview only — nothing published yet.");
+        renderPlan();
+        if (job.apply) load();
+        message(
+          (job.apply ? "Published " : "Preview ready: ") +
+            d.count +
+            " bundles across " +
+            d.games +
+            " games (min stock " +
+            d.minStock +
+            ", max " +
+            d.maxProfilesPerGame +
+            "/game) in " +
+            took +
+            "s." +
+            (job.apply ? "" : " No records changed."),
+        );
+      }
+      async function pollVariantJob() {
+        try {
+          const d = await api("/catalog/admin/sync-variants/status");
+          const job = d.job || {};
+          if (job.running) {
+            const secs = Math.round((Date.now() - job.startedAt) / 1000);
+            message(
+              (job.apply ? "Publishing" : "Previewing") +
+                " inventory bundles… " +
+                secs +
+                "s (scanning the drops archive, ~1 min).",
+            );
+            setTimeout(pollVariantJob, 3000);
+            return;
+          }
+          finishVariantJob(job);
+        } catch (e) {
+          variantPolling = false;
+          $("previewVariants").disabled = false;
+          $("syncVariants").disabled = false;
+          message(e.message, true);
+        }
+      }
+      async function runVariantSync(apply) {
+        if (variantPolling) return;
         if (
+          apply &&
           !confirm(
             "Publish public inventory bundles? This delists the previous " +
               "auto-generated bundles and recreates them — manual price " +
@@ -878,36 +915,35 @@
           )
         )
           return;
+        $("previewVariants").disabled = true;
         $("syncVariants").disabled = true;
-        message("Grouping account inventory into public bundles...");
+        variantPolling = true;
         try {
-          const d = await api("/catalog/admin/sync-variants", {
+          await api("/catalog/admin/sync-variants", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ apply: true, ...variantTuning() }),
+            body: JSON.stringify({ apply, ...variantTuning() }),
           });
-          currentPlan = d.plan || [];
-          $("planTitle").textContent = "Inventory variant sync";
-          $("planNote").textContent = variantNote(d);
-          renderPlan();
-          await load();
-          message(
-            "Published " +
-              d.count +
-              " inventory bundles across " +
-              d.games +
-              " games (min stock " +
-              d.minStock +
-              ", max " +
-              d.maxProfilesPerGame +
-              "/game).",
-          );
         } catch (e) {
-          message(e.message, true);
-        } finally {
-          $("syncVariants").disabled = false;
+          // A sync already running (409) is fine — just attach to it by polling.
+          if (!/already running/i.test(e.message)) {
+            variantPolling = false;
+            $("previewVariants").disabled = false;
+            $("syncVariants").disabled = false;
+            message(e.message, true);
+            return;
+          }
         }
-      });
+        message(
+          (apply ? "Publishing" : "Previewing") +
+            " inventory bundles… this runs in the background (~1 min).",
+        );
+        pollVariantJob();
+      }
+      $("previewVariants").addEventListener("click", () =>
+        runVariantSync(false),
+      );
+      $("syncVariants").addEventListener("click", () => runVariantSync(true));
       $("preview").addEventListener("click", async () => {
         $("preview").disabled = true;
         message("Calculating plan from every sellable account...");

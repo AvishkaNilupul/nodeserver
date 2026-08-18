@@ -766,28 +766,73 @@ router.put(
   },
 );
 
+// The variant sync scans the whole DropLog archive and can run ~1 minute —
+// well past proxy/browser timeouts. Run it in the background and let the admin
+// page poll for the result instead of holding the HTTP request open (a stuck
+// synchronous request was why applied syncs never committed).
+let variantSyncJob = {
+  running: false,
+  apply: false,
+  startedAt: 0,
+  finishedAt: 0,
+  result: null,
+  error: null,
+};
+function publicVariantJob() {
+  return { ...variantSyncJob };
+}
+
 router.post(
   "/catalog/admin/sync-variants",
   requireSuperadmin,
   enforce2fa,
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const apply = body.apply === true;
-      const games = Array.isArray(body.games) ? body.games : null;
-      res.json({
-        success: true,
-        ...(await syncInventoryVariants({
+  (req, res) => {
+    if (variantSyncJob.running) {
+      return res.status(409).json({
+        success: false,
+        message: "A variant sync is already running.",
+        job: publicVariantJob(),
+      });
+    }
+    const body = req.body || {};
+    const apply = body.apply === true;
+    const games = Array.isArray(body.games) ? body.games : null;
+    variantSyncJob = {
+      running: true,
+      apply,
+      startedAt: Date.now(),
+      finishedAt: 0,
+      result: null,
+      error: null,
+    };
+    (async () => {
+      try {
+        variantSyncJob.result = await syncInventoryVariants({
           apply,
           games,
           minStock: body.minStock,
           maxProfilesPerGame: body.maxProfilesPerGame,
-        })),
-      });
-    } catch (err) {
-      console.error("catalog inventory variant sync error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
-    }
+        });
+      } catch (err) {
+        console.error("catalog inventory variant sync error:", err.message);
+        variantSyncJob.error = err.message || "Sync failed";
+      } finally {
+        variantSyncJob.running = false;
+        variantSyncJob.finishedAt = Date.now();
+      }
+    })();
+    res
+      .status(202)
+      .json({ success: true, started: true, apply, job: publicVariantJob() });
+  },
+);
+
+router.get(
+  "/catalog/admin/sync-variants/status",
+  requireSuperadmin,
+  enforce2fa,
+  (req, res) => {
+    res.json({ success: true, job: publicVariantJob() });
   },
 );
 
