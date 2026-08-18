@@ -4,6 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Public Catalog | RedeemHub</title>
+    <script>
+      // Apply the saved theme before styles paint to avoid a flash. The shared
+      // theme.js (loaded at the end) wires the toggle and persistence.
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
     <style>
       :root {
         --bg: #f6f7fb;
@@ -19,6 +29,44 @@
         --green: #059669;
         --amber: #b45309;
         --red: #dc2626;
+      }
+      /* Dark theme — mirrors the shared admin palette (theme.js + shop.html). */
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --amber: #fbbf24;
+        --red: #f87171;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      html[data-theme="dark"] .tuner input,
+      html[data-theme="dark"] .edit-form input,
+      html[data-theme="dark"] .edit-form textarea {
+        background: var(--surface-2);
+      }
+      html[data-theme="dark"] .pill {
+        background: rgba(52, 211, 153, 0.14);
+      }
+      html[data-theme="dark"] .pill.off {
+        background: rgba(154, 163, 180, 0.16);
+      }
+      html[data-theme="dark"] .pill.warn {
+        background: rgba(251, 191, 36, 0.16);
+      }
+      html[data-theme="dark"] .plan table td {
+        background: rgba(251, 191, 36, 0.05);
+      }
+      html[data-theme="dark"] .plan-note {
+        background: rgba(251, 191, 36, 0.1);
+        color: #fbbf24;
+        border-bottom-color: rgba(251, 191, 36, 0.25);
       }
       * {
         box-sizing: border-box;
@@ -462,6 +510,46 @@
           </p>
         </div>
         <div class="actions">
+          <button
+            class="btn"
+            data-theme-toggle
+            onclick="toggleTheme()"
+            title="Toggle dark mode"
+            aria-pressed="false"
+            style="display: grid; place-items: center; min-width: 40px"
+          >
+            <svg
+              class="t-moon"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path
+                d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+              ></path></svg
+            ><svg
+              class="t-sun"
+              style="display: none"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="4"></circle>
+              <path
+                d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+              ></path>
+            </svg>
+          </button>
           <button class="btn" id="refresh">Refresh</button>
           <label class="tuner"
             >Min stock<input
@@ -1083,6 +1171,7 @@
       });
       load();
     </script>
+    <script src="/theme.js"></script>
     <script src="/admin-nav.js"></script>
   </body>
 </html>
