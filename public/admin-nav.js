@@ -89,6 +89,9 @@
     accountStash:
       '<path d="M3 7l1.5 12a2 2 0 0 0 2 1.8h11a2 2 0 0 0 2-1.8L21 7"></path>' +
       '<path d="M2 7h20M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>',
+    banned:
+      '<circle cx="12" cy="12" r="10"></circle>' +
+      '<line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
     guides:
       '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>' +
@@ -145,6 +148,12 @@
           href: "/account-stash.html",
           label: "Account stash",
           icon: ICONS.accountStash,
+          superOnly: true,
+        },
+        {
+          href: "/banned-accounts.html",
+          label: "Banned accounts",
+          icon: ICONS.banned,
           superOnly: true,
         },
       ],

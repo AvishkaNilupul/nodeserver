@@ -47,6 +47,7 @@ const { requireRenter } = require("./middleware/renterAuth");
 const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
+const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
@@ -421,6 +422,11 @@ app.get("/radar.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "radar.html"));
 });
 
+// Banned accounts (superadmin only) — ban waves, cohorts and what they cost.
+app.get("/banned-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "banned-accounts.html"));
+});
+
 // Epic accounts manager (superadmin only) — stock accounts + auto-claim.
 app.get("/epic-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "epic-accounts.html"));
@@ -587,6 +593,7 @@ app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
+app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
 app.use(enforce2fa, japaneseRoutes);

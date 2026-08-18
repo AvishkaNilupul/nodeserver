@@ -1,0 +1,830 @@
+<!doctype html>
+<html>
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Banned Accounts</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --green: #059669;
+        --red: #dc2626;
+        --amber: #d97706;
+        --red-soft: #fef2f2;
+        --amber-soft: #fffbeb;
+        --green-soft: #ecfdf5;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --red: #f87171;
+        --amber: #fbbf24;
+        --red-soft: #2a1416;
+        --amber-soft: #2a2010;
+        --green-soft: #10241d;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        display: flex;
+        min-height: 100vh;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .nav {
+        width: 248px;
+        flex: none;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 18px 14px;
+        gap: 6px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 8px 14px;
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: var(--accent);
+        display: grid;
+        place-items: center;
+      }
+      .nav .brand b {
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+      }
+      .nav .brand b span {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        overflow-y: auto;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        border-radius: 10px;
+        font-size: 13.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+        color: var(--ink);
+      }
+      .nav .links a.active {
+        background: var(--accent);
+        color: #fff;
+      }
+      .nav .me {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 8px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .nav .me .av {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--surface-2);
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--muted);
+      }
+      .nav .me .who {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.25;
+        flex: 1;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13px;
+      }
+      .nav .me .who span {
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .themebtn {
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        flex: none;
+      }
+      main {
+        flex: 1;
+        padding: 26px 30px 60px;
+        min-width: 0;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 23px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin-bottom: 20px;
+        max-width: 900px;
+        line-height: 1.55;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px;
+        margin-bottom: 18px;
+      }
+      .card > h2 {
+        margin: 0 0 4px;
+        font-size: 15px;
+      }
+      .card > h2 + .hint {
+        margin-bottom: 14px;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.5;
+      }
+
+      /* KPI tiles */
+      .kpis {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+      .kpi {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        padding: 14px 15px;
+      }
+      .kpi .k {
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .kpi .v {
+        font-size: 25px;
+        font-weight: 700;
+        margin-top: 6px;
+        line-height: 1.1;
+      }
+      .kpi .f {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .kpi.bad .v {
+        color: var(--red);
+      }
+      .kpi.warn .v {
+        color: var(--amber);
+      }
+      .kpi.good .v {
+        color: var(--green);
+      }
+
+      /* Timeline chart */
+      .chart-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      .chart {
+        width: 100%;
+        overflow-x: auto;
+      }
+      .chart svg {
+        display: block;
+      }
+      .bar {
+        fill: var(--accent);
+        cursor: pointer;
+      }
+      .bar:hover {
+        fill: var(--red);
+      }
+      .bar.wave {
+        fill: var(--red);
+      }
+      .axis {
+        stroke: var(--line);
+      }
+      .axis-text {
+        fill: var(--muted);
+        font-size: 10px;
+      }
+
+      /* Tables */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th {
+        text-align: left;
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--line);
+        padding: 9px 10px;
+        white-space: nowrap;
+        position: sticky;
+        top: 0;
+        background: var(--surface);
+        z-index: 1;
+      }
+      th.sortable {
+        cursor: pointer;
+        user-select: none;
+      }
+      th.sortable:hover {
+        color: var(--ink);
+      }
+      th .arrow {
+        opacity: 0.45;
+        font-size: 10px;
+      }
+      td {
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      tbody tr:hover td {
+        background: var(--surface-2);
+      }
+      .tablewrap {
+        overflow-x: auto;
+        max-height: 70vh;
+        overflow-y: auto;
+      }
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 26px 10px;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+      .login {
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .login:hover {
+        color: var(--accent);
+        text-decoration: underline;
+      }
+
+      /* Chips */
+      .chip {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .chip.red {
+        background: var(--red-soft);
+        color: var(--red);
+      }
+      .chip.amber {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+      .chip.green {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+      .chip.grey {
+        background: var(--surface-2);
+        color: var(--muted);
+      }
+
+      /* Filters */
+      .filters {
+        display: flex;
+        gap: 9px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      input[type="text"],
+      select {
+        padding: 8px 11px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13px;
+        font-family: inherit;
+      }
+      input[type="text"] {
+        min-width: 210px;
+      }
+      button {
+        padding: 8px 14px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      button:hover {
+        background: var(--surface-2);
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      button.primary:hover {
+        filter: brightness(1.08);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      /* Two-column layout for the analysis cards */
+      .cols {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+        gap: 18px;
+        margin-bottom: 18px;
+      }
+      .cols .card {
+        margin-bottom: 0;
+      }
+
+      /* Horizontal rate bars */
+      .ratebar {
+        display: grid;
+        grid-template-columns: 1fr 62px;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 7px;
+        font-size: 12.5px;
+      }
+      .ratebar .track {
+        position: relative;
+        background: var(--surface-2);
+        border-radius: 6px;
+        height: 22px;
+        overflow: hidden;
+      }
+      .ratebar .fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        background: var(--red);
+        opacity: 0.75;
+      }
+      .ratebar .lbl {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 8px;
+        font-size: 11.5px;
+        font-weight: 600;
+      }
+      .ratebar .num {
+        text-align: right;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      /* Exposure panel */
+      .danger {
+        border-color: var(--red);
+        background: var(--red-soft);
+      }
+      .danger h2 {
+        color: var(--red);
+      }
+
+      /* Modal */
+      .modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.55);
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 40px 20px;
+        z-index: 300;
+        overflow-y: auto;
+      }
+      .modal.show {
+        display: flex;
+      }
+      .modal .box {
+        background: var(--surface);
+        border-radius: 15px;
+        border: 1px solid var(--line);
+        width: 100%;
+        max-width: 860px;
+        padding: 22px;
+      }
+      .modal .box h3 {
+        margin: 0 0 3px;
+        font-size: 17px;
+      }
+      .modal .close {
+        float: right;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 10px 18px;
+        margin: 16px 0;
+      }
+      .kv div {
+        font-size: 12.5px;
+        min-width: 0;
+      }
+      .kv div b {
+        display: block;
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-bottom: 2px;
+      }
+      .kv div span {
+        word-break: break-word;
+      }
+
+      .toast {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%) translateY(80px);
+        background: var(--ink);
+        color: var(--bg);
+        padding: 11px 18px;
+        border-radius: 10px;
+        font-size: 13px;
+        font-weight: 600;
+        opacity: 0;
+        transition: 0.25s;
+        z-index: 400;
+        max-width: 90vw;
+      }
+      .toast.show {
+        transform: translateX(-50%) translateY(0);
+        opacity: 1;
+      }
+      .toast.err {
+        background: var(--red);
+        color: #fff;
+      }
+
+      .pager {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 14px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      @media (max-width: 768px) {
+        main {
+          padding: 18px 14px 50px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links"></nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main>
+      <h1>Banned accounts</h1>
+      <div class="sub">
+        Accounts Twitch has <b>deleted or suspended</b> — confirmed with the
+        public user query, not merely a rejected token. This is separate from
+        <b>token invalid</b>, which only means the token expired and the account
+        can be re-authed; the Drops Archive lumps the two together, which is why
+        a ban wave is invisible there. Bans arrive in waves, so everything here
+        is arranged on a time axis and against the population it came from.
+      </div>
+
+      <div class="kpis" id="kpis"></div>
+
+      <div class="card">
+        <div class="chart-head">
+          <div>
+            <h2>Ban timeline</h2>
+            <div class="hint">
+              One bar per day. Red bars are waves — days that took more than
+              triple the daily average.
+            </div>
+          </div>
+          <select id="rangeSel" onchange="loadSummary()">
+            <option value="30">Last 30 days</option>
+            <option value="90" selected>Last 90 days</option>
+            <option value="180">Last 180 days</option>
+            <option value="365">Last year</option>
+          </select>
+        </div>
+        <div class="chart" id="chart"></div>
+      </div>
+
+      <div class="card danger" id="exposureCard">
+        <h2>Live exposure</h2>
+        <div class="hint">
+          Banned accounts still attached to <b>active listings</b> — a buyer who
+          pays for one of these receives a dead account. These need delisting
+          from the Listings page.
+        </div>
+        <div id="exposureBody" style="margin-top: 14px">
+          <div class="hint">Loading…</div>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div class="card">
+          <h2>Delivered, then banned</h2>
+          <div class="hint">
+            Accounts a real buyer received that Twitch later killed. Sorted by
+            ban date — the short gaps are the likely disputes. Marketplace
+            <i>reservations</i> are counted separately below, because a held
+            listing slot is lost stock, not an unhappy customer.
+          </div>
+          <div id="soldBody" style="margin-top: 12px">
+            <div class="hint">Loading…</div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Drops lost</h2>
+          <div class="hint">
+            Farmed drops that died with their account — supply that was paid for
+            in watch time and can't be sold.
+          </div>
+          <div id="lostBody" style="margin-top: 12px">
+            <div class="hint">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div class="card">
+          <h2>Ban rate by host</h2>
+          <div class="hint">
+            Share of each host's own accounts that are banned — a rate, so a big
+            host doesn't look worse just for being big.
+          </div>
+          <div id="hostBody" style="margin-top: 12px">
+            <div class="hint">Loading…</div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>What they were committed to</h2>
+          <div class="hint">
+            Where each banned account was promised when it died. Platform names
+            are <b>reservation tags</b> (held against a live listing), not
+            buyers — only the delivered bar is customers.
+          </div>
+          <div id="commitBody" style="margin-top: 12px">
+            <div class="hint">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div class="card">
+          <h2>Age at ban</h2>
+          <div class="hint">
+            How long accounts survived after entering the rig. Mass at the left
+            means they're dying before they earn back their cost.
+          </div>
+          <div id="ageBody" style="margin-top: 12px">
+            <div class="hint">Loading…</div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Intake cohorts</h2>
+          <div class="hint">
+            Of everything added on a given day, how much is dead now. A spike
+            means that batch was born bad.
+          </div>
+          <div id="cohortBody" style="margin-top: 12px">
+            <div class="hint">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>All accounts</h2>
+        <div class="hint">
+          Click a login for the full record: its drops, its listings, and how
+          the rest of its config file fared.
+        </div>
+        <div class="filters" style="margin-top: 14px">
+          <select id="fStatus" onchange="resetAndLoad()">
+            <option value="suspended">Banned (suspended)</option>
+            <option value="token_invalid">Token invalid (re-authable)</option>
+            <option value="all_dead">Both</option>
+            <option value="any">Every account</option>
+          </select>
+          <select id="fHost" onchange="resetAndLoad()">
+            <option value="">All hosts</option>
+          </select>
+          <select id="fSince" onchange="resetAndLoad()">
+            <option value="">Any time</option>
+            <option value="1">Banned last 24h</option>
+            <option value="7">Banned last 7 days</option>
+            <option value="30">Banned last 30 days</option>
+            <option value="90">Banned last 90 days</option>
+          </select>
+          <select id="fSold" onchange="resetAndLoad()">
+            <option value="">Sold or not</option>
+            <option value="yes">Sold only</option>
+            <option value="no">Unsold only</option>
+          </select>
+          <input
+            type="text"
+            id="fSearch"
+            placeholder="login, container, config, twitch id…"
+          />
+          <button onclick="resetAndLoad()">Search</button>
+          <button onclick="exportCsv()">Export CSV</button>
+          <button id="recheckBtn" onclick="recheckPage()">
+            Re-check with Twitch
+          </button>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr id="headRow"></tr>
+            </thead>
+            <tbody id="rows">
+              <tr>
+                <td class="empty" colspan="12">Loading…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="prevBtn" onclick="pageBy(-1)">Previous</button>
+          <span id="pageInfo">—</span>
+          <button id="nextBtn" onclick="pageBy(1)">Next</button>
+          <select
+            id="fLimit"
+            onchange="resetAndLoad()"
+            style="margin-left: auto"
+          >
+            <option value="50">50 per page</option>
+            <option value="100" selected>100 per page</option>
+            <option value="250">250 per page</option>
+            <option value="500">500 per page</option>
+          </select>
+        </div>
+      </div>
+    </main>
+
+    <div class="modal" id="modal" onclick="closeModalOutside(event)">
+      <div class="box" id="modalBox"></div>
+    </div>
+    <div class="toast" id="toast"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script src="/banned-accounts.js"></script>
+  </body>
+</html>
