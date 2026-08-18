@@ -424,12 +424,42 @@ router.get("/account-stash/sets/:id/scan/status", requireSuperadmin, (req, res) 
 // Rescan ONE account. Same integrity-gated verdict a set-wide sweep produces,
 // so a stale "dead" from a transient Twitch hiccup can be cleared in one click
 // without waiting for the whole set to re-check.
+//
+// If the token check flips to "ok" AND the aging runner had previously parked
+// the account at stage="dead" (only set on a token_invalid/integrity_failed
+// verdict), rehabilitate it back into the ladder — the "dead" verdict was
+// wrong by definition once the token proves live. Uses the same
+// sessions-vs-warmup rung selection the "resume" action does.
 router.post("/account-stash/:id/rescan", requireSuperadmin, async (req, res) => {
   try {
     const acc = await StashAccount.findById(req.params.id);
     if (!acc) return res.status(404).json({ success: false, message: "Not found" });
     await stashChecker.checkOne(acc);
-    res.json({ success: true, account: publicAccount(acc) });
+
+    let revived = false;
+    if (acc.lastCheckStatus === "ok" && acc.aging && acc.aging.stage === "dead") {
+      const from = "dead";
+      const sessions = acc.aging.sessions || 0;
+      if (sessions >= stashAging.WARMUP_SESSIONS) acc.aging.stage = "active";
+      else if (sessions > 0) acc.aging.stage = "warmup";
+      else acc.aging.stage = "verify";
+      acc.aging.strikes = 0;
+      acc.aging.lastError = "";
+      acc.aging.nextEligibleAt = new Date();
+      await acc.save();
+      await StashAgingLog.create({
+        accountId: acc._id,
+        setId: acc.setId,
+        username: acc.username,
+        kind: "note",
+        fromStage: from,
+        toStage: acc.aging.stage,
+        message: "Rescan cleared stale 'dead' (token verified live)",
+      });
+      revived = true;
+    }
+
+    res.json({ success: true, account: publicAccount(acc), revived });
   } catch (err) {
     console.error("stash single-rescan error:", err.message);
     res.status(500).json({ success: false, message: err.message || "Server error" });

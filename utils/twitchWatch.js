@@ -266,12 +266,20 @@ async function getCurrentUser(token, opts = {}) {
   if (parsed?.errors?.length) throw gqlError(parsed.errors);
   const u = parsed?.data?.currentUser;
   if (!u) {
+    // Same split as fetchInventory: only a hard 401/403 (or an "Unauthorized"
+    // body) is a genuinely dead token. A 200 carrying null currentUser — or a
+    // 429/5xx — is a transient Twitch hiccup that a perfectly valid token also
+    // hits, and coding it token_invalid here was killing aging accounts
+    // outright: recordSessionFailure treats token_invalid as terminal and moved
+    // them to aging.stage="dead" with nextEligibleAt=null (never retried).
+    const authFailed = authFailedFrom(status, parsed);
     const e = new Error(
-      authFailedFrom(status, parsed)
+      authFailed
         ? "Token invalid/expired"
-        : "No currentUser in response",
+        : "Twitch returned no user (transient; token not confirmed dead)" +
+            (status ? " [HTTP " + status + "]" : ""),
     );
-    e.code = "token_invalid";
+    e.code = authFailed ? "token_invalid" : "no_user";
     throw e;
   }
   return { id: String(u.id || ""), login: u.login || "" };
