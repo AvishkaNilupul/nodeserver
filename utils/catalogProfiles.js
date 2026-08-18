@@ -71,42 +71,61 @@ async function buildCatalogProfilePlan({
   const gameMatch = requestedGames?.length
     ? { $in: [...new Set(requestedGames)] }
     : { $nin: [null, ""] };
-  const rows = await DropLog.aggregate(
-    [
-      {
-        $match: {
-          game: gameMatch,
-          connected: { $ne: true },
-          soldAt: null,
-          itemKey: { $ne: "" },
-        },
-      },
+  // The prod Atlas shared tier ignores allowDiskUse — a $group that exceeds
+  // 100MB in memory just throws (see the atlas-no-diskuse note). Carrying
+  // name/image strings through a group keyed per drop (game, account, itemKey)
+  // is the pattern that blows that limit, and it made this whole sync throw for
+  // large games like Rainbow Six. Split it: keep the per-account roll-up
+  // numeric-only, and pull item metadata from a separate group keyed by item
+  // alone (few groups, tiny), then merge in JS.
+  const match = {
+    game: gameMatch,
+    connected: { $ne: true },
+    soldAt: null,
+    itemKey: { $ne: "" },
+  };
+  const [rows, metaRows] = await Promise.all([
+    DropLog.aggregate([
+      { $match: match },
       {
         $group: {
           _id: { game: "$game", account: "$account", itemKey: "$itemKey" },
           count: { $sum: "$count" },
-          name: { $first: "$name" },
-          image: { $first: { $ifNull: ["$imageLocal", "$imageURL"] } },
         },
       },
       {
         $group: {
           _id: { game: "$_id.game", account: "$_id.account" },
-          items: {
-            $push: {
-              itemKey: "$_id.itemKey",
-              count: "$count",
-              name: "$name",
-              image: "$image",
-            },
-          },
+          items: { $push: { itemKey: "$_id.itemKey", count: "$count" } },
           totalRewards: { $sum: "$count" },
         },
       },
-    ],
-    { allowDiskUse: true },
-  );
+    ]),
+    DropLog.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: { game: "$game", itemKey: "$itemKey" },
+          name: { $first: "$name" },
+          image: { $first: { $ifNull: ["$imageLocal", "$imageURL"] } },
+        },
+      },
+    ]),
+  ]);
   if (!rows.length) return [];
+  const metaByKey = new Map(
+    metaRows.map((row) => [
+      `${String(row._id.game || "")
+        .trim()
+        .toLowerCase()}||${String(row._id.itemKey || "")
+        .trim()
+        .toLowerCase()}`,
+      {
+        name: String(row.name || "").trim(),
+        image: String(row.image || "").trim(),
+      },
+    ]),
+  );
 
   const accounts = await BotAccount.find(
     {
@@ -134,16 +153,21 @@ async function buildCatalogProfilePlan({
     const game = String(row._id.game || "").trim();
     const account = accountById.get(String(row._id.account));
     if (!game || !account) continue;
+    const gameKey = game.toLowerCase();
     const items = (row.items || [])
-      .map((item) => ({
-        itemKey: String(item.itemKey || "")
+      .map((item) => {
+        const itemKey = String(item.itemKey || "")
           .trim()
-          .toLowerCase(),
-        count: Math.max(1, Number(item.count) || 1),
-        name: String(item.name || "").trim(),
-        image: String(item.image || "").trim(),
-        game,
-      }))
+          .toLowerCase();
+        const meta = metaByKey.get(`${gameKey}||${itemKey}`) || {};
+        return {
+          itemKey,
+          count: Math.max(1, Number(item.count) || 1),
+          name: String(meta.name || "").trim(),
+          image: String(meta.image || "").trim(),
+          game,
+        };
+      })
       .filter((item) => item.itemKey)
       .sort((a, b) => a.itemKey.localeCompare(b.itemKey));
     const signature = signatureForItems(items);
