@@ -16,11 +16,17 @@ const {
 } = require("../utils/rateLimit");
 
 const router = express.Router();
-const CACHE_TTL_MS = 15000;
+// Stock aggregation spans the complete DropLog archive and can take tens of
+// seconds on production data. Keep a bounded snapshot and refresh it in the
+// background so public visitors never queue behind the aggregation after the
+// first warm-up.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 let publicCache = { at: 0, data: null };
+let publicRefresh = null;
 
 function invalidateCatalogCache() {
-  publicCache = { at: 0, data: null };
+  publicCache.at = 0;
+  if (publicCache.data) refreshPublicCatalog().catch(() => {});
 }
 
 function cleanText(value, max = 120) {
@@ -105,9 +111,7 @@ function publicListing(set, stock, marketMedian = 0) {
   };
 }
 
-async function loadPublicCatalog() {
-  if (publicCache.data && Date.now() - publicCache.at < CACHE_TTL_MS)
-    return publicCache.data;
+async function buildPublicCatalog() {
   const sets = await DropSet.find({
     listed: true,
     publicCatalog: { $ne: false },
@@ -176,8 +180,31 @@ async function loadPublicCatalog() {
     ),
     listings,
   };
-  publicCache = { at: Date.now(), data };
   return data;
+}
+
+function refreshPublicCatalog() {
+  if (publicRefresh) return publicRefresh;
+  publicRefresh = buildPublicCatalog()
+    .then((data) => {
+      publicCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      publicRefresh = null;
+    });
+  return publicRefresh;
+}
+
+async function loadPublicCatalog() {
+  if (publicCache.data) {
+    if (Date.now() - publicCache.at < CACHE_TTL_MS) return publicCache.data;
+    refreshPublicCatalog().catch((err) =>
+      console.error("public catalog refresh error:", err.message),
+    );
+    return publicCache.data;
+  }
+  return refreshPublicCatalog();
 }
 
 router.get("/catalog/categories", catalogReadLimiter, async (req, res) => {
@@ -576,3 +603,4 @@ module.exports.categoryFor = categoryFor;
 module.exports.publicPriceFor = publicPriceFor;
 module.exports.inquiryQuantity = inquiryQuantity;
 module.exports.invalidateCatalogCache = invalidateCatalogCache;
+module.exports.warmPublicCatalog = refreshPublicCatalog;

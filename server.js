@@ -619,6 +619,12 @@ mongoose
       .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
+      catalogRoutes
+        .warmPublicCatalog()
+        .then(() => console.log("[catalog] public snapshot warmed"))
+        .catch((err) =>
+          console.error("[catalog] public snapshot warm failed:", err.message),
+        );
       // Prime the item inventory as soon as Mongo and HTTP are ready. Cold
       // archive aggregation takes tens of seconds on production-sized data, so
       // delaying this until after the other dashboard rollups makes the first
