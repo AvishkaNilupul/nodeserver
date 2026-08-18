@@ -8,7 +8,7 @@ const {
 const { thumbnailUrl } = require("../utils/catalogImage");
 const { recommendedProfilePrice } = require("../routes/catalogRoutes");
 
-test("catalog profile signatures are exact and order independent", () => {
+test("catalog profile signatures group by item type, order and count independent", () => {
   const left = signatureForItems([
     { itemKey: "rare|game", count: 2 },
     { itemKey: "common|game", count: 1 },
@@ -18,12 +18,19 @@ test("catalog profile signatures are exact and order independent", () => {
     { itemKey: "rare|game", count: 2 },
   ]);
   assert.equal(left, right);
-  assert.notEqual(
+  // Copy counts no longer affect grouping — same item TYPES => same signature,
+  // so accounts farmed at different times bundle together.
+  assert.equal(
     left,
     signatureForItems([
       { itemKey: "rare|game", count: 1 },
       { itemKey: "common|game", count: 1 },
     ]),
+  );
+  // A different set of item TYPES still produces a different signature.
+  assert.notEqual(
+    left,
+    signatureForItems([{ itemKey: "rare|game", count: 1 }]),
   );
 });
 

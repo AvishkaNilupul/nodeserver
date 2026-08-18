@@ -5,19 +5,30 @@ const BotAccount = require("../models/BotAccount");
 const accountState = require("./twitchAccountState");
 
 const DEFAULT_MIN_STOCK = 2;
-const DEFAULT_MAX_PROFILES_PER_GAME = 8;
+// Bundles now group by item TYPE (not exact copy counts), so far fewer distinct
+// bundles form per game — this cap can be generous without flooding the
+// catalog. Lower it if a game produces more public bundles than you want.
+const DEFAULT_MAX_PROFILES_PER_GAME = 40;
 
+// Group accounts by the SET OF ITEM TYPES they hold, independent of how many
+// copies of each they farmed. Accounts farmed at different times accumulate
+// different counts of the same drops; keying the signature on counts shattered
+// them into near-duplicate singletons that never met the minimum stock. The
+// per-item copy count a bundle promises is decided later (the minimum held
+// across the grouped accounts), not here.
 function signatureForItems(items) {
-  return (items || [])
-    .map((item) => ({
-      itemKey: String(item.itemKey || "")
-        .trim()
-        .toLowerCase(),
-      count: Math.max(1, Number(item.count) || 1),
-    }))
-    .filter((item) => item.itemKey)
-    .sort((a, b) => a.itemKey.localeCompare(b.itemKey))
-    .map((item) => `${item.itemKey}:${item.count}`)
+  return [
+    ...new Set(
+      (items || [])
+        .map((item) =>
+          String(item.itemKey || "")
+            .trim()
+            .toLowerCase(),
+        )
+        .filter(Boolean),
+    ),
+  ]
+    .sort((a, b) => a.localeCompare(b))
     .join("|");
 }
 
@@ -46,7 +57,7 @@ function profileDescription(items, totalRewards) {
     .slice(0, 5)
     .map((item) => `${item.count > 1 ? `${item.count}x ` : ""}${item.name}`)
     .join(", ");
-  return `Exact inventory profile with ${totalRewards} rewards across ${items.length} distinct items. ${preview}${items.length > 5 ? ", and more" : ""}. Live stock is checked against deliverable inventory before a quote.`;
+  return `Bundle of ${items.length} reward types — every account delivers at least ${totalRewards} rewards. ${preview}${items.length > 5 ? ", and more" : ""}. Live stock is verified against deliverable inventory before a quote.`;
 }
 
 async function buildCatalogProfilePlan({
@@ -139,14 +150,26 @@ async function buildCatalogProfilePlan({
     if (!signature) continue;
     if (!profilesByGame.has(game)) profilesByGame.set(game, new Map());
     const profiles = profilesByGame.get(game);
+    // Accounts sharing this signature hold the same item TYPES but possibly
+    // different copy counts. Track the MINIMUM count per item so the bundle
+    // only ever promises what every grouped account can actually deliver.
     const profile = profiles.get(signature) || {
       game,
       signature,
-      items,
-      totalRewards: Number(row.totalRewards) || 0,
+      itemsByKey: new Map(),
       logins: [],
       accountIds: [],
     };
+    for (const item of items) {
+      const existing = profile.itemsByKey.get(item.itemKey);
+      if (!existing) {
+        profile.itemsByKey.set(item.itemKey, { ...item });
+      } else {
+        existing.count = Math.min(existing.count, item.count);
+        if (!existing.name && item.name) existing.name = item.name;
+        if (!existing.image && item.image) existing.image = item.image;
+      }
+    }
     profile.logins.push(account.login);
     profile.accountIds.push(account.id);
     profiles.set(signature, profile);
@@ -156,22 +179,44 @@ async function buildCatalogProfilePlan({
   for (const [, profiles] of [...profilesByGame.entries()].sort((a, b) =>
     a[0].localeCompare(b[0]),
   )) {
-    const ranked = [...profiles.values()]
-      .filter((profile) => profile.logins.length >= minStock)
+    // Turn each signature's min-count accumulator into a concrete item list and
+    // de-duplicate the account membership (duplicate-login rows are distinct
+    // BotAccounts, so scoping is by account id — stock is the id count).
+    const materialized = [...profiles.values()].map((profile) => {
+      const items = [...profile.itemsByKey.values()]
+        .map((item) => ({
+          itemKey: item.itemKey,
+          count: Math.max(1, Number(item.count) || 1),
+          name: item.name,
+          image: item.image,
+          game: item.game,
+        }))
+        .sort((a, b) => a.itemKey.localeCompare(b.itemKey));
+      const logins = [...new Set(profile.logins)].sort((a, b) =>
+        a.localeCompare(b),
+      );
+      const accountIds = [...new Set(profile.accountIds)].sort((a, b) =>
+        a.localeCompare(b),
+      );
+      return {
+        game: profile.game,
+        signature: profile.signature,
+        items,
+        totalRewards: items.reduce((sum, item) => sum + item.count, 0),
+        logins,
+        accountIds,
+      };
+    });
+    const ranked = materialized
+      .filter((profile) => profile.accountIds.length >= minStock)
       .sort(
         (a, b) =>
-          b.logins.length - a.logins.length ||
+          b.accountIds.length - a.accountIds.length ||
           b.totalRewards - a.totalRewards ||
           a.signature.localeCompare(b.signature),
       )
       .slice(0, maxProfilesPerGame);
     for (const profile of ranked) {
-      profile.logins = [...new Set(profile.logins)].sort((a, b) =>
-        a.localeCompare(b),
-      );
-      profile.accountIds = [...new Set(profile.accountIds)].sort((a, b) =>
-        a.localeCompare(b),
-      );
       profile.sourceEventKey = sourceEventKeyFor(
         profile.game,
         profile.signature,

@@ -157,6 +157,24 @@
         opacity: 0.5;
         cursor: not-allowed;
       }
+      .tuner {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .tuner input {
+        width: 62px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 6px 8px;
+        color: var(--ink);
+        background: #fff;
+        font-size: 12px;
+      }
       .status {
         min-height: 20px;
         margin: -10px 0 15px;
@@ -442,11 +460,33 @@
           </p>
         </div>
         <div class="actions">
-          <button class="btn" id="refresh">Refresh</button
-          ><button class="btn" id="syncVariants">Sync inventory variants</button
-          ><button class="btn primary" id="preview">
-            Preview auto-list plan</button
-          ><button class="btn primary" id="apply" disabled>Publish plan</button>
+          <button class="btn" id="refresh">Refresh</button>
+          <label class="tuner"
+            >Min stock<input
+              id="varMinStock"
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              placeholder="2"
+              title="Minimum deliverable accounts a bundle needs before it lists"
+          /></label>
+          <label class="tuner"
+            >Max / game<input
+              id="varMaxPerGame"
+              type="number"
+              min="1"
+              max="500"
+              step="1"
+              placeholder="40"
+              title="Cap on how many bundles a single game can publish"
+          /></label>
+          <button class="btn" id="previewVariants">Preview variants</button>
+          <button class="btn" id="syncVariants">Publish variants</button>
+          <button class="btn primary" id="preview">
+            Preview auto-list plan
+          </button>
+          <button class="btn primary" id="apply" disabled>Publish plan</button>
         </div>
       </header>
       <p id="status" class="status"></p>
@@ -778,33 +818,89 @@
           : '<tr><td colspan="6" class="empty">No in-stock sets qualify for auto-listing.</td></tr>';
       }
       $("refresh").addEventListener("click", load);
-      $("syncVariants").addEventListener("click", async () => {
-        if (
-          !confirm(
-            "Refresh public variants from exact per-account inventory profiles?",
-          )
-        )
-          return;
-        $("syncVariants").disabled = true;
-        message("Scanning exact inventory profiles across every game...");
+      // Read the optional min-stock / max-per-game knobs. Blank or invalid
+      // inputs are omitted so the server falls back to its defaults.
+      function variantTuning() {
+        const tuning = {};
+        const minStock = parseInt($("varMinStock").value, 10);
+        const maxPerGame = parseInt($("varMaxPerGame").value, 10);
+        if (Number.isInteger(minStock) && minStock >= 1)
+          tuning.minStock = minStock;
+        if (Number.isInteger(maxPerGame) && maxPerGame >= 1)
+          tuning.maxProfilesPerGame = maxPerGame;
+        return tuning;
+      }
+      function variantNote(d) {
+        return (
+          "Bundles group accounts that share the same item types; the promised " +
+          "quantity per item is the minimum every grouped account can deliver. " +
+          "Min stock " +
+          d.minStock +
+          ", max " +
+          d.maxProfilesPerGame +
+          " bundles per game. Account identities stay private."
+        );
+      }
+      $("previewVariants").addEventListener("click", async () => {
+        $("previewVariants").disabled = true;
+        message("Previewing inventory bundles (no records changed)...");
         try {
           const d = await api("/catalog/admin/sync-variants", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ apply: true }),
+            body: JSON.stringify({ apply: false, ...variantTuning() }),
+          });
+          currentPlan = d.plan || [];
+          $("planTitle").textContent = "Inventory variant preview";
+          $("planNote").textContent =
+            variantNote(d) + " Preview only — nothing published yet.";
+          renderPlan();
+          message(
+            "Preview ready: " +
+              d.count +
+              " bundles across " +
+              d.games +
+              " games. No records changed.",
+          );
+        } catch (e) {
+          message(e.message, true);
+        } finally {
+          $("previewVariants").disabled = false;
+        }
+      });
+      $("syncVariants").addEventListener("click", async () => {
+        if (
+          !confirm(
+            "Publish public inventory bundles? This delists the previous " +
+              "auto-generated bundles and recreates them — manual price " +
+              "overrides on auto-bundles are reset. Your manual and approved " +
+              "listings are untouched.",
+          )
+        )
+          return;
+        $("syncVariants").disabled = true;
+        message("Grouping account inventory into public bundles...");
+        try {
+          const d = await api("/catalog/admin/sync-variants", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apply: true, ...variantTuning() }),
           });
           currentPlan = d.plan || [];
           $("planTitle").textContent = "Inventory variant sync";
-          $("planNote").textContent =
-            "Each row is an exact reward-and-quantity signature shared by a stocked group of deliverable accounts. Account identities remain private.";
+          $("planNote").textContent = variantNote(d);
           renderPlan();
           await load();
           message(
             "Published " +
               d.count +
-              " exact inventory variants across " +
+              " inventory bundles across " +
               d.games +
-              " games.",
+              " games (min stock " +
+              d.minStock +
+              ", max " +
+              d.maxProfilesPerGame +
+              "/game).",
           );
         } catch (e) {
           message(e.message, true);

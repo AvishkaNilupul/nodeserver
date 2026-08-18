@@ -14,7 +14,11 @@ const {
   SAFE_FILE,
   thumbnailUrl,
 } = require("../utils/catalogImage");
-const { buildCatalogProfilePlan } = require("../utils/catalogProfiles");
+const {
+  buildCatalogProfilePlan,
+  DEFAULT_MIN_STOCK,
+  DEFAULT_MAX_PROFILES_PER_GAME,
+} = require("../utils/catalogProfiles");
 const {
   catalogReadLimiter,
   catalogEventLimiter,
@@ -189,7 +193,25 @@ async function profilePrices(profiles) {
   );
 }
 
-async function syncInventoryVariants({ apply = false, games = null } = {}) {
+function boundedInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) return fallback;
+  return n;
+}
+
+async function syncInventoryVariants({
+  apply = false,
+  games = null,
+  minStock,
+  maxProfilesPerGame,
+} = {}) {
+  const effectiveMinStock = boundedInt(minStock, 1, 100, DEFAULT_MIN_STOCK);
+  const effectiveMaxPerGame = boundedInt(
+    maxProfilesPerGame,
+    1,
+    500,
+    DEFAULT_MAX_PROFILES_PER_GAME,
+  );
   let targetGames = games;
   if (!Array.isArray(targetGames)) {
     const approvedSets = await DropSet.find(
@@ -211,7 +233,11 @@ async function syncInventoryVariants({ apply = false, games = null } = {}) {
       ),
     ];
   }
-  const profiles = await buildCatalogProfilePlan({ games: targetGames });
+  const profiles = await buildCatalogProfilePlan({
+    games: targetGames,
+    minStock: effectiveMinStock,
+    maxProfilesPerGame: effectiveMaxPerGame,
+  });
   const prices = await profilePrices(profiles);
   const existing = await DropSet.find({ sourceType: "catalog_profile" }).lean();
   const existingByKey = new Map(
@@ -299,6 +325,8 @@ async function syncInventoryVariants({ apply = false, games = null } = {}) {
   }
   return {
     applied: apply,
+    minStock: effectiveMinStock,
+    maxProfilesPerGame: effectiveMaxPerGame,
     count: plan.length,
     games: new Set(plan.map((row) => row.category)).size,
     plan: plan.map(({ profile: _profile, ...row }) => row),
@@ -744,13 +772,17 @@ router.post(
   enforce2fa,
   async (req, res) => {
     try {
-      const apply = req.body && req.body.apply === true;
-      const games = Array.isArray(req.body && req.body.games)
-        ? req.body.games
-        : null;
+      const body = req.body || {};
+      const apply = body.apply === true;
+      const games = Array.isArray(body.games) ? body.games : null;
       res.json({
         success: true,
-        ...(await syncInventoryVariants({ apply, games })),
+        ...(await syncInventoryVariants({
+          apply,
+          games,
+          minStock: body.minStock,
+          maxProfilesPerGame: body.maxProfilesPerGame,
+        })),
       });
     } catch (err) {
       console.error("catalog inventory variant sync error:", err.message);
