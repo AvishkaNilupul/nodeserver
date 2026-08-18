@@ -10,6 +10,12 @@ const Purchase = require("../models/Purchase");
 const SaleSignal = require("../models/SaleSignal");
 const { stockForSets } = require("./shopRoutes");
 const {
+  ensureThumbnail,
+  SAFE_FILE,
+  thumbnailUrl,
+} = require("../utils/catalogImage");
+const { buildCatalogProfilePlan } = require("../utils/catalogProfiles");
+const {
   catalogReadLimiter,
   catalogEventLimiter,
   catalogInquiryLimiter,
@@ -85,14 +91,10 @@ function inquiryQuantity(value) {
 
 function publicListing(set, stock, marketMedian = 0) {
   const category = categoryFor(set);
-  const items = (set.items || []).slice(0, 30).map((item) => ({
+  const items = (set.items || []).slice(0, 120).map((item) => ({
     name: cleanText(item.name, 120),
     game: cleanText(item.game, 80),
-    image:
-      String(item.image || "").startsWith("/") &&
-      !String(item.image || "").startsWith("//")
-        ? String(item.image)
-        : "",
+    image: thumbnailUrl(item.image),
     qty: Math.max(1, Math.min(99, Number(item.qty) || 1)),
   }));
   return {
@@ -105,11 +107,174 @@ function publicListing(set, stock, marketMedian = 0) {
     stock: Math.max(0, Number(stock) || 0),
     minQty: Math.max(1, Math.min(1000, Number(set.bulkMinQty) || 5)),
     featured: !!set.publicFeatured,
+    exactProfile: set.sourceType === "catalog_profile",
     itemCount: items.reduce((sum, item) => sum + item.qty, 0),
     items,
     updatedAt: set.updatedAt,
   };
 }
+
+function recommendedProfilePrice(profile, marketMedian = 0) {
+  const rewards = Math.max(1, Number(profile.totalRewards) || 1);
+  const observed = Number(marketMedian) || 0;
+  const base = observed
+    ? observed * Math.max(0.45, Math.min(1.6, rewards / 30))
+    : Math.max(0.75, rewards * 0.1);
+  return Math.round(Math.max(0.5, base * 0.94) * 100) / 100;
+}
+
+async function profilePrices(profiles) {
+  const games = [
+    ...new Set(profiles.map((profile) => profile.game.toLowerCase())),
+  ];
+  const signals = games.length
+    ? await SaleSignal.find({
+        gameKey: { $in: games },
+        source: "listing_sold",
+        priceUsd: { $gt: 0 },
+      })
+        .select("gameKey priceUsd")
+        .sort({ at: -1 })
+        .limit(5000)
+        .lean()
+    : [];
+  const byGame = new Map();
+  for (const signal of signals) {
+    const key = String(signal.gameKey || "");
+    if (!byGame.has(key)) byGame.set(key, []);
+    byGame.get(key).push(Number(signal.priceUsd) || 0);
+  }
+  return new Map(
+    profiles.map((profile) => {
+      const observed = median(byGame.get(profile.game.toLowerCase()) || []);
+      return [
+        profile.sourceEventKey,
+        {
+          observed,
+          recommended: recommendedProfilePrice(profile, observed),
+        },
+      ];
+    }),
+  );
+}
+
+async function syncInventoryVariants({ apply = false, games = null } = {}) {
+  let targetGames = games;
+  if (!Array.isArray(targetGames)) {
+    const approvedSets = await DropSet.find(
+      {
+        listed: true,
+        publicCatalog: { $ne: false },
+        custom: { $ne: true },
+        sourceType: { $ne: "catalog_profile" },
+      },
+      { items: 1 },
+    ).lean();
+    targetGames = [
+      ...new Set(
+        approvedSets.flatMap((set) =>
+          (set.items || [])
+            .map((item) => String(item.game || "").trim())
+            .filter(Boolean),
+        ),
+      ),
+    ];
+  }
+  const profiles = await buildCatalogProfilePlan({ games: targetGames });
+  const prices = await profilePrices(profiles);
+  const existing = await DropSet.find({ sourceType: "catalog_profile" }).lean();
+  const existingByKey = new Map(
+    existing.map((set) => [String(set.sourceEventKey || ""), set]),
+  );
+  const plan = profiles.map((profile) => {
+    const current = existingByKey.get(profile.sourceEventKey);
+    const price = prices.get(profile.sourceEventKey) || {
+      observed: 0,
+      recommended: recommendedProfilePrice(profile),
+    };
+    return {
+      sourceEventKey: profile.sourceEventKey,
+      name: profile.name,
+      category: profile.game,
+      stock: profile.stock,
+      itemCount: profile.totalRewards,
+      distinctRewards: profile.distinctRewards,
+      observedMedian: Math.round(price.observed * 100) / 100,
+      recommendedPrice: price.recommended,
+      currentPrice: Number(current?.publicPrice || current?.price) || 0,
+      action: current ? "refresh profile" : "create profile",
+      profile,
+    };
+  });
+  if (apply) {
+    for (const row of plan) {
+      const current = existingByKey.get(row.sourceEventKey);
+      const publicPrice = Number(current?.publicPrice) || row.recommendedPrice;
+      const retailPrice = Number(current?.price) || row.recommendedPrice;
+      await DropSet.updateOne(
+        { sourceType: "catalog_profile", sourceEventKey: row.sourceEventKey },
+        {
+          $set: {
+            name: row.profile.name,
+            note: row.profile.description,
+            items: row.profile.items.map((item) => ({
+              itemKey: item.itemKey,
+              name: item.name,
+              game: item.game,
+              image: item.image,
+              qty: item.count,
+            })),
+            price: retailPrice,
+            listed: true,
+            publicCatalog: true,
+            publicTitle: row.profile.name,
+            publicDescription: row.profile.description,
+            publicPrice,
+            bulkMinQty: Math.max(1, Math.min(5, row.profile.stock)),
+            bulkDiscountPct: 6,
+            accountScopeLogins: row.profile.logins,
+            sourceType: "catalog_profile",
+            sourceEventKey: row.sourceEventKey,
+            sourceEventName: row.profile.game,
+            custom: false,
+          },
+          $setOnInsert: { publicFeatured: false, publicSort: 0 },
+        },
+        { upsert: true },
+      );
+    }
+    const activeKeys = plan.map((row) => row.sourceEventKey);
+    await DropSet.updateMany(
+      {
+        sourceType: "catalog_profile",
+        sourceEventKey: { $nin: activeKeys },
+      },
+      { $set: { listed: false, publicCatalog: false } },
+    );
+    invalidateCatalogCache();
+  }
+  return {
+    applied: apply,
+    count: plan.length,
+    games: new Set(plan.map((row) => row.category)).size,
+    plan: plan.map(({ profile: _profile, ...row }) => row),
+  };
+}
+
+router.get("/catalog/thumb/:file", async (req, res) => {
+  try {
+    const file = String(req.params.file || "");
+    if (!SAFE_FILE.test(file)) return res.status(404).end();
+    const thumbnail = await ensureThumbnail(file);
+    if (!thumbnail) return res.status(404).end();
+    res.set("Cache-Control", "public, max-age=31536000, immutable");
+    res.type("image/webp").sendFile(thumbnail);
+  } catch (err) {
+    if (err && err.code !== "ENOENT")
+      console.error("catalog thumbnail error:", err.message);
+    res.status(404).end();
+  }
+});
 
 async function buildPublicCatalog() {
   const sets = await DropSet.find({
@@ -229,7 +394,7 @@ router.get("/catalog/listings", catalogReadLimiter, async (req, res) => {
     const data = await loadPublicCatalog();
     const category = cleanText(req.query.category, 80).toLowerCase();
     const q = cleanText(req.query.q, 80).toLowerCase();
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 60));
+    const limit = Math.max(1, Math.min(250, Number(req.query.limit) || 60));
     let listings = data.listings;
     if (category)
       listings = listings.filter(
@@ -530,6 +695,27 @@ router.put(
 );
 
 router.post(
+  "/catalog/admin/sync-variants",
+  requireSuperadmin,
+  enforce2fa,
+  async (req, res) => {
+    try {
+      const apply = req.body && req.body.apply === true;
+      const games = Array.isArray(req.body && req.body.games)
+        ? req.body.games
+        : null;
+      res.json({
+        success: true,
+        ...(await syncInventoryVariants({ apply, games })),
+      });
+    } catch (err) {
+      console.error("catalog inventory variant sync error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
+router.post(
   "/catalog/admin/auto-list",
   requireSuperadmin,
   enforce2fa,
@@ -601,6 +787,8 @@ router.post(
 module.exports = router;
 module.exports.categoryFor = categoryFor;
 module.exports.publicPriceFor = publicPriceFor;
+module.exports.recommendedProfilePrice = recommendedProfilePrice;
 module.exports.inquiryQuantity = inquiryQuantity;
 module.exports.invalidateCatalogCache = invalidateCatalogCache;
 module.exports.warmPublicCatalog = refreshPublicCatalog;
+module.exports.syncInventoryVariants = syncInventoryVariants;

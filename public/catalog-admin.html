@@ -443,6 +443,7 @@
         </div>
         <div class="actions">
           <button class="btn" id="refresh">Refresh</button
+          ><button class="btn" id="syncVariants">Sync inventory variants</button
           ><button class="btn primary" id="preview">
             Preview auto-list plan</button
           ><button class="btn primary" id="apply" disabled>Publish plan</button>
@@ -493,10 +494,10 @@
       </div>
       <section class="panel plan" id="planPanel" hidden>
         <div class="panel-head">
-          <h2>Auto-list pricing plan</h2>
+          <h2 id="planTitle">Auto-list pricing plan</h2>
           <span id="planMeta"></span>
         </div>
-        <p class="plan-note">
+        <p class="plan-note" id="planNote">
           Recommendations use complete live stock, the current listing price,
           and observed sold-price signals. Preview does not change records.
           Publish makes qualifying sets listed and visible in the public
@@ -777,6 +778,40 @@
           : '<tr><td colspan="6" class="empty">No in-stock sets qualify for auto-listing.</td></tr>';
       }
       $("refresh").addEventListener("click", load);
+      $("syncVariants").addEventListener("click", async () => {
+        if (
+          !confirm(
+            "Refresh public variants from exact per-account inventory profiles?",
+          )
+        )
+          return;
+        $("syncVariants").disabled = true;
+        message("Scanning exact inventory profiles across every game...");
+        try {
+          const d = await api("/catalog/admin/sync-variants", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apply: true }),
+          });
+          currentPlan = d.plan || [];
+          $("planTitle").textContent = "Inventory variant sync";
+          $("planNote").textContent =
+            "Each row is an exact reward-and-quantity signature shared by a stocked group of deliverable accounts. Account identities remain private.";
+          renderPlan();
+          await load();
+          message(
+            "Published " +
+              d.count +
+              " exact inventory variants across " +
+              d.games +
+              " games.",
+          );
+        } catch (e) {
+          message(e.message, true);
+        } finally {
+          $("syncVariants").disabled = false;
+        }
+      });
       $("preview").addEventListener("click", async () => {
         $("preview").disabled = true;
         message("Calculating plan from every sellable account...");
@@ -787,6 +822,9 @@
             body: JSON.stringify({ apply: false }),
           });
           currentPlan = d.plan || [];
+          $("planTitle").textContent = "Auto-list pricing plan";
+          $("planNote").textContent =
+            "Recommendations use complete live stock, the current listing price, and observed sold-price signals. Preview does not change records. Publish makes qualifying sets listed and visible in the public catalog.";
           renderPlan();
           $("apply").disabled = !currentPlan.length;
           message("Preview ready. No records changed.");
