@@ -38,6 +38,7 @@ const stashRoutes = require("./routes/stashRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
+const catalogRoutes = require("./routes/catalogRoutes");
 const bulkOrderRoutes = require("./routes/bulkOrderRoutes");
 const renterAuthRoutes = require("./routes/renterAuthRoutes");
 const renterRoutes = require("./routes/renterRoutes");
@@ -485,6 +486,16 @@ app.get("/shop.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "shop.html"));
 });
 
+// Public, read-only bulk catalog. All stock computation stays server-side and
+// the API exposes no account identities or credentials.
+app.get(["/catalog", "/catalog.html"], (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "catalog.html"));
+});
+
+app.get("/catalog-admin.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "catalog-admin.html"));
+});
+
 // Personal Japanese (JLPT N5) study tab. Self-contained learning app
 // (kana / kanji / vocab / grammar + spaced repetition) with progress kept
 // client-side in the browser's localStorage.
@@ -537,6 +548,9 @@ app.get("/", (req, res) => {
 // of whether that router matches the path, so anything mounted after it 401s
 // without an admin session.
 app.use(japaneseLearnRoutes);
+// Public reads plus self-guarded superadmin controls. This must be before the
+// blanket requireAdmin routers below so anonymous catalog visitors can read it.
+app.use(catalogRoutes);
 app.use(redeemRoutes);
 app.use(enforce2fa, chatRoutes);
 // Bulk orders must mount BEFORE the requireAdmin blanket guards below: the two

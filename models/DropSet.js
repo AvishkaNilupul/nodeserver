@@ -30,6 +30,19 @@ const dropSetSchema = new mongoose.Schema(
     // market-derived pricing would undercut.
     minPriceUsd: { type: Number, default: 0, min: 0 },
     listed: { type: Boolean, default: false, index: true },
+    // Public bulk catalog controls. Existing listed sets remain visible unless
+    // an operator explicitly hides them; the public API never exposes account
+    // identities or credentials, only aggregate stock for the full set.
+    publicCatalog: { type: Boolean, default: true, index: true },
+    publicFeatured: { type: Boolean, default: false, index: true },
+    publicSort: { type: Number, default: 0 },
+    publicTitle: { type: String, default: "" },
+    publicDescription: { type: String, default: "" },
+    // Optional public override. 0 means derive the bulk price from the regular
+    // listing price and discount below.
+    publicPrice: { type: Number, default: 0, min: 0 },
+    bulkMinQty: { type: Number, default: 5, min: 1, max: 1000 },
+    bulkDiscountPct: { type: Number, default: 8, min: 0, max: 60 },
     // Custom listings (game-based promo covers pushed to marketplaces) are kept
     // out of the regular Shop listings view via this flag. They still use the
     // same DropSet shape so marketplace publishing/auto-delivery is unchanged.

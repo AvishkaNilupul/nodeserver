@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      name="description"
+      content="Browse live bulk gaming inventory and request volume pricing."
+    />
+    <title>RedeemHub Bulk Catalog</title>
+    <style>
+      :root {
+        --bg: #f4f6f8;
+        --surface: #ffffff;
+        --surface-2: #eef1f4;
+        --ink: #15191e;
+        --muted: #69727d;
+        --line: #dfe3e7;
+        --brand: #0b6b53;
+        --brand-dark: #074b3b;
+        --accent: #e9a23b;
+        --danger: #b42318;
+        --shadow: 0 10px 32px rgba(21, 25, 30, 0.08);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+      button,
+      input,
+      textarea {
+        font: inherit;
+        letter-spacing: 0;
+      }
+      button {
+        cursor: pointer;
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        background: rgba(255, 255, 255, 0.96);
+        border-bottom: 1px solid var(--line);
+        backdrop-filter: blur(12px);
+      }
+      .topbar-inner {
+        width: min(1240px, calc(100% - 32px));
+        min-height: 68px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-width: 190px;
+        color: inherit;
+        text-decoration: none;
+      }
+      .brand-mark {
+        width: 36px;
+        height: 36px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        background: var(--brand);
+        color: #fff;
+        font-weight: 900;
+      }
+      .brand-name {
+        font-weight: 800;
+        font-size: 17px;
+      }
+      .brand-name small {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+      .search-wrap {
+        flex: 1;
+        position: relative;
+      }
+      .search-wrap input {
+        width: 100%;
+        height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 42px 0 14px;
+        background: var(--surface-2);
+        color: var(--ink);
+        outline: none;
+      }
+      .search-wrap input:focus {
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px rgba(11, 107, 83, 0.12);
+        background: #fff;
+      }
+      .search-wrap button {
+        position: absolute;
+        right: 4px;
+        top: 4px;
+        width: 34px;
+        height: 34px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 18px;
+      }
+      .top-link {
+        color: var(--brand-dark);
+        font-size: 13px;
+        font-weight: 750;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      main {
+        width: min(1240px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 30px 0 70px;
+      }
+      .catalog-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 22px;
+      }
+      .eyebrow {
+        margin: 0 0 6px;
+        color: var(--brand);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      h1 {
+        margin: 0;
+        max-width: 760px;
+        font-size: clamp(28px, 4vw, 48px);
+        line-height: 1.04;
+        letter-spacing: 0;
+      }
+      .catalog-head p:last-child {
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .live-note {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .live-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #1a9b70;
+        box-shadow: 0 0 0 4px rgba(26, 155, 112, 0.12);
+      }
+      .section-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin: 30px 0 12px;
+      }
+      .section-bar h2 {
+        margin: 0;
+        font-size: 17px;
+      }
+      .section-bar span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .categories {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .category {
+        min-height: 152px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        text-align: left;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--surface);
+        color: var(--ink);
+        overflow: hidden;
+        transition:
+          transform 0.15s ease,
+          border-color 0.15s ease,
+          box-shadow 0.15s ease;
+      }
+      .category:hover,
+      .category.active {
+        transform: translateY(-2px);
+        border-color: var(--brand);
+        box-shadow: var(--shadow);
+      }
+      .category-images {
+        height: 54px;
+        display: flex;
+        align-items: center;
+        margin-bottom: 13px;
+      }
+      .category-images img,
+      .category-fallback {
+        width: 52px;
+        height: 52px;
+        object-fit: cover;
+        border: 2px solid #fff;
+        border-radius: 6px;
+        background: var(--surface-2);
+      }
+      .category-images img + img {
+        margin-left: -12px;
+      }
+      .category-fallback {
+        display: grid;
+        place-items: center;
+        color: var(--brand);
+        font-size: 20px;
+        font-weight: 900;
+        border-color: var(--surface-2);
+      }
+      .category strong {
+        display: block;
+        max-width: 100%;
+        font-size: 16px;
+        overflow-wrap: anywhere;
+      }
+      .category small {
+        margin-top: 5px;
+        color: var(--muted);
+        line-height: 1.3;
+      }
+      .category .available {
+        margin-top: auto;
+        color: var(--brand);
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .listing-layout {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: 24px;
+        align-items: start;
+      }
+      .filters {
+        position: sticky;
+        top: 88px;
+      }
+      .filter-title {
+        font-size: 12px;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 800;
+        margin: 0 0 9px;
+      }
+      .filter-list {
+        display: grid;
+        gap: 3px;
+      }
+      .filter {
+        width: 100%;
+        min-height: 40px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        border: 0;
+        border-left: 3px solid transparent;
+        border-radius: 0 5px 5px 0;
+        padding: 7px 10px;
+        background: transparent;
+        color: var(--ink);
+        text-align: left;
+      }
+      .filter:hover {
+        background: var(--surface-2);
+      }
+      .filter.active {
+        border-left-color: var(--brand);
+        background: #e7f1ee;
+        color: var(--brand-dark);
+        font-weight: 800;
+      }
+      .filter span:last-child {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .listing-tools {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 40px;
+        margin-bottom: 12px;
+      }
+      .listing-tools h2 {
+        margin: 0;
+        font-size: 19px;
+      }
+      .listing-tools p {
+        margin: 3px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .card {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: 112px minmax(0, 1fr);
+        gap: 15px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--surface);
+      }
+      .card-media {
+        width: 112px;
+        height: 112px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: var(--surface-2);
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2px;
+      }
+      .card-media img {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        object-fit: cover;
+      }
+      .card-media.one {
+        grid-template-columns: 1fr;
+      }
+      .card-media .placeholder {
+        grid-column: 1 / -1;
+        display: grid;
+        place-items: center;
+        color: var(--brand);
+        font-size: 31px;
+        font-weight: 900;
+      }
+      .card-body {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .card-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .badge {
+        flex: none;
+        border-radius: 999px;
+        padding: 3px 7px;
+        background: #fff3dd;
+        color: #895611;
+        font-size: 10px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .card h3 {
+        margin: 4px 0 5px;
+        font-size: 16px;
+        line-height: 1.22;
+        overflow-wrap: anywhere;
+      }
+      .card-desc {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.42;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        overflow: hidden;
+      }
+      .card-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        margin: 9px 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .stock-ok {
+        color: var(--brand);
+        font-weight: 800;
+      }
+      .stock-zero {
+        color: var(--danger);
+        font-weight: 800;
+      }
+      .card-foot {
+        margin-top: auto;
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .price {
+        font-size: 20px;
+        font-weight: 850;
+      }
+      .price small {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 600;
+      }
+      .quote-btn,
+      .primary-btn,
+      .ghost-btn {
+        min-height: 36px;
+        border-radius: 5px;
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .quote-btn,
+      .primary-btn {
+        border: 1px solid var(--brand);
+        background: var(--brand);
+        color: #fff;
+      }
+      .quote-btn:hover,
+      .primary-btn:hover {
+        background: var(--brand-dark);
+      }
+      .quote-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .ghost-btn {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+      }
+      .empty,
+      .loading {
+        grid-column: 1 / -1;
+        padding: 56px 20px;
+        border: 1px dashed var(--line);
+        text-align: center;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.5);
+      }
+      .skeleton {
+        min-height: 150px;
+        border-radius: 7px;
+        background: linear-gradient(
+          90deg,
+          #eceff1 25%,
+          #f8f9fa 50%,
+          #eceff1 75%
+        );
+        background-size: 200% 100%;
+        animation: load 1.3s infinite;
+      }
+      @keyframes load {
+        to {
+          background-position: -200% 0;
+        }
+      }
+      dialog {
+        width: min(560px, calc(100% - 28px));
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 28px 70px rgba(0, 0, 0, 0.25);
+      }
+      dialog::backdrop {
+        background: rgba(14, 20, 24, 0.58);
+      }
+      .dialog-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 20px 22px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .dialog-head h2 {
+        margin: 0;
+        font-size: 19px;
+      }
+      .dialog-head p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .close-btn {
+        width: 34px;
+        height: 34px;
+        border: 0;
+        background: var(--surface-2);
+        border-radius: 5px;
+        font-size: 21px;
+        line-height: 1;
+      }
+      .quote-form {
+        padding: 18px 22px 22px;
+        display: grid;
+        gap: 13px;
+      }
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+      .field label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .field input,
+      .field textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 10px 11px;
+        background: #fff;
+        outline: none;
+      }
+      .field textarea {
+        min-height: 86px;
+        resize: vertical;
+      }
+      .field input:focus,
+      .field textarea:focus {
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px rgba(11, 107, 83, 0.12);
+      }
+      .form-row {
+        display: grid;
+        grid-template-columns: 130px 1fr;
+        gap: 12px;
+      }
+      .dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 9px;
+        margin-top: 3px;
+      }
+      .form-message {
+        min-height: 18px;
+        margin: 0;
+        color: var(--danger);
+        font-size: 12px;
+      }
+      .success-box {
+        padding: 30px 22px;
+        text-align: center;
+      }
+      .success-box .check {
+        width: 48px;
+        height: 48px;
+        margin: 0 auto 12px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: #e3f2ed;
+        color: var(--brand);
+        font-size: 24px;
+        font-weight: 900;
+      }
+      .success-box h2 {
+        margin: 0;
+        font-size: 20px;
+      }
+      .success-box p {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .reference {
+        display: inline-block;
+        padding: 7px 10px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        font-family: ui-monospace, monospace;
+        font-weight: 800;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        background: #fff;
+      }
+      footer div {
+        width: min(1240px, calc(100% - 32px));
+        min-height: 64px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        font-size: 12px;
+      }
+      @media (max-width: 980px) {
+        .categories {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .listing-layout {
+          grid-template-columns: 1fr;
+        }
+        .filters {
+          position: static;
+          overflow-x: auto;
+        }
+        .filter-list {
+          display: flex;
+          min-width: max-content;
+        }
+        .filter {
+          width: auto;
+          border-left: 0;
+          border-bottom: 3px solid transparent;
+          border-radius: 5px 5px 0 0;
+        }
+        .filter.active {
+          border-left-color: transparent;
+          border-bottom-color: var(--brand);
+        }
+      }
+      @media (max-width: 720px) {
+        .topbar-inner {
+          width: min(100% - 20px, 1240px);
+          flex-wrap: wrap;
+          padding: 10px 0;
+          gap: 10px;
+        }
+        .brand {
+          min-width: 0;
+        }
+        .top-link {
+          margin-left: auto;
+        }
+        .search-wrap {
+          flex-basis: 100%;
+          order: 3;
+        }
+        main {
+          width: min(100% - 20px, 1240px);
+          padding-top: 22px;
+        }
+        .catalog-head {
+          display: block;
+        }
+        .live-note {
+          margin-top: 18px;
+        }
+        .cards {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 480px) {
+        .brand-name small {
+          display: none;
+        }
+        .categories {
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
+        .category {
+          min-height: 138px;
+          padding: 12px;
+        }
+        .card {
+          grid-template-columns: 86px minmax(0, 1fr);
+          gap: 11px;
+          padding: 11px;
+        }
+        .card-media {
+          width: 86px;
+          height: 102px;
+        }
+        .card-foot {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .quote-btn {
+          width: 100%;
+        }
+        .form-row {
+          grid-template-columns: 1fr;
+        }
+        footer div {
+          align-items: flex-start;
+          flex-direction: column;
+          justify-content: center;
+          padding: 14px 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/catalog" aria-label="RedeemHub catalog home">
+          <span class="brand-mark">R</span>
+          <span class="brand-name">RedeemHub<small>Bulk inventory</small></span>
+        </a>
+        <form class="search-wrap" id="searchForm" role="search">
+          <input
+            id="searchInput"
+            maxlength="80"
+            autocomplete="off"
+            placeholder="Search sets or rewards"
+            aria-label="Search catalog"
+          />
+          <button type="submit" title="Search" aria-label="Search">
+            &#128269;
+          </button>
+        </form>
+        <a class="top-link" href="#inventory">Browse inventory</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="catalog-head" aria-labelledby="pageTitle">
+        <div>
+          <p class="eyebrow">Live wholesale catalog</p>
+          <h1 id="pageTitle">Game sets ready for bulk orders.</h1>
+          <p>
+            Volume pricing is shown per unit. Stock is calculated from complete,
+            deliverable sets.
+          </p>
+        </div>
+        <div class="live-note">
+          <span class="live-dot"></span
+          ><span id="updatedText">Checking inventory</span>
+        </div>
+      </section>
+
+      <div class="section-bar">
+        <h2>Categories</h2>
+        <span id="categoryCount"></span>
+      </div>
+      <section class="categories" id="categories" aria-live="polite">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </section>
+
+      <section id="inventory">
+        <div class="section-bar">
+          <h2>Available sets</h2>
+          <span id="resultCount"></span>
+        </div>
+        <div class="listing-layout">
+          <aside class="filters" aria-label="Catalog categories">
+            <p class="filter-title">Game</p>
+            <div class="filter-list" id="filters"></div>
+          </aside>
+          <div>
+            <div class="listing-tools">
+              <div>
+                <h2 id="listingTitle">All inventory</h2>
+                <p id="listingSub">Live availability across every category</p>
+              </div>
+            </div>
+            <div class="cards" id="cards">
+              <div class="loading">Loading inventory...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div>
+        <strong>RedeemHub bulk inventory</strong
+        ><span
+          >Availability and pricing can change before a quote is
+          confirmed.</span
+        >
+      </div>
+    </footer>
+
+    <dialog id="quoteDialog">
+      <div id="quoteContent"></div>
+    </dialog>
+
+    <script>
+      const state = {
+        categories: [],
+        listings: [],
+        active: "",
+        query: "",
+        selected: null,
+      };
+      const $ = (id) => document.getElementById(id);
+      const esc = (value) =>
+        String(value == null ? "" : value).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      const attr = esc;
+      const money = (n) =>
+        new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: "USD",
+        }).format(Number(n) || 0);
+      function visitorId() {
+        let id = sessionStorage.getItem("catalogVisitor");
+        if (!id) {
+          const bytes = new Uint8Array(16);
+          crypto.getRandomValues(bytes);
+          id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(
+            "",
+          );
+          sessionStorage.setItem("catalogVisitor", id);
+        }
+        return id;
+      }
+      function track(event, extra) {
+        fetch("/catalog/events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            event,
+            visitorId: visitorId(),
+            ...(extra || {}),
+          }),
+          keepalive: true,
+        }).catch(() => {});
+      }
+      async function api(url, options) {
+        const response = await fetch(url, {
+          credentials: "same-origin",
+          ...(options || {}),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.success === false)
+          throw new Error(data.message || "Request failed");
+        return data;
+      }
+      function categoryImages(category) {
+        if (!category.images.length)
+          return (
+            '<span class="category-fallback">' +
+            esc(category.name.charAt(0)) +
+            "</span>"
+          );
+        return category.images
+          .slice(0, 3)
+          .map((src) => '<img src="' + attr(src) + '" alt="" loading="lazy" />')
+          .join("");
+      }
+      function renderCategories() {
+        $("categoryCount").textContent =
+          state.categories.length +
+          (state.categories.length === 1 ? " game" : " games");
+        $("categories").innerHTML = state.categories.length
+          ? state.categories
+              .map(
+                (category) =>
+                  '<button class="category' +
+                  (state.active === category.name ? " active" : "") +
+                  '" data-category="' +
+                  attr(category.name) +
+                  '">' +
+                  '<span class="category-images">' +
+                  categoryImages(category) +
+                  "</span>" +
+                  "<strong>" +
+                  esc(category.name) +
+                  "</strong>" +
+                  "<small>" +
+                  category.listingCount +
+                  (category.listingCount === 1 ? " set" : " sets") +
+                  " from " +
+                  money(category.fromPrice) +
+                  "</small>" +
+                  '<span class="available">' +
+                  category.stock +
+                  " units available</span></button>",
+              )
+              .join("")
+          : '<div class="empty">No public categories are available right now.</div>';
+      }
+      function renderFilters() {
+        const rows = [
+          { name: "", label: "All games", listingCount: state.listings.length },
+          ...state.categories.map((c) => ({
+            name: c.name,
+            label: c.name,
+            listingCount: c.listingCount,
+          })),
+        ];
+        $("filters").innerHTML = rows
+          .map(
+            (row) =>
+              '<button class="filter' +
+              (state.active === row.name ? " active" : "") +
+              '" data-filter="' +
+              attr(row.name) +
+              '"><span>' +
+              esc(row.label) +
+              "</span><span>" +
+              row.listingCount +
+              "</span></button>",
+          )
+          .join("");
+      }
+      function media(listing) {
+        const images = [
+          ...new Set(listing.items.map((item) => item.image).filter(Boolean)),
+        ].slice(0, 4);
+        if (!images.length)
+          return (
+            '<div class="card-media"><span class="placeholder">' +
+            esc(listing.category.charAt(0)) +
+            "</span></div>"
+          );
+        return (
+          '<div class="card-media ' +
+          (images.length === 1 ? "one" : "") +
+          '">' +
+          images
+            .map(
+              (src) => '<img src="' + attr(src) + '" alt="" loading="lazy" />',
+            )
+            .join("") +
+          "</div>"
+        );
+      }
+      function renderCards() {
+        let rows = state.listings;
+        if (state.active)
+          rows = rows.filter((row) => row.category === state.active);
+        if (state.query) {
+          const q = state.query.toLowerCase();
+          rows = rows.filter((row) =>
+            (
+              row.title +
+              " " +
+              row.description +
+              " " +
+              row.items.map((item) => item.name).join(" ")
+            )
+              .toLowerCase()
+              .includes(q),
+          );
+        }
+        $("listingTitle").textContent =
+          state.active || (state.query ? "Search results" : "All inventory");
+        $("listingSub").textContent = state.query
+          ? 'Matching "' + state.query + '"'
+          : state.active
+            ? "Bulk sets currently available for " + state.active
+            : "Live availability across every category";
+        $("resultCount").textContent =
+          rows.length + (rows.length === 1 ? " listing" : " listings");
+        if (!rows.length) {
+          $("cards").innerHTML =
+            '<div class="empty">No sets match this view.</div>';
+          return;
+        }
+        $("cards").innerHTML = rows
+          .map(
+            (listing) =>
+              '<article class="card">' +
+              media(listing) +
+              '<div class="card-body"><div class="card-top"><span class="eyebrow">' +
+              esc(listing.category) +
+              "</span>" +
+              (listing.featured ? '<span class="badge">Featured</span>' : "") +
+              "</div>" +
+              "<h3>" +
+              esc(listing.title) +
+              '</h3><p class="card-desc">' +
+              esc(
+                listing.description ||
+                  listing.items
+                    .slice(0, 4)
+                    .map((i) => i.name)
+                    .join(", "),
+              ) +
+              "</p>" +
+              '<div class="card-meta"><span>' +
+              listing.itemCount +
+              " rewards</span><span>Min. " +
+              listing.minQty +
+              '</span><span class="' +
+              (listing.stock ? "stock-ok" : "stock-zero") +
+              '">' +
+              (listing.stock ? listing.stock + " in stock" : "Out of stock") +
+              "</span></div>" +
+              '<div class="card-foot"><div class="price">' +
+              money(listing.price) +
+              '<small>per unit for bulk orders</small></div><button class="quote-btn" data-quote="' +
+              attr(listing.id) +
+              '" ' +
+              (listing.stock ? "" : "disabled") +
+              ">Request quote</button></div></div></article>",
+          )
+          .join("");
+      }
+      function selectCategory(name) {
+        state.active = name;
+        state.query = "";
+        $("searchInput").value = "";
+        renderCategories();
+        renderFilters();
+        renderCards();
+        if (name) track("category_view", { category: name });
+        $("inventory").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      function openQuote(listing) {
+        state.selected = listing;
+        track("listing_view", {
+          category: listing.category,
+          listingId: listing.id,
+        });
+        $("quoteContent").innerHTML =
+          '<div class="dialog-head"><div><h2>' +
+          esc(listing.title) +
+          "</h2><p>" +
+          esc(listing.category) +
+          " · " +
+          money(listing.price) +
+          ' per unit</p></div><button class="close-btn" type="button" data-close aria-label="Close">&times;</button></div>' +
+          '<form class="quote-form" id="quoteForm"><div class="form-row"><div class="field"><label for="quoteQty">Quantity</label><input id="quoteQty" name="quantity" type="number" min="' +
+          listing.minQty +
+          '" max="1000" value="' +
+          Math.max(listing.minQty, Math.min(10, listing.stock)) +
+          '" required /></div><div class="field"><label for="quoteContact">Email or contact handle</label><input id="quoteContact" name="contact" maxlength="180" autocomplete="email" required placeholder="name@example.com" /></div></div><div class="field"><label for="quoteNote">Order note</label><textarea id="quoteNote" name="note" maxlength="800" placeholder="Preferred platform, delivery timing, or other details"></textarea></div><p class="form-message" id="formMessage"></p><div class="dialog-actions"><button type="button" class="ghost-btn" data-close>Cancel</button><button class="primary-btn" type="submit">Send request</button></div></form>';
+        $("quoteDialog").showModal();
+      }
+      async function submitQuote(form) {
+        const listing = state.selected;
+        const button = form.querySelector("button[type=submit]");
+        button.disabled = true;
+        $("formMessage").textContent = "";
+        try {
+          const data = await api("/catalog/inquiries", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              listingId: listing.id,
+              quantity: Number(form.quantity.value),
+              contact: form.contact.value,
+              note: form.note.value,
+            }),
+          });
+          track("inquiry_click", {
+            category: listing.category,
+            listingId: listing.id,
+          });
+          $("quoteContent").innerHTML =
+            '<div class="success-box"><div class="check">&#10003;</div><h2>Request received</h2><p>Keep this reference for follow-up.</p><span class="reference">' +
+            esc(data.reference) +
+            '</span><div class="dialog-actions" style="justify-content:center;margin-top:20px"><button class="primary-btn" data-close>Done</button></div></div>';
+        } catch (error) {
+          $("formMessage").textContent = error.message;
+          button.disabled = false;
+        }
+      }
+      $("categories").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-category]");
+        if (button) selectCategory(button.dataset.category);
+      });
+      $("filters").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-filter]");
+        if (button) selectCategory(button.dataset.filter);
+      });
+      $("cards").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-quote]");
+        if (!button) return;
+        const listing = state.listings.find(
+          (row) => row.id === button.dataset.quote,
+        );
+        if (listing) openQuote(listing);
+      });
+      $("searchForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        state.query = $("searchInput").value.trim().slice(0, 80);
+        state.active = "";
+        renderCategories();
+        renderFilters();
+        renderCards();
+        $("inventory").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      $("searchInput").addEventListener("input", () => {
+        if (!$("searchInput").value) {
+          state.query = "";
+          renderCards();
+        }
+      });
+      $("quoteDialog").addEventListener("click", (event) => {
+        if (
+          event.target === $("quoteDialog") ||
+          event.target.closest("[data-close]")
+        )
+          $("quoteDialog").close();
+      });
+      $("quoteDialog").addEventListener("submit", (event) => {
+        if (event.target.id === "quoteForm") {
+          event.preventDefault();
+          submitQuote(event.target);
+        }
+      });
+      async function init() {
+        try {
+          const [categories, listings] = await Promise.all([
+            api("/catalog/categories"),
+            api("/catalog/listings?limit=100"),
+          ]);
+          state.categories = categories.categories || [];
+          state.listings = listings.listings || [];
+          renderCategories();
+          renderFilters();
+          renderCards();
+          $("updatedText").textContent =
+            "Inventory checked " +
+            new Date(categories.generatedAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+          track("catalog_view");
+          const requested = new URLSearchParams(location.search).get(
+            "category",
+          );
+          if (
+            requested &&
+            state.categories.some(
+              (row) => row.name.toLowerCase() === requested.toLowerCase(),
+            )
+          )
+            selectCategory(
+              state.categories.find(
+                (row) => row.name.toLowerCase() === requested.toLowerCase(),
+              ).name,
+            );
+        } catch (error) {
+          $("categories").innerHTML =
+            '<div class="empty">' + esc(error.message) + "</div>";
+          $("cards").innerHTML =
+            '<div class="empty">' + esc(error.message) + "</div>";
+          $("updatedText").textContent = "Inventory unavailable";
+        }
+      }
+      init();
+    </script>
+  </body>
+</html>

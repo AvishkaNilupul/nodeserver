@@ -1,0 +1,916 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Public Catalog | RedeemHub</title>
+    <style>
+      :root {
+        --bg: #f5f7f8;
+        --surface: #fff;
+        --line: #e1e5e8;
+        --ink: #172026;
+        --muted: #68737b;
+        --brand: #0b6b53;
+        --accent: #0b6b53;
+        --surface-2: #f0f3f4;
+        --green: #087443;
+        --amber: #97600e;
+        --red: #b42318;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        display: flex;
+        min-height: 100vh;
+      }
+      .nav {
+        width: 236px;
+        flex: none;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+        font-weight: 800;
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        background: var(--brand);
+        color: #fff;
+      }
+      .nav .brand b {
+        font-size: 14px;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 600;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 10px 12px;
+        border-radius: 7px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .nav .links a:hover {
+        color: var(--ink);
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        color: var(--brand);
+        background: #e7f1ee;
+        font-weight: 800;
+      }
+      .page {
+        flex: 1;
+        max-width: 1360px;
+        margin: 0 auto;
+        padding: 30px 32px 70px;
+      }
+      .head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 24px;
+      }
+      .eyebrow {
+        margin: 0 0 7px;
+        color: var(--brand);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .head h1 {
+        margin: 0;
+        font-size: 28px;
+        letter-spacing: 0;
+      }
+      .head p:last-child {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .btn {
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--surface);
+        padding: 8px 13px;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      .btn.primary {
+        border-color: var(--brand);
+        background: var(--brand);
+        color: #fff;
+      }
+      .btn.primary:hover {
+        background: #074b3b;
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .status {
+        min-height: 20px;
+        margin: -10px 0 15px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .status.error {
+        color: var(--red);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 24px;
+      }
+      .stat {
+        padding: 15px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--surface);
+      }
+      .stat b {
+        display: block;
+        font-size: 24px;
+        line-height: 1.1;
+      }
+      .stat span {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.85fr);
+        gap: 16px;
+        align-items: start;
+      }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .panel-head h2 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .panel-head span {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th,
+      td {
+        padding: 11px 12px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        white-space: nowrap;
+      }
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      .name {
+        font-weight: 800;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .pill {
+        display: inline-block;
+        padding: 3px 7px;
+        border-radius: 999px;
+        background: #edf2f0;
+        color: var(--green);
+        font-size: 10px;
+        font-weight: 800;
+      }
+      .pill.off {
+        background: #f2f3f4;
+        color: var(--muted);
+      }
+      .pill.warn {
+        background: #fff3dc;
+        color: var(--amber);
+      }
+      .row-actions {
+        display: flex;
+        gap: 5px;
+        flex-wrap: wrap;
+      }
+      .row-actions .btn {
+        min-height: 29px;
+        padding: 5px 8px;
+        font-size: 10px;
+      }
+      .inquiry {
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .inquiry:last-child {
+        border-bottom: 0;
+      }
+      .inquiry-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .inquiry strong {
+        font-size: 12px;
+      }
+      .inquiry p {
+        margin: 5px 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+      .inquiry small {
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .empty {
+        padding: 38px 16px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 12px;
+      }
+      .plan {
+        margin-top: 16px;
+      }
+      .plan table td {
+        background: #fffdf7;
+      }
+      .plan-note {
+        margin: 0;
+        padding: 11px 16px;
+        background: #fffaf0;
+        color: #765116;
+        border-bottom: 1px solid #f1dfb4;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      dialog {
+        width: min(560px, calc(100% - 28px));
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+      }
+      dialog::backdrop {
+        background: rgba(23, 32, 38, 0.48);
+      }
+      .edit-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 18px 20px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .edit-head h2 {
+        margin: 0;
+        font-size: 18px;
+      }
+      .edit-head p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .edit-form {
+        display: grid;
+        gap: 12px;
+        padding: 18px 20px 20px;
+      }
+      .edit-form label {
+        display: grid;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .edit-form input,
+      .edit-form textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 9px 10px;
+        color: var(--ink);
+        background: #fff;
+        font-size: 12px;
+      }
+      .edit-form textarea {
+        min-height: 72px;
+        resize: vertical;
+      }
+      .edit-form input:focus,
+      .edit-form textarea:focus {
+        outline: none;
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px rgba(11, 107, 83, 0.12);
+      }
+      .edit-fields {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .edit-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      @media (max-width: 1120px) {
+        .stats {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 680px) {
+        .page {
+          padding: 22px 14px 50px;
+        }
+        .head {
+          display: block;
+        }
+        .actions {
+          margin-top: 15px;
+          flex-wrap: wrap;
+        }
+        .stats {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .stat b {
+          font-size: 21px;
+        }
+        .edit-fields {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark">R</span><b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links"></nav>
+    </aside>
+    <main class="page">
+      <header class="head">
+        <div>
+          <p class="eyebrow">Superadmin workspace</p>
+          <h1>Public catalog control</h1>
+          <p>
+            Monitor live stock, pricing signals, quote demand, and public
+            visibility.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="refresh">Refresh</button
+          ><button class="btn primary" id="preview">
+            Preview auto-list plan</button
+          ><button class="btn primary" id="apply" disabled>Publish plan</button>
+        </div>
+      </header>
+      <p id="status" class="status"></p>
+      <section class="stats" id="stats">
+        <div class="stat"><b>—</b><span>Categories</span></div>
+        <div class="stat"><b>—</b><span>Public listings</span></div>
+        <div class="stat"><b>—</b><span>Available units</span></div>
+        <div class="stat"><b>—</b><span>30d catalog views</span></div>
+        <div class="stat"><b>—</b><span>30d shop revenue</span></div>
+        <div class="stat"><b>—</b><span>Open quote requests</span></div>
+      </section>
+      <div class="grid">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Listings</h2>
+            <span id="listingMeta"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Set</th>
+                  <th>Category</th>
+                  <th>Stock</th>
+                  <th>Public price</th>
+                  <th>Visibility</th>
+                  <th>Controls</th>
+                </tr>
+              </thead>
+              <tbody id="listings">
+                <tr>
+                  <td colspan="6" class="empty">Loading...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Quote requests</h2>
+            <span>Newest first</span>
+          </div>
+          <div id="inquiries"><div class="empty">Loading...</div></div>
+        </section>
+      </div>
+      <section class="panel plan" id="planPanel" hidden>
+        <div class="panel-head">
+          <h2>Auto-list pricing plan</h2>
+          <span id="planMeta"></span>
+        </div>
+        <p class="plan-note">
+          Recommendations use complete live stock, the current listing price,
+          and observed sold-price signals. Preview does not change records.
+          Publish makes qualifying sets listed and visible in the public
+          catalog.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Set</th>
+                <th>Category</th>
+                <th>Stock</th>
+                <th>Observed median</th>
+                <th>Recommended</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="plan"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <dialog id="editDialog">
+      <div class="edit-head">
+        <div>
+          <h2>Edit public listing</h2>
+          <p id="editSetName"></p>
+        </div>
+        <button class="btn" type="button" data-edit-close>Close</button>
+      </div>
+      <form class="edit-form" id="editForm">
+        <label
+          >Public title
+          <input id="editTitle" name="publicTitle" maxlength="140" />
+        </label>
+        <label
+          >Public description
+          <textarea
+            id="editDescription"
+            name="publicDescription"
+            maxlength="600"
+          ></textarea>
+        </label>
+        <div class="edit-fields">
+          <label
+            >Price override (USD)
+            <input
+              id="editPrice"
+              name="publicPrice"
+              type="number"
+              min="0"
+              step="0.01"
+            />
+          </label>
+          <label
+            >Minimum quantity
+            <input
+              id="editMinQty"
+              name="bulkMinQty"
+              type="number"
+              min="1"
+              max="1000"
+              step="1"
+            />
+          </label>
+          <label
+            >Bulk discount (%)
+            <input
+              id="editDiscount"
+              name="bulkDiscountPct"
+              type="number"
+              min="0"
+              max="60"
+              step="0.1"
+            />
+          </label>
+        </div>
+        <label
+          >Sort priority
+          <input id="editSort" name="publicSort" type="number" step="1" />
+        </label>
+        <p id="editMessage" class="status"></p>
+        <div class="edit-actions">
+          <button class="btn" type="button" data-edit-close>Cancel</button>
+          <button class="btn primary" type="submit">Save listing</button>
+        </div>
+      </form>
+    </dialog>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const esc = (v) =>
+        String(v == null ? "" : v).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      const money = (n) =>
+        new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: "USD",
+        }).format(Number(n) || 0);
+      const date = (v) =>
+        v
+          ? new Date(v).toLocaleString([], {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })
+          : "—";
+      let overview = null;
+      let currentPlan = [];
+      let editingId = "";
+      async function api(url, options) {
+        const r = await fetch(url, {
+          credentials: "same-origin",
+          ...(options || {}),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.success === false)
+          throw new Error(d.message || "Request failed");
+        return d;
+      }
+      function message(text, error) {
+        $("status").textContent = text || "";
+        $("status").className = "status" + (error ? " error" : "");
+      }
+      function renderStats() {
+        const t = overview.totals;
+        const values = [
+          t.categories,
+          t.listings,
+          t.units,
+          t.views30d,
+          money(t.shopRevenue30d),
+          t.openInquiries,
+        ];
+        $("stats").innerHTML = values
+          .map(
+            (v, i) =>
+              '<div class="stat"><b>' +
+              esc(v) +
+              "</b><span>" +
+              [
+                "Categories",
+                "Public listings",
+                "Available units",
+                "30d catalog views",
+                "30d shop revenue",
+                "Open quote requests",
+              ][i] +
+              "</span></div>",
+          )
+          .join("");
+      }
+      function renderListings() {
+        const rows = overview.listings || [];
+        $("listingMeta").textContent = rows.length + " listed sets";
+        $("listings").innerHTML = rows.length
+          ? rows
+              .map(
+                (row) =>
+                  '<tr><td><div class="name">' +
+                  esc(row.title) +
+                  '</div><span class="muted">' +
+                  row.itemCount +
+                  " rewards</span></td><td>" +
+                  esc(row.category) +
+                  "</td><td>" +
+                  (row.stock
+                    ? '<span class="pill">' + row.stock + "</span>"
+                    : '<span class="pill warn">0</span>') +
+                  "</td><td><strong>" +
+                  money(row.price) +
+                  '</strong><br><span class="muted">retail ' +
+                  money(row.retailPrice) +
+                  "</span></td><td>" +
+                  (row.visible
+                    ? '<span class="pill">public</span>'
+                    : '<span class="pill off">hidden</span>') +
+                  (row.stock
+                    ? ""
+                    : ' <span class="pill warn">out of stock</span>') +
+                  '</td><td><div class="row-actions"><button class="btn" data-toggle="' +
+                  esc(row.id) +
+                  '">' +
+                  (row.visible ? "Hide" : "Show") +
+                  '</button><button class="btn" data-feature="' +
+                  esc(row.id) +
+                  '">' +
+                  (row.featured ? "Unfeature" : "Feature") +
+                  '</button><button class="btn" data-edit="' +
+                  esc(row.id) +
+                  '">Edit</button></div></td></tr>',
+              )
+              .join("")
+          : '<tr><td colspan="6" class="empty">No listed sets yet.</td></tr>';
+      }
+      function renderInquiries() {
+        const rows = overview.inquiries || [];
+        $("inquiries").innerHTML = rows.length
+          ? rows
+              .map(
+                (row) =>
+                  '<article class="inquiry"><div class="inquiry-top"><strong>' +
+                  esc(row.listingTitle) +
+                  " · " +
+                  row.quantity +
+                  ' units</strong><span class="pill ' +
+                  (row.status === "new"
+                    ? "warn"
+                    : row.status === "closed"
+                      ? "off"
+                      : "") +
+                  '">' +
+                  esc(row.status) +
+                  "</span></div><p>" +
+                  esc(row.contact) +
+                  (row.note ? "<br>" + esc(row.note) : "") +
+                  "</p><small>" +
+                  esc(date(row.createdAt)) +
+                  '</small><div class="row-actions" style="margin-top:8px">' +
+                  (row.status !== "contacted"
+                    ? '<button class="btn" data-inquiry="' +
+                      esc(row.id) +
+                      '" data-status="contacted">Mark contacted</button>'
+                    : "") +
+                  (row.status !== "closed"
+                    ? '<button class="btn" data-inquiry="' +
+                      esc(row.id) +
+                      '" data-status="closed">Close</button>'
+                    : "") +
+                  "</div></article>",
+              )
+              .join("")
+          : '<div class="empty">No quote requests yet.</div>';
+      }
+      async function load() {
+        message("Refreshing live catalog data...");
+        try {
+          overview = await api("/catalog/admin/overview");
+          renderStats();
+          renderListings();
+          renderInquiries();
+          message("Updated " + date(overview.generatedAt));
+        } catch (e) {
+          message(e.message, true);
+        }
+      }
+      function renderPlan() {
+        $("planPanel").hidden = false;
+        $("planMeta").textContent = currentPlan.length + " recommendations";
+        $("plan").innerHTML = currentPlan.length
+          ? currentPlan
+              .map(
+                (row) =>
+                  '<tr><td><div class="name">' +
+                  esc(row.name) +
+                  "</div></td><td>" +
+                  esc(row.category) +
+                  "</td><td>" +
+                  row.stock +
+                  "</td><td>" +
+                  (row.observedMedian
+                    ? money(row.observedMedian)
+                    : "No signal") +
+                  "</td><td><strong>" +
+                  money(row.recommendedPrice) +
+                  '</strong></td><td><span class="pill">' +
+                  esc(row.action) +
+                  "</span></td></tr>",
+              )
+              .join("")
+          : '<tr><td colspan="6" class="empty">No in-stock sets qualify for auto-listing.</td></tr>';
+      }
+      $("refresh").addEventListener("click", load);
+      $("preview").addEventListener("click", async () => {
+        $("preview").disabled = true;
+        message("Calculating plan from every sellable account...");
+        try {
+          const d = await api("/catalog/admin/auto-list", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apply: false }),
+          });
+          currentPlan = d.plan || [];
+          renderPlan();
+          $("apply").disabled = !currentPlan.length;
+          message("Preview ready. No records changed.");
+        } catch (e) {
+          message(e.message, true);
+        } finally {
+          $("preview").disabled = false;
+        }
+      });
+      $("apply").addEventListener("click", async () => {
+        if (!currentPlan.length || !confirm("Publish this auto-listing plan?"))
+          return;
+        $("apply").disabled = true;
+        try {
+          const d = await api("/catalog/admin/auto-list", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apply: true }),
+          });
+          currentPlan = d.plan || currentPlan;
+          renderPlan();
+          await load();
+          message("Published " + d.count + " listing recommendations.");
+        } catch (e) {
+          message(e.message, true);
+          $("apply").disabled = false;
+        }
+      });
+      $("listings").addEventListener("click", async (event) => {
+        const button = event.target.closest(
+          "[data-toggle],[data-feature],[data-edit]",
+        );
+        if (!button) return;
+        const id =
+          button.dataset.toggle ||
+          button.dataset.feature ||
+          button.dataset.edit;
+        const row = overview.listings.find((item) => item.id === id);
+        if (!row) return;
+        if (button.dataset.edit) {
+          editingId = row.id;
+          $("editSetName").textContent = row.title;
+          $("editTitle").value = row.publicTitle || row.title || "";
+          $("editDescription").value = row.publicDescription || "";
+          $("editPrice").value = row.publicPrice || 0;
+          $("editMinQty").value = row.minQty || 5;
+          $("editDiscount").value = row.bulkDiscountPct || 0;
+          $("editSort").value = row.publicSort || 0;
+          $("editMessage").textContent = "";
+          $("editDialog").showModal();
+          return;
+        }
+        const body = button.dataset.toggle
+          ? { publicCatalog: !row.visible }
+          : { publicFeatured: !row.featured };
+        try {
+          await api("/catalog/admin/listings/" + encodeURIComponent(id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          await load();
+        } catch (e) {
+          message(e.message, true);
+        }
+      });
+      $("editDialog").addEventListener("click", (event) => {
+        if (
+          event.target === $("editDialog") ||
+          event.target.closest("[data-edit-close]")
+        )
+          $("editDialog").close();
+      });
+      $("editForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!editingId) return;
+        const button = event.target.querySelector("button[type=submit]");
+        button.disabled = true;
+        $("editMessage").textContent = "Saving...";
+        try {
+          await api(
+            "/catalog/admin/listings/" + encodeURIComponent(editingId),
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                publicTitle: $("editTitle").value,
+                publicDescription: $("editDescription").value,
+                publicPrice: Number($("editPrice").value),
+                bulkMinQty: Number($("editMinQty").value),
+                bulkDiscountPct: Number($("editDiscount").value),
+                publicSort: Number($("editSort").value),
+              }),
+            },
+          );
+          $("editDialog").close();
+          await load();
+          message("Listing updated.");
+        } catch (e) {
+          $("editMessage").textContent = e.message;
+        } finally {
+          button.disabled = false;
+        }
+      });
+      $("inquiries").addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-inquiry]");
+        if (!button) return;
+        try {
+          await api(
+            "/catalog/admin/inquiries/" +
+              encodeURIComponent(button.dataset.inquiry),
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: button.dataset.status }),
+            },
+          );
+          await load();
+        } catch (e) {
+          message(e.message, true);
+        }
+      });
+      load();
+    </script>
+    <script src="/admin-nav.js"></script>
+  </body>
+</html>

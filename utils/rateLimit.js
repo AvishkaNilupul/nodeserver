@@ -103,6 +103,27 @@ const renterLiveLimiter = jsonLimiter({
   message: "Checking too fast — give it a few seconds.",
 });
 
+// Public catalog reads are cached and cheap, but a dedicated ceiling prevents
+// aggressive scrapers from repeatedly triggering stock aggregations. Event
+// writes get a tighter limit because normal browsing creates only a few.
+const catalogReadLimiter = jsonLimiter({
+  windowMs: 60 * 1000,
+  limit: 120,
+  message: "Too many catalog requests. Please slow down.",
+});
+
+const catalogEventLimiter = jsonLimiter({
+  windowMs: 10 * 60 * 1000,
+  limit: 60,
+  message: "Too many catalog events. Please slow down.",
+});
+
+const catalogInquiryLimiter = jsonLimiter({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  message: "Too many quote requests. Please try again later.",
+});
+
 module.exports = {
   globalLimiter,
   loginLimiter,
@@ -114,4 +135,7 @@ module.exports = {
   renterSubmitLimiter,
   renterBotControlLimiter,
   renterLiveLimiter,
+  catalogReadLimiter,
+  catalogEventLimiter,
+  catalogInquiryLimiter,
 };

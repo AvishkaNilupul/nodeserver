@@ -23,6 +23,9 @@
       '<circle cx="9" cy="21" r="1"></circle>' +
       '<circle cx="20" cy="21" r="1"></circle><path d="M1 1h4l2.68 13.39a2 ' +
       '2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path>',
+    catalog:
+      '<path d="M4 6h16M4 12h16M4 18h10"></path>' +
+      '<circle cx="19" cy="18" r="2"></circle>',
     dropsArchive:
       '<path d="M21 8v13H3V8"></path>' +
       '<path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>',
@@ -162,6 +165,12 @@
           label: "Shop",
           icon: ICONS.shop,
           superOnly: false,
+        },
+        {
+          href: "/catalog-admin.html",
+          label: "Public catalog",
+          icon: ICONS.catalog,
+          superOnly: true,
         },
         {
           href: "/listings.html",
