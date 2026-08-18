@@ -45,6 +45,11 @@ test("profile pricing scales observed account sales by reward volume", () => {
   assert.equal(recommendedProfilePrice({ totalRewards: 5 }, 0), 0.71);
 });
 
+test("profile pricing prefers approved catalog price per reward", () => {
+  assert.equal(recommendedProfilePrice({ totalRewards: 30 }, 0.75, 0.1), 2.82);
+  assert.equal(recommendedProfilePrice({ totalRewards: 15 }, 10, 0.1), 1.41);
+});
+
 test("catalog thumbnails accept only cached hash image paths", () => {
   const hash = "a".repeat(40);
   assert.equal(

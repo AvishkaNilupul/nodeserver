@@ -114,12 +114,19 @@ function publicListing(set, stock, marketMedian = 0) {
   };
 }
 
-function recommendedProfilePrice(profile, marketMedian = 0) {
+function recommendedProfilePrice(
+  profile,
+  marketMedian = 0,
+  catalogPricePerReward = 0,
+) {
   const rewards = Math.max(1, Number(profile.totalRewards) || 1);
   const observed = Number(marketMedian) || 0;
-  const base = observed
-    ? observed * Math.max(0.45, Math.min(1.6, rewards / 30))
-    : Math.max(0.75, rewards * 0.1);
+  const catalogRate = Number(catalogPricePerReward) || 0;
+  const base = catalogRate
+    ? catalogRate * rewards
+    : observed
+      ? observed * Math.max(0.45, Math.min(1.6, rewards / 30))
+      : Math.max(0.75, rewards * 0.1);
   return Math.round(Math.max(0.5, base * 0.94) * 100) / 100;
 }
 
@@ -127,31 +134,55 @@ async function profilePrices(profiles) {
   const games = [
     ...new Set(profiles.map((profile) => profile.game.toLowerCase())),
   ];
-  const signals = games.length
-    ? await SaleSignal.find({
-        gameKey: { $in: games },
-        source: "listing_sold",
-        priceUsd: { $gt: 0 },
-      })
-        .select("gameKey priceUsd")
-        .sort({ at: -1 })
-        .limit(5000)
-        .lean()
-    : [];
+  const [signals, approvedSets] = games.length
+    ? await Promise.all([
+        SaleSignal.find({
+          gameKey: { $in: games },
+          source: "listing_sold",
+          priceUsd: { $gt: 0 },
+        })
+          .select("gameKey priceUsd")
+          .sort({ at: -1 })
+          .limit(5000)
+          .lean(),
+        DropSet.find({
+          listed: true,
+          publicCatalog: { $ne: false },
+          custom: { $ne: true },
+          sourceType: { $ne: "catalog_profile" },
+          $or: [{ price: { $gt: 0 } }, { publicPrice: { $gt: 0 } }],
+        }).lean(),
+      ])
+    : [[], []];
   const byGame = new Map();
   for (const signal of signals) {
     const key = String(signal.gameKey || "");
     if (!byGame.has(key)) byGame.set(key, []);
     byGame.get(key).push(Number(signal.priceUsd) || 0);
   }
+  const ratesByGame = new Map();
+  for (const set of approvedSets) {
+    const game = categoryFor(set).toLowerCase();
+    const rewards = (set.items || []).reduce(
+      (sum, item) => sum + Math.max(1, Number(item.qty) || 1),
+      0,
+    );
+    const price = publicPriceFor(set);
+    if (!games.includes(game) || !rewards || !price) continue;
+    if (!ratesByGame.has(game)) ratesByGame.set(game, []);
+    ratesByGame.get(game).push(price / rewards);
+  }
   return new Map(
     profiles.map((profile) => {
-      const observed = median(byGame.get(profile.game.toLowerCase()) || []);
+      const game = profile.game.toLowerCase();
+      const observed = median(byGame.get(game) || []);
+      const catalogRate = median(ratesByGame.get(game) || []);
       return [
         profile.sourceEventKey,
         {
           observed,
-          recommended: recommendedProfilePrice(profile, observed),
+          catalogRate,
+          recommended: recommendedProfilePrice(profile, observed, catalogRate),
         },
       ];
     }),
@@ -190,6 +221,7 @@ async function syncInventoryVariants({ apply = false, games = null } = {}) {
     const current = existingByKey.get(profile.sourceEventKey);
     const price = prices.get(profile.sourceEventKey) || {
       observed: 0,
+      catalogRate: 0,
       recommended: recommendedProfilePrice(profile),
     };
     return {
@@ -200,6 +232,7 @@ async function syncInventoryVariants({ apply = false, games = null } = {}) {
       itemCount: profile.totalRewards,
       distinctRewards: profile.distinctRewards,
       observedMedian: Math.round(price.observed * 100) / 100,
+      catalogPricePerReward: Math.round(price.catalogRate * 10000) / 10000,
       recommendedPrice: price.recommended,
       currentPrice: Number(current?.publicPrice || current?.price) || 0,
       action: current ? "refresh profile" : "create profile",
@@ -209,8 +242,18 @@ async function syncInventoryVariants({ apply = false, games = null } = {}) {
   if (apply) {
     for (const row of plan) {
       const current = existingByKey.get(row.sourceEventKey);
-      const publicPrice = Number(current?.publicPrice) || row.recommendedPrice;
-      const retailPrice = Number(current?.price) || row.recommendedPrice;
+      const currentPublicPrice = Number(current?.publicPrice) || 0;
+      const currentRetailPrice = Number(current?.price) || 0;
+      const priceLocked =
+        currentPublicPrice > 0 &&
+        currentRetailPrice > 0 &&
+        Math.abs(currentPublicPrice - currentRetailPrice) > 0.001;
+      const publicPrice = priceLocked
+        ? currentPublicPrice
+        : row.recommendedPrice;
+      const retailPrice = priceLocked
+        ? currentRetailPrice
+        : row.recommendedPrice;
       await DropSet.updateOne(
         { sourceType: "catalog_profile", sourceEventKey: row.sourceEventKey },
         {
