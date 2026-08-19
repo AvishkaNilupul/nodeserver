@@ -114,11 +114,22 @@
     var t = d.totals || {};
     var rate = (d.rate || 0).toFixed(1);
     var age = d.ageAtBan || {};
+    var s = d.sources || {};
     var html = "";
+    // The bot/pool split is spelled out rather than summed away: it is the
+    // difference between losing accounts that were farming and losing accounts
+    // that never got deployed, and for a long time this page showed only the
+    // first — a 67-account pool wave read as zero here.
     html += kpi(
       "Banned",
       num(t.banned),
-      "of " + num(t.total) + " accounts",
+      "of " +
+        num(t.total) +
+        " accounts · " +
+        num(s.bot) +
+        " bot / " +
+        num(s.pool) +
+        " pool",
       "bad",
     );
     html += kpi(
@@ -127,10 +138,15 @@
       "share of the whole fleet",
       Number(rate) >= 10 ? "bad" : Number(rate) >= 3 ? "warn" : "good",
     );
+    // Healthy/token-invalid are counted on the deployed side only, so they are
+    // shown against the deployed population — dividing a bot-only count by the
+    // fleet-wide total would quietly understate both.
     html += kpi(
       "Healthy",
       num(t.healthy),
-      t.total ? ((t.healthy / t.total) * 100).toFixed(1) + "% of fleet" : "",
+      s.botPopulation
+        ? ((t.healthy / s.botPopulation) * 100).toFixed(1) + "% of deployed"
+        : "",
       "good",
     );
     html += kpi(
@@ -185,12 +201,18 @@
     var last = new Date(series[series.length - 1].day + "T00:00:00Z");
     var byDay = {};
     series.forEach(function (r) {
-      byDay[r.day] = r.n;
+      byDay[r.day] = r;
     });
     var all = [];
     for (var t = first.getTime(); t <= last.getTime(); t += 86400000) {
       var key = new Date(t).toISOString().slice(0, 10);
-      all.push({ day: key, n: byDay[key] || 0 });
+      var r = byDay[key];
+      all.push({
+        day: key,
+        n: r ? r.n : 0,
+        bot: r ? r.bot || 0 : 0,
+        pool: r ? r.pool || 0 : 0,
+      });
     }
 
     var total = all.reduce(function (s, r) {
@@ -236,27 +258,56 @@
         "</text>";
     });
 
+    // Each bar is stacked bot-under-pool. A day's total is the number that
+    // matters, but which half it landed on changes what it means — accounts
+    // dying in the pool never farmed anything, so a pool-heavy wave is a supply
+    // problem while a bot-heavy one is a live-fleet problem.
     all.forEach(function (r, i) {
       var h = max ? (r.n / max) * plotH : 0;
       var x = 40 + i * (barW + gap);
       var y = 8 + plotH - h;
       var isWave = r.n > avg * 3 && r.n > 5;
-      svg +=
-        '<rect class="bar' +
-        (isWave ? " wave" : "") +
-        '" x="' +
-        x +
-        '" y="' +
-        y +
-        '" width="' +
-        barW +
-        '" height="' +
-        Math.max(r.n ? 1 : 0, h) +
-        '" rx="1"><title>' +
+      var tip =
         esc(r.day) +
         " — " +
         r.n +
-        " banned</title></rect>";
+        " banned (" +
+        r.bot +
+        " bot, " +
+        r.pool +
+        " pool)";
+      var botH = r.n ? (r.bot / r.n) * h : 0;
+      var poolH = Math.max(0, h - botH);
+      if (poolH > 0) {
+        svg +=
+          '<rect class="bar pool" x="' +
+          x +
+          '" y="' +
+          y +
+          '" width="' +
+          barW +
+          '" height="' +
+          Math.max(1, poolH) +
+          '" rx="1"><title>' +
+          tip +
+          "</title></rect>";
+      }
+      if (r.bot > 0) {
+        svg +=
+          '<rect class="bar' +
+          (isWave ? " wave" : "") +
+          '" x="' +
+          x +
+          '" y="' +
+          (y + poolH) +
+          '" width="' +
+          barW +
+          '" height="' +
+          Math.max(1, botH) +
+          '" rx="1"><title>' +
+          tip +
+          "</title></rect>";
+      }
     });
 
     // x labels: first, middle, last — enough to orient without crowding
@@ -609,6 +660,13 @@
           '">' +
           esc(a.login || "(none)") +
           "</span>" +
+          // Pool rows are marked because almost every other column reads
+          // differently for them: an empty host or a zero drop count means
+          // "never deployed", not "deployed and produced nothing".
+          (a.source === "pool"
+            ? ' <span class="chip grey" title="Account pool row — never ' +
+              'deployed into a bot config">pool</span>'
+            : "") +
           (a.twitchId
             ? '<div class="hint mono">' + esc(a.twitchId) + "</div>"
             : "")
@@ -664,6 +722,7 @@
       "Host",
       "host",
       function (a) {
+        if (!a.host) return '<span class="hint">not deployed</span>';
         return '<span class="chip grey">' + esc(a.host) + "</span>";
       },
     ],
@@ -671,6 +730,13 @@
       "Config",
       "configFile",
       function (a) {
+        if (a.source === "pool") {
+          return (
+            '<span class="hint">' +
+            esc(a.poolStatus === "claimed" ? "claimed in pool" : "in pool") +
+            "</span>"
+          );
+        }
         return (
           '<span class="mono">' +
           esc(a.configFile || "—") +
@@ -791,6 +857,7 @@
   function query() {
     var p = new URLSearchParams();
     p.set("status", $("fStatus").value);
+    p.set("source", $("fSource").value);
     if ($("fHost").value) p.set("host", $("fHost").value);
     if ($("fSince").value) p.set("since", $("fSince").value);
     if ($("fSold").value) p.set("sold", $("fSold").value);
@@ -882,7 +949,10 @@
 
   window.exportCsv = function () {
     window.location.href =
-      "/banned/export.csv?status=" + encodeURIComponent($("fStatus").value);
+      "/banned/export.csv?status=" +
+      encodeURIComponent($("fStatus").value) +
+      "&source=" +
+      encodeURIComponent($("fSource").value);
   };
 
   // Ask Twitch about the accounts currently on screen. Read-only: it reports

@@ -272,6 +272,12 @@
       .bar.wave {
         fill: var(--red);
       }
+      /* The pool half of a stacked bar: same hue, knocked back, so the total
+         height still reads at a glance while the split stays visible. */
+      .bar.pool {
+        fill: var(--accent);
+        opacity: 0.45;
+      }
       .axis {
         stroke: var(--line);
       }
@@ -663,6 +669,10 @@
           </select>
         </div>
         <div class="chart" id="chart"></div>
+        <div class="hint" style="margin-top: 8px">
+          Each bar is stacked: solid = accounts deployed in a bot config, faded
+          = account-pool rows that were never deployed. Hover for the split.
+        </div>
       </div>
 
       <div class="card danger" id="exposureCard">
@@ -761,6 +771,11 @@
             <option value="token_invalid">Token invalid (re-authable)</option>
             <option value="all_dead">Both</option>
             <option value="any">Every account</option>
+          </select>
+          <select id="fSource" onchange="resetAndLoad()">
+            <option value="all">Bots + pool</option>
+            <option value="bot">Deployed bots only</option>
+            <option value="pool">Account pool only</option>
           </select>
           <select id="fHost" onchange="resetAndLoad()">
             <option value="">All hosts</option>

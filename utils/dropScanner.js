@@ -39,6 +39,7 @@ const botHosts = require("./botHosts");
 const { fetchInventory, itemKeyFor } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 const accountState = require("./twitchAccountState");
+const suspendedAccounts = require("./suspendedAccounts");
 const { stopFarmingGame } = require("./farmControl");
 
 // Marketplace claim tags: a DropLog reserved with one of these is merely
@@ -46,7 +47,13 @@ const { stopFarmingGame } = require("./farmControl");
 // (a shop username, "manual", a bulk-order tag, an operator name) means the
 // game actually SOLD. Farming must stop on sold/connected games, but a
 // listed-but-unsold game must keep farming so its stock keeps stacking.
-const MARKET_CLAIM_TAGS = ["gameflip", "ggsel", "digiseller", "funpay", "zeusx"];
+const MARKET_CLAIM_TAGS = [
+  "gameflip",
+  "ggsel",
+  "digiseller",
+  "funpay",
+  "zeusx",
+];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // How long a worker whose host just went unreachable waits before re-probing.
@@ -399,6 +406,17 @@ async function scanAccount(acc, worker) {
         acc.suspendedAt = acc.suspendedAt || now;
         acc.lastScanError =
           "Account no longer exists on Twitch (suspended or deleted)";
+        // The same Twitch account often exists twice: here as a deployed
+        // BotAccount and again as the AvailableAccount pool row it came from.
+        // Marking only this side leaves the twin looking alive until the pool's
+        // own once-a-day probe happens to reach it, and the suspension sweep
+        // then reports that stale twin as a BRAND NEW ban — measured on prod,
+        // 50 of the 67 "newly banned" accounts in the 2026-08-18 Telegram alert
+        // were re-discoveries of bans already announced on 08-05/06/10/11.
+        // Propagating immediately is what keeps one ban to one notification.
+        await suspendedAccounts
+          .propagateSuspensionToPool([acc.login])
+          .catch(() => {});
       }
     }
     await acc.save();
