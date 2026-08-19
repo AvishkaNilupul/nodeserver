@@ -172,19 +172,26 @@ async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Co
 var openBots = {}; // id -> {tab, loadedAccounts, loadedDrops}
 var pollT=null;
 
-async function loadState(){
+async function loadState(force){
   try{
     var j=await api('/api/noclaim-farm/state');
     $('stBots').textContent=j.bots.length;
     $('stRunning').textContent=j.bots.filter(b=>b.running).length;
     $('stImg').textContent=j.imageBuilt?'ready':(j.provisioning?'building…':'none');
     $('botsCount').textContent=j.bots.length+' bot'+(j.bots.length===1?'':'s')+(j.provisioning?' · building…':'');
-    renderBots(j.bots);
+    renderBots(j.bots,force);
     // keep polling only while something is building/running
     var active=j.provisioning||j.bots.some(b=>b.running);
-    if(active&&!pollT) pollT=setInterval(loadState,6000);
+    if(active&&!pollT) pollT=setInterval(function(){ loadState(); },6000);
     if(!active&&pollT){clearInterval(pollT);pollT=null;}
-  }catch(e){ $('bots').innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+  }catch(e){
+    var el=$('bots'), msg='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>';
+    if(el.querySelector('.bot')){
+      var line=el.querySelector('.errline');
+      if(line) line.innerHTML=msg;
+      else { line=document.createElement('div'); line.className='errline'; line.style.marginBottom='10px'; line.innerHTML=msg; el.insertBefore(line,el.firstChild); }
+    } else el.innerHTML='<div class="errline">'+msg+'</div>';
+  }
 }
 
 async function loadPool(){
@@ -201,44 +208,68 @@ function stChip(b){
   return '<span class="chip">'+esc(b.containerState||'?')+'</span>';
 }
 
-function renderBots(bots){
-  if(!bots.length){ $('bots').innerHTML='<div class="muted">No bots yet. Create one above.</div>'; return; }
-  var el=$('bots'); el.innerHTML='';
-  bots.forEach(function(b){
-    var open=!!openBots[b.id];
-    var wrap=document.createElement('div'); wrap.className='bot'+(open?' open':'');
-    wrap.innerHTML =
-      '<div class="row" data-id="'+b.id+'">'+
-        '<span class="g">'+esc(b.game||'(any)')+'</span>'+
-        '<span class="meta">bot #'+esc(b.id)+' · '+b.accounts+' account'+(b.accounts===1?'':'s')+'</span>'+
-        '<span class="sp">'+stChip(b)+
-          '<button class="btn ghost sm" data-act="stop" data-id="'+b.id+'">Stop</button>'+
-          '<button class="btn danger sm" data-act="release" data-id="'+b.id+'">Release</button>'+
-        '</span>'+
-      '</div>'+
-      '<div class="body" id="body-'+b.id+'">'+(open?'':'')+'</div>';
-    el.appendChild(wrap);
-    if(open) renderBotBody(b.id);
+// The state poll ticks every 6s while a bot is farming. It used to rebuild the
+// whole list from scratch, which tore down any expanded row and refetched its
+// accounts — the table visibly reloaded and the page jumped every few seconds.
+// The poll now patches only the volatile bits (status chip, account count) and
+// never touches an open row's body.
+function wireBot(wrap,id){
+  wrap.querySelector('.row').addEventListener('click',function(e){
+    if(e.target.closest('button')) return;
+    var body=wrap.querySelector('.body');
+    if(openBots[id]){ delete openBots[id]; wrap.classList.remove('open'); body.innerHTML=''; body.removeAttribute('data-rendered'); }
+    else { openBots[id]={tab:'accounts'}; wrap.classList.add('open'); renderBotBody(id); }
   });
-  el.querySelectorAll('.row').forEach(function(row){
-    row.addEventListener('click',function(e){
-      if(e.target.closest('button')) return;
-      var id=row.getAttribute('data-id');
-      if(openBots[id]) delete openBots[id]; else openBots[id]={tab:'accounts'};
-      loadState();
-    });
-  });
-  el.querySelectorAll('button[data-act]').forEach(function(btn){
+  wrap.querySelectorAll('button[data-act]').forEach(function(btn){
     btn.addEventListener('click',async function(e){
       e.stopPropagation();
-      var id=btn.getAttribute('data-id'), act=btn.getAttribute('data-act');
+      var act=btn.getAttribute('data-act');
       if(act==='release' && !confirm('Release bot #'+id+'? Stops it, returns its accounts to the pool, deletes its config.')) return;
       btn.disabled=true;
       try{ var j=await api('/api/noclaim-farm/bots/'+id+'/'+act,{method:'POST'});
         toast(act==='release'?('Released — '+(j.released||0)+' account(s) back to pool.'):'Stopped.');
         delete openBots[id]; await loadState(); await loadPool();
-      }catch(err){ toast(act+' failed: '+err.message); btn.disabled=false; }
+      }catch(err){ toast(act+' failed: '+err.message); }
+      finally{ btn.disabled=false; }
     });
+  });
+}
+
+function renderBots(bots,force){
+  var el=$('bots');
+  // Drop any placeholder ("Loading…" / error / "no bots") before diffing.
+  Array.prototype.slice.call(el.children).forEach(function(ch){ if(!ch.classList.contains('bot')) ch.remove(); });
+  if(!bots.length){ el.innerHTML='<div class="muted">No bots yet. Create one above.</div>'; return; }
+  var seen={};
+  bots.forEach(function(b){
+    seen[b.id]=1;
+    var wrap=el.querySelector('.bot[data-bot="'+b.id+'"]');
+    if(!wrap){
+      wrap=document.createElement('div');
+      wrap.className='bot'; wrap.setAttribute('data-bot',b.id);
+      wrap.innerHTML=
+        '<div class="row">'+
+          '<span class="g"></span><span class="meta"></span>'+
+          '<span class="sp"><span class="st"></span>'+
+            '<button class="btn ghost sm" data-act="stop">Stop</button>'+
+            '<button class="btn danger sm" data-act="release">Release</button>'+
+          '</span>'+
+        '</div>'+
+        '<div class="body" id="body-'+b.id+'"></div>';
+      el.appendChild(wrap);
+      wireBot(wrap,b.id);
+    }
+    wrap.querySelector('.g').textContent=b.game||'(any)';
+    wrap.querySelector('.meta').textContent='bot #'+b.id+' · '+b.accounts+' account'+(b.accounts===1?'':'s');
+    var st=wrap.querySelector('.st'), chip=stChip(b);
+    if(st.innerHTML!==chip) st.innerHTML=chip;
+    var open=!!openBots[b.id];
+    wrap.classList.toggle('open',open);
+    var body=wrap.querySelector('.body');
+    if(open && (force || !body.getAttribute('data-rendered'))) renderBotBody(b.id);
+  });
+  Array.prototype.slice.call(el.querySelectorAll('.bot')).forEach(function(w){
+    if(!seen[w.getAttribute('data-bot')]) w.remove();
   });
 }
 
@@ -252,6 +283,7 @@ function renderBotBody(id){
       '<button class="tab '+(tab==='social'?'active':'')+'" data-tab="social">Social post</button>'+
       '<button class="tab '+(tab==='logs'?'active':'')+'" data-tab="logs">Logs</button>'+
     '</div><div id="tabc-'+id+'"><div class="muted">Loading…</div></div>';
+  body.setAttribute('data-rendered','1');
   body.querySelectorAll('.tab').forEach(function(t){
     t.onclick=function(){ st.tab=t.getAttribute('data-tab'); renderBotBody(id); };
   });
@@ -262,10 +294,48 @@ function renderBotBody(id){
   else loadLogs(id,c);
 }
 
+// Credentials the operator has to hand off manually, so the accounts tab can
+// dump them straight to a file instead of forcing a hand-copy of every row.
+// Everything is built from the response already in memory — no extra request.
+var acctCache={}; // bot id -> {game, accounts}
+
+function dlFile(name,mime,text){
+  var url=URL.createObjectURL(new Blob([text],{type:mime+';charset=utf-8'}));
+  var a=document.createElement('a'); a.href=url; a.download=name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); },1000);
+}
+function csvCell(v){ v=String(v==null?'':v); return /[",\r\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }
+function exportAccounts(id,fmt){
+  var d=acctCache[id];
+  if(!d||!d.accounts.length){ toast('Nothing to export.'); return; }
+  var slug=String(d.game||'noclaim').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'noclaim';
+  var base='noclaim-bot'+id+'-'+slug+'-'+new Date().toISOString().slice(0,10);
+  if(fmt==='json'){ dlFile(base+'.json','application/json',JSON.stringify(d.accounts,null,2)); toast('Exported '+d.accounts.length+' account(s) as JSON.'); return; }
+  if(fmt==='csv'){
+    var rows=[['login','password','twitchId','clientSecret']].concat(
+      d.accounts.map(function(a){ return [a.login,a.password,a.twitchId,a.clientSecret]; }));
+    dlFile(base+'.csv','text/csv',rows.map(function(r){ return r.map(csvCell).join(','); }).join('\r\n'));
+    toast('Exported '+d.accounts.length+' account(s) as CSV.'); return;
+  }
+  var txt=d.accounts.map(function(a){ return a.login+':'+(a.password||''); }).join('\n');
+  if(fmt==='copy'){ copyToClipboard(txt); return; }
+  dlFile(base+'.txt','text/plain',txt);
+  toast('Exported '+d.accounts.length+' account(s) as TXT.');
+}
+
 async function loadAccounts(id,c){
   try{ var j=await api('/api/noclaim-farm/bots/'+id+'/accounts');
+    acctCache[id]={game:j.game||'',accounts:j.accounts||[]};
     if(!j.accounts.length){c.innerHTML='<div class="muted">No accounts.</div>';return;}
-    var h='<table><thead><tr><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
+    var h='<div class="tagrow" style="margin-bottom:10px;">'+
+            '<span class="muted">'+j.accounts.length+' account'+(j.accounts.length===1?'':'s')+'</span>'+
+            '<button class="btn ghost sm" data-exp="csv" style="margin-left:auto;">Export CSV</button>'+
+            '<button class="btn ghost sm" data-exp="txt">Export TXT</button>'+
+            '<button class="btn ghost sm" data-exp="json">Export JSON</button>'+
+            '<button class="btn ghost sm" data-exp="copy">Copy user:pass</button>'+
+          '</div>';
+    h+='<table><thead><tr><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
     j.accounts.forEach(function(a){
       h+='<tr><td>'+esc(a.login)+'</td><td class="mono">'+(a.password?esc(a.password):'<span class="muted">—</span>')+'</td>'+
          '<td class="mono">'+esc(a.twitchId)+'</td>'+
@@ -273,6 +343,9 @@ async function loadAccounts(id,c){
     });
     h+='</tbody></table>';
     c.innerHTML=h;
+    c.querySelectorAll('button[data-exp]').forEach(function(btn){
+      btn.onclick=function(){ exportAccounts(id,btn.getAttribute('data-exp')); };
+    });
   }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
 }
 
@@ -383,7 +456,7 @@ $('createBtn').onclick=async function(){
   }catch(e){ toast('Create failed: '+e.message); $('createHint').textContent=''; }
   finally{ this.disabled=false; }
 };
-$('refreshBtn').onclick=function(){ loadState(); loadPool(); };
+$('refreshBtn').onclick=function(){ loadState(true); loadPool(); };
 
 (async function(){ await loadGames(); await loadPool(); await loadState(); })();
 </script>
