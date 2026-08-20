@@ -87,6 +87,7 @@ const RETRYABLE = new Set([
   "skip_no_capacity",
   "skip_host_offline",
   "skip_already_covered", // covered accounts may sell — demand reopens
+  "skip_reuse_only", // reuse-only game — retries once one of its own accounts recycles back to the pool
 ]);
 
 const state = {
@@ -670,7 +671,14 @@ function fairShare(requests, budget) {
 // campaign of the SAME game (their claimedNote reads "recycled after <game>")
 // are claimed FIRST, so an account keeps stacking one game's drops event after
 // event instead of scattering across whatever campaign claims it next.
-async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
+//
+// `recycledOnly` is the reuse-only games' gate (World of Tanks / UFL, see
+// settings.isReuseOnlyGame): claim ONLY accounts this game was already farmed
+// on and recycled — never a brand-new pool account. It drops the generic
+// fallback pass, so when none of the game's own recycled accounts are free it
+// claims nothing rather than reaching for fresh stock. Requires preferGame;
+// without it there is nothing game-specific to match and it claims nothing.
+async function claimPoolAccounts(n, note, { preferGame = "", recycledOnly = false } = {}) {
   const claimed = [];
   const passes = [];
   if (preferGame) {
@@ -679,7 +687,7 @@ async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
       claimedNote: new RegExp("^recycled after " + esc + "$", "i"),
     });
   }
-  passes.push({});
+  if (!recycledOnly) passes.push({});
   for (const extra of passes) {
     while (claimed.length < n) {
       const doc = await AvailableAccount.findOneAndUpdate(
@@ -1721,12 +1729,44 @@ async function executeTask(task, ctx, { append = false } = {}) {
     );
   }
 
+  // Reuse-only games (World of Tanks / UFL) never draw a fresh pool account:
+  // they may only reuse accounts already farmed on that same game, so the claim
+  // is restricted to the game's own "recycled after <game>" pool entries.
+  const reuseOnly = settings.isReuseOnlyGame(game);
   const claimed = await claimPoolAccounts(
     n,
     "auto-farm: " + game + " (" + task.campaignId + ")",
-    { preferGame: game },
+    { preferGame: game, recycledOnly: reuseOnly },
   );
   if (!claimed.length) {
+    // Reuse-only game with none of its own recycled accounts free right now:
+    // there is nothing to spend and, by design, nothing fresh is allowed. Record
+    // a clean, retryable skip instead of leaving a stuck "planned" plan behind —
+    // it re-decides and deploys the moment one of its accounts recycles back.
+    // Append mode is the reuse top-up: it must NOT rewrite the active reuse
+    // task's status, so it keeps throwing (its caller swallows that and the
+    // reuse stands on its restarted bots alone).
+    if (reuseOnly && !append) {
+      await AutoFarmTask.updateOne(
+        { _id: task._id },
+        {
+          $set: {
+            status: "skipped",
+            decision: "skip_reuse_only",
+            dryRun: false,
+            plannedAccounts: 0,
+            reason:
+              "Reuse-only game (" +
+              game +
+              "): no fresh pool accounts are ever spent here — only accounts " +
+              "already farmed on this game. None of its own recycled accounts " +
+              "are free right now; will retry when one recycles back to the pool.",
+            executedAt: new Date(),
+          },
+        },
+      ).catch(() => {});
+      return { decision: "skip_reuse_only", bots: [], accounts: 0 };
+    }
     // Same reasoning as the reserve-floor guard above: the claim won nothing,
     // so nothing is owned and nothing is lost. Keep the task "planned" and
     // retryable rather than burning it. The genuine terminal "failed" write
@@ -3173,9 +3213,14 @@ async function backfillActiveTasks(af, host, progress) {
         have +
         ")\u2026",
     );
+    // Reuse-only games (World of Tanks / UFL) top up ONLY from their own
+    // "recycled after <game>" accounts — never a fresh pool account. Every
+    // other game keeps the original unscoped claim, so nothing else changes.
+    const reuseOnly = settings.isReuseOnlyGame(task.game);
     const claimed = await claimPoolAccounts(
       n,
       "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",
+      reuseOnly ? { preferGame: task.game, recycledOnly: true } : {},
     );
     if (!claimed.length) continue;
 

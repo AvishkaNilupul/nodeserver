@@ -165,6 +165,40 @@ router.post("/api/noclaim-farm/games", requireSuperadmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Reuse-only game list (World of Tanks / UFL): the auto-farmer may farm these
+// but must never spend a FRESH pool account on them — it only reuses accounts
+// already used for that same game. Same single-source-of-truth pattern as the
+// no-claim list above (see settings.isReuseOnlyGame).
+// ---------------------------------------------------------------------------
+router.get("/api/noclaim-farm/reuse-only-games", requireSuperadmin, (req, res) => {
+  res.json({
+    success: true,
+    games: settings.getAutoFarm().reuseOnlyGames || [],
+  });
+});
+
+router.post(
+  "/api/noclaim-farm/reuse-only-games",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      let games = Array.isArray(req.body.games) ? req.body.games : null;
+      if (!games)
+        return res
+          .status(400)
+          .json({ success: false, message: "games must be an array." });
+      games = games
+        .map((g) => String(g || "").trim().toLowerCase())
+        .filter(Boolean);
+      const saved = await settings.setAutoFarm({ reuseOnlyGames: games });
+      res.json({ success: true, games: saved.reuseOnlyGames });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Pool availability (cheap count for the create form).
 // ---------------------------------------------------------------------------
 router.get("/api/noclaim-farm/pool", requireSuperadmin, async (req, res) => {

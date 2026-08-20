@@ -25,6 +25,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
         "skip_no_capacity", // Pi at max auto containers (may be retried later)
         "skip_host_offline", // the Pi was unreachable at decision time
         "skip_already_covered", // manual bots / archived accounts already cover this game's demand
+        "skip_reuse_only", // reuse-only game (WoT/UFL): never spends fresh accounts and none of its own recycled ones are free right now
       ],
       required: true,
     },
