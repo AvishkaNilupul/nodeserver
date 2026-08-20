@@ -502,6 +502,7 @@
     var listing = c.listing || [];
     var buyer = c.buyer || [];
     var bulk = c.bulk || [];
+    var reseller = c.reseller || [];
     var totalListing = listing.reduce(function (s, r) {
       return s + r.n;
     }, 0);
@@ -509,6 +510,12 @@
       1,
       totalListing,
       buyer.reduce(function (s, r) {
+        return s + r.n;
+      }, 0),
+      bulk.reduce(function (s, r) {
+        return s + r.n;
+      }, 0),
+      reseller.reduce(function (s, r) {
         return s + r.n;
       }, 0),
       c.none || 0,
@@ -539,6 +546,22 @@
     }, 0);
     if (bulkTotal) {
       html += bar("Bulk orders", (bulkTotal / max) * 100, num(bulkTotal), "");
+    }
+    var resellerTotal = reseller.reduce(function (s, r) {
+      return s + r.n;
+    }, 0);
+    if (resellerTotal) {
+      html += bar(
+        "Reseller handoffs",
+        (resellerTotal / max) * 100,
+        num(resellerTotal),
+        reseller
+          .slice(0, 3)
+          .map(function (r) {
+            return r.label;
+          })
+          .join(", "),
+      );
     }
     if (c.none) {
       html += bar(
