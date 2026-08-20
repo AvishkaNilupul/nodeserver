@@ -133,6 +133,15 @@
           superOnly: true,
         },
         {
+          href: "/webbot-farm.html",
+          label: "Web-token farm",
+          icon:
+            '<circle cx="12" cy="12" r="10"></circle>' +
+            '<path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 ' +
+            '10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>',
+          superOnly: true,
+        },
+        {
           href: "/drops-archive.html",
           label: "Drops archive",
           icon: ICONS.dropsArchive,
