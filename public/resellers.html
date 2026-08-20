@@ -594,6 +594,14 @@
         $(id).textContent = text;
         $(id).className = "result " + (good ? "ok" : "err");
       }
+      function dateInputValue(value) {
+        if (!value) return "";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return "";
+        return new Date(d.getTime() + 9 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+      }
       function renderList() {
         $("metricResellers").textContent = resellers.length;
         $("metricHeld").textContent = resellers.reduce(
@@ -668,7 +676,7 @@
           const d = await api("/resellers/" + encodeURIComponent(id));
           const r = d.reseller;
           $("detail").innerHTML =
-            `<h2>${esc(r.displayName || r.username)}</h2><p class="sub">${esc(r.username)} · ${esc(r.status)} · ${r.held || 0} accounts</p><section class="panel"><div class="panel-header"><div><h2>Edit access</h2></div><div class="actions"><button class="btn sm ghost" data-action="password">Reveal password</button><button class="btn sm ${r.status === "suspended" ? "" : "danger"}" data-action="suspend">${r.status === "suspended" ? "Unsuspend" : "Suspend"}</button><button class="btn sm danger" data-action="delete">Delete reseller</button></div></div><div class="panel-body"><form id="editForm" class="grid"><div class="span-2"><label>Display name</label><input id="editDisplay" value="${esc(r.displayName)}"></div><div class="span-2"><label>Max accounts (0 = unlimited)</label><input id="editMax" type="number" min="0" value="${Number(r.maxAccounts) || 0}"></div><div class="span-2"><label>Access end</label><input id="editEnd" type="date" value="${r.accessEnd ? String(r.accessEnd).slice(0, 10) : ""}"></div><div style="grid-column:1/-1"><label>Notes</label><textarea id="editNotes">${esc(r.notes)}</textarea></div><div><button class="btn sm" type="submit">Save changes</button></div></form></div></section><section class="panel"><div class="panel-header"><div><h2>Assign from drops archive</h2><p class="sub">One login per line. Preview runs the same eligibility checks as Assign.</p></div></div><div class="panel-body"><textarea id="assignText" placeholder="login1\nlogin: login2"></textarea><div class="actions" style="margin-top:10px"><button class="btn sm ghost" data-action="preview">Preview</button><button class="btn sm" data-action="assign">Assign</button></div><div id="assignResult" class="result"></div></div></section><section class="panel"><div class="panel-header"><div><h2>Held accounts</h2><p class="sub">Credentials are shown here only because this is a superadmin surface.</p></div></div><div class="panel-body table-wrap"><table><thead><tr><th>Login</th><th>Game</th><th>Connection</th><th>Status</th><th>Credentials</th><th></th></tr></thead><tbody>${(d.accounts || []).map((a) => `<tr><td class="mono">${esc(a.login)}</td><td>${esc(a.game)}</td><td>${a.needsConnect ? '<span class="badge warn">needs connect</span>' : '<span class="badge active">ready</span>'}</td><td>${esc(a.resellerStatus)}</td><td><div class="mono">${esc(a.password)}<br>${esc(a.email)}<br>${esc(a.token)}</div></td><td><button class="btn sm danger" data-reclaim="${esc(a.id)}">Reclaim</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">No accounts held.</td></tr>'}</tbody></table></div></section><section class="panel"><div class="panel-header"><div><h2>Recent audit</h2></div></div><div class="panel-body table-wrap"><table><thead><tr><th>At</th><th>Action</th><th>Account</th><th>IP</th></tr></thead><tbody>${
+            `<h2>${esc(r.displayName || r.username)}</h2><p class="sub">${esc(r.username)} · ${esc(r.status)} · ${r.held || 0} accounts</p><section class="panel"><div class="panel-header"><div><h2>Edit access</h2></div><div class="actions"><button class="btn sm ghost" data-action="password">Reveal password</button><button class="btn sm ${r.status === "suspended" ? "" : "danger"}" data-action="suspend">${r.status === "suspended" ? "Unsuspend" : "Suspend"}</button><button class="btn sm danger" data-action="delete">Delete reseller</button></div></div><div class="panel-body"><form id="editForm" class="grid"><div class="span-2"><label>Display name</label><input id="editDisplay" value="${esc(r.displayName)}"></div><div class="span-2"><label>Max accounts (0 = unlimited)</label><input id="editMax" type="number" min="0" value="${Number(r.maxAccounts) || 0}"></div><div class="span-2"><label>Access end</label><input id="editEnd" type="date" value="${dateInputValue(r.accessEnd)}"></div><div style="grid-column:1/-1"><label>Notes</label><textarea id="editNotes">${esc(r.notes)}</textarea></div><div><button class="btn sm" type="submit">Save changes</button></div></form></div></section><section class="panel"><div class="panel-header"><div><h2>Add one account by username</h2><p class="sub">Fetch the account from the main server, review its live inventory, then add it.</p></div></div><div class="panel-body"><div class="actions"><input id="lookupLogin" placeholder="Twitch username" autocomplete="off" spellcheck="false"><button class="btn sm ghost" type="button" data-action="lookup">Fetch account</button><button class="btn sm" type="button" data-action="lookupAssign" disabled>Add account</button></div><div id="lookupResult" class="result"></div></div></section><section class="panel"><div class="panel-header"><div><h2>Assign multiple accounts</h2><p class="sub">One login per line. Preview runs the same eligibility checks as Assign.</p></div></div><div class="panel-body"><textarea id="assignText" placeholder="login1\nlogin: login2"></textarea><div class="actions" style="margin-top:10px"><button class="btn sm ghost" data-action="preview">Preview</button><button class="btn sm" data-action="assign">Assign</button></div><div id="assignResult" class="result"></div></div></section><section class="panel"><div class="panel-header"><div><h2>Held accounts</h2><p class="sub">Credentials are shown here only because this is a superadmin surface.</p></div></div><div class="panel-body table-wrap"><table><thead><tr><th>Login</th><th>Game</th><th>Connection</th><th>Status</th><th>Credentials</th><th></th></tr></thead><tbody>${(d.accounts || []).map((a) => `<tr><td class="mono">${esc(a.login)}</td><td>${esc(a.game)}</td><td>${a.needsConnect ? '<span class="badge warn">needs connect</span>' : '<span class="badge active">ready</span>'}</td><td>${esc(a.resellerStatus)}</td><td><div class="mono">${esc(a.password)}<br>${esc(a.email)}<br>${esc(a.token)}</div></td><td><button class="btn sm danger" data-reclaim="${esc(a.id)}">Reclaim</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">No accounts held.</td></tr>'}</tbody></table></div></section><section class="panel"><div class="panel-header"><div><h2>Recent audit</h2></div></div><div class="panel-body table-wrap"><table><thead><tr><th>At</th><th>Action</th><th>Account</th><th>IP</th></tr></thead><tbody>${
               (d.audit || [])
                 .slice(0, 100)
                 .map(
@@ -681,7 +689,7 @@
           $("drawer").classList.add("show");
           $("editMax").parentElement.insertAdjacentHTML(
             "afterend",
-            `<div class="span-2"><label>Access start</label><input id="editStart" type="date" value="${r.accessStart ? String(r.accessStart).slice(0, 10) : ""}"></div>`,
+            `<div class="span-2"><label>Access start</label><input id="editStart" type="date" value="${dateInputValue(r.accessStart)}"></div>`,
           );
           document
             .querySelector('[data-action="password"]')
@@ -818,6 +826,58 @@
                 showResult("assignResult", err.message);
               }
             };
+          let lookupAccount = null;
+          const lookupButton = document.querySelector('[data-action="lookup"]');
+          const lookupAssign = document.querySelector('[data-action="lookupAssign"]');
+          lookupButton.onclick = async () => {
+            const login = $("lookupLogin").value.trim();
+            if (!login) return showResult("lookupResult", "Enter one username");
+            try {
+              lookupButton.disabled = true;
+              const data = await api(
+                "/resellers/" + id + "/assign/lookup?login=" + encodeURIComponent(login),
+              );
+              lookupAccount = data.account;
+              showResult(
+                "lookupResult",
+                `${lookupAccount.login} · ${lookupAccount.game || "No game"} · ${lookupAccount.drops} drops · ${lookupAccount.needsConnect ? "needs connecting" : "ready"}`,
+                true,
+              );
+              lookupAssign.disabled = false;
+            } catch (err) {
+              lookupAccount = null;
+              lookupAssign.disabled = true;
+              showResult("lookupResult", err.message);
+            } finally {
+              lookupButton.disabled = false;
+            }
+          };
+          lookupAssign.onclick = async () => {
+            if (!lookupAccount) return;
+            try {
+              lookupAssign.disabled = true;
+              const a = await api("/resellers/" + id + "/assign", {
+                method: "POST",
+                body: JSON.stringify({ logins: lookupAccount.login }),
+              });
+              const skipped = (a.skipped || [])
+                .map((x) => `${x.login}: ${x.reason}`)
+                .join(", ");
+              showResult(
+                "lookupResult",
+                a.assigned?.length
+                  ? `Added ${a.assigned[0].login}`
+                  : skipped || "Account was not added",
+                Boolean(a.assigned?.length),
+              );
+              lookupAccount = null;
+              await openDetail(id);
+              await load();
+            } catch (err) {
+              lookupAssign.disabled = false;
+              showResult("lookupResult", err.message);
+            }
+          };
         } catch (e) {
           alert(e.message);
         }

@@ -207,6 +207,41 @@ test("assign reserves valid stock and computes the connection snapshot", async (
   );
 });
 
+test("single username lookup reads live account data without reserving it", async () => {
+  const cookie = await sessionCookie();
+  const reseller = await createReseller({
+    username: "lookup-reseller",
+    password: "password1",
+  });
+  const account = await makeAccount("lookup-login");
+  await addDrop(account, { game: "VALORANT", count: 2 });
+
+  const result = await request(
+    `/resellers/${reseller._id}/assign/lookup?login=LOOKUP-LOGIN`,
+    { cookie },
+  );
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(
+    {
+      login: result.payload.account.login,
+      game: result.payload.account.game,
+      drops: result.payload.account.drops,
+      status: result.payload.account.status,
+    },
+    {
+      login: "lookup-login",
+      game: "VALORANT",
+      drops: 1,
+      status: "assignable",
+    },
+  );
+  assert.equal(
+    await ResellerAccount.countDocuments({ reseller: reseller._id }),
+    0,
+  );
+  assert.equal((await BotAccount.findById(account._id).lean()).soldAt, null);
+});
+
 test("assign reports sold, assigned, bulk-held and active-listing accounts and continues", async () => {
   const cookie = await sessionCookie();
   const reseller = await createReseller({

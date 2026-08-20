@@ -658,6 +658,65 @@ async function assignmentReport(req, res, commit) {
   res.json({ success: true, assigned, skipped });
 }
 
+// Resolve one username against the live BotAccount/DropLog collections before
+// the operator commits an assignment. The response intentionally omits
+// credentials; those remain behind the existing protected reveal flow.
+router.get(
+  "/resellers/:id/assign/lookup",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (badId(req.params.id))
+        return res
+          .status(400)
+          .json({ success: false, message: "Bad reseller id" });
+      const reseller = await Reseller.findById(req.params.id);
+      if (!reseller)
+        return res
+          .status(404)
+          .json({ success: false, message: "Reseller not found" });
+      const login = String(req.query.login || "").trim().slice(0, 200);
+      if (!login || /[\r\n]/.test(login))
+        return res
+          .status(400)
+          .json({ success: false, message: "Enter one username" });
+      const check = await eligibility(login, reseller);
+      if (!check.ok)
+        return res.status(422).json({
+          success: false,
+          message: check.reason,
+          reason: check.reason,
+          login,
+        });
+      const held = await ResellerAccount.countDocuments({
+        reseller: reseller._id,
+      });
+      const quota = quotaReason(reseller, held, 0);
+      if (quota)
+        return res.status(422).json({
+          success: false,
+          message: quota,
+          reason: quota,
+          login: check.login,
+        });
+      return res.json({
+        success: true,
+        account: {
+          login: check.bot.login || check.login,
+          game: check.snapshot.game,
+          drops: check.drops,
+          needsConnect: check.snapshot.needsConnect,
+          connectSummary: check.snapshot.connectSummary,
+          status: "assignable",
+        },
+      });
+    } catch (err) {
+      console.error("reseller assignment lookup error:", err.message);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 router.post(
   "/resellers/:id/assign/preview",
   requireSuperadmin,

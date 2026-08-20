@@ -4,8 +4,7 @@
     <script>
       (function () {
         try {
-          if (localStorage.getItem("theme") === "dark")
-            document.documentElement.setAttribute("data-theme", "dark");
+          document.documentElement.setAttribute("data-theme", "dark");
         } catch (e) {}
       })();
     </script>
@@ -178,6 +177,5 @@
         $("btn").textContent = "Sign in";
       });
     </script>
-    <script src="/theme.js"></script>
   </body>
 </html>
