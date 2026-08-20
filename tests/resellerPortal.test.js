@@ -15,8 +15,10 @@ const DropLog = require("../models/DropLog");
 const { createReseller } = require("../utils/resellers");
 const { encrypt } = require("../utils/secretBox");
 const twitchInventory = require("../utils/twitchInventory");
+const resellerFarmingForecast = require("../utils/resellerFarmingForecast");
 
 const originalFetchInventory = twitchInventory.fetchInventory;
+const originalGetForecast = resellerFarmingForecast.getForecast;
 twitchInventory.fetchInventory = async (token) => ({
   twitchId: "twitch-" + token,
   login: token.replace(/^token-/, ""),
@@ -37,6 +39,24 @@ twitchInventory.fetchInventory = async (token) => ({
       requiredAccountLink: "Riot",
       state: "connected",
       source: "gameEventDrop",
+    },
+  ],
+});
+resellerFarmingForecast.getForecast = async () => ({
+  generatedAt: new Date("2026-08-21T00:00:00Z"),
+  freshness: { newestScanAt: new Date("2026-08-20T23:00:00Z"), stale: false },
+  runtime: { available: true, checkedAt: new Date("2026-08-21T00:00:00Z") },
+  summary: { activeAccounts: 12, items: 2, readySoon: 1, availableNow: 3 },
+  games: [{ game: "VALORANT", farmingAccounts: 12, items: 2, readySoon: 1 }],
+  items: [
+    {
+      name: "Forecast reward",
+      game: "VALORANT",
+      farmingAccounts: 12,
+      averagePercent: 82,
+      readySoon: true,
+      availableNow: { accounts: 3, units: 3 },
+      confidence: "high",
     },
   ],
 });
@@ -92,6 +112,7 @@ test.before(async () => {
 
 test.after(async () => {
   twitchInventory.fetchInventory = originalFetchInventory;
+  resellerFarmingForecast.getForecast = originalGetForecast;
   await new Promise((resolve) => server.close(resolve));
   await mongoose.disconnect();
   await mongod.stop();
@@ -254,6 +275,38 @@ test("inventory, detail, me and summary stay scoped to the session reseller", as
   assert.equal(me.payload.me.displayName, "Portal A");
   assert.equal(summary.payload.summary.total, 1);
   assert.equal(summary.payload.summary.needsConnect, 1);
+});
+
+test("farming forecast requires the reseller realm and exposes aggregates only", async () => {
+  const reseller = await createReseller({
+    username: "forecast-reseller",
+    password: "password1",
+  });
+  const cookie = await resellerCookie(reseller);
+  const result = await request("/reseller/farming-forecast", { cookie });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.payload.forecast.summary.activeAccounts, 12);
+  assert.equal(result.payload.forecast.items[0].name, "Forecast reward");
+  assertNoSecretKeys(result.payload);
+  const text = JSON.stringify(result.payload);
+  for (const forbidden of [
+    "clientSecret",
+    "login",
+    "host",
+    "configFile",
+    "container",
+    "accountId",
+  ]) {
+    assert.equal(text.includes(forbidden), false, `forecast exposed ${forbidden}`);
+  }
+
+  const unauth = await request("/reseller/farming-forecast");
+  assert.equal(unauth.response.status, 401);
+  const renter = await request("/test/session/renter");
+  const wrongRealm = await request("/reseller/farming-forecast", {
+    cookie: renter.cookie,
+  });
+  assert.equal(wrongRealm.response.status, 401);
 });
 
 test("all per-account IDOR probes return 404 and leave the foreign row unchanged", async () => {

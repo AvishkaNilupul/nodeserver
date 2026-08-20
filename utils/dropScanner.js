@@ -249,10 +249,25 @@ async function hostReachable(host) {
 // being scanned by another worker.
 async function nextDueAccount() {
   const cutoff = new Date(Date.now() - state.perAccountMs);
-  return BotAccount.findOne({
+  const due = {
     $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
     _id: { $nin: [...inFlight] },
+  };
+  // Rollout/warm-up for item-level farming progress: rows that are already due
+  // and known to have pending work are scanned first until they have the new
+  // snapshot. This does not increase request rate or rescan fresh accounts; it
+  // only changes the order inside the existing rate-limited daily rotation.
+  const warm = await BotAccount.findOne({
+    ...due,
+    inProgressCount: { $gt: 0 },
+    $and: [
+      { $or: [{ farmingSnapshotAt: null }, { farmingSnapshotAt: { $exists: false } }] },
+    ],
   })
+    .sort({ lastScanAt: 1 })
+    .exec();
+  if (warm) return warm;
+  return BotAccount.findOne(due)
     .sort({ lastScanAt: 1 }) // nulls sort first
     .exec();
 }
@@ -494,6 +509,25 @@ async function scanAccount(acc, worker) {
   acc.inProgressGames = [
     ...new Set(pending.map((d) => d.game).filter(Boolean)),
   ];
+  // Keep the item-level evidence bounded. The reseller forecast must be able
+  // to say which reward is closest to completion, while a pathological Twitch
+  // response must never grow a BotAccount document without limit.
+  acc.farmingProgress = pending
+    .filter((d) => d && d.name && d.game)
+    .sort((a, b) => (b.percent || 0) - (a.percent || 0))
+    .slice(0, 100)
+    .map((d) => ({
+      name: String(d.name || "Reward").slice(0, 240),
+      game: String(d.game || "").slice(0, 160),
+      campaign: String(d.campaign || "").slice(0, 240),
+      imageURL: String(d.imageURL || "").slice(0, 1000),
+      current: Math.max(0, Number(d.current) || 0),
+      required: Math.max(0, Number(d.required) || 0),
+      percent: Math.max(0, Math.min(100, Number(d.percent) || 0)),
+      connected: d.connected === true,
+      scannedAt: now,
+    }));
+  acc.farmingSnapshotAt = now;
   // First scan that finds nothing pending stamps the time; any new pending
   // work clears it, so the field always reads "idle since", not "was idle
   // once". A scan that fails never reaches here, so an unreachable host

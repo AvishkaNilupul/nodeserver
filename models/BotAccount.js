@@ -92,6 +92,28 @@ const botAccountSchema = new mongoose.Schema(
     // freshness is checked too.
     inProgressCount: { type: Number, default: 0 },
     inProgressGames: { type: [String], default: [] },
+    // Bounded item-level snapshot of Twitch's current unclaimed watch
+    // progress. This is the source for the reseller "farming next" view; it
+    // is refreshed by the same successful inventory scan that updates the
+    // archive, so it never invents progress from stale bot logs.
+    farmingProgress: {
+      type: [
+        {
+          _id: false,
+          name: { type: String, default: "" },
+          game: { type: String, default: "" },
+          campaign: { type: String, default: "" },
+          imageURL: { type: String, default: "" },
+          current: { type: Number, default: 0, min: 0 },
+          required: { type: Number, default: 0, min: 0 },
+          percent: { type: Number, default: 0, min: 0, max: 100 },
+          connected: { type: Boolean, default: false },
+          scannedAt: { type: Date, default: null },
+        },
+      ],
+      default: [],
+    },
+    farmingSnapshotAt: { type: Date, default: null, index: true },
     farmingCompleteAt: { type: Date, default: null, index: true },
 
     // How many times this account's credentials were copied from the archive

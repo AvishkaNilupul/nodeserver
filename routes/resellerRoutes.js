@@ -13,6 +13,7 @@ const ResellerAccount = require("../models/ResellerAccount");
 const ResellerAudit = require("../models/ResellerAudit");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const resellerFarmingForecast = require("../utils/resellerFarmingForecast");
 
 const router = express.Router();
 const MAX_PAGE_SIZE = 100;
@@ -209,6 +210,25 @@ router.get("/reseller/summary", requireReseller, async (req, res) => {
   } catch (err) {
     console.error("reseller summary error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Read-only aggregate view of the operator's active farming pipeline. It is
+// intentionally not account-scoped data: no login, token, host, config file,
+// or individual bot identity crosses the reseller boundary.
+router.get("/reseller/farming-forecast", requireReseller, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      forecast: await resellerFarmingForecast.getForecast(),
+    });
+  } catch (err) {
+    console.error("reseller farming forecast error:", err.message);
+    res.status(503).json({
+      success: false,
+      code: "forecast_unavailable",
+      message: "Farming forecast is temporarily unavailable. Try again shortly.",
+    });
   }
 });
 
