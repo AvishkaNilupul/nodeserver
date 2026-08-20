@@ -225,6 +225,7 @@ function commitmentOf(soldToUsername) {
     return { kind: "listing", label: v };
   }
   if (/^bulk:/i.test(v)) return { kind: "bulk", label: v };
+  if (/^reseller:/i.test(v)) return { kind: "reseller", label: v };
   return { kind: "buyer", label: v };
 }
 
@@ -861,7 +862,13 @@ router.get("/banned/analytics", requireSuperadmin, async (req, res) => {
       { $group: { _id: "$soldToUsername", n: { $sum: 1 } } },
       { $sort: { n: -1 } },
     ]);
-    const commitment = { listing: [], buyer: [], bulk: [], none: 0 };
+    const commitment = {
+      listing: [],
+      buyer: [],
+      bulk: [],
+      reseller: [],
+      none: 0,
+    };
     for (const r of commitRows) {
       const c = commitmentOf(r._id);
       if (c.kind === "none") commitment.none += r.n;
@@ -1404,3 +1411,6 @@ router.get("/banned/facets", requireSuperadmin, async (req, res) => {
 });
 
 module.exports = router;
+// Exported on the router object for the focused classification test; Express
+// still receives the same callable router value.
+module.exports.commitmentOf = commitmentOf;

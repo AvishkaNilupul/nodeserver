@@ -1,33 +1,33 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <script>
-      (function () {
-        try {
-          if (localStorage.getItem("theme") === "dark")
-            document.documentElement.setAttribute("data-theme", "dark");
-        } catch (e) {}
-      })();
-    </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="referrer" content="no-referrer" />
     <title>Reseller portal</title>
     <style>
       :root {
-        --bg: #f6f7fb;
+        --bg: #f4f6f8;
         --surface: #fff;
-        --line: #e7eaf0;
-        --ink: #0f172a;
-        --muted: #6b7280;
-        --accent: #4f46e5;
+        --soft: #f8fafb;
+        --line: #dfe4e8;
+        --ink: #182025;
+        --muted: #65717a;
+        --accent: #19705a;
+        --warn: #9a5b00;
+        --danger: #a33a3a;
+        --info: #325b89;
       }
       html[data-theme="dark"] {
-        --bg: #0e1014;
-        --surface: #161a22;
-        --line: #2a3140;
-        --ink: #e8ebf2;
-        --muted: #9aa3b4;
+        --bg: #101417;
+        --surface: #181e22;
+        --soft: #20272c;
+        --line: #303a40;
+        --ink: #edf1f3;
+        --muted: #a4afb6;
+        --accent: #58b99c;
+        --warn: #f1bc64;
+        --danger: #f09090;
+        --info: #8eb8e1;
         color-scheme: dark;
       }
       * {
@@ -35,83 +35,666 @@
       }
       body {
         margin: 0;
-        min-height: 100vh;
-        padding: 24px 16px;
         background: var(--bg);
         color: var(--ink);
-        font-family: Inter, "Segoe UI", Tahoma, sans-serif;
+        font:
+          14px Inter,
+          "Segoe UI",
+          sans-serif;
       }
-      .wrap {
-        max-width: 900px;
-        margin: 0 auto;
+      button,
+      input,
+      select {
+        font: inherit;
       }
-      header {
+      button {
+        cursor: pointer;
+      }
+      .shell {
+        width: min(1400px, calc(100% - 32px));
+        margin: auto;
+        padding: 24px 0 48px;
+      }
+      .top {
         display: flex;
-        align-items: center;
         justify-content: space-between;
-        gap: 16px;
-        margin-bottom: 20px;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 18px;
       }
-      h1 {
-        margin: 0;
-        font-size: 22px;
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 6px;
       }
-      .who {
-        margin-top: 4px;
+      .muted {
         color: var(--muted);
-        font-size: 13px;
       }
+      .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .btn {
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        padding: 8px 12px;
+        font-weight: 700;
+      }
+      .btn.secondary {
+        border-color: var(--line);
+        background: var(--surface);
+        color: var(--ink);
+      }
+      .btn.small {
+        padding: 6px 9px;
+        font-size: 12px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .metric,
       .panel {
-        padding: 24px;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--surface);
-        color: var(--muted);
       }
-      button {
-        padding: 10px 14px;
-        border: 0;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #fff;
+      .metric {
+        padding: 14px;
+        min-height: 82px;
+      }
+      .metric strong {
+        display: block;
+        margin-top: 8px;
+        font-size: 25px;
+      }
+      .toolbar {
+        display: grid;
+        grid-template-columns: 1.5fr repeat(3, 1fr);
+        gap: 10px;
+        padding: 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--muted);
+        font-size: 12px;
         font-weight: 700;
-        cursor: pointer;
+      }
+      input,
+      select {
+        width: 100%;
+        min-height: 38px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--surface);
+        color: var(--ink);
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 11px 13px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: middle;
+      }
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+      .account {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 210px;
+      }
+      .thumb {
+        width: 38px;
+        height: 38px;
+        flex: 0 0 38px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        object-fit: cover;
+        background: var(--soft);
+      }
+      .placeholder {
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow-wrap: anywhere;
+      }
+      .badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: #eaf1f8;
+        color: var(--info);
+        font-size: 11px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .ready {
+        background: #e7f4ef;
+        color: var(--accent);
+      }
+      .warn {
+        background: #fff3d8;
+        color: var(--warn);
+      }
+      .sold {
+        background: #fdecec;
+        color: var(--danger);
+      }
+      .empty {
+        padding: 42px 16px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .pager {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 11px 13px;
+      }
+      .backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        display: none;
+        background: #07101688;
+      }
+      .backdrop.open {
+        display: block;
+      }
+      .drawer {
+        position: fixed;
+        z-index: 6;
+        top: 0;
+        right: 0;
+        width: min(620px, 100%);
+        height: 100vh;
+        overflow: auto;
+        padding: 18px;
+        border-left: 1px solid var(--line);
+        background: var(--surface);
+        transform: translateX(102%);
+        transition: transform 0.18s;
+      }
+      .drawer.open {
+        transform: translateX(0);
+      }
+      .drawer-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .section {
+        padding: 16px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .section:last-child {
+        border-bottom: 0;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1.5fr;
+        gap: 10px;
+      }
+      .reward {
+        display: grid;
+        grid-template-columns: 42px 1fr auto;
+        align-items: center;
+        gap: 9px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .reward:last-child {
+        border-bottom: 0;
+      }
+      .creds {
+        display: none;
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--soft);
+      }
+      .creds.open {
+        display: block;
+      }
+      .cred {
+        display: grid;
+        grid-template-columns: 72px 1fr;
+        gap: 8px;
+        padding: 4px 0;
+      }
+      .toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 10;
+        display: none;
+        padding: 11px 13px;
+        border-radius: 6px;
+        background: #182025;
+        color: #fff;
+      }
+      .toast.show {
+        display: block;
+      }
+      .toast.error {
+        background: #8e3030;
+      }
+      @media (max-width: 800px) {
+        .metrics {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .toolbar {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+      @media (max-width: 520px) {
+        .shell {
+          width: calc(100% - 20px);
+          padding-top: 14px;
+        }
+        .top,
+        .grid {
+          align-items: flex-start;
+          grid-template-columns: 1fr;
+        }
+        .top {
+          display: flex;
+        }
+        .metrics,
+        .toolbar {
+          grid-template-columns: 1fr;
+        }
+        .hide-mobile {
+          display: none;
+        }
       }
     </style>
   </head>
   <body>
-    <main class="wrap">
-      <header>
+    <main class="shell">
+      <header class="top">
         <div>
-          <h1>Reseller portal</h1>
-          <div class="who" id="who"></div>
+          <h1>Account inventory</h1>
+          <div class="muted" id="identity">Loading...</div>
         </div>
-        <button id="logout" type="button">Log out</button>
+        <div class="actions">
+          <button class="btn secondary" id="refresh">Refresh</button
+          ><button class="btn secondary" id="logout">Log out</button>
+        </div>
       </header>
-      <section class="panel" aria-live="polite">No accounts assigned.</section>
+      <div
+        id="fresh"
+        class="badge ready"
+        style="display: none; margin-bottom: 14px"
+      ></div>
+      <section class="metrics">
+        <div class="metric">
+          <span class="muted">Received</span><strong id="total">0</strong>
+        </div>
+        <div class="metric">
+          <span class="muted">Need connecting</span
+          ><strong id="needs">0</strong>
+        </div>
+        <div class="metric">
+          <span class="muted">Connection ready</span
+          ><strong id="ready">0</strong>
+        </div>
+        <div class="metric">
+          <span class="muted">Sold</span><strong id="sold">0</strong>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="toolbar">
+          <div>
+            <label for="q">Search</label
+            ><input id="q" type="search" placeholder="Login or game" />
+          </div>
+          <div>
+            <label for="status">Status</label
+            ><select id="status">
+              <option value="">All statuses</option>
+              <option>received</option>
+              <option>listed</option>
+              <option>sold</option>
+              <option>returned</option>
+            </select>
+          </div>
+          <div>
+            <label for="game">Game</label
+            ><select id="game">
+              <option value="">All games</option>
+            </select>
+          </div>
+          <div>
+            <label for="connect">Connection</label
+            ><select id="connect">
+              <option value="">All accounts</option>
+              <option value="true">Needs connecting</option>
+              <option value="false">Connection ready</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Game</th>
+                <th>Connection</th>
+                <th>Status</th>
+                <th class="hide-mobile">Received</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="rows">
+              <tr>
+                <td colspan="6" class="empty">Loading inventory...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <span class="muted" id="pages">0 accounts</span>
+          <div class="actions">
+            <button class="btn secondary small" id="prev">Previous</button
+            ><button class="btn secondary small" id="next">Next</button>
+          </div>
+        </div>
+      </section>
     </main>
+    <div class="backdrop" id="backdrop"></div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <div>
+          <h2 id="title">Account</h2>
+          <div class="muted" id="meta"></div>
+        </div>
+        <button class="btn secondary small" id="close">Close</button>
+      </div>
+      <div id="detail"></div>
+    </aside>
+    <div class="toast" id="toast"></div>
     <script>
-      async function loadIdentity() {
-        const response = await fetch("/reseller/whoami", {
-          credentials: "same-origin",
-        });
-        if (!response.ok) {
-          location.href = "/reseller-login.html";
-          return;
-        }
-        const data = await response.json();
-        const reseller = data.reseller || {};
-        document.getElementById("who").textContent =
-          reseller.displayName || reseller.username || "";
+      const $ = (id) => document.getElementById(id),
+        S = { page: 1, pages: 1, account: null, creds: null };
+      const esc = (v) =>
+        String(v ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      const date = (v) => (v ? new Date(v).toLocaleString() : "Never");
+      function toast(msg, error) {
+        const n = $("toast");
+        n.textContent = msg;
+        n.className = "toast show" + (error ? " error" : "");
+        clearTimeout(toast.t);
+        toast.t = setTimeout(() => (n.className = "toast"), 3000);
       }
-      document.getElementById("logout").addEventListener("click", async () => {
-        await fetch("/reseller-logout", {
-          method: "POST",
+      async function api(path, opt = {}) {
+        const r = await fetch(path, {
           credentials: "same-origin",
+          ...opt,
+          headers: {
+            Accept: "application/json",
+            ...(opt.body ? { "Content-Type": "application/json" } : {}),
+          },
         });
+        let d = {};
+        try {
+          d = await r.json();
+        } catch (e) {}
+        if (r.status === 401 || d.code === "blocked") {
+          location.href = "/reseller-login.html";
+          throw Error("Session ended");
+        }
+        if (!r.ok || d.success === false)
+          throw Error(d.message || "Request failed");
+        return d;
+      }
+      const badge = (text, cls = "") =>
+        `<span class="badge ${cls}">${esc(text)}</span>`;
+      function summary(s) {
+        $("total").textContent = s.total || 0;
+        $("needs").textContent = s.needsConnect || 0;
+        $("ready").textContent = s.connected || 0;
+        $("sold").textContent = s.sold || 0;
+        const old = $("game").value;
+        $("game").innerHTML =
+          '<option value="">All games</option>' +
+          (s.games || [])
+            .map(
+              (g) =>
+                `<option value="${esc(g.game)}">${esc(g.game)} (${g.total})</option>`,
+            )
+            .join("");
+        $("game").value = old;
+      }
+      function query() {
+        const p = new URLSearchParams({ page: S.page, limit: 25 });
+        for (const [id, key] of [
+          ["q", "q"],
+          ["status", "status"],
+          ["game", "game"],
+          ["connect", "needsConnect"],
+        ])
+          if ($(id).value) p.set(key, $(id).value);
+        return p;
+      }
+      async function loadRows() {
+        const d = await api("/reseller/accounts?" + query());
+        const rows = d.accounts || [];
+        S.pages = d.pagination.pages || 1;
+        S.page = d.pagination.page || 1;
+        $("rows").innerHTML = rows.length
+          ? rows
+              .map((a) => {
+                const r = a.drops?.topReward;
+                return `<tr><td><div class="account">${r?.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong class="mono">${esc(a.login)}</strong><div class="muted">${a.drops?.count || 0} drops${r ? ` - ${esc(r.name)}` : ""}</div></div></div></td><td>${esc(a.game || "Unspecified")}</td><td>${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}</td><td>${badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}</td><td class="hide-mobile">${esc(date(a.receivedAt))}</td><td><button class="btn secondary small" data-open="${esc(a.id)}">Open</button></td></tr>`;
+              })
+              .join("")
+          : '<tr><td colspan="6" class="empty">No accounts match these filters.</td></tr>';
+        $("pages").textContent =
+          `${d.pagination.total || 0} accounts - page ${S.page} of ${S.pages}`;
+        $("prev").disabled = S.page <= 1;
+        $("next").disabled = S.page >= S.pages;
+        document
+          .querySelectorAll("[data-open]")
+          .forEach((b) => (b.onclick = () => openAccount(b.dataset.open)));
+      }
+      async function load() {
+        try {
+          const [m, s] = await Promise.all([
+            api("/reseller/me"),
+            api("/reseller/summary"),
+          ]);
+          $("identity").textContent =
+            m.me.displayName || m.me.username || "Reseller";
+          $("fresh").style.display = m.me.freshAccounts
+            ? "inline-block"
+            : "none";
+          $("fresh").textContent =
+            `${m.me.freshAccounts || 0} new account${m.me.freshAccounts === 1 ? "" : "s"} received`;
+          summary(s.summary || {});
+          await loadRows();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }
+      function render(a) {
+        S.account = a;
+        S.creds = null;
+        $("title").textContent = a.login || "Account";
+        $("meta").textContent =
+          `${a.game || "Unspecified game"} - received ${date(a.receivedAt)}`;
+        const groups =
+          (a.dropGroups || [])
+            .map(
+              (g) =>
+                `<div><h3>${esc(g.game)}</h3>${g.rewards.map((r) => `<div class="reward">${r.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong>${esc(r.name)}</strong><div class="muted">${r.requiredAccountLink ? `Link ${esc(r.requiredAccountLink)}` : "No publisher link required"}${r.count > 1 ? ` - ${r.count}` : ""}</div></div>${r.connected || r.state === "connected" ? badge("Connected", "ready") : r.state === "connect" ? badge("Connect", "warn") : badge("Claimed")}</div>`).join("")}</div>`,
+            )
+            .join("") ||
+          '<div class="muted">No drop records for this account.</div>';
+        $("detail").innerHTML =
+          `<section class="section"><div class="actions">${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}${badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}<span class="muted">Verified ${esc(date(a.lastVerifiedAt))}</span></div></section><section class="section"><h3>Delivery status</h3><div class="grid"><div><label>Status</label><select id="detailStatus"><option>received</option><option>listed</option><option>sold</option><option>returned</option></select></div><div><label>Note</label><input id="detailNote" maxlength="500" value="${esc(a.resellerNote || "")}"></div></div><div class="actions" style="margin-top:10px"><button class="btn small" id="save">Save status</button><button class="btn secondary small" id="verify">Verify live</button></div></section><section class="section"><div class="actions"><h3 style="margin:0">Credentials</h3><button class="btn secondary small" id="reveal">Reveal credentials</button></div><div class="creds" id="creds"></div></section><section class="section"><h3>Connection checklist</h3>${groups}</section>`;
+        $("detailStatus").value = a.resellerStatus || "received";
+        $("save").onclick = saveStatus;
+        $("verify").onclick = verify;
+        $("reveal").onclick = reveal;
+      }
+      async function openAccount(id) {
+        $("backdrop").classList.add("open");
+        $("drawer").classList.add("open");
+        $("detail").innerHTML = '<div class="empty">Loading account...</div>';
+        try {
+          render(
+            (await api(`/reseller/accounts/${encodeURIComponent(id)}`)).account,
+          );
+        } catch (e) {
+          $("detail").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+        }
+      }
+      function closeDrawer() {
+        $("backdrop").classList.remove("open");
+        $("drawer").classList.remove("open");
+        S.account = null;
+      }
+      async function saveStatus() {
+        try {
+          await api(
+            `/reseller/accounts/${encodeURIComponent(S.account.id)}/status`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                status: $("detailStatus").value,
+                note: $("detailNote").value,
+              }),
+            },
+          );
+          toast("Status saved");
+          const id = S.account.id;
+          await load();
+          await openAccount(id);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }
+      async function verify() {
+        try {
+          const d = await api(
+            `/reseller/accounts/${encodeURIComponent(S.account.id)}/verify`,
+            { method: "POST" },
+          );
+          toast(
+            d.needsConnect
+              ? "Live check complete: connection needed"
+              : "Live check complete: ready",
+          );
+          const id = S.account.id;
+          await load();
+          await openAccount(id);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }
+      function showCreds(c) {
+        S.creds = c;
+        $("creds").className = "creds open";
+        $("creds").innerHTML =
+          `<div class="cred"><span class="muted">Login</span><strong class="mono">${esc(c.login)}</strong></div><div class="cred"><span class="muted">Password</span><strong class="mono">${esc(c.password)}</strong></div><div class="cred"><span class="muted">Email</span><strong class="mono">${esc(c.email)}</strong></div><div class="cred"><span class="muted">Token</span><strong class="mono">${esc(c.token)}</strong></div><button class="btn small" id="copy">Copy all</button>`;
+        $("copy").onclick = copy;
+      }
+      async function reveal() {
+        try {
+          showCreds(
+            (
+              await api(
+                `/reseller/accounts/${encodeURIComponent(S.account.id)}/credentials`,
+              )
+            ).credentials || {},
+          );
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }
+      async function copy() {
+        const c = S.creds,
+          v = `Login: ${c.login || ""}\nPassword: ${c.password || ""}\nEmail: ${c.email || ""}\nToken: ${c.token || ""}`;
+        try {
+          await navigator.clipboard.writeText(v);
+        } catch (e) {
+          const t = document.createElement("textarea");
+          t.value = v;
+          document.body.appendChild(t);
+          t.select();
+          document.execCommand("copy");
+          t.remove();
+        }
+        toast("Credentials copied");
+      }
+      let timer;
+      $("q").oninput = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          S.page = 1;
+          loadRows().catch((e) => toast(e.message, true));
+        }, 250);
+      };
+      ["status", "game", "connect"].forEach(
+        (id) =>
+          ($(id).onchange = () => {
+            S.page = 1;
+            loadRows().catch((e) => toast(e.message, true));
+          }),
+      );
+      $("prev").onclick = () => {
+        if (S.page > 1) {
+          S.page--;
+          loadRows();
+        }
+      };
+      $("next").onclick = () => {
+        if (S.page < S.pages) {
+          S.page++;
+          loadRows();
+        }
+      };
+      $("refresh").onclick = load;
+      $("close").onclick = closeDrawer;
+      $("backdrop").onclick = closeDrawer;
+      $("logout").onclick = async () => {
+        await fetch("/reseller-logout", { method: "POST" });
         location.href = "/reseller-login.html";
-      });
-      loadIdentity();
+      };
+      load();
     </script>
     <script src="/theme.js"></script>
   </body>

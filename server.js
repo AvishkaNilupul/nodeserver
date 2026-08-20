@@ -47,6 +47,7 @@ const renterAdminRoutes = require("./routes/renterAdminRoutes");
 const { requireRenter } = require("./middleware/renterAuth");
 const resellerAuthRoutes = require("./routes/resellerAuthRoutes");
 const { requireReseller } = require("./middleware/resellerAuth");
+const resellerRoutes = require("./routes/resellerRoutes");
 const resellerAdminRoutes = require("./routes/resellerAdminRoutes");
 const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
@@ -592,9 +593,10 @@ app.use(enforce2fa, bulkOrderRoutes);
 app.use(renterAuthRoutes);
 app.use(renterRoutes);
 app.use(enforce2fa, renterAdminRoutes);
-// Reseller Phase 1 auth realm. Portal/admin routers are added in later phases;
-// mounting auth before the requireAdmin cascade keeps login/whoami reachable.
+// Resellers are a separate tenant realm. Auth + tenant routes mount before the
+// admin cascade; each portal request loads and scopes the fresh reseller row.
 app.use(resellerAuthRoutes);
+app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
 // Mounted BEFORE the requireAdmin cascade below because stashRoutes contains
 // the bearer-authenticated POST /account-stash/ingest for the browser account
