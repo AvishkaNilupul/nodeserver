@@ -233,18 +233,23 @@ function aggregateForecast({ accounts, runtime, fallback = new Map(), campaigns 
     }
   }
 
+  const availableItems = Array.isArray(available) ? available : available.items || [];
   const stockByKey = new Map();
   const stockByGame = new Map();
-  let availableUnits = 0;
-  for (const row of available || []) {
+  for (const row of availableItems) {
     const units = Math.max(0, Number(row.units || row.accounts || 0));
     stockByKey.set(itemKey(row), {
       accounts: Number(row.accounts || 0),
       units,
     });
     const gameKey = norm(row.game);
-    if (gameKey) stockByGame.set(gameKey, (stockByGame.get(gameKey) || 0) + units);
-    availableUnits += units;
+    if (gameKey) stockByGame.set(gameKey, (stockByGame.get(gameKey) || 0) + Number(row.accounts || 0));
+  }
+  if (!Array.isArray(available)) {
+    for (const row of available.games || []) {
+      const key = norm(row.game);
+      if (key) stockByGame.set(key, Math.max(0, Number(row.accounts || 0)));
+    }
   }
   const campaignByGame = new Map();
   for (const campaign of campaigns || []) {
@@ -303,19 +308,29 @@ function aggregateForecast({ accounts, runtime, fallback = new Map(), campaigns 
     generatedAt: new Date(),
     freshness: { oldestScanAt: oldest, newestScanAt: newest, stale: !newest || now - newest.getTime() > FRESH_MS },
     runtime: { available: runtime.available, checkedAt: runtime.checkedAt, configsSeen: runtime.configsSeen },
-    summary: { activeAccounts, estimatedAccounts, games: outGames.length, items: outItems.length, readySoon: outItems.filter((i) => i.readySoon).length, availableNow: availableUnits },
+    summary: { activeAccounts, estimatedAccounts, games: outGames.length, items: outItems.length, readySoon: outItems.filter((i) => i.readySoon).length, availableNow: Array.isArray(available) ? availableItems.reduce((sum, row) => sum + Number(row.accounts || 0), 0) : Math.max(0, Number(available.accounts || 0)) },
     games: outGames,
     items: outItems.slice(0, MAX_ITEMS),
   };
 }
 
 async function loadAvailableStock(accountIds) {
-  if (!accountIds.length) return [];
-  return DropLog.aggregate([
-    { $match: { account: { $in: accountIds }, connected: { $ne: true }, soldAt: null } },
-    { $group: { _id: { name: "$name", game: "$game", itemKey: "$itemKey", image: { $ifNull: ["$imageLocal", "$imageURL"] } }, accounts: { $addToSet: "$account" }, units: { $sum: { $ifNull: ["$count", 1] } } } },
-    { $project: { _id: 0, name: "$_id.name", game: "$_id.game", itemKey: "$_id.itemKey", imageURL: "$_id.image", accounts: { $size: "$accounts" }, units: 1 } },
+  if (!accountIds.length) return { items: [], games: [], accounts: 0 };
+  const match = { account: { $in: accountIds }, connected: { $ne: true }, soldAt: null };
+  const [items, games, accounts] = await Promise.all([
+    DropLog.aggregate([
+      { $match: match },
+      { $group: { _id: { name: "$name", game: "$game", itemKey: "$itemKey", image: { $ifNull: ["$imageLocal", "$imageURL"] } }, accounts: { $addToSet: "$account" }, units: { $sum: { $ifNull: ["$count", 1] } } } },
+      { $project: { _id: 0, name: "$_id.name", game: "$_id.game", itemKey: "$_id.itemKey", imageURL: "$_id.image", accounts: { $size: "$accounts" }, units: 1 } },
+    ]),
+    DropLog.aggregate([
+      { $match: match },
+      { $group: { _id: "$game", accounts: { $addToSet: "$account" } } },
+      { $project: { _id: 0, game: "$_id", accounts: { $size: "$accounts" } } },
+    ]),
+    DropLog.distinct("account", match),
   ]);
+  return { items, games, accounts: accounts.length };
 }
 
 async function getForecast() {

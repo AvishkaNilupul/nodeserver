@@ -59,8 +59,8 @@ test("ranks high-progress items first and counts duplicate rewards once per acco
   assert.equal(forecast.items[0].farmingAccounts, 2);
   assert.equal(forecast.items[0].averagePercent, 87);
   assert.equal(forecast.items[0].availableNow.accounts, 3);
-  assert.equal(forecast.games[0].availableNow, 4);
-  assert.equal(forecast.summary.availableNow, 4);
+  assert.equal(forecast.games[0].availableNow, 3);
+  assert.equal(forecast.summary.availableNow, 3);
   assert.equal(forecast.summary.readySoon, 1);
 });
 
@@ -127,8 +127,26 @@ test("keeps a game-level farming signal while item snapshots warm up", () => {
   assert.equal(forecast.games[0].game, "Valorant");
   assert.equal(forecast.games[0].farmingAccounts, 1);
   assert.equal(forecast.games[0].itemSnapshotReady, false);
-  assert.equal(forecast.games[0].availableNow, 3);
-  assert.equal(forecast.summary.availableNow, 3);
+  assert.equal(forecast.games[0].availableNow, 2);
+  assert.equal(forecast.summary.availableNow, 2);
+});
+
+test("uses exact unique available-account rollups when supplied", () => {
+  const forecast = aggregateForecast({
+    accounts: [account("a", "one", [], { inProgressGames: ["Valorant"] })],
+    runtime: runtime([["secret-a", ["valorant"]]]),
+    available: {
+      accounts: 7,
+      games: [{ game: "Valorant", accounts: 4 }],
+      items: [
+        { name: "Skin", game: "Valorant", accounts: 4, units: 20 },
+        { name: "Spray", game: "Valorant", accounts: 3, units: 30 },
+      ],
+    },
+  });
+
+  assert.equal(forecast.summary.availableNow, 7);
+  assert.equal(forecast.games[0].availableNow, 4);
 });
 
 test("game confidence keeps the least trustworthy account evidence", () => {
