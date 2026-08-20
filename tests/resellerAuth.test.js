@@ -186,6 +186,44 @@ test("successful login regenerates the session id and writes only reseller realm
   );
 });
 
+test("post-login bookkeeping failure does not turn a saved session into a 500", async () => {
+  await createReseller({
+    username: "bookkeeping-test",
+    password: "password1",
+  });
+  const originalCreate = ResellerAudit.create;
+  ResellerAudit.create = async () => {
+    throw new Error("audit unavailable");
+  };
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(" "));
+  try {
+    const login = await request("/reseller-login", {
+      method: "POST",
+      body: { username: "bookkeeping-test", password: "password1" },
+      ip: "10.0.0.6",
+    });
+    assert.equal(login.response.status, 200);
+    assert.equal(login.payload.success, true);
+    assert.equal(
+      (
+        await request("/reseller/whoami", {
+          cookie: login.cookie,
+          ip: "10.0.0.6",
+        })
+      ).response.status,
+      200,
+    );
+    assert.ok(
+      logged.some((line) => line.includes("reseller login bookkeeping")),
+    );
+  } finally {
+    ResellerAudit.create = originalCreate;
+    console.error = originalError;
+  }
+});
+
 test("suspension and access expiry destroy an existing session on the next request", async () => {
   const reseller = await createReseller({
     username: "instant-lock",

@@ -53,15 +53,23 @@ router.post("/reseller-login", loginLimiter, async (req, res) => {
       at: Date.now(),
     };
     await saveSession(req);
-    reseller.lastLoginAt = new Date();
-    await Promise.all([
-      reseller.save(),
-      ResellerAudit.create({
+
+    // The session is now authenticated and persisted. Bookkeeping is
+    // best-effort: a database hiccup must not turn a completed login into a
+    // 500 or make the reseller retry credentials unnecessarily. Keep the audit
+    // write awaited so callers/tests can observe it deterministically when it
+    // succeeds.
+    try {
+      reseller.lastLoginAt = new Date();
+      await reseller.save();
+      await ResellerAudit.create({
         reseller: reseller._id,
         action: "login",
         ip: req.ip || req.socket?.remoteAddress || "",
-      }),
-    ]);
+      });
+    } catch (err) {
+      console.error("reseller login bookkeeping:", err.message);
+    }
     return res.json({ success: true });
   } catch (err) {
     console.error("reseller login error:", err.message);
