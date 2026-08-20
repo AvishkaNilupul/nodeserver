@@ -44,6 +44,8 @@ const renterAuthRoutes = require("./routes/renterAuthRoutes");
 const renterRoutes = require("./routes/renterRoutes");
 const renterAdminRoutes = require("./routes/renterAdminRoutes");
 const { requireRenter } = require("./middleware/renterAuth");
+const resellerAuthRoutes = require("./routes/resellerAuthRoutes");
+const { requireReseller } = require("./middleware/resellerAuth");
 const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
@@ -537,6 +539,12 @@ app.get("/renter.html", requireRenter, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "renter.html"));
 });
 
+// Reseller dashboard — separate tenant realm; never put it behind the admin
+// blanket. The public login page remains available through express.static.
+app.get("/reseller.html", requireReseller, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "reseller.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -572,6 +580,9 @@ app.use(enforce2fa, bulkOrderRoutes);
 app.use(renterAuthRoutes);
 app.use(renterRoutes);
 app.use(enforce2fa, renterAdminRoutes);
+// Reseller Phase 1 auth realm. Portal/admin routers are added in later phases;
+// mounting auth before the requireAdmin cascade keeps login/whoami reachable.
+app.use(resellerAuthRoutes);
 // Mounted BEFORE the requireAdmin cascade below because stashRoutes contains
 // the bearer-authenticated POST /account-stash/ingest for the browser account
 // automator — requireAdmin runs unconditionally for every request and would

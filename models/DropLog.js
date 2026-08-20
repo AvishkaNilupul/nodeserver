@@ -65,6 +65,8 @@ const dropLogSchema = new mongoose.Schema(
     soldToAdminId: { type: String, default: "" },
     soldSetId: { type: String, default: "", index: true },
     soldBulkOrderId: { type: String, default: "", index: true },
+    // Distinguishes a reseller reservation from a normal sale/bulk hold.
+    soldResellerId: { type: String, default: "", index: true },
 
     firstSeenAt: { type: Date, default: Date.now },
     lastSeenAt: { type: Date, default: Date.now },

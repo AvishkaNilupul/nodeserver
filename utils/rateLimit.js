@@ -103,6 +103,21 @@ const renterLiveLimiter = jsonLimiter({
   message: "Checking too fast — give it a few seconds.",
 });
 
+// Credential reveals are high-value and must be deliberately paced per IP.
+const resellerRevealLimiter = jsonLimiter({
+  windowMs: 60 * 1000,
+  limit: 5,
+  message: "Too many credential reveals. Please wait a minute.",
+});
+
+// Live verification fans out to Twitch and is intentionally tighter than a
+// normal read, while still allowing a reseller to work through a small batch.
+const resellerLiveLimiter = jsonLimiter({
+  windowMs: 60 * 1000,
+  limit: 20,
+  message: "Checking too fast - give it a few seconds.",
+});
+
 // Public catalog reads are cached and cheap, but a dedicated ceiling prevents
 // aggressive scrapers from repeatedly triggering stock aggregations. Event
 // writes get a tighter limit because normal browsing creates only a few.
@@ -135,6 +150,8 @@ module.exports = {
   renterSubmitLimiter,
   renterBotControlLimiter,
   renterLiveLimiter,
+  resellerRevealLimiter,
+  resellerLiveLimiter,
   catalogReadLimiter,
   catalogEventLimiter,
   catalogInquiryLimiter,

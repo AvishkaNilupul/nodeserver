@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Reseller sign in</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #fff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --red: #dc2626;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --red: #f87171;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        color: var(--ink);
+        font-family: Inter, "Segoe UI", Tahoma, sans-serif;
+        background:
+          radial-gradient(
+            1000px 500px at 100% -10%,
+            rgba(99, 102, 241, 0.1),
+            transparent 60%
+          ),
+          var(--bg);
+      }
+      .card {
+        width: 100%;
+        max-width: 380px;
+        padding: 30px 26px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--surface);
+        box-shadow: 0 24px 60px rgba(31, 41, 55, 0.1);
+      }
+      h1 {
+        margin: 0;
+        font-size: 19px;
+      }
+      .sub {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      label {
+        display: block;
+        margin: 16px 0 5px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      input {
+        width: 100%;
+        padding: 11px 13px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-2);
+        color: var(--ink);
+        font: 14px inherit;
+      }
+      button {
+        width: 100%;
+        margin-top: 20px;
+        padding: 12px;
+        border: 0;
+        border-radius: 11px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 14.5px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .msg {
+        display: none;
+        margin-top: 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--red);
+        border-radius: 9px;
+        color: var(--red);
+        background: rgba(220, 38, 38, 0.06);
+        font-size: 13px;
+      }
+      .msg.err {
+        display: block;
+      }
+      .foot {
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: 11.5px;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <form class="card" id="form">
+      <h1>Reseller sign in</h1>
+      <div class="sub">Access your assigned account inventory</div>
+      <label for="u">Username</label>
+      <input
+        id="u"
+        autocomplete="username"
+        autocapitalize="none"
+        spellcheck="false"
+      />
+      <label for="p">Password</label>
+      <input id="p" type="password" autocomplete="current-password" />
+      <button id="btn" type="submit">Sign in</button>
+      <div class="msg" id="msg"></div>
+      <div class="foot">Contact the operator if you can't get in.</div>
+    </form>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      function showErr(message) {
+        $("msg").textContent = message;
+        $("msg").className = "msg err";
+      }
+      if (/[?&]blocked=1/.test(location.search))
+        showErr("Your access has ended. Contact the operator.");
+      $("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const username = $("u").value.trim();
+        const password = $("p").value;
+        if (!username || !password)
+          return showErr("Enter your username and password.");
+        $("btn").disabled = true;
+        $("btn").textContent = "Signing in...";
+        try {
+          const response = await fetch("/reseller-login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({ username, password }),
+          });
+          const data = await response.json();
+          if (response.ok && data.success) {
+            location.href = "/reseller.html";
+            return;
+          }
+          showErr(data.message || "Sign in failed.");
+        } catch {
+          showErr("Network error. Try again.");
+        }
+        $("btn").disabled = false;
+        $("btn").textContent = "Sign in";
+      });
+    </script>
+    <script src="/theme.js"></script>
+  </body>
+</html>
