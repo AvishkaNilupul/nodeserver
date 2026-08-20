@@ -77,6 +77,32 @@ function dropCacheSet(key, data) {
     dropCache.delete(dropCache.keys().next().value);
   }
 }
+// The view prefixes that mean "this write changed the archive itself", and so
+// must drop BOTH shared archive caches: the exclusion set and the background
+// rollup built from it. Split out from bustDropCache so the rule can be tested
+// on its own — getting it wrong is silent, showing stale numbers with no error.
+const ARCHIVE_BUST_PREFIXES = ["archive:", "overview", "by-game", "by-item:"];
+
+// The two used to be decided separately, and disagreed. /mark-sold busts
+// ["by-item:", "sets:"], which rebuilt the rollup but left the exclusions cache
+// alone — and stamping soldAt un-excludes a sold shadow duplicate ("never hide
+// a sale"), so the rebuild that fired 3s later baked the PRE-write exclusion set
+// into the numbers, hiding the account just sold until the next periodic
+// refresh. They read the same set, so they invalidate together or not at all.
+//
+// Deliberately still false for ["accounts:"] (copied) and ["accounts:",
+// "bad-tokens"] (password): neither touches scan status, placement or soldAt, so
+// neither changes the exclusion set — and recomputing it uncached measured ~4.7s
+// on the Atlas shared tier, which is not a bill to hand the next reader for a
+// copy-count bump.
+function bustTargets(prefixes) {
+  const archive =
+    !prefixes ||
+    !prefixes.length ||
+    prefixes.some((p) => ARCHIVE_BUST_PREFIXES.includes(p));
+  return { exclusions: archive, snapshot: archive };
+}
+
 function bustDropCache(prefixes) {
   // Any archive write can change who holds what, and the drill-down is the
   // view an operator checks right before handing an account over — so it is
@@ -91,20 +117,15 @@ function bustDropCache(prefixes) {
       }
     }
   }
-  if (!prefixes || prefixes.some((p) => p === "archive:"))
-    invalidateExclusions();
+  const targets = bustTargets(prefixes);
+  // Exclusions first: the rollup rebuild below reads them, so clearing them
+  // afterwards would leave the rebuild it just kicked off using the old set.
+  if (targets.exclusions) invalidateExclusions();
   // overview / by-game / by-item are no longer in this map at all — they come
   // from the background rollup. Tell it to rebuild, but let it keep serving the
   // current numbers until the new ones land: a write must never turn the next
   // page load into a cold half-minute aggregation.
-  if (
-    !prefixes ||
-    prefixes.some(
-      (p) => p === "overview" || p === "by-game" || p === "by-item:",
-    )
-  ) {
-    archiveSnapshot.invalidate();
-  }
+  if (targets.snapshot) archiveSnapshot.invalidate();
 }
 
 // Serve an expensive view without ever making two people pay for it at once.
@@ -2598,4 +2619,6 @@ function warmArchiveViews() {
 }
 
 router.warmArchiveViews = warmArchiveViews;
+// Exported for tests only — see tests/archiveBustTargets.test.js.
+router.bustTargets = bustTargets;
 module.exports = router;
