@@ -54,21 +54,33 @@
         cursor: pointer;
       }
       .shell {
-        width: min(1400px, calc(100% - 32px));
+        width: min(1480px, calc(100% - 40px));
         margin: auto;
-        padding: 24px 0 48px;
+        padding: 30px 0 56px;
       }
       .top {
         display: flex;
         justify-content: space-between;
         align-items: center;
         gap: 12px;
-        margin-bottom: 18px;
+        margin-bottom: 22px;
+      }
+      .eyebrow {
+        margin-bottom: 7px;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
       }
       h1,
       h2,
       h3 {
         margin: 0 0 6px;
+      }
+      h1 {
+        font-size: clamp(28px, 3vw, 38px);
+        letter-spacing: -0.04em;
       }
       .muted {
         color: var(--muted);
@@ -78,6 +90,9 @@
         gap: 8px;
         align-items: center;
         flex-wrap: wrap;
+      }
+      .top .actions {
+        align-self: flex-start;
       }
       .btn {
         border: 1px solid var(--accent);
@@ -100,7 +115,7 @@
         display: grid;
         grid-template-columns: repeat(4, 1fr);
         gap: 10px;
-        margin-bottom: 14px;
+        margin-bottom: 18px;
       }
       .metric,
       .panel {
@@ -109,20 +124,66 @@
         background: var(--surface);
       }
       .metric {
-        padding: 14px;
-        min-height: 82px;
+        position: relative;
+        overflow: hidden;
+        padding: 16px 18px;
+        min-height: 106px;
+      }
+      .metric::after {
+        position: absolute;
+        right: -22px;
+        bottom: -36px;
+        width: 92px;
+        height: 92px;
+        border-radius: 50%;
+        background: var(--soft);
+        content: "";
+        opacity: 0.9;
       }
       .metric strong {
         display: block;
-        margin-top: 8px;
-        font-size: 25px;
+        position: relative;
+        z-index: 1;
+        margin-top: 7px;
+        font-size: 30px;
+        letter-spacing: -0.04em;
+      }
+      .metric small {
+        position: relative;
+        z-index: 1;
+        color: var(--muted);
+        font-size: 12px;
       }
       .toolbar {
-        display: grid;
-        grid-template-columns: 1.5fr repeat(3, 1fr);
-        gap: 10px;
-        padding: 14px;
+        padding: 18px;
         border-bottom: 1px solid var(--line);
+      }
+      .toolbar-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .toolbar-head h2 {
+        margin-bottom: 3px;
+        font-size: 18px;
+      }
+      .filters {
+        display: grid;
+        grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(145px, 1fr));
+        gap: 10px;
+      }
+      .filter-actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .filter-count {
+        color: var(--muted);
+        font-size: 12px;
       }
       label {
         display: block;
@@ -141,8 +202,79 @@
         background: var(--surface);
         color: var(--ink);
       }
+      input:focus,
+      select:focus,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
       .table-wrap {
         overflow: auto;
+      }
+      .account-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        padding: 14px;
+      }
+      .account-card {
+        display: grid;
+        grid-template-columns: 48px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        min-height: 104px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--soft);
+        transition: border-color 0.15s, transform 0.15s, background 0.15s;
+      }
+      .account-card:hover {
+        border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+        background: var(--surface);
+        transform: translateY(-1px);
+      }
+      .account-card .thumb {
+        width: 48px;
+        height: 48px;
+        border-radius: 10px;
+      }
+      .account-main {
+        min-width: 0;
+      }
+      .account-name {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .account-game {
+        margin-top: 4px;
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .account-meta {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 9px;
+      }
+      .account-side {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 9px;
+      }
+      .account-side .btn {
+        min-width: 62px;
+      }
+      .drop-count {
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
       }
       table {
         width: 100%;
@@ -216,7 +348,8 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 11px 13px;
+        padding: 12px 18px;
+        border-top: 1px solid var(--line);
       }
       .backdrop {
         position: fixed;
@@ -233,10 +366,10 @@
         z-index: 6;
         top: 0;
         right: 0;
-        width: min(620px, 100%);
+        width: min(720px, 100%);
         height: 100vh;
         overflow: auto;
-        padding: 18px;
+        padding: 22px 24px 36px;
         border-left: 1px solid var(--line);
         background: var(--surface);
         transform: translateX(102%);
@@ -246,6 +379,13 @@
         transform: translateX(0);
       }
       .drawer-head {
+        position: sticky;
+        top: -22px;
+        z-index: 2;
+        margin: -22px -24px 0;
+        padding: 22px 24px 16px;
+        background: color-mix(in srgb, var(--surface) 94%, transparent);
+        backdrop-filter: blur(12px);
         display: flex;
         justify-content: space-between;
         gap: 10px;
@@ -253,7 +393,7 @@
         border-bottom: 1px solid var(--line);
       }
       .section {
-        padding: 16px 0;
+        padding: 18px 0;
         border-bottom: 1px solid var(--line);
       }
       .section:last-child {
@@ -264,16 +404,119 @@
         grid-template-columns: 1fr 1.5fr;
         gap: 10px;
       }
+      .account-summary {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .summary-item {
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--soft);
+      }
+      .summary-item strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 16px;
+      }
+      .checklist {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .check-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        padding: 11px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--soft);
+      }
+      .check-item strong {
+        display: block;
+        margin-bottom: 3px;
+      }
+      .progress {
+        height: 5px;
+        margin-top: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--line);
+      }
+      .progress span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent);
+      }
+      .game-group {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--soft);
+        overflow: hidden;
+      }
+      .game-group summary {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 14px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .game-group summary::-webkit-details-marker {
+        display: none;
+      }
+      .game-group summary::after {
+        color: var(--muted);
+        content: "+";
+        font-size: 18px;
+      }
+      .game-group[open] summary::after {
+        content: "−";
+      }
+      .game-group-body {
+        padding: 0 14px 10px;
+      }
+      .group-meta {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
       .reward {
         display: grid;
-        grid-template-columns: 42px 1fr auto;
+        grid-template-columns: 38px minmax(0, 1fr) auto;
         align-items: center;
         gap: 9px;
-        padding: 9px 0;
+        padding: 8px 0;
         border-bottom: 1px solid var(--line);
       }
       .reward:last-child {
         border-bottom: 0;
+      }
+      .reward .thumb {
+        width: 38px;
+        height: 38px;
+        border-radius: 8px;
+      }
+      .reward-name {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .reward-link {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 11px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .creds {
         display: none;
@@ -313,8 +556,9 @@
         .metrics {
           grid-template-columns: repeat(2, 1fr);
         }
-        .toolbar {
-          grid-template-columns: repeat(2, 1fr);
+        .filters,
+        .account-grid {
+          grid-template-columns: 1fr;
         }
       }
       @media (max-width: 520px) {
@@ -331,8 +575,39 @@
           display: flex;
         }
         .metrics,
-        .toolbar {
+        .filters {
           grid-template-columns: 1fr;
+        }
+        .toolbar-head {
+          display: block;
+        }
+        .toolbar-head .btn {
+          margin-top: 10px;
+        }
+        .account-card {
+          grid-template-columns: 42px minmax(0, 1fr);
+        }
+        .account-card .account-side {
+          grid-column: 1 / -1;
+          flex-direction: row;
+          justify-content: space-between;
+          align-items: center;
+          padding-top: 4px;
+          border-top: 1px solid var(--line);
+        }
+        .account-summary {
+          grid-template-columns: 1fr 1fr 1fr;
+        }
+        .drawer {
+          padding-right: 16px;
+          padding-left: 16px;
+        }
+        .drawer-head {
+          top: -22px;
+          margin-right: -16px;
+          margin-left: -16px;
+          padding-right: 16px;
+          padding-left: 16px;
         }
         .hide-mobile {
           display: none;
@@ -344,8 +619,9 @@
     <main class="shell">
       <header class="top">
         <div>
+          <div class="eyebrow">Reseller workspace</div>
           <h1>Account inventory</h1>
-          <div class="muted" id="identity">Loading...</div>
+          <div class="muted" id="identity">Loading your inventory...</div>
         </div>
         <div class="actions">
           <button class="btn secondary" id="refresh">Refresh</button
@@ -359,72 +635,70 @@
       ></div>
       <section class="metrics">
         <div class="metric">
-          <span class="muted">Received</span><strong id="total">0</strong>
+          <span class="muted">Total accounts</span><strong id="total">0</strong
+          ><small>Assigned to your workspace</small>
         </div>
         <div class="metric">
-          <span class="muted">Need connecting</span
-          ><strong id="needs">0</strong>
+          <span class="muted">Needs action</span><strong id="needs">0</strong
+          ><small>Accounts waiting for a connection</small>
         </div>
         <div class="metric">
-          <span class="muted">Connection ready</span
-          ><strong id="ready">0</strong>
+          <span class="muted">Ready to list</span><strong id="ready">0</strong
+          ><small>Connections complete</small>
         </div>
         <div class="metric">
-          <span class="muted">Sold</span><strong id="sold">0</strong>
+          <span class="muted">Sold</span><strong id="sold">0</strong
+          ><small>Marked as delivered</small>
         </div>
       </section>
       <section class="panel">
         <div class="toolbar">
-          <div>
-            <label for="q">Search</label
-            ><input id="q" type="search" placeholder="Login or game" />
+          <div class="toolbar-head">
+            <div>
+              <h2>Your accounts</h2>
+              <div class="muted">Open an account to review drops and connection steps.</div>
+            </div>
+            <button class="btn secondary small" id="clearFilters" type="button">Clear filters</button>
           </div>
-          <div>
-            <label for="status">Status</label
-            ><select id="status">
-              <option value="">All statuses</option>
-              <option>received</option>
-              <option>listed</option>
-              <option>sold</option>
-              <option>returned</option>
-            </select>
+          <div class="filters">
+            <div>
+              <label for="q">Search accounts</label
+              ><input id="q" type="search" placeholder="Search by login or game" />
+            </div>
+            <div>
+              <label for="status">Delivery status</label
+              ><select id="status">
+                <option value="">All statuses</option>
+                <option>received</option>
+                <option>listed</option>
+                <option>sold</option>
+                <option>returned</option>
+              </select>
+            </div>
+            <div>
+              <label for="game">Game</label
+              ><select id="game">
+                <option value="">All games</option>
+              </select>
+            </div>
+            <div>
+              <label for="connect">Connection</label
+              ><select id="connect">
+                <option value="">All accounts</option>
+                <option value="true">Needs connecting</option>
+                <option value="false">Ready to list</option>
+              </select>
+            </div>
           </div>
-          <div>
-            <label for="game">Game</label
-            ><select id="game">
-              <option value="">All games</option>
-            </select>
-          </div>
-          <div>
-            <label for="connect">Connection</label
-            ><select id="connect">
-              <option value="">All accounts</option>
-              <option value="true">Needs connecting</option>
-              <option value="false">Connection ready</option>
-            </select>
+          <div class="filter-actions">
+            <span class="filter-count" id="pages">0 accounts</span>
+            <span class="muted">Newest received first</span>
           </div>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Account</th>
-                <th>Game</th>
-                <th>Connection</th>
-                <th>Status</th>
-                <th class="hide-mobile">Received</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="rows">
-              <tr>
-                <td colspan="6" class="empty">Loading inventory...</td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="account-grid" id="rows">
+          <div class="empty">Loading inventory...</div>
         </div>
         <div class="pager">
-          <span class="muted" id="pages">0 accounts</span>
           <div class="actions">
             <button class="btn secondary small" id="prev">Previous</button
             ><button class="btn secondary small" id="next">Next</button>
@@ -501,6 +775,15 @@
             .join("");
         $("game").value = old;
       }
+      function statusClass(status) {
+        return status === "sold" ? "sold" : status === "listed" ? "ready" : "";
+      }
+      function statusLabel(status) {
+        return status ? status.charAt(0).toUpperCase() + status.slice(1) : "Received";
+      }
+      function connectionLabel(account) {
+        return account.needsConnect ? "Needs connecting" : "Ready to list";
+      }
       function query() {
         const p = new URLSearchParams({ page: S.page, limit: 25 });
         for (const [id, key] of [
@@ -521,10 +804,10 @@
           ? rows
               .map((a) => {
                 const r = a.drops?.topReward;
-                return `<tr><td><div class="account">${r?.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong class="mono">${esc(a.login)}</strong><div class="muted">${a.drops?.count || 0} drops${r ? ` - ${esc(r.name)}` : ""}</div></div></div></td><td>${esc(a.game || "Unspecified")}</td><td>${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}</td><td>${a.showcaseOnly ? badge("Showcase") : badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}</td><td class="hide-mobile">${esc(date(a.receivedAt))}</td><td><button class="btn secondary small" data-open="${esc(a.id)}">Open</button></td></tr>`;
+                return `<article class="account-card"><div>${r?.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}</div><div class="account-main"><strong class="mono account-name">${esc(a.login)}</strong><div class="account-game">${esc(a.game || "Unspecified game")}</div><div class="account-meta">${a.needsConnect ? badge(connectionLabel(a), "warn") : badge(connectionLabel(a), "ready")}${a.showcaseOnly ? badge("Showcase") : badge(statusLabel(a.resellerStatus), statusClass(a.resellerStatus))}</div></div><div class="account-side"><span class="drop-count">${a.drops?.count || 0} drops</span><button class="btn secondary small" data-open="${esc(a.id)}">View account</button></div></article>`;
               })
               .join("")
-          : '<tr><td colspan="6" class="empty">No accounts match these filters.</td></tr>';
+          : '<div class="empty">No accounts match these filters.</div>';
         $("pages").textContent =
           `${d.pagination.total || 0} accounts - page ${S.page} of ${S.pages}`;
         $("prev").disabled = S.page <= 1;
@@ -558,17 +841,32 @@
         $("title").textContent = a.login || "Account";
         $("meta").textContent =
           `${a.game || "Unspecified game"} - received ${date(a.receivedAt)}`;
+        const totalDrops = Number(a.dropCount || 0);
+        const connectedDrops = (a.connectSummary || []).reduce((sum, g) => sum + Number(g.connected || 0), 0);
+        const requiredDrops = (a.connectSummary || []).reduce((sum, g) => sum + Number(g.total || 0), 0);
         const groups =
           (a.dropGroups || [])
-            .map(
-              (g) =>
-                `<div><h3>${esc(g.game)}</h3>${g.rewards.map((r) => `<div class="reward">${r.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong>${esc(r.name)}</strong><div class="muted">${r.requiredAccountLink ? `Link ${esc(r.requiredAccountLink)}` : "No publisher link required"}${r.count > 1 ? ` - ${r.count}` : ""}</div></div>${r.connected || r.state === "connected" ? badge("Connected", "ready") : r.state === "connect" ? badge("Connect", "warn") : badge("Claimed")}</div>`).join("")}</div>`,
-            )
+            .map((g, index) => {
+              const rewards = g.rewards || [];
+              const uniqueLinks = [...new Set(rewards.map((r) => r.requiredAccountLink).filter(Boolean))];
+              const connectable = rewards.filter((r) => r.state === "connect" && !r.connected).length;
+              return `<details class="game-group" ${index === 0 ? "open" : ""}><summary><div><strong>${esc(g.game)}</strong><div class="group-meta"><span class="muted">${rewards.length} items</span>${connectable ? badge(`${connectable} to connect`, "warn") : badge("All reviewed", "ready")}</div></div><span class="muted">${uniqueLinks.length || 0} publisher link${uniqueLinks.length === 1 ? "" : "s"}</span></summary><div class="game-group-body">${rewards.map((r) => `<div class="reward">${r.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong class="reward-name">${esc(r.name)}${r.count > 1 ? ` ×${r.count}` : ""}</strong><div class="reward-link">${r.requiredAccountLink ? esc(r.requiredAccountLink) : "No publisher link required"}</div></div>${r.connected || r.state === "connected" ? badge("Connected", "ready") : r.state === "connect" ? badge("Connect", "warn") : badge("Claimed")}</div>`).join("")}</div></details>`;
+            })
             .join("") ||
           '<div class="muted">No drop records for this account.</div>';
+        const status = a.showcaseOnly ? badge("Showcase") : badge(statusLabel(a.resellerStatus), statusClass(a.resellerStatus));
+        const connection = a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready to list", "ready");
+        const summary = `<div class="account-summary"><div class="summary-item"><span class="muted">Drops</span><strong>${totalDrops}</strong></div><div class="summary-item"><span class="muted">Connected</span><strong>${connectedDrops || (a.needsConnect ? 0 : requiredDrops || totalDrops)}</strong></div><div class="summary-item"><span class="muted">Received</span><strong>${esc(date(a.receivedAt))}</strong></div></div>`;
+        const connectionChecklist = (a.connectSummary || []).map((g) => {
+          const total = Number(g.total || 0);
+          const connected = Math.min(total, Number(g.connected || 0));
+          const percent = total ? Math.round((connected / total) * 100) : 0;
+          return `<div class="check-item"><div><strong>${esc(g.game || "Other")}</strong><div class="muted">${g.requiredAccountLink ? esc(g.requiredAccountLink) : "No publisher link required"}</div><div class="progress"><span style="width:${percent}%"></span></div></div><div>${percent === 100 ? badge("Complete", "ready") : badge(`${connected}/${total}`, "warn")}</div></div>`;
+        }).join("");
+        const checklist = connectionChecklist ? `<div class="checklist">${connectionChecklist}</div>` : "";
         $("detail").innerHTML = a.showcaseOnly
-          ? `<section class="section"><div class="actions">${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}${badge("Showcase")}<span class="muted">Read-only account showcase</span></div></section><section class="section"><h3>Connection checklist</h3>${groups}</section>`
-          : `<section class="section"><div class="actions">${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}${badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}<span class="muted">Verified ${esc(date(a.lastVerifiedAt))}</span></div></section><section class="section"><h3>Delivery status</h3><div class="grid"><div><label>Status</label><select id="detailStatus"><option>received</option><option>listed</option><option>sold</option><option>returned</option></select></div><div><label>Note</label><input id="detailNote" maxlength="500" value="${esc(a.resellerNote || "")}"></div></div><div class="actions" style="margin-top:10px"><button class="btn small" id="save">Save status</button><button class="btn secondary small" id="verify">Verify live</button></div></section><section class="section"><div class="actions"><h3 style="margin:0">Credentials</h3><button class="btn secondary small" id="reveal">Reveal credentials</button></div><div class="creds" id="creds"></div></section><section class="section"><h3>Connection checklist</h3>${groups}</section>`;
+          ? `<section class="section"><div class="actions">${connection}${status}<span class="muted">Read-only showcase</span></div>${summary}</section><section class="section"><h3>Connection overview</h3>${checklist || '<div class="muted">No connection steps recorded.</div>'}</section><section class="section"><h3>Items in this account</h3>${groups}</section>`
+          : `<section class="section"><div class="actions">${connection}${status}<span class="muted">Verified ${esc(date(a.lastVerifiedAt))}</span></div>${summary}</section><section class="section"><h3>Delivery status</h3><div class="grid"><div><label for="detailStatus">Status</label><select id="detailStatus"><option>received</option><option>listed</option><option>sold</option><option>returned</option></select></div><div><label for="detailNote">Note</label><input id="detailNote" maxlength="500" value="${esc(a.resellerNote || "")}"></div></div><div class="actions" style="margin-top:10px"><button class="btn small" id="save">Save status</button><button class="btn secondary small" id="verify">Verify live</button></div></section><section class="section"><div class="actions"><h3 style="margin:0">Credentials</h3><button class="btn secondary small" id="reveal">Reveal credentials</button></div><div class="creds" id="creds"></div></section><section class="section"><h3>Connection overview</h3>${checklist || '<div class="muted">No connection steps recorded.</div>'}</section><section class="section"><h3>Items in this account</h3>${groups}</section>`;
         if (!a.showcaseOnly) {
           $("detailStatus").value = a.resellerStatus || "received";
           $("save").onclick = saveStatus;
@@ -694,6 +992,14 @@
         }
       };
       $("refresh").onclick = load;
+      $("clearFilters").onclick = () => {
+        $("q").value = "";
+        $("status").value = "";
+        $("game").value = "";
+        $("connect").value = "";
+        S.page = 1;
+        loadRows().catch((e) => toast(e.message, true));
+      };
       $("close").onclick = closeDrawer;
       $("backdrop").onclick = closeDrawer;
       $("logout").onclick = async () => {
