@@ -46,13 +46,42 @@
 
   // ---- renters list ----
 
+  // The renter picker is a real <select>, not an <input list=..>/<datalist>.
+  // iOS Safari never opens a datalist as a tappable dropdown — its suggestions
+  // only appear in a strip above the keyboard once you type a matching prefix,
+  // with nothing on screen to say they exist. On a phone the field therefore
+  // looked inert, and since quickFarm() refuses to submit without an exact
+  // username match, Quick farm could not be used at all without already knowing
+  // how a renter is spelled. A select gets the native picker everywhere, the
+  // same control as the "Farm for" field beside it.
+  function fillRenterSelect(rs) {
+    const sel = $("qRenter");
+    if (!sel) return;
+    // Renters reload on the global refresh and after every successful start, so
+    // rewriting the options would drop a half-filled form's chosen renter.
+    const chosen = sel.value;
+    sel.innerHTML =
+      '<option value="">Choose a renter</option>' +
+      rs
+        .map((r) => {
+          const u = esc(r.username);
+          // Still listed — their bot may be exactly what needs attention — but
+          // labelled, so neither is mistaken for a normal target.
+          const flag = r.status === "suspended" ? " (suspended)" : r.expired ? " (expired)" : "";
+          return '<option value="' + u + '">' + u + flag + "</option>";
+        })
+        .join("");
+    // Only restore a choice that still exists; a removed renter falls back to
+    // the placeholder rather than silently keeping a dead value.
+    if (chosen && rs.some((r) => String(r.username || "") === chosen)) sel.value = chosen;
+  }
+
   async function loadRenters() {
     try {
       const d = await api("/renters");
       const rs = d.renters || [];
       quickRenters = rs.slice();
-      const qOptions = $("qRenterOptions");
-      if (qOptions) qOptions.innerHTML = rs.map((r) => '<option value="' + esc(r.username) + '"></option>').join("");
+      fillRenterSelect(rs);
       const blocked = rs.filter((r) => r.status === "suspended" || r.expired).length;
       RT.setMetric("Renters", rs.length, blocked ? blocked + " blocked or expired" : "All access active", blocked ? "warn" : "good");
       if (!rs.length) {

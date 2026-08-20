@@ -413,8 +413,45 @@ test("no timers are left running", async () => {
 test("Quick farm keeps account lookup and game search compact", () => {
   assert.match(PAGE, /id="qUser"/, "Quick farm username field missing");
   assert.match(PAGE, /id="qGame"[^>]*list="qGameOptions"/, "Quick farm game typeahead missing");
-  assert.match(SRC.detail, /id="qRenter"|qRenterOptions/, "Quick farm renter selector missing");
+  assert.match(SRC.detail, /fillRenterSelect/, "Quick farm renter selector missing");
   assert.match(SRC.detail, /renters\/game-search\?q=/, "Quick farm does not call game search");
   assert.match(SRC.detail, /games\.slice\(0, 20\)/, "game suggestions are not capped");
   assert.match(PAGE, /data-act="quickFarm"/, "Quick farm action missing");
+});
+
+// iOS Safari never opens a <datalist> as a tappable dropdown — its suggestions
+// only surface in a strip above the keyboard once a matching prefix is typed.
+// The renter field was an <input list=..>, so on a phone it looked inert, and
+// quickFarm() refuses to submit without an exact username match: Quick farm was
+// unusable on mobile unless you already knew how a renter was spelled. The game
+// field stays a typeahead on purpose (it searches server-side), but the renter
+// list is small and fixed, so it must stay a real <select>.
+test("the Quick farm renter field is a native select, not a datalist", () => {
+  assert.match(PAGE, /<select id="qRenter">/, "renter field is not a <select>");
+  assert.doesNotMatch(
+    PAGE,
+    /id="qRenter"[^>]*list=/,
+    "renter field is back on a datalist — iOS cannot open one",
+  );
+  assert.doesNotMatch(PAGE, /qRenterOptions/, "stale renter datalist left behind");
+  assert.match(
+    PAGE,
+    /<option value="">Choose a renter<\/option>/,
+    "renter select has no empty placeholder, so it would submit the first renter by default",
+  );
+});
+
+// loadRenters() re-runs on the global refresh and after every successful start,
+// so rebuilding the options must not silently drop a half-filled form's choice.
+test("repopulating the renter select keeps the operator's current choice", () => {
+  assert.match(
+    SRC.detail,
+    /const chosen = sel\.value;/,
+    "fillRenterSelect does not read the current selection",
+  );
+  assert.match(
+    SRC.detail,
+    /if \(chosen && rs\.some\(/,
+    "fillRenterSelect does not restore the selection after rebuilding options",
+  );
 });
