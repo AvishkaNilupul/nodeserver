@@ -1818,17 +1818,18 @@
       // The cross-archive views (overview / by game / by item) are served from a
       // rollup the server rebuilds in the background, so a read right after a
       // write can still show the pre-write numbers. Actions where that would
-      // read as "nothing happened" set this, and the next load of those views
-      // asks the server to wait for a rebuild instead.
-      let wantFreshArchive = false;
-      function freshParam(sep) {
-        if (!wantFreshArchive) return "";
-        // Consumed on use: the rebuild it forces produces the rollup every
-        // other view then reads, so asking twice would just queue a second
-        // full pass over the archive for no new information.
-        wantFreshArchive = false;
-        return (sep || "?") + "fresh=1";
-      }
+      // read as "nothing happened" pass { fresh: true } to loadOverview(), which
+      // asks the server to wait for a rebuild.
+      //
+      // This is deliberately an ARGUMENT and not a shared flag. It used to be a
+      // module-level boolean consumed by whichever view loaded first, so opening
+      // another tab while a refresh was in flight let that tab eat the flag and
+      // the overview quietly read pre-write numbers. It cannot simply be sent on
+      // all three either: ?fresh=1 does not join an in-flight build (it must not
+      // — that build may predate the write being waited on), so three views
+      // asking would queue three full passes over the archive. One awaited
+      // loader asks; the rebuild it forces is the rollup every other view then
+      // reads.
       function invalidateClientViews() {
         Object.keys(viewLoaded).forEach((key) => (viewLoaded[key] = false));
         itemLoadedKey = "";
@@ -1864,10 +1865,12 @@
         return h >= 1 ? h + "h" : Math.round(ms / 60000) + "m";
       }
 
-      async function loadOverview() {
+      async function loadOverview(opts) {
+        const fresh = !!(opts && opts.fresh);
         try {
-          const o = (await api("/drops-archive/overview" + freshParam()))
-            .overview;
+          const o = (
+            await api("/drops-archive/overview" + (fresh ? "?fresh=1" : ""))
+          ).overview;
           $("overview").innerHTML =
             '<div class="stat accent"><b>' +
             o.totalItemsHeld +
@@ -2078,8 +2081,7 @@
               "&limit=" +
               ITEM_PAGE_SIZE +
               "&offset=" +
-              offset +
-              freshParam("&"),
+              offset,
           );
         } catch (e) {
           if (requestId !== itemRequestId) return;
@@ -2582,7 +2584,7 @@
         if (viewLoaded.games) return;
         let data;
         try {
-          data = await api("/drops-archive/by-game" + freshParam());
+          data = await api("/drops-archive/by-game");
         } catch (e) {
           $("gameRows").innerHTML =
             '<tr><td colspan="6" class="empty">' +
@@ -3369,12 +3371,7 @@
           // The import wrote for minutes after its POST returned, so any
           // rebuild that POST triggered missed most of it — ask for one that
           // starts now, and land it before the tab reloads.
-          wantFreshArchive = true;
-          try {
-            await loadOverview();
-          } finally {
-            wantFreshArchive = false;
-          }
+          await loadOverview({ fresh: true });
           loadProgress();
           if (activeTab === "accounts") loadAccounts();
         } catch (err) {
@@ -3390,15 +3387,13 @@
         // Refresh is the operator explicitly asking for current numbers, so it
         // waits for a rebuilt rollup rather than re-rendering the one already
         // in hand. Awaited before the tab reload so the tab reads the new one.
-        wantFreshArchive = true;
         const btn = $("refreshBtn");
         const label = btn.textContent;
         btn.disabled = true;
         btn.textContent = "Refreshing…";
         try {
-          await loadOverview();
+          await loadOverview({ fresh: true });
         } finally {
-          wantFreshArchive = false;
           btn.disabled = false;
           btn.textContent = label;
         }
