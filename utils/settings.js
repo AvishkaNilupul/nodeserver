@@ -25,6 +25,18 @@ const AUTO_FARM_DEFAULTS = {
   // isNoClaimGame), so "overwatch" also catches "Overwatch 2" and "rainbow six"
   // catches "Tom Clancy's Rainbow Six Siege". Editable from that tab.
   noClaimGames: ["overwatch", "rainbow six"],
+  // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
+  // account on — World of Tanks and UFL sell too thin to be worth burning new
+  // accounts. For these, the brain only ever REUSES accounts it has already
+  // used for that same game: it restarts the game's existing auto-bots and,
+  // when it wants more, re-claims ONLY the pool accounts it previously farmed
+  // this game on (the "recycled after <game>" ones written back on retirement).
+  // It never draws a brand-new account from the pool for them; if none of the
+  // game's own accounts are free it simply waits (a retryable skip). Matched by
+  // EXACT normalised label (see isReuseOnlyGame) — the list carries short tokens
+  // like "ufl" that a substring test could catch inside an unrelated game name.
+  // Editable via GET/POST /api/noclaim-farm/reuse-only-games (superadmin).
+  reuseOnlyGames: ["world of tanks", "ufl"],
   // Suspended-account retirement (utils/suspendedAccounts.js). Classifying and
   // releasing runs every tick and is reversible, so it has no switch; the
   // permanent delete does, and ships OFF. Turning it on removes every account
@@ -183,6 +195,20 @@ function isNoClaimGame(game) {
   });
 }
 
+// True when a game is on the reuse-only list — the auto-farmer may farm it but
+// ONLY by reusing accounts it has already used for that same game (its existing
+// auto-bots, plus its own "recycled after <game>" pool accounts). It must never
+// claim a fresh pool account for it. Single source of truth for the claim gate
+// in utils/autoFarmer.js. Unlike isNoClaimGame this matches by EXACT normalised
+// label, not substring: the list carries short tokens like "ufl" that a
+// substring test could catch inside an unrelated game name.
+function isReuseOnlyGame(game) {
+  const list = getAutoFarm().reuseOnlyGames || [];
+  const g = normGameName(game);
+  if (!g) return false;
+  return list.some((x) => normGameName(x) === g);
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -192,4 +218,5 @@ module.exports = {
   setAutoFarm,
   normGameName,
   isNoClaimGame,
+  isReuseOnlyGame,
 };
