@@ -267,6 +267,13 @@ function renderBots(bots,force){
     wrap.classList.toggle('open',open);
     var body=wrap.querySelector('.body');
     if(open && (force || !body.getAttribute('data-rendered'))) renderBotBody(b.id);
+    // Logs are the one tab worth re-reading on every poll — a frozen log pane
+    // reads as a hung bot, and it's a cheap tail of a container log. Only the
+    // <pre> is swapped, so the row stays open and the tab strip is untouched.
+    // The other tabs are deliberately left alone: Drops queries Twitch once per
+    // account and Social renders a cover image, and re-firing those every 6s is
+    // exactly what made the old rebuild-everything poll so expensive.
+    else if(open && openBots[b.id].tab==='logs') refreshLogs(b.id);
   });
   Array.prototype.slice.call(el.querySelectorAll('.bot')).forEach(function(w){
     if(!seen[w.getAttribute('data-bot')]) w.remove();
@@ -423,6 +430,42 @@ async function loadLogs(id,c){
   try{ var j=await api('/api/noclaim-farm/bots/'+id+'/logs?tail=200');
     c.innerHTML='<pre class="log">'+esc(j.container||'(no logs yet)')+'</pre>';
   }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+
+// Re-read an open Logs tab in place, from the 6s state poll. Deliberately not
+// loadLogs(): that replaces the whole pane, and the pane scrolls (max-height
+// 280px), so it would yank the operator back to the top every tick. This keeps
+// the scroll offset — and keeps it pinned to the bottom when that's where it
+// already was, which is where you watch a bot from.
+async function refreshLogs(id){
+  var c=$('tabc-'+id); if(!c) return;
+  if(c.getAttribute('data-logbusy')) return;        // a tick is still in flight
+  var st=openBots[id]; if(!st||st.tab!=='logs') return;
+  var pre=c.querySelector('pre.log');
+  var atBottom=pre?(pre.scrollHeight-pre.scrollTop-pre.clientHeight<24):true;
+  var top=pre?pre.scrollTop:0;
+  c.setAttribute('data-logbusy','1');
+  var j=null,err=null;
+  try{ j=await api('/api/noclaim-farm/bots/'+id+'/logs?tail=200'); }
+  catch(e){ err=e; }
+  finally{ c.removeAttribute('data-logbusy'); }
+  // Both can change while the request is out: the operator can switch tabs (the
+  // Social tab also renders a pre.log, so writing blind would overwrite a post)
+  // or collapse and reopen the row, which builds a new container element.
+  var live=openBots[id];
+  if(!live||live.tab!=='logs'||$('tabc-'+id)!==c) return;
+  if(err){
+    // A failed tick leaves the last good tail on screen rather than replacing it
+    // with an error; only report when there is nothing to keep.
+    if(!c.querySelector('pre.log'))
+      c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(err.message)+'</div>';
+    return;
+  }
+  var next=c.querySelector('pre.log');
+  // No pre yet means the pane is showing an earlier error — a good tick clears it.
+  if(!next){ c.innerHTML='<pre class="log"></pre>'; next=c.querySelector('pre.log'); }
+  next.textContent=j.container||'(no logs yet)';
+  next.scrollTop=atBottom?next.scrollHeight:top;
 }
 
 // --- no-claim game list ---
