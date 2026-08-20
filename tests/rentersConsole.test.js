@@ -412,7 +412,7 @@ test("no timers are left running", async () => {
 
 test("Quick farm keeps account lookup and game search compact", () => {
   assert.match(PAGE, /id="qUser"/, "Quick farm username field missing");
-  assert.match(PAGE, /id="qGame"[^>]*list="qGameOptions"/, "Quick farm game typeahead missing");
+  assert.match(PAGE, /id="qGameMenu"/, "Quick farm game typeahead missing");
   assert.match(SRC.detail, /fillRenterSelect/, "Quick farm renter selector missing");
   assert.match(SRC.detail, /renters\/game-search\?q=/, "Quick farm does not call game search");
   assert.match(SRC.detail, /games\.slice\(0, 20\)/, "game suggestions are not capped");
@@ -438,6 +438,32 @@ test("the Quick farm renter field is a native select, not a datalist", () => {
     PAGE,
     /<option value="">Choose a renter<\/option>/,
     "renter select has no empty placeholder, so it would submit the first renter by default",
+  );
+});
+
+// The game field is the other half of the same mobile problem. It degraded more
+// quietly than the renter field — quickFarm() only requires a non-empty game
+// string, so typing still submitted — which is worse, not better: a typo farms a
+// game no campaign matches. A <select> is wrong here (long list, searched
+// server-side), so it is a hand-rolled menu.
+test("the Quick farm game field uses a real menu, not a datalist", () => {
+  assert.doesNotMatch(PAGE, /<datalist/, "a datalist is back — iOS cannot open one");
+  assert.doesNotMatch(PAGE, /qGameOptions/, "stale game datalist left behind");
+  assert.doesNotMatch(SRC.detail, /qGameOptions/, "detail.js still fills a game datalist");
+  assert.match(PAGE, /id="qGameMenu"[^>]*hidden/, "game menu is not hidden by default");
+  assert.match(SRC.detail, /function renderGameMenu/, "nothing renders the game menu");
+  // pointerdown, not click: it covers touch and fires before the input's blur,
+  // which is what stops the menu closing out from under a tap.
+  assert.match(
+    SRC.detail,
+    /addEventListener\("pointerdown"/,
+    "game menu selection is not wired on pointerdown",
+  );
+  // A game the search never returned must still be submittable.
+  assert.match(
+    SRC.detail,
+    /e\.key === "Enter" && gameMenuIndex >= 0/,
+    "Enter commits even with no highlighted row, which would fight free typing",
   );
 });
 
