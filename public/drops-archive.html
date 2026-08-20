@@ -1815,6 +1815,20 @@
         badtokens: false,
         duplicates: false,
       };
+      // The cross-archive views (overview / by game / by item) are served from a
+      // rollup the server rebuilds in the background, so a read right after a
+      // write can still show the pre-write numbers. Actions where that would
+      // read as "nothing happened" set this, and the next load of those views
+      // asks the server to wait for a rebuild instead.
+      let wantFreshArchive = false;
+      function freshParam(sep) {
+        if (!wantFreshArchive) return "";
+        // Consumed on use: the rebuild it forces produces the rollup every
+        // other view then reads, so asking twice would just queue a second
+        // full pass over the archive for no new information.
+        wantFreshArchive = false;
+        return (sep || "?") + "fresh=1";
+      }
       function invalidateClientViews() {
         Object.keys(viewLoaded).forEach((key) => (viewLoaded[key] = false));
         itemLoadedKey = "";
@@ -1852,7 +1866,8 @@
 
       async function loadOverview() {
         try {
-          const o = (await api("/drops-archive/overview")).overview;
+          const o = (await api("/drops-archive/overview" + freshParam()))
+            .overview;
           $("overview").innerHTML =
             '<div class="stat accent"><b>' +
             o.totalItemsHeld +
@@ -2063,7 +2078,8 @@
               "&limit=" +
               ITEM_PAGE_SIZE +
               "&offset=" +
-              offset,
+              offset +
+              freshParam("&"),
           );
         } catch (e) {
           if (requestId !== itemRequestId) return;
@@ -2081,12 +2097,20 @@
         lastItems = append ? lastItems.concat(page) : page;
         itemLoadedKey = key;
         const total = Number(data.total) || lastItems.length;
+        // These counts come from a rollup rebuilt in the background, so say how
+        // old they are once that's long enough to matter. Without it, numbers
+        // that lag a scan by a minute look like a bug rather than a refresh
+        // that hasn't landed yet.
+        const age = data.builtAt
+          ? Date.now() - new Date(data.builtAt).getTime()
+          : 0;
         $("itemCount").textContent = lastItems.length
           ? lastItems.length +
             " of " +
             total +
             (data.truncated ? "+" : "") +
-            " distinct item(s)"
+            " distinct item(s)" +
+            (age > 90000 ? " · counts from " + timeAgo(data.builtAt) : "")
           : "";
         renderItemsGrid(append, page);
         $("loadMoreItems").hidden = !data.hasMore;
@@ -2558,7 +2582,7 @@
         if (viewLoaded.games) return;
         let data;
         try {
-          data = await api("/drops-archive/by-game");
+          data = await api("/drops-archive/by-game" + freshParam());
         } catch (e) {
           $("gameRows").innerHTML =
             '<tr><td colspan="6" class="empty">' +
@@ -3342,7 +3366,15 @@
                 : ""),
             "ok",
           );
-          loadOverview();
+          // The import wrote for minutes after its POST returned, so any
+          // rebuild that POST triggered missed most of it — ask for one that
+          // starts now, and land it before the tab reloads.
+          wantFreshArchive = true;
+          try {
+            await loadOverview();
+          } finally {
+            wantFreshArchive = false;
+          }
           loadProgress();
           if (activeTab === "accounts") loadAccounts();
         } catch (err) {
@@ -3353,9 +3385,23 @@
         }
       });
 
-      $("refreshBtn").addEventListener("click", () => {
+      $("refreshBtn").addEventListener("click", async () => {
         invalidateClientViews();
-        loadOverview();
+        // Refresh is the operator explicitly asking for current numbers, so it
+        // waits for a rebuilt rollup rather than re-rendering the one already
+        // in hand. Awaited before the tab reload so the tab reads the new one.
+        wantFreshArchive = true;
+        const btn = $("refreshBtn");
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Refreshing…";
+        try {
+          await loadOverview();
+        } finally {
+          wantFreshArchive = false;
+          btn.disabled = false;
+          btn.textContent = label;
+        }
         loadProgress();
         switchTab(activeTab);
       });
