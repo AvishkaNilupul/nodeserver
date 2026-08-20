@@ -262,6 +262,12 @@
           icon: ICONS.renters,
           superOnly: true,
         },
+        {
+          href: "/resellers.html",
+          label: "Resellers",
+          icon: ICONS.renters,
+          superOnly: true,
+        },
       ],
     },
   ];

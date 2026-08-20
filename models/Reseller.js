@@ -17,6 +17,7 @@ const resellerSchema = new mongoose.Schema(
     },
     accessStart: { type: Date, default: null },
     accessEnd: { type: Date, default: null, index: true },
+    // Zero means unlimited; assignment enforces a cap only when this is > 0.
     maxAccounts: { type: Number, default: 0, min: 0 },
     lastLoginAt: { type: Date, default: null },
     createdBy: { type: String, default: "" },
