@@ -242,6 +242,57 @@ test("single username lookup reads live account data without reserving it", asyn
   assert.equal((await BotAccount.findById(account._id).lean()).soldAt, null);
 });
 
+test("single username lookup showcases sold accounts without making them assignable", async () => {
+  const cookie = await sessionCookie();
+  const reseller = await createReseller({
+    username: "showcase-reseller",
+    password: "password1",
+  });
+  const account = await makeAccount("showcase-sold", { soldAt: new Date() });
+  await addDrop(account, { game: "FORTNITE", count: 3 });
+
+  const result = await request(
+    `/resellers/${reseller._id}/assign/lookup?login=showcase-sold`,
+    { cookie },
+  );
+  assert.equal(result.response.status, 200);
+  assert.equal(result.payload.success, true);
+  assert.equal(result.payload.account.login, "showcase-sold");
+  assert.equal(result.payload.account.game, "FORTNITE");
+  assert.equal(result.payload.account.drops, 1);
+  assert.equal(result.payload.account.assignable, false);
+  assert.equal(result.payload.account.status, "already sold");
+  assert.equal(
+    await ResellerAccount.countDocuments({ reseller: reseller._id }),
+    0,
+  );
+});
+
+test("showcase adds a sold account without changing its sale reservation", async () => {
+  const cookie = await sessionCookie();
+  const reseller = await createReseller({
+    username: "showcase-add",
+    password: "password1",
+  });
+  const account = await makeAccount("showcase-add-login", {
+    soldAt: new Date(),
+    soldToUsername: "buyer",
+  });
+  await addDrop(account, { game: "FORTNITE" });
+
+  const result = await request(`/resellers/${reseller._id}/showcase`, {
+    method: "POST",
+    cookie,
+    body: { login: account.login },
+  });
+  assert.equal(result.response.status, 201);
+  const row = await ResellerAccount.findOne({ reseller: reseller._id }).lean();
+  assert.equal(row.showcaseOnly, true);
+  const unchanged = await BotAccount.findById(account._id).lean();
+  assert.equal(unchanged.soldToUsername, "buyer");
+  assert.ok(unchanged.soldAt);
+});
+
 test("assign reports sold, assigned, bulk-held and active-listing accounts and continues", async () => {
   const cookie = await sessionCookie();
   const reseller = await createReseller({
@@ -430,6 +481,7 @@ test("a reseller session cannot access any reseller administration route", async
     ["POST", `/resellers/${id}/unsuspend`, {}],
     ["POST", `/resellers/${id}/assign/preview`, { logins: "x" }],
     ["POST", `/resellers/${id}/assign`, { logins: "x" }],
+    ["POST", `/resellers/${id}/showcase`, { login: "x" }],
     ["POST", `/resellers/${id}/reclaim`, { accountIds: [accountId] }],
     ["DELETE", `/resellers/${id}/accounts/${accountId}`],
     ["DELETE", `/resellers/${id}`],

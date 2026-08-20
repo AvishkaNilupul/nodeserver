@@ -243,6 +243,7 @@ router.get("/reseller/accounts", requireReseller, async (req, res) => {
         login: 1,
         game: 1,
         resellerStatus: 1,
+        showcaseOnly: 1,
         needsConnect: 1,
         receivedAt: 1,
         lastVerifiedAt: 1,
@@ -281,6 +282,7 @@ router.get("/reseller/accounts", requireReseller, async (req, res) => {
           login: row.login || "",
           game: row.game || "",
           resellerStatus: row.resellerStatus,
+          showcaseOnly: row.showcaseOnly === true,
           needsConnect: row.needsConnect === true,
           receivedAt: row.receivedAt || null,
           lastVerifiedAt: row.lastVerifiedAt || null,
@@ -355,6 +357,7 @@ router.get("/reseller/accounts/:id", requireReseller, async (req, res) => {
         login: account.login || "",
         game: account.game || "",
         resellerStatus: account.resellerStatus,
+        showcaseOnly: account.showcaseOnly === true,
         resellerNote: account.resellerNote || "",
         resellerSoldAt: account.resellerSoldAt || null,
         receivedAt: account.receivedAt || null,
@@ -386,6 +389,11 @@ router.get(
           .status(404)
           .json({ success: false, message: "Account not found" });
       }
+      if (account.showcaseOnly)
+        return res.status(403).json({
+          success: false,
+          message: "Showcase accounts are read-only",
+        });
       const bot = await BotAccount.findById(account.botAccount, {
         login: 1,
         clientSecret: 1,
@@ -427,6 +435,11 @@ router.post(
           .status(404)
           .json({ success: false, message: "Account not found" });
       }
+      if (account.showcaseOnly)
+        return res.status(403).json({
+          success: false,
+          message: "Showcase accounts are read-only",
+        });
       const status = String(req.body?.status || "");
       if (!STATUSES.has(status)) {
         return res.status(400).json({
@@ -475,6 +488,11 @@ router.post(
         .status(404)
         .json({ success: false, message: "Account not found" });
     }
+    if (account.showcaseOnly)
+      return res.status(403).json({
+        success: false,
+        message: "Showcase accounts are read-only",
+      });
     const checkedAt = new Date();
     try {
       const inventory = await twitchInventory.fetchInventory(

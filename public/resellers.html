@@ -840,7 +840,7 @@
               lookupAccount = data.account;
               showResult(
                 "lookupResult",
-                `${lookupAccount.login} · ${lookupAccount.game || "No game"} · ${lookupAccount.drops} drops · ${lookupAccount.needsConnect ? "needs connecting" : "ready"}`,
+                `${lookupAccount.login} · ${lookupAccount.game || "No game"} · ${lookupAccount.drops} drops · ${lookupAccount.needsConnect ? "needs connecting" : "ready"} · ${lookupAccount.status}`,
                 true,
               );
               lookupAssign.disabled = false;
@@ -856,19 +856,16 @@
             if (!lookupAccount) return;
             try {
               lookupAssign.disabled = true;
-              const a = await api("/resellers/" + id + "/assign", {
+              const a = await api("/resellers/" + id + "/showcase", {
                 method: "POST",
-                body: JSON.stringify({ logins: lookupAccount.login }),
+                body: JSON.stringify({ login: lookupAccount.login }),
               });
-              const skipped = (a.skipped || [])
-                .map((x) => `${x.login}: ${x.reason}`)
-                .join(", ");
               showResult(
                 "lookupResult",
-                a.assigned?.length
-                  ? `Added ${a.assigned[0].login}`
-                  : skipped || "Account was not added",
-                Boolean(a.assigned?.length),
+                a.existing
+                  ? `${a.account.login} is already in the showcase`
+                  : `Added ${a.account.login} to the showcase`,
+                true,
               );
               lookupAccount = null;
               await openDetail(id);

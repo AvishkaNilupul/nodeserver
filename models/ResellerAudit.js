@@ -16,6 +16,8 @@ const resellerAuditSchema = new mongoose.Schema(
         "mark_sold",
         "verify",
         "assign",
+        "showcase",
+        "reclaim_showcase",
         "reclaim",
         "status_change",
         "create",

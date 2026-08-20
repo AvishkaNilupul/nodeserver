@@ -100,10 +100,13 @@ async function botCredentialView(row, botsById, resellersById) {
     login: row.login || bot?.login || "",
     password: bot?.credPassword ? decrypt(bot.credPassword) || "" : "",
     email: bot?.credEmail ? decrypt(bot.credEmail) || "" : "",
-    token: row.clientSecret || bot?.clientSecret || "",
-    clientSecret: row.clientSecret || bot?.clientSecret || "",
+    token: row.showcaseOnly ? "" : row.clientSecret || bot?.clientSecret || "",
+    clientSecret: row.showcaseOnly
+      ? ""
+      : row.clientSecret || bot?.clientSecret || "",
     game: row.game || "",
     resellerStatus: row.resellerStatus,
+    showcaseOnly: row.showcaseOnly === true,
     resellerSoldAt: row.resellerSoldAt || null,
     resellerNote: row.resellerNote || "",
     receivedAt: row.receivedAt || null,
@@ -323,6 +326,16 @@ async function assignOne(reseller, check, req) {
 }
 
 async function reclaimRow(row, reseller, req) {
+  if (row.showcaseOnly === true) {
+    await ResellerAccount.deleteOne({ _id: row._id, reseller: reseller._id });
+    await audit({
+      reseller: reseller._id,
+      action: "reclaim_showcase",
+      accountLogin: row.login,
+      ip: req.ip || req.socket?.remoteAddress,
+    });
+    return;
+  }
   const resellerId = String(reseller._id);
   const bot = await BotAccount.findById(row.botAccount, {
     resellerId: 1,
@@ -680,34 +693,34 @@ router.get(
         return res
           .status(400)
           .json({ success: false, message: "Enter one username" });
-      const check = await eligibility(login, reseller);
-      if (!check.ok)
-        return res.status(422).json({
+      const bot = await BotAccount.findOne({ login: loginRegex(login) }).lean();
+      if (!bot)
+        return res.status(404).json({
           success: false,
-          message: check.reason,
-          reason: check.reason,
+          message: "Account not found",
+          reason: "not found",
           login,
         });
+      const check = await eligibility(login, reseller);
+      const snapshot = check.snapshot || (await connectSnapshot(bot._id));
+      const drops =
+        check.drops ?? (await DropLog.countDocuments({ account: bot._id }));
       const held = await ResellerAccount.countDocuments({
         reseller: reseller._id,
       });
-      const quota = quotaReason(reseller, held, 0);
-      if (quota)
-        return res.status(422).json({
-          success: false,
-          message: quota,
-          reason: quota,
-          login: check.login,
-        });
+      const quota = check.ok ? quotaReason(reseller, held, 0) : "";
+      const reason = check.ok ? quota || "" : check.reason;
+      const assignable = !reason;
       return res.json({
         success: true,
         account: {
-          login: check.bot.login || check.login,
-          game: check.snapshot.game,
-          drops: check.drops,
-          needsConnect: check.snapshot.needsConnect,
-          connectSummary: check.snapshot.connectSummary,
-          status: "assignable",
+          login: bot.login || login,
+          game: snapshot.game,
+          drops,
+          needsConnect: snapshot.needsConnect,
+          connectSummary: snapshot.connectSummary,
+          assignable,
+          status: assignable ? "assignable" : reason,
         },
       });
     } catch (err) {
@@ -716,6 +729,64 @@ router.get(
     }
   },
 );
+
+router.post("/resellers/:id/showcase", requireSuperadmin, async (req, res) => {
+  try {
+    if (badId(req.params.id))
+      return res.status(400).json({ success: false, message: "Bad reseller id" });
+    const reseller = await Reseller.findById(req.params.id);
+    if (!reseller)
+      return res.status(404).json({ success: false, message: "Reseller not found" });
+    const login = String(req.body?.login || "").trim().slice(0, 200);
+    if (!login || /[\r\n]/.test(login))
+      return res.status(400).json({ success: false, message: "Enter one username" });
+    const bot = await BotAccount.findOne({ login: loginRegex(login) }).lean();
+    if (!bot)
+      return res.status(404).json({ success: false, message: "Account not found" });
+    const existing = await ResellerAccount.findOne({
+      reseller: reseller._id,
+      botAccount: bot._id,
+    });
+    if (existing)
+      return res.json({
+        success: true,
+        existing: true,
+        account: { id: String(existing._id), login: existing.login },
+      });
+    const snapshot = await connectSnapshot(bot._id);
+    const drops = await DropLog.countDocuments({ account: bot._id });
+    const row = await ResellerAccount.create({
+      reseller: reseller._id,
+      botAccount: bot._id,
+      clientSecret: `showcase:${reseller._id}:${bot.clientSecret}`,
+      login: bot.login || login,
+      game: snapshot.game,
+      showcaseOnly: true,
+      needsConnect: snapshot.needsConnect,
+      connectSummary: snapshot.connectSummary,
+    });
+    await audit({
+      reseller: reseller._id,
+      action: "showcase",
+      accountLogin: row.login,
+      ip: req.ip || req.socket?.remoteAddress,
+      meta: { drops },
+    });
+    return res.status(201).json({
+      success: true,
+      existing: false,
+      account: { id: String(row._id), login: row.login, drops },
+    });
+  } catch (err) {
+    if (err?.code === 11000)
+      return res.status(409).json({
+        success: false,
+        message: "This account is already attached to a reseller",
+      });
+    console.error("reseller showcase error:", err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 router.post(
   "/resellers/:id/assign/preview",

@@ -521,7 +521,7 @@
           ? rows
               .map((a) => {
                 const r = a.drops?.topReward;
-                return `<tr><td><div class="account">${r?.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong class="mono">${esc(a.login)}</strong><div class="muted">${a.drops?.count || 0} drops${r ? ` - ${esc(r.name)}` : ""}</div></div></div></td><td>${esc(a.game || "Unspecified")}</td><td>${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}</td><td>${badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}</td><td class="hide-mobile">${esc(date(a.receivedAt))}</td><td><button class="btn secondary small" data-open="${esc(a.id)}">Open</button></td></tr>`;
+                return `<tr><td><div class="account">${r?.image ? `<img class="thumb" src="${esc(r.image)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}<div><strong class="mono">${esc(a.login)}</strong><div class="muted">${a.drops?.count || 0} drops${r ? ` - ${esc(r.name)}` : ""}</div></div></div></td><td>${esc(a.game || "Unspecified")}</td><td>${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}</td><td>${a.showcaseOnly ? badge("Showcase") : badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}</td><td class="hide-mobile">${esc(date(a.receivedAt))}</td><td><button class="btn secondary small" data-open="${esc(a.id)}">Open</button></td></tr>`;
               })
               .join("")
           : '<tr><td colspan="6" class="empty">No accounts match these filters.</td></tr>';
@@ -566,12 +566,15 @@
             )
             .join("") ||
           '<div class="muted">No drop records for this account.</div>';
-        $("detail").innerHTML =
-          `<section class="section"><div class="actions">${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}${badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}<span class="muted">Verified ${esc(date(a.lastVerifiedAt))}</span></div></section><section class="section"><h3>Delivery status</h3><div class="grid"><div><label>Status</label><select id="detailStatus"><option>received</option><option>listed</option><option>sold</option><option>returned</option></select></div><div><label>Note</label><input id="detailNote" maxlength="500" value="${esc(a.resellerNote || "")}"></div></div><div class="actions" style="margin-top:10px"><button class="btn small" id="save">Save status</button><button class="btn secondary small" id="verify">Verify live</button></div></section><section class="section"><div class="actions"><h3 style="margin:0">Credentials</h3><button class="btn secondary small" id="reveal">Reveal credentials</button></div><div class="creds" id="creds"></div></section><section class="section"><h3>Connection checklist</h3>${groups}</section>`;
-        $("detailStatus").value = a.resellerStatus || "received";
-        $("save").onclick = saveStatus;
-        $("verify").onclick = verify;
-        $("reveal").onclick = reveal;
+        $("detail").innerHTML = a.showcaseOnly
+          ? `<section class="section"><div class="actions">${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}${badge("Showcase")}<span class="muted">Read-only account showcase</span></div></section><section class="section"><h3>Connection checklist</h3>${groups}</section>`
+          : `<section class="section"><div class="actions">${a.needsConnect ? badge("Needs connecting", "warn") : badge("Ready", "ready")}${badge(a.resellerStatus, a.resellerStatus === "sold" ? "sold" : "")}<span class="muted">Verified ${esc(date(a.lastVerifiedAt))}</span></div></section><section class="section"><h3>Delivery status</h3><div class="grid"><div><label>Status</label><select id="detailStatus"><option>received</option><option>listed</option><option>sold</option><option>returned</option></select></div><div><label>Note</label><input id="detailNote" maxlength="500" value="${esc(a.resellerNote || "")}"></div></div><div class="actions" style="margin-top:10px"><button class="btn small" id="save">Save status</button><button class="btn secondary small" id="verify">Verify live</button></div></section><section class="section"><div class="actions"><h3 style="margin:0">Credentials</h3><button class="btn secondary small" id="reveal">Reveal credentials</button></div><div class="creds" id="creds"></div></section><section class="section"><h3>Connection checklist</h3>${groups}</section>`;
+        if (!a.showcaseOnly) {
+          $("detailStatus").value = a.resellerStatus || "received";
+          $("save").onclick = saveStatus;
+          $("verify").onclick = verify;
+          $("reveal").onclick = reveal;
+        }
       }
       async function openAccount(id) {
         $("backdrop").classList.add("open");

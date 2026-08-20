@@ -24,6 +24,9 @@ const resellerAccountSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Read-only reference used by the operator's showcase. It never claims
+    // the underlying BotAccount or changes DropLog sale ownership.
+    showcaseOnly: { type: Boolean, default: false, index: true },
     clientSecret: { type: String, required: true, unique: true, index: true },
     login: { type: String, default: "", index: true },
     game: { type: String, default: "", index: true },
