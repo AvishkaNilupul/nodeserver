@@ -46,13 +46,42 @@
 
   // ---- renters list ----
 
+  // The renter picker is a real <select>, not an <input list=..>/<datalist>.
+  // iOS Safari never opens a datalist as a tappable dropdown — its suggestions
+  // only appear in a strip above the keyboard once you type a matching prefix,
+  // with nothing on screen to say they exist. On a phone the field therefore
+  // looked inert, and since quickFarm() refuses to submit without an exact
+  // username match, Quick farm could not be used at all without already knowing
+  // how a renter is spelled. A select gets the native picker everywhere, the
+  // same control as the "Farm for" field beside it.
+  function fillRenterSelect(rs) {
+    const sel = $("qRenter");
+    if (!sel) return;
+    // Renters reload on the global refresh and after every successful start, so
+    // rewriting the options would drop a half-filled form's chosen renter.
+    const chosen = sel.value;
+    sel.innerHTML =
+      '<option value="">Choose a renter</option>' +
+      rs
+        .map((r) => {
+          const u = esc(r.username);
+          // Still listed — their bot may be exactly what needs attention — but
+          // labelled, so neither is mistaken for a normal target.
+          const flag = r.status === "suspended" ? " (suspended)" : r.expired ? " (expired)" : "";
+          return '<option value="' + u + '">' + u + flag + "</option>";
+        })
+        .join("");
+    // Only restore a choice that still exists; a removed renter falls back to
+    // the placeholder rather than silently keeping a dead value.
+    if (chosen && rs.some((r) => String(r.username || "") === chosen)) sel.value = chosen;
+  }
+
   async function loadRenters() {
     try {
       const d = await api("/renters");
       const rs = d.renters || [];
       quickRenters = rs.slice();
-      const qOptions = $("qRenterOptions");
-      if (qOptions) qOptions.innerHTML = rs.map((r) => '<option value="' + esc(r.username) + '"></option>').join("");
+      fillRenterSelect(rs);
       const blocked = rs.filter((r) => r.status === "suspended" || r.expired).length;
       RT.setMetric("Renters", rs.length, blocked ? blocked + " blocked or expired" : "All access active", blocked ? "warn" : "good");
       if (!rs.length) {
@@ -306,6 +335,7 @@
     clearTimeout(quickGameTimer);
     quickTokenTimer = null;
     quickGameTimer = null;
+    hideGameMenu();
   }
 
   function quickTokenLookup() {
@@ -325,20 +355,79 @@
     }, 350);
   }
 
+  // The game suggestions are a hand-rolled menu, not a <datalist>. iOS Safari
+  // never opens a datalist as a tappable list — its entries surface only in a
+  // strip above the keyboard once a matching prefix is typed — so on a phone the
+  // field looked inert. It degraded more quietly than the renter field did
+  // (quickFarm only requires the game string to be non-empty, so typing still
+  // submitted) which is worse, not better: a typo farms a game no campaign
+  // matches. A <select> is the wrong shape here because the list is long and
+  // searched server-side, so this is a real menu instead.
+  let gameMenuItems = [];
+  let gameMenuIndex = -1;
+
+  function hideGameMenu() {
+    const menu = $("qGameMenu");
+    gameMenuItems = [];
+    gameMenuIndex = -1;
+    if (!menu) return;
+    menu.hidden = true;
+    menu.innerHTML = "";
+    const input = $("qGame");
+    if (input) input.setAttribute("aria-expanded", "false");
+  }
+
+  function renderGameMenu(games) {
+    const menu = $("qGameMenu");
+    if (!menu) return;
+    gameMenuItems = games;
+    gameMenuIndex = -1;
+    if (!games.length) { hideGameMenu(); return; }
+    menu.innerHTML = games
+      .map((game, i) => '<button type="button" role="option" data-qgame="' + i + '">' + esc(game) + "</button>")
+      .join("");
+    menu.hidden = false;
+    const input = $("qGame");
+    if (input) input.setAttribute("aria-expanded", "true");
+  }
+
+  function chooseGame(i) {
+    const game = gameMenuItems[i];
+    if (game == null) return;
+    const input = $("qGame");
+    if (input) input.value = game;
+    const info = $("qGameInfo");
+    // The count described the menu that is now closed; the field speaks for itself.
+    if (info) info.textContent = "";
+    hideGameMenu();
+  }
+
+  // Returns whether it handled the key, so Arrow keys still move the caret when
+  // no menu is open.
+  function moveGameMenu(delta) {
+    const menu = $("qGameMenu");
+    if (!menu || menu.hidden || !gameMenuItems.length) return false;
+    gameMenuIndex = (gameMenuIndex + delta + gameMenuItems.length) % gameMenuItems.length;
+    Array.prototype.forEach.call(menu.querySelectorAll("button"), (b, i) => {
+      b.classList.toggle("active", i === gameMenuIndex);
+      if (i === gameMenuIndex && b.scrollIntoView) b.scrollIntoView({ block: "nearest" });
+    });
+    return true;
+  }
+
   function quickGameLookup() {
     clearTimeout(quickGameTimer);
-    const options = $("qGameOptions");
     const info = $("qGameInfo");
-    if (options) options.innerHTML = "";
+    hideGameMenu();
     if (info) info.textContent = "";
     const query = (val("qGame") || "").trim();
     if (query.length < 2) return;
     quickGameTimer = setTimeout(async () => {
       try {
         const d = await api("/renters/game-search?q=" + encodeURIComponent(query));
-        if ((val("qGame") || "").trim() !== query || !$("qGameOptions")) return;
+        if ((val("qGame") || "").trim() !== query || !$("qGameMenu")) return;
         const games = Array.isArray(d.games) ? d.games.slice(0, 20) : [];
-        $("qGameOptions").innerHTML = games.map((game) => '<option value="' + esc(game) + '"></option>').join("");
+        renderGameMenu(games);
         if ($("qGameInfo")) $("qGameInfo").textContent = games.length ? games.length + " matches" : "No matches";
       } catch (e) { /* typed values remain valid even if suggestions are unavailable */ }
     }, 300);
@@ -375,6 +464,7 @@
       const gameInput = $("qGame");
       if (user) user.value = "";
       if (gameInput) gameInput.value = "";
+      hideGameMenu();
       if (info) info.textContent = d.note || "Farming started";
       if (btn) { btn.disabled = false; btn.textContent = "Start farming"; }
     } catch (e) {
@@ -598,6 +688,31 @@
     if (e.target && e.target.id === "mUser") tokenLookup();
     if (e.target && e.target.id === "qUser") quickTokenLookup();
     if (e.target && e.target.id === "qGame") quickGameLookup();
+  });
+
+  // pointerdown, not click: it covers mouse and touch alike, and firing before
+  // the input's blur is what stops the menu closing out from under the tap.
+  document.addEventListener("pointerdown", (e) => {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    const option = target.closest("[data-qgame]");
+    if (option) {
+      e.preventDefault();
+      chooseGame(Number(option.getAttribute("data-qgame")));
+      return;
+    }
+    const menu = $("qGameMenu");
+    if (menu && !menu.hidden && target.id !== "qGame" && !menu.contains(target)) hideGameMenu();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (!e.target || e.target.id !== "qGame") return;
+    if (e.key === "ArrowDown" && moveGameMenu(1)) { e.preventDefault(); return; }
+    if (e.key === "ArrowUp" && moveGameMenu(-1)) { e.preventDefault(); return; }
+    // Enter only commits a highlighted row; with none, it leaves the typed value
+    // alone so a game absent from the search can still be submitted.
+    if (e.key === "Enter" && gameMenuIndex >= 0) { e.preventDefault(); chooseGame(gameMenuIndex); return; }
+    if (e.key === "Escape") hideGameMenu();
   });
 
   RT.detail = { open: open, reopen: reopen };
