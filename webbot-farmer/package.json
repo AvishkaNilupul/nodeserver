@@ -1,0 +1,20 @@
+{
+  "name": "webbot-drops",
+  "version": "0.2.0",
+  "description": "Twitch drop farming with web-client OAuth tokens (no integrity gate needed).",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "webbot": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "manage": "node src/index.js --manage"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "mongoose": "^8.0.0"
+  }
+}

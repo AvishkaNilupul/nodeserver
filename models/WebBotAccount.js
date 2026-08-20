@@ -59,6 +59,10 @@ const webBotAccountSchema = new mongoose.Schema(
     // release that pool account back to "available".
     fromPool: { type: Boolean, default: false, index: true },
 
+    // Which farm bot this account is assigned to ("" = idle/unassigned). A bot
+    // is a group of accounts farming one game as an isolated Pi container.
+    botId: { type: String, default: "", index: true },
+
     // Operator hint — force this account onto a specific game (bypasses
     // auto-picker). Empty = auto.
     pinnedGame: { type: String, default: "" },

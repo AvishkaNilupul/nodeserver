@@ -43,6 +43,8 @@
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 16px; }
   .panel .hd { padding: 12px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .panel .hd b { font-size: 14.5px; } .panel .bd { padding: 14px 16px; }
+  details.acctwrap > summary { list-style:none; cursor:pointer; }
+  details.acctwrap > summary::-webkit-details-marker { display:none; }
 
   label { display:block; font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing:.03em; }
   input, select, textarea { padding: 9px 11px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; outline:none; font-family:inherit; }
@@ -60,15 +62,24 @@
   .chip.off { color: var(--red); background:#fef2f2; border-color:transparent; }
   .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
 
+  .bot { border:1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow:hidden; }
+  .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; }
+  .bot .row:hover { background: var(--surface-2); }
+  .bot .row .g { font-weight:600; } .bot .row .meta { color:var(--muted); font-size:12.5px; }
+  .bot .row .sp { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end;}
+  .bot .body { border-top:1px solid var(--line); padding: 12px 14px; display:none; background:var(--surface-2); }
+  .bot.open .body { display:block; }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; }
+  .tab { font-size:12px; padding:5px 11px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer; font-weight:600; }
+  .tab.active { background:var(--accent); color:#fff; border-color:transparent; }
   table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
-  th { font-size:10.5px; text-transform:uppercase; color:var(--muted); letter-spacing:.03em;}
-  tr.acct:hover { background: var(--surface-2); }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  th { font-size:10.5px; text-transform:uppercase; color:var(--muted); }
   .mono { font-family: ui-monospace, Menlo, monospace; font-size:11.5px; color:var(--muted); }
-  .prog { height:6px; border-radius:999px; background:var(--surface-2); overflow:hidden; min-width:90px; display:inline-block; vertical-align:middle; border:1px solid var(--line);}
+  .prog { height:6px; border-radius:999px; background:var(--surface); overflow:hidden; min-width:80px; display:inline-block; vertical-align:middle; border:1px solid var(--line);}
   .prog i { display:block; height:100%; background:var(--accent); } .prog i.done{background:var(--green);}
+  pre.log { margin:0; background:#0b0e14; color:#c8d3e6; border-radius:9px; padding:11px; font-size:11.5px; line-height:1.5; max-height:300px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; }
   .acts { display:flex; gap:5px; flex-wrap:wrap; justify-content:flex-end; }
-  .detail td { background: var(--surface-2); }
   .muted { color:var(--muted); font-size:12.5px; }
   .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width:380px;}
   .toast.show { opacity:1; transform:none; }
@@ -99,65 +110,80 @@
   <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
     <div>
       <h1>Web-token farm <span class="chip warn" style="vertical-align:middle;">TEST</span></h1>
-      <div class="sub">Standalone drop farmer driven by web-client OAuth tokens (the <code>webbot-drops</code> system) — separate model, separate from the bot rig.</div>
+      <div class="sub">Isolated drop-farm bots using web-client OAuth tokens (the <code>webbot-drops</code> farmer), running as their own Docker containers on the Pi.</div>
     </div>
-    <div style="margin-left:auto;"><button class="btn ghost sm" id="refreshBtn">Refresh</button></div>
+    <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn ghost sm" id="rebuildBtn" title="Rebuild the farmer image on the Pi after a code change">Rebuild image</button><button class="btn ghost sm" id="refreshBtn">Refresh</button></div>
   </div>
 
   <div class="banner">
-    🧪 <b>Isolated test system.</b> Source of truth is the standalone <code>WebBotAccount</code> collection — nothing else on the site touches it. Farming runs as the external <code>webbot-drops</code> manager (pointed at this Mongo); this page <b>seeds</b> accounts, <b>monitors</b> what that process writes back, and can <b>validate a token</b> / <b>read live drops</b> for a quick check.
-    <br>⚠️ <b>Farm-only:</b> web tokens can't clear Twitch's integrity gate to <b>claim</b>, so completed drops show as <span class="chip warn">ready · needs external claim</span> (<code>claimBlocked</code>).
+    🧪 <b>Isolated.</b> Bots run the web-token farmer in their own Pi dir (<code>/home/avishka/webbot-drops-farm</code>) as one Docker container each, farming one game via spade pings — touching <b>no</b> listings / scanner / Drop Archive / other bots. Accounts come from the standalone <code>WebBotAccount</code> registry (seed or pull-from-pool below).
+    <br>⚠️ <b>Farm-only:</b> web tokens can't clear Twitch's integrity gate to <b>claim</b>, so completed drops show as <span class="chip warn">ready · needs external claim</span>.
   </div>
 
   <div class="stats">
-    <div class="stat"><b id="stTotal">–</b><span>Accounts</span></div>
-    <div class="stat"><b id="stEnabled">–</b><span>Enabled</span></div>
-    <div class="stat"><b id="stFarming">–</b><span>Farming</span></div>
+    <div class="stat"><b id="stBots">–</b><span>Bots</span></div>
+    <div class="stat"><b id="stRunning">–</b><span>Running</span></div>
+    <div class="stat"><b id="stIdle">–</b><span>Idle accounts</span></div>
     <div class="stat"><b id="stReady">–</b><span>Ready · unclaimed</span></div>
-    <div class="stat"><b id="stBlocked">–</b><span>Claim-blocked</span></div>
-    <div class="stat"><b id="stDead">–</b><span>Dead tokens</span></div>
-    <div class="stat"><b id="stMinutes">–</b><span>Total minutes</span></div>
+    <div class="stat"><b id="stAccts">–</b><span>Total accounts</span></div>
+    <div class="stat"><b id="stImg">–</b><span>Image</span></div>
   </div>
 
-  <!-- Seed -->
+  <!-- Create bot -->
   <div class="panel">
-    <div class="hd"><b>Seed accounts</b> <span class="muted" style="margin-left:auto;">one per line</span></div>
+    <div class="hd"><b>New farm bot</b> <span class="muted" id="idleNote" style="margin-left:auto;"></span></div>
     <div class="bd">
-      <label for="seedText">Paste <code>user:pass:token</code> · <code>user:token</code> · or bare <code>token</code></label>
-      <textarea id="seedText" rows="5" placeholder="username:password:webtoken&#10;username:webtoken&#10;webtoken"></textarea>
-      <div style="display:flex;gap:10px;align-items:center;margin-top:10px;">
-        <button class="btn primary" id="seedBtn">Seed accounts</button>
-        <span class="muted" id="seedHint">Duplicates (by token) are skipped. Passwords are stored encrypted.</span>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+        <div><label for="game">Game</label>
+          <input id="game" list="gamelist" placeholder="e.g. Rust" style="min-width:220px;" autocomplete="off" />
+          <datalist id="gamelist">
+            <option value="Rust"></option><option value="Overwatch 2"></option>
+            <option value="Genshin Impact"></option><option value="World of Tanks"></option>
+            <option value="Apex Legends"></option><option value="Rainbow Six Siege"></option>
+            <option value="Dota 2"></option><option value="Counter-Strike 2"></option>
+          </datalist>
+        </div>
+        <div><label for="count">Accounts</label><input id="count" type="number" min="1" max="200" value="5" style="width:120px;" /></div>
+        <button class="btn primary" id="createBtn">Create &amp; farm</button>
       </div>
+      <div class="muted" id="createHint" style="margin-top:9px;">Takes that many <b>idle</b> accounts and runs them as one Pi container on the chosen game. First bot builds the image (a few minutes).</div>
     </div>
   </div>
 
-  <!-- Pull from pool -->
+  <!-- Bots -->
   <div class="panel">
-    <div class="hd"><b>Pull from account pool</b> <span class="muted" id="poolNote" style="margin-left:auto;"></span></div>
-    <div class="bd">
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
-        <div><label for="pullCount">How many</label><input id="pullCount" type="number" min="1" max="200" value="5" style="width:110px;" /></div>
-        <button class="btn primary" id="pullBtn">Pull from pool</button>
-        <span class="muted" id="pullHint" style="max-width:420px;">Claims ready pool accounts (respecting the auto-farm reserve) and adds them here using their <code>clientSecret</code> as the web token. Deleting a pulled account releases it back to the pool.</span>
-      </div>
-    </div>
+    <div class="hd"><b>Bots</b> <span class="muted" id="botsCount" style="margin-left:auto;"></span></div>
+    <div class="bd"><div id="bots"><div class="muted">Loading…</div></div></div>
   </div>
 
-  <!-- Accounts -->
+  <!-- Accounts (management) -->
   <div class="panel">
-    <div class="hd"><b>Accounts</b> <span class="muted" id="acctCount" style="margin-left:auto;"></span></div>
-    <div class="bd" style="padding:0;">
-      <div style="overflow-x:auto;">
-        <table>
-          <thead><tr>
-            <th>Account</th><th>Status</th><th>Game · channel</th><th>Progress</th>
-            <th>Total</th><th>Claim</th><th style="text-align:right;">Actions</th>
-          </tr></thead>
-          <tbody id="rows"><tr><td colspan="7" class="muted" style="padding:16px;">Loading…</td></tr></tbody>
-        </table>
+    <details class="acctwrap">
+      <summary class="hd"><b>Accounts</b> <span class="muted" id="acctCount" style="margin-left:auto;">click to manage</span></summary>
+      <div class="bd">
+        <div style="display:flex;gap:20px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:280px;">
+            <label for="seedText">Seed — paste <code>user:pass:token</code> / <code>user:token</code> / <code>token</code></label>
+            <textarea id="seedText" rows="4" placeholder="username:password:webtoken&#10;webtoken"></textarea>
+            <div style="margin-top:8px;"><button class="btn primary sm" id="seedBtn">Seed accounts</button></div>
+          </div>
+          <div style="min-width:240px;">
+            <label>Pull from account pool <span id="poolNote" class="muted" style="text-transform:none;font-weight:400;"></span></label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input id="pullCount" type="number" min="1" max="200" value="5" style="width:100px;" />
+              <button class="btn ghost sm" id="pullBtn">Pull</button>
+            </div>
+            <div class="muted" style="margin-top:6px;">Reserve-guarded; released on delete.</div>
+          </div>
+        </div>
+        <div style="overflow-x:auto;margin-top:14px;">
+          <table>
+            <thead><tr><th>Account</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="5" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </details>
   </div>
 </main>
 
@@ -169,156 +195,219 @@ function ti(){var dark=document.documentElement.getAttribute('data-theme')==='da
 ti();
 document.getElementById('logoutBtn').onclick=function(){fetch('/logout',{method:'POST'}).finally(()=>location.href='/admin-login.html');};
 var $=function(id){return document.getElementById(id);};
-var toastT; function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),3400);}
+var toastT; function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),3600);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j={};try{j=await r.json();}catch(e){}if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
 
-var STATUS_CHIP = {
-  ok:['on','farming'], attaching:['warn','attaching'], idle:['','idle'],
-  pending:['','pending'], dead:['off','dead'], error:['off','error']
-};
-function statusChip(a){
-  var m = STATUS_CHIP[a.lastStatus] || ['','?'];
-  return '<span class="chip '+m[0]+'">'+esc(m[1])+'</span>';
-}
-function claimCell(a){
-  if(a.claimBlocked){
-    return '<span class="chip warn">claim-blocked</span>'+(a.dropsReadyUnclaimed?' <span class="muted">'+a.dropsReadyUnclaimed+' ready</span>':'');
-  }
-  if(a.dropsReadyUnclaimed) return '<span class="muted">'+a.dropsReadyUnclaimed+' ready</span>';
-  if(a.dropsClaimed) return '<span class="chip on">'+a.dropsClaimed+' claimed</span>';
-  return '<span class="muted">–</span>';
-}
-function progressCell(a){
-  if(!a.requiredMinutes) return '<span class="muted">–</span>';
-  var pct = Math.min(100, Math.round((a.currentMinutes/a.requiredMinutes)*100));
-  return '<span class="prog"><i class="'+(pct>=100?'done':'')+'" style="width:'+pct+'%"></i></span> '+
-         '<span class="mono">'+a.currentMinutes+'/'+a.requiredMinutes+'</span>';
-}
-function fmtWhen(s){ if(!s) return ''; var d=new Date(s); var m=Math.round((Date.now()-d)/60000); if(m<1) return 'just now'; if(m<60) return m+'m ago'; var h=Math.round(m/60); if(h<24) return h+'h ago'; return Math.round(h/24)+'d ago'; }
+var openBots={}; // id -> active tab
+var pollT=null;
+var botIndex={}; // id -> {game,count,dead}
 
-function rowHtml(a){
-  var who = a.login ? esc(a.login) : '<span class="muted">(unvalidated)</span>';
-  var sub = a.credUsername && a.credUsername!==a.login ? esc(a.credUsername)+' · ' : '';
-  var gc = a.currentGame ? esc(a.currentGame)+(a.currentChannel?' · '+esc(a.currentChannel):'') : (a.pinnedGame?'<span class="muted">pinned: '+esc(a.pinnedGame)+'</span>':'<span class="muted">–</span>');
-  var msg = a.lastStatusMessage ? '<div class="muted" style="margin-top:2px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(a.lastStatusMessage)+'">'+esc(a.lastStatusMessage)+'</div>' : '';
-  return ''+
-  '<tr class="acct" data-id="'+a.id+'">'+
-    '<td><b>'+who+'</b> <span class="mono">…'+esc(a.tokenTail)+'</span>'+
-        (a.fromPool?' <span class="chip">pool</span>':'')+
-        (a.enabled?'':' <span class="chip off">disabled</span>')+
-        '<div class="muted" style="margin-top:2px;">'+sub+(a.twitchId?'id '+esc(a.twitchId):'')+' · '+esc(fmtWhen(a.lastCheckedAt)||'never checked')+'</div></td>'+
-    '<td>'+statusChip(a)+msg+'</td>'+
-    '<td>'+gc+'</td>'+
-    '<td>'+progressCell(a)+'</td>'+
-    '<td class="mono">'+(a.totalMinutesWatched||0)+'m</td>'+
-    '<td>'+claimCell(a)+'</td>'+
-    '<td><div class="acts">'+
-      '<button class="btn ghost sm" data-act="validate" data-id="'+a.id+'">Validate</button>'+
-      '<button class="btn ghost sm" data-act="drops" data-id="'+a.id+'">Drops</button>'+
-      '<button class="btn ghost sm" data-act="pin" data-id="'+a.id+'">Pin</button>'+
-      '<button class="btn ghost sm" data-act="toggle" data-id="'+a.id+'">'+(a.enabled?'Disable':'Enable')+'</button>'+
-      (a.claimBlocked?'<button class="btn ghost sm" data-act="clearblock" data-id="'+a.id+'">Clear block</button>':'')+
-      '<button class="btn danger sm" data-act="delete" data-id="'+a.id+'">Delete</button>'+
-    '</div></td>'+
-  '</tr>'+
-  '<tr class="detail" id="detail-'+a.id+'" style="display:none;"><td colspan="7"><div id="dropwrap-'+a.id+'" class="muted">Loading drops…</div></td></tr>';
+function contChip(c){
+  if(!c) return '<span class="chip warn">starting…</span>';
+  if(c.running) return '<span class="chip on">running</span>';
+  if(c.state==='exited') return '<span class="chip off">stopped</span>';
+  return '<span class="chip">'+esc(c.state||'?')+'</span>';
+}
+
+function renderBots(){
+  var el=$('bots'); var ids=Object.keys(botIndex);
+  if(!ids.length){ el.innerHTML='<div class="muted">No bots yet. Create one above.</div>'; return; }
+  el.innerHTML='';
+  ids.sort((a,b)=>(parseInt(a,10)||0)-(parseInt(b,10)||0)).forEach(function(id){
+    var b=botIndex[id]; var open=!!openBots[id]; var tab=openBots[id]||'drops';
+    var wrap=document.createElement('div'); wrap.className='bot'+(open?' open':'');
+    wrap.innerHTML=
+      '<div class="row" data-bid="'+id+'">'+
+        '<span class="g">'+esc(b.game||'(any)')+'</span>'+
+        '<span class="meta">bot #'+esc(id)+' · '+b.count+' account'+(b.count===1?'':'s')+(b.dead?' · '+b.dead+' dead':'')+'</span>'+
+        '<span class="sp">'+contChip(b.cont)+
+          (b.cont&&!b.cont.running?'<button class="btn ghost sm" data-bact="start" data-bid="'+id+'">Start</button>':'')+
+          '<button class="btn ghost sm" data-bact="stop" data-bid="'+id+'">Stop</button>'+
+          '<button class="btn danger sm" data-bact="release" data-bid="'+id+'">Release</button>'+
+        '</span>'+
+      '</div>'+
+      '<div class="body">'+
+        '<div class="tabs">'+
+          '<span class="tab'+(tab==='drops'?' active':'')+'" data-tab="drops" data-bid="'+id+'">Live drops</span>'+
+          '<span class="tab'+(tab==='accounts'?' active':'')+'" data-tab="accounts" data-bid="'+id+'">Accounts</span>'+
+          '<span class="tab'+(tab==='logs'?' active':'')+'" data-tab="logs" data-bid="'+id+'">Logs</span>'+
+        '</div>'+
+        '<div id="btab-'+id+'"><div class="muted">Loading…</div></div>'+
+      '</div>';
+    el.appendChild(wrap);
+    if(open) loadBotTab(id,tab);
+  });
 }
 
 async function load(){
   try{
     var j=await api('/api/webbot-farm/state');
     var s=j.summary;
-    $('stTotal').textContent=s.total;
-    $('stEnabled').textContent=s.enabled;
-    $('stFarming').textContent=s.farming;
-    $('stReady').textContent=s.readyUnclaimed;
-    $('stBlocked').textContent=s.claimBlocked;
-    $('stDead').textContent=s.dead;
-    $('stMinutes').textContent=(s.totalMinutes||0).toLocaleString();
-    $('acctCount').textContent=s.total+' account'+(s.total===1?'':'s');
-    var rows=$('rows');
-    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="7" class="muted" style="padding:16px;">No accounts yet — seed some above.</td></tr>'; return; }
-    rows.innerHTML=j.accounts.map(rowHtml).join('');
-  }catch(e){ $('rows').innerHTML='<tr><td colspan="7"><span class="chip off">'+esc(e.message)+'</span></td></tr>'; }
+    $('stBots').textContent=s.bots; $('stIdle').textContent=s.idle;
+    $('stReady').textContent=s.readyUnclaimed; $('stAccts').textContent=s.total;
+    $('idleNote').textContent=s.idle+' idle account'+(s.idle===1?'':'s')+' available';
+    $('botsCount').textContent=s.bots+' bot'+(s.bots===1?'':'s');
+    var keep={}; j.bots.forEach(function(b){ keep[b.id]=Object.assign(botIndex[b.id]||{},{game:b.game,count:b.count,dead:b.dead}); });
+    botIndex=keep;
+    renderBots();
+    botsStatus();
+    loadAccounts();
+  }catch(e){ $('bots').innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
 }
 
-async function loadPool(){
+async function botsStatus(){
   try{
-    var j=await api('/api/webbot-farm/pool');
-    $('poolNote').textContent=j.ready+' ready · reserve '+j.reserve+' · '+j.spendable+' spendable';
-  }catch(e){ $('poolNote').textContent='pool unavailable'; }
+    var j=await api('/api/webbot-farm/bots-status');
+    $('stImg').textContent=j.imageBuilt?'ready':(j.provisioning?'building…':'none');
+    var running=0;
+    Object.keys(botIndex).forEach(function(id){ botIndex[id].cont=j.containers[id]||null; if(j.containers[id]&&j.containers[id].running) running++; });
+    $('stRunning').textContent=running;
+    renderBots();
+    var active=j.provisioning||Object.values(j.containers).some(c=>c.running);
+    if(active&&!pollT) pollT=setInterval(botsStatus,6000);
+    if(!active&&pollT){clearInterval(pollT);pollT=null;}
+  }catch(e){ $('stImg').textContent='?'; }
 }
 
-async function pull(){
-  var count=parseInt($('pullCount').value,10)||0;
-  if(!count){ toast('Enter how many to pull.'); return; }
-  var btn=$('pullBtn'); btn.disabled=true; btn.textContent='Pulling…';
+async function loadBotTab(id,tab){
+  openBots[id]=tab;
+  var box=$('btab-'+id); if(!box) return; box.innerHTML='<div class="muted">Loading…</div>';
   try{
-    var j=await api('/api/webbot-farm/pull',{method:'POST',body:JSON.stringify({count:count})});
-    var msg='Pulled '+j.created+' from pool';
-    if(j.duplicate) msg+=' · '+j.duplicate+' already present';
-    toast(msg);
-    await load(); await loadPool();
-  }catch(e){ toast('Pull failed: '+e.message); }
-  finally{ btn.disabled=false; btn.textContent='Pull from pool'; }
+    if(tab==='accounts'){
+      var j=await api('/api/webbot-farm/bots/'+id+'/accounts');
+      if(!j.accounts.length){ box.innerHTML='<div class="muted">No accounts.</div>'; return; }
+      box.innerHTML='<table><thead><tr><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
+        j.accounts.map(a=>'<tr><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table>';
+    } else if(tab==='drops'){
+      var j=await api('/api/webbot-farm/bots/'+id+'/drops');
+      var rows=[];
+      j.accounts.forEach(function(a){
+        if(!a.ok){ rows.push('<tr><td>'+esc(a.login)+'</td><td colspan="3"><span class="chip off">'+esc(a.error||'error')+'</span></td></tr>'); return; }
+        var farming=(a.drops||[]).filter(d=>!d.claimed);
+        if(!farming.length){ rows.push('<tr><td>'+esc(a.login)+'</td><td colspan="3" class="muted">no active drops</td></tr>'); return; }
+        farming.forEach(function(d,k){
+          var pct=d.percent||0;
+          var st=(d.ready||d.farmedUnclaimed)?'<span class="chip warn">ready · external claim</span>':'<span class="chip">farming</span>';
+          rows.push('<tr><td>'+(k===0?esc(a.login):'')+'</td><td>'+esc(d.game)+' · '+esc(d.name)+'</td>'+
+            '<td><span class="prog"><i class="'+(pct>=100?'done':'')+'" style="width:'+pct+'%"></i></span> <span class="mono">'+d.current+'/'+d.required+'</span></td><td>'+st+'</td></tr>');
+        });
+      });
+      box.innerHTML='<table><thead><tr><th>Account</th><th>Drop</th><th>Progress</th><th>State</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+    } else if(tab==='logs'){
+      var j=await api('/api/webbot-farm/bots/'+id+'/logs');
+      box.innerHTML='<div class="muted" style="margin-bottom:6px;">Container logs</div><pre class="log">'+esc(j.container||'(none)')+'</pre>'+
+        (j.provision?'<div class="muted" style="margin:8px 0 6px;">Provision log</div><pre class="log">'+esc(j.provision)+'</pre>':'');
+    }
+  }catch(e){ box.innerHTML='<span class="chip off">'+esc(e.message)+'</span>'; }
 }
 
-async function seed(){
-  var text=$('seedText').value.trim();
-  if(!text){ toast('Paste some account lines first.'); return; }
-  var btn=$('seedBtn'); btn.disabled=true; btn.textContent='Seeding…';
-  try{
-    var j=await api('/api/webbot-farm/seed',{method:'POST',body:JSON.stringify({text:text})});
-    var msg='Seeded '+j.created+' new';
-    if(j.duplicate) msg+=' · '+j.duplicate+' duplicate';
-    if(j.skipped&&j.skipped.length) msg+=' · '+j.skipped.length+' skipped';
-    toast(msg);
-    $('seedText').value='';
-    await load();
-  }catch(e){ toast('Seed failed: '+e.message); }
-  finally{ btn.disabled=false; btn.textContent='Seed accounts'; }
-}
-
-async function showDrops(id){
-  var detail=$('detail-'+id), wrap=$('dropwrap-'+id);
-  if(detail.style.display!=='none'){ detail.style.display='none'; return; }
-  detail.style.display=''; wrap.innerHTML='Loading drops…';
-  try{
-    var j=await api('/api/webbot-farm/accounts/'+id+'/drops');
-    if(!j.drops.length){ wrap.innerHTML='<span class="muted">No in-progress drops.</span>'; return; }
-    var html='<table style="margin:4px 0;"><thead><tr><th>Game</th><th>Drop</th><th>Progress</th><th>State</th></tr></thead><tbody>';
-    j.drops.forEach(function(d){
-      var pct=d.percent||0;
-      var state = d.claimed?'<span class="chip on">claimed</span>' : (d.ready||d.farmedUnclaimed)?'<span class="chip warn">ready · needs external claim</span>':'<span class="chip">farming</span>';
-      html+='<tr><td>'+esc(d.game)+'</td><td>'+esc(d.name)+'</td>'+
-        '<td><span class="prog"><i class="'+(pct>=100?'done':'')+'" style="width:'+pct+'%"></i></span> <span class="mono">'+d.current+'/'+d.required+'</span></td>'+
-        '<td>'+state+'</td></tr>';
-    });
-    html+='</tbody></table>';
-    wrap.innerHTML=html;
-  }catch(e){ wrap.innerHTML='<span class="chip off">'+esc(e.message)+'</span>'; }
-}
-
-async function act(el){
-  var id=el.getAttribute('data-id'), a=el.getAttribute('data-act');
-  if(a==='drops') return showDrops(id);
+async function botAct(el){
+  var id=el.getAttribute('data-bid'), a=el.getAttribute('data-bact');
+  if(a==='release'&&!confirm('Release bot '+id+'? Stops the container and returns its accounts to idle.')) return;
   el.disabled=true;
   try{
-    if(a==='validate'){ await api('/api/webbot-farm/accounts/'+id+'/validate',{method:'POST'}); toast('Validated.'); await load(); }
-    else if(a==='toggle'){ await api('/api/webbot-farm/accounts/'+id+'/toggle',{method:'POST'}); await load(); }
-    else if(a==='clearblock'){ await api('/api/webbot-farm/accounts/'+id+'/clear-claimblock',{method:'POST'}); toast('Claim-block cleared.'); await load(); }
-    else if(a==='pin'){ var g=prompt('Pin this account to a game (blank = auto):'); if(g===null){el.disabled=false;return;} await api('/api/webbot-farm/accounts/'+id+'/pin',{method:'POST',body:JSON.stringify({game:g})}); toast(g?('Pinned to '+g):'Unpinned.'); await load(); }
-    else if(a==='delete'){ if(!confirm('Delete this account from the test set?')){el.disabled=false;return;} await api('/api/webbot-farm/accounts/'+id,{method:'DELETE'}); toast('Deleted.'); await load(); }
+    await api('/api/webbot-farm/bots/'+id+'/'+a,{method:'POST'});
+    toast('Bot '+id+' '+(a==='release'?'released':a+'ped')+'.');
+    if(a==='release'){ delete openBots[id]; }
+    await load();
   }catch(e){ toast('Failed: '+e.message); el.disabled=false; }
 }
 
-document.getElementById('rows').addEventListener('click',function(e){ var b=e.target.closest('button[data-act]'); if(b) act(b); });
+async function createBot(){
+  var game=$('game').value.trim(), count=parseInt($('count').value,10)||0;
+  if(!game){ toast('Pick a game.'); return; }
+  if(!count){ toast('How many accounts?'); return; }
+  var btn=$('createBtn'); btn.disabled=true; btn.textContent='Creating…';
+  try{
+    var j=await api('/api/webbot-farm/bots',{method:'POST',body:JSON.stringify({game:game,count:count})});
+    toast(j.message||('Bot '+j.id+' created.'));
+    $('game').value='';
+    await load();
+  }catch(e){ toast('Create failed: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent='Create & farm'; }
+}
+
+async function rebuild(){
+  if(!confirm('Rebuild the farmer image on the Pi? New bots use the new image; running bots keep the old one until released.')) return;
+  var btn=$('rebuildBtn'); btn.disabled=true;
+  try{ var j=await api('/api/webbot-farm/rebuild',{method:'POST'}); toast(j.message||'Rebuilding.'); botsStatus(); }
+  catch(e){ toast('Rebuild failed: '+e.message); }
+  finally{ btn.disabled=false; }
+}
+
+// ---- Accounts management ----
+function statusChip(a){
+  var m={ok:['on','farming'],attaching:['warn','attaching'],idle:['','idle'],pending:['','pending'],dead:['off','dead'],error:['off','error']}[a.lastStatus]||['','?'];
+  return '<span class="chip '+m[0]+'">'+esc(m[1])+'</span>';
+}
+function claimCell(a){
+  if(a.claimBlocked) return '<span class="chip warn">claim-blocked</span>'+(a.dropsReadyUnclaimed?' <span class="muted">'+a.dropsReadyUnclaimed+' ready</span>':'');
+  if(a.dropsReadyUnclaimed) return '<span class="muted">'+a.dropsReadyUnclaimed+' ready</span>';
+  return '<span class="muted">–</span>';
+}
+async function loadAccounts(){
+  try{
+    var j=await api('/api/webbot-farm/accounts');
+    $('acctCount').textContent=j.accounts.length+' account'+(j.accounts.length===1?'':'s');
+    var rows=$('rows');
+    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">No accounts — seed or pull below.</td></tr>'; return; }
+    rows.innerHTML=j.accounts.map(function(a){
+      return '<tr>'+
+        '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b> <span class="mono">…'+esc(a.tokenTail)+'</span>'+(a.fromPool?' <span class="chip">pool</span>':'')+(a.enabled?'':' <span class="chip off">disabled</span>')+'</td>'+
+        '<td>'+statusChip(a)+'</td>'+
+        '<td>'+(a.botId?'<span class="chip">bot '+esc(a.botId)+'</span>':'<span class="muted">idle</span>')+'</td>'+
+        '<td>'+claimCell(a)+'</td>'+
+        '<td><div class="acts">'+
+          '<button class="btn ghost sm" data-aact="validate" data-id="'+a.id+'">Validate</button>'+
+          '<button class="btn ghost sm" data-aact="toggle" data-id="'+a.id+'">'+(a.enabled?'Disable':'Enable')+'</button>'+
+          (a.claimBlocked?'<button class="btn ghost sm" data-aact="clearblock" data-id="'+a.id+'">Clear</button>':'')+
+          (a.botId?'':'<button class="btn danger sm" data-aact="delete" data-id="'+a.id+'">Delete</button>')+
+        '</div></td></tr>';
+    }).join('');
+  }catch(e){ $('rows').innerHTML='<tr><td colspan="5"><span class="chip off">'+esc(e.message)+'</span></td></tr>'; }
+}
+async function acctAct(el){
+  var id=el.getAttribute('data-id'), a=el.getAttribute('data-aact');
+  el.disabled=true;
+  try{
+    if(a==='validate'){ await api('/api/webbot-farm/accounts/'+id+'/validate',{method:'POST'}); toast('Validated.'); }
+    else if(a==='toggle'){ await api('/api/webbot-farm/accounts/'+id+'/toggle',{method:'POST'}); }
+    else if(a==='clearblock'){ await api('/api/webbot-farm/accounts/'+id+'/clear-claimblock',{method:'POST'}); toast('Cleared.'); }
+    else if(a==='delete'){ if(!confirm('Delete this account?')){el.disabled=false;return;} await api('/api/webbot-farm/accounts/'+id,{method:'DELETE'}); toast('Deleted.'); }
+    await loadAccounts(); await load();
+  }catch(e){ toast('Failed: '+e.message); el.disabled=false; }
+}
+async function seed(){
+  var text=$('seedText').value.trim(); if(!text){ toast('Paste account lines first.'); return; }
+  var btn=$('seedBtn'); btn.disabled=true; btn.textContent='Seeding…';
+  try{ var j=await api('/api/webbot-farm/seed',{method:'POST',body:JSON.stringify({text:text})});
+    var m='Seeded '+j.created+' new'; if(j.duplicate) m+=' · '+j.duplicate+' dup'; if(j.skipped&&j.skipped.length) m+=' · '+j.skipped.length+' skipped';
+    toast(m); $('seedText').value=''; await loadAccounts(); await load();
+  }catch(e){ toast('Seed failed: '+e.message); } finally{ btn.disabled=false; btn.textContent='Seed accounts'; }
+}
+async function pull(){
+  var count=parseInt($('pullCount').value,10)||0; if(!count){ toast('How many to pull?'); return; }
+  var btn=$('pullBtn'); btn.disabled=true; btn.textContent='…';
+  try{ var j=await api('/api/webbot-farm/pull',{method:'POST',body:JSON.stringify({count:count})});
+    var m='Pulled '+j.created; if(j.duplicate) m+=' · '+j.duplicate+' dup'; toast(m); await loadAccounts(); await load(); await loadPool();
+  }catch(e){ toast('Pull failed: '+e.message); } finally{ btn.disabled=false; btn.textContent='Pull'; }
+}
+async function loadPool(){ try{ var j=await api('/api/webbot-farm/pool'); $('poolNote').textContent='('+j.spendable+' spendable · reserve '+j.reserve+')'; }catch(e){ $('poolNote').textContent=''; } }
+
+// ---- Event wiring ----
+$('bots').addEventListener('click',function(e){
+  var ba=e.target.closest('button[data-bact]'); if(ba){ botAct(ba); return; }
+  var tb=e.target.closest('.tab[data-tab]'); if(tb){ loadBotTab(tb.getAttribute('data-bid'),tb.getAttribute('data-tab')); renderBots(); return; }
+  var row=e.target.closest('.row[data-bid]'); if(row){ var id=row.getAttribute('data-bid'); if(openBots[id]) delete openBots[id]; else openBots[id]='drops'; renderBots(); }
+});
+$('rows').addEventListener('click',function(e){ var b=e.target.closest('button[data-aact]'); if(b) acctAct(b); });
+$('createBtn').onclick=createBot;
+$('rebuildBtn').onclick=rebuild;
 $('seedBtn').onclick=seed;
 $('pullBtn').onclick=pull;
 $('refreshBtn').onclick=function(){load();loadPool();};
-load();
-loadPool();
+load(); loadPool();
 </script>
 <script src="/admin-nav.js"></script>
 </body>
