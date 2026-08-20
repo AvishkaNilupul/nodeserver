@@ -13,7 +13,13 @@ const ResellerAudit = require("../models/ResellerAudit");
 const ResellerAccount = require("../models/ResellerAccount");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
-const { createReseller, revealPassword } = require("../utils/resellers");
+const {
+  createReseller,
+  revealPassword,
+  parseAccessDate,
+  isBeforeStart,
+  isExpired,
+} = require("../utils/resellers");
 const { requireAdmin } = require("../middleware/auth");
 const { requireRenter } = require("../middleware/renterAuth");
 const resellerAuthRoutes = require("../routes/resellerAuthRoutes");
@@ -63,6 +69,29 @@ test.beforeEach(async () => {
     Object.values(mongoose.connection.collections).map((collection) =>
       collection.deleteMany({}),
     ),
+  );
+});
+
+test("date-only reseller access follows Japan calendar days", () => {
+  const start = parseAccessDate("2026-08-21");
+  const end = parseAccessDate("2026-09-21", { endOfDay: true });
+
+  assert.equal(start.toISOString(), "2026-08-20T15:00:00.000Z");
+  assert.equal(end.toISOString(), "2026-09-21T14:59:59.999Z");
+  assert.equal(
+    isBeforeStart(
+      { accessStart: start },
+      new Date("2026-08-20T15:01:00.000Z"),
+    ),
+    false,
+  );
+  assert.equal(
+    isExpired({ accessEnd: end }, new Date("2026-09-21T14:00:00.000Z")),
+    false,
+  );
+  assert.equal(
+    isExpired({ accessEnd: end }, new Date("2026-09-21T15:00:00.000Z")),
+    true,
   );
 });
 

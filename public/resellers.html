@@ -99,6 +99,28 @@
         padding: 12px;
         flex: 1;
         overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .nav .links a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav .links a:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 700;
       }
       .page {
         min-height: 100vh;
@@ -297,6 +319,12 @@
       }
       .badge.suspended {
         color: var(--red);
+      }
+      .badge.expired {
+        color: var(--red);
+      }
+      .badge.scheduled {
+        color: var(--yellow);
       }
       .badge.warn {
         color: var(--yellow);
@@ -583,8 +611,17 @@
         $("resellerList").innerHTML = resellers.length
           ? resellers
               .map(
-                (r) =>
-                  `<div class="row"><div><div class="nm">${esc(r.displayName || r.username)}</div><div class="meta">${esc(r.username)} · ${r.held || 0} accounts · ${r.needsConnect || 0} need connecting · ${r.sold || 0} sold</div></div><div><span class="badge ${esc(r.status)}">${esc(r.status)}</span></div><div class="meta">Last login: ${r.lastLoginAt ? esc(new Date(r.lastLoginAt).toLocaleString()) : "never"}<br>Limit: ${r.maxAccounts || "unlimited"}</div><div class="actions"><button class="btn sm" data-open="${esc(r.id)}">Manage</button></div></div>`,
+                (r) => {
+                  const effectiveStatus =
+                    r.status === "suspended"
+                      ? "suspended"
+                      : r.expired
+                        ? "expired"
+                        : r.notStarted
+                          ? "scheduled"
+                          : "active";
+                  return `<div class="row"><div><div class="nm">${esc(r.displayName || r.username)}</div><div class="meta">${esc(r.username)} · ${r.held || 0} accounts · ${r.needsConnect || 0} need connecting · ${r.sold || 0} sold</div></div><div><span class="badge ${effectiveStatus}">${effectiveStatus}</span></div><div class="meta">Last login: ${r.lastLoginAt ? esc(new Date(r.lastLoginAt).toLocaleString()) : "never"}<br>Limit: ${r.maxAccounts || "unlimited"}</div><div class="actions"><button class="btn sm" data-open="${esc(r.id)}">Manage</button></div></div>`;
+                },
               )
               .join("")
           : `<div class="muted">No resellers yet.</div>`;

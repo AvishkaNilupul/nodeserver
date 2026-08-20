@@ -4,12 +4,49 @@ const { encrypt, decrypt } = require("./secretBox");
 
 const BCRYPT_ROUNDS = 10;
 const MIN_PASSWORD = 8;
+// The reseller console is operated in Japan and its HTML date inputs contain
+// calendar dates without a timezone. JavaScript otherwise parses YYYY-MM-DD
+// as UTC, which makes a selected start date begin at 09:00 JST. Keep the
+// operator-facing lease window aligned with the calendar shown in the UI.
+const ACCESS_UTC_OFFSET_MINUTES = 9 * 60;
 const DUMMY_HASH =
   "$2b$10$CwTycUXWue0Thq9StjUM0uJ8Diq1oV7l0nF1iJ9Z6Kx4z3qK4kHe";
 
 function normUsername(username) {
   return String(username || "").trim();
 }
+
+function parseAccessDate(value, { endOfDay = false } = {}) {
+  if (value === null || value === undefined || value === "") return null;
+  if (value instanceof Date) {
+    const copy = new Date(value.getTime());
+    if (Number.isNaN(copy.getTime())) throw new Error("Invalid access date");
+    return copy;
+  }
+
+  const text = String(value).trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  let parsed;
+  if (dateOnly) {
+    const [, year, month, day] = dateOnly;
+    const utcMs = Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      endOfDay ? 23 : 0,
+      endOfDay ? 59 : 0,
+      endOfDay ? 59 : 0,
+      endOfDay ? 999 : 0,
+    );
+    parsed = new Date(utcMs - ACCESS_UTC_OFFSET_MINUTES * 60 * 1000);
+  } else {
+    parsed = new Date(text);
+  }
+
+  if (Number.isNaN(parsed.getTime())) throw new Error("Invalid access date");
+  return parsed;
+}
+
 function isBeforeStart(reseller, now = new Date()) {
   return !!(
     reseller?.accessStart && new Date(reseller.accessStart) > new Date(now)
@@ -88,8 +125,8 @@ async function createReseller({
     notes: String(notes || "").slice(0, 500),
     status: status === "suspended" ? "suspended" : "active",
     maxAccounts: Math.max(0, Math.floor(Number(maxAccounts) || 0)),
-    accessStart: accessStart ? new Date(accessStart) : null,
-    accessEnd: accessEnd ? new Date(accessEnd) : null,
+    accessStart: parseAccessDate(accessStart),
+    accessEnd: parseAccessDate(accessEnd, { endOfDay: true }),
     createdBy: String(createdBy || ""),
   });
 }
@@ -133,7 +170,9 @@ function revealPassword(reseller) {
 
 module.exports = {
   MIN_PASSWORD,
+  ACCESS_UTC_OFFSET_MINUTES,
   normUsername,
+  parseAccessDate,
   isBeforeStart,
   isExpired,
   isBlocked,

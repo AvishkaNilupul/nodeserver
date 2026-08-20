@@ -13,6 +13,7 @@ const {
   setPassword,
   revealPassword,
   sanitizeReseller,
+  parseAccessDate,
 } = require("../utils/resellers");
 const { decrypt } = require("../utils/secretBox");
 
@@ -460,11 +461,9 @@ router.put("/resellers/:id", requireSuperadmin, async (req, res) => {
         Math.floor(Number(body.maxAccounts) || 0),
       );
     if (body.accessStart !== undefined)
-      reseller.accessStart = body.accessStart
-        ? new Date(body.accessStart)
-        : null;
+      reseller.accessStart = parseAccessDate(body.accessStart);
     if (body.accessEnd !== undefined)
-      reseller.accessEnd = body.accessEnd ? new Date(body.accessEnd) : null;
+      reseller.accessEnd = parseAccessDate(body.accessEnd, { endOfDay: true });
     await reseller.save();
     await audit({
       reseller: reseller._id,
