@@ -40,6 +40,9 @@ const botAccountSchema = new mongoose.Schema(
     // bulk order rather than a single Shop purchase. The soldAt:null guard is
     // shared, so a bulk reservation and a Shop sale can never collide.
     soldBulkOrderId: { type: String, default: "" },
+    // Non-empty when the account is reserved for a reseller handoff. The
+    // existing soldAt reservation remains the supply exclusion mechanism.
+    resellerId: { type: String, default: "", index: true },
 
     // Scan bookkeeping. Indexed because the scanner picks the oldest-scanned
     // account each tick and the progress view sorts/filters on it.
