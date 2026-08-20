@@ -52,13 +52,15 @@ test("ranks high-progress items first and counts duplicate rewards once per acco
       ["secret-a", ["valorant"]],
       ["secret-b", ["valorant"]],
     ]),
-    available: [{ name: "Rare Skin", game: "Valorant", accounts: 3, units: 3 }],
+    available: [{ name: "Rare Skin", game: "Valorant", accounts: 3, units: 4 }],
   });
 
   assert.equal(forecast.items[0].name, "Rare Skin");
   assert.equal(forecast.items[0].farmingAccounts, 2);
   assert.equal(forecast.items[0].averagePercent, 87);
   assert.equal(forecast.items[0].availableNow.accounts, 3);
+  assert.equal(forecast.games[0].availableNow, 4);
+  assert.equal(forecast.summary.availableNow, 4);
   assert.equal(forecast.summary.readySoon, 1);
 });
 
@@ -118,12 +120,15 @@ test("keeps a game-level farming signal while item snapshots warm up", () => {
       account("a", "one", [], { inProgressGames: ["Valorant"] }),
     ],
     runtime: runtime([["secret-a", ["valorant"]]]),
+    available: [{ name: "Ready reward", game: "Valorant", accounts: 2, units: 3 }],
   });
 
   assert.equal(forecast.items.length, 0);
   assert.equal(forecast.games[0].game, "Valorant");
   assert.equal(forecast.games[0].farmingAccounts, 1);
   assert.equal(forecast.games[0].itemSnapshotReady, false);
+  assert.equal(forecast.games[0].availableNow, 3);
+  assert.equal(forecast.summary.availableNow, 3);
 });
 
 test("game confidence keeps the least trustworthy account evidence", () => {

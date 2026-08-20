@@ -234,11 +234,17 @@ function aggregateForecast({ accounts, runtime, fallback = new Map(), campaigns 
   }
 
   const stockByKey = new Map();
+  const stockByGame = new Map();
+  let availableUnits = 0;
   for (const row of available || []) {
+    const units = Math.max(0, Number(row.units || row.accounts || 0));
     stockByKey.set(itemKey(row), {
       accounts: Number(row.accounts || 0),
-      units: Number(row.units || 0),
+      units,
     });
+    const gameKey = norm(row.game);
+    if (gameKey) stockByGame.set(gameKey, (stockByGame.get(gameKey) || 0) + units);
+    availableUnits += units;
   }
   const campaignByGame = new Map();
   for (const campaign of campaigns || []) {
@@ -278,7 +284,10 @@ function aggregateForecast({ accounts, runtime, fallback = new Map(), campaigns 
       items: matching.length,
       itemSnapshotReady: matching.length > 0,
       readySoon: matching.filter((item) => item.readySoon).length,
-      availableNow: matching.reduce((sum, item) => sum + item.availableNow.accounts, 0),
+      // Stock exists independently of the new item-progress snapshot. Use the
+      // DropLog rollup directly so the warm-up game view does not say zero
+      // while the scanner is still learning item-level progress.
+      availableNow: stockByGame.get(norm(game.game)) || 0,
       campaignEndAt: campaign?.endAt || null,
       // Preserve the least-trustworthy evidence represented by this game.
       // A fresh item snapshot must not make a game look high-confidence when
@@ -294,7 +303,7 @@ function aggregateForecast({ accounts, runtime, fallback = new Map(), campaigns 
     generatedAt: new Date(),
     freshness: { oldestScanAt: oldest, newestScanAt: newest, stale: !newest || now - newest.getTime() > FRESH_MS },
     runtime: { available: runtime.available, checkedAt: runtime.checkedAt, configsSeen: runtime.configsSeen },
-    summary: { activeAccounts, estimatedAccounts, games: outGames.length, items: outItems.length, readySoon: outItems.filter((i) => i.readySoon).length, availableNow: outItems.reduce((sum, i) => sum + i.availableNow.accounts, 0) },
+    summary: { activeAccounts, estimatedAccounts, games: outGames.length, items: outItems.length, readySoon: outItems.filter((i) => i.readySoon).length, availableNow: availableUnits },
     games: outGames,
     items: outItems.slice(0, MAX_ITEMS),
   };

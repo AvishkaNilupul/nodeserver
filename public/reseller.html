@@ -1110,7 +1110,13 @@
       }
       function forecastGameCard(game) {
         const end = game.campaignEndAt ? `Ends ${new Date(game.campaignEndAt).toLocaleDateString()}` : "Campaign end unknown";
-        return `<article class="forecast-card"><div class="thumb placeholder">GAME</div><div class="forecast-main"><strong class="forecast-name">${esc(game.game)}</strong><div class="forecast-game">${game.items} item${game.items === 1 ? "" : "s"} in progress · ${esc(end)}</div><div class="forecast-progress"><span style="width:${Math.min(100, game.readySoon * 25)}%"></span></div><div class="forecast-meta">${confidenceBadge(game.confidence)}<span class="muted">${game.farmingAccounts} farming account${game.farmingAccounts === 1 ? "" : "s"}</span></div></div><div class="forecast-side"><span class="forecast-percent">${game.readySoon}</span><span class="muted">nearly ready</span></div></article>`;
+        const snapshotReady = game.itemSnapshotReady === true;
+        const detail = snapshotReady
+          ? `${game.items} item${game.items === 1 ? "" : "s"} in progress · ${esc(end)}`
+          : `Item scan warming up · ${esc(end)}`;
+        const sideValue = snapshotReady ? game.readySoon : game.availableNow || 0;
+        const sideLabel = snapshotReady ? "nearly ready" : "rewards ready now";
+        return `<article class="forecast-card"><div class="thumb placeholder">GAME</div><div class="forecast-main"><strong class="forecast-name">${esc(game.game)}</strong><div class="forecast-game">${detail}</div><div class="forecast-progress"><span style="width:${snapshotReady ? Math.min(100, game.readySoon * 25) : 0}%"></span></div><div class="forecast-meta">${confidenceBadge(game.confidence)}<span class="muted">${game.farmingAccounts} farming account${game.farmingAccounts === 1 ? "" : "s"}</span></div></div><div class="forecast-side"><span class="forecast-percent">${sideValue}</span><span class="muted">${sideLabel}</span></div></article>`;
       }
       function renderForecast(forecast) {
         S.forecast = forecast;
