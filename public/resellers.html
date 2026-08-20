@@ -1,0 +1,797 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Resellers | RedeemHub</title>
+    <style>
+      :root {
+        --bg: #f4f6f8;
+        --surface: #fff;
+        --surface-2: #f8fafb;
+        --line: #dfe5ea;
+        --ink: #17212b;
+        --muted: #687582;
+        --accent: #3f51b5;
+        --accent-soft: #eef1ff;
+        --green: #087f5b;
+        --red: #c92a2a;
+        --yellow: #a15c00;
+        --shadow: 0 8px 24px rgba(28, 39, 49, 0.06);
+      }
+      html[data-theme="dark"] {
+        --bg: #101419;
+        --surface: #171d23;
+        --surface-2: #1d252d;
+        --line: #303a44;
+        --ink: #edf1f4;
+        --muted: #9aa8b4;
+        --accent: #9aa9ff;
+        --accent-soft: #252b4a;
+        --green: #55d6a6;
+        --red: #ff8585;
+        --yellow: #f6c66f;
+        --shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+      .nav {
+        width: 236px;
+        height: 100vh;
+        position: fixed;
+        inset: 0 auto 0 0;
+        z-index: 10;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: var(--accent);
+        display: grid;
+        place-items: center;
+      }
+      .nav .brand b {
+        font-size: 15px;
+      }
+      .nav .brand b span {
+        display: block;
+        color: var(--muted);
+        font-size: 10.5px;
+        font-weight: 500;
+        margin-top: 2px;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        overflow: auto;
+      }
+      .page {
+        min-height: 100vh;
+        margin-left: 236px;
+        padding: 30px 34px 64px;
+      }
+      .page-inner {
+        max-width: 1440px;
+        margin: 0 auto;
+      }
+      .page-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 20px;
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      h1 {
+        margin: 5px 0 0;
+        font-size: 32px;
+      }
+      h2 {
+        font-size: 14px;
+      }
+      .sub,
+      .muted {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .header-actions,
+      .actions,
+      .toolbar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 7px;
+      }
+      .btn {
+        min-height: 36px;
+        border: 0;
+        border-radius: 8px;
+        padding: 9px 13px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 12.5px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .btn.ghost {
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+      .btn.danger {
+        background: var(--surface);
+        color: var(--red);
+        border: 1px solid var(--line);
+      }
+      .btn.sm {
+        min-height: 31px;
+        padding: 7px 10px;
+        font-size: 11.5px;
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin: 26px 0 22px;
+      }
+      .metric,
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+      }
+      .metric {
+        min-height: 95px;
+        padding: 16px;
+      }
+      .metric-label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+      .metric-value {
+        display: block;
+        margin-top: 10px;
+        font-size: 25px;
+      }
+      .panel {
+        margin-top: 16px;
+      }
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 17px 18px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .panel-body {
+        padding: 15px 18px 18px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .span-2 {
+        grid-column: span 2;
+      }
+      .span-3 {
+        grid-column: span 3;
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 750;
+      }
+      input,
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--ink);
+        padding: 9px 10px;
+        font-size: 12.5px;
+      }
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+      input:focus,
+      select:focus,
+      textarea:focus {
+        outline: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+        border-color: var(--accent);
+      }
+      .list {
+        display: flex;
+        flex-direction: column;
+      }
+      .row {
+        display: grid;
+        grid-template-columns:
+          minmax(150px, 1.1fr) minmax(120px, 0.7fr) minmax(150px, 1fr)
+          auto;
+        gap: 14px;
+        align-items: center;
+        padding: 13px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .row:last-child {
+        border-bottom: 0;
+      }
+      .nm {
+        font-size: 13px;
+        font-weight: 750;
+      }
+      .meta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+      .badge {
+        display: inline-flex;
+        width: max-content;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 8px;
+        color: var(--muted);
+        font-size: 10.5px;
+        font-weight: 800;
+      }
+      .badge.active {
+        color: var(--green);
+      }
+      .badge.suspended {
+        color: var(--red);
+      }
+      .badge.warn {
+        color: var(--yellow);
+      }
+      .result {
+        margin-top: 12px;
+        font-size: 12px;
+      }
+      .ok {
+        color: var(--green);
+      }
+      .err {
+        color: var(--red);
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th,
+      td {
+        padding: 9px 8px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        white-space: nowrap;
+      }
+      code,
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        word-break: break-all;
+      }
+      .drawer {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: rgba(15, 23, 42, 0.5);
+        padding: 30px 16px;
+        overflow: auto;
+      }
+      .drawer.show {
+        display: block;
+      }
+      .drawer-card {
+        max-width: 1050px;
+        margin: 0 auto;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: var(--surface);
+      }
+      .close {
+        float: right;
+      }
+      @media (max-width: 900px) {
+        .page {
+          margin-left: 0;
+          padding: 76px 15px 42px;
+        }
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+        .span-2,
+        .span-3 {
+          grid-column: span 2;
+        }
+        .row {
+          grid-template-columns: 1fr 1fr;
+        }
+        .row .actions {
+          grid-column: 1/-1;
+        }
+      }
+      @media (max-width: 560px) {
+        .metrics {
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
+        .metric {
+          padding: 13px;
+        }
+        .metric-value {
+          font-size: 22px;
+        }
+        .panel-header {
+          flex-direction: column;
+        }
+        .toolbar {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span
+        ><b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links"></nav>
+    </aside>
+    <main class="page">
+      <div class="page-inner">
+        <header class="page-header">
+          <div>
+            <div class="eyebrow">Resale operations</div>
+            <h1>Resellers</h1>
+            <p class="sub">
+              Create trusted reseller access, assign accounts from the drops
+              archive, and reclaim inventory safely.
+            </p>
+          </div>
+          <div class="header-actions">
+            <button class="btn ghost" id="refreshBtn">Refresh</button>
+          </div>
+        </header>
+        <section class="metrics">
+          <div class="metric">
+            <span class="metric-label">Resellers</span
+            ><strong class="metric-value" id="metricResellers">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Accounts held</span
+            ><strong class="metric-value" id="metricHeld">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Need connect</span
+            ><strong class="metric-value" id="metricConnect">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Marked sold</span
+            ><strong class="metric-value" id="metricSold">—</strong>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Create reseller</h2>
+              <p class="sub">Zero account limit means unlimited.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <form id="createForm" class="grid">
+              <div class="span-2">
+                <label>Username</label
+                ><input
+                  id="createUsername"
+                  required
+                  pattern="[A-Za-z0-9_.-]{3,32}"
+                />
+              </div>
+              <div class="span-2">
+                <label>Password</label
+                ><input
+                  id="createPassword"
+                  type="password"
+                  minlength="8"
+                  required
+                />
+              </div>
+              <div class="span-2">
+                <label>Display name</label
+                ><input id="createDisplay" maxlength="80" />
+              </div>
+              <div class="span-2">
+                <label>Max accounts</label
+                ><input id="createMax" type="number" min="0" value="0" />
+              </div>
+              <div class="span-2">
+                <label>Access start</label
+                ><input id="createStart" type="date" />
+              </div>
+              <div class="span-2">
+                <label>Access end</label><input id="createEnd" type="date" />
+              </div>
+              <div style="grid-column: 1/-1">
+                <label>Notes</label
+                ><textarea id="createNotes" maxlength="500"></textarea>
+              </div>
+              <div>
+                <button class="btn" type="submit">Create reseller</button>
+              </div>
+            </form>
+            <div id="createResult" class="result"></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Reseller roster</h2>
+              <p class="sub">
+                Select a reseller to edit access, review credentials, assign
+                accounts, or reclaim inventory.
+              </p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div id="resellerList" class="list">
+              <div class="muted">Loading...</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+    <div class="drawer" id="drawer">
+      <div class="drawer-card">
+        <button class="btn ghost sm close" id="closeDrawer">Close</button>
+        <div id="detail"></div>
+      </div>
+    </div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let resellers = [];
+      const esc = (v) =>
+        String(v == null ? "" : v).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      async function api(url, options = {}) {
+        const r = await fetch(url, {
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            ...(options.headers || {}),
+          },
+          ...options,
+        });
+        let data = null;
+        try {
+          data = await r.json();
+        } catch {}
+        if (!r.ok) throw new Error(data?.message || "Request failed");
+        return data;
+      }
+      function showResult(id, text, good = false) {
+        $(id).textContent = text;
+        $(id).className = "result " + (good ? "ok" : "err");
+      }
+      function renderList() {
+        $("metricResellers").textContent = resellers.length;
+        $("metricHeld").textContent = resellers.reduce(
+          (n, r) => n + (r.held || 0),
+          0,
+        );
+        $("metricConnect").textContent = resellers.reduce(
+          (n, r) => n + (r.needsConnect || 0),
+          0,
+        );
+        $("metricSold").textContent = resellers.reduce(
+          (n, r) => n + (r.sold || 0),
+          0,
+        );
+        $("resellerList").innerHTML = resellers.length
+          ? resellers
+              .map(
+                (r) =>
+                  `<div class="row"><div><div class="nm">${esc(r.displayName || r.username)}</div><div class="meta">${esc(r.username)} · ${r.held || 0} accounts · ${r.needsConnect || 0} need connecting · ${r.sold || 0} sold</div></div><div><span class="badge ${esc(r.status)}">${esc(r.status)}</span></div><div class="meta">Last login: ${r.lastLoginAt ? esc(new Date(r.lastLoginAt).toLocaleString()) : "never"}<br>Limit: ${r.maxAccounts || "unlimited"}</div><div class="actions"><button class="btn sm" data-open="${esc(r.id)}">Manage</button></div></div>`,
+              )
+              .join("")
+          : `<div class="muted">No resellers yet.</div>`;
+        document
+          .querySelectorAll("[data-open]")
+          .forEach((b) => (b.onclick = () => openDetail(b.dataset.open)));
+      }
+      async function load() {
+        try {
+          const d = await api("/resellers");
+          resellers = d.resellers || [];
+          renderList();
+        } catch (e) {
+          $("resellerList").innerHTML =
+            `<div class="err">${esc(e.message)}</div>`;
+        }
+      }
+      $("refreshBtn").onclick = load;
+      $("createForm").onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await api("/resellers", {
+            method: "POST",
+            body: JSON.stringify({
+              username: $("createUsername").value.trim(),
+              password: $("createPassword").value,
+              displayName: $("createDisplay").value,
+              notes: $("createNotes").value,
+              maxAccounts: Number($("createMax").value) || 0,
+              accessStart: $("createStart").value || null,
+              accessEnd: $("createEnd").value || null,
+            }),
+          });
+          e.target.reset();
+          $("createMax").value = 0;
+          showResult("createResult", "Reseller created", true);
+          await load();
+        } catch (err) {
+          showResult("createResult", err.message);
+        }
+      };
+      async function openDetail(id) {
+        try {
+          const d = await api("/resellers/" + encodeURIComponent(id));
+          const r = d.reseller;
+          $("detail").innerHTML =
+            `<h2>${esc(r.displayName || r.username)}</h2><p class="sub">${esc(r.username)} · ${esc(r.status)} · ${r.held || 0} accounts</p><section class="panel"><div class="panel-header"><div><h2>Edit access</h2></div><div class="actions"><button class="btn sm ghost" data-action="password">Reveal password</button><button class="btn sm ${r.status === "suspended" ? "" : "danger"}" data-action="suspend">${r.status === "suspended" ? "Unsuspend" : "Suspend"}</button><button class="btn sm danger" data-action="delete">Delete reseller</button></div></div><div class="panel-body"><form id="editForm" class="grid"><div class="span-2"><label>Display name</label><input id="editDisplay" value="${esc(r.displayName)}"></div><div class="span-2"><label>Max accounts (0 = unlimited)</label><input id="editMax" type="number" min="0" value="${Number(r.maxAccounts) || 0}"></div><div class="span-2"><label>Access end</label><input id="editEnd" type="date" value="${r.accessEnd ? String(r.accessEnd).slice(0, 10) : ""}"></div><div style="grid-column:1/-1"><label>Notes</label><textarea id="editNotes">${esc(r.notes)}</textarea></div><div><button class="btn sm" type="submit">Save changes</button></div></form></div></section><section class="panel"><div class="panel-header"><div><h2>Assign from drops archive</h2><p class="sub">One login per line. Preview runs the same eligibility checks as Assign.</p></div></div><div class="panel-body"><textarea id="assignText" placeholder="login1\nlogin: login2"></textarea><div class="actions" style="margin-top:10px"><button class="btn sm ghost" data-action="preview">Preview</button><button class="btn sm" data-action="assign">Assign</button></div><div id="assignResult" class="result"></div></div></section><section class="panel"><div class="panel-header"><div><h2>Held accounts</h2><p class="sub">Credentials are shown here only because this is a superadmin surface.</p></div></div><div class="panel-body table-wrap"><table><thead><tr><th>Login</th><th>Game</th><th>Connection</th><th>Status</th><th>Credentials</th><th></th></tr></thead><tbody>${(d.accounts || []).map((a) => `<tr><td class="mono">${esc(a.login)}</td><td>${esc(a.game)}</td><td>${a.needsConnect ? '<span class="badge warn">needs connect</span>' : '<span class="badge active">ready</span>'}</td><td>${esc(a.resellerStatus)}</td><td><div class="mono">${esc(a.password)}<br>${esc(a.email)}<br>${esc(a.token)}</div></td><td><button class="btn sm danger" data-reclaim="${esc(a.id)}">Reclaim</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">No accounts held.</td></tr>'}</tbody></table></div></section><section class="panel"><div class="panel-header"><div><h2>Recent audit</h2></div></div><div class="panel-body table-wrap"><table><thead><tr><th>At</th><th>Action</th><th>Account</th><th>IP</th></tr></thead><tbody>${
+              (d.audit || [])
+                .slice(0, 100)
+                .map(
+                  (a) =>
+                    `<tr><td>${esc(new Date(a.at).toLocaleString())}</td><td>${esc(a.action)}</td><td class="mono">${esc(a.accountLogin)}</td><td class="mono">${esc(a.ip)}</td></tr>`,
+                )
+                .join("") ||
+              '<tr><td colspan="4" class="muted">No audit activity.</td></tr>'
+            }</tbody></table></div></section>`;
+          $("drawer").classList.add("show");
+          $("editMax").parentElement.insertAdjacentHTML(
+            "afterend",
+            `<div class="span-2"><label>Access start</label><input id="editStart" type="date" value="${r.accessStart ? String(r.accessStart).slice(0, 10) : ""}"></div>`,
+          );
+          document
+            .querySelector('[data-action="password"]')
+            .insertAdjacentHTML(
+              "afterend",
+              '<button class="btn sm ghost" data-action="reset">Reset password</button>',
+            );
+          $("editForm").onsubmit = async (e) => {
+            e.preventDefault();
+            try {
+              await api("/resellers/" + id, {
+                method: "PUT",
+                body: JSON.stringify({
+                  displayName: $("editDisplay").value,
+                  notes: $("editNotes").value,
+                  maxAccounts: Number($("editMax").value) || 0,
+                  accessStart: $("editStart").value || null,
+                  accessEnd: $("editEnd").value || null,
+                }),
+              });
+              await openDetail(id);
+              await load();
+            } catch (err) {
+              alert(err.message);
+            }
+          };
+          document.querySelectorAll("[data-reclaim]").forEach(
+            (b) =>
+              (b.onclick = async () => {
+                if (!confirm("Reclaim this account?")) return;
+                try {
+                  await api(
+                    "/resellers/" + id + "/accounts/" + b.dataset.reclaim,
+                    { method: "DELETE" },
+                  );
+                  await openDetail(id);
+                  await load();
+                } catch (err) {
+                  alert(err.message);
+                }
+              }),
+          );
+          document.querySelector('[data-action="password"]').onclick =
+            async () => {
+              try {
+                const p = await api("/resellers/" + id + "/password");
+                alert("Password: " + (p.password || "(not available)"));
+              } catch (err) {
+                alert(err.message);
+              }
+            };
+          document.querySelector('[data-action="reset"]').onclick =
+            async () => {
+              const password = prompt("New password (8+ characters):");
+              if (!password) return;
+              try {
+                await api("/resellers/" + id + "/password", {
+                  method: "POST",
+                  body: JSON.stringify({ password }),
+                });
+                alert("Password reset");
+              } catch (err) {
+                alert(err.message);
+              }
+            };
+          document.querySelector('[data-action="suspend"]').onclick =
+            async () => {
+              try {
+                await api(
+                  "/resellers/" +
+                    id +
+                    "/" +
+                    (r.status === "suspended" ? "unsuspend" : "suspend"),
+                  { method: "POST" },
+                );
+                await openDetail(id);
+                await load();
+              } catch (err) {
+                alert(err.message);
+              }
+            };
+          document.querySelector('[data-action="delete"]').onclick =
+            async () => {
+              if (!confirm("Delete reseller and reclaim all accounts?")) return;
+              try {
+                await api("/resellers/" + id, { method: "DELETE" });
+                $("drawer").classList.remove("show");
+                await load();
+              } catch (err) {
+                alert(err.message);
+              }
+            };
+          document.querySelector('[data-action="preview"]').onclick =
+            async () => {
+              try {
+                const p = await api("/resellers/" + id + "/assign/preview", {
+                  method: "POST",
+                  body: JSON.stringify({ logins: $("assignText").value }),
+                });
+                $("assignResult").textContent = (p.preview || [])
+                  .map(
+                    (x) =>
+                      x.login +
+                      ": " +
+                      x.status +
+                      " (" +
+                      x.reason +
+                      ", " +
+                      x.drops +
+                      " drops)",
+                  )
+                  .join("\n");
+              } catch (err) {
+                showResult("assignResult", err.message);
+              }
+            };
+          document.querySelector('[data-action="assign"]').onclick =
+            async () => {
+              try {
+                const a = await api("/resellers/" + id + "/assign", {
+                  method: "POST",
+                  body: JSON.stringify({ logins: $("assignText").value }),
+                });
+                $("assignResult").textContent =
+                  "Assigned: " +
+                  (a.assigned || []).map((x) => x.login).join(", ") +
+                  "; skipped: " +
+                  (a.skipped || [])
+                    .map((x) => x.login + ": " + x.reason)
+                    .join(", ");
+                await openDetail(id);
+                await load();
+              } catch (err) {
+                showResult("assignResult", err.message);
+              }
+            };
+        } catch (e) {
+          alert(e.message);
+        }
+      }
+      $("closeDrawer").onclick = () => $("drawer").classList.remove("show");
+      $("drawer").onclick = (e) => {
+        if (e.target === $("drawer")) $("drawer").classList.remove("show");
+      };
+      load();
+    </script>
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+  </body>
+</html>

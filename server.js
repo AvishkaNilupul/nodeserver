@@ -47,6 +47,7 @@ const renterAdminRoutes = require("./routes/renterAdminRoutes");
 const { requireRenter } = require("./middleware/renterAuth");
 const resellerAuthRoutes = require("./routes/resellerAuthRoutes");
 const { requireReseller } = require("./middleware/resellerAuth");
+const resellerAdminRoutes = require("./routes/resellerAdminRoutes");
 const renterExpiry = require("./utils/renterExpiry");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
@@ -470,6 +471,10 @@ app.get("/renters.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "renters.html"));
 });
 
+app.get("/resellers.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "resellers.html"));
+});
+
 // =========================
 // Marketplace tab (all admins)
 // =========================
@@ -590,6 +595,7 @@ app.use(enforce2fa, renterAdminRoutes);
 // Reseller Phase 1 auth realm. Portal/admin routers are added in later phases;
 // mounting auth before the requireAdmin cascade keeps login/whoami reachable.
 app.use(resellerAuthRoutes);
+app.use(enforce2fa, resellerAdminRoutes);
 // Mounted BEFORE the requireAdmin cascade below because stashRoutes contains
 // the bearer-authenticated POST /account-stash/ingest for the browser account
 // automator — requireAdmin runs unconditionally for every request and would
