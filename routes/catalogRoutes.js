@@ -7,10 +7,14 @@ const CatalogInquiry = require("../models/CatalogInquiry");
 const DropSet = require("../models/DropSet");
 const AutoFarmTask = require("../models/AutoFarmTask");
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const Purchase = require("../models/Purchase");
 const SaleSignal = require("../models/SaleSignal");
 const { stockForSets } = require("./shopRoutes");
+const { stockForSetFromHoldings } = require("./shopRoutes");
+const { AVAILABLE_DROP } = require("../utils/dropReservation");
+const accountState = require("../utils/twitchAccountState");
 const {
   ensureThumbnail,
   SAFE_FILE,
@@ -146,9 +150,59 @@ function inquiryQuantity(value) {
 
 async function stockForSetsBatched(
   sets,
-  stockReader = stockForSets,
+  stockReader = null,
   batchSize = PUBLIC_STOCK_BATCH_SIZE,
 ) {
+  if (!stockReader) {
+    const result = new Map();
+    const keys = [
+      ...new Set(
+        sets.flatMap((set) =>
+          (set.items || []).map((item) => item.itemKey).filter(Boolean),
+        ),
+      ),
+    ];
+    if (!keys.length) {
+      for (const set of sets)
+        result.set(String(set._id), { stock: 0, topItems: [] });
+      return result;
+    }
+    const drops = await DropLog.find(
+      { itemKey: { $in: keys }, ...AVAILABLE_DROP },
+      { account: 1, itemKey: 1, count: 1 },
+    ).lean();
+    const byAccount = new Map();
+    for (const drop of drops) {
+      const accountId = String(drop.account || "");
+      if (!accountId) continue;
+      if (!byAccount.has(accountId)) byAccount.set(accountId, new Map());
+      const counts = byAccount.get(accountId);
+      counts.set(
+        String(drop.itemKey),
+        (counts.get(String(drop.itemKey)) || 0) + (Number(drop.count) || 0),
+      );
+    }
+    const accounts = await BotAccount.find(
+      { _id: { $in: [...byAccount.keys()] } },
+      { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1 },
+    ).lean();
+    const holdings = accounts
+      .filter(
+        (account) =>
+          account.credPassword &&
+          String(account.credPassword).length > 0 &&
+          !accountState.isUnusableScanStatus(account.lastScanStatus),
+      )
+      .map((account) => ({
+        accountId: String(account._id),
+        login: account.login || "",
+        counts: byAccount.get(String(account._id)) || new Map(),
+      }));
+    for (const set of sets) {
+      result.set(String(set._id), stockForSetFromHoldings(set, holdings));
+    }
+    return result;
+  }
   const result = new Map();
   const size = Math.max(1, Number(batchSize) || PUBLIC_STOCK_BATCH_SIZE);
   for (let index = 0; index < sets.length; index += size) {
