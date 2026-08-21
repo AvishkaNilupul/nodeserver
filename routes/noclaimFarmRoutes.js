@@ -660,6 +660,41 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// Restart a bot's container. Works whether it's running or was stopped:
+// `docker restart` re-spins the process from scratch, which respawns every
+// per-account watch thread. Over days of uptime a container can silently bleed
+// watch threads (some accounts stop farming while others keep going) — a
+// restart revives them all, and it also just starts a container the operator
+// had stopped. Watch progress lives on Twitch's side, so nothing is lost.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/bots/:id/restart",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      // `docker restart` errors if the container doesn't exist; surface that
+      // clearly rather than silently swallowing it, so the UI can tell the
+      // operator to re-create the bot (its container may have been removed).
+      const out = await sh(
+        `docker restart ${hosts.shq(containerFor(id))} 2>&1 || echo "__ERR__"`,
+        { timeout: 40000 },
+      );
+      if (out.includes("__ERR__"))
+        return res.status(409).json({
+          success: false,
+          message:
+            "No container to restart — it may have been removed. Release and re-create the bot.",
+        });
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Release a bot: stop+remove container, release its accounts back to the pool,
 // delete its config. Use once you've listed the accounts (or to abandon).
 // ---------------------------------------------------------------------------
