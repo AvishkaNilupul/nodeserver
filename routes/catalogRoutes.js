@@ -43,7 +43,7 @@ const router = express.Router();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_STOCK_BATCH_SIZE = 25;
 const PUBLIC_STOCK_KEY_BATCH_SIZE = 10;
-const PUBLIC_STOCK_KEY_CONCURRENCY = 4;
+const PUBLIC_STOCK_KEY_CONCURRENCY = 12;
 let publicCache = { at: 0, data: null };
 let publicRefresh = null;
 
