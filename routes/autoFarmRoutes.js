@@ -8,8 +8,227 @@ const settings = require("../utils/settings");
 const hosts = require("../utils/botHosts");
 const botFactory = require("../utils/botFactory");
 const suspendedAccounts = require("../utils/suspendedAccounts");
+const AutoFarmSnapshot = require("../models/AutoFarmSnapshot");
+const AutoFarmEvent = require("../models/AutoFarmEvent");
+const BotAccount = require("../models/BotAccount");
+const autoFarmSnapshot = require("../utils/autoFarmSnapshot");
+const { recordAutoFarmEvent } = require("../utils/autoFarmEventLog");
 
 const router = express.Router();
+
+function watcherEtag(builtAt) {
+  const time = builtAt ? new Date(builtAt).getTime() : 0;
+  return 'W/"auto-farm-' + (Number.isFinite(time) ? time : 0) + '"';
+}
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// One persisted-document read. No aggregation, task join or host access is
+// allowed on this request path; the background snapshot builder owns all of it.
+router.get("/auto-farm/watcher", requireSuperadmin, async (req, res) => {
+  try {
+    const snapshot = await AutoFarmSnapshot.findOne({ key: "auto-farm" }).lean();
+    if (!snapshot || !snapshot.builtAt) {
+      autoFarmSnapshot.refreshFast().catch(() => {});
+      return res.status(503).json({
+        success: false,
+        message: "Auto-farm watcher is warming up",
+      });
+    }
+    const etag = watcherEtag(snapshot.builtAt);
+    const since = req.query.since ? new Date(req.query.since).getTime() : null;
+    const builtMs = new Date(snapshot.builtAt).getTime();
+    res.set("ETag", etag);
+    res.set("Cache-Control", "private, no-cache");
+    if (
+      req.get("If-None-Match") === etag ||
+      (Number.isFinite(since) && since >= builtMs)
+    ) {
+      return res.status(304).end();
+    }
+    res.json({
+      success: true,
+      builtAt: snapshot.builtAt,
+      stale: Date.now() - builtMs > autoFarmSnapshot.FAST_INTERVAL_MS * 3,
+      snapshot,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Enqueue a deduplicated DB-only rebuild. The request never waits for SSH.
+router.post(
+  "/auto-farm/watcher/refresh",
+  requireSuperadmin,
+  async (req, res) => {
+    const current = await AutoFarmSnapshot.findOne(
+      { key: "auto-farm" },
+      { builtAt: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    autoFarmSnapshot.refreshFast().catch((err) =>
+      console.error("auto-farm watcher refresh failed:", err.message),
+    );
+    res.status(202).json({
+      success: true,
+      queued: true,
+      builtAt: current && current.builtAt,
+    });
+  },
+);
+
+router.get(
+  "/auto-farm/watcher/bots/:host/:container/accounts",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const host = String(req.params.host || "");
+      const container = String(req.params.container || "");
+      const file = String(req.query.file || "");
+      const rows = await BotAccount.find(
+        {
+          host,
+          $or: [
+            { container },
+            ...(file ? [{ configFile: file }] : []),
+          ],
+        },
+        {
+          login: 1,
+          enabled: 1,
+          host: 1,
+          container: 1,
+          configFile: 1,
+          lastScanAt: 1,
+          lastScanStatus: 1,
+          lastScanError: 1,
+          inProgressCount: 1,
+          inProgressGames: 1,
+          farmingProgress: 1,
+          farmingCompleteAt: 1,
+          suspendedAt: 1,
+          dropCount: 1,
+        },
+      )
+        .sort({ login: 1 })
+        .lean();
+      res.json({
+        success: true,
+        accounts: rows.map((row) => ({
+          ...row,
+          state:
+            row.lastScanStatus === "suspended"
+              ? "suspended"
+              : row.lastScanStatus === "token_invalid"
+                ? "dead_token"
+                : row.lastScanStatus === "error"
+                  ? "scan_error"
+                  : row.inProgressCount > 0
+                    ? "progressing"
+                    : row.lastScanStatus === "ok"
+                      ? "idle_or_done"
+                      : "unknown",
+        })),
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+router.get(
+  "/auto-farm/watcher/decisions",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const match = {};
+      if (req.query.decision === "failed") match.status = "failed";
+      else if (req.query.decision)
+        match.decision = String(req.query.decision);
+      if (req.query.q) {
+        const re = new RegExp(escapeRegex(req.query.q), "i");
+        match.$or = [
+          { game: re },
+          { campaignName: re },
+          { campaignId: re },
+          { reason: re },
+        ];
+      }
+      const limit = Math.max(
+        1,
+        Math.min(200, Math.floor(Number(req.query.limit) || 100)),
+      );
+      const tasks = await AutoFarmTask.find(match, taskProjectionForWatcher())
+        .sort({ decidedAt: -1, createdAt: -1 })
+        .limit(limit)
+        .lean();
+      res.json({ success: true, tasks });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+router.get(
+  "/auto-farm/watcher/events",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const match = {};
+      if (req.query.type) match.type = String(req.query.type);
+      if (req.query.game) {
+        match.game = new RegExp(escapeRegex(req.query.game), "i");
+      }
+      const limit = Math.max(
+        1,
+        Math.min(300, Math.floor(Number(req.query.limit) || 100)),
+      );
+      const events = await AutoFarmEvent.find(match)
+        .sort({ at: -1 })
+        .limit(limit)
+        .lean();
+      res.json({ success: true, events });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+function taskProjectionForWatcher() {
+  return {
+    game: 1,
+    campaignId: 1,
+    campaignName: 1,
+    campaignEndAt: 1,
+    decision: 1,
+    reason: 1,
+    status: 1,
+    dryRun: 1,
+    error: 1,
+    plannedAccounts: 1,
+    targetAccounts: 1,
+    decidedAt: 1,
+    createdAt: 1,
+    executedAt: 1,
+    completedAt: 1,
+    "listing.externalId": 1,
+    "listing.url": 1,
+    "listing.title": 1,
+    "listing.price": 1,
+    "listing.qty": 1,
+    "listing.heldBack": 1,
+    "listing.postEvent": 1,
+    "listing.error": 1,
+    "listing.plati": 1,
+    "listing.ggsel": 1,
+    "listing.zeusx": 1,
+    wouldList: 1,
+  };
+}
 
 // ENGINE STATE + settings + pool budget, one call for the whole tab header.
 router.get("/auto-farm/status", requireSuperadmin, async (req, res) => {
@@ -352,6 +571,15 @@ router.post(
       task.listing = undefined;
       task.wouldList = undefined;
       await task.save();
+      await recordAutoFarmEvent({
+        type: "delisted",
+        game: task.game,
+        campaignId: task.campaignId,
+        taskId: task._id,
+        count: 1,
+        reason: "manually delisted from the Auto Farm watcher",
+        actor: "autoFarmRoutes.delist",
+      });
       res.json({ success: true, remote });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });

@@ -70,6 +70,7 @@ const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
 const autoFarmer = require("./utils/autoFarmer");
+const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
 const epicClaimer = require("./utils/epicClaimer");
 const telegramBot = require("./utils/telegramBot");
@@ -701,6 +702,7 @@ mongoose
     // host (or dry-run plans) - fully gated by the superadmin settings
     // switch, so starting it here is a no-op until it's enabled.
     autoFarmer.start();
+    autoFarmSnapshot.start();
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();

@@ -28,6 +28,7 @@ const hosts = require("./botHosts");
 const TwitchCampaign = require("../models/TwitchCampaign");
 const { botCompletion } = require("./farmCompletion");
 const settings = require("./settings");
+const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 
 const REGISTRY = "parked-bots.json";
 
@@ -140,7 +141,7 @@ async function liveCampaigns() {
       status: "ACTIVE",
       $or: [{ endAt: null }, { endAt: { $gt: now } }],
     },
-    { game: 1, name: 1, startAt: 1, endAt: 1 },
+    { campaignId: 1, game: 1, name: 1, startAt: 1, endAt: 1 },
   ).lean();
 }
 
@@ -209,6 +210,18 @@ async function wakeFinishedBots(hostId, opts = {}) {
       delete reg[k];
       dirty = true;
       woken.push({ container, game: trigger.game, campaign: trigger.name });
+      await recordAutoFarmEvent({
+        type: "woken",
+        game: trigger.game,
+        campaignId: trigger.campaignId,
+        host: host.id,
+        container,
+        count: Number(entry.accounts) || 0,
+        reason:
+          "new campaign started: " +
+          (trigger.name || trigger.campaignId || trigger.game),
+        actor: "wakeFinishedBots",
+      });
       log(
         "Woke " +
           container +
@@ -325,6 +338,18 @@ async function stopFinishedBots(hostId, opts = {}) {
         reason: empty
           ? "no enabled accounts left in the config"
           : "all accounts finished their assigned games",
+      });
+      const parkReason = empty
+        ? "no enabled accounts left in the config"
+        : "all accounts finished their assigned games";
+      await recordAutoFarmEvent({
+        type: "parked",
+        game: empty ? "" : (verdict.assignedGames || []).join(", "),
+        host: host.id,
+        container,
+        count: verdict.total,
+        reason: parkReason,
+        actor: "stopFinishedBots",
       });
       stopped.push({ container, accounts: verdict.total, empty });
       log(

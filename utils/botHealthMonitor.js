@@ -132,12 +132,15 @@ async function checkContainer(host, container, now) {
   }
 
   const hash = tailHash(logs);
+  const isCrashing = CRASH_PATTERNS.some((re) => re.test(logs));
   let entry = tracked.get(k);
   if (!entry) {
     entry = {
       hash,
       sameSince: now,
       stuckSince: null,
+      crashing: isCrashing,
+      lastCheckedAt: now,
       lastStuckAlertAt: 0,
       lastCrashAlertAt: 0,
     };
@@ -145,7 +148,8 @@ async function checkContainer(host, container, now) {
     return; // first sighting — nothing to compare against yet
   }
 
-  const isCrashing = CRASH_PATTERNS.some((re) => re.test(logs));
+  entry.crashing = isCrashing;
+  entry.lastCheckedAt = now;
   if (isCrashing && now - entry.lastCrashAlertAt > REMINDER_MS) {
     entry.lastCrashAlertAt = now;
     await sendTelegram(
@@ -466,7 +470,11 @@ function status() {
     containers: Array.from(tracked.entries()).map(([k, v]) => ({
       key: k,
       stuck: !!v.stuckSince,
+      crashing: !!v.crashing,
       silentSince: new Date(v.sameSince).toISOString(),
+      lastCheckedAt: v.lastCheckedAt
+        ? new Date(v.lastCheckedAt).toISOString()
+        : null,
     })),
     decay: {
       enabled: DECAY_ENABLED,

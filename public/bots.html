@@ -168,6 +168,48 @@
   .banner { background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:12px 16px; border-radius:12px; font-size:13.5px; margin-bottom:16px; }
   html[data-theme="dark"] .banner{background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.3);color:#fbbf24;}
 
+  /* Auto-farm operational watcher */
+  .af-head { padding:14px 18px; }
+  .af-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .af-actions { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; }
+  .af-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:9px; margin-top:12px; }
+  .af-metric { padding:9px 11px; border:1px solid var(--line); border-radius:11px; background:var(--surface-2); }
+  .af-metric b { display:block; font-size:15px; }
+  .af-metric span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+  .af-bar { height:5px; border-radius:999px; background:var(--line); overflow:hidden; margin-top:7px; }
+  .af-bar i { display:block; height:100%; background:linear-gradient(90deg,var(--accent2),var(--accent)); }
+  .af-section { margin-bottom:18px; }
+  .af-section-h { display:flex; align-items:center; gap:9px; margin-bottom:9px; flex-wrap:wrap; }
+  .af-section-h b { font-size:15px; }
+  .af-section-h .muted { font-size:12.5px; }
+  .af-attention { border-color:#fde68a; background:#fffbeb; }
+  html[data-theme="dark"] .af-attention{background:rgba(251,191,36,.08);border-color:rgba(251,191,36,.3);}
+  .af-game { background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; margin-bottom:10px; }
+  .af-game-h { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .af-game-h b { font-size:14px; }
+  .af-bot { padding:11px 14px; border-bottom:1px solid var(--line); }
+  .af-bot:last-child { border-bottom:0; }
+  .af-bot-top { display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+  .af-bot-main { flex:1; min-width:220px; }
+  .af-bot-controls { display:flex; gap:6px; flex-wrap:wrap; }
+  .af-detail { margin-top:9px; overflow-x:auto; }
+  .af-state { border:1px solid transparent; }
+  .af-state.farming { background:#ecfdf5; color:var(--green); }
+  .af-state.done_idle { background:#eef2ff; color:var(--accent); }
+  .af-state.stalled,.af-state.degraded { background:#fffbeb; color:var(--yellow); border-color:#fde68a; }
+  .af-state.down { background:#fef2f2; color:var(--red); }
+  .af-state.parked,.af-state.unknown { background:var(--surface-2); color:var(--muted); }
+  html[data-theme="dark"] .af-state.farming{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .af-state.done_idle{background:rgba(99,102,241,.18);}
+  html[data-theme="dark"] .af-state.stalled,html[data-theme="dark"] .af-state.degraded{background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);}
+  html[data-theme="dark"] .af-state.down{background:rgba(248,113,113,.14);}
+  .af-filter { padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); font:inherit; font-size:12.5px; }
+  .af-table-wrap { overflow-x:auto; }
+  .af-event-type { font-weight:700; font-size:11.5px; text-transform:uppercase; }
+  .af-view-toggle { display:inline-flex; border:1px solid var(--line); border-radius:9px; overflow:hidden; }
+  .af-view-toggle button { border:0; border-radius:0; background:var(--surface); color:var(--muted); padding:6px 9px; }
+  .af-view-toggle button.on { background:var(--accent); color:#fff; }
+
   /* Modal (add bot / mass-add accounts) */
   .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:56px 16px; overflow-y:auto; }
   .modal-bg.show { display:flex; }
@@ -296,6 +338,12 @@
   const AUTOFARM_TAB = "__autofarm__"; // synthetic tab: auto-farmer bots + decision log
   let AUTO_KEYS = new Set(); // "host|file" of every auto-created bot (kept out of host tabs)
   let _afLoading = false;    // guards overlapping Auto-farm refreshes
+  let _afSnapshot = null;
+  let _afWatcherEtag = "";
+  let _afWatcherBuiltAt = "";
+  let _afEvents = [];
+  let _afDecisions = [];
+  let _afLegacy = (() => { try { return localStorage.getItem("autoFarmView") === "legacy"; } catch (e) { return false; } })();
   let _allLoading = false;     // guards overlapping All-bots refreshes
   let _rentedLoading = false;  // guards overlapping Rented refreshes
   // Append the active host to a bot-configs URL so every read/write/restart
@@ -445,7 +493,7 @@
     if (id === AUTOFARM_TAB) {
       setAllMode(true);
       $("bots").innerHTML = '<div class="empty">Loading auto farm…</div>';
-      loadAutoFarm();
+      loadAutoFarm(true);
       return;
     }
     setAllMode(false);
@@ -531,7 +579,7 @@
     _statsTimer = setInterval(function () {
       if (CURRENT_HOST === ALL_TAB) { loadAllBots(); return; }
       if (CURRENT_HOST === RENTED_TAB) { loadRentedBots(); return; }
-      if (CURRENT_HOST === AUTOFARM_TAB) { loadAutoFarm(); return; }
+      if (CURRENT_HOST === AUTOFARM_TAB) { loadAutoFarm(false); return; }
       loadHostStats();
     }, 7000);
   }
@@ -699,29 +747,106 @@
     }
   };
 
-  // ---- Auto farm (autonomous drop farmer: status, decision log, controls) ----
+  // ---- Auto farm operational watcher + legacy decision log ----
+  function afSnapshotKeys(snap) {
+    const keys = new Set(Array.isArray(snap && snap.autoBotKeys) ? snap.autoBotKeys : []);
+    for (const row of ((snap && snap.bots) || [])) {
+      const bots = Array.isArray(row.bots) ? row.bots : [row];
+      for (const b of bots) {
+        const host = b.hostId || b.host;
+        if (host && b.file) keys.add(host + "|" + b.file);
+      }
+    }
+    return keys;
+  }
+
+  async function afFetchWatcher(force) {
+    let url = "/auto-farm/watcher";
+    if (!force && _afWatcherBuiltAt) url += "?since=" + encodeURIComponent(_afWatcherBuiltAt);
+    const headers = {};
+    if (!force && _afWatcherEtag) headers["If-None-Match"] = _afWatcherEtag;
+    const r = await fetch(url, { credentials: "same-origin", headers });
+    if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
+    if (r.status === 304) return false;
+    let j = {}; try { j = await r.json(); } catch (e) {}
+    if (!r.ok || j.success === false) throw new Error(j.message || ("HTTP " + r.status));
+    _afSnapshot = j.snapshot || j;
+    if (j.snapshot && Object.prototype.hasOwnProperty.call(j, "stale")) _afSnapshot.stale = !!j.stale;
+    _afWatcherBuiltAt = j.builtAt || _afSnapshot.builtAt || "";
+    _afWatcherEtag = r.headers.get("ETag") || _afWatcherEtag;
+    AUTO_KEYS = afSnapshotKeys(_afSnapshot);
+    return true;
+  }
+
+  async function afRefreshWatcher() {
+    const prior = _afWatcherBuiltAt;
+    await api("/auto-farm/watcher/refresh", { method: "POST" });
+    for (let i = 0; i < 10; i++) {
+      await new Promise(function (resolve) { setTimeout(resolve, 500); });
+      await afFetchWatcher(true);
+      if (_afWatcherBuiltAt && _afWatcherBuiltAt !== prior) break;
+    }
+    if (CURRENT_HOST === AUTOFARM_TAB && !_afLegacy) renderAutoFarmWatcher(_afSnapshot || {});
+  }
+
+  window.afManualRefresh = async function (btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Refreshing…"; }
+    try { await afRefreshWatcher(); toast("Watcher refreshed"); }
+    catch (e) { toast("Refresh failed: " + e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "Refresh"; } }
+  };
+
   async function refreshAutoKeys() {
     try {
+      if (!_afLegacy) { await afFetchWatcher(false); return; }
       const r = await api("/auto-farm/tasks");
       const keys = new Set();
       for (const t of (r.tasks || [])) {
         for (const b of (t.bots || [])) if (b && b.host && b.file) keys.add(b.host + "|" + b.file);
       }
       AUTO_KEYS = keys;
-    } catch (e) { /* endpoint may 403 for non-superadmin; auto tab just stays empty */ }
+    } catch (e) {
+      // A brand-new deploy may still be warming its first persisted snapshot.
+      // Preserve the old bot-hiding contract during that brief window.
+      try {
+        const r = await api("/auto-farm/tasks");
+        const keys = new Set();
+        for (const t of (r.tasks || [])) for (const b of (t.bots || [])) if (b && b.host && b.file) keys.add(b.host + "|" + b.file);
+        AUTO_KEYS = keys;
+      } catch (_) { /* superadmin-only endpoint; leave prior keys intact */ }
+    }
   }
 
-  async function loadAutoFarm() {
+  async function loadAutoFarm(force) {
     if (CURRENT_HOST !== AUTOFARM_TAB || _afLoading) return;
     _afLoading = true;
     try {
-      const [st, tk] = await Promise.all([api("/auto-farm/status"), api("/auto-farm/tasks")]);
-      if (CURRENT_HOST !== AUTOFARM_TAB) return; // tab changed mid-flight
-      renderAutoFarm(st, (tk && tk.tasks) || []);
+      if (_afLegacy) {
+        const [st, tk] = await Promise.all([api("/auto-farm/status"), api("/auto-farm/tasks")]);
+        if (CURRENT_HOST === AUTOFARM_TAB) renderAutoFarmLegacy(st, (tk && tk.tasks) || []);
+      } else {
+        const changed = await afFetchWatcher(!!force);
+        if (CURRENT_HOST === AUTOFARM_TAB && (changed || !$("afWatcherRoot"))) renderAutoFarmWatcher(_afSnapshot || {});
+      }
     } catch (e) {
-      if (CURRENT_HOST === AUTOFARM_TAB) $("bots").innerHTML = '<div class="empty">Failed to load auto farm: ' + esc(e.message) + "</div>";
+      if (CURRENT_HOST === AUTOFARM_TAB) {
+        if (!_afLegacy && _afSnapshot) renderAutoFarmWatcher(_afSnapshot);
+        else $("bots").innerHTML = '<div class="panel af-head"><div class="af-row"><b>Auto farmer</b>' + afViewToggle() + '</div><div class="empty">Failed to load auto farm: ' + esc(e.message) + "</div></div>";
+      }
     } finally { _afLoading = false; }
   }
+
+  function afViewToggle() {
+    return '<span class="af-view-toggle"><button class="' + (!_afLegacy ? "on" : "") + '" onclick="afToggleView(false)">Watcher</button>' +
+      '<button class="' + (_afLegacy ? "on" : "") + '" onclick="afToggleView(true)">Legacy list</button></span>';
+  }
+
+  window.afToggleView = function (legacy) {
+    _afLegacy = !!legacy;
+    try { localStorage.setItem("autoFarmView", _afLegacy ? "legacy" : "watcher"); } catch (e) {}
+    $("bots").innerHTML = '<div class="empty">Loading auto farm…</div>';
+    loadAutoFarm(true);
+  };
 
   function afDecisionChip(t) {
     const map = {
@@ -730,6 +855,7 @@
       skip_no_accounts: ["SKIP · no accounts", "off"], skip_no_capacity: ["SKIP · no capacity", "off"],
       skip_host_offline: ["SKIP · host offline", "off"],
       skip_already_covered: ["SKIP · already covered", "off"],
+      skip_reuse_only: ["SKIP · reuse only", "off"],
     };
     const m = map[t.decision] || [t.decision, ""];
     return '<span class="chip ' + m[1] + '">' + esc(m[0]) + "</span>";
@@ -762,24 +888,37 @@
       lines + "</div></details>";
   }
 
-  // Poll the engine status every 2s while a scan runs so the log streams in.
+  function afUpdateProgress(eng) {
+    const el = $("afProgressWrap");
+    if (el) el.innerHTML = afProgressPanel(eng || {});
+    const box = $("afProgressLog");
+    if (box) box.scrollTop = box.scrollHeight;
+    const last = $("afLastScan");
+    if (last && eng && eng.lastRun) last.innerHTML = "Last scan: " + esc(new Date(eng.lastRun).toLocaleString()) +
+      (eng.lastError ? ' · <span style="color:var(--red)">' + esc(eng.lastError) + "</span>" : "");
+  }
+
+  // During a scan only the lightweight in-memory status streams. The full
+  // task log is never fetched in watcher mode.
   async function afPollProgress() {
     if (_afPolling) return;
     _afPolling = true;
     try {
       for (let i = 0; i < 300; i++) {
         if (CURRENT_HOST !== AUTOFARM_TAB) break;
-        await loadAutoFarm();
-        const box = $("afProgressLog");
-        if (box) box.scrollTop = box.scrollHeight;
         const st = await api("/auto-farm/status").catch(function () { return null; });
-        if (!st || !st.engine || !st.engine.running) { await loadAutoFarm(); break; }
+        if (st && st.engine) afUpdateProgress(st.engine);
+        if (!st || !st.engine || !st.engine.running) {
+          if (!_afLegacy) await afRefreshWatcher().catch(function () {});
+          else await loadAutoFarm(true);
+          break;
+        }
         await new Promise(function (r) { setTimeout(r, 2000); });
       }
-    } finally { _afPolling = false; await refreshAutoKeys(); loadAutoFarm(); }
+    } finally { _afPolling = false; await refreshAutoKeys(); loadAutoFarm(true); }
   }
 
-  function renderAutoFarm(st, tasks) {
+  function renderAutoFarmLegacy(st, tasks) {
     const s = (st && st.settings) || {};
     const pool = (st && st.pool) || {};
     const eng = (st && st.engine) || {};
@@ -789,7 +928,7 @@
     const head =
       '<div class="panel" style="padding:14px 18px;margin-bottom:16px">' +
         '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
-          "<b>Auto farmer</b> " + mode +
+          "<b>Auto farmer · legacy decision log</b> " + mode + afViewToggle() +
           '<span class="muted" style="font-size:12.5px">host: ' + esc(hostTxt) +
           " · pool: " + (pool.ready == null ? "?" : pool.ready) + " ready / " + (pool.spendable == null ? "?" : pool.spendable) + " spendable (reserve " + (pool.reserve == null ? "?" : pool.reserve) + ")" +
           " · cap " + (s.maxPerGame || "?") + "/game, " + (s.accountsPerBot || "?") + "/bot, " + (s.maxAutoBots || "?") + " bots max</span>" +
@@ -799,8 +938,8 @@
             '<a class="btn-sm btn-ghost" href="/superadmin.html" style="text-decoration:none;display:inline-flex;align-items:center">Settings</a>' +
           "</span>" +
         "</div>" +
-        (eng.lastRun ? '<div class="muted" style="font-size:12px;margin-top:6px">Last scan: ' + esc(new Date(eng.lastRun).toLocaleString()) + (eng.lastError ? ' · <span style="color:var(--red)">' + esc(eng.lastError) + "</span>" : "") + "</div>" : "") +
-        afProgressPanel(eng) +
+        (eng.lastRun ? '<div id="afLastScan" class="muted" style="font-size:12px;margin-top:6px">Last scan: ' + esc(new Date(eng.lastRun).toLocaleString()) + (eng.lastError ? ' · <span style="color:var(--red)">' + esc(eng.lastError) + "</span>" : "") + "</div>" : "") +
+        '<div id="afProgressWrap">' + afProgressPanel(eng) + "</div>" +
       "</div>";
 
     if (!tasks.length) {
@@ -858,6 +997,235 @@
     $("bots").innerHTML = head + rows;
   }
 
+  function afNum(v, fallback) { return v == null || isNaN(v) ? (fallback == null ? 0 : fallback) : Number(v); }
+  function afPct(v) { return Math.max(0, Math.min(100, afNum(v))); }
+  function afStateChip(state) {
+    const s = String(state || "UNKNOWN").toUpperCase();
+    return '<span class="chip af-state ' + s.toLowerCase() + '">' + esc(s.replace("_", " ")) + "</span>";
+  }
+  function afTaskId(row) { return row.taskId || row._id || row.id || (row.task && (row.task._id || row.task.id)) || ""; }
+  function afActionAllowed(row, name) {
+    return !!(row && row.actions && Object.prototype.hasOwnProperty.call(row.actions, name) && row.actions[name]);
+  }
+  function afListingHtml(row) {
+    if (Array.isArray(row.relatedTasks)) return row.relatedTasks.map(afListingHtml).join("");
+    const listings = Array.isArray(row.listings) ? row.listings : [row.listing, row.stackListing].filter(Boolean);
+    const parts = [];
+    for (const l of listings) {
+      if (!l || !l.externalId) continue;
+      const market = l.marketplace || (l === row.stackListing ? "Stack" : "Gameflip");
+      parts.push((l.url ? '<a href="' + esc(l.url) + '" target="_blank" rel="noopener">' + esc(market) + "</a>" : esc(market)) +
+        (l.price != null ? " $" + esc(l.price) : "") + (l.qty ? " · " + esc(l.qty) + " acc" : "") +
+        (l.heldBack ? " · " + esc(l.heldBack) + " held" : ""));
+      for (const key of ["plati", "ggsel", "zeusx"]) {
+        const x = l[key];
+        if (x && x.externalId) parts.push(x.url ? '<a href="' + esc(x.url) + '" target="_blank" rel="noopener">' + esc(key) + " #" + esc(x.externalId) + "</a>" : esc(key) + " #" + esc(x.externalId));
+      }
+    }
+    return parts.length ? '<div class="ab-farm">listed: ' + parts.join(" · ") + "</div>" : "";
+  }
+
+  function afGameGroups(snap) {
+    const map = new Map();
+    const botByKey = new Map((snap.bots || []).map((b) => [b.key || ((b.host || "") + "|" + (b.container || "")), b]));
+    const add = function (game, task, bot) {
+      const key = game || "Unknown game";
+      if (!map.has(key)) map.set(key, { game:key, rows:[] });
+      map.get(key).rows.push({ task:task || {}, bot:bot || task || {} });
+    };
+    for (const g of (Array.isArray(snap.games) ? snap.games : [])) {
+      if (Array.isArray(g.bots) && g.bots.length) {
+        for (const bot of g.bots) add(g.game || g.name, g, bot);
+        continue;
+      }
+      const tasks = Array.isArray(g.tasks) ? g.tasks : [];
+      const keys = Array.isArray(g.botKeys) ? g.botKeys : [];
+      const task = Object.assign({}, tasks[0] || g, { relatedTasks:tasks });
+      for (const key of keys) if (botByKey.has(key)) add(g.game || g.name, task, botByKey.get(key));
+    }
+    if (!map.size) for (const row of (Array.isArray(snap.bots) ? snap.bots : [])) {
+      const bots = Array.isArray(row.bots) && row.bots.length ? row.bots : [row];
+      for (const b of bots) add(row.game || b.game, row, b);
+    }
+    return Array.from(map.values());
+  }
+
+  function afBotControls(task, bot) {
+    const host = encodeURIComponent(bot.hostId || bot.host || "");
+    const file = encodeURIComponent(bot.file || "");
+    const controls = [];
+    const tasks = Array.isArray(task.relatedTasks) && task.relatedTasks.length ? task.relatedTasks : [task];
+    for (const t of tasks) {
+      const id = afTaskId(t);
+      const title = esc(t.campaignName || t.campaignId || t.game || "task");
+      if (id && (t.status === "planned" || t.type === "plan" || afActionAllowed(t, "approve"))) controls.push('<button class="btn-sm" title="' + title + '" onclick="afApprove(\'' + esc(id) + '\',this)">Approve &amp; run</button>');
+      if (id && (t.status === "active" || afActionAllowed(t, "stop"))) controls.push('<button class="btn-sm btn-danger" title="' + title + '" onclick="afStop(\'' + esc(id) + '\',this)">Stop</button>');
+      if (id && t.status !== "active" && (afActionAllowed(t, "delete") || ["planned", "failed"].includes(t.status) || ["plan", "failed"].includes(t.type))) controls.push('<button class="btn-sm btn-ghost" title="' + title + '" onclick="afDelete(\'' + esc(id) + '\',this)">Delete</button>');
+      if (id && (afActionAllowed(t, "delist") || (t.listing && t.listing.externalId))) controls.push('<button class="btn-sm btn-ghost" title="' + title + '" onclick="afDelist(event,\'' + esc(id) + '\')">Delist</button>');
+    }
+    if (file && (afActionAllowed(bot, "restart") || ["STALLED", "DOWN", "DEGRADED"].includes(bot.state))) controls.push('<button class="btn-sm btn-ghost" onclick="afBotAction(\'restart\',\'' + host + '\',\'' + file + '\',this)">Restart</button>');
+    if (file && (afActionAllowed(bot, "wake") || bot.state === "PARKED")) controls.push('<button class="btn-sm" onclick="afBotAction(\'start\',\'' + host + '\',\'' + file + '\',this)">Wake</button>');
+    return controls.join("");
+  }
+
+  function afRenderBot(task, bot) {
+    const hostId = bot.hostId || bot.host || "";
+    const hostLabel = bot.hostLabel || labelFor(hostId);
+    const counts = bot.accounts || bot.completion || {};
+    const total = afNum(counts.total, afNum(bot.accountsTotal));
+    const working = afNum(counts.progressing, afNum(counts.working, afNum(bot.accountsProgressing)));
+    const dead = afNum(counts.deadToken, afNum(bot.deadTokenCount, afNum(bot.degraded)));
+    const suspended = afNum(counts.suspended, afNum(bot.suspendedCount));
+    const unknown = afNum(counts.unknown, afNum(bot.accountsUnknown));
+    const health = bot.health || {};
+    const detailId = "afDetail-" + encodeURIComponent(hostId + "|" + (bot.container || bot.file || "")).replace(/%/g, "_");
+    const sub = [total ? working + "/" + total + " progressing" : "account count unavailable", dead ? dead + " dead token" : "", suspended ? suspended + " suspended" : "", unknown ? unknown + " unknown" : ""].filter(Boolean).join(" · ");
+    const decayRow = health.decay || health;
+    const decay = decayRow.decayed ? "thread decay: " + afNum(decayRow.active) + "/" + afNum(decayRow.enabled) + " active" : "";
+    return '<div class="af-bot"><div class="af-bot-top"><div class="af-bot-main">' +
+      '<div class="ab-ttl">' + afStateChip(bot.state) + esc(bot.container || bot.file || "unknown bot") + ' <span class="ab-file">' + esc(hostLabel) + (bot.file ? " · " + esc(bot.file) : "") + "</span></div>" +
+      '<div class="ab-sub">' + esc(sub) + (bot.uptimeMs != null ? " · up " + esc(fmtUptime(bot.uptimeMs / 1000)) : "") + "</div>" +
+      ((bot.stateReason || bot.reason || decay) ? '<div class="ab-farm muted">' + esc(bot.stateReason || bot.reason || decay) + "</div>" : "") +
+      afListingHtml(Object.assign({}, task, bot)) + "</div>" +
+      '<div class="af-bot-controls"><button class="btn-sm btn-ghost" onclick="afToggleBotDetail(\'' + encodeURIComponent(hostId) + '\',\'' + encodeURIComponent(bot.container || "") + '\',\'' + encodeURIComponent(bot.file || "") + '\',\'' + detailId + '\',this)">Accounts</button>' + afBotControls(task, bot) + "</div></div>" +
+      '<div class="af-detail" id="' + detailId + '" style="display:none"></div></div>';
+  }
+
+  function afRenderHeader(snap) {
+    const h = snap.header || {};
+    const cfg = h.settings || {};
+    const pool = h.pool || {};
+    const caps = h.caps || cfg;
+    const cap = h.capacity || {};
+    const active = afNum(cap.activeAutoBots, afNum(cap.used, afNum(h.activeAutoBots)));
+    const max = afNum(cap.maxAutoBots, afNum(cap.max, afNum(caps.maxAutoBots)));
+    const used = cap.usedPct != null ? cap.usedPct : (cap.pct != null ? cap.pct * 100 : (max ? active / max * 100 : 0));
+    const modeName = h.mode || (!cfg.enabled ? "OFF" : (cfg.dryRun ? "DRY-RUN" : "LIVE"));
+    const mode = modeName === "LIVE" ? "on" : (modeName === "OFF" ? "off" : "");
+    const host = h.host || h.farmHost || {};
+    const engine = h.engine || {};
+    return '<div class="panel af-head"><div class="af-row"><b>Auto farmer</b><span class="chip ' + mode + '">' + esc(modeName) + "</span>" + afViewToggle() +
+      '<span class="muted" style="font-size:12.5px">host: ' + esc(host.label || h.hostLabel || "none") + "</span>" +
+      '<span class="af-actions"><button class="btn-sm btn-ghost" onclick="afManualRefresh(this)">Refresh</button><button class="btn-sm btn-ghost" onclick="afTick(this)">Scan now</button><button class="btn-sm btn-ghost" onclick="afRescan(this)">Rescan all</button><a class="btn-sm btn-ghost" href="/superadmin.html" style="text-decoration:none;display:inline-flex;align-items:center">Settings</a></span></div>' +
+      '<div class="af-metrics"><div class="af-metric"><b>' + active + " / " + (max || "?") + '</b><span>Container capacity</span><div class="af-bar"><i style="width:' + afPct(used) + '%"></i></div></div>' +
+      '<div class="af-metric"><b>' + (pool.ready == null ? "?" : esc(pool.ready)) + " ready · " + (pool.spendable == null ? "?" : esc(pool.spendable)) + '</b><span>Pool · reserve ' + esc(pool.reserve == null ? "?" : pool.reserve) + "</span></div>" +
+      '<div class="af-metric"><b>' + esc(caps.maxPerGame || "?") + " / game · " + esc(caps.accountsPerBot || "?") + '</b><span>Allocation caps</span></div>' +
+      '<div class="af-metric"><b>' + esc(h.nextScanIn || h.nextScanLabel || (h.nextScanAt ? new Date(h.nextScanAt).toLocaleTimeString() : "—")) + '</b><span>Next scan</span></div></div>' +
+      '<div id="afLastScan" class="muted" style="font-size:12px;margin-top:8px">' + (h.lastScanAt || engine.lastRun ? "Last scan: " + esc(new Date(h.lastScanAt || engine.lastRun).toLocaleString()) : "No scan recorded") +
+      (snap.stale ? ' · <span style="color:var(--yellow)">snapshot stale</span>' : "") + (snap.hostBuiltAt ? " · host data " + esc(timeAgoShort(snap.hostBuiltAt)) : "") + "</div>" +
+      '<div id="afProgressWrap">' + afProgressPanel(engine) + "</div></div>";
+  }
+
+  function afAttentionHtml(snap) {
+    const rows = Array.isArray(snap.attention) ? snap.attention : [];
+    if (!rows.length) return "";
+    return '<section class="af-section"><div class="af-section-h"><b>Needs attention</b><span class="chip off">' + rows.length + "</span></div>" + rows.map(function (a) {
+      const task = a.task || a;
+      const bot = typeof a.bot === "string" ? ((snap.bots || []).find((b) => b.key === a.bot) || {}) : (a.bot || {});
+      return '<div class="allbot af-attention"><div class="ab-main"><div class="ab-ttl">' + esc(a.title || a.type || "Attention") + " " + (a.game ? '<span class="chip">' + esc(a.game) + "</span>" : "") + '</div><div class="ab-farm muted">' + esc(a.message || a.reason || "Action required") + '</div></div><div class="ab-actions">' + afBotControls(task, bot) + "</div></div>";
+    }).join("") + "</section>";
+  }
+
+  function afFarmingHtml(snap) {
+    const groups = afGameGroups(snap);
+    if (!groups.length) return '<section class="af-section"><div class="af-section-h"><b>Farming now</b></div><div class="empty panel">No active auto-farm bots.</div></section>';
+    return '<section class="af-section"><div class="af-section-h"><b>Farming now</b><span class="muted">live fleet reality, grouped by game</span></div>' + groups.map(function (g) {
+      const campaigns = Array.from(new Set(g.rows.map((r) => r.task.campaignName || r.task.campaignId).filter(Boolean)));
+      return '<div class="af-game"><div class="af-game-h"><b>' + esc(g.game) + "</b>" + (campaigns.length ? '<span class="muted">' + esc(campaigns.join(" · ")) + "</span>" : "") + "</div>" + g.rows.map((r) => afRenderBot(r.task, r.bot)).join("") + "</div>";
+    }).join("") + "</section>";
+  }
+
+  function afLifecycleRows() {
+    if (!_afEvents.length) return '<div class="empty" style="padding:20px">No lifecycle events loaded.</div>';
+    return '<div class="af-table-wrap"><table><thead><tr><th>When</th><th>Type</th><th>Bot / game</th><th>Reason</th></tr></thead><tbody>' + _afEvents.map(function (e) {
+      return "<tr><td>" + esc(e.at ? new Date(e.at).toLocaleString() : "—") + '</td><td><span class="af-event-type">' + esc(e.type || "event") + "</span></td><td>" + esc(e.container || e.game || "—") + "</td><td>" + esc(e.reason || e.message || "") + "</td></tr>";
+    }).join("") + "</tbody></table></div>";
+  }
+
+  function afLifecycleHtml() {
+    return '<section class="panel af-section"><div class="ph"><b>Lifecycle</b><span class="count">what the farmer turned on, off, or moved</span><span class="af-actions"><select class="af-filter" id="afEventType"><option value="">All types</option><option>parked</option><option>woken</option><option>reaped</option><option>recycled</option><option>repacked</option><option>listed</option><option>delisted</option><option>task_started</option><option>task_completed</option><option>task_failed</option></select><input class="af-filter" id="afEventGame" placeholder="Game"><button class="btn-sm btn-ghost" onclick="afLoadLifecycle()">Load</button></span></div><div class="pb" id="afLifecycleBody">' + afLifecycleRows() + "</div></section>";
+  }
+
+  function afDecisionRows() {
+    if (!_afDecisions.length) return '<div class="empty" style="padding:20px">Expand and load decision history.</div>';
+    return '<div class="af-table-wrap"><table><thead><tr><th>When</th><th>Game</th><th>Decision</th><th>Campaign</th><th>Reason</th><th></th></tr></thead><tbody>' + _afDecisions.map(function (t) {
+      const id = afTaskId(t); const controls = [];
+      if (id && t.status === "planned") controls.push('<button class="btn-sm" onclick="afApprove(\'' + esc(id) + '\',this)">Approve</button>');
+      if (id && t.status !== "active") controls.push('<button class="btn-sm btn-ghost" onclick="afDelete(\'' + esc(id) + '\',this)">Delete</button>');
+      return "<tr><td>" + esc(t.createdAt ? new Date(t.createdAt).toLocaleString() : "—") + "</td><td>" + esc(t.game || "—") + "</td><td>" + afDecisionChip(t) + "</td><td>" + esc(t.campaignName || t.campaignId || "—") + "</td><td>" + esc(t.reason || t.error || "") + "</td><td>" + controls.join("") + "</td></tr>";
+    }).join("") + "</tbody></table></div>";
+  }
+
+  function afDecisionsHtml(snap) {
+    const s = snap.decisionSummary || {};
+    const by = s.bySkipReason || s.byDecision || [];
+    const detail = Array.isArray(by) ? by.map((x) => (x.decision || x.reason || x.type) + ": " + x.count).join(" · ") : Object.keys(by).map((k) => k + ": " + by[k]).join(" · ");
+    const total = afNum(s.todayTotal, afNum(s.todayCount, afNum(s.total)));
+    const counts = s.byDecision || {};
+    const farm = afNum(counts.farm) + afNum(counts.probe);
+    const reuse = afNum(counts.reuse_existing);
+    return '<details class="panel af-section" id="afDecisionsPanel" ontoggle="if(this.open&&!this.dataset.loaded){this.dataset.loaded=\'1\';afLoadDecisions()}"><summary class="ph"><b>Decisions</b><span class="count">Today: ' + total + " decided → " + farm + " farm · " + reuse + " reuse · " + afNum(s.skipped) + ' skipped</span></summary><div class="pb"><div class="af-row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="muted" style="font-size:12.5px">' + esc(detail) + '</span><span class="af-actions"><input class="af-filter" id="afDecisionSearch" placeholder="Search game or campaign"><select class="af-filter" id="afDecisionType"><option value="">All decisions</option><option value="farm">Farm</option><option value="reuse_existing">Reuse</option><option value="skip_low_demand">Low demand</option><option value="skip_ends_soon">Ends soon</option><option value="skip_no_capacity">No capacity</option><option value="skip_no_accounts">No accounts</option><option value="skip_reuse_only">Reuse only</option><option value="failed">Failed</option></select><button class="btn-sm btn-ghost" onclick="afLoadDecisions()">Load</button></span></div><div id="afDecisionBody">' + afDecisionRows() + "</div></div></details>";
+  }
+
+  function renderAutoFarmWatcher(snap) {
+    snap = snap || {};
+    $("bots").innerHTML = '<div id="afWatcherRoot">' + afRenderHeader(snap) + afAttentionHtml(snap) + afFarmingHtml(snap) + afLifecycleHtml() + afDecisionsHtml(snap) + "</div>";
+    setTimeout(function () { if (CURRENT_HOST === AUTOFARM_TAB && !_afLegacy) afLoadLifecycle(); }, 0);
+  }
+
+  window.afLoadLifecycle = async function () {
+    const type = $("afEventType") ? $("afEventType").value : "";
+    const game = $("afEventGame") ? $("afEventGame").value.trim() : "";
+    if ($("afLifecycleBody")) $("afLifecycleBody").innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+    try {
+      const r = await api("/auto-farm/watcher/events?type=" + encodeURIComponent(type) + "&game=" + encodeURIComponent(game) + "&limit=100");
+      _afEvents = r.events || r.rows || [];
+      if ($("afLifecycleBody")) $("afLifecycleBody").innerHTML = afLifecycleRows();
+    } catch (e) { if ($("afLifecycleBody")) $("afLifecycleBody").innerHTML = '<div class="empty" style="padding:20px">' + esc(e.message) + "</div>"; }
+  };
+
+  window.afLoadDecisions = async function () {
+    const q = $("afDecisionSearch") ? $("afDecisionSearch").value.trim() : "";
+    const decision = $("afDecisionType") ? $("afDecisionType").value : "";
+    if ($("afDecisionBody")) $("afDecisionBody").innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+    try {
+      const r = await api("/auto-farm/watcher/decisions?q=" + encodeURIComponent(q) + "&decision=" + encodeURIComponent(decision) + "&limit=100");
+      _afDecisions = r.decisions || r.tasks || r.rows || [];
+      if ($("afDecisionBody")) $("afDecisionBody").innerHTML = afDecisionRows();
+    } catch (e) { if ($("afDecisionBody")) $("afDecisionBody").innerHTML = '<div class="empty" style="padding:20px">' + esc(e.message) + "</div>"; }
+  };
+
+  window.afToggleBotDetail = async function (host, container, file, detailId, btn) {
+    host = decodeURIComponent(host); container = decodeURIComponent(container); file = decodeURIComponent(file);
+    const el = $(detailId); if (!el) return;
+    if (el.style.display !== "none") { el.style.display = "none"; return; }
+    el.style.display = "block";
+    if (el.dataset.loaded) return;
+    el.innerHTML = '<div class="muted">Loading accounts…</div>';
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api("/auto-farm/watcher/bots/" + encodeURIComponent(host) + "/" + encodeURIComponent(container) + "/accounts?file=" + encodeURIComponent(file));
+      const rows = r.accounts || r.rows || [];
+      el.innerHTML = rows.length ? '<table class="acctbl"><thead><tr><th>Login</th><th>State</th><th>Last scan</th><th>Progress</th><th>Games</th></tr></thead><tbody>' + rows.map(function (a) {
+        return "<tr><td>" + esc(a.login || "—") + "</td><td>" + esc(a.state || a.status || a.lastScanStatus || "—") + "</td><td>" + esc(a.lastScanAt ? timeAgoShort(a.lastScanAt) : "never") + "</td><td>" + esc(a.inProgressCount == null ? "—" : a.inProgressCount) + "</td><td>" + esc((a.inProgressGames || []).join(", ")) + "</td></tr>";
+      }).join("") + "</tbody></table>" : '<div class="muted">No accounts found.</div>';
+      el.dataset.loaded = "1";
+    } catch (e) { el.innerHTML = '<div style="color:var(--red)">' + esc(e.message) + "</div>"; }
+    finally { if (btn) btn.disabled = false; }
+  };
+
+  window.afBotAction = async function (action, host, file, btn) {
+    host = decodeURIComponent(host); file = decodeURIComponent(file);
+    const verb = action === "start" ? "Wake" : "Restart";
+    if (!confirm(verb + " " + file + " on " + labelFor(host) + "?")) return;
+    if (btn) btn.disabled = true;
+    try {
+      await api("/bot-configs/" + action + "/" + encodeURIComponent(file) + "?host=" + encodeURIComponent(host), { method:"POST" });
+      toast(verb + " requested");
+      await afRefreshWatcher().catch(function () {});
+    } catch (e) { toast(verb + " failed: " + e.message, true); if (btn) btn.disabled = false; }
+  };
+
   window.afTick = async function (btn) {
     if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
     try {
@@ -874,7 +1242,7 @@
       const r = await api("/auto-farm/tasks/" + id + "/delist", { method: "POST" });
       toast("Delisted (" + (r.remote || "removed") + ")");
     } catch (e) { toast("Delist failed: " + e.message, true); }
-    loadAutoFarm();
+    loadAutoFarm(true);
   };
   window.afRescan = async function (btn) {
     if (!confirm("Fresh rescan: forget all prior skip/failed/completed decisions for live campaigns and re-decide everything from scratch (fresh market research)?")) return;
@@ -891,21 +1259,21 @@
     if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
     try { await api("/auto-farm/tasks/" + id + "/approve", { method: "POST" }); toast("Plan executed"); }
     catch (e) { toast("Approve failed: " + e.message, true); }
-    finally { await refreshAutoKeys(); loadAutoFarm(); }
+    finally { await refreshAutoKeys(); loadAutoFarm(true); }
   };
   window.afStop = async function (id, btn) {
     if (!confirm("Stop this auto-farm task's bots? Farmed accounts stay as inventory.")) return;
     if (btn) btn.disabled = true;
     try { await api("/auto-farm/tasks/" + id + "/stop", { method: "POST" }); toast("Stopped"); }
     catch (e) { toast("Stop failed: " + e.message, true); }
-    finally { await refreshAutoKeys(); loadAutoFarm(); }
+    finally { await refreshAutoKeys(); loadAutoFarm(true); }
   };
   window.afDelete = async function (id, btn) {
     if (!confirm("Delete this decision from the log? A live campaign may be re-decided on the next scan.")) return;
     if (btn) btn.disabled = true;
     try { await api("/auto-farm/tasks/" + id, { method: "DELETE" }); toast("Deleted"); }
     catch (e) { toast("Delete failed: " + e.message, true); }
-    finally { await refreshAutoKeys(); loadAutoFarm(); }
+    finally { await refreshAutoKeys(); loadAutoFarm(true); }
   };
 
   // Read-only accounts/passwords view (so you can confirm what's stored, incl.

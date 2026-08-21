@@ -124,4 +124,8 @@ const botAccountSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Fleet snapshots and per-bot drill-downs address accounts by their physical
+// placement. The individual host index cannot narrow a large host to one bot.
+botAccountSchema.index({ host: 1, container: 1 });
+
 module.exports = mongoose.model("BotAccount", botAccountSchema);
