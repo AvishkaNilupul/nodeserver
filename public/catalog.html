@@ -35,6 +35,9 @@
         --field: #ffffff;
         --brand-soft: #eef2ff;
         --badge-soft: #fff3dd;
+        --preorder: #9a5b08;
+        --preorder-soft: #fff2d6;
+        --preorder-line: #e8b45f;
         --empty-bg: rgba(255, 255, 255, 0.5);
         --footer: #ffffff;
         --skeleton-1: #eceff1;
@@ -57,6 +60,9 @@
         --field: #151a1d;
         --brand-soft: #1e1b4b;
         --badge-soft: #3a2e1d;
+        --preorder: #ffd083;
+        --preorder-soft: #352817;
+        --preorder-line: #765222;
         --empty-bg: rgba(24, 29, 32, 0.62);
         --footer: #151a1d;
         --skeleton-1: #20272a;
@@ -248,6 +254,68 @@
         color: var(--muted);
         font-size: 12px;
       }
+      .preorder-section[hidden] {
+        display: none;
+      }
+      .preorder-rail {
+        display: grid;
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(300px, 390px);
+        gap: 12px;
+        overflow-x: auto;
+        overscroll-behavior-inline: contain;
+        scroll-snap-type: inline proximity;
+        padding: 2px 2px 10px;
+      }
+      .preorder-card {
+        scroll-snap-align: start;
+        padding: 16px;
+        border: 1px solid var(--preorder-line);
+        border-radius: 7px;
+        background: var(--preorder-soft);
+      }
+      .preorder-card h3 {
+        margin: 8px 0 6px;
+        font-size: 17px;
+      }
+      .preorder-badge {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 4px 8px;
+        background: var(--preorder);
+        color: var(--surface);
+        font-size: 10px;
+        font-weight: 900;
+        text-transform: uppercase;
+      }
+      .ending-badge {
+        margin-left: 6px;
+        color: var(--preorder);
+        font-size: 10px;
+        font-weight: 900;
+        text-transform: uppercase;
+      }
+      .progress-track {
+        height: 7px;
+        margin: 12px 0 7px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--surface);
+      }
+      .progress-track span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--preorder);
+      }
+      .preorder-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        color: var(--preorder);
+        font-size: 11px;
+        font-weight: 800;
+      }
       .categories {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -398,6 +466,15 @@
         color: var(--muted);
         font-size: 12px;
       }
+      .sort-select {
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 7px 30px 7px 10px;
+        background: var(--field);
+        color: var(--ink);
+        font-size: 12px;
+      }
       .cards {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -508,6 +585,20 @@
       .stock-zero {
         color: var(--danger);
         font-weight: 800;
+      }
+      .expected-stock {
+        color: var(--preorder);
+        font-weight: 800;
+      }
+      .price-tiers {
+        margin: 7px 0 0;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.4;
+      }
+      .load-sentinel {
+        grid-column: 1 / -1;
+        min-height: 1px;
       }
       .card-foot {
         margin-top: auto;
@@ -920,6 +1011,13 @@
         .cards {
           grid-template-columns: 1fr;
         }
+        .listing-tools {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .sort-select {
+          width: 100%;
+        }
         .detail-grid {
           grid-template-columns: 1fr;
         }
@@ -937,6 +1035,9 @@
         .categories {
           grid-template-columns: 1fr 1fr;
           gap: 8px;
+        }
+        .preorder-rail {
+          grid-auto-columns: minmax(280px, calc(100vw - 34px));
         }
         .category {
           min-height: 138px;
@@ -1036,6 +1137,14 @@
         </div>
       </section>
 
+      <section class="preorder-section" id="preorderSection" hidden>
+        <div class="section-bar">
+          <h2>Farming now — reserve ahead</h2>
+          <span id="preorderCount"></span>
+        </div>
+        <div class="preorder-rail" id="preorderRail"></div>
+      </section>
+
       <div class="section-bar">
         <h2>Categories</h2>
         <span id="categoryCount"></span>
@@ -1063,6 +1172,16 @@
                 <h2 id="listingTitle">All inventory</h2>
                 <p id="listingSub">Live availability across every category</p>
               </div>
+              <label>
+                <span class="filter-title">Sort</span>
+                <select class="sort-select" id="sortSelect">
+                  <option value="newest">Newest</option>
+                  <option value="price-asc">Price ↑</option>
+                  <option value="price-desc">Price ↓</option>
+                  <option value="stock">Most stock</option>
+                  <option value="rewards">Most rewards</option>
+                </select>
+              </label>
             </div>
             <div class="cards" id="cards">
               <div class="loading">Loading inventory...</div>
@@ -1095,8 +1214,12 @@
         listings: [],
         active: "",
         query: "",
+        sort: "newest",
+        visibleCount: 24,
+        filtered: [],
         selected: null,
       };
+      let loadObserver = null;
       const $ = (id) => document.getElementById(id);
       const esc = (value) =>
         String(value == null ? "" : value).replace(
@@ -1248,7 +1371,92 @@
           "</div>"
         );
       }
-      function renderCards() {
+      function relativeTime(iso) {
+        const minutes = Math.max(
+          0,
+          Math.round((Date.now() - new Date(iso).getTime()) / 60000),
+        );
+        if (minutes < 1) return "just now";
+        if (minutes < 60)
+          return minutes + " minute" + (minutes === 1 ? "" : "s") + " ago";
+        const hours = Math.round(minutes / 60);
+        if (hours < 24)
+          return hours + " hour" + (hours === 1 ? "" : "s") + " ago";
+        const days = Math.round(hours / 24);
+        return days + " day" + (days === 1 ? "" : "s") + " ago";
+      }
+      function readyText(minutes) {
+        if (!Number.isFinite(Number(minutes))) return "Timing being confirmed";
+        const hours = Math.max(0, Math.round(Number(minutes) / 60));
+        return hours < 1 ? "Ready in under 1h" : "Ready in ~" + hours + "h";
+      }
+      function endingSoon(listing) {
+        if (!listing.campaignEndsAt) return false;
+        const remaining =
+          new Date(listing.campaignEndsAt).getTime() - Date.now();
+        return remaining > 0 && remaining <= 48 * 60 * 60 * 1000;
+      }
+      function renderPreorders() {
+        const rows = state.listings.filter(
+          (listing) => listing.state === "preorder",
+        );
+        $("preorderSection").hidden = !rows.length;
+        $("preorderCount").textContent = rows.length
+          ? rows.length + " live event" + (rows.length === 1 ? "" : "s")
+          : "";
+        $("preorderRail").innerHTML = rows
+          .map((listing) => {
+            const preorder = listing.preorder || {};
+            const percent = Math.max(
+              0,
+              Math.min(100, Number(preorder.progressPercent) || 0),
+            );
+            return (
+              '<article class="preorder-card"><span class="preorder-badge">Pre-order</span>' +
+              (endingSoon(listing)
+                ? '<span class="ending-badge">Ending soon</span>'
+                : "") +
+              "<h3>" +
+              esc(listing.eventName || listing.title) +
+              "</h3>" +
+              '<div class="progress-track" aria-label="' +
+              attr(percent + "% farmed") +
+              '"><span style="width:' +
+              percent +
+              '%"></span></div>' +
+              '<div class="preorder-meta"><span>' +
+              esc(readyText(preorder.readyInMinutes)) +
+              "</span><span>~" +
+              (Number(preorder.expectedUnits) || 0) +
+              " units expected</span></div>" +
+              '<div class="card-foot" style="margin-top:14px"><span class="price">' +
+              money(listing.price) +
+              '<small>per unit · reserve volume</small></span><button class="quote-btn" data-preorder-quote="' +
+              attr(listing.id) +
+              '">Reserve now</button></div></article>'
+            );
+          })
+          .join("");
+      }
+      function sortRows(rows) {
+        return [...rows].sort((a, b) => {
+          if (state.sort === "price-asc")
+            return a.price - b.price || b.stock - a.stock;
+          if (state.sort === "price-desc")
+            return b.price - a.price || b.stock - a.stock;
+          if (state.sort === "stock")
+            return b.stock - a.stock || b.price - a.price;
+          if (state.sort === "rewards")
+            return b.itemCount - a.itemCount || b.stock - a.stock;
+          return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+        });
+      }
+      function priceTiers(listing) {
+        return (listing.priceTiers || [])
+          .map((tier) => tier.quantity + "+ " + money(tier.price))
+          .join(" · ");
+      }
+      function renderCards({ reset = true } = {}) {
         let rows = state.listings;
         if (state.active)
           rows = rows.filter((row) => row.category === state.active);
@@ -1273,6 +1481,11 @@
           : state.active
             ? "Bulk sets currently available for " + state.active
             : "Live availability across every category";
+        rows = sortRows(rows);
+        state.filtered = rows;
+        state.visibleCount = reset
+          ? Math.min(24, rows.length)
+          : Math.min(Math.max(24, state.visibleCount), rows.length);
         $("resultCount").textContent =
           rows.length + (rows.length === 1 ? " listing" : " listings");
         if (!rows.length) {
@@ -1280,53 +1493,96 @@
             '<div class="empty">No sets match this view.</div>';
           return;
         }
-        $("cards").innerHTML = rows
-          .map(
-            (listing) =>
-              '<article class="card" role="button" tabindex="0" aria-label="View details for ' +
-              attr(listing.title) +
-              '" data-details="' +
-              attr(listing.id) +
-              '">' +
-              media(listing) +
-              '<div class="card-body"><div class="card-top"><span class="eyebrow">' +
-              esc(listing.category) +
-              "</span>" +
-              (listing.featured
-                ? '<span class="badge">Featured</span>'
-                : listing.exactProfile
-                  ? '<span class="badge">Exact profile</span>'
-                  : "") +
-              "</div>" +
-              "<h3>" +
-              esc(listing.title) +
-              '</h3><p class="card-desc">' +
-              esc(
-                listing.description ||
-                  listing.items
-                    .slice(0, 4)
-                    .map((i) => i.name)
-                    .join(", "),
-              ) +
-              "</p>" +
-              '<div class="card-meta"><span>' +
-              listing.itemCount +
-              " rewards</span><span>Min. " +
-              listing.minQty +
-              '</span><span class="' +
-              (listing.stock ? "stock-ok" : "stock-zero") +
-              '">' +
-              (listing.stock ? listing.stock + " in stock" : "Out of stock") +
-              "</span></div>" +
-              '<div class="card-foot"><div class="price">' +
-              money(listing.price) +
-              '<small>per unit for bulk orders</small></div><button class="quote-btn" data-quote="' +
-              attr(listing.id) +
-              '" ' +
-              (listing.stock ? "" : "disabled") +
-              ">Request quote</button></div></div></article>",
-          )
-          .join("");
+        $("cards").innerHTML =
+          rows
+            .slice(0, state.visibleCount)
+            .map(
+              (listing) =>
+                '<article class="card" role="button" tabindex="0" aria-label="View details for ' +
+                attr(listing.title) +
+                '" data-details="' +
+                attr(listing.id) +
+                '">' +
+                media(listing) +
+                '<div class="card-body"><div class="card-top"><span class="eyebrow">' +
+                esc(listing.category) +
+                "</span>" +
+                (listing.state === "preorder"
+                  ? '<span class="preorder-badge">Pre-order</span>'
+                  : listing.featured
+                    ? '<span class="badge">Featured</span>'
+                    : listing.exactProfile
+                      ? '<span class="badge">Exact profile</span>'
+                      : "") +
+                "</div>" +
+                "<h3>" +
+                esc(listing.title) +
+                '</h3><p class="card-desc">' +
+                esc(
+                  listing.description ||
+                    listing.items
+                      .slice(0, 4)
+                      .map((i) => i.name)
+                      .join(", "),
+                ) +
+                "</p>" +
+                '<div class="card-meta"><span>' +
+                listing.itemCount +
+                " rewards</span><span>Min. " +
+                listing.minQty +
+                "</span>" +
+                (listing.state === "preorder"
+                  ? '<span class="expected-stock">~' +
+                    (Number(listing.preorder?.expectedUnits) || 0) +
+                    " units expected</span>"
+                  : '<span class="' +
+                    (listing.stock ? "stock-ok" : "stock-zero") +
+                    '">' +
+                    (listing.stock
+                      ? listing.stock + " in stock"
+                      : "Out of stock") +
+                    "</span>") +
+                "</div>" +
+                '<div class="card-foot"><div class="price">' +
+                money(listing.price) +
+                '<small>per unit for bulk orders</small><div class="price-tiers">' +
+                esc(priceTiers(listing)) +
+                '</div></div><button class="quote-btn" data-quote="' +
+                attr(listing.id) +
+                '" ' +
+                (listing.state === "preorder" || listing.stock
+                  ? ""
+                  : "disabled") +
+                ">" +
+                (listing.state === "preorder"
+                  ? "Reserve now"
+                  : "Request quote") +
+                "</button></div></div></article>",
+            )
+            .join("") +
+          (state.visibleCount < rows.length
+            ? '<div class="load-sentinel" id="loadSentinel"></div>'
+            : "");
+        if (loadObserver) loadObserver.disconnect();
+        const sentinel = $("loadSentinel");
+        if (sentinel && "IntersectionObserver" in window) {
+          loadObserver = new IntersectionObserver(
+            (entries) => {
+              if (
+                !entries[0].isIntersecting ||
+                state.visibleCount >= state.filtered.length
+              )
+                return;
+              state.visibleCount = Math.min(
+                state.visibleCount + 24,
+                state.filtered.length,
+              );
+              renderCards({ reset: false });
+            },
+            { rootMargin: "500px" },
+          );
+          loadObserver.observe(sentinel);
+        }
       }
       function selectCategory(name) {
         state.active = name;
@@ -1394,9 +1650,11 @@
           '<div class="detail-grid"><div class="detail-gallery">' +
           gallery +
           '</div><div class="detail-summary"><span class="eyebrow">' +
-          (listing.exactProfile
-            ? "Exact farmed inventory profile"
-            : "Bulk set") +
+          (listing.state === "preorder"
+            ? "Pre-order event bundle"
+            : listing.exactProfile
+              ? "Exact farmed inventory profile"
+              : "Bulk set") +
           "</span><h2>" +
           esc(listing.title) +
           "</h2><p>" +
@@ -1409,16 +1667,24 @@
           '</strong><span>Total rewards</span></div><div class="detail-stat"><strong>' +
           listing.items.length +
           '</strong><span>Distinct items</span></div><div class="detail-stat"><strong>' +
-          listing.stock +
-          '</strong><span>Available units</span></div></div><div class="detail-price-row"><div class="price">' +
+          (listing.state === "preorder"
+            ? "~" + (Number(listing.preorder?.expectedUnits) || 0)
+            : listing.stock) +
+          "</strong><span>" +
+          (listing.state === "preorder"
+            ? "Expected units"
+            : "Available units") +
+          '</span></div></div><div class="detail-price-row"><div class="price">' +
           money(listing.price) +
           "<small>per unit · minimum " +
           listing.minQty +
           '</small></div><button class="primary-btn" data-detail-quote="' +
           attr(listing.id) +
           '" ' +
-          (listing.stock ? "" : "disabled") +
-          ">Request quote</button></div></div></div>" +
+          (listing.state === "preorder" || listing.stock ? "" : "disabled") +
+          ">" +
+          (listing.state === "preorder" ? "Reserve now" : "Request quote") +
+          "</button></div></div></div>" +
           '<section class="items-section"><h3>Included rewards and quantities</h3><ul class="item-list">' +
           items +
           "</ul></section>";
@@ -1437,13 +1703,43 @@
           esc(listing.category) +
           " · " +
           money(listing.price) +
-          ' per unit</p></div><button class="close-btn" type="button" data-close aria-label="Close">&times;</button></div>' +
+          " per unit" +
+          (listing.state === "preorder" ? " · pre-order" : "") +
+          '</p></div><button class="close-btn" type="button" data-close aria-label="Close">&times;</button></div>' +
           '<form class="quote-form" id="quoteForm"><div class="form-row"><div class="field"><label for="quoteQty">Quantity</label><input id="quoteQty" name="quantity" type="number" min="' +
           listing.minQty +
           '" max="1000" value="' +
-          Math.max(listing.minQty, Math.min(10, listing.stock)) +
-          '" required /></div><div class="field"><label for="quoteContact">Email or contact handle</label><input id="quoteContact" name="contact" maxlength="180" autocomplete="email" required placeholder="name@example.com" /></div></div><div class="field"><label for="quoteNote">Order note</label><textarea id="quoteNote" name="note" maxlength="800" placeholder="Preferred platform, delivery timing, or other details"></textarea></div><p class="form-message" id="formMessage"></p><div class="dialog-actions"><button type="button" class="ghost-btn" data-close>Cancel</button><button class="primary-btn" type="submit">Send request</button></div></form>';
+          Math.max(
+            listing.minQty,
+            Math.min(
+              10,
+              listing.state === "preorder"
+                ? Number(listing.preorder?.expectedUnits) || listing.minQty
+                : listing.stock,
+            ),
+          ) +
+          '" required /></div><div class="field"><label for="quoteContact">Telegram, Discord, or email</label><input id="quoteContact" name="contact" maxlength="180" autocomplete="off" required placeholder="@handle, username, or name@example.com" /></div></div><p style="margin:0;color:var(--muted);font-size:12px">We normally reply within one business day.</p><div class="field"><label for="quoteNote">Order note (optional)</label><textarea id="quoteNote" name="note" maxlength="800" placeholder="Preferred platform, delivery timing, or other details"></textarea></div><p class="form-message" id="formMessage"></p><div class="dialog-actions"><button type="button" class="ghost-btn" data-close>Cancel</button><button class="primary-btn" type="submit">' +
+          (listing.state === "preorder"
+            ? "Reserve pre-order"
+            : "Send request") +
+          "</button></div></form>";
         $("quoteDialog").showModal();
+      }
+      function expectedReadyCopy(listing) {
+        const minutes = Number(listing.preorder?.readyInMinutes);
+        if (!Number.isFinite(minutes) || minutes < 0)
+          return "The delivery timing is still being confirmed.";
+        const readyAt = new Date(Date.now() + minutes * 60000);
+        return (
+          "Current delivery estimate: " +
+          readyAt.toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          }) +
+          "."
+        );
       }
       async function submitQuote(form) {
         const listing = state.selected;
@@ -1459,6 +1755,7 @@
               quantity: Number(form.quantity.value),
               contact: form.contact.value,
               note: form.note.value,
+              preorder: listing.state === "preorder",
             }),
           });
           track("inquiry_click", {
@@ -1466,7 +1763,15 @@
             listingId: listing.id,
           });
           $("quoteContent").innerHTML =
-            '<div class="success-box"><div class="check">&#10003;</div><h2>Request received</h2><p>Keep this reference for follow-up.</p><span class="reference">' +
+            '<div class="success-box"><div class="check">&#10003;</div><h2>' +
+            (listing.state === "preorder"
+              ? "Pre-order received"
+              : "Request received") +
+            "</h2><p>" +
+            (listing.state === "preorder"
+              ? expectedReadyCopy(listing) + " "
+              : "") +
+            'Keep this reference for follow-up.</p><span class="reference">' +
             esc(data.reference) +
             '</span><div class="dialog-actions" style="justify-content:center;margin-top:20px"><button class="primary-btn" data-close>Done</button></div></div>';
         } catch (error) {
@@ -1491,6 +1796,18 @@
         if (!listing) return;
         if (button) openQuote(listing);
         else openDetails(listing);
+      });
+      $("preorderRail").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-preorder-quote]");
+        if (!button) return;
+        const listing = state.listings.find(
+          (row) => row.id === button.dataset.preorderQuote,
+        );
+        if (listing) openQuote(listing);
+      });
+      $("sortSelect").addEventListener("change", (event) => {
+        state.sort = event.target.value;
+        renderCards();
       });
       $("cards").addEventListener("keydown", (event) => {
         if (event.target.closest("[data-quote]")) return;
@@ -1590,19 +1907,16 @@
         try {
           const [categories, listings] = await Promise.all([
             api("/catalog/categories"),
-            api("/catalog/listings?limit=250"),
+            api("/catalog/listings?limit=1000"),
           ]);
           state.categories = categories.categories || [];
           state.listings = listings.listings || [];
+          renderPreorders();
           renderCategories();
           renderFilters();
           renderCards();
           $("updatedText").textContent =
-            "Inventory checked " +
-            new Date(categories.generatedAt).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            });
+            "Inventory checked " + relativeTime(categories.generatedAt);
           track("catalog_view");
           const requested = new URLSearchParams(location.search).get(
             "category",

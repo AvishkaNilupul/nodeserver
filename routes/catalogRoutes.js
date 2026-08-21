@@ -5,6 +5,8 @@ const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
 const CatalogEvent = require("../models/CatalogEvent");
 const CatalogInquiry = require("../models/CatalogInquiry");
 const DropSet = require("../models/DropSet");
+const AutoFarmTask = require("../models/AutoFarmTask");
+const BotAccount = require("../models/BotAccount");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const Purchase = require("../models/Purchase");
 const SaleSignal = require("../models/SaleSignal");
@@ -24,6 +26,10 @@ const {
   catalogEventLimiter,
   catalogInquiryLimiter,
 } = require("../utils/rateLimit");
+const {
+  computePreorderEta,
+  syncHistoricalEventSets,
+} = require("../utils/catalogPreorder");
 
 const router = express.Router();
 // Stock aggregation spans the complete DropLog archive and can take tens of
@@ -55,12 +61,23 @@ function categoryFor(set) {
   const counts = new Map();
   for (const item of set.items || []) {
     const game = cleanText(item.game, 80);
-    if (game) counts.set(game, (counts.get(game) || 0) + 1);
+    if (!game) continue;
+    const key = game.toLowerCase();
+    const row = counts.get(key) || { count: 0, labels: new Map() };
+    row.count++;
+    row.labels.set(game, (row.labels.get(game) || 0) + 1);
+    counts.set(key, row);
   }
   return (
-    [...counts.entries()].sort(
-      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
-    )[0]?.[0] || "Other"
+    [...counts.values()]
+      .map((row) => ({
+        count: row.count,
+        label: [...row.labels.entries()].sort(
+          (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+        )[0][0],
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))[0]
+      ?.label || "Other"
   );
 }
 
@@ -86,6 +103,39 @@ function publicPriceFor(set, marketMedian = 0) {
   return Math.round(Math.max(floor, retail * (1 - discount / 100)) * 100) / 100;
 }
 
+function publicPriceTiers(set, marketMedian = 0) {
+  const minQty = Math.max(1, Math.min(1000, Number(set.bulkMinQty) || 5));
+  const retail = Number(set.price) || marketMedian || 0;
+  const override = Math.max(0, Number(set.publicPrice) || 0);
+  const floor = Math.max(0, Number(set.minPriceUsd) || 0);
+  const rawDiscount = Number(set.bulkDiscountPct);
+  const discount = Math.max(
+    0,
+    Math.min(60, Number.isFinite(rawDiscount) ? rawDiscount : 8),
+  );
+  const quantities = [
+    minQty,
+    Math.max(minQty * 5, 50),
+    Math.max(minQty * 10, 100),
+  ];
+  return quantities
+    .filter((quantity, index) => !index || quantity > quantities[index - 1])
+    .map((quantity, index) => ({
+      quantity,
+      price:
+        index === 0
+          ? publicPriceFor(set, marketMedian)
+          : override
+            ? Math.round(Math.max(floor, override) * 100) / 100
+            : Math.round(
+                Math.max(
+                  floor,
+                  retail * (1 - Math.min(60, discount + index * 5) / 100),
+                ) * 100,
+              ) / 100,
+    }));
+}
+
 function inquiryQuantity(value) {
   const quantity = Number(value);
   return Number.isInteger(quantity) && quantity >= 1 && quantity <= 1000
@@ -93,7 +143,7 @@ function inquiryQuantity(value) {
     : 0;
 }
 
-function publicListing(set, stock, marketMedian = 0) {
+function publicListing(set, stock, marketMedian = 0, preorder = null) {
   const category = categoryFor(set);
   const items = (set.items || []).slice(0, 120).map((item) => ({
     name: cleanText(item.name, 120),
@@ -101,6 +151,12 @@ function publicListing(set, stock, marketMedian = 0) {
     image: thumbnailUrl(item.image),
     qty: Math.max(1, Math.min(99, Number(item.qty) || 1)),
   }));
+  const state =
+    set.catalogState === "preorder"
+      ? "preorder"
+      : stock > 0
+        ? "instock"
+        : "soldout";
   return {
     id: String(set._id),
     category,
@@ -110,12 +166,69 @@ function publicListing(set, stock, marketMedian = 0) {
     retailPrice: Math.round((Number(set.price) || 0) * 100) / 100,
     stock: Math.max(0, Number(stock) || 0),
     minQty: Math.max(1, Math.min(1000, Number(set.bulkMinQty) || 5)),
+    bulkDiscountPct: Math.max(
+      0,
+      Math.min(60, Number(set.bulkDiscountPct) || 0),
+    ),
+    priceTiers: publicPriceTiers(set, marketMedian),
     featured: !!set.publicFeatured,
     exactProfile: set.sourceType === "catalog_profile",
     itemCount: items.reduce((sum, item) => sum + item.qty, 0),
     items,
     updatedAt: set.updatedAt,
+    state,
+    eventName: cleanText(set.sourceEventName || set.name, 180),
+    campaignEndsAt: set.campaignEndAt || null,
+    ...(state === "preorder"
+      ? {
+          preorder: {
+            expectedUnits: Math.max(0, Number(set.expectedUnits) || 0),
+            ...(preorder || {}),
+          },
+        }
+      : {}),
   };
+}
+
+async function updateAutofarmCatalogStates() {
+  const sets = await DropSet.find({
+    sourceType: "autofarm_event",
+    listed: true,
+    catalogState: "preorder",
+  }).lean();
+  if (!sets.length) return 0;
+  const stockMap = await stockForSets(sets);
+  const tasks = await AutoFarmTask.find(
+    { _id: { $in: sets.map((set) => set.autoFarmTaskId).filter(Boolean) } },
+    { status: 1 },
+  ).lean();
+  const taskStatus = new Map(
+    tasks.map((task) => [String(task._id), task.status]),
+  );
+  let changed = 0;
+  for (const set of sets) {
+    const stock = stockMap.get(String(set._id))?.stock || 0;
+    const status = taskStatus.get(String(set.autoFarmTaskId));
+    let next = set.catalogState;
+    let listed = set.listed;
+    if (stock > 0) next = "instock";
+    else if (["completed", "stopped"].includes(status)) next = "soldout";
+    if (
+      stock === 0 &&
+      set.campaignEndAt &&
+      new Date(set.campaignEndAt) < new Date()
+    )
+      listed = false;
+    if (next !== set.catalogState || listed !== set.listed) {
+      await DropSet.updateOne(
+        { _id: set._id },
+        { $set: { catalogState: next, listed } },
+      );
+      changed++;
+    }
+  }
+  if (changed) invalidateCatalogCache();
+  return changed;
 }
 
 function recommendedProfilePrice(
@@ -358,6 +471,39 @@ async function buildPublicCatalog() {
     .sort({ publicFeatured: -1, publicSort: -1, updatedAt: -1 })
     .lean();
   const stockMap = await stockForSets(sets);
+  const preorderSets = sets.filter((set) => set.catalogState === "preorder");
+  const tasks = preorderSets.length
+    ? await AutoFarmTask.find(
+        {
+          _id: {
+            $in: preorderSets.map((set) => set.autoFarmTaskId).filter(Boolean),
+          },
+        },
+        { assignedAccounts: 1, campaignName: 1 },
+      ).lean()
+    : [];
+  const taskById = new Map(tasks.map((task) => [String(task._id), task]));
+  const accountLogins = [
+    ...new Set(tasks.flatMap((task) => task.assignedAccounts || [])),
+  ];
+  const accounts = accountLogins.length
+    ? await BotAccount.find(
+        { login: { $in: accountLogins }, enabled: true },
+        { login: 1, farmingProgress: 1, farmingSnapshotAt: 1 },
+      ).lean()
+    : [];
+  const accountsByLogin = new Map();
+  for (const account of accounts) {
+    const key = String(account.login || "").toLowerCase();
+    const current = accountsByLogin.get(key);
+    if (
+      !current ||
+      new Date(account.farmingSnapshotAt || 0) >
+        new Date(current.farmingSnapshotAt || 0)
+    ) {
+      accountsByLogin.set(key, account);
+    }
+  }
   const games = [...new Set(sets.map(categoryFor).map((g) => g.toLowerCase()))];
   const signals = games.length
     ? await SaleSignal.find({
@@ -379,24 +525,43 @@ async function buildPublicCatalog() {
   const listings = sets.map((set) => {
     const category = categoryFor(set);
     const stock = stockMap.get(String(set._id))?.stock || 0;
+    const task = taskById.get(String(set.autoFarmTaskId));
+    const progress = task
+      ? computePreorderEta(
+          (task.assignedAccounts || [])
+            .map((login) => accountsByLogin.get(String(login).toLowerCase()))
+            .filter(Boolean),
+          task.campaignName,
+        )
+      : null;
     return publicListing(
       set,
       stock,
       median(pricesByGame.get(category.toLowerCase()) || []),
+      progress,
     );
   });
   const categoryMap = new Map();
   for (const listing of listings) {
-    if (!categoryMap.has(listing.category)) {
-      categoryMap.set(listing.category, {
+    const key = listing.category.toLowerCase();
+    if (!categoryMap.has(key)) {
+      categoryMap.set(key, {
         name: listing.category,
+        labels: new Map([[listing.category, 1]]),
         listingCount: 0,
         stock: 0,
         fromPrice: 0,
         images: [],
       });
     }
-    const row = categoryMap.get(listing.category);
+    const row = categoryMap.get(key);
+    row.labels.set(
+      listing.category,
+      (row.labels.get(listing.category) || 0) + 1,
+    );
+    row.name = [...row.labels.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    )[0][0];
     row.listingCount++;
     row.stock += listing.stock;
     if (listing.price > 0 && (!row.fromPrice || listing.price < row.fromPrice))
@@ -412,9 +577,10 @@ async function buildPublicCatalog() {
   }
   const data = {
     generatedAt: new Date().toISOString(),
-    categories: [...categoryMap.values()].sort(
-      (a, b) => b.stock - a.stock || a.name.localeCompare(b.name),
-    ),
+    categories: [...categoryMap.values()]
+      .filter((row) => row.stock > 0)
+      .map(({ labels: _labels, ...row }) => row)
+      .sort((a, b) => b.stock - a.stock || a.name.localeCompare(b.name)),
     listings,
   };
   return data;
@@ -466,7 +632,7 @@ router.get("/catalog/listings", catalogReadLimiter, async (req, res) => {
     const data = await loadPublicCatalog();
     const category = cleanText(req.query.category, 80).toLowerCase();
     const q = cleanText(req.query.q, 80).toLowerCase();
-    const limit = Math.max(1, Math.min(250, Number(req.query.limit) || 60));
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 60));
     let listings = data.listings;
     if (category)
       listings = listings.filter(
@@ -552,6 +718,7 @@ router.post("/catalog/inquiries", catalogInquiryLimiter, async (req, res) => {
     const quantity = inquiryQuantity(body.quantity);
     const contact = cleanText(body.contact, 180);
     const note = cleanText(body.note, 800);
+    const requestedPreorder = body.preorder === true;
     if (
       !/^[a-f0-9]{24}$/i.test(listingId) ||
       contact.length < 3 ||
@@ -578,6 +745,18 @@ router.post("/catalog/inquiries", catalogInquiryLimiter, async (req, res) => {
         message: `Minimum order is ${Math.max(1, Number(set.bulkMinQty) || 5)}`,
       });
     }
+    const preorder = requestedPreorder && set.catalogState === "preorder";
+    let expectedReadyAt = null;
+    if (preorder) {
+      const publicData = await loadPublicCatalog();
+      const publicRow = publicData.listings.find(
+        (row) => row.id === String(set._id),
+      );
+      const minutes = Number(publicRow?.preorder?.readyInMinutes);
+      if (Number.isFinite(minutes) && minutes >= 0) {
+        expectedReadyAt = new Date(Date.now() + minutes * 60000);
+      }
+    }
     const inquiry = await CatalogInquiry.create({
       listing: set._id,
       listingTitle: cleanText(set.publicTitle || set.name, 140),
@@ -585,6 +764,8 @@ router.post("/catalog/inquiries", catalogInquiryLimiter, async (req, res) => {
       quantity,
       contact,
       note,
+      preorder,
+      expectedReadyAt,
     });
     res.status(201).json({
       success: true,
@@ -801,6 +982,63 @@ function publicVariantJob() {
   return { ...variantSyncJob };
 }
 
+function startVariantSync({
+  apply = false,
+  games = null,
+  minStock,
+  maxProfilesPerGame,
+  source = "admin",
+  syncEventSets = false,
+  onFinish = null,
+} = {}) {
+  if (variantSyncJob.running) return false;
+  variantSyncJob = {
+    running: true,
+    apply,
+    source,
+    startedAt: Date.now(),
+    finishedAt: 0,
+    result: null,
+    error: null,
+  };
+  (async () => {
+    try {
+      const eventSets = syncEventSets
+        ? await syncHistoricalEventSets({
+            AutoFarmTask,
+            DropSet,
+            stockForSets,
+            apply,
+          })
+        : null;
+      const variants = await syncInventoryVariants({
+        apply,
+        games,
+        minStock,
+        maxProfilesPerGame,
+      });
+      variantSyncJob.result = { ...variants, eventSets };
+      if (eventSets && (eventSets.published || eventSets.retired)) {
+        invalidateCatalogCache();
+      }
+    } catch (err) {
+      console.error("catalog inventory variant sync error:", err.message);
+      variantSyncJob.error = err.message || "Sync failed";
+    } finally {
+      variantSyncJob.running = false;
+      variantSyncJob.finishedAt = Date.now();
+      if (typeof onFinish === "function") {
+        try {
+          onFinish(publicVariantJob());
+        } catch {
+          /* audit callback must not affect sync completion */
+        }
+      }
+    }
+  })();
+  return true;
+}
+
 router.post(
   "/catalog/admin/sync-variants",
   requireSuperadmin,
@@ -816,30 +1054,13 @@ router.post(
     const body = req.body || {};
     const apply = body.apply === true;
     const games = Array.isArray(body.games) ? body.games : null;
-    variantSyncJob = {
-      running: true,
+    startVariantSync({
       apply,
-      startedAt: Date.now(),
-      finishedAt: 0,
-      result: null,
-      error: null,
-    };
-    (async () => {
-      try {
-        variantSyncJob.result = await syncInventoryVariants({
-          apply,
-          games,
-          minStock: body.minStock,
-          maxProfilesPerGame: body.maxProfilesPerGame,
-        });
-      } catch (err) {
-        console.error("catalog inventory variant sync error:", err.message);
-        variantSyncJob.error = err.message || "Sync failed";
-      } finally {
-        variantSyncJob.running = false;
-        variantSyncJob.finishedAt = Date.now();
-      }
-    })();
+      games,
+      minStock: body.minStock,
+      maxProfilesPerGame: body.maxProfilesPerGame,
+      source: "admin",
+    });
     res
       .status(202)
       .json({ success: true, started: true, apply, job: publicVariantJob() });
@@ -926,9 +1147,14 @@ router.post(
 
 module.exports = router;
 module.exports.categoryFor = categoryFor;
+module.exports.publicListing = publicListing;
 module.exports.publicPriceFor = publicPriceFor;
+module.exports.publicPriceTiers = publicPriceTiers;
 module.exports.recommendedProfilePrice = recommendedProfilePrice;
 module.exports.inquiryQuantity = inquiryQuantity;
 module.exports.invalidateCatalogCache = invalidateCatalogCache;
 module.exports.warmPublicCatalog = refreshPublicCatalog;
 module.exports.syncInventoryVariants = syncInventoryVariants;
+module.exports.startVariantSync = startVariantSync;
+module.exports.variantSyncStatus = publicVariantJob;
+module.exports.updateAutofarmCatalogStates = updateAutofarmCatalogStates;
