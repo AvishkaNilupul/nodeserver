@@ -27,10 +27,14 @@ const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
+const DropSet = require("../models/DropSet");
+const catalogRoutes = require("../routes/catalogRoutes");
+const { stampPreorderSet } = require("./catalogPreorder");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
 const DECISION_READ_CONCURRENCY = 4;
+const CATALOG_VARIANT_SYNC_MS = 6 * 60 * 60 * 1000;
 
 // Demand tiers (demandScore is 0-100 from utils/marketResearch.js).
 const DEMAND_FULL = 40; // proven seller -> full allocation
@@ -160,6 +164,7 @@ const state = {
   // Epoch ms of the last container repack. Same reasoning: a restart just means
   // the next tick may re-check a plan that turns out not to be worth running.
   lastRepackAt: 0,
+  lastCatalogVariantSyncAt: 0,
 };
 
 // Live progress log for the UI: every scan appends human-readable steps here
@@ -2181,6 +2186,28 @@ async function executeTask(task, ctx, { append = false } = {}) {
       },
     },
   );
+  if (ok && !append) {
+    try {
+      const autoLister = require("./autoLister");
+      const research = await MarketResearch.findOne({ game: task.game }).lean();
+      await stampPreorderSet(
+        {
+          ...task.toObject(),
+          status: "active",
+          assignedAccounts: finalAccounts,
+        },
+        {
+          DropSet,
+          campaignItems: autoLister.campaignItems,
+          derivePrice: autoLister.derivePrice,
+          research,
+        },
+      );
+      catalogRoutes.invalidateCatalogCache();
+    } catch (err) {
+      console.error("catalog preorder stamp failed:", err.message);
+    }
+  }
   if (append) {
     if (deployed.length) {
       await recordAutoFarmEvent({
@@ -2818,9 +2845,60 @@ async function runOnce() {
   progressBegin();
   try {
     const af = cfg();
+    const catalogChanges = await catalogRoutes
+      .updateAutofarmCatalogStates()
+      .catch((e) => {
+        progress("Catalog state refresh failed: " + e.message, "warn");
+        return 0;
+      });
+    if (catalogChanges) {
+      progress("Updated " + catalogChanges + " event catalog listing(s).");
+    }
+    if (
+      !state.lastCatalogVariantSyncAt ||
+      Date.now() - state.lastCatalogVariantSyncAt >= CATALOG_VARIANT_SYNC_MS
+    ) {
+      const started = catalogRoutes.startVariantSync({
+        apply: true,
+        source: "auto-farm",
+        syncEventSets: true,
+        onFinish(job) {
+          if (job.error) {
+            progress(
+              "Scheduled catalog inventory sync failed: " + job.error,
+              "warn",
+            );
+          } else {
+            state.lastCatalogVariantSyncAt = Date.now();
+            progress(
+              "Scheduled catalog inventory sync completed: " +
+                (job.result?.count || 0) +
+                " profile(s) across " +
+                (job.result?.games || 0) +
+                " game(s); " +
+                (job.result?.eventSets?.stocked || 0) +
+                " stocked event set(s).",
+            );
+          }
+          recordAutoFarmEvent({
+            type: "catalog_sync",
+            count: Number(job.result?.count) || 0,
+            actor: "auto-farm",
+            reason: job.error
+              ? `failed: ${job.error}`
+              : `${Number(job.result?.games) || 0} games; ${Number(job.result?.eventSets?.stocked) || 0} stocked event sets`,
+          });
+        },
+      });
+      if (started) {
+        progress("Started scheduled catalog inventory sync (6-hour cycle).");
+      } else {
+        progress("Scheduled catalog sync skipped: another sync is running.");
+      }
+    }
     if (!af.enabled) {
       progress("Auto farmer is disabled in settings — nothing to do.", "warn");
-      state.lastSummary = { enabled: false };
+      state.lastSummary = { enabled: false, catalogChanges };
       return state.lastSummary;
     }
     progress(
@@ -3547,6 +3625,7 @@ async function runOnce() {
       poolSpendable: spendable,
       candidates: candidates.length,
       completed,
+      catalogChanges,
       results,
     };
     return state.lastSummary;
