@@ -37,6 +37,7 @@ const router = express.Router();
 // background so public visitors never queue behind the aggregation after the
 // first warm-up.
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const PUBLIC_STOCK_BATCH_SIZE = 200;
 let publicCache = { at: 0, data: null };
 let publicRefresh = null;
 
@@ -143,6 +144,20 @@ function inquiryQuantity(value) {
     : 0;
 }
 
+async function stockForSetsBatched(
+  sets,
+  stockReader = stockForSets,
+  batchSize = PUBLIC_STOCK_BATCH_SIZE,
+) {
+  const result = new Map();
+  const size = Math.max(1, Number(batchSize) || PUBLIC_STOCK_BATCH_SIZE);
+  for (let index = 0; index < sets.length; index += size) {
+    const batch = await stockReader(sets.slice(index, index + size));
+    for (const [setId, stock] of batch) result.set(setId, stock);
+  }
+  return result;
+}
+
 function publicListing(set, stock, marketMedian = 0, preorder = null) {
   const category = categoryFor(set);
   const items = (set.items || []).slice(0, 120).map((item) => ({
@@ -197,7 +212,10 @@ async function updateAutofarmCatalogStates() {
     catalogState: "preorder",
   }).lean();
   if (!sets.length) return 0;
-  const stockMap = await stockForSets(sets);
+  // Atlas shared-tier aggregations cannot spill to disk. Keeping one logical
+  // stock read while bounding each aggregation prevents a large catalog from
+  // crossing MongoDB's 100 MB $group ceiling as historical event sets grow.
+  const stockMap = await stockForSetsBatched(sets);
   const tasks = await AutoFarmTask.find(
     { _id: { $in: sets.map((set) => set.autoFarmTaskId).filter(Boolean) } },
     { status: 1 },
@@ -1150,6 +1168,7 @@ module.exports.categoryFor = categoryFor;
 module.exports.publicListing = publicListing;
 module.exports.publicPriceFor = publicPriceFor;
 module.exports.publicPriceTiers = publicPriceTiers;
+module.exports.stockForSetsBatched = stockForSetsBatched;
 module.exports.recommendedProfilePrice = recommendedProfilePrice;
 module.exports.inquiryQuantity = inquiryQuantity;
 module.exports.invalidateCatalogCache = invalidateCatalogCache;

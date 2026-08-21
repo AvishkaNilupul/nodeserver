@@ -7,6 +7,7 @@ const {
   publicPriceTiers,
   inquiryQuantity,
   publicListing,
+  stockForSetsBatched,
 } = require("../routes/catalogRoutes");
 
 test("catalog category uses the dominant game and deterministic tie breaking", () => {
@@ -119,4 +120,23 @@ test("quote quantity accepts only whole values in the public order range", () =>
   assert.equal(inquiryQuantity(undefined), 0);
   assert.equal(inquiryQuantity(2.5), 0);
   assert.equal(inquiryQuantity(1001), 0);
+});
+
+test("public catalog stock is merged from Atlas-safe bounded batches", async () => {
+  const calls = [];
+  const sets = Array.from({ length: 5 }, (_, index) => ({
+    _id: String(index),
+  }));
+  const result = await stockForSetsBatched(
+    sets,
+    async (batch) => {
+      calls.push(batch.map((set) => set._id));
+      return new Map(
+        batch.map((set) => [String(set._id), { stock: Number(set._id) + 1 }]),
+      );
+    },
+    2,
+  );
+  assert.deepEqual(calls, [["0", "1"], ["2", "3"], ["4"]]);
+  assert.equal(result.get("4").stock, 5);
 });
