@@ -16,6 +16,13 @@ async function recordPoolUsage(idOrIds, entry) {
     host: "",
     ...entry,
   };
+  // PoolUsageEvent.event is `required`, so an entry that arrives without one
+  // would fail insertMany, get swallowed by the catch below, and land in the
+  // per-account history but NOT in the watcher — the two trails would diverge
+  // with nothing but a console line to show for it. Substituting a visible
+  // placeholder keeps them consistent and makes the omission obvious in the UI
+  // instead of silently dropping the event.
+  if (!doc.event) doc.event = "unknown";
   // Resolve usernames once for the denormalized watcher feed. Do this before
   // the two independent best-effort writes so one failure cannot suppress the
   // other audit trail.
