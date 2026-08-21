@@ -42,6 +42,8 @@ const router = express.Router();
 // first warm-up.
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_STOCK_BATCH_SIZE = 25;
+const PUBLIC_STOCK_KEY_BATCH_SIZE = 10;
+const PUBLIC_STOCK_KEY_CONCURRENCY = 4;
 let publicCache = { at: 0, data: null };
 let publicRefresh = null;
 
@@ -167,20 +169,43 @@ async function stockForSetsBatched(
         result.set(String(set._id), { stock: 0, topItems: [] });
       return result;
     }
-    const drops = await DropLog.find(
-      { itemKey: { $in: keys }, ...AVAILABLE_DROP },
-      { account: 1, itemKey: 1, count: 1 },
-    ).lean();
+    const rows = [];
+    for (
+      let index = 0;
+      index < keys.length;
+      index += PUBLIC_STOCK_KEY_BATCH_SIZE * PUBLIC_STOCK_KEY_CONCURRENCY
+    ) {
+      const chunk = keys.slice(
+        index,
+        index + PUBLIC_STOCK_KEY_BATCH_SIZE * PUBLIC_STOCK_KEY_CONCURRENCY,
+      );
+      const parts = await Promise.all(
+        Array.from({ length: PUBLIC_STOCK_KEY_CONCURRENCY }, (_, offset) => {
+          const keyBatch = chunk.slice(
+            offset * PUBLIC_STOCK_KEY_BATCH_SIZE,
+            (offset + 1) * PUBLIC_STOCK_KEY_BATCH_SIZE,
+          );
+          if (!keyBatch.length) return [];
+          return DropLog.aggregate([
+            { $match: { itemKey: { $in: keyBatch }, ...AVAILABLE_DROP } },
+            {
+              $group: {
+                _id: { account: "$account", k: "$itemKey" },
+                count: { $sum: "$count" },
+              },
+            },
+          ]);
+        }),
+      );
+      rows.push(...parts.flat());
+    }
     const byAccount = new Map();
-    for (const drop of drops) {
-      const accountId = String(drop.account || "");
+    for (const row of rows) {
+      const accountId = String(row._id?.account || "");
       if (!accountId) continue;
       if (!byAccount.has(accountId)) byAccount.set(accountId, new Map());
       const counts = byAccount.get(accountId);
-      counts.set(
-        String(drop.itemKey),
-        (counts.get(String(drop.itemKey)) || 0) + (Number(drop.count) || 0),
-      );
+      counts.set(String(row._id.k), Number(row.count) || 0);
     }
     const accounts = await BotAccount.find(
       { _id: { $in: [...byAccount.keys()] } },
