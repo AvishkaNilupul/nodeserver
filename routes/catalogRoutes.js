@@ -567,7 +567,7 @@ async function buildPublicCatalog() {
   })
     .sort({ publicFeatured: -1, publicSort: -1, updatedAt: -1 })
     .lean();
-  const stockMap = await stockForSets(sets);
+  const stockMap = await stockForSetsBatched(sets);
   const preorderSets = sets.filter((set) => set.catalogState === "preorder");
   const tasks = preorderSets.length
     ? await AutoFarmTask.find(
