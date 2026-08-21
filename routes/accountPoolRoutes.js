@@ -72,9 +72,13 @@ router.get("/account-pool/list", requireSuperadmin, async (req, res) => {
         : status === "all"
           ? { lastCheckStatus: { $ne: "suspended" } }
           : { status, lastCheckStatus: { $ne: "suspended" } };
+    // Derive usageCount/lastUsedGame and DROP the full usageHistory array
+    // BEFORE the $sort, so the in-memory sort buffers only the small projected
+    // docs — Atlas shared tier has allowDiskUse off and a 100MB aggregation
+    // cap (see memory: atlas-no-diskuse). Sort by createdAt is untouched, so
+    // the ordering is identical to the old find().sort().
     const accounts = await AvailableAccount.aggregate([
       { $match: filter },
-      { $sort: { createdAt: -1 } },
       {
         $set: {
           usageCount: { $size: { $ifNull: ["$usageHistory", []] } },
@@ -105,6 +109,7 @@ router.get("/account-pool/list", requireSuperadmin, async (req, res) => {
         },
       },
       { $project: { usageHistory: 0 } },
+      { $sort: { createdAt: -1 } },
     ]);
     res.json({ success: true, accounts: accounts.map(publicAccount) });
   } catch (err) {
