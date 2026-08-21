@@ -25,6 +25,7 @@ const mp = require("./marketplaces");
 const settings = require("./settings");
 const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
+const { recordPoolUsage } = require("./poolUsageLog");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
@@ -703,6 +704,14 @@ async function claimPoolAccounts(n, note, { preferGame = "", recycledOnly = fals
       );
       if (!doc) break;
       claimed.push(doc);
+      const match = String(note || "").match(/^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i);
+      await recordPoolUsage(doc._id, {
+        event: "claimed",
+        actor: "auto-farm",
+        note,
+        game: preferGame || (match && match[1]) || "",
+        campaignId: (match && match[2]) || "",
+      });
     }
     if (claimed.length >= n) break;
   }
@@ -711,10 +720,13 @@ async function claimPoolAccounts(n, note, { preferGame = "", recycledOnly = fals
 
 async function releasePoolAccounts(docs) {
   if (!docs.length) return;
-  await AvailableAccount.updateMany(
+  const result = await AvailableAccount.updateMany(
     { _id: { $in: docs.map((d) => d._id) } },
     { $set: { status: "available", claimedAt: null, claimedNote: "" } },
   ).catch(() => {});
+  if (result) {
+    await recordPoolUsage(docs.map((d) => d._id), { event: "released", actor: "auto-farm" });
+  }
 }
 
 // Containers currently in use by live auto-farm tasks (the capacity gate).
@@ -924,7 +936,7 @@ async function recycleSoldOutAccounts(af, progress) {
     if (fresh && fresh.lastScanStatus === "ok") {
       // Still ours → back to the pool. The claimedNote matches the preferGame
       // affinity regex so it re-farms the same game preferentially.
-      await AvailableAccount.updateOne(
+      const result = await AvailableAccount.updateOne(
         { _id: e.pool._id, status: "claimed" },
         {
           $set: {
@@ -934,14 +946,29 @@ async function recycleSoldOutAccounts(af, progress) {
           },
         },
       );
-      recycled++;
+      if (result.modifiedCount || result.nModified) {
+        await recordPoolUsage(e.pool._id, {
+          event: "recycled",
+          actor: "auto-farm",
+          game: e.game || "",
+          note: e.game ? "recycled after " + e.game : "recycled after sale",
+        });
+        recycled++;
+      }
     } else {
       // Buyer changed the password (or token died) — never redeploy it.
-      await AvailableAccount.updateOne(
+      const result = await AvailableAccount.updateOne(
         { _id: e.pool._id },
         { $set: { claimedNote: "sold — token reclaimed by buyer" } },
       );
-      reclaimed++;
+      if (result.modifiedCount || result.nModified) {
+        await recordPoolUsage(e.pool._id, {
+          event: "sold",
+          actor: "auto-farm",
+          note: "sold — token reclaimed by buyer",
+        });
+        reclaimed++;
+      }
     }
   }
   if (recycled || reclaimed) {
@@ -1988,6 +2015,10 @@ async function reapRetiredBots(af, host, progress) {
         (u) => !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
       );
       if (back.length) {
+        const poolRows = await AvailableAccount.find(
+          { usernameLower: { $in: back.map((u) => u.toLowerCase()) }, status: "claimed" },
+          { _id: 1 },
+        ).lean();
         const r = await AvailableAccount.updateMany(
           {
             usernameLower: { $in: back.map((u) => u.toLowerCase()) },
@@ -2002,6 +2033,13 @@ async function reapRetiredBots(af, host, progress) {
           },
         );
         recycled = (r && r.modifiedCount) || 0;
+        if (recycled) {
+          await recordPoolUsage(poolRows.map((row) => row._id), {
+            event: "recycled",
+            actor: "retro-reaper",
+            note: "recycled by retro-reaper",
+          });
+        }
       }
     }
   } catch {
@@ -2318,6 +2356,10 @@ async function completeEndedTasks() {
           );
         }
         if (back.length) {
+          const poolRows = await AvailableAccount.find(
+            { usernameLower: { $in: back.map((u) => String(u).toLowerCase()) }, status: "claimed" },
+            { _id: 1 },
+          ).lean();
           const r = await AvailableAccount.updateMany(
             {
               usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
@@ -2332,6 +2374,14 @@ async function completeEndedTasks() {
             },
           );
           recycled = (r && r.modifiedCount) || 0;
+          if (recycled) {
+            await recordPoolUsage(poolRows.map((row) => row._id), {
+              event: "recycled",
+              actor: "auto-farm",
+              game: t.game,
+              note: "recycled after " + t.game,
+            });
+          }
         }
       } catch {
         /* best-effort — accounts stay claimed, owner can release manually */

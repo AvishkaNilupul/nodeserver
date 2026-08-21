@@ -42,6 +42,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
 const { decrypt, encrypt } = require("../utils/secretBox");
+const { recordPoolUsage } = require("../utils/poolUsageLog");
 const {
   listStacks,
   requireStack,
@@ -1675,11 +1676,21 @@ router.post(
         poolSet.password = encrypt(password);
         poolSet.hasPassword = true;
       }
-      await AvailableAccount.updateOne(
+      const poolResult = await AvailableAccount.updateOne(
         { usernameLower: lower },
         { $set: poolSet, $setOnInsert: { usernameLower: lower } },
         { upsert: true },
       ).catch(() => {});
+      const rentedPool = poolResult
+        ? await AvailableAccount.findOne({ usernameLower: lower }, { _id: 1 }).lean().catch(() => null)
+        : null;
+      if (rentedPool && (poolResult.modifiedCount || poolResult.upsertedCount || poolResult.nModified)) {
+        await recordPoolUsage(rentedPool._id, {
+          event: "rented",
+          actor: "renter-admin",
+          note: poolSet.claimedNote,
+        });
+      }
 
       // Restart the renter's bot so it picks the new account up (best effort —
       // a stopped bot stays stopped until the operator starts it).
@@ -2118,6 +2129,7 @@ async function movePoolAccountToRenter(renter, host, doc) {
   if (!(claim.modifiedCount || claim.nModified)) {
     throw new Error("was claimed by someone else");
   }
+  await recordPoolUsage(doc._id, { event: "rented", actor: "renter-admin", note: claimNote });
 
   // The account is now claimed. If writing it into the renter's config fails,
   // RELEASE the claim before propagating — otherwise it is stranded: claimed
@@ -2127,10 +2139,13 @@ async function movePoolAccountToRenter(renter, host, doc) {
   try {
     await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
   } catch (e) {
-    await AvailableAccount.updateOne(
+    const returned = await AvailableAccount.updateOne(
       { _id: doc._id, status: "claimed", claimedNote: claimNote },
       { $set: { status: "available" }, $unset: { claimedAt: "", claimedNote: "" } },
     ).catch(() => {});
+    if (returned && (returned.modifiedCount || returned.nModified)) {
+      await recordPoolUsage(doc._id, { event: "returned", actor: "renter-admin" });
+    }
     throw e;
   }
 

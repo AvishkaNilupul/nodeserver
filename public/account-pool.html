@@ -96,6 +96,11 @@
   .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
   .revealbox { font-family: ui-monospace, monospace; font-size: 13px; background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; line-height:1.7; word-break:break-all; }
   .revealbox .k { color: var(--muted); }
+  .history-list { display:flex; flex-direction:column; gap:10px; max-height:55vh; overflow-y:auto; }
+  .history-item { border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:var(--surface-2); line-height:1.45; }
+  .history-item .when { color:var(--muted); font-size:11.5px; }
+  .history-item .event { font-weight:700; text-transform:capitalize; }
+  .history-item .meta { color:var(--muted); font-size:12px; }
 </style>
 </head>
 
@@ -152,9 +157,9 @@
     <div style="overflow-x:auto;">
       <table id="tbl">
         <thead>
-          <tr><th>Username</th><th>Ready</th><th>Verified</th><th>Twitch ID</th><th>Status</th><th>Added</th><th></th></tr>
+          <tr><th>Username</th><th>Ready</th><th>Verified</th><th>Twitch ID</th><th>Status</th><th>Usage</th><th>Added</th><th></th></tr>
         </thead>
-        <tbody id="tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -197,6 +202,13 @@ or JSON:
   </div>
 </div>
 
+<div class="modal-bg" id="historyBg">
+  <div class="modal" style="max-width:680px;">
+    <header><b id="historyTitle">Usage history</b><button class="x" id="historyClose">&times;</button></header>
+    <div class="mbody"><div class="history-list" id="historyList"><div class="empty">Loading…</div></div></div>
+  </div>
+</div>
+
 <div class="modal-bg" id="revealBg">
   <div class="modal">
     <header><b id="revealTitle">Account details</b><button class="x" id="revealClose">&times;</button></header>
@@ -216,6 +228,7 @@ or JSON:
   let ACCOUNTS = [];
   let CURRENT_STATUS = "available";
   let REVEAL_ID = null;
+  let HISTORY_ID = null;
 
   async function api(url, opts) {
     const r = await fetch(url, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts));
@@ -263,7 +276,7 @@ or JSON:
     const q = $("search").value.trim().toLowerCase();
     const rows = ACCOUNTS.filter((a) => !q || a.username.toLowerCase().includes(q));
     if (!rows.length) {
-      $("tbody").innerHTML = '<tr><td colspan="7" class="empty">No accounts here.</td></tr>';
+      $("tbody").innerHTML = '<tr><td colspan="8" class="empty">No accounts here.</td></tr>';
       renderStats();
       return;
     }
@@ -279,14 +292,18 @@ or JSON:
         ? '<button class="btn-ghost btn-sm" data-unclaim="' + a.id + '">Unclaim</button>'
         : '<button class="btn-ghost btn-sm" data-reveal="' + a.id + '">View</button>') +
         (a.hasAuth ? '<button class="btn-ghost btn-sm" data-check="' + a.id + '">Check</button>' : "");
+      const usage = '<span class="chip" title="' + esc(a.lastUsedGame || "No game recorded") + '">' +
+        'used ' + (a.usageCount || 0) + '×' + (a.lastUsedGame ? ' · ' + esc(a.lastUsedGame) : '') + '</span>';
       return "<tr>" +
         "<td>" + esc(a.username) + "</td>" +
         "<td>" + readyChip + "</td>" +
         "<td>" + verifiedChip(a) + "</td>" +
         '<td class="mono">' + esc(a.twitchId || "—") + "</td>" +
         "<td>" + statusChip + "</td>" +
+        "<td>" + usage + "</td>" +
         "<td>" + added + "</td>" +
         '<td style="display:flex;gap:6px;">' + actions +
+          '<button class="btn-ghost btn-sm" data-history="' + a.id + '">History</button>' +
           '<button class="btn-danger btn-sm" data-delete="' + a.id + '">Delete</button></td>' +
         "</tr>";
     }).join("");
@@ -299,7 +316,7 @@ or JSON:
       ACCOUNTS = r.accounts || [];
       render();
     } catch (e) {
-      $("tbody").innerHTML = '<tr><td colspan="7" class="empty">' + esc(e.message) + "</td></tr>";
+      $("tbody").innerHTML = '<tr><td colspan="8" class="empty">' + esc(e.message) + "</td></tr>";
     }
   }
 
@@ -377,7 +394,9 @@ or JSON:
     const unclaimId = e.target.getAttribute("data-unclaim");
     const deleteId = e.target.getAttribute("data-delete");
     const checkId = e.target.getAttribute("data-check");
+    const historyId = e.target.getAttribute("data-history");
     if (revealId) return openReveal(revealId);
+    if (historyId) return openHistory(historyId);
     if (checkId) return runCheck(checkId, e.target);
     if (unclaimId) {
       try { await api("/account-pool/" + unclaimId + "/unclaim", { method: "POST" }); toast("Marked available again"); load(); }
@@ -424,6 +443,29 @@ or JSON:
     }
   }
 
+  async function openHistory(id) {
+    HISTORY_ID = id;
+    const acc = ACCOUNTS.find((a) => a.id === id);
+    $("historyTitle").textContent = (acc ? acc.username : "Account") + " · usage history";
+    $("historyList").innerHTML = '<div class="empty">Loading…</div>';
+    $("historyBg").classList.add("show");
+    try {
+      const r = await api("/account-pool/" + id + "/history");
+      const rows = r.history || [];
+      $("historyList").innerHTML = rows.length ? rows.map((h) => {
+        const when = h.at ? new Date(h.at).toLocaleString() : "Unknown time";
+        const context = [h.game, h.campaignId ? "campaign " + h.campaignId : ""].filter(Boolean).join(" · ");
+        return '<div class="history-item"><div><span class="when">' + esc(when) + '</span> · <span class="event">' + esc(h.event || "event") + '</span>' +
+          (context ? ' · ' + esc(context) : '') + '</div>' +
+          (h.note ? '<div>' + esc(h.note) + '</div>' : '') +
+          (h.actor || h.host ? '<div class="meta">' + esc([h.actor, h.host].filter(Boolean).join(" · ")) + '</div>' : '') +
+          '</div>';
+      }).join("") : '<div class="empty">No usage history recorded yet.</div>';
+    } catch (err) {
+      $("historyList").innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    }
+  }
+
   function renderCheckResult(r) {
     if (r.status === "ok") {
       const rows = (r.drops || []).slice(0, 100).map((d) =>
@@ -465,6 +507,8 @@ or JSON:
   }
   $("revealClose").addEventListener("click", () => $("revealBg").classList.remove("show"));
   $("revealBg").addEventListener("click", (e) => { if (e.target === $("revealBg")) $("revealBg").classList.remove("show"); });
+  $("historyClose").addEventListener("click", () => $("historyBg").classList.remove("show"));
+  $("historyBg").addEventListener("click", (e) => { if (e.target === $("historyBg")) $("historyBg").classList.remove("show"); });
   $("checkBtn").addEventListener("click", (e) => { if (REVEAL_ID) runCheck(REVEAL_ID, e.target); });
   $("claimBtn").addEventListener("click", async () => {
     if (!REVEAL_ID) return;

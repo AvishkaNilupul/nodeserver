@@ -21,10 +21,13 @@ const dropScanner = require("../utils/dropScanner");
 const { parseAccountList } = require("../utils/parseAccountList");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const { fetchInventory, fetchDropCampaigns } = require("../utils/twitchInventory");
+const { recordPoolUsage } = require("../utils/poolUsageLog");
 
 const router = express.Router();
 
 function publicAccount(a) {
+  const history = Array.isArray(a.usageHistory) ? a.usageHistory : [];
+  const lastUsedGame = a.lastUsedGame || [...history].reverse().find((entry) => entry.game)?.game || "";
   return {
     id: a._id,
     username: a.username,
@@ -52,6 +55,8 @@ function publicAccount(a) {
     dropCount: a.dropCount || 0,
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
+    usageCount: Number.isFinite(a.usageCount) ? a.usageCount : history.length,
+    lastUsedGame,
   };
 }
 
@@ -67,12 +72,55 @@ router.get("/account-pool/list", requireSuperadmin, async (req, res) => {
         : status === "all"
           ? { lastCheckStatus: { $ne: "suspended" } }
           : { status, lastCheckStatus: { $ne: "suspended" } };
-    const accounts = await AvailableAccount.find(filter)
-      .sort({ createdAt: -1 })
-      .lean();
+    const accounts = await AvailableAccount.aggregate([
+      { $match: filter },
+      { $sort: { createdAt: -1 } },
+      {
+        $set: {
+          usageCount: { $size: { $ifNull: ["$usageHistory", []] } },
+          lastUsedGame: {
+            $let: {
+              vars: {
+                withGames: {
+                  $filter: {
+                    input: { $reverseArray: { $ifNull: ["$usageHistory", []] } },
+                    as: "entry",
+                    cond: { $ne: [{ $ifNull: ["$$entry.game", ""] }, ""] },
+                  },
+                },
+              },
+              in: {
+                $ifNull: [
+                  {
+                    $arrayElemAt: [
+                      { $map: { input: "$$withGames", as: "entry", in: "$$entry.game" } },
+                      0,
+                    ],
+                  },
+                  "",
+                ],
+              },
+            },
+          },
+        },
+      },
+      { $project: { usageHistory: 0 } },
+    ]);
     res.json({ success: true, accounts: accounts.map(publicAccount) });
   } catch (err) {
     console.error("account-pool list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.get("/account-pool/:id/history", requireSuperadmin, async (req, res) => {
+  try {
+    const acc = await AvailableAccount.findById(req.params.id, { usageHistory: 1 }).lean();
+    if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    const history = (acc.usageHistory || []).slice().sort((a, b) => new Date(b.at) - new Date(a.at));
+    res.json({ success: true, history });
+  } catch (err) {
+    console.error("account-pool history error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -550,6 +598,7 @@ router.post("/account-pool/:id/claim", requireSuperadmin, async (req, res) => {
     if (!acc) {
       return res.status(404).json({ success: false, message: "Not found" });
     }
+    await recordPoolUsage(acc._id, { event: "claimed", actor: "manual", note });
     res.json({ success: true, account: publicAccount(acc) });
   } catch (err) {
     console.error("account-pool claim error:", err.message);
@@ -567,6 +616,7 @@ router.post("/account-pool/:id/unclaim", requireSuperadmin, async (req, res) => 
     if (!acc) {
       return res.status(404).json({ success: false, message: "Not found" });
     }
+    await recordPoolUsage(acc._id, { event: "released", actor: "manual" });
     res.json({ success: true, account: publicAccount(acc) });
   } catch (err) {
     console.error("account-pool unclaim error:", err.message);
