@@ -37,7 +37,7 @@ const router = express.Router();
 // background so public visitors never queue behind the aggregation after the
 // first warm-up.
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const PUBLIC_STOCK_BATCH_SIZE = 200;
+const PUBLIC_STOCK_BATCH_SIZE = 25;
 let publicCache = { at: 0, data: null };
 let publicRefresh = null;
 
