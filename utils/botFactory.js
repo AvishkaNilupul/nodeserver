@@ -243,6 +243,7 @@ async function createBot(host, poolAccounts, game, opts = {}) {
     container: slot.container,
     accountCount: users.length,
     logins: users.map((u) => u.Login),
+    config: data,
     started,
     startError,
   };
@@ -278,7 +279,9 @@ async function addAccountsToBot(host, file, poolAccounts, game) {
   }
 
   const favouriteGames = [game].filter(Boolean);
-  const wanted = String(game || "").trim().toLowerCase();
+  const wanted = String(game || "")
+    .trim()
+    .toLowerCase();
   const fresh = [];
   const merged = [];
   for (const acc of poolAccounts) {
@@ -319,6 +322,7 @@ async function addAccountsToBot(host, file, poolAccounts, game) {
     added: fresh.length,
     merged: merged.length,
     changed: !!changed,
+    data,
     logins: fresh
       .map((u) => u.Login)
       .concat(merged.map((m) => m.login))

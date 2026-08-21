@@ -30,6 +30,7 @@ const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
+const DECISION_READ_CONCURRENCY = 4;
 
 // Demand tiers (demandScore is 0-100 from utils/marketResearch.js).
 const DEMAND_FULL = 40; // proven seller -> full allocation
@@ -72,6 +73,59 @@ const INTERNAL_SALE_WEIGHT = 18;
 const REFERENCE_SALE_USD = 2.5;
 const PRICE_FACTOR_MIN = 0.6;
 const PRICE_FACTOR_MAX = 2;
+
+// Bounded parallel map that preserves input order. Decision-input reads may
+// overlap, but the campaign commit loop remains serial because it owns finite
+// pool, config and container resources.
+async function mapWithConcurrency(items, concurrency, fn) {
+  const list = Array.from(items || []);
+  if (!list.length) return [];
+  const out = new Array(list.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, Number(concurrency) || 1), list.length) },
+    async () => {
+      while (true) {
+        const index = next++;
+        if (index >= list.length) return;
+        out[index] = await fn(list[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return out;
+}
+
+function createSeatCounter({
+  maxAutoBots,
+  accountsPerBot,
+  activeContainers = 0,
+  freeSeats = 0,
+} = {}) {
+  let active = Math.max(0, Number(activeContainers) || 0);
+  let free = Math.max(0, Number(freeSeats) || 0);
+  const max = Math.max(0, Number(maxAutoBots) || 0);
+  const perBot = Math.max(1, Number(accountsPerBot) || 1);
+  const usableFree = () =>
+    Math.min(free, Math.min(active, max) * perBot, max * perBot);
+  return {
+    activeContainers: () => active,
+    freeSeats: () => usableFree(),
+    slotsFree: () => Math.max(0, max - active),
+    capacity: () =>
+      Math.min(max * perBot, Math.max(0, max - active) * perBot + usableFree()),
+    consumeExisting(count) {
+      free = Math.max(0, free - Math.max(0, Number(count) || 0));
+    },
+    addContainer(count = 1, seatsFree = 0) {
+      const requested = Math.max(0, Number(count) || 0);
+      const added = Math.min(requested, Math.max(0, max - active));
+      active += added;
+      free += Math.min(Math.max(0, Number(seatsFree) || 0), added * perBot);
+      return added;
+    },
+  };
+}
 
 // How much to scale a game's demand by what its sales are worth. Games we have
 // no price for (connection flips only) sit at 1 — unchanged, not punished.
@@ -737,7 +791,8 @@ async function releasePoolAccounts(docs) {
 }
 
 // Containers currently in use by live auto-farm tasks (the capacity gate).
-async function activeAutoBotCount() {
+async function activeAutoBotCount(ctx) {
+  if (ctx && ctx.hostState) return ctx.hostState.activeBots.length;
   const rows = await AutoFarmTask.find(
     { status: "active" },
     { bots: 1 },
@@ -1012,11 +1067,172 @@ async function recycleSoldOutAccounts(af, progress) {
   return recycled;
 }
 
+function uniqueTaskBots(rows, hostId) {
+  const seen = new Set();
+  const out = [];
+  for (const task of rows || []) {
+    for (const bot of task.bots || []) {
+      if (hostId && bot.host !== hostId) continue;
+      const key = bot.host + "|" + bot.container;
+      if (!bot.host || !bot.container || seen.has(key)) continue;
+      seen.add(key);
+      out.push(bot);
+    }
+  }
+  return out;
+}
+
+// One batched, post-wake/park view of every auto-owned config. This replaces
+// the per-campaign exists/readFile loops. If a host snapshot fails, callers
+// fall back to the old conservative live reads rather than trusting partial
+// data and creating replacement bots from an incomplete view.
+async function buildDecisionHostState(taskRows, af, farmHost, opts = {}) {
+  const started = Date.now();
+  const grouped = new Map();
+  for (const task of taskRows || []) {
+    for (const bot of task.bots || []) {
+      if (!bot.host || !bot.file) continue;
+      if (!grouped.has(bot.host)) grouped.set(bot.host, new Set());
+      grouped.get(bot.host).add(bot.file);
+    }
+  }
+  const hostRows = await mapWithConcurrency(
+    [...grouped.entries()],
+    DECISION_READ_CONCURRENCY,
+    async ([hostId, fileSet]) => {
+      const host = hosts.resolveHost(hostId);
+      if (!host) return [hostId, { ok: false, error: "unknown host" }];
+      if ((opts.skipHosts || new Set()).has(hostId)) {
+        return [hostId, { ok: false, error: "host already known offline" }];
+      }
+      let calls = 0;
+      try {
+        calls++;
+        const docker = await hosts.dockerPs(host);
+        calls++;
+        const raw = await hosts.readFiles(host, [...fileSet]);
+        const configs = new Map();
+        const files = new Set();
+        const missing = new Set();
+        for (const file of fileSet) {
+          const entry = raw[file];
+          if (!entry || !entry.ok) {
+            if (entry && /not found/i.test(entry.error || ""))
+              missing.add(file);
+            continue;
+          }
+          files.add(file);
+          try {
+            configs.set(file, JSON.parse(entry.text));
+          } catch {
+            /* existence remains known; malformed configs offer no seats */
+          }
+        }
+        return [hostId, { ok: true, docker, files, missing, configs, calls }];
+      } catch (error) {
+        return [
+          hostId,
+          {
+            ok: false,
+            calls,
+            error: error.message || String(error),
+          },
+        ];
+      }
+    },
+  );
+  const byHost = new Map(hostRows);
+  const activeTasks = (taskRows || []).filter(
+    (task) => task.status === "active",
+  );
+  const activeBots = uniqueTaskBots(activeTasks);
+  const farmRow = farmHost && byHost.get(farmHost.id);
+  let freeSeats = 0;
+  if (farmRow && farmRow.ok && af.consolidate !== false) {
+    for (const bot of uniqueTaskBots(activeTasks, farmHost.id)) {
+      const data = farmRow.configs.get(bot.file);
+      if (!data) continue;
+      freeSeats += Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
+    }
+  }
+  const seatCounter = createSeatCounter({
+    maxAutoBots: af.maxAutoBots,
+    accountsPerBot: af.accountsPerBot,
+    activeContainers: activeBots.length,
+    freeSeats,
+  });
+  const activeBotKeys = new Set(
+    activeBots.map((bot) => bot.host + "|" + bot.container),
+  );
+  return {
+    byHost,
+    activeBots,
+    seatCounter,
+    elapsedMs: Date.now() - started,
+    hostCalls: hostRows.reduce((n, [, row]) => n + (row.calls || 0), 0),
+    fileCount: [...grouped.values()].reduce((n, files) => n + files.size, 0),
+    hasFile(hostId, file, container) {
+      const row = byHost.get(hostId);
+      if (!row || !row.ok) return null;
+      if (row.missing.has(file)) return false;
+      if (!row.files.has(file)) return null;
+      return container
+        ? Object.prototype.hasOwnProperty.call(row.docker, container)
+        : true;
+    },
+    config(hostId, file) {
+      const row = byHost.get(hostId);
+      return row && row.ok ? row.configs.get(file) || null : null;
+    },
+    setConfig(hostId, file, data) {
+      if (!data) return;
+      let row = byHost.get(hostId);
+      if (!row || !row.ok) {
+        row = {
+          ok: true,
+          docker: {},
+          files: new Set(),
+          missing: new Set(),
+          configs: new Map(),
+          calls: row ? row.calls || 0 : 0,
+        };
+        byHost.set(hostId, row);
+      }
+      row.files.add(file);
+      row.missing.delete(file);
+      row.configs.set(file, data);
+    },
+    activateBot(bot, data) {
+      if (!bot || !bot.host || !bot.container) return false;
+      if (data && bot.file) this.setConfig(bot.host, bot.file, data);
+      const key = bot.host + "|" + bot.container;
+      if (activeBotKeys.has(key)) return false;
+      activeBotKeys.add(key);
+      activeBots.push(bot);
+      const row = byHost.get(bot.host);
+      if (row && row.ok) {
+        row.docker[bot.container] = { state: "running", status: "started" };
+      }
+      const config =
+        data || (bot.file ? this.config(bot.host, bot.file) : null);
+      const seatsFree = config
+        ? Math.max(0, af.accountsPerBot - botFactory.usedSeats(config))
+        : 0;
+      seatCounter.addContainer(1, seatsFree);
+      return true;
+    },
+  };
+}
+
 // Free seats inside containers that active auto-farm tasks already run on
 // this host. A "seat" is one enabled TwitchUsers slot out of accountsPerBot.
 // Unreadable configs count as zero free seats (never over-promise capacity).
-async function autoSeatCapacity(host, af) {
+async function autoSeatCapacity(host, af, ctx) {
   if (!host || af.consolidate === false) return 0;
+  if (ctx && ctx.hostState) {
+    const row = ctx.hostState.byHost.get(host.id);
+    if (row && row.ok) return ctx.hostState.seatCounter.freeSeats();
+  }
   const rows = await AutoFarmTask.find(
     { status: "active" },
     { bots: 1 },
@@ -1046,33 +1262,27 @@ async function autoSeatCapacity(host, af) {
 // many games at once. Returns { placed, remaining }; placed entries carry
 // the task.bots row plus the accounts that landed there. Every filled
 // container is restarted once so TwitchDropsBot reloads its config.
-async function fillExistingBots(host, claimed, game, af) {
+async function fillExistingBots(host, claimed, game, af, ctx) {
   const placed = [];
   let remaining = claimed.slice();
   if (!remaining.length || af.consolidate === false) {
     return { placed, remaining };
   }
-  const rows = await AutoFarmTask.find(
-    { status: "active" },
-    { bots: 1 },
-  ).lean();
-  const seen = new Set();
-  const containers = [];
-  for (const t of rows) {
-    for (const b of t.bots || []) {
-      if (b.host !== host.id) continue;
-      const key = b.host + "|" + b.container;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      containers.push(b);
-    }
-  }
+  const containers =
+    ctx && ctx.hostState
+      ? ctx.hostState.activeBots.filter((bot) => bot.host === host.id)
+      : uniqueTaskBots(
+          await AutoFarmTask.find({ status: "active" }, { bots: 1 }).lean(),
+          host.id,
+        );
   for (const b of containers) {
     if (!remaining.length) break;
     let freeSeats = 0;
     let present = new Set();
     try {
-      const data = JSON.parse(await hosts.readFile(host, b.file));
+      const cached =
+        ctx && ctx.hostState ? ctx.hostState.config(host.id, b.file) : null;
+      const data = cached || JSON.parse(await hosts.readFile(host, b.file));
       freeSeats = Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
       const users =
         data.TwitchSettings && Array.isArray(data.TwitchSettings.TwitchUsers)
@@ -1103,6 +1313,10 @@ async function fillExistingBots(host, claimed, game, af) {
       const taken = batch.filter((a) => landed.has(a.username));
       if (!taken.length) continue;
       remaining = remaining.filter((a) => !taken.includes(a));
+      if (ctx && ctx.hostState) {
+        ctx.hostState.seatCounter.consumeExisting(r.added);
+        if (r.data) ctx.hostState.setConfig(host.id, b.file, r.data);
+      }
       if (r.changed) {
         await hosts
           .dockerContainer(host, "restart", b.container)
@@ -1384,7 +1598,9 @@ async function processCampaign(c, ctx) {
   }
 
   // 4) Reuse-first: weekly campaigns restart the game's existing auto-bot.
-  let reusable = await reusableTaskForGame(game);
+  let reusable = ctx.reusableMap
+    ? ctx.reusableMap.get(game) || null
+    : await reusableTaskForGame(game);
   if (reusable) {
     // Retired bots (deleted container, config renamed .done-*) can't be
     // restarted — drop them; if none survive, fall through to a fresh plan
@@ -1394,7 +1610,13 @@ async function processCampaign(c, ctx) {
       const h = hosts.resolveHost(b.host);
       if (!h) continue;
       try {
-        if (await hosts.exists(h, b.file)) live.push(b);
+        const cached =
+          ctx.hostState && ctx.hostState.hasFile(b.host, b.file, b.container);
+        if (
+          cached === true ||
+          (cached == null && (await hosts.exists(h, b.file)))
+        )
+          live.push(b);
       } catch {
         /* host unreachable — treat as not reusable */
       }
@@ -1430,6 +1652,7 @@ async function processCampaign(c, ctx) {
       try {
         await botFactory.startContainer(hosts.resolveHost(b.host), b.container);
         started.push(b.container);
+        if (ctx.hostState) ctx.hostState.activateBot(b);
       } catch (e) {
         failed.push(b.container + ": " + e.message);
       }
@@ -1645,9 +1868,9 @@ async function processCampaign(c, ctx) {
 
   // 6) Capacity gate: free SEATS, not just container slots — running bots
   // with spare TwitchUsers slots can absorb accounts without new containers.
-  const activeBots = await activeAutoBotCount();
+  const activeBots = await activeAutoBotCount(ctx);
   const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
+  const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
   const seatCapacity = slotsFree * af.accountsPerBot + freeSeats;
   if (seatCapacity < 1) {
     await record({
@@ -1780,9 +2003,9 @@ async function executeTask(task, ctx, { append = false } = {}) {
   // approved by hand days later) can have consumed every slot. Without this
   // term nothing bounded the createBot loop below at all — which is how 31
   // containers came to exist on the Pi under a maxAutoBots of 6.
-  const activeBots = await activeAutoBotCount();
+  const activeBots = await activeAutoBotCount(ctx);
   const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
+  const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
   const capacity = slotsFree * af.accountsPerBot + freeSeats;
   if (capacity < 1) {
     throw new Error(
@@ -1863,7 +2086,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
     // Pack into free seats of running auto-bots first — one container can
     // farm many games via per-account FavouriteGames, and every container
     // we don't create is RAM the Pi keeps.
-    const packed = await fillExistingBots(host, claimed, game, af);
+    const packed = await fillExistingBots(host, claimed, game, af, ctx);
     for (const pl of packed.placed) {
       bots.push(pl.bot);
       for (const a of pl.accounts) deployed.push(a);
@@ -1879,6 +2102,16 @@ async function executeTask(task, ctx, { append = false } = {}) {
         startRunning: true,
       });
       created++;
+      if (ctx && ctx.hostState) {
+        ctx.hostState.activateBot(
+          {
+            host: bot.host,
+            file: bot.file,
+            container: bot.container,
+          },
+          bot.config,
+        );
+      }
       bots.push({
         host: bot.host,
         file: bot.file,
@@ -2692,6 +2925,22 @@ async function runOnce() {
       );
     }
 
+    // Read the auto-task registry once after wake/park has finished mutating
+    // containers. The same rows feed the manual-stash exclusion, reusable-task
+    // lookup and the batched host snapshot below.
+    const autoTasks = await AutoFarmTask.find(
+      { "bots.0": { $exists: true } },
+      {
+        status: 1,
+        game: 1,
+        campaignId: 1,
+        createdAt: 1,
+        assignedAccounts: 1,
+        bots: 1,
+      },
+    )
+      .sort({ createdAt: -1 })
+      .lean();
     // Candidates: live campaigns not yet decided, plus retryable skips.
     const now = new Date();
     const live = await TwitchCampaign.find({
@@ -2711,6 +2960,30 @@ async function runOnce() {
     // re-announce an unchanged verdict on every tick, forever. Passing the prior
     // task down lets processCampaign tell a NEW decision from a repeat of one.
     const priorTasks = new Map();
+    const existingKeys = live
+      .filter((c) => c.game && !settings.isNoClaimGame(c.game))
+      .map((c) => ({ game: c.game, campaignId: c.campaignId }));
+    const existingRows = existingKeys.length
+      ? await AutoFarmTask.find(
+          {
+            $or: existingKeys.map((x) => ({
+              game: x.game,
+              campaignId: x.campaignId,
+            })),
+          },
+          {
+            game: 1,
+            campaignId: 1,
+            status: 1,
+            decision: 1,
+            rescanRequested: 1,
+            bots: 1,
+          },
+        ).lean()
+      : [];
+    const existingByKey = new Map(
+      existingRows.map((row) => [row.game + "|" + row.campaignId, row]),
+    );
     let noClaimSkipped = 0;
     for (const c of live) {
       if (!c.game) continue;
@@ -2722,10 +2995,7 @@ async function runOnce() {
         noClaimSkipped++;
         continue;
       }
-      const existing = await AutoFarmTask.findOne({
-        game: c.game,
-        campaignId: c.campaignId,
-      }).lean();
+      const existing = existingByKey.get(c.game + "|" + c.campaignId);
       if (!existing) {
         candidates.push(c);
       } else if (
@@ -2754,37 +3024,98 @@ async function runOnce() {
       );
     progress(candidates.length + " campaign(s) to decide this tick.");
 
-    // Prefetch decision inputs once per candidate: live-refreshed market
-    // research (Gameflip/GGSel/Plati when stale) + our own sales history.
-    const infoMap = new Map();
-    for (const c of candidates) {
-      progress(
-        "Researching " + c.game + " (markets + own sales history)\u2026",
-      );
-      const research = await freshResearchForGame(c.game);
-      const sales = await internalSalesForGame(c.game);
-      infoMap.set(c.campaignId, { research, sales });
-      progress(
-        c.game +
-          ": " +
-          (research && research.scannedAt
-            ? "market demand " +
-              (research.demandScore != null ? research.demandScore : "?")
-            : "no market data") +
-          ", " +
-          sales.count +
-          " own sale(s) in 45d" +
-          (sales.revenue > 0 ? " worth $" + sales.revenue.toFixed(2) : "") +
-          ".",
-      );
+    const reusableMap = new Map();
+    const candidateGames = new Set(candidates.map((c) => c.game));
+    for (const task of autoTasks) {
+      if (
+        candidateGames.has(task.game) &&
+        ["active", "completed", "stopped"].includes(task.status) &&
+        !reusableMap.has(task.game)
+      ) {
+        reusableMap.set(task.game, task);
+      }
     }
+    const snapshotTasks = [];
+    const snapshotTaskIds = new Set();
+    const tasksToSnapshot =
+      candidates.length && hostOnline
+        ? [
+            ...autoTasks.filter((t) => t.status === "active"),
+            ...reusableMap.values(),
+          ]
+        : [];
+    for (const task of tasksToSnapshot) {
+      const key = String(task._id || task.game + "|" + task.campaignId);
+      if (snapshotTaskIds.has(key)) continue;
+      snapshotTaskIds.add(key);
+      snapshotTasks.push(task);
+    }
+    const skipSnapshotHosts = new Set();
+    if (host && !hostOnline) skipSnapshotHosts.add(host.id);
+    const hostState = await buildDecisionHostState(snapshotTasks, af, host, {
+      skipHosts: skipSnapshotHosts,
+    });
+    progress(
+      "Auto-host snapshot: " +
+        hostState.fileCount +
+        " config file(s), " +
+        hostState.hostCalls +
+        " host call(s) in " +
+        hostState.elapsedMs +
+        "ms.",
+      "info",
+    );
+
+    // Prefetch decision inputs once per game, with bounded parallel reads. Two
+    // campaigns for one game share the exact same market and sales snapshot.
+    const infoMap = new Map();
+    const researchGames = [...new Set(candidates.map((c) => c.game))];
+    let researched = 0;
+    const researchedRows = await mapWithConcurrency(
+      researchGames,
+      DECISION_READ_CONCURRENCY,
+      async (game) => {
+        const [research, sales] = await Promise.all([
+          freshResearchForGame(game),
+          internalSalesForGame(game),
+        ]);
+        researched++;
+        progress(
+          "Researched " +
+            game +
+            " (" +
+            researched +
+            "/" +
+            researchGames.length +
+            ").",
+        );
+        progress(
+          game +
+            ": " +
+            (research && research.scannedAt
+              ? "market demand " +
+                (research.demandScore != null ? research.demandScore : "?")
+              : "no market data") +
+            ", " +
+            sales.count +
+            " own sale(s) in 45d" +
+            (sales.revenue > 0 ? " worth $" + sales.revenue.toFixed(2) : "") +
+            ".",
+        );
+        return { game, research, sales };
+      },
+    );
+    const infoByGame = new Map(
+      researchedRows.map((row) => [
+        row.game,
+        { research: row.research, sales: row.sales },
+      ]),
+    );
+    for (const c of candidates)
+      infoMap.set(c.campaignId, infoByGame.get(c.game));
 
     // Snapshot which games manual bots are farming right now (one config
     // sweep across all hosts per tick; auto-bot files excluded via registry).
-    const autoTasks = await AutoFarmTask.find(
-      { "bots.0": { $exists: true } },
-      { bots: 1 },
-    ).lean();
     const autoKeys = new Set();
     for (const t of autoTasks) {
       for (const b of t.bots || []) autoKeys.add(b.host + "|" + b.file);
@@ -2857,10 +3188,19 @@ async function runOnce() {
     const budgetMap = fairShare(requests, spendable);
 
     const results = [];
-    for (const c of candidates) {
+    for (let index = 0; index < candidates.length; index++) {
+      const c = candidates[index];
       try {
         progress(
-          "Deciding " + c.game + " (" + (c.name || c.campaignId) + ")\u2026",
+          "Deciding " +
+            c.game +
+            " (" +
+            (index + 1) +
+            "/" +
+            candidates.length +
+            ", " +
+            (c.name || c.campaignId) +
+            ")\u2026",
         );
         const r = await processCampaign(c, {
           af,
@@ -2872,9 +3212,19 @@ async function runOnce() {
           archiveHolders,
           owned,
           priorTasks,
+          reusableMap,
+          hostState,
         });
         progress(
-          c.game + " \u2192 " + (r && r.decision ? r.decision : "done") + ".",
+          "Decided " +
+            (index + 1) +
+            "/" +
+            candidates.length +
+            ": " +
+            c.game +
+            " \u2192 " +
+            (r && r.decision ? r.decision : "done") +
+            ".",
         );
         results.push({ game: c.game, ...r });
       } catch (e) {
@@ -3659,4 +4009,7 @@ module.exports = {
   internalSalesForGame,
   resolveFarmHost,
   isStranded,
+  mapWithConcurrency,
+  createSeatCounter,
+  buildDecisionHostState,
 };
