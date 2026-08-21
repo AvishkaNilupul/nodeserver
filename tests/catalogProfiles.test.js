@@ -4,6 +4,8 @@ const assert = require("node:assert/strict");
 const {
   signatureForItems,
   sourceEventKeyFor,
+  profileTitle,
+  collapseSubsetProfiles,
 } = require("../utils/catalogProfiles");
 const { thumbnailUrl } = require("../utils/catalogImage");
 const { recommendedProfilePrice } = require("../routes/catalogRoutes");
@@ -44,6 +46,63 @@ test("catalog profile source keys are deterministic and game scoped", () => {
     sourceEventKeyFor("Rocket League", signature),
     sourceEventKeyFor("Warframe", signature),
   );
+});
+
+test("profile titles use campaigns or neutral tier names, never item names", () => {
+  assert.equal(
+    profileTitle(
+      "Rocket League",
+      [{ campaigns: ["Summer Event"], name: "Secret Drop" }],
+      "Starter",
+    ),
+    "Rocket League — Summer Event",
+  );
+  const title = profileTitle(
+    "Rocket League",
+    [{ name: "Secret Drop" }],
+    "Standard",
+  );
+  assert.equal(title, "Rocket League Drops — Standard Bundle");
+  assert.equal(title.includes("Secret Drop"), false);
+});
+
+test("strict subset profiles are removed when the larger profile has equal stock", () => {
+  const item = (itemKey) => ({ itemKey });
+  const profiles = [
+    {
+      signature: "a",
+      items: [item("a")],
+      accountIds: ["1", "2"],
+      totalRewards: 1,
+    },
+    {
+      signature: "a|b",
+      items: [item("a"), item("b")],
+      accountIds: ["1", "2"],
+      totalRewards: 2,
+    },
+    {
+      signature: "c",
+      items: [item("c")],
+      accountIds: ["3", "4"],
+      totalRewards: 1,
+    },
+  ];
+  const result = collapseSubsetProfiles(profiles, 6);
+  assert.deepEqual(result.map((profile) => profile.signature).sort(), [
+    "a|b",
+    "c",
+  ]);
+});
+
+test("subset collapse honors the per-game cap", () => {
+  const profiles = Array.from({ length: 8 }, (_, index) => ({
+    signature: String(index),
+    items: [{ itemKey: String(index) }],
+    accountIds: [String(index), `${index}-b`],
+    totalRewards: 1,
+  }));
+  assert.equal(collapseSubsetProfiles(profiles, 6).length, 6);
 });
 
 test("profile pricing scales observed account sales by reward volume", () => {
