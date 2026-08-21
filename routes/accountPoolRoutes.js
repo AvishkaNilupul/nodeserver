@@ -14,6 +14,7 @@ const mongoose = require("mongoose");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const AvailableAccount = require("../models/AvailableAccount");
+const PoolUsageEvent = require("../models/PoolUsageEvent");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const accountPoolChecker = require("../utils/accountPoolChecker");
@@ -22,6 +23,7 @@ const { parseAccountList } = require("../utils/parseAccountList");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const { fetchInventory, fetchDropCampaigns } = require("../utils/twitchInventory");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
+const { usageSince, summarizeUsageRows } = require("../utils/poolUsageWatcher");
 
 const router = express.Router();
 
@@ -126,6 +128,61 @@ router.get("/account-pool/:id/history", requireSuperadmin, async (req, res) => {
     res.json({ success: true, history });
   } catch (err) {
     console.error("account-pool history error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.get("/account-pool/usage-summary", requireSuperadmin, async (req, res) => {
+  try {
+    const { key: window, since } = usageSince(
+      String(req.query.window || "today"),
+      new Date(),
+      String(req.query.since || ""),
+    );
+    const rows = await PoolUsageEvent.aggregate([
+      { $match: since ? { at: { $gte: since } } : {} },
+      {
+        $group: {
+          _id: { game: "$game", event: "$event", actor: "$actor" },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    const summary = summarizeUsageRows(rows);
+    const readyPool = await AvailableAccount.countDocuments({
+      status: "available",
+      clientSecret: { $gt: "" },
+      lastCheckStatus: { $in: ["", "ok"] },
+    });
+    res.json({
+      success: true,
+      window,
+      totals: { consumed: summary.consumed, returned: summary.returned, net: summary.net, readyPool },
+      games: summary.games,
+    });
+  } catch (err) {
+    console.error("account-pool usage summary error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.get("/account-pool/usage-feed", requireSuperadmin, async (req, res) => {
+  try {
+    const { key: window, since } = usageSince(
+      String(req.query.window || "today"),
+      new Date(),
+      String(req.query.since || ""),
+    );
+    const requestedLimit = parseInt(req.query.limit, 10);
+    const limit = Math.max(1, Math.min(100, Number.isFinite(requestedLimit) ? requestedLimit : 100));
+    const filter = since ? { at: { $gte: since } } : {};
+    const feed = await PoolUsageEvent.find(filter, { _id: 0 })
+      .sort({ at: -1 })
+      .limit(limit)
+      .lean();
+    res.json({ success: true, window, feed });
+  } catch (err) {
+    console.error("account-pool usage feed error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
