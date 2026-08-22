@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   HOST_STALE_MS,
   WATCHER_FRESH_MS,
+  farmingRollup,
   deriveBotState,
   decisionSummary,
   buildPayload,
@@ -347,4 +348,59 @@ test("snapshot exposes the watcher header and per-game bot contract", () => {
     suspended: 0,
     scanError: 0,
   });
+});
+
+test("farmingRollup summarises live watch-minute progress across a bot's accounts", () => {
+  const mine = [
+    {
+      farmingSnapshotAt: new Date("2026-08-22T11:00:00.000Z"), // NOW - 1h (newest)
+      farmingProgress: [
+        { percent: 50, current: 50, required: 100 }, // remain 50
+        { percent: 90, current: 90, required: 100 }, // ready soon, remain 10 (soonest)
+      ],
+    },
+    {
+      farmingSnapshotAt: new Date("2026-08-22T09:00:00.000Z"), // NOW - 3h
+      farmingProgress: [
+        { percent: 100, current: 100, required: 100 }, // complete: ready soon, no eta
+        { percent: 0, current: 0, required: 60 }, // remain 60
+      ],
+    },
+  ];
+  const r = farmingRollup(mine, { now: NOW });
+  assert.equal(r.items, 4);
+  assert.equal(r.avgPercent, 60); // (50 + 90 + 100 + 0) / 4
+  assert.equal(r.readySoon, 2); // the 90% and 100% items clear the 75% bar
+  assert.equal(r.etaMinutes, 10); // soonest incomplete item: 100 - 90 watch-minutes
+  assert.equal(r.stale, false); // newest snapshot 1h old, inside the 30h window
+  assert.equal(r.snapshotAt, "2026-08-22T11:00:00.000Z"); // newest of the two
+});
+
+test("farmingRollup returns null when a bot has no in-progress items", () => {
+  assert.equal(farmingRollup([], { now: NOW }), null);
+  assert.equal(
+    farmingRollup([{ farmingSnapshotAt: NOW, farmingProgress: [] }], {
+      now: NOW,
+    }),
+    null,
+  );
+  assert.equal(farmingRollup(undefined, { now: NOW }), null);
+});
+
+test("farmingRollup flags stale snapshots and clamps out-of-range percents", () => {
+  const mine = [
+    {
+      farmingSnapshotAt: new Date("2026-08-21T05:00:00.000Z"), // NOW - 31h > 30h window
+      farmingProgress: [
+        { percent: 150, current: 100, required: 100 }, // clamps to 100, complete
+        { percent: -5, current: 0, required: 40 }, // clamps to 0, remain 40
+      ],
+    },
+  ];
+  const r = farmingRollup(mine, { now: NOW });
+  assert.equal(r.items, 2);
+  assert.equal(r.avgPercent, 50); // (100 + 0) / 2
+  assert.equal(r.readySoon, 1); // only the clamped-to-100 item
+  assert.equal(r.etaMinutes, 40); // the single incomplete item
+  assert.equal(r.stale, true); // newest snapshot 31h old
 });

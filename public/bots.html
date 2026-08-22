@@ -178,6 +178,14 @@
   .af-metric span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
   .af-bar { height:5px; border-radius:999px; background:var(--line); overflow:hidden; margin-top:7px; }
   .af-bar i { display:block; height:100%; background:linear-gradient(90deg,var(--accent2),var(--accent)); }
+  .af-farm-prog { margin-top:8px; max-width:420px; }
+  .af-farm-lbl { font-size:11.5px; margin-top:4px; }
+  .af-acct-prog { display:flex; flex-direction:column; gap:3px; min-width:210px; }
+  .af-acct-item { display:flex; align-items:center; gap:7px; }
+  .af-acct-nm { flex:0 0 118px; max-width:118px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:11.5px; }
+  .af-acct-bar { flex:1; min-width:44px; height:5px; border-radius:999px; background:var(--line); overflow:hidden; }
+  .af-acct-bar i { display:block; height:100%; background:linear-gradient(90deg,var(--accent2),var(--accent)); }
+  .af-acct-pct { flex:0 0 34px; text-align:right; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
   .af-section { margin-bottom:18px; }
   .af-section-h { display:flex; align-items:center; gap:9px; margin-bottom:9px; flex-wrap:wrap; }
   .af-section-h b { font-size:15px; }
@@ -1068,6 +1076,44 @@
     return controls.join("");
   }
 
+  function afFmtMins(min) {
+    min = Math.max(0, Math.round(Number(min) || 0));
+    if (!min) return "now";
+    if (min < 60) return "~" + min + "m";
+    const h = Math.floor(min / 60), m = min % 60;
+    if (h < 24) return "~" + h + "h" + (m ? " " + m + "m" : "");
+    const d = Math.floor(h / 24);
+    return "~" + d + "d" + (h % 24 ? " " + (h % 24) + "h" : "");
+  }
+  function afClampPct(v) { return Math.max(0, Math.min(100, Math.round(Number(v) || 0))); }
+  // Watch-minute progress bar for a bot card, built from the snapshot's
+  // per-bot `farming` rollup. Returns "" when absent/stale so afRenderBot's
+  // existing "N/M progressing" account line stays the fallback.
+  function afFarmBar(f) {
+    if (!f || f.stale || !f.items) return "";
+    const pct = afClampPct(f.avgPercent);
+    const bits = [pct + "% avg"];
+    if (f.readySoon) bits.push(f.readySoon + " ready soon");
+    bits.push(f.etaMinutes ? afFmtMins(f.etaMinutes) + " to first ready" : "first ready now");
+    bits.push(f.items + " item" + (f.items === 1 ? "" : "s") + " farming");
+    return '<div class="af-farm-prog"><div class="af-bar"><i style="width:' + pct + '%"></i></div>' +
+      '<div class="af-farm-lbl muted">' + esc(bits.join(" · ")) + "</div></div>";
+  }
+  // Per-item watch-minute progress for the Accounts drill-down. The accounts
+  // endpoint already returns the raw farmingProgress[]; falls back to the
+  // in-progress count when a row has none.
+  function afAcctProgress(a) {
+    const prog = Array.isArray(a.farmingProgress) ? a.farmingProgress : [];
+    if (!prog.length) return esc(a.inProgressCount == null ? "—" : String(a.inProgressCount));
+    const items = prog.slice().sort(function (x, y) { return (Number(y.percent) || 0) - (Number(x.percent) || 0); }).slice(0, 6);
+    const more = prog.length - items.length;
+    return '<div class="af-acct-prog">' + items.map(function (it) {
+      const pct = afClampPct(it.percent);
+      const nm = it.name || it.game || "item";
+      return '<div class="af-acct-item" title="' + esc(nm + " — " + (it.current == null ? "?" : it.current) + "/" + (it.required == null ? "?" : it.required)) + '"><span class="af-acct-nm">' + esc(nm) + '</span><span class="af-acct-bar"><i style="width:' + pct + '%"></i></span><span class="af-acct-pct">' + pct + '%</span></div>';
+    }).join("") + (more > 0 ? '<div class="muted" style="font-size:11px">+' + more + " more</div>" : "") + "</div>";
+  }
+
   function afRenderBot(task, bot) {
     const hostId = bot.hostId || bot.host || "";
     const hostLabel = bot.hostLabel || labelFor(hostId);
@@ -1085,6 +1131,7 @@
     return '<div class="af-bot"><div class="af-bot-top"><div class="af-bot-main">' +
       '<div class="ab-ttl">' + afStateChip(bot.state) + esc(bot.container || bot.file || "unknown bot") + ' <span class="ab-file">' + esc(hostLabel) + (bot.file ? " · " + esc(bot.file) : "") + "</span></div>" +
       '<div class="ab-sub">' + esc(sub) + (bot.uptimeMs != null ? " · up " + esc(fmtUptime(bot.uptimeMs / 1000)) : "") + "</div>" +
+      afFarmBar(bot.farming) +
       ((bot.stateReason || bot.reason || decay) ? '<div class="ab-farm muted">' + esc(bot.stateReason || bot.reason || decay) + "</div>" : "") +
       afListingHtml(Object.assign({}, task, bot)) + "</div>" +
       '<div class="af-bot-controls"><button class="btn-sm btn-ghost" onclick="afToggleBotDetail(\'' + encodeURIComponent(hostId) + '\',\'' + encodeURIComponent(bot.container || "") + '\',\'' + encodeURIComponent(bot.file || "") + '\',\'' + detailId + '\',this)">Accounts</button>' + afBotControls(task, bot) + "</div></div>" +
@@ -1207,7 +1254,7 @@
       const r = await api("/auto-farm/watcher/bots/" + encodeURIComponent(host) + "/" + encodeURIComponent(container) + "/accounts?file=" + encodeURIComponent(file));
       const rows = r.accounts || r.rows || [];
       el.innerHTML = rows.length ? '<table class="acctbl"><thead><tr><th>Login</th><th>State</th><th>Last scan</th><th>Progress</th><th>Games</th></tr></thead><tbody>' + rows.map(function (a) {
-        return "<tr><td>" + esc(a.login || "—") + "</td><td>" + esc(a.state || a.status || a.lastScanStatus || "—") + "</td><td>" + esc(a.lastScanAt ? timeAgoShort(a.lastScanAt) : "never") + "</td><td>" + esc(a.inProgressCount == null ? "—" : a.inProgressCount) + "</td><td>" + esc((a.inProgressGames || []).join(", ")) + "</td></tr>";
+        return "<tr><td>" + esc(a.login || "—") + "</td><td>" + esc(a.state || a.status || a.lastScanStatus || "—") + "</td><td>" + esc(a.lastScanAt ? timeAgoShort(a.lastScanAt) : "never") + "</td><td>" + afAcctProgress(a) + "</td><td>" + esc((a.inProgressGames || []).join(", ")) + "</td></tr>";
       }).join("") + "</tbody></table>" : '<div class="muted">No accounts found.</div>';
       el.dataset.loaded = "1";
     } catch (e) { el.innerHTML = '<div style="color:var(--red)">' + esc(e.message) + "</div>"; }

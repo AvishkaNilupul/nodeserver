@@ -22,6 +22,12 @@ const BOT_PROJECTION = {
   inProgressCount: 1,
   inProgressGames: 1,
   dropCount: 1,
+  // Real watch-minute progress toward each drop, written per inventory scan by
+  // utils/dropScanner.js. Rolled up per bot by farmingRollup() below so the
+  // watcher can show "% avg · ETA · N items" instead of only account counts.
+  farmingProgress: 1,
+  farmingSnapshotAt: 1,
+  farmingCompleteAt: 1,
 };
 
 const state = {
@@ -40,6 +46,48 @@ const state = {
 
 function iso(value) {
   return value ? new Date(value).toISOString() : null;
+}
+
+// Roll a container's per-account BotAccount.farmingProgress[] up into one
+// watcher-friendly summary. Returns null when no account has any in-progress
+// item (so the UI can fall back to the plain "N/M progressing" account count).
+// `percent`/`current`/`required` are watch-minute progress toward each drop;
+// watch-minutes accrue ~1/min, so (required - current) ≈ minutes remaining.
+function farmingRollup(mine, { now = new Date() } = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
+  let items = 0;
+  let percentSum = 0;
+  let readySoon = 0;
+  let eta = null;
+  let newestSnap = 0;
+  for (const acc of mine || []) {
+    if (acc && acc.farmingSnapshotAt) {
+      const t = new Date(acc.farmingSnapshotAt).getTime();
+      if (!Number.isNaN(t) && t > newestSnap) newestSnap = t;
+    }
+    const progress =
+      acc && Array.isArray(acc.farmingProgress) ? acc.farmingProgress : [];
+    for (const it of progress) {
+      if (!it) continue;
+      const pct = Math.max(0, Math.min(100, Number(it.percent) || 0));
+      items += 1;
+      percentSum += pct;
+      if (pct >= 75) readySoon += 1;
+      const remain =
+        Math.max(0, (Number(it.required) || 0) - (Number(it.current) || 0));
+      // Only items not yet complete contribute to "time to first ready".
+      if (pct < 100 && remain > 0 && (eta === null || remain < eta)) eta = remain;
+    }
+  }
+  if (!items) return null;
+  return {
+    items,
+    avgPercent: Math.round(percentSum / items),
+    readySoon,
+    etaMinutes: eta === null ? 0 : Math.round(eta),
+    snapshotAt: newestSnap ? new Date(newestSnap).toISOString() : null,
+    stale: !newestSnap || nowMs - newestSnap > WATCHER_FRESH_MS,
+  };
 }
 
 function botKey(hostId, container) {
@@ -386,6 +434,7 @@ function buildPayload({
           : null,
       completion,
       degraded: detail && detail.degraded ? detail.degraded : 0,
+      farming: detail && detail.farming ? detail.farming : null,
       health: healthRow,
       hostObservedAt: host && host.observedAt ? host.observedAt : null,
       actions: {
@@ -661,6 +710,7 @@ async function collectHost(hostId, taskMap, now, registry) {
       deadToken: mine.filter((r) => r.lastScanStatus === "token_invalid").length,
       suspended: mine.filter((r) => r.lastScanStatus === "suspended").length,
       scanError: mine.filter((r) => r.lastScanStatus === "error").length,
+      farming: farmingRollup(mine, { now }),
       state: stateRow.state,
       stateReason: stateRow.reason,
     };
@@ -707,6 +757,7 @@ function hydrateHostData(snapshot) {
         ? { state: bot.containerState, status: bot.status || "" }
         : null,
       completion: bot.completion || null,
+      farming: bot.farming || null,
       degraded: Number(bot.degraded) || 0,
       deadToken: Number(bot.accounts && bot.accounts.deadToken) || 0,
       suspended: Number(bot.accounts && bot.accounts.suspended) || 0,
@@ -784,6 +835,7 @@ async function refreshCompletionFromTopology(tasks, now) {
       hostRow.bots[row.container].scanError = mine.filter(
         (r) => r.lastScanStatus === "error",
       ).length;
+      hostRow.bots[row.container].farming = farmingRollup(mine, { now });
     }
   }
 }
@@ -963,6 +1015,7 @@ module.exports = {
   HOST_STALE_MS,
   WATCHER_FRESH_MS,
   botKey,
+  farmingRollup,
   deriveBotState,
   decisionSummary,
   buildPayload,

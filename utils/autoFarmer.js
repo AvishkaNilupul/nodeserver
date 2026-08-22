@@ -3187,6 +3187,9 @@ async function runOnce() {
     }
     const budgetMap = fairShare(requests, spendable);
 
+    // Phase timing (scan visibility): mark boundaries so "Scan complete" can
+    // report where the tick spent its wall-clock. Timestamps only, no logic change.
+    const decideStartMs = Date.now();
     const results = [];
     for (let index = 0; index < candidates.length; index++) {
       const c = candidates[index];
@@ -3242,6 +3245,12 @@ async function runOnce() {
         results.push({ game: c.game, error: e.message });
       }
     }
+    const sweepStartMs = Date.now();
+    progress(
+      "Decisions done (" +
+        results.length +
+        " campaign(s)); running maintenance sweeps…",
+    );
     // Suspension sweep runs before the dead-token reaper, because the reaper
     // cannot tell the two apart and its "keep it, the owner will re-auth" rule is
     // exactly wrong for an account Twitch has deleted: it holds its task slot and
@@ -3315,12 +3324,23 @@ async function runOnce() {
     // Refill sweep: every LISTED active task gets its markets topped up —
     // sold-out (or shorted) gameflip/plati/ggsel stock is refilled from
     // spare accounts, then the post-event holdback, no delist/relist.
+    const listStartMs = Date.now();
     if (!af.dryRun) {
       const autoListerR = require("./autoLister");
       const listed = await AutoFarmTask.find({
         status: "active",
         "listing.externalId": { $nin: ["", null] },
       });
+      // Visibility: this sweep makes serial marketplace API calls (Gameflip
+      // rate-limits hard, so it is deliberately NOT parallelized) and used to
+      // log only when it topped stock up — the long silent stretch that made a
+      // tick feel stalled. Announce the workload + heartbeat every few tasks.
+      if (listed.length) {
+        progress(
+          "Refilling markets on " + listed.length + " listed task(s)…",
+        );
+      }
+      let refillDone = 0;
       for (const t of listed) {
         try {
           const acts = await autoListerR.refillMarkets(t, {
@@ -3358,6 +3378,16 @@ async function runOnce() {
           }
         } catch (e) {
           progress("Re-list " + t.game + " failed: " + e.message, "warn");
+        }
+        refillDone += 1;
+        if (listed.length > 8 && refillDone % 10 === 0) {
+          progress(
+            "Refill progress: " +
+              refillDone +
+              "/" +
+              listed.length +
+              " task(s) checked…",
+          );
         }
       }
     }
@@ -3460,6 +3490,15 @@ async function runOnce() {
           { "stackListing.externalId": { $exists: false } },
         ],
       }).lean();
+      // Visibility: same serial, rate-limited API tail as the refill sweep.
+      if (stackable.length) {
+        progress(
+          "Checking " +
+            stackable.length +
+            " task(s) for stacked bundles…",
+        );
+      }
+      let stackDone = 0;
       for (const t of stackable) {
         try {
           const r = await autoLister.listStackedBundle(t._id, {});
@@ -3494,10 +3533,41 @@ async function runOnce() {
             "warn",
           );
         }
+        stackDone += 1;
+        if (stackable.length > 8 && stackDone % 10 === 0) {
+          progress(
+            "Stacked-bundle progress: " +
+              stackDone +
+              "/" +
+              stackable.length +
+              " task(s) checked…",
+          );
+        }
       }
     }
 
-    progress("Scan complete: " + results.length + " decision(s) this tick.");
+    // Per-phase wall-clock so "it takes forever" is attributable at a glance:
+    // decide = campaign decisions; sweeps = suspension/dead-token/backfill/
+    // reaper/recycle/repack; listing = serial marketplace refill + stacked
+    // bundle API calls (the unavoidably slow, rate-limited path).
+    const scanEndMs = Date.now();
+    const phaseSecs = (a, b) => Math.max(0, Math.round((a - b) / 1000));
+    progress(
+      "Scan complete: " +
+        results.length +
+        " decision(s) this tick. Timing — decide " +
+        phaseSecs(sweepStartMs, decideStartMs) +
+        "s · sweeps " +
+        phaseSecs(listStartMs, sweepStartMs) +
+        "s · listing " +
+        phaseSecs(scanEndMs, listStartMs) +
+        "s · total " +
+        phaseSecs(
+          scanEndMs,
+          progressLog.startedAt ? progressLog.startedAt.getTime() : scanEndMs,
+        ) +
+        "s.",
+    );
 
     // Pool starvation is the one condition that silently stops everything: with
     // spendable at 0 no campaign can be decided and no active task can be
