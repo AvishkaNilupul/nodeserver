@@ -580,6 +580,14 @@
         color: var(--muted);
         margin-left: auto;
       }
+      /* Divider between the status chips and the origin (Mine/Auto) chips. */
+      .list-toolbar .sep {
+        width: 1px;
+        align-self: stretch;
+        min-height: 18px;
+        background: var(--line);
+        margin: 0 2px;
+      }
       .listing .price {
         font-weight: 700;
         font-size: 15px;
@@ -987,6 +995,10 @@
             <button class="fchip on" data-lsf="all">All</button>
             <button class="fchip" data-lsf="listed">Listed</button>
             <button class="fchip" data-lsf="draft">Draft</button>
+            <span class="sep" aria-hidden="true"></span>
+            <button class="fchip on" data-lso="all">All sources</button>
+            <button class="fchip" data-lso="mine">Mine</button>
+            <button class="fchip" data-lso="auto">Auto</button>
             <span class="count" id="lsCount"></span>
           </div>
           <div id="listings">
@@ -2471,6 +2483,14 @@ Reliable Daily Rewards</textarea
           (set.note ? '<div class="d">' + esc(set.note) + "</div>" : "") +
           '<div class="meta">' +
           statusBadge +
+          (isAuto(set)
+            ? '<span class="badge auto" title="' +
+              attr(
+                "Auto-listed" +
+                  (set.sourceType ? " · " + set.sourceType : ""),
+              ) +
+              '">Auto</span>'
+            : "") +
           "<span>" +
           set.itemCount +
           " item" +
@@ -2502,38 +2522,106 @@ Reliable Daily Rewards</textarea
 
       var listingsCache = [];
       var lsFilter = "all";
+      var lsOrigin = "all";
       var requestedPublishSet =
         new window.URLSearchParams(window.location.search).get("publishSet") ||
         "";
       var requestedPublishOpened = false;
+
+      // A set is "auto" when the radar/auto-lister or catalog profiler created
+      // it (those stamp sourceType, e.g. "radar-event" / "catalog_profile"); an
+      // empty sourceType means the owner built it by hand from this page. This
+      // is the same signal the sets API already returns — no extra call needed.
+      function isAuto(set) {
+        return !!(set && set.sourceType && String(set.sourceType).trim());
+      }
+
+      function lsMatches(set) {
+        if (lsFilter === "listed" && !set.listed) return false;
+        if (lsFilter === "draft" && set.listed) return false;
+        if (lsOrigin === "mine" && isAuto(set)) return false;
+        if (lsOrigin === "auto" && !isAuto(set)) return false;
+        var q = ($("lsSearch").value || "").toLowerCase();
+        if (
+          q &&
+          (set.name + " " + (set.note || "")).toLowerCase().indexOf(q) < 0
+        )
+          return false;
+        return true;
+      }
+
+      function lsCountText() {
+        return lsRows.length === listingsCache.length
+          ? listingsCache.length +
+              " listing" +
+              (listingsCache.length === 1 ? "" : "s")
+          : lsRows.length + " of " + listingsCache.length;
+      }
+
+      // ---- paged rendering + lazy stock ----
+      // The list can hold 600+ sets and each row needs a heavy /fulfillment
+      // aggregation for its live stock. Rendering (and fetching stock for)
+      // every row up front was the slow part, so rows are appended a page at a
+      // time as a sentinel scrolls into view, and each row's stock is fetched
+      // only once it is actually rendered (then cached on the set object, so
+      // re-filtering or scrolling back never refetches).
+      var LS_PAGE = 40;
+      var lsRows = []; // current filtered set list
+      var lsShown = 0; // how many of lsRows are in the DOM
+      var lsObserver = null;
+
       function renderShopListings() {
         var box = $("listings");
+        if (lsObserver) {
+          lsObserver.disconnect();
+          lsObserver = null;
+        }
         if (!listingsCache.length) {
+          lsRows = [];
           $("lsCount").textContent = "";
           box.innerHTML =
             '<div class="empty">No listings yet. Create one above.</div>';
           return;
         }
-        var q = ($("lsSearch").value || "").toLowerCase();
-        var rows = listingsCache.filter(function (set) {
-          if (lsFilter === "listed" && !set.listed) return false;
-          if (lsFilter === "draft" && set.listed) return false;
-          if (
-            q &&
-            (set.name + " " + (set.note || "")).toLowerCase().indexOf(q) < 0
-          )
-            return false;
-          return true;
-        });
-        $("lsCount").textContent =
-          rows.length === listingsCache.length
-            ? listingsCache.length +
-              " listing" +
-              (listingsCache.length === 1 ? "" : "s")
-            : rows.length + " of " + listingsCache.length;
-        box.innerHTML = rows.length
-          ? rows.map(listingRow).join("")
+        lsRows = listingsCache.filter(lsMatches);
+        $("lsCount").textContent = lsCountText();
+        lsShown = 0;
+        box.innerHTML = lsRows.length
+          ? ""
           : '<div class="empty">No matches.</div>';
+        if (lsRows.length) appendNextListingPage();
+      }
+
+      // Append the next page of rows (before the sentinel) and load stock for
+      // just those rows. Re-arms the observer on the fresh sentinel while more
+      // rows remain.
+      function appendNextListingPage() {
+        var box = $("listings");
+        var slice = lsRows.slice(lsShown, lsShown + LS_PAGE);
+        if (!slice.length) return;
+        var old = document.getElementById("lsSentinel");
+        if (old) old.remove();
+        box.insertAdjacentHTML("beforeend", slice.map(listingRow).join(""));
+        lsShown += slice.length;
+        fanoutStock(slice);
+        if (lsShown < lsRows.length) {
+          box.insertAdjacentHTML(
+            "beforeend",
+            '<div id="lsSentinel" class="empty" style="padding:10px">Loading more…</div>',
+          );
+          if (!lsObserver) {
+            lsObserver = new IntersectionObserver(
+              function (entries) {
+                if (entries.some((en) => en.isIntersecting))
+                  appendNextListingPage();
+              },
+              { rootMargin: "400px 0px" },
+            );
+          } else {
+            lsObserver.disconnect();
+          }
+          lsObserver.observe(document.getElementById("lsSentinel"));
+        }
       }
       function loadListings() {
         return api("/drops-archive/sets")
@@ -2553,11 +2641,10 @@ Reliable Daily Rewards</textarea
               }
             }
             if (!sets.length) return;
-            // Fetch live stock per set and patch the badges/meta. Each
-            // fulfillment call runs heavy DB aggregations, so cap concurrency
-            // instead of firing all N at once (a burst that grew slower as
-            // both the listing count and the drops archive grew).
-            fanoutStock(sets);
+            // Stock is now fetched lazily per rendered page (see
+            // appendNextListingPage), so loading no longer fans a heavy
+            // /fulfillment aggregation out across every set at once — that
+            // startup burst was what made a big list slow to load.
           })
           .catch(function (e) {
             $("listings").innerHTML =
@@ -2574,32 +2661,51 @@ Reliable Daily Rewards</textarea
           renderShopListings();
         });
       });
+      document.querySelectorAll("[data-lso]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          lsOrigin = b.dataset.lso;
+          document.querySelectorAll("[data-lso]").forEach(function (x) {
+            x.classList.toggle("on", x === b);
+          });
+          renderShopListings();
+        });
+      });
       function patchRow(set) {
         var el = document.querySelector('.listing[data-id="' + set.id + '"]');
         if (!el) return;
         el.outerHTML = listingRow(set);
       }
-      // Load live stock for many sets with a small concurrency cap so a page
-      // with lots of listings doesn't fire a burst of heavy aggregations.
+      // Load live stock for the given sets with a small concurrency cap. Only
+      // sets whose stock we don't already have are fetched, and the result is
+      // cached on the set object — so a set rendered again (filter/search
+      // change, or scrolling back) is never re-aggregated.
       function fanoutStock(sets) {
+        var pending = (sets || []).filter(function (s) {
+          return s && !s._stockLoaded && !s._stockLoading;
+        });
         var i = 0;
         var MAX = 4;
         function next() {
-          if (i >= sets.length) return Promise.resolve();
-          var set = sets[i++];
+          if (i >= pending.length) return Promise.resolve();
+          var set = pending[i++];
+          set._stockLoading = true;
           return api("/drops-archive/sets/" + set.id + "/fulfillment")
             .then(function (f) {
               set.stock = f.bundlesAvailable != null ? f.bundlesAvailable : 0;
               set.stockHeld = f.bundlesHeld != null ? f.bundlesHeld : 0;
               set.stockNoPw =
                 f.bundlesMissingPassword != null ? f.bundlesMissingPassword : 0;
+              set._stockLoaded = true;
               patchRow(set);
             })
             .catch(function () {})
+            .then(function () {
+              set._stockLoading = false;
+            })
             .then(next);
         }
         var runners = [];
-        for (var k = 0; k < Math.min(MAX, sets.length); k++)
+        for (var k = 0; k < Math.min(MAX, pending.length); k++)
           runners.push(next());
         return Promise.all(runners);
       }
@@ -2656,14 +2762,26 @@ Reliable Daily Rewards</textarea
               toast("Listing deleted");
               if (editId === did) resetForm();
               // Removing one set doesn't affect the others' stock — drop it
-              // locally instead of re-fetching every remaining listing.
+              // locally instead of re-fetching every remaining listing. Keep
+              // the paged state in step: pull it from the filtered rows and,
+              // if it was one of the rendered rows, drop the shown counter so
+              // the next page still lines up.
               listingsCache = listingsCache.filter(function (x) {
+                return x.id !== did;
+              });
+              lsRows = lsRows.filter(function (x) {
                 return x.id !== did;
               });
               var node = document.querySelector(
                 '.listing[data-id="' + did + '"]',
               );
-              if (node) node.remove();
+              if (node) {
+                node.remove();
+                if (lsShown > 0) lsShown -= 1;
+              }
+              $("lsCount").textContent = listingsCache.length
+                ? lsCountText()
+                : "";
               if (!listingsCache.length) {
                 $("listings").innerHTML =
                   '<div class="empty">No listings yet. Create one above.</div>';
