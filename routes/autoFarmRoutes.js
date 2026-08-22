@@ -520,23 +520,46 @@ router.post(
       }
       const mp = require("../utils/marketplaces");
       const MarketplaceListing = require("../models/MarketplaceListing");
+      // The relist chain mints a new external id on every sale and the task's
+      // stored task.listing.externalId is never updated — so delisting that id
+      // would take down an already-sold row and leave the LIVE successor
+      // selling. Resolve every live gameflip row for this set (same set-based
+      // lookup the reprice uses) and delist each; fall back to the stored id if
+      // none is live.
+      const liveRows = task.listing.setId
+        ? await MarketplaceListing.find({
+            set: task.listing.setId,
+            marketplace: "gameflip",
+            status: "active",
+            origin: "auto",
+          })
+            .select("externalId")
+            .lean()
+        : [];
+      const gfIds = liveRows.map((r) => r.externalId).filter(Boolean);
+      if (!gfIds.length && task.listing.externalId) {
+        gfIds.push(task.listing.externalId);
+      }
       let remote = "removed";
-      try {
-        await mp.gameflipDelist(task.listing.externalId);
-      } catch (e) {
-        // Already deleted on Gameflip (or never existed) is fine — the goal
-        // is a clean local record either way.
-        if (/404|not.?found/i.test(String(e.message || ""))) {
-          remote = "was already gone";
-        } else {
-          throw e;
+      for (const id of gfIds) {
+        try {
+          await mp.gameflipDelist(id);
+        } catch (e) {
+          // Already deleted on Gameflip (or never existed) is fine — the goal
+          // is a clean local record either way.
+          if (/404|not.?found/i.test(String(e.message || ""))) {
+            remote = "was already gone";
+          } else {
+            throw e;
+          }
         }
       }
-      await MarketplaceListing.updateOne(
+      await MarketplaceListing.updateMany(
         {
           set: task.listing.setId,
           marketplace: "gameflip",
-          externalId: task.listing.externalId,
+          status: "active",
+          origin: "auto",
         },
         { $set: { status: "removed" } },
       );

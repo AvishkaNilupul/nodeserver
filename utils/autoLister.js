@@ -1042,10 +1042,16 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   // are reserved from the archive at delivery time, so a refill is just a
   // counter bump backed by real spare accounts.
   try {
+    // Look the live row up by SET, not by L.externalId: the relist chain mints
+    // a fresh external id on every sale and the task's stored id is never
+    // updated, so an externalId match silently misses the live successor and
+    // the refill never fires. (Same set-based lookup the post-event reprice
+    // uses.)
     const row = await MarketplaceListing.findOne({
+      set: set._id,
       marketplace: "gameflip",
-      externalId: L.externalId,
       status: "active",
+      origin: "auto",
     });
     if (row) {
       const stock = Math.max(0, Number(row.qtyRemaining) || 0);
