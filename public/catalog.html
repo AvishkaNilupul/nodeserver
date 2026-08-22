@@ -273,9 +273,27 @@
         border: 1px solid var(--preorder-line);
         border-radius: 7px;
         background: var(--preorder-soft);
+        cursor: pointer;
+        transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+      }
+      .preorder-card:hover,
+      .preorder-card:focus-visible {
+        border-color: var(--preorder);
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
+        outline: none;
+        transform: translateY(-1px);
+      }
+      .preorder-game {
+        display: block;
+        margin-top: 10px;
+        color: var(--preorder);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
       }
       .preorder-card h3 {
-        margin: 8px 0 6px;
+        margin: 5px 0 6px;
         font-size: 17px;
       }
       .preorder-badge {
@@ -1412,10 +1430,17 @@
               Math.min(100, Number(preorder.progressPercent) || 0),
             );
             return (
-              '<article class="preorder-card"><span class="preorder-badge">Pre-order</span>' +
+              '<article class="preorder-card" role="button" tabindex="0" data-preorder-details="' +
+              attr(listing.id) +
+              '" aria-label="View ' +
+              attr((listing.category || "") + " — " + (listing.eventName || listing.title)) +
+              ' pre-order details"><span class="preorder-badge">Pre-order</span>' +
               (endingSoon(listing)
                 ? '<span class="ending-badge">Ending soon</span>'
                 : "") +
+              '<span class="preorder-game">' +
+              esc(listing.category || "Game") +
+              "</span>" +
               "<h3>" +
               esc(listing.eventName || listing.title) +
               "</h3>" +
@@ -1799,11 +1824,21 @@
       });
       $("preorderRail").addEventListener("click", (event) => {
         const button = event.target.closest("[data-preorder-quote]");
-        if (!button) return;
-        const listing = state.listings.find(
-          (row) => row.id === button.dataset.preorderQuote,
-        );
-        if (listing) openQuote(listing);
+        const card = event.target.closest("[data-preorder-details]");
+        const id = button?.dataset.preorderQuote || card?.dataset.preorderDetails;
+        if (!id) return;
+        const listing = state.listings.find((row) => row.id === id);
+        if (!listing) return;
+        if (button) openQuote(listing);
+        else openDetails(listing);
+      });
+      $("preorderRail").addEventListener("keydown", (event) => {
+        if (!['Enter', ' '].includes(event.key) || event.target.closest("[data-preorder-quote]")) return;
+        const card = event.target.closest("[data-preorder-details]");
+        if (!card) return;
+        event.preventDefault();
+        const listing = state.listings.find((row) => row.id === card.dataset.preorderDetails);
+        if (listing) openDetails(listing);
       });
       $("sortSelect").addEventListener("change", (event) => {
         state.sort = event.target.value;
