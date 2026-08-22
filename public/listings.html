@@ -2425,11 +2425,10 @@ Reliable Daily Rewards</textarea
             }
             toast(msg);
             // Re-open the set so the editor shows the newly-filled images.
-            return api("/drops-archive/sets").then(function (d) {
-              var s = (d.sets || []).find(function (x) {
-                return x.id === editId;
-              });
-              if (s) startEdit(s);
+            // Fetch just this set's detail (the list is loaded light, without
+            // item arrays) instead of pulling every set to find one.
+            return api("/drops-archive/sets/" + editId).then(function (d) {
+              if (d && d.set) startEdit(d.set);
             });
           })
           .catch(function (e) {
@@ -2443,9 +2442,20 @@ Reliable Daily Rewards</textarea
 
       // ---- existing listings ----
       function listingRow(set) {
-        var imgs = (set.items || [])
+        // The list loads in light mode, where each set carries only `thumbs`
+        // (the first four image URLs) instead of its full item array. Fall back
+        // to items so a fully-loaded set (e.g. after Edit fetches it) still
+        // renders identically.
+        var thumbSrcs = set.thumbs
+          ? set.thumbs
+          : (set.items || []).slice(0, 4).map(function (i) {
+              return i.image;
+            });
+        var imgs = thumbSrcs
           .slice(0, 4)
-          .map((i) => imgTag(i.image))
+          .map(function (src) {
+            return imgTag(src);
+          })
           .join("");
         var statusBadge;
         if (!set.listed) statusBadge = '<span class="badge draft">Draft</span>';
@@ -2623,8 +2633,33 @@ Reliable Daily Rewards</textarea
           lsObserver.observe(document.getElementById("lsSentinel"));
         }
       }
+      // Fetch a set's full item array on demand. The list loads in light mode
+      // (no per-item data), so editing or publishing a row first pulls that one
+      // set's detail and caches it back onto the row object — a second open of
+      // the same row is then instant and needs no refetch.
+      function ensureSetItems(set) {
+        if (!set) return Promise.resolve(set);
+        if (Array.isArray(set.items)) return Promise.resolve(set);
+        return api("/drops-archive/sets/" + set.id)
+          .then(function (j) {
+            // Merge the full detail (items + any cover/source fields the light
+            // list omits) onto the cached row in place, so the editor and
+            // publish modal see every field. Stock (loaded lazily and not part
+            // of the detail payload) is preserved.
+            if (j && j.set) Object.assign(set, j.set);
+            else set.items = [];
+            return set;
+          })
+          .catch(function () {
+            // Fall back to an empty item list rather than blocking the action;
+            // the editor/publish modal still opens (just without prefilled
+            // items) instead of silently doing nothing.
+            set.items = set.items || [];
+            return set;
+          });
+      }
       function loadListings() {
-        return api("/drops-archive/sets")
+        return api("/drops-archive/sets?light=1")
           .then(function (j) {
             var sets = j.sets || [];
             listingsCache = sets;
@@ -2636,7 +2671,7 @@ Reliable Daily Rewards</textarea
               if (requested) {
                 requestedPublishOpened = true;
                 setTimeout(function () {
-                  openPublishModal(requested);
+                  ensureSetItems(requested).then(openPublishModal);
                 }, 0);
               }
             }
@@ -2717,12 +2752,12 @@ Reliable Daily Rewards</textarea
         var mpb = e.target.closest("[data-mp]");
         if (mpb) {
           var mset = listingsCache.find((x) => x.id === mpb.dataset.mp);
-          if (mset) openPublishModal(mset);
+          if (mset) ensureSetItems(mset).then(openPublishModal);
           return;
         }
         if (ed) {
           var s = listingsCache.find((x) => x.id === ed.dataset.edit);
-          if (s) startEdit(s);
+          if (s) ensureSetItems(s).then(startEdit);
         } else if (tg) {
           var id = tg.dataset.toggle;
           var set = listingsCache.find((x) => x.id === id);

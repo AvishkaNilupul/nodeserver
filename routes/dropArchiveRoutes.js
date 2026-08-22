@@ -2070,40 +2070,97 @@ function publicSet(s) {
 router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
   try {
     const wantCustom = req.query.custom === "1" || req.query.custom === "true";
-    // Sets carry their full item arrays, so this is a fat response for a list
-    // that only changes when an operator edits a bundle — and any such edit is
-    // a write to /drops-archive/*, which clears the cache immediately.
-    const payload = await cachedView("sets:" + wantCustom, async () => {
-      const sets = await DropSet.find({
-        custom: wantCustom ? true : { $ne: true },
-      })
+    // A set carries its full item snapshots, so the full response is fat for a
+    // list whose rows only ever show 4 thumbnails and a count. `light=1` drops
+    // the per-item arrays and returns just the first four thumbnail URLs — the
+    // Listings page loads with this so the initial render never has to ship (or
+    // parse) every item of every bundle. The full items are then fetched one
+    // set at a time from GET /drops-archive/sets/:id when a row is edited or
+    // published. Any edit is a write to /drops-archive/*, which clears the
+    // cache immediately, so both variants stay fresh.
+    const light = req.query.light === "1" || req.query.light === "true";
+    const key = "sets:" + wantCustom + (light ? ":light" : "");
+    const payload = await cachedView(key, async () => {
+      // In light mode only the fields the list rows read are pulled from Mongo,
+      // so the query returns a fraction of the bytes (this archive is bound by
+      // bytes returned, not query time). `items.image` alone still lets us build
+      // the row thumbnails without the rest of each item snapshot.
+      const projection = light
+        ? {
+            name: 1,
+            note: 1,
+            price: 1,
+            listed: 1,
+            custom: 1,
+            coverStyle: 1,
+            coverGame: 1,
+            sourceType: 1,
+            sourceEventName: 1,
+            sourceCampaignIds: 1,
+            updatedAt: 1,
+            "items.image": 1,
+          }
+        : {};
+      const sets = await DropSet.find(
+        { custom: wantCustom ? true : { $ne: true } },
+        projection,
+      )
         .sort({ updatedAt: -1 })
         .lean();
       return {
         success: true,
-        sets: sets.map((s) => ({
-          id: String(s._id),
-          name: s.name,
-          note: s.note || "",
-          items: s.items || [],
-          itemCount: (s.items || []).length,
-          price: Number(s.price) || 0,
-          listed: !!s.listed,
-          custom: !!s.custom,
-          coverStyle: s.coverStyle || "grid",
-          coverGame: s.coverGame || "",
-          sourceType: s.sourceType || "",
-          sourceEventName: s.sourceEventName || "",
-          sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
-            ? s.sourceCampaignIds
-            : [],
-          updatedAt: s.updatedAt,
-        })),
+        sets: sets.map((s) => {
+          const base = {
+            id: String(s._id),
+            name: s.name,
+            note: s.note || "",
+            itemCount: (s.items || []).length,
+            price: Number(s.price) || 0,
+            listed: !!s.listed,
+            custom: !!s.custom,
+            coverStyle: s.coverStyle || "grid",
+            coverGame: s.coverGame || "",
+            sourceType: s.sourceType || "",
+            sourceEventName: s.sourceEventName || "",
+            sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
+              ? s.sourceCampaignIds
+              : [],
+            updatedAt: s.updatedAt,
+          };
+          if (light) {
+            // Just what a row's thumbnail strip renders — the first four images.
+            base.thumbs = (s.items || [])
+              .slice(0, 4)
+              .map((i) => i.image || "");
+          } else {
+            base.items = s.items || [];
+          }
+          return base;
+        }),
       };
     });
     res.json(payload);
   } catch (err) {
     console.error("drops-archive sets list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Full detail (including every item) for one set. The Listings page loads its
+// list in `light=1` mode without item arrays, then fetches this for the single
+// set an operator opens to edit or publish.
+router.get("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ success: false, message: "Not found" });
+    }
+    const set = await DropSet.findById(req.params.id).lean();
+    if (!set) {
+      return res.status(404).json({ success: false, message: "Not found" });
+    }
+    res.json({ success: true, set: publicSet(set) });
+  } catch (err) {
+    console.error("drops-archive set detail error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
