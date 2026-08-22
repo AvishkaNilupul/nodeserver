@@ -114,6 +114,43 @@ function orphanMirrorKey(set) {
   return `autofarm:set:${set._id}`;
 }
 
+async function syncActivePreorders({
+  AutoFarmTask,
+  DropSet,
+  campaignItems,
+  derivePrice,
+  researchForGame,
+  apply = true,
+  now = new Date(),
+}) {
+  const tasks = await AutoFarmTask.find(
+    { status: "active", campaignId: { $exists: true, $nin: ["", null] } },
+    { game: 1, campaignId: 1, campaignName: 1, campaignEndAt: 1, assignedAccounts: 1 },
+  ).lean();
+  if (!tasks.length) return { candidates: 0, stamped: 0 };
+  const keys = tasks.map((task) => `autofarm:${task.campaignId}`);
+  const existing = await DropSet.find(
+    { sourceType: "autofarm_event", sourceEventKey: { $in: keys } },
+    { sourceEventKey: 1 },
+  ).lean();
+  const existingKeys = new Set(existing.map((set) => String(set.sourceEventKey)));
+  let stamped = 0;
+  for (const task of tasks) {
+    if (existingKeys.has(`autofarm:${task.campaignId}`)) continue;
+    stamped++;
+    if (!apply) continue;
+    const research = researchForGame ? await researchForGame(task.game) : null;
+    await stampPreorderSet(task, {
+      DropSet,
+      campaignItems,
+      derivePrice,
+      research,
+      now,
+    });
+  }
+  return { candidates: tasks.length, stamped };
+}
+
 function sourceSetId(task, kind) {
   return kind === "stack" ? task.stackListing?.setId : task.listing?.setId;
 }
@@ -212,6 +249,7 @@ async function syncHistoricalEventSets({
   );
   let stocked = 0;
   let published = 0;
+  let preordered = 0;
   let retired = 0;
   for (const row of usable) {
     const source = sourceById.get(row.setId);
@@ -264,6 +302,55 @@ async function syncHistoricalEventSets({
       published++;
       continue;
     }
+    // Tasks that were already active before the preorder feature was deployed
+    // have no mirror yet. Seed those mirrors from the existing event DropSet
+    // so the first scheduled sync does not leave current farming invisible.
+    if (
+      !current &&
+      row.kind !== "orphan" &&
+      ["active", "planned"].includes(row.task.status)
+    ) {
+      preordered++;
+      if (!apply) continue;
+      const eventName = row.task.campaignName || source.name;
+      await DropSet.updateOne(
+        { sourceType: "autofarm_event", sourceEventKey: row.key },
+        {
+          $set: {
+            name: source.name,
+            note: `Pre-order for ${eventName}. Delivery begins when a farmed account completes the bundle.`,
+            items: (source.items || []).map((item) => ({
+              itemKey: item.itemKey,
+              name: item.name,
+              game: item.game,
+              image: item.image,
+              qty: Math.max(1, Number(item.qty) || 1),
+            })),
+            price: Number(source.price) || 0,
+            listed: true,
+            publicCatalog: true,
+            custom: false,
+            sourceType: "autofarm_event",
+            sourceEventKey: row.key,
+            sourceEventName: eventName,
+            sourceCampaignIds: [String(row.task.campaignId)],
+            catalogState: "preorder",
+            farmStartedAt: now,
+            campaignEndAt: row.task.campaignEndAt || null,
+            expectedUnits: (row.task.assignedAccounts || []).length,
+            autoFarmTaskId: String(row.task._id),
+          },
+          $setOnInsert: {
+            bulkMinQty: 5,
+            bulkDiscountPct: 8,
+            publicFeatured: false,
+            publicSort: 0,
+          },
+        },
+        { upsert: true },
+      );
+      continue;
+    }
     if (!current || current.catalogState === "preorder" || !apply) continue;
     const campaignExpired =
       current.campaignEndAt && new Date(current.campaignEndAt) < now;
@@ -280,12 +367,13 @@ async function syncHistoricalEventSets({
     }
     retired++;
   }
-  return { candidates: usable.length, stocked, published, retired };
+  return { candidates: usable.length, stocked, published, preordered, retired };
 }
 
 module.exports = {
   STALE_PROGRESS_MS,
   computePreorderEta,
   stampPreorderSet,
+  syncActivePreorders,
   syncHistoricalEventSets,
 };

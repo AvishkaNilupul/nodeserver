@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   stampPreorderSet,
+  syncActivePreorders,
   syncHistoricalEventSets,
 } = require("../utils/catalogPreorder");
 
@@ -84,6 +85,37 @@ test("campaign item lookup errors are swallowed", async () => {
 function query(rows) {
   return { lean: async () => rows };
 }
+
+test("active tasks missing a mirror are backfilled as preorders", async () => {
+  const writes = [];
+  const task = {
+    _id: "task-1",
+    game: "Sea of Thieves",
+    campaignId: "campaign-1",
+    campaignName: "Season 20 Drops 3",
+    assignedAccounts: ["one", "two"],
+  };
+  const result = await syncActivePreorders({
+    AutoFarmTask: { find: () => query([task]) },
+    DropSet: {
+      find: () => query([]),
+      updateOne(filter, update, options) {
+        writes.push({ filter, update, options });
+      },
+    },
+    campaignItems: async () => [
+      { itemKey: "reward-1", name: "Reward", game: "Sea of Thieves", qty: 1 },
+    ],
+    derivePrice: () => 2.5,
+    researchForGame: async () => ({}),
+  });
+  assert.equal(result.stamped, 1);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].filter.sourceEventKey, "autofarm:campaign-1");
+  assert.equal(writes[0].update.$set.catalogState, "preorder");
+  assert.equal(writes[0].update.$set.expectedUnits, 2);
+  assert.equal(writes[0].options.upsert, true);
+});
 
 test("historical marketplace event sets are mirrored without touching source rows", async () => {
   const writes = [];

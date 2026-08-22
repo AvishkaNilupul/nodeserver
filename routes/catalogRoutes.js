@@ -32,6 +32,7 @@ const {
 } = require("../utils/rateLimit");
 const {
   computePreorderEta,
+  syncActivePreorders,
   syncHistoricalEventSets,
 } = require("../utils/catalogPreorder");
 
@@ -1100,6 +1101,18 @@ function startVariantSync({
   };
   (async () => {
     try {
+      const autoLister = require("../utils/autoLister");
+      const MarketResearch = require("../models/MarketResearch");
+      const activePreorders = syncEventSets
+        ? await syncActivePreorders({
+            AutoFarmTask,
+            DropSet,
+            campaignItems: autoLister.campaignItems,
+            derivePrice: autoLister.derivePrice,
+            researchForGame: (game) => MarketResearch.findOne({ game }).lean(),
+            apply,
+          })
+        : null;
       const eventSets = syncEventSets
         ? await syncHistoricalEventSets({
             AutoFarmTask,
@@ -1114,7 +1127,7 @@ function startVariantSync({
         minStock,
         maxProfilesPerGame,
       });
-      variantSyncJob.result = { ...variants, eventSets };
+      variantSyncJob.result = { ...variants, eventSets, activePreorders };
       if (eventSets && (eventSets.published || eventSets.retired)) {
         invalidateCatalogCache();
       }
