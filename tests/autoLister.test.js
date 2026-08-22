@@ -7,6 +7,7 @@ const {
   buildDescription,
   derivePrice,
   stackItems,
+  chooseStackItems,
   postEventPrice,
   computeSplit,
   isAutoOwned,
@@ -16,6 +17,8 @@ const {
   filterVerifiedHolders,
   withReservationRollback,
 } = require("../utils/autoLister");
+// The stock side's key builder — the campaign side must produce identical keys.
+const { itemKeyFor } = require("../utils/twitchInventory");
 
 const items = [
   { itemKey: "a|g", name: "Heidel Chest", game: "Black Desert", qty: 1 },
@@ -215,6 +218,53 @@ test("stacking unions items across sets without duplicates", () => {
   ]);
 });
 
+// onCampaignEnded's stacking gate (the re-verify fix). The old code grew the
+// advertised bundle to the sibling union UNCONDITIONALLY. Delivery — for the
+// live row AND every backlog relist (claimAccountForSet -> availableAccountsForSet)
+// — only ever resolves accounts holding EVERY item in the set, so growing past
+// what any account holds makes the live row over-promise and every relist find
+// no holder and stall. chooseStackItems is that decision, isolated and pure.
+const backed = [items[0]]; // what the live row is already verified/reserved for
+const union = [items[0], items[1], items[2]]; // the bigger sibling union
+
+test("stacking gate GROWS to the union when a verified holder exists", () => {
+  const { items: chosen, stackSkipped } = chooseStackItems(backed, union, 1);
+  assert.strictEqual(chosen, union);
+  assert.strictEqual(stackSkipped, "");
+});
+
+test("stacking gate does NOT grow when no account holds the full union", () => {
+  // The bug's core: 0 holders must keep the already-backed items, never
+  // advertise contents nothing backs.
+  const { items: chosen, stackSkipped } = chooseStackItems(backed, union, 0);
+  assert.strictEqual(chosen, backed);
+  assert.match(stackSkipped, /kept 1 backed item\(s\) instead of advertising 3/);
+});
+
+test("stacking gate is a no-op when there's nothing extra to stack", () => {
+  // No siblings (stacked == current) — never re-lists the same bundle, and
+  // never flags a skip because nothing was withheld.
+  const { items: chosen, stackSkipped } = chooseStackItems(union, union, 0);
+  assert.strictEqual(chosen, union);
+  assert.strictEqual(stackSkipped, "");
+});
+
+test("stacking gate keeps current when the union is somehow smaller", () => {
+  // Defensive: a shrunk union is never grown into, holders or not.
+  const { items: chosen, stackSkipped } = chooseStackItems(union, backed, 5);
+  assert.strictEqual(chosen, union);
+  assert.strictEqual(stackSkipped, "");
+});
+
+test("stacking gate tolerates null/empty inputs without throwing", () => {
+  assert.deepStrictEqual(chooseStackItems(null, null, 0), {
+    items: [],
+    stackSkipped: "",
+  });
+  const grown = chooseStackItems(null, union, 2);
+  assert.strictEqual(grown.items, union);
+});
+
 test("post-event price is +50% on the listing's own price", () => {
   assert.strictEqual(postEventPrice(1.75), 2.75); // 2.625 -> nearest 0.25
   assert.strictEqual(postEventPrice(1.5), 2.25);
@@ -304,6 +354,69 @@ test("resolveCampaignItems drops the AC placeholder and keeps real drops", () =>
     "Cheetah Claw Cat",
     "Rustborne Swords",
   ]);
+});
+
+// Latent-asymmetry fix: the stock side (twitchInventory.buildDrops) keys drops
+// on game.displayName||name; the campaign side used to fetch only game.name and
+// key on that. A game whose displayName differs from its name beyond case then
+// produced two itemKeys that never matched, so the holdings gate found 0 holders
+// and the bundle never listed. Both sides must now yield the SAME key.
+test("resolveCampaignItems keys on the game's displayName, matching the stock side", () => {
+  const camp = {
+    game: { displayName: "PUBG: BATTLEGROUNDS" },
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [
+          {
+            benefit: {
+              name: "Golden Kappa",
+              game: { name: "pubg", displayName: "PUBG: BATTLEGROUNDS" },
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const { items } = resolveCampaignItems(camp, {
+    game: "PUBG: BATTLEGROUNDS",
+    campaignName: "Season 30",
+  });
+  assert.strictEqual(items.length, 1);
+  // Identical to what twitchInventory would store for the same reward, so the
+  // holdings gate matches. Keying on name ("pubg") would NOT equal this.
+  assert.strictEqual(
+    items[0].itemKey,
+    itemKeyFor("Golden Kappa", "PUBG: BATTLEGROUNDS"),
+  );
+  assert.notStrictEqual(items[0].itemKey, itemKeyFor("Golden Kappa", "pubg"));
+  assert.strictEqual(items[0].game, "PUBG: BATTLEGROUNDS");
+});
+
+// Fallback chain unchanged when there's no displayName: the benefit game's name
+// still keys it, and an absent benefit game falls back to the campaign's game
+// then the task game — so nothing that worked before regresses.
+test("resolveCampaignItems falls back to name, then campaign game, then task game", () => {
+  const camp = {
+    game: { displayName: "Campaign Game" },
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [
+          { benefit: { name: "Has Name", game: { name: "Benefit Game" } } },
+          { benefit: { name: "No Game" } },
+        ],
+      },
+    ],
+  };
+  const { items } = resolveCampaignItems(camp, {
+    game: "Task Game",
+    campaignName: "C",
+  });
+  const byName = Object.fromEntries(items.map((i) => [i.name, i]));
+  assert.strictEqual(byName["Has Name"].itemKey, itemKeyFor("Has Name", "Benefit Game"));
+  // No benefit game -> the campaign's own game (mirrors stock's c.game fallback).
+  assert.strictEqual(byName["No Game"].itemKey, itemKeyFor("No Game", "Campaign Game"));
 });
 
 /* --------------- holdings gate: only fully-holding accounts -------------- */

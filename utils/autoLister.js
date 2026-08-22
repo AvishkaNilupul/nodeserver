@@ -31,6 +31,11 @@ const settings = require("./settings");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
+// The stock side (twitchInventory.buildDrops) keys every earned drop through
+// itemKeyFor. Reuse the SAME function here so the campaign side's itemKeys are
+// normalised identically and the holdings gate can match them (no circular
+// require — twitchInventory does not require autoLister).
+const { itemKeyFor } = require("./twitchInventory");
 const accountState = require("./twitchAccountState");
 
 const fsp = require("fs/promises");
@@ -75,11 +80,20 @@ function resolveCampaignItems(camp, { game, campaignName }) {
       if (!b || !b.name) continue;
       rawBenefits++;
       if (looksLikeTitlePlaceholder(b.name, { game, campaignName })) continue;
-      const g = (b.game && b.game.name) || game || "";
-      const key =
-        String(b.name).trim().toLowerCase() +
-        "|" +
-        String(g).trim().toLowerCase();
+      // Build the itemKey game-token EXACTLY as the stock side does
+      // (twitchInventory.buildDrops): prefer the game's displayName, then its
+      // name, then the campaign's own game, then the task game — and normalise
+      // through the shared itemKeyFor so the two sides can never drift. Before
+      // this the campaign query fetched only `game { name }` and keyed on it,
+      // while stock keyed on `displayName || name`; any game whose displayName
+      // differed from its name beyond case produced two itemKeys that never
+      // matched, so the holdings gate found 0 holders and the set never listed.
+      const g =
+        (b.game && (b.game.displayName || b.game.name)) ||
+        (camp && camp.game && camp.game.displayName) ||
+        game ||
+        "";
+      const key = itemKeyFor(b.name, g);
       if (seen.has(key)) continue;
       seen.add(key);
       items.push({
@@ -1828,6 +1842,34 @@ function stackItems(sets) {
   return out;
 }
 
+// The load-bearing decision for onCampaignEnded's stacking gate (pure, exported
+// for tests). Grow the advertised bundle from `current` to the sibling union
+// `stacked` ONLY when the union is strictly bigger AND at least one account
+// provably holds the WHOLE union (holderCount, from verifiedHoldersForItems).
+//
+// Growing past what any account holds is the bug this guards: delivery for the
+// live row and every backlog relist resolves through availableAccountsForSet,
+// which returns only accounts holding EVERY item — so an over-grown set makes
+// the live row over-promise and every relist find no holder and stall. When no
+// holder is there yet we keep `current`: the markup still applies to it, we just
+// under-advertise honestly instead of advertising contents no account backs.
+// Total function: `stacked` not bigger than `current` (fewer/equal, e.g. no
+// siblings) also keeps `current` with no skip note.
+function chooseStackItems(current, stacked, holderCount) {
+  const cur = current || [];
+  const stk = stacked || [];
+  if (stk.length <= cur.length) return { items: cur, stackSkipped: "" };
+  if (holderCount > 0) return { items: stk, stackSkipped: "" };
+  return {
+    items: cur,
+    stackSkipped:
+      "no assigned account holds the full stacked bundle yet — kept " +
+      cur.length +
+      " backed item(s) instead of advertising " +
+      stk.length,
+  };
+}
+
 // The scarcity markup: +50% on what this listing already charges.
 //
 // It used to sum EVERY past campaign price for the game and mark that up, on
@@ -1868,7 +1910,47 @@ async function onCampaignEnded(taskId) {
   const mySet = sets.find((x) => String(x._id) === task.listing.setId);
   if (!mySet) return { skipped: "set gone" };
 
-  const items = stackItems(sets);
+  // What we'd grow the advertised bundle to: the de-duplicated union of every
+  // completed sibling set for this game (incl. this one). But growing is only
+  // safe when an account actually HOLDS that union — see the gate below.
+  const stacked = stackItems(sets);
+  const current = (mySet.items || []).map((i) => ({
+    itemKey: i.itemKey,
+    name: i.name,
+    game: i.game,
+    image: i.image || "",
+    qty: i.qty || 1,
+  }));
+
+  // Re-verify holdings before stacking (bug fix). See chooseStackItems for the
+  // full rationale: grow the advertised bundle to the sibling union ONLY when a
+  // verified account holds the whole union, else keep the already-backed items.
+  // The `if` is just a fetch guard — skip the aggregate when there's nothing to
+  // grow. No pre-reservation here on purpose: the Gameflip relist chain reserves
+  // each unit's account LAZILY at relist time (claimAccountForSet), so reserving
+  // the union now would stamp soldAt on those holders, hide them from
+  // availableAccountsForSet, and STARVE the very chain we're feeding.
+  // onCampaignEnded reprices an already-baked live row and publishes no new
+  // unit, so there is genuinely nothing to reserve.
+  //
+  // Residual (pre-existing, not fixed here): the ONE unit already baked into the
+  // live Gameflip row was reserved for `current`; a grown bundle can over-list
+  // that single already-live unit relative to what its baked account holds.
+  // Fully fixing that needs a delist + republish with a union-holder's code — a
+  // bigger, live-sale-path change tracked separately.
+  let items = current;
+  let stackSkipped = "";
+  if (stacked.length > current.length) {
+    const holders = await verifiedHoldersForItems(task, stacked);
+    ({ items, stackSkipped } = chooseStackItems(
+      current,
+      stacked,
+      holders.length,
+    ));
+    if (stackSkipped) {
+      console.log("[onCampaignEnded] " + task.game + ": " + stackSkipped);
+    }
+  }
   // Base the markup on the price recorded ON THE TASK, not on the live row.
   // task.listing.price and postEvent are written together in the same save at
   // the end, so a retry after a partial failure recomputes from the identical
@@ -1887,8 +1969,9 @@ async function onCampaignEnded(taskId) {
     postEvent: true,
   });
 
-  // Grow this task's set into the stacked bundle so delivery checks demand
-  // accounts holding EVERYTHING in it.
+  // Persist the (possibly grown, possibly unchanged) items + the marked-up
+  // price. When the gate above kept `current`, this is an items no-op plus a
+  // price-only bump — the markup still applies to the already-backed bundle.
   mySet.items = items;
   mySet.price = price;
   await mySet.save();
@@ -2008,6 +2091,7 @@ async function onCampaignEnded(taskId) {
       released: row ? heldBack : 0,
       secondaryUpdated,
       secondaryTextStale,
+      stackSkipped, // "" when grown to the full sibling union
     },
   };
 }
@@ -2026,6 +2110,7 @@ module.exports = {
   buildDescription,
   derivePrice,
   stackItems,
+  chooseStackItems,
   postEventPrice,
   computeSplit,
   // holdings gate + placeholder guard (the wrong-content fix)
