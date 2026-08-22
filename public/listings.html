@@ -2671,7 +2671,7 @@ Reliable Daily Rewards</textarea
               if (requested) {
                 requestedPublishOpened = true;
                 setTimeout(function () {
-                  ensureSetItems(requested).then(openPublishModal);
+                  openPublishModal(requested);
                 }, 0);
               }
             }
@@ -2752,7 +2752,7 @@ Reliable Daily Rewards</textarea
         var mpb = e.target.closest("[data-mp]");
         if (mpb) {
           var mset = listingsCache.find((x) => x.id === mpb.dataset.mp);
-          if (mset) ensureSetItems(mset).then(openPublishModal);
+          if (mset) openPublishModal(mset);
           return;
         }
         if (ed) {
@@ -3234,6 +3234,11 @@ Reliable Daily Rewards</textarea
         mpSet = set;
         $("mpPubTitle").innerText = 'Sell "' + set.name + '" on marketplaces';
         $("mpPubName").value = set.name || "";
+        // The "Includes:" list and the price-term game come from the full item
+        // snapshot, which the light list omits. Fill them from whatever is
+        // present now and open the modal immediately, then hydrate in the
+        // background — so clicking "Sell on" never waits on a per-set detail
+        // fetch before anything appears.
         $("mpPubDesc").value = mpBuildDescription(set);
         $("mpPubPrice").value = Number(set.price) || "";
         var pcGame =
@@ -3255,12 +3260,32 @@ Reliable Daily Rewards</textarea
         p.then(renderPubTargets).catch(function () {
           renderPubTargets();
         });
-        // Refresh sold status of auto-delivery listings, then show the list.
-        api("/marketplaces/sync", { method: "POST", body: {} })
-          .catch(function () {})
-          .then(function () {
-            loadExtListings(set.id);
+        // Existing marketplace listings for THIS set — a fast, scoped DB read.
+        // The global sold-status sync (gfFulfiller.syncOnce) is deliberately NOT
+        // run here: it refreshes every auto-delivery listing system-wide against
+        // Gameflip's rate-limited API and would block this list for seconds on
+        // every open. A background watcher already runs that sync every 60s, so
+        // the rows shown here stay fresh without opening the modal.
+        loadExtListings(set.id);
+        // If the item snapshot wasn't loaded yet (light list), pull it in the
+        // background and refill the item-dependent fields once it arrives —
+        // never clobbering edits the user has already started typing.
+        if (!Array.isArray(set.items)) {
+          var descBefore = $("mpPubDesc").value;
+          var termBefore = $("mpPriceTerm").value;
+          ensureSetItems(set).then(function (full) {
+            if (mpSet !== set) return; // modal was closed or moved to another set
+            if ($("mpPubDesc").value === descBefore)
+              $("mpPubDesc").value = mpBuildDescription(full);
+            if ($("mpPriceTerm").value === termBefore) {
+              var g =
+                full.coverGame ||
+                (full.items && full.items[0] && full.items[0].game) ||
+                "";
+              $("mpPriceTerm").value = g ? g + " twitch" : full.name || "";
+            }
           });
+        }
       }
 
       $("mpPubClose").addEventListener("click", function () {
