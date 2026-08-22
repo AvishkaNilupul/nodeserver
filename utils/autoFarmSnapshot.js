@@ -291,9 +291,21 @@ function deriveBotState({
   };
 }
 
+// The operator is in Japan; the server process runs on UTC. Using the server's
+// own midnight made "today" roll over at 09:00 JST, so every morning the panel
+// read ~0 decisions until mid-morning and then reset in the middle of the
+// working day. Anchor the day to midnight Asia/Tokyo instead — same convention
+// (and same no-DST reasoning) as utils/poolUsageWatcher.js#usageSince.
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+function startOfJstDay(now = new Date()) {
+  const jst = new Date(new Date(now).getTime() + JST_OFFSET_MS);
+  jst.setUTCHours(0, 0, 0, 0);
+  return new Date(jst.getTime() - JST_OFFSET_MS);
+}
+
 function decisionSummary(tasks, now = new Date()) {
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
+  const start = startOfJstDay(now);
   const rows = (tasks || []).filter((task) => {
     const at = task.decidedAt || task.createdAt;
     return at && new Date(at) >= start;

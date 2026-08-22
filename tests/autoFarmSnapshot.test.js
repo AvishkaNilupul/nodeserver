@@ -247,6 +247,25 @@ test("decision summary uses decidedAt and canonical decision enums", () => {
   assert.deepEqual(out.byDecision, { farm: 1, skip_low_demand: 1 });
 });
 
+// Regression: "today" used the server's own midnight, and the server runs UTC
+// while the operator is in Tokyo — so the panel rolled over at 09:00 JST,
+// reading ~0 decisions all morning and then resetting mid-working-day.
+test("the decision day starts at midnight Tokyo, not midnight UTC", () => {
+  // 00:13Z on Aug 22 is 09:13 JST — well into the operator's day.
+  const now = new Date("2026-08-22T00:13:00.000Z");
+  const rows = [
+    { decision: "skip_low_demand", decidedAt: new Date("2026-08-21T16:00:00Z") }, // 01:00 JST today
+    { decision: "farm", decidedAt: new Date("2026-08-21T23:00:00Z") }, // 08:00 JST today
+    { decision: "reuse_existing", decidedAt: new Date("2026-08-22T00:05:00Z") }, // 09:05 JST today
+    { decision: "farm", decidedAt: new Date("2026-08-21T14:00:00Z") }, // 23:00 JST YESTERDAY
+  ];
+  const out = decisionSummary(rows, now);
+  assert.equal(out.since, "2026-08-21T15:00:00.000Z"); // = 2026-08-22 00:00 JST
+  assert.equal(out.total, 3); // yesterday's 23:00 JST row excluded
+  assert.equal(out.farm, 2);
+  assert.equal(out.skipped, 1);
+});
+
 test("auto ownership keys retain historical configs without exposing accounts", () => {
   const keys = allAutoBotKeys([
     {
