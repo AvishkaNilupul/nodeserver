@@ -42,6 +42,7 @@ const router = express.Router();
 // background so public visitors never queue behind the aggregation after the
 // first warm-up.
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const NEW_LISTING_MS = 24 * 60 * 60 * 1000;
 const PUBLIC_STOCK_BATCH_SIZE = 25;
 const PUBLIC_STOCK_KEY_BATCH_SIZE = 10;
 const PUBLIC_STOCK_KEY_CONCURRENCY = 12;
@@ -252,6 +253,8 @@ function publicListing(set, stock, marketMedian = 0, preorder = null) {
       : stock > 0
         ? "instock"
         : "soldout";
+  const createdAt = set.createdAt || set.farmStartedAt || set.updatedAt || null;
+  const createdMs = createdAt ? new Date(createdAt).getTime() : 0;
   return {
     id: String(set._id),
     category,
@@ -270,7 +273,9 @@ function publicListing(set, stock, marketMedian = 0, preorder = null) {
     exactProfile: set.sourceType === "catalog_profile",
     itemCount: items.reduce((sum, item) => sum + item.qty, 0),
     items,
+    createdAt,
     updatedAt: set.updatedAt,
+    isNew: Number.isFinite(createdMs) && createdMs > Date.now() - NEW_LISTING_MS,
     state,
     eventName: cleanText(set.sourceEventName || set.name, 180),
     campaignEndsAt: set.campaignEndAt || null,
@@ -647,6 +652,9 @@ async function buildPublicCatalog() {
         name: listing.category,
         labels: new Map([[listing.category, 1]]),
         listingCount: 0,
+        newListingCount: 0,
+        preorderCount: 0,
+        expectedUnits: 0,
         stock: 0,
         fromPrice: 0,
         images: [],
@@ -661,6 +669,11 @@ async function buildPublicCatalog() {
       (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
     )[0][0];
     row.listingCount++;
+    if (listing.isNew) row.newListingCount++;
+    if (listing.state === "preorder") {
+      row.preorderCount++;
+      row.expectedUnits += Number(listing.preorder?.expectedUnits) || 0;
+    }
     row.stock += listing.stock;
     if (listing.price > 0 && (!row.fromPrice || listing.price < row.fromPrice))
       row.fromPrice = listing.price;
@@ -676,9 +689,14 @@ async function buildPublicCatalog() {
   const data = {
     generatedAt: new Date().toISOString(),
     categories: [...categoryMap.values()]
-      .filter((row) => row.stock > 0)
+      .filter((row) => row.stock > 0 || row.preorderCount > 0)
       .map(({ labels: _labels, ...row }) => row)
-      .sort((a, b) => b.stock - a.stock || a.name.localeCompare(b.name)),
+      .sort(
+        (a, b) =>
+          Number(b.newListingCount > 0) - Number(a.newListingCount > 0) ||
+          b.stock - a.stock ||
+          a.name.localeCompare(b.name),
+      ),
     listings,
   };
   return data;

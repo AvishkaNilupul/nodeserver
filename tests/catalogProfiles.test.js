@@ -124,4 +124,11 @@ test("catalog thumbnails accept only cached hash image paths", () => {
   );
   assert.equal(thumbnailUrl("/drop-images/../../server.js"), "");
   assert.equal(thumbnailUrl("https://example.com/image.png"), "");
+  const twitchImage =
+    "https://static-cdn.jtvnw.net/twitch-quests-assets/REWARD/example.png";
+  assert.equal(thumbnailUrl(twitchImage), twitchImage);
+  assert.equal(
+    thumbnailUrl("https://static-cdn.jtvnw.net/other-assets/example.png"),
+    "",
+  );
 });

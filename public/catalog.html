@@ -306,6 +306,18 @@
         font-weight: 900;
         text-transform: uppercase;
       }
+      .new-badge {
+        display: inline-flex;
+        margin-left: 6px;
+        border-radius: 999px;
+        padding: 3px 7px;
+        background: #1a9b70;
+        color: #fff;
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
       .ending-badge {
         margin-left: 6px;
         color: var(--preorder);
@@ -406,6 +418,17 @@
         max-width: 100%;
         font-size: 16px;
         overflow-wrap: anywhere;
+      }
+      .category-title-row {
+        width: 100%;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .category-title-row .new-badge {
+        flex: none;
+        margin-left: 0;
       }
       .category small {
         margin-top: 5px;
@@ -617,6 +640,51 @@
       .load-sentinel {
         grid-column: 1 / -1;
         min-height: 1px;
+      }
+      .card-badges {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .card-badges .new-badge {
+        margin-left: 0;
+      }
+      .new-listings-toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 50;
+        width: min(360px, calc(100% - 36px));
+        padding: 16px;
+        border: 1px solid var(--brand);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+      }
+      .new-listings-toast[hidden] {
+        display: none;
+      }
+      .new-listings-toast strong,
+      .new-listings-toast span {
+        display: block;
+      }
+      .new-listings-toast strong {
+        padding-right: 30px;
+        font-size: 15px;
+      }
+      .new-listings-toast span {
+        margin: 5px 0 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .new-listings-toast .toast-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 20px;
       }
       .card-foot {
         margin-top: auto;
@@ -1225,6 +1293,12 @@
     <dialog class="details-dialog" id="detailsDialog">
       <div id="detailsContent"></div>
     </dialog>
+    <aside class="new-listings-toast" id="newListingsToast" hidden aria-live="polite">
+      <button class="toast-close" type="button" data-new-close aria-label="Dismiss">&times;</button>
+      <strong id="newListingsTitle">New bundles listed</strong>
+      <span id="newListingsText"></span>
+      <button class="primary-btn" type="button" data-view-new>View newly listed</button>
+    </aside>
 
     <script>
       const state = {
@@ -1232,6 +1306,7 @@
         listings: [],
         active: "",
         query: "",
+        onlyNew: false,
         sort: "newest",
         visibleCount: 24,
         filtered: [],
@@ -1324,9 +1399,13 @@
                   '<span class="category-images">' +
                   categoryImages(category) +
                   "</span>" +
-                  "<strong>" +
+                  '<span class="category-title-row"><strong>' +
                   esc(category.name) +
                   "</strong>" +
+                  (category.newListingCount
+                    ? '<span class="new-badge">' + category.newListingCount + " new</span>"
+                    : "") +
+                  "</span>" +
                   "<small>" +
                   category.listingCount +
                   (category.listingCount === 1 ? " set" : " sets") +
@@ -1334,8 +1413,10 @@
                   money(category.fromPrice) +
                   "</small>" +
                   '<span class="available">' +
-                  category.stock +
-                  " units available</span></button>",
+                  (category.stock
+                    ? category.stock + " units available"
+                    : category.preorderCount + " farming now · ~" + category.expectedUnits + " expected") +
+                  "</span></button>",
               )
               .join("")
           : '<div class="empty">No public categories are available right now.</div>';
@@ -1343,6 +1424,11 @@
       function renderFilters() {
         const rows = [
           { name: "", label: "All games", listingCount: state.listings.length },
+          {
+            name: "__new__",
+            label: "Newly listed",
+            listingCount: state.listings.filter((row) => row.isNew).length,
+          },
           ...state.categories.map((c) => ({
             name: c.name,
             label: c.name,
@@ -1353,7 +1439,7 @@
           .map(
             (row) =>
               '<button class="filter' +
-              (state.active === row.name ? " active" : "") +
+              ((row.name === "__new__" ? state.onlyNew : state.active === row.name) ? " active" : "") +
               '" data-filter="' +
               attr(row.name) +
               '"><span>' +
@@ -1435,6 +1521,7 @@
               '" aria-label="View ' +
               attr((listing.category || "") + " — " + (listing.eventName || listing.title)) +
               ' pre-order details"><span class="preorder-badge">Pre-order</span>' +
+              (listing.isNew ? '<span class="new-badge">New</span>' : "") +
               (endingSoon(listing)
                 ? '<span class="ending-badge">Ending soon</span>'
                 : "") +
@@ -1483,6 +1570,7 @@
       }
       function renderCards({ reset = true } = {}) {
         let rows = state.listings;
+        if (state.onlyNew) rows = rows.filter((row) => row.isNew);
         if (state.active)
           rows = rows.filter((row) => row.category === state.active);
         if (state.query) {
@@ -1500,8 +1588,12 @@
           );
         }
         $("listingTitle").textContent =
-          state.active || (state.query ? "Search results" : "All inventory");
-        $("listingSub").textContent = state.query
+          state.onlyNew
+            ? "Newly listed"
+            : state.active || (state.query ? "Search results" : "All inventory");
+        $("listingSub").textContent = state.onlyNew
+          ? "Bundles and event listings added in the last 24 hours"
+          : state.query
           ? 'Matching "' + state.query + '"'
           : state.active
             ? "Bulk sets currently available for " + state.active
@@ -1531,7 +1623,8 @@
                 media(listing) +
                 '<div class="card-body"><div class="card-top"><span class="eyebrow">' +
                 esc(listing.category) +
-                "</span>" +
+                '</span><span class="card-badges">' +
+                (listing.isNew ? '<span class="new-badge">New</span>' : "") +
                 (listing.state === "preorder"
                   ? '<span class="preorder-badge">Pre-order</span>'
                   : listing.featured
@@ -1539,6 +1632,7 @@
                     : listing.exactProfile
                       ? '<span class="badge">Exact profile</span>'
                       : "") +
+                "</span>" +
                 "</div>" +
                 "<h3>" +
                 esc(listing.title) +
@@ -1610,6 +1704,18 @@
         }
       }
       function selectCategory(name) {
+        if (name === "__new__") {
+          state.onlyNew = true;
+          state.active = "";
+          state.query = "";
+          $("searchInput").value = "";
+          renderCategories();
+          renderFilters();
+          renderCards();
+          $("inventory").scrollIntoView({ behavior: "smooth", block: "start" });
+          return;
+        }
+        state.onlyNew = false;
         state.active = name;
         state.query = "";
         $("searchInput").value = "";
@@ -1856,6 +1962,7 @@
       });
       $("searchForm").addEventListener("submit", (event) => {
         event.preventDefault();
+        state.onlyNew = false;
         state.query = $("searchInput").value.trim().slice(0, 80);
         state.active = "";
         renderCategories();
@@ -1898,6 +2005,26 @@
         )
           $("detailsDialog").close();
       });
+      $("newListingsToast").addEventListener("click", (event) => {
+        if (event.target.closest("[data-new-close]")) {
+          $("newListingsToast").hidden = true;
+          return;
+        }
+        if (event.target.closest("[data-view-new]")) {
+          $("newListingsToast").hidden = true;
+          selectCategory("__new__");
+        }
+      });
+      function showNewListingsNotice() {
+        const rows = state.listings.filter((row) => row.isNew);
+        if (!rows.length) return;
+        const games = new Set(rows.map((row) => row.category));
+        $("newListingsTitle").textContent =
+          rows.length + " newly listed bundle" + (rows.length === 1 ? "" : "s");
+        $("newListingsText").textContent =
+          "Added in the last 24 hours across " + games.size + " game" + (games.size === 1 ? "" : "s") + ".";
+        $("newListingsToast").hidden = false;
+      }
       document.addEventListener(
         "error",
         (event) => {
@@ -1950,6 +2077,7 @@
           renderCategories();
           renderFilters();
           renderCards();
+          showNewListingsNotice();
           $("updatedText").textContent =
             "Inventory checked " + relativeTime(categories.generatedAt);
           track("catalog_view");

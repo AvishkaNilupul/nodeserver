@@ -71,6 +71,30 @@ test("public listing omits account scope and credential-like fields", () => {
   assert.equal(JSON.stringify(listing).includes("config_private.json"), false);
 });
 
+test("public listing marks records created within 24 hours as new", () => {
+  const recent = publicListing(
+    {
+      _id: "507f1f77bcf86cd799439012",
+      name: "Recent bundle",
+      createdAt: new Date(),
+      items: [{ name: "Reward", game: "Game", qty: 1 }],
+    },
+    1,
+  );
+  const old = publicListing(
+    {
+      _id: "507f1f77bcf86cd799439013",
+      name: "Old bundle",
+      createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      items: [{ name: "Reward", game: "Game", qty: 1 }],
+    },
+    1,
+  );
+  assert.equal(recent.isNew, true);
+  assert.equal(old.isNew, false);
+  assert.ok(recent.createdAt);
+});
+
 test("public price honors an explicit override", () => {
   assert.equal(
     publicPriceFor({ publicPrice: 12.345, price: 20, bulkDiscountPct: 50 }),

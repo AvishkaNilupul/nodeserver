@@ -12,6 +12,18 @@ const jobs = new Map();
 
 function thumbnailUrl(image) {
   const value = String(image || "");
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol === "https:" &&
+      url.hostname === "static-cdn.jtvnw.net" &&
+      url.pathname.startsWith("/twitch-quests-assets/")
+    ) {
+      return url.href;
+    }
+  } catch {
+    // Local catalog artwork is handled below.
+  }
   if (!value.startsWith("/drop-images/")) return "";
   const file = path.basename(value);
   return SAFE_FILE.test(file) ? `/catalog/thumb/${file}` : "";
