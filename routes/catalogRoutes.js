@@ -43,6 +43,8 @@ const router = express.Router();
 // first warm-up.
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const NEW_LISTING_MS = 24 * 60 * 60 * 1000;
+const PUBLIC_PRICE_MIN_USD = 1.01;
+const PUBLIC_PRICE_MAX_USD = 2.99;
 const PUBLIC_STOCK_BATCH_SIZE = 25;
 const PUBLIC_STOCK_KEY_BATCH_SIZE = 10;
 const PUBLIC_STOCK_KEY_CONCURRENCY = 12;
@@ -99,9 +101,18 @@ function median(values) {
   return rows.length % 2 ? rows[mid] : (rows[mid - 1] + rows[mid]) / 2;
 }
 
+function clampPublicPrice(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return PUBLIC_PRICE_MIN_USD;
+  return Math.min(
+    PUBLIC_PRICE_MAX_USD,
+    Math.max(PUBLIC_PRICE_MIN_USD, Math.round(amount * 100) / 100),
+  );
+}
+
 function publicPriceFor(set, marketMedian = 0) {
   const override = Number(set.publicPrice) || 0;
-  if (override > 0) return Math.round(override * 100) / 100;
+  if (override > 0) return clampPublicPrice(override);
   const retail = Number(set.price) || marketMedian || 0;
   const rawDiscount = Number(set.bulkDiscountPct);
   const discount = Math.max(
@@ -109,7 +120,7 @@ function publicPriceFor(set, marketMedian = 0) {
     Math.min(60, Number.isFinite(rawDiscount) ? rawDiscount : 8),
   );
   const floor = Math.max(0, Number(set.minPriceUsd) || 0);
-  return Math.round(Math.max(floor, retail * (1 - discount / 100)) * 100) / 100;
+  return clampPublicPrice(Math.max(floor, retail * (1 - discount / 100)));
 }
 
 function publicPriceTiers(set, marketMedian = 0) {
@@ -135,13 +146,13 @@ function publicPriceTiers(set, marketMedian = 0) {
         index === 0
           ? publicPriceFor(set, marketMedian)
           : override
-            ? Math.round(Math.max(floor, override) * 100) / 100
-            : Math.round(
+            ? clampPublicPrice(Math.max(floor, override))
+            : clampPublicPrice(
                 Math.max(
                   floor,
                   retail * (1 - Math.min(60, discount + index * 5) / 100),
-                ) * 100,
-              ) / 100,
+                ),
+              ),
     }));
 }
 
@@ -275,7 +286,8 @@ function publicListing(set, stock, marketMedian = 0, preorder = null) {
     items,
     createdAt,
     updatedAt: set.updatedAt,
-    isNew: Number.isFinite(createdMs) && createdMs > Date.now() - NEW_LISTING_MS,
+    isNew:
+      Number.isFinite(createdMs) && createdMs > Date.now() - NEW_LISTING_MS,
     state,
     eventName: cleanText(set.sourceEventName || set.name, 180),
     campaignEndsAt: set.campaignEndAt || null,
@@ -491,8 +503,8 @@ async function syncInventoryVariants({
         currentRetailPrice > 0 &&
         Math.abs(currentPublicPrice - currentRetailPrice) > 0.001;
       const publicPrice = priceLocked
-        ? currentPublicPrice
-        : row.recommendedPrice;
+        ? clampPublicPrice(currentPublicPrice)
+        : clampPublicPrice(row.recommendedPrice);
       const retailPrice = priceLocked
         ? currentRetailPrice
         : row.recommendedPrice;
@@ -1029,7 +1041,7 @@ router.put(
       if (body.publicDescription !== undefined)
         set.publicDescription = cleanText(body.publicDescription, 600);
       const numericRules = {
-        publicPrice: [0, 1000000],
+        publicPrice: [0, PUBLIC_PRICE_MAX_USD],
         bulkMinQty: [1, 1000],
         bulkDiscountPct: [0, 60],
         publicSort: [-1000000, 1000000],
@@ -1041,6 +1053,16 @@ router.put(
           return res
             .status(400)
             .json({ success: false, message: `Invalid ${field}` });
+        if (
+          field === "publicPrice" &&
+          value > 0 &&
+          value < PUBLIC_PRICE_MIN_USD
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: `publicPrice must be between $${PUBLIC_PRICE_MIN_USD.toFixed(2)} and $${PUBLIC_PRICE_MAX_USD.toFixed(2)}`,
+          });
+        }
         set[field] = value;
       }
       await set.save();
@@ -1240,10 +1262,9 @@ router.post(
         const observed = median(byGame.get(category.toLowerCase()) || []);
         const base = observed || Number(set.price) || 0;
         if (!base) continue;
-        const recommended =
-          Math.round(
-            Math.max(Number(set.minPriceUsd) || 0, base * 0.94) * 100,
-          ) / 100;
+        const recommended = clampPublicPrice(
+          Math.max(Number(set.minPriceUsd) || 0, base * 0.94),
+        );
         plan.push({
           id: String(set._id),
           name: set.name,
@@ -1278,6 +1299,9 @@ module.exports.categoryFor = categoryFor;
 module.exports.publicListing = publicListing;
 module.exports.publicPriceFor = publicPriceFor;
 module.exports.publicPriceTiers = publicPriceTiers;
+module.exports.clampPublicPrice = clampPublicPrice;
+module.exports.PUBLIC_PRICE_MIN_USD = PUBLIC_PRICE_MIN_USD;
+module.exports.PUBLIC_PRICE_MAX_USD = PUBLIC_PRICE_MAX_USD;
 module.exports.stockForSetsBatched = stockForSetsBatched;
 module.exports.recommendedProfilePrice = recommendedProfilePrice;
 module.exports.inquiryQuantity = inquiryQuantity;

@@ -5,6 +5,8 @@ const {
   categoryFor,
   publicPriceFor,
   publicPriceTiers,
+  PUBLIC_PRICE_MIN_USD,
+  PUBLIC_PRICE_MAX_USD,
   inquiryQuantity,
   publicListing,
   stockForSetsBatched,
@@ -98,27 +100,41 @@ test("public listing marks records created within 24 hours as new", () => {
 test("public price honors an explicit override", () => {
   assert.equal(
     publicPriceFor({ publicPrice: 12.345, price: 20, bulkDiscountPct: 50 }),
-    12.35,
+    PUBLIC_PRICE_MAX_USD,
   );
 });
 
-test("public price applies bulk discount without crossing the floor", () => {
+test("public price stays inside the catalog range", () => {
   assert.equal(
     publicPriceFor({ price: 20, bulkDiscountPct: 25, minPriceUsd: 16 }),
-    16,
+    PUBLIC_PRICE_MAX_USD,
   );
+  assert.equal(
+    publicPriceFor({ price: 0, publicPrice: 0 }),
+    PUBLIC_PRICE_MIN_USD,
+  );
+  assert.equal(publicPriceFor({ price: 0.5 }), PUBLIC_PRICE_MIN_USD);
 });
 
 test("public price falls back to observed market median when retail is absent", () => {
-  assert.equal(publicPriceFor({ price: 0, bulkDiscountPct: 10 }, 18), 16.2);
+  assert.equal(
+    publicPriceFor({ price: 0, bulkDiscountPct: 10 }, 18),
+    PUBLIC_PRICE_MAX_USD,
+  );
 });
 
 test("public price clamps malformed discount values to the supported range", () => {
-  assert.equal(publicPriceFor({ price: 20, bulkDiscountPct: 100 }), 8);
-  assert.equal(publicPriceFor({ price: 20, bulkDiscountPct: -20 }), 20);
+  assert.equal(
+    publicPriceFor({ price: 20, bulkDiscountPct: 100 }),
+    PUBLIC_PRICE_MAX_USD,
+  );
+  assert.equal(
+    publicPriceFor({ price: 20, bulkDiscountPct: -20 }),
+    PUBLIC_PRICE_MAX_USD,
+  );
 });
 
-test("public price tiers respect floors and explicit overrides", () => {
+test("public price tiers stay inside the catalog range", () => {
   assert.deepEqual(
     publicPriceTiers({
       price: 20,
@@ -127,14 +143,18 @@ test("public price tiers respect floors and explicit overrides", () => {
       minPriceUsd: 17,
     }),
     [
-      { quantity: 10, price: 18 },
-      { quantity: 50, price: 17 },
-      { quantity: 100, price: 17 },
+      { quantity: 10, price: PUBLIC_PRICE_MAX_USD },
+      { quantity: 50, price: PUBLIC_PRICE_MAX_USD },
+      { quantity: 100, price: PUBLIC_PRICE_MAX_USD },
     ],
   );
   assert.equal(
     publicPriceTiers({ price: 20, publicPrice: 12, bulkMinQty: 10 })[2].price,
-    12,
+    PUBLIC_PRICE_MAX_USD,
+  );
+  assert.equal(
+    publicPriceTiers({ price: 0.5, bulkMinQty: 10 })[2].price,
+    PUBLIC_PRICE_MIN_USD,
   );
 });
 
