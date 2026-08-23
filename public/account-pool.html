@@ -96,6 +96,28 @@
   .modal > footer { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
   .revealbox { font-family: ui-monospace, monospace; font-size: 13px; background: var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; line-height:1.7; word-break:break-all; }
   .revealbox .k { color: var(--muted); }
+  .history-list { display:flex; flex-direction:column; gap:10px; max-height:55vh; overflow-y:auto; }
+  .history-item { border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:var(--surface-2); line-height:1.45; }
+  .history-item .when { color:var(--muted); font-size:11.5px; }
+  .history-item .event { font-weight:700; text-transform:capitalize; }
+  .history-item .meta { color:var(--muted); font-size:12px; }
+  .usage-dashboard { display:none; }
+  .usage-dashboard.show { display:block; }
+  .usage-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+  .usage-head .tabs { margin:0; }
+  .usage-updated { margin-left:auto; color:var(--muted); font-size:12px; }
+  .usage-summary { display:grid; grid-template-columns:repeat(4,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+  .usage-summary .stat { padding:14px 16px; }
+  .usage-summary .stat b { font-size:24px; }
+  .usage-grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(310px,1fr); gap:14px; align-items:start; }
+  .usage-grid .panel { margin-bottom:0; }
+  .usage-feed { max-height:570px; overflow-y:auto; }
+  .feed-item { padding:11px 14px; border-bottom:1px solid var(--line); line-height:1.4; font-size:13px; }
+  .feed-item:last-child { border-bottom:0; }
+  .feed-item .when, .feed-item .meta { color:var(--muted); font-size:11.5px; }
+  .actor-chips { display:flex; gap:5px; flex-wrap:wrap; }
+  @media (max-width:1100px) { .usage-grid { grid-template-columns:1fr; } .usage-summary { grid-template-columns:repeat(2,minmax(140px,1fr)); } }
+  @media (max-width:620px) { .usage-summary { grid-template-columns:1fr 1fr; } }
 </style>
 </head>
 
@@ -133,7 +155,7 @@
 
   <div id="checkQueueBanner" style="display:none;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:10px 16px;margin:14px 0 0;font-size:13px;color:var(--muted);"></div>
 
-  <div class="toolbar">
+  <div class="toolbar" id="accountsToolbar">
     <div class="search">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path></svg>
       <input id="search" type="text" placeholder="Search by username…" />
@@ -146,18 +168,51 @@
     <button class="tab" id="tabClaimed" data-status="claimed">Claimed</button>
     <button class="tab" id="tabAll" data-status="all">All</button>
     <button class="tab" id="tabSuspended" data-status="suspended">Suspended</button>
+    <button class="tab" id="tabUsage">Usage</button>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="accountsPanel">
     <div style="overflow-x:auto;">
       <table id="tbl">
         <thead>
-          <tr><th>Username</th><th>Ready</th><th>Verified</th><th>Twitch ID</th><th>Status</th><th>Added</th><th></th></tr>
+          <tr><th>Username</th><th>Ready</th><th>Verified</th><th>Twitch ID</th><th>Status</th><th>Usage</th><th>Added</th><th></th></tr>
         </thead>
-        <tbody id="tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
+
+  <section class="usage-dashboard" id="usageDashboard">
+    <div class="usage-head">
+      <div class="tabs" id="usageWindows">
+        <button class="tab active" data-window="today">Today</button>
+        <button class="tab" data-window="7d">Last 7 days</button>
+        <button class="tab" data-window="30d">Last 30 days</button>
+        <button class="tab" data-window="all">All time</button>
+      </div>
+      <span class="usage-updated" id="usageUpdated">Local time · waiting to refresh</span>
+    </div>
+    <div class="usage-summary" id="usageSummary">
+      <div class="stat"><b>—</b><span>Consumed</span></div>
+      <div class="stat"><b>—</b><span>Returned</span></div>
+      <div class="stat"><b>—</b><span>Net out</span></div>
+      <div class="stat"><b>—</b><span>Ready now</span></div>
+    </div>
+    <div class="usage-grid">
+      <div class="panel">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Game</th><th>Consumed</th><th>Still farming</th><th>Recycled</th><th>Sold</th><th>Rented</th><th>Where it went</th></tr></thead>
+            <tbody id="usageGames"><tr><td colspan="7" class="empty">Loading usage…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div style="padding:13px 14px;border-bottom:1px solid var(--line);"><b>Live activity</b><div class="sub">Newest pool events in this window</div></div>
+        <div class="usage-feed" id="usageFeed"><div class="empty">Loading activity…</div></div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <div class="modal-bg" id="importBg">
@@ -197,6 +252,13 @@ or JSON:
   </div>
 </div>
 
+<div class="modal-bg" id="historyBg">
+  <div class="modal" style="max-width:680px;">
+    <header><b id="historyTitle">Usage history</b><button class="x" id="historyClose">&times;</button></header>
+    <div class="mbody"><div class="history-list" id="historyList"><div class="empty">Loading…</div></div></div>
+  </div>
+</div>
+
 <div class="modal-bg" id="revealBg">
   <div class="modal">
     <header><b id="revealTitle">Account details</b><button class="x" id="revealClose">&times;</button></header>
@@ -215,7 +277,11 @@ or JSON:
   const $ = (id) => document.getElementById(id);
   let ACCOUNTS = [];
   let CURRENT_STATUS = "available";
+  let ACTIVE_TAB = "accounts";
+  let USAGE_WINDOW = "today";
+  let USAGE_TIMER = null;
   let REVEAL_ID = null;
+  let HISTORY_ID = null;
 
   async function api(url, opts) {
     const r = await fetch(url, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts));
@@ -263,7 +329,7 @@ or JSON:
     const q = $("search").value.trim().toLowerCase();
     const rows = ACCOUNTS.filter((a) => !q || a.username.toLowerCase().includes(q));
     if (!rows.length) {
-      $("tbody").innerHTML = '<tr><td colspan="7" class="empty">No accounts here.</td></tr>';
+      $("tbody").innerHTML = '<tr><td colspan="8" class="empty">No accounts here.</td></tr>';
       renderStats();
       return;
     }
@@ -279,14 +345,18 @@ or JSON:
         ? '<button class="btn-ghost btn-sm" data-unclaim="' + a.id + '">Unclaim</button>'
         : '<button class="btn-ghost btn-sm" data-reveal="' + a.id + '">View</button>') +
         (a.hasAuth ? '<button class="btn-ghost btn-sm" data-check="' + a.id + '">Check</button>' : "");
+      const usage = '<span class="chip" title="' + esc(a.lastUsedGame || "No game recorded") + '">' +
+        'used ' + (a.usageCount || 0) + '×' + (a.lastUsedGame ? ' · ' + esc(a.lastUsedGame) : '') + '</span>';
       return "<tr>" +
         "<td>" + esc(a.username) + "</td>" +
         "<td>" + readyChip + "</td>" +
         "<td>" + verifiedChip(a) + "</td>" +
         '<td class="mono">' + esc(a.twitchId || "—") + "</td>" +
         "<td>" + statusChip + "</td>" +
+        "<td>" + usage + "</td>" +
         "<td>" + added + "</td>" +
         '<td style="display:flex;gap:6px;">' + actions +
+          '<button class="btn-ghost btn-sm" data-history="' + a.id + '">History</button>' +
           '<button class="btn-danger btn-sm" data-delete="' + a.id + '">Delete</button></td>' +
         "</tr>";
     }).join("");
@@ -299,24 +369,117 @@ or JSON:
       ACCOUNTS = r.accounts || [];
       render();
     } catch (e) {
-      $("tbody").innerHTML = '<tr><td colspan="7" class="empty">' + esc(e.message) + "</td></tr>";
+      $("tbody").innerHTML = '<tr><td colspan="8" class="empty">' + esc(e.message) + "</td></tr>";
+    }
+  }
+
+  function stopUsageWatcher() {
+    if (USAGE_TIMER) {
+      clearInterval(USAGE_TIMER);
+      USAGE_TIMER = null;
     }
   }
 
   function setTab(status, btn) {
+    ACTIVE_TAB = "accounts";
     CURRENT_STATUS = status;
+    stopUsageWatcher();
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
     btn.classList.add("active");
+    $("accountsToolbar").style.display = "";
+    $("accountsPanel").style.display = "";
+    $("usageDashboard").classList.remove("show");
     load();
   }
+
+  function openUsageTab(btn) {
+    ACTIVE_TAB = "usage";
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll("#usageWindows .tab").forEach((t) => {
+      t.classList.toggle("active", t.getAttribute("data-window") === USAGE_WINDOW);
+    });
+    $("accountsToolbar").style.display = "none";
+    $("accountsPanel").style.display = "none";
+    $("usageDashboard").classList.add("show");
+    refreshUsage();
+    stopUsageWatcher();
+    USAGE_TIMER = setInterval(refreshUsage, 30000);
+  }
+
+  function renderUsageSummary(totals) {
+    const net = Number(totals.net) || 0;
+    $("usageSummary").innerHTML =
+      '<div class="stat"><b>' + (Number(totals.consumed) || 0) + '</b><span>Consumed</span></div>' +
+      '<div class="stat"><b>' + (Number(totals.returned) || 0) + '</b><span>Returned</span></div>' +
+      '<div class="stat"><b style="color:' + (net > 0 ? 'var(--red)' : net < 0 ? 'var(--green)' : 'inherit') + ';">' + (net > 0 ? '+' : '') + net + '</b><span>Net out</span></div>' +
+      '<div class="stat"><b>' + (Number(totals.readyPool) || 0) + '</b><span>Ready now</span></div>';
+  }
+
+  function renderUsageGames(games) {
+    $("usageGames").innerHTML = games.length ? games.map((g) => {
+      const actors = Object.entries(g.byActor || {}).sort((a, b) => b[1] - a[1]);
+      const actorHtml = actors.length ? actors.map(([actor, count]) =>
+        '<span class="chip">' + esc(actor) + ' · ' + count + '</span>'
+      ).join("") : '<span class="chip">—</span>';
+      return '<tr><td><b>' + esc(g.game || "(unspecified)") + '</b></td>' +
+        '<td>' + (g.consumed || 0) + '</td><td>' + (g.farming || 0) + '</td>' +
+        '<td>' + (g.recycled || 0) + '</td><td>' + (g.sold || 0) + '</td>' +
+        '<td>' + (g.rented || 0) + '</td><td><div class="actor-chips">' + actorHtml + '</div></td></tr>';
+    }).join("") : '<tr><td colspan="7" class="empty">No pool usage recorded in this window.</td></tr>';
+  }
+
+  function renderUsageFeed(feed) {
+    $("usageFeed").innerHTML = feed.length ? feed.map((h) => {
+      const when = h.at ? new Date(h.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Unknown time";
+      const game = String(h.game || "").trim() || "(unspecified)";
+      const detail = [h.actor, h.campaignId ? "campaign " + h.campaignId : "", h.host].filter(Boolean).join(" · ");
+      return '<div class="feed-item"><div><span class="when">' + esc(when) + '</span> · <b>' + esc(game) + '</b> · ' + esc(h.event || "event") + ' · ' + esc(h.username || "account") + '</div>' +
+        (h.note ? '<div>' + esc(h.note) + '</div>' : '') +
+        (detail ? '<div class="meta">' + esc(detail) + '</div>' : '') + '</div>';
+    }).join("") : '<div class="empty">No activity recorded in this window.</div>';
+  }
+
+  async function refreshUsage() {
+    if (ACTIVE_TAB !== "usage") return;
+    try {
+      const since = new Date();
+      since.setHours(0, 0, 0, 0);
+      if (USAGE_WINDOW === "7d") since.setDate(since.getDate() - 6);
+      if (USAGE_WINDOW === "30d") since.setDate(since.getDate() - 29);
+      const query = "?window=" + encodeURIComponent(USAGE_WINDOW) +
+        (USAGE_WINDOW === "all" ? "" : "&since=" + encodeURIComponent(since.toISOString()));
+      const [summary, activity] = await Promise.all([
+        api("/account-pool/usage-summary" + query),
+        api("/account-pool/usage-feed" + query + "&limit=100"),
+      ]);
+      if (ACTIVE_TAB !== "usage") return;
+      renderUsageSummary(summary.totals || {});
+      renderUsageGames(summary.games || []);
+      renderUsageFeed(activity.feed || []);
+      $("usageUpdated").textContent = "Local window · refreshed " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    } catch (err) {
+      $("usageGames").innerHTML = '<tr><td colspan="7" class="empty">' + esc(err.message) + '</td></tr>';
+      $("usageFeed").innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    }
+  }
+
   $("tabAvailable").addEventListener("click", (e) => setTab("available", e.target));
   $("tabClaimed").addEventListener("click", (e) => setTab("claimed", e.target));
   $("tabAll").addEventListener("click", (e) => setTab("all", e.target));
   // Gone from Twitch. Only rows that are sale evidence survive the sweep's purge,
   // and none of them are stock, so the other tabs leave them out.
   $("tabSuspended").addEventListener("click", (e) => setTab("suspended", e.target));
+  $("tabUsage").addEventListener("click", (e) => openUsageTab(e.target));
+  $("usageWindows").addEventListener("click", (e) => {
+    const value = e.target.getAttribute("data-window");
+    if (!value) return;
+    USAGE_WINDOW = value;
+    document.querySelectorAll("#usageWindows .tab").forEach((t) => t.classList.toggle("active", t === e.target));
+    refreshUsage();
+  });
   $("search").addEventListener("input", render);
-  $("refreshBtn").addEventListener("click", load);
+  $("refreshBtn").addEventListener("click", () => ACTIVE_TAB === "usage" ? refreshUsage() : load());
 
   async function exportNeedsAuth(btn, source) {
     const old = btn.textContent;
@@ -377,7 +540,9 @@ or JSON:
     const unclaimId = e.target.getAttribute("data-unclaim");
     const deleteId = e.target.getAttribute("data-delete");
     const checkId = e.target.getAttribute("data-check");
+    const historyId = e.target.getAttribute("data-history");
     if (revealId) return openReveal(revealId);
+    if (historyId) return openHistory(historyId);
     if (checkId) return runCheck(checkId, e.target);
     if (unclaimId) {
       try { await api("/account-pool/" + unclaimId + "/unclaim", { method: "POST" }); toast("Marked available again"); load(); }
@@ -424,6 +589,29 @@ or JSON:
     }
   }
 
+  async function openHistory(id) {
+    HISTORY_ID = id;
+    const acc = ACCOUNTS.find((a) => a.id === id);
+    $("historyTitle").textContent = (acc ? acc.username : "Account") + " · usage history";
+    $("historyList").innerHTML = '<div class="empty">Loading…</div>';
+    $("historyBg").classList.add("show");
+    try {
+      const r = await api("/account-pool/" + id + "/history");
+      const rows = r.history || [];
+      $("historyList").innerHTML = rows.length ? rows.map((h) => {
+        const when = h.at ? new Date(h.at).toLocaleString() : "Unknown time";
+        const context = [h.game, h.campaignId ? "campaign " + h.campaignId : ""].filter(Boolean).join(" · ");
+        return '<div class="history-item"><div><span class="when">' + esc(when) + '</span> · <span class="event">' + esc(h.event || "event") + '</span>' +
+          (context ? ' · ' + esc(context) : '') + '</div>' +
+          (h.note ? '<div>' + esc(h.note) + '</div>' : '') +
+          (h.actor || h.host ? '<div class="meta">' + esc([h.actor, h.host].filter(Boolean).join(" · ")) + '</div>' : '') +
+          '</div>';
+      }).join("") : '<div class="empty">No usage history recorded yet.</div>';
+    } catch (err) {
+      $("historyList").innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    }
+  }
+
   function renderCheckResult(r) {
     if (r.status === "ok") {
       const rows = (r.drops || []).slice(0, 100).map((d) =>
@@ -465,6 +653,8 @@ or JSON:
   }
   $("revealClose").addEventListener("click", () => $("revealBg").classList.remove("show"));
   $("revealBg").addEventListener("click", (e) => { if (e.target === $("revealBg")) $("revealBg").classList.remove("show"); });
+  $("historyClose").addEventListener("click", () => $("historyBg").classList.remove("show"));
+  $("historyBg").addEventListener("click", (e) => { if (e.target === $("historyBg")) $("historyBg").classList.remove("show"); });
   $("checkBtn").addEventListener("click", (e) => { if (REVEAL_ID) runCheck(REVEAL_ID, e.target); });
   $("claimBtn").addEventListener("click", async () => {
     if (!REVEAL_ID) return;

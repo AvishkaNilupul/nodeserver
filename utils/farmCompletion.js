@@ -28,9 +28,12 @@ const BotAccount = require("../models/BotAccount");
 // Stale scans are worthless for this decision — a verdict from before the
 // current campaign started would happily stop a bot that is mid-drop.
 const FRESH_MS = 24 * 60 * 60 * 1000;
+const PARK_FRESH_MS = 30 * 60 * 60 * 1000;
 
 function norm(s) {
-  return String(s || "").trim().toLowerCase();
+  return String(s || "")
+    .trim()
+    .toLowerCase();
 }
 
 function usersOf(data) {
@@ -52,54 +55,28 @@ function gamesForUser(user, configLevel) {
   return (Array.isArray(list) ? list : []).map(norm).filter(Boolean);
 }
 
-// Classify every enabled account in `file` on `host`.
-//
-// Returns { assignedGames, total, working, finished, unknown, notStarted,
-//           stoppable, accounts }. `stoppable` is the only field a caller
-//           should act on, and it is deliberately conservative: it requires at
-//           least one account and zero working / unknown / not-started.
-async function botCompletion(hostId, file, opts = {}) {
-  const host = hosts.resolveHost(hostId);
-  if (!host) throw new Error("Unknown host: " + hostId);
+// Pure, batch-friendly half of botCompletion. A fleet watcher can read every
+// config on a host in one hosts.readFiles() call and every referenced account
+// in one Mongo query, then apply the exact same completion rules per bot.
+function classifyBotCompletion(data, rows, opts = {}) {
   const freshMs = Number(opts.freshMs) || FRESH_MS;
-
-  const data = JSON.parse(await hosts.readFile(host, file));
-  const configLevel = Array.isArray(data.FavouriteGames)
+  const nowMs = opts.now == null ? Date.now() : new Date(opts.now).getTime();
+  const configLevel = Array.isArray(data && data.FavouriteGames)
     ? data.FavouriteGames
     : [];
-  // OnlyFavouriteGames off means the bot may wander onto any campaign, so the
-  // "assigned games" narrowing is unsound — fall back to counting all pending
-  // work, which is the strictly safer reading.
   const onlyFavourites =
-    !data.TwitchSettings || data.TwitchSettings.OnlyFavouriteGames !== false;
-
+    !data ||
+    !data.TwitchSettings ||
+    data.TwitchSettings.OnlyFavouriteGames !== false;
   const users = usersOf(data).filter((u) => u && u.Enabled !== false);
-  const secrets = users
-    .map((u) => String((u && u.ClientSecret) || "").trim())
-    .filter(Boolean);
-  if (!secrets.length) {
-    return {
-      host: host.id, file, assignedGames: configLevel.map(norm),
-      total: 0, working: 0, finished: 0, unknown: 0, notStarted: 0,
-      stoppable: false, reason: "no enabled accounts", accounts: [],
-    };
-  }
-
-  const rows = await BotAccount.find(
-    { clientSecret: { $in: secrets } },
-    {
-      clientSecret: 1, login: 1, inProgressCount: 1, inProgressGames: 1,
-      dropCount: 1, lastScanAt: 1, lastScanStatus: 1,
-    },
-  ).lean();
-  const bySecret = new Map(rows.map((r) => [r.clientSecret, r]));
-
-  const cutoff = Date.now() - freshMs;
+  const bySecret = new Map(
+    (rows || [])
+      .filter((r) => r && r.clientSecret)
+      .map((r) => [String(r.clientSecret), r]),
+  );
+  const cutoff = nowMs - freshMs;
   const out = { working: [], finished: [], unknown: [], notStarted: [] };
   const assignedAll = new Set();
-  // The oldest scan behind this verdict. A caller that stops containers uses it
-  // to ask "did a campaign for these games start AFTER the evidence I am
-  // judging on?" — see the newer-campaign guard in botWaker.stopFinishedBots.
   let oldestScanAt = null;
 
   for (const u of users) {
@@ -120,27 +97,18 @@ async function botCompletion(hostId, file, opts = {}) {
       continue;
     }
     const scannedAt = new Date(rec.lastScanAt).getTime();
-    if (oldestScanAt == null || scannedAt < oldestScanAt) oldestScanAt = scannedAt;
+    if (oldestScanAt == null || scannedAt < oldestScanAt)
+      oldestScanAt = scannedAt;
     const pendingGames = (rec.inProgressGames || []).map(norm);
     const onAssigned = onlyFavourites
       ? pendingGames.filter((g) => mine.includes(g))
       : pendingGames;
-    if (onAssigned.length) {
-      out.working.push(label);
-    } else if (!rec.dropCount) {
-      // Nothing pending and nothing earned: hasn't started, not finished.
-      out.notStarted.push(label);
-    } else {
-      out.finished.push(label);
-    }
+    if (onAssigned.length) out.working.push(label);
+    else if (!rec.dropCount) out.notStarted.push(label);
+    else out.finished.push(label);
   }
 
   const total = users.length;
-  // A config whose accounts name no games at all is unreadable as a verdict.
-  // With OnlyFavouriteGames on and an empty list there is nothing to intersect
-  // pending work against, so EVERY scanned account trivially looks finished and
-  // the whole container would be parked on no evidence. Several manual bots on
-  // prod are shaped exactly like this and hold 100+ accounts each.
   const noAssignedGames = assignedAll.size === 0;
   const stoppable =
     total > 0 &&
@@ -150,10 +118,8 @@ async function botCompletion(hostId, file, opts = {}) {
     out.notStarted.length === 0;
 
   return {
-    host: host.id,
-    file,
     onlyFavourites,
-    assignedGames: [...assignedAll],
+    assignedGames: total ? [...assignedAll] : configLevel.map(norm),
     oldestScanAt: oldestScanAt == null ? null : new Date(oldestScanAt),
     total,
     working: out.working.length,
@@ -161,16 +127,18 @@ async function botCompletion(hostId, file, opts = {}) {
     unknown: out.unknown.length,
     notStarted: out.notStarted.length,
     stoppable,
-    reason: stoppable
-      ? "every enabled account has finished its assigned games"
-      : [
-          noAssignedGames ? "no assigned games — cannot judge" : "",
-          out.working.length ? out.working.length + " still working" : "",
-          out.unknown.length ? out.unknown.length + " unscanned/stale" : "",
-          out.notStarted.length ? out.notStarted.length + " not started" : "",
-        ]
-          .filter(Boolean)
-          .join(", "),
+    reason: !total
+      ? "no enabled accounts"
+      : stoppable
+        ? "every enabled account has finished its assigned games"
+        : [
+            noAssignedGames ? "no assigned games — cannot judge" : "",
+            out.working.length ? out.working.length + " still working" : "",
+            out.unknown.length ? out.unknown.length + " unscanned/stale" : "",
+            out.notStarted.length ? out.notStarted.length + " not started" : "",
+          ]
+            .filter(Boolean)
+            .join(", "),
     samples: {
       working: out.working.slice(0, 5),
       unknown: out.unknown.slice(0, 5),
@@ -179,4 +147,41 @@ async function botCompletion(hostId, file, opts = {}) {
   };
 }
 
-module.exports = { botCompletion, gamesForUser };
+// Classify every enabled account in `file` on `host`.
+//
+// Returns { assignedGames, total, working, finished, unknown, notStarted,
+//           stoppable, accounts }. `stoppable` is the only field a caller
+//           should act on, and it is deliberately conservative: it requires at
+//           least one account and zero working / unknown / not-started.
+async function botCompletion(hostId, file, opts = {}) {
+  const host = hosts.resolveHost(hostId);
+  if (!host) throw new Error("Unknown host: " + hostId);
+  const data = JSON.parse(await hosts.readFile(host, file));
+  const users = usersOf(data).filter((u) => u && u.Enabled !== false);
+  const secrets = users
+    .map((u) => String((u && u.ClientSecret) || "").trim())
+    .filter(Boolean);
+  const rows = secrets.length
+    ? await BotAccount.find(
+        { clientSecret: { $in: secrets } },
+        {
+          clientSecret: 1,
+          login: 1,
+          inProgressCount: 1,
+          inProgressGames: 1,
+          dropCount: 1,
+          lastScanAt: 1,
+          lastScanStatus: 1,
+        },
+      ).lean()
+    : [];
+  return { host: host.id, file, ...classifyBotCompletion(data, rows, opts) };
+}
+
+module.exports = {
+  FRESH_MS,
+  PARK_FRESH_MS,
+  botCompletion,
+  classifyBotCompletion,
+  gamesForUser,
+};

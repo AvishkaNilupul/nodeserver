@@ -185,6 +185,175 @@
         color: var(--muted);
         font-size: 12px;
       }
+      .forecast {
+        margin-bottom: 18px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .forecast-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 14px;
+        padding: 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      .forecast-title {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .forecast-icon {
+        display: grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        flex: 0 0 38px;
+        border-radius: 10px;
+        background: #17352f;
+        color: var(--accent);
+        font-size: 19px;
+      }
+      .forecast-head h2 {
+        margin-bottom: 4px;
+        font-size: 18px;
+      }
+      .forecast-status {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .forecast-summary {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--line);
+        background: var(--soft);
+      }
+      .forecast-stat {
+        min-width: 0;
+      }
+      .forecast-stat strong {
+        display: block;
+        margin-top: 3px;
+        font-size: 18px;
+      }
+      .forecast-stat span {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .forecast-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 18px;
+      }
+      .forecast-tabs {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .forecast-tab {
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .forecast-tab.active {
+        border-color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 13%, transparent);
+        color: var(--accent);
+      }
+      .forecast-items {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        padding: 0 14px 14px;
+      }
+      .forecast-card {
+        display: grid;
+        grid-template-columns: 46px minmax(0, 1fr) auto;
+        gap: 11px;
+        align-items: center;
+        min-width: 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--soft);
+      }
+      .forecast-card .thumb {
+        width: 46px;
+        height: 46px;
+        border-radius: 10px;
+      }
+      .forecast-main {
+        min-width: 0;
+      }
+      .forecast-name {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .forecast-game {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .forecast-progress {
+        height: 6px;
+        margin-top: 9px;
+        overflow: hidden;
+        border-radius: 99px;
+        background: var(--line);
+      }
+      .forecast-progress span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent);
+      }
+      .forecast-meta {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 7px;
+      }
+      .forecast-side {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 6px;
+        white-space: nowrap;
+      }
+      .forecast-percent {
+        font-size: 18px;
+        font-weight: 800;
+      }
+      .forecast-empty {
+        padding: 22px 18px 26px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .forecast-notice {
+        margin: 0 14px 14px;
+        padding: 10px 12px;
+        border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--warn) 9%, transparent);
+        color: var(--warn);
+        font-size: 12px;
+      }
       label {
         display: block;
         margin-bottom: 5px;
@@ -557,8 +726,12 @@
           grid-template-columns: repeat(2, 1fr);
         }
         .filters,
-        .account-grid {
+        .account-grid,
+        .forecast-items {
           grid-template-columns: 1fr;
+        }
+        .forecast-summary {
+          grid-template-columns: repeat(2, 1fr);
         }
       }
       @media (max-width: 520px) {
@@ -598,6 +771,29 @@
         .account-summary {
           grid-template-columns: 1fr 1fr 1fr;
         }
+        .forecast-head,
+        .forecast-toolbar {
+          display: block;
+        }
+        .forecast-head .btn,
+        .forecast-toolbar .forecast-tabs {
+          margin-top: 10px;
+        }
+        .forecast-card {
+          grid-template-columns: 42px minmax(0, 1fr);
+        }
+        .forecast-card .thumb {
+          width: 42px;
+          height: 42px;
+        }
+        .forecast-side {
+          grid-column: 1 / -1;
+          flex-direction: row;
+          justify-content: space-between;
+          align-items: center;
+          padding-top: 7px;
+          border-top: 1px solid var(--line);
+        }
         .drawer {
           padding-right: 16px;
           padding-left: 16px;
@@ -633,6 +829,37 @@
         class="badge ready"
         style="display: none; margin-bottom: 14px"
       ></div>
+      <section class="forecast" id="forecast" aria-live="polite">
+        <div class="forecast-head">
+          <div class="forecast-title">
+            <div class="forecast-icon" aria-hidden="true">↗</div>
+            <div>
+              <h2>Farming next</h2>
+              <div class="muted">Live progress from the active fleet, ranked by what should become sellable soon.</div>
+              <div class="forecast-status" id="forecastStatus"><span class="muted">Loading farming data...</span></div>
+            </div>
+          </div>
+          <button class="btn secondary small" id="forecastRefresh" type="button">Refresh</button>
+        </div>
+        <div class="forecast-summary" id="forecastSummary">
+          <div class="forecast-stat"><span>Farming accounts</span><strong>0</strong></div>
+          <div class="forecast-stat"><span>Items in progress</span><strong>0</strong></div>
+          <div class="forecast-stat"><span>Nearly ready</span><strong>0</strong></div>
+          <div class="forecast-stat"><span>Available now</span><strong>0</strong></div>
+        </div>
+        <div class="forecast-toolbar">
+          <div class="forecast-tabs" id="forecastTabs">
+            <button class="forecast-tab active" type="button" data-forecast-filter="soon">Next to sell</button>
+            <button class="forecast-tab" type="button" data-forecast-filter="all">All farming</button>
+            <button class="forecast-tab" type="button" data-forecast-filter="games">By game</button>
+          </div>
+          <span class="filter-count" id="forecastUpdated">Waiting for a fresh scan</span>
+        </div>
+        <div id="forecastNotice"></div>
+        <div class="forecast-items" id="forecastItems">
+          <div class="forecast-empty">Loading the current farming pipeline...</div>
+        </div>
+      </section>
       <section class="metrics">
         <div class="metric">
           <span class="muted">Total accounts</span><strong id="total">0</strong
@@ -720,7 +947,14 @@
     <div class="toast" id="toast"></div>
     <script>
       const $ = (id) => document.getElementById(id),
-        S = { page: 1, pages: 1, account: null, creds: null };
+        S = {
+          page: 1,
+          pages: 1,
+          account: null,
+          creds: null,
+          forecast: null,
+          forecastFilter: "soon",
+        };
       const esc = (v) =>
         String(v ?? "")
           .replace(/&/g, "&amp;")
@@ -759,6 +993,23 @@
       }
       const badge = (text, cls = "") =>
         `<span class="badge ${cls}">${esc(text)}</span>`;
+      const confidenceBadge = (confidence) => {
+        const map = {
+          high: ["Live", "ready"],
+          medium: ["Recent", "ready"],
+          estimated: ["Estimated", ""],
+          low: ["Stale", "warn"],
+        };
+        const [label, cls] = map[confidence] || ["Unknown", "warn"];
+        return badge(label, cls);
+      };
+      const ago = (value) => {
+        if (!value) return "No scan yet";
+        const mins = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.round(mins / 60);
+        return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+      };
       function summary(s) {
         $("total").textContent = s.total || 0;
         $("needs").textContent = s.needsConnect || 0;
@@ -818,9 +1069,10 @@
       }
       async function load() {
         try {
-          const [m, s] = await Promise.all([
+          const [m, s, f] = await Promise.all([
             api("/reseller/me"),
             api("/reseller/summary"),
+            loadForecast().catch(() => null),
           ]);
           $("identity").textContent =
             m.me.displayName || m.me.username || "Reseller";
@@ -833,6 +1085,78 @@
           await loadRows();
         } catch (e) {
           toast(e.message, true);
+        }
+      }
+      function renderForecastSummary(summary) {
+        const values = [
+          summary.activeAccounts || 0,
+          summary.items || 0,
+          summary.readySoon || 0,
+          summary.availableNow || 0,
+        ];
+        $("forecastSummary").innerHTML = ["Farming accounts", "Items in progress", "Nearly ready", "Available now"]
+          .map((label, index) => `<div class="forecast-stat"><span>${label}</span><strong>${values[index]}</strong></div>`)
+          .join("");
+      }
+      function forecastItemCard(item) {
+        const percent = Math.max(0, Math.min(100, Number(item.averagePercent) || 0));
+        const remaining = item.estimatedMinutesRemaining == null
+          ? "Time remaining unknown"
+          : item.estimatedMinutesRemaining <= 0
+            ? "Claim is ready"
+            : `~${item.estimatedMinutesRemaining} min left`;
+        const available = item.availableNow?.accounts || 0;
+        return `<article class="forecast-card"><div>${item.imageURL ? `<img class="thumb" src="${esc(item.imageURL)}" alt="">` : '<span class="thumb placeholder">DROP</span>'}</div><div class="forecast-main"><strong class="forecast-name">${esc(item.name)}</strong><div class="forecast-game">${esc(item.game)}${item.campaign ? ` · ${esc(item.campaign)}` : ""}</div><div class="forecast-progress" aria-label="${percent}% complete"><span style="width:${percent}%"></span></div><div class="forecast-meta">${confidenceBadge(item.confidence)}<span class="muted">${item.farmingAccounts} account${item.farmingAccounts === 1 ? "" : "s"}</span><span class="muted">${esc(remaining)}</span></div></div><div class="forecast-side"><span class="forecast-percent">${percent}%</span>${available ? badge(`${available} ready now`, "ready") : badge("New stock ahead")}</div></article>`;
+      }
+      function forecastGameCard(game) {
+        const end = game.campaignEndAt ? `Ends ${new Date(game.campaignEndAt).toLocaleDateString()}` : "Campaign end unknown";
+        const snapshotReady = game.itemSnapshotReady === true;
+        const detail = snapshotReady
+          ? `${game.items} item${game.items === 1 ? "" : "s"} in progress · ${esc(end)}`
+          : `Item scan warming up · ${esc(end)}`;
+        const sideValue = snapshotReady ? game.readySoon : game.availableNow || 0;
+        const sideLabel = snapshotReady ? "nearly ready" : "accounts ready now";
+        return `<article class="forecast-card"><div class="thumb placeholder">GAME</div><div class="forecast-main"><strong class="forecast-name">${esc(game.game)}</strong><div class="forecast-game">${detail}</div><div class="forecast-progress"><span style="width:${snapshotReady ? Math.min(100, game.readySoon * 25) : 0}%"></span></div><div class="forecast-meta">${confidenceBadge(game.confidence)}<span class="muted">${game.farmingAccounts} farming account${game.farmingAccounts === 1 ? "" : "s"}</span></div></div><div class="forecast-side"><span class="forecast-percent">${sideValue}</span><span class="muted">${sideLabel}</span></div></article>`;
+      }
+      function renderForecast(forecast) {
+        S.forecast = forecast;
+        const summary = forecast.summary || {};
+        renderForecastSummary(summary);
+        const status = $("forecastStatus");
+        const runtime = forecast.runtime || {};
+        const freshness = forecast.freshness || {};
+        status.innerHTML = `${runtime.available === false ? badge("Fleet status delayed", "warn") : badge("Fleet status live", "ready")}${freshness.stale ? badge("Progress scan is stale", "warn") : badge("Progress scan current", "ready")}`;
+        $("forecastUpdated").textContent = freshness.newestScanAt ? `Updated ${ago(freshness.newestScanAt)}` : "Waiting for a fresh scan";
+        $("forecastNotice").innerHTML = runtime.available === false || freshness.stale
+          ? '<div class="forecast-notice">Some progress evidence is delayed. Treat the ranking as directional until the next successful scan.</div>'
+          : "";
+        const filter = S.forecastFilter;
+        if (filter === "games") {
+          const games = forecast.games || [];
+          $("forecastItems").innerHTML = games.length ? games.map(forecastGameCard).join("") : '<div class="forecast-empty">No active game pipeline is visible yet.</div>';
+          return;
+        }
+        let items = forecast.items || [];
+        if (filter === "soon") items = items.filter((item) => item.readySoon || item.averagePercent >= 50);
+        if (items.length) {
+          $("forecastItems").innerHTML = items.map(forecastItemCard).join("");
+        } else if ((forecast.games || []).length) {
+          $("forecastItems").innerHTML = `<div class="forecast-empty">Item-level progress is warming up. Current farming is visible by game below.</div>${(forecast.games || []).slice(0, 8).map(forecastGameCard).join("")}`;
+        } else {
+          $("forecastItems").innerHTML = '<div class="forecast-empty">No active item progress is available yet.</div>';
+        }
+      }
+      async function loadForecast(force = false) {
+        try {
+          if (force) $("forecastItems").innerHTML = '<div class="forecast-empty">Refreshing farming pipeline...</div>';
+          const d = await api("/reseller/farming-forecast" + (force ? `?t=${Date.now()}` : ""));
+          renderForecast(d.forecast || {});
+          return d;
+        } catch (e) {
+          $("forecastStatus").innerHTML = badge("Unavailable", "warn");
+          $("forecastUpdated").textContent = "Try again shortly";
+          $("forecastItems").innerHTML = `<div class="forecast-empty">${esc(e.message)}</div>`;
+          throw e;
         }
       }
       function render(a) {
@@ -992,6 +1316,14 @@
         }
       };
       $("refresh").onclick = load;
+      $("forecastRefresh").onclick = () => loadForecast(true).catch(() => {});
+      document.querySelectorAll("[data-forecast-filter]").forEach((button) => {
+        button.onclick = () => {
+          S.forecastFilter = button.dataset.forecastFilter || "soon";
+          document.querySelectorAll("[data-forecast-filter]").forEach((node) => node.classList.toggle("active", node === button));
+          if (S.forecast) renderForecast(S.forecast);
+        };
+      });
       $("clearFilters").onclick = () => {
         $("q").value = "";
         $("status").value = "";
