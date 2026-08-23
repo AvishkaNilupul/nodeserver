@@ -178,8 +178,14 @@
     const assigned = !!(bot && bot.assigned);
     const bots = RT.state.BOTS || [];
 
+    // Show accounts as used/capacity when the stack's cap is known (a rental
+    // stack always reports one); fall back to the bare count otherwise.
+    const acctTxt =
+      assigned && bot.capacity != null
+        ? (bot.accounts || 0) + "/" + bot.capacity + " accounts"
+        : (bot.accounts || 0) + " account(s)";
     const botMeta = assigned
-      ? esc((bot.hostLabel || "") + " · " + (bot.file || "") + " · " + (bot.accounts || 0) + " account(s)") +
+      ? esc((bot.hostLabel || "") + " · " + (bot.file || "") + " · " + acctTxt) +
         ((bot.sharedWith || []).length ? ' · <b>shared with ' + esc(bot.sharedWith.join(", ")) + '</b>' : '')
       : "no bot yet";
 
@@ -212,7 +218,10 @@
         '<b>Bot</b> ' + RT.botStatusHtml(bot) +
         '<span class="muted">' + botMeta + '</span>' +
         (assigned
-          ? '<span style="flex:1"></span>' +
+          ? '<span class="muted" style="font-size:12px;margin-left:6px">Cap</span>' +
+            '<input id="eCap" type="number" min="1" max="100" value="' + (bot.capacity == null ? '' : Number(bot.capacity)) + '" style="width:56px" title="Rental stack capacity — how many accounts this bot may hold"/>' +
+            '<button class="btn ghost sm" id="eCapBtn" data-act="setStackCap" data-id="' + id + '">Set</button>' +
+            '<span style="flex:1"></span>' +
             '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + id + '">Start</button>' +
             '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + id + '">Restart</button>' +
             '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + id + '">Stop</button>' +
@@ -589,6 +598,38 @@
     }
   }
 
+  // ---- bot: stack capacity ----
+
+  // Change how many accounts the renter's rental stack may hold. This is the
+  // per-config cap that actually gates account writes (separate from the
+  // renter's "Account limit"). The stack can be shared, so a change here shifts
+  // every co-renter's free-slot count — hence the botPicker reload afterwards.
+  async function setStackCap(id) {
+    const capacity = intVal("eCap");
+    if (!(capacity >= 1 && capacity <= 100)) {
+      toast("Capacity must be a whole number between 1 and 100");
+      return;
+    }
+    const btn = $("eCapBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Setting…"; }
+    try {
+      const d = await api("/renters/" + id + "/stack-capacity", {
+        method: "PUT",
+        body: JSON.stringify({ capacity }),
+      });
+      toast("Capacity set to " + d.capacity +
+        (d.remaining != null ? " · " + d.remaining + " slot(s) free" : ""));
+      await RT.reloadMany(["renters", "bots", "botPicker"]);
+      // Like manualAdd/addFromPool: a failed refresh leaves this button on
+      // screen, so its busy state must be undone here.
+      const ok = await open(id);
+      if (!ok && btn) { btn.disabled = false; btn.textContent = "Set"; }
+    } catch (e) {
+      toast(e.message);
+      if (btn) { btn.disabled = false; btn.textContent = "Set"; }
+    }
+  }
+
   // ---- save / password / delete ----
 
   async function saveRenter(id) {
@@ -670,6 +711,7 @@
   RT.on("saveRenter", (el, ds) => { saveRenter(ds.id); });
   RT.on("createRenterBot", (el, ds) => { createRenterBot(ds.id); });
   RT.on("assignBot", (el, ds) => { assignBot(ds.id); });
+  RT.on("setStackCap", (el, ds) => { setStackCap(ds.id); });
   RT.on("quickFarm", () => { quickFarm(); });
   RT.on("manualAdd", (el, ds) => { manualAdd(ds.id); });
   RT.on("previewPool", (el, ds) => { previewPool(ds.id); });

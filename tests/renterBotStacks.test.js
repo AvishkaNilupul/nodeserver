@@ -6,6 +6,7 @@ const {
   stackKey,
   assertCapacity,
   chooseAvailableStack,
+  normalizeCapacity,
 } = require("../utils/renterBotStacks");
 
 test("rental stack keys normalize the local host", () => {
@@ -50,4 +51,22 @@ test("quick farming returns null when every stack is full", () => {
     chooseAvailableStack([{ host: "pi", file: "config_30.json", remaining: 0 }]),
     null,
   );
+});
+
+test("normalizeCapacity accepts whole numbers within the schema bounds", () => {
+  assert.equal(normalizeCapacity(1), 1);
+  assert.equal(normalizeCapacity(100), 100);
+  assert.equal(normalizeCapacity("50"), 50);
+  assert.equal(normalizeCapacity(10.9), 10); // floored, not rounded
+});
+
+test("normalizeCapacity rejects out-of-range and non-numeric input as null", () => {
+  assert.equal(normalizeCapacity(0), null);
+  assert.equal(normalizeCapacity(101), null);
+  assert.equal(normalizeCapacity(-5), null);
+  assert.equal(normalizeCapacity("abc"), null);
+  assert.equal(normalizeCapacity(""), null);
+  assert.equal(normalizeCapacity(null), null);
+  assert.equal(normalizeCapacity(undefined), null);
+  assert.equal(normalizeCapacity(NaN), null);
 });
