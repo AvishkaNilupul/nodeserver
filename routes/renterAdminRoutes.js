@@ -46,6 +46,9 @@ const { recordPoolUsage } = require("../utils/poolUsageLog");
 const {
   listStacks,
   requireStack,
+  findStack,
+  setStackCapacity,
+  normalizeCapacity,
   stackKey,
   chooseAvailableStack,
 } = require("../utils/renterBotStacks");
@@ -59,6 +62,7 @@ const {
   provisionEmptyConfig,
   getConfigGames,
   removeAccountFromConfig,
+  countConfigAccounts,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
@@ -876,12 +880,15 @@ async function renterBotStatus(renter) {
     running = null;
   }
   const sharers = await otherSharers(renter);
+  const stack = await findStack(host.id, renter.botFile);
   return {
     assigned: true,
     running,
     accounts,
+    host: host.id,
     hostLabel: host.label,
     file: renter.botFile,
+    capacity: stack ? stack.capacity : null,
     sharedWith: sharers.map((s) => s.username),
   };
 }
@@ -896,6 +903,97 @@ router.get("/renters/:id/bot", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// Change the account CAPACITY of the rental stack this renter is on. This is
+// the per-config cap (RenterBotStack.capacity) that actually gates how many
+// Twitch accounts the bot may hold — a different limit from Renter.maxAccounts,
+// which only sizes the renter's own pool quota. Bounded 1..100. A stack can be
+// shared by several renters, so this affects every renter on the same config;
+// the UI surfaces that. Refuses to drop the cap below what the config already
+// holds, which would leave the stack permanently full and unable to accept adds.
+router.put(
+  "/renters/:id/stack-capacity",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: "Bad renter id" });
+      }
+      const r = await Renter.findById(req.params.id);
+      if (!r)
+        return res.status(404).json({ success: false, message: "Not found" });
+      if (!r.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "This renter has no bot assigned." });
+      }
+      const host = hosts.resolveHost(r.botHost);
+      if (!host) {
+        return res.status(400).json({
+          success: false,
+          message: "Unknown host for this renter's bot.",
+        });
+      }
+
+      const capacity = normalizeCapacity(req.body && req.body.capacity);
+      if (capacity == null) {
+        return res.status(400).json({
+          success: false,
+          message: "Capacity must be a whole number between 1 and 100.",
+        });
+      }
+
+      // Must already be a registered rental stack (clear 409 otherwise).
+      await requireStack(host.id, r.botFile);
+
+      // Never set the cap below what the config physically holds. Best effort —
+      // an unreadable host simply skips this guard, since capacity is a DB value
+      // and the add-time assertCapacity re-checks against the live config anyway.
+      let current = null;
+      try {
+        current = await countConfigAccounts(host, r.botFile);
+      } catch {
+        current = null;
+      }
+      if (current != null && capacity < current) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This bot already holds " +
+            current +
+            " account(s). Set the capacity to " +
+            current +
+            " or higher.",
+        });
+      }
+
+      const row = await setStackCapacity(host.id, r.botFile, capacity);
+      if (!row) {
+        return res.status(409).json({
+          success: false,
+          message: "That config is not a dedicated rental stack.",
+        });
+      }
+      res.json({
+        success: true,
+        capacity: row.capacity,
+        used: current,
+        remaining: current == null ? null : Math.max(0, row.capacity - current),
+      });
+    } catch (err) {
+      const status =
+        err && ["not_rental_stack", "bad_capacity"].includes(err.code)
+          ? 409
+          : 500;
+      if (status === 500) {
+        console.error("renter stack-capacity error:", err.message);
+      }
+      res
+        .status(status)
+        .json({ success: false, message: err.message || "Server error" });
+    }
+  },
+);
 
 // LIVE LOGS for a renter's bot — the same docker-logs tail the operator's Bots
 // page offers (/bot-configs/logs/:file), but the container is always derived
