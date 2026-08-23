@@ -461,7 +461,7 @@ async function fetchDropCampaigns(token, arg) {
 const CAMPAIGN_DETAILS_QUERY =
   "query($dropID: ID!) { currentUser { dropCampaign(id: $dropID) { id name " +
   "game { displayName } timeBasedDrops { id name requiredMinutesWatched " +
-  "benefitEdges { benefit { id name imageAssetURL game { name } } } } } } }";
+  "benefitEdges { benefit { id name imageAssetURL game { displayName name } } } } } } }";
 
 async function fetchCampaignDetails(token, dropID, arg) {
   const { clientId, host } = scanOpts(arg);

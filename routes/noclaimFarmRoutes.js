@@ -32,6 +32,7 @@ const { buildSocialPost } = require("../utils/socialPost");
 const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
 const { decrypt } = require("../utils/secretBox");
+const { recordPoolUsage } = require("../utils/poolUsageLog");
 
 const router = express.Router();
 
@@ -165,6 +166,40 @@ router.post("/api/noclaim-farm/games", requireSuperadmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Reuse-only game list (World of Tanks / UFL): the auto-farmer may farm these
+// but must never spend a FRESH pool account on them — it only reuses accounts
+// already used for that same game. Same single-source-of-truth pattern as the
+// no-claim list above (see settings.isReuseOnlyGame).
+// ---------------------------------------------------------------------------
+router.get("/api/noclaim-farm/reuse-only-games", requireSuperadmin, (req, res) => {
+  res.json({
+    success: true,
+    games: settings.getAutoFarm().reuseOnlyGames || [],
+  });
+});
+
+router.post(
+  "/api/noclaim-farm/reuse-only-games",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      let games = Array.isArray(req.body.games) ? req.body.games : null;
+      if (!games)
+        return res
+          .status(400)
+          .json({ success: false, message: "games must be an array." });
+      games = games
+        .map((g) => String(g || "").trim().toLowerCase())
+        .filter(Boolean);
+      const saved = await settings.setAutoFarm({ reuseOnlyGames: games });
+      res.json({ success: true, games: saved.reuseOnlyGames });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Pool availability (cheap count for the create form).
 // ---------------------------------------------------------------------------
 router.get("/api/noclaim-farm/pool", requireSuperadmin, async (req, res) => {
@@ -289,6 +324,7 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
       );
       if (!doc) break;
       claimed.push(doc);
+      await recordPoolUsage(doc._id, { event: "claimed", actor: "noclaim", game, note });
     }
     if (!claimed.length)
       return res
@@ -343,10 +379,17 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
   } catch (err) {
     // Roll the claim back so accounts aren't stranded out of the pool.
     if (claimed.length) {
-      await AvailableAccount.updateMany(
+      const stillClaimed = await AvailableAccount.find(
+        { _id: { $in: claimed.map((d) => d._id) }, status: "claimed" },
+        { _id: 1 },
+      ).lean();
+      const rolledBack = await AvailableAccount.updateMany(
         { _id: { $in: claimed.map((d) => d._id) } },
         { $set: { status: "available", claimedAt: null, claimedNote: "" } },
       ).catch(() => {});
+      if (rolledBack && (rolledBack.modifiedCount || rolledBack.nModified)) {
+        await recordPoolUsage(stillClaimed.map((d) => d._id), { event: "released", actor: "noclaim" });
+      }
     }
     res
       .status(err.status || 500)
@@ -626,6 +669,41 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// Restart a bot's container. Works whether it's running or was stopped:
+// `docker restart` re-spins the process from scratch, which respawns every
+// per-account watch thread. Over days of uptime a container can silently bleed
+// watch threads (some accounts stop farming while others keep going) — a
+// restart revives them all, and it also just starts a container the operator
+// had stopped. Watch progress lives on Twitch's side, so nothing is lost.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/bots/:id/restart",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      // `docker restart` errors if the container doesn't exist; surface that
+      // clearly rather than silently swallowing it, so the UI can tell the
+      // operator to re-create the bot (its container may have been removed).
+      const out = await sh(
+        `docker restart ${hosts.shq(containerFor(id))} 2>&1 || echo "__ERR__"`,
+        { timeout: 40000 },
+      );
+      if (out.includes("__ERR__"))
+        return res.status(409).json({
+          success: false,
+          message:
+            "No container to restart — it may have been removed. Release and re-create the bot.",
+        });
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Release a bot: stop+remove container, release its accounts back to the pool,
 // delete its config. Use once you've listed the accounts (or to abandon).
 // ---------------------------------------------------------------------------
@@ -658,6 +736,10 @@ router.post(
             },
           );
           released = r.modifiedCount || 0;
+          if (released) {
+            const rows = await AvailableAccount.find({ clientSecret: { $in: secrets } }, { _id: 1 }).lean();
+            await recordPoolUsage(rows.map((row) => row._id), { event: "released", actor: "noclaim" });
+          }
         }
       }
       await sh(

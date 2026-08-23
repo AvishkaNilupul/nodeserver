@@ -30,6 +30,7 @@ const settings = require("../utils/settings");
 const WebBotAccount = require("../models/WebBotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
 const { encrypt } = require("../utils/secretBox");
+const { recordPoolUsage } = require("../utils/poolUsageLog");
 const webbotTwitch = require("../utils/webbotTwitch");
 
 const router = express.Router();
@@ -303,6 +304,7 @@ router.post("/api/webbot-farm/pull", requireSuperadmin, async (req, res) => {
       );
       if (!doc) break;
       claimed.push(doc);
+      await recordPoolUsage(doc._id, { event: "claimed", actor: "webbot", note: POOL_NOTE });
     }
     if (!claimed.length) return res.status(409).json({ success: false, message: "No ready pool accounts to claim." });
     let created = 0;
@@ -312,6 +314,7 @@ router.post("/api/webbot-farm/pull", requireSuperadmin, async (req, res) => {
       const exists = await WebBotAccount.findOne({ webToken: token }).lean();
       if (exists) {
         await AvailableAccount.updateOne({ _id: a._id }, { $set: { status: "available", claimedAt: null, claimedNote: "" } });
+        await recordPoolUsage(a._id, { event: "released", actor: "webbot" });
         duplicate++;
         continue;
       }
@@ -331,10 +334,17 @@ router.post("/api/webbot-farm/pull", requireSuperadmin, async (req, res) => {
     res.json({ success: true, created, duplicate, claimed: claimed.length });
   } catch (err) {
     if (claimed.length) {
-      await AvailableAccount.updateMany(
+      const stillClaimed = await AvailableAccount.find(
+        { _id: { $in: claimed.map((d) => d._id) }, status: "claimed" },
+        { _id: 1 },
+      ).lean();
+      const rolledBack = await AvailableAccount.updateMany(
         { _id: { $in: claimed.map((d) => d._id) } },
         { $set: { status: "available", claimedAt: null, claimedNote: "" } },
       ).catch(() => {});
+      if (rolledBack && (rolledBack.modifiedCount || rolledBack.nModified)) {
+        await recordPoolUsage(stillClaimed.map((d) => d._id), { event: "released", actor: "webbot" });
+      }
     }
     res.status(500).json({ success: false, message: err.message });
   }
@@ -703,11 +713,16 @@ router.delete("/api/webbot-farm/accounts/:id", requireSuperadmin, async (req, re
     }
     let released = false;
     if (doc.fromPool && doc.webToken) {
+      const poolRow = await AvailableAccount.findOne(
+        { clientSecret: doc.webToken, status: "claimed", claimedNote: POOL_NOTE },
+        { _id: 1 },
+      ).lean();
       const r = await AvailableAccount.updateOne(
         { clientSecret: doc.webToken, status: "claimed", claimedNote: POOL_NOTE },
         { $set: { status: "available", claimedAt: null, claimedNote: "" } },
       );
       released = (r.modifiedCount || 0) > 0;
+      if (released && poolRow) await recordPoolUsage(poolRow._id, { event: "released", actor: "webbot" });
     }
     await doc.deleteOne();
     res.json({ success: true, released });

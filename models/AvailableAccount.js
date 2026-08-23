@@ -37,6 +37,27 @@ const availableAccountSchema = new mongoose.Schema(
     claimedAt: { type: Date, default: null },
     claimedNote: { type: String, default: "" },
 
+    // Append-only trail of pool usage. Writers cap this to the newest 50
+    // entries so long-lived accounts cannot grow the document unbounded.
+    usageHistory: {
+      type: [
+        {
+          at: { type: Date, default: Date.now },
+          event: {
+            type: String,
+            enum: ["claimed", "released", "recycled", "rented", "returned", "sold", "deleted"],
+          },
+          game: { type: String, default: "" },
+          campaignId: { type: String, default: "" },
+          note: { type: String, default: "" },
+          actor: { type: String, default: "" },
+          host: { type: String, default: "" },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
+
     // Bookkeeping from the on-demand "Check" button — a real call against
     // Twitch's own drops-inventory API (utils/twitchInventory.js, the same
     // one the drop archive scanner uses), so a stored clientSecret is

@@ -25,6 +25,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
         "skip_no_capacity", // Pi at max auto containers (may be retried later)
         "skip_host_offline", // the Pi was unreachable at decision time
         "skip_already_covered", // manual bots / archived accounts already cover this game's demand
+        "skip_reuse_only", // reuse-only game (WoT/UFL): never spends fresh accounts and none of its own recycled ones are free right now
       ],
       required: true,
     },
@@ -103,6 +104,12 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // next time a decision is recorded. Declared here because Mongoose strict
     // mode silently drops undeclared paths on $set (see `bots.shared` above).
     rescanRequested: { type: Boolean, default: false },
+
+    // When the brain most recently made (or re-made) the decision on this
+    // campaign. createdAt answers when the row first appeared; updatedAt also
+    // moves for listing/backfill bookkeeping, so neither is a truthful watcher
+    // decision timestamp.
+    decidedAt: { type: Date, default: null, index: true },
 
     executedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
@@ -188,5 +195,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
 
 // One decision per game+campaign — the brain never double-plans a campaign.
 autoFarmTaskSchema.index({ game: 1, campaignId: 1 }, { unique: true });
+autoFarmTaskSchema.index({ status: 1, decidedAt: -1 });
+autoFarmTaskSchema.index({ decision: 1, decidedAt: -1 });
 
 module.exports = mongoose.model("AutoFarmTask", autoFarmTaskSchema);

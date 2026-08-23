@@ -1815,6 +1815,21 @@
         badtokens: false,
         duplicates: false,
       };
+      // The cross-archive views (overview / by game / by item) are served from a
+      // rollup the server rebuilds in the background, so a read right after a
+      // write can still show the pre-write numbers. Actions where that would
+      // read as "nothing happened" pass { fresh: true } to loadOverview(), which
+      // asks the server to wait for a rebuild.
+      //
+      // This is deliberately an ARGUMENT and not a shared flag. It used to be a
+      // module-level boolean consumed by whichever view loaded first, so opening
+      // another tab while a refresh was in flight let that tab eat the flag and
+      // the overview quietly read pre-write numbers. It cannot simply be sent on
+      // all three either: ?fresh=1 does not join an in-flight build (it must not
+      // — that build may predate the write being waited on), so three views
+      // asking would queue three full passes over the archive. One awaited
+      // loader asks; the rebuild it forces is the rollup every other view then
+      // reads.
       function invalidateClientViews() {
         Object.keys(viewLoaded).forEach((key) => (viewLoaded[key] = false));
         itemLoadedKey = "";
@@ -1850,9 +1865,12 @@
         return h >= 1 ? h + "h" : Math.round(ms / 60000) + "m";
       }
 
-      async function loadOverview() {
+      async function loadOverview(opts) {
+        const fresh = !!(opts && opts.fresh);
         try {
-          const o = (await api("/drops-archive/overview")).overview;
+          const o = (
+            await api("/drops-archive/overview" + (fresh ? "?fresh=1" : ""))
+          ).overview;
           $("overview").innerHTML =
             '<div class="stat accent"><b>' +
             o.totalItemsHeld +
@@ -2081,12 +2099,20 @@
         lastItems = append ? lastItems.concat(page) : page;
         itemLoadedKey = key;
         const total = Number(data.total) || lastItems.length;
+        // These counts come from a rollup rebuilt in the background, so say how
+        // old they are once that's long enough to matter. Without it, numbers
+        // that lag a scan by a minute look like a bug rather than a refresh
+        // that hasn't landed yet.
+        const age = data.builtAt
+          ? Date.now() - new Date(data.builtAt).getTime()
+          : 0;
         $("itemCount").textContent = lastItems.length
           ? lastItems.length +
             " of " +
             total +
             (data.truncated ? "+" : "") +
-            " distinct item(s)"
+            " distinct item(s)" +
+            (age > 90000 ? " · counts from " + timeAgo(data.builtAt) : "")
           : "";
         renderItemsGrid(append, page);
         $("loadMoreItems").hidden = !data.hasMore;
@@ -3342,7 +3368,10 @@
                 : ""),
             "ok",
           );
-          loadOverview();
+          // The import wrote for minutes after its POST returned, so any
+          // rebuild that POST triggered missed most of it — ask for one that
+          // starts now, and land it before the tab reloads.
+          await loadOverview({ fresh: true });
           loadProgress();
           if (activeTab === "accounts") loadAccounts();
         } catch (err) {
@@ -3353,9 +3382,21 @@
         }
       });
 
-      $("refreshBtn").addEventListener("click", () => {
+      $("refreshBtn").addEventListener("click", async () => {
         invalidateClientViews();
-        loadOverview();
+        // Refresh is the operator explicitly asking for current numbers, so it
+        // waits for a rebuilt rollup rather than re-rendering the one already
+        // in hand. Awaited before the tab reload so the tab reads the new one.
+        const btn = $("refreshBtn");
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Refreshing…";
+        try {
+          await loadOverview({ fresh: true });
+        } finally {
+          btn.disabled = false;
+          btn.textContent = label;
+        }
         loadProgress();
         switchTab(activeTab);
       });

@@ -25,9 +25,16 @@ const mp = require("./marketplaces");
 const settings = require("./settings");
 const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
+const { recordPoolUsage } = require("./poolUsageLog");
+const { recordAutoFarmEvent } = require("./autoFarmEventLog");
+const DropSet = require("../models/DropSet");
+const catalogRoutes = require("../routes/catalogRoutes");
+const { stampPreorderSet } = require("./catalogPreorder");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
+const DECISION_READ_CONCURRENCY = 4;
+const CATALOG_VARIANT_SYNC_MS = 6 * 60 * 60 * 1000;
 
 // Demand tiers (demandScore is 0-100 from utils/marketResearch.js).
 const DEMAND_FULL = 40; // proven seller -> full allocation
@@ -71,6 +78,59 @@ const REFERENCE_SALE_USD = 2.5;
 const PRICE_FACTOR_MIN = 0.6;
 const PRICE_FACTOR_MAX = 2;
 
+// Bounded parallel map that preserves input order. Decision-input reads may
+// overlap, but the campaign commit loop remains serial because it owns finite
+// pool, config and container resources.
+async function mapWithConcurrency(items, concurrency, fn) {
+  const list = Array.from(items || []);
+  if (!list.length) return [];
+  const out = new Array(list.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, Number(concurrency) || 1), list.length) },
+    async () => {
+      while (true) {
+        const index = next++;
+        if (index >= list.length) return;
+        out[index] = await fn(list[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return out;
+}
+
+function createSeatCounter({
+  maxAutoBots,
+  accountsPerBot,
+  activeContainers = 0,
+  freeSeats = 0,
+} = {}) {
+  let active = Math.max(0, Number(activeContainers) || 0);
+  let free = Math.max(0, Number(freeSeats) || 0);
+  const max = Math.max(0, Number(maxAutoBots) || 0);
+  const perBot = Math.max(1, Number(accountsPerBot) || 1);
+  const usableFree = () =>
+    Math.min(free, Math.min(active, max) * perBot, max * perBot);
+  return {
+    activeContainers: () => active,
+    freeSeats: () => usableFree(),
+    slotsFree: () => Math.max(0, max - active),
+    capacity: () =>
+      Math.min(max * perBot, Math.max(0, max - active) * perBot + usableFree()),
+    consumeExisting(count) {
+      free = Math.max(0, free - Math.max(0, Number(count) || 0));
+    },
+    addContainer(count = 1, seatsFree = 0) {
+      const requested = Math.max(0, Number(count) || 0);
+      const added = Math.min(requested, Math.max(0, max - active));
+      active += added;
+      free += Math.min(Math.max(0, Number(seatsFree) || 0), added * perBot);
+      return added;
+    },
+  };
+}
+
 // How much to scale a game's demand by what its sales are worth. Games we have
 // no price for (connection flips only) sit at 1 — unchanged, not punished.
 function priceFactor(avgPrice) {
@@ -87,6 +147,7 @@ const RETRYABLE = new Set([
   "skip_no_capacity",
   "skip_host_offline",
   "skip_already_covered", // covered accounts may sell — demand reopens
+  "skip_reuse_only", // reuse-only game — retries once one of its own accounts recycles back to the pool
 ]);
 
 const state = {
@@ -95,6 +156,7 @@ const state = {
   lastRun: null,
   lastError: "",
   lastSummary: null,
+  nextRunAt: null,
   // Epoch ms of the last pool-starvation alert (0 = not currently starving).
   // Plain in-process state on purpose: a missed alert after a restart is
   // harmless, and the alternative would need a schema field.
@@ -102,6 +164,7 @@ const state = {
   // Epoch ms of the last container repack. Same reasoning: a restart just means
   // the next tick may re-check a plan that turns out not to be worth running.
   lastRepackAt: 0,
+  lastCatalogVariantSyncAt: 0,
 };
 
 // Live progress log for the UI: every scan appends human-readable steps here
@@ -574,9 +637,7 @@ function demandAllocation(research, af, internalSales = 0) {
   const salesBoost =
     sales.count > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(sales.count) * pf : 0;
   const priceNote =
-    sales.avgPrice > 0
-      ? " at $" + sales.avgPrice.toFixed(2) + " avg"
-      : "";
+    sales.avgPrice > 0 ? " at $" + sales.avgPrice.toFixed(2) + " avg" : "";
   if (!research || research.scannedAt == null) {
     if (salesBoost >= DEMAND_HALF) {
       // No market data but our own sales history says it sells.
@@ -606,9 +667,7 @@ function demandAllocation(research, af, internalSales = 0) {
   const market = Number(research.demandScore || 0);
   const d = Math.round((market + salesBoost) * 10) / 10;
   const salesNote =
-    sales.count > 0
-      ? " incl. " + sales.count + " own sales" + priceNote
-      : "";
+    sales.count > 0 ? " incl. " + sales.count + " own sales" + priceNote : "";
   if (d >= DEMAND_FULL) {
     return {
       cap,
@@ -670,7 +729,18 @@ function fairShare(requests, budget) {
 // campaign of the SAME game (their claimedNote reads "recycled after <game>")
 // are claimed FIRST, so an account keeps stacking one game's drops event after
 // event instead of scattering across whatever campaign claims it next.
-async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
+//
+// `recycledOnly` is the reuse-only games' gate (World of Tanks / UFL, see
+// settings.isReuseOnlyGame): claim ONLY accounts this game was already farmed
+// on and recycled — never a brand-new pool account. It drops the generic
+// fallback pass, so when none of the game's own recycled accounts are free it
+// claims nothing rather than reaching for fresh stock. Requires preferGame;
+// without it there is nothing game-specific to match and it claims nothing.
+async function claimPoolAccounts(
+  n,
+  note,
+  { preferGame = "", recycledOnly = false } = {},
+) {
   const claimed = [];
   const passes = [];
   if (preferGame) {
@@ -679,7 +749,7 @@ async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
       claimedNote: new RegExp("^recycled after " + esc + "$", "i"),
     });
   }
-  passes.push({});
+  if (!recycledOnly) passes.push({});
   for (const extra of passes) {
     while (claimed.length < n) {
       const doc = await AvailableAccount.findOneAndUpdate(
@@ -695,6 +765,16 @@ async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
       );
       if (!doc) break;
       claimed.push(doc);
+      const match = String(note || "").match(
+        /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
+      );
+      await recordPoolUsage(doc._id, {
+        event: "claimed",
+        actor: "auto-farm",
+        note,
+        game: preferGame || (match && match[1]) || "",
+        campaignId: (match && match[2]) || "",
+      });
     }
     if (claimed.length >= n) break;
   }
@@ -703,14 +783,21 @@ async function claimPoolAccounts(n, note, { preferGame = "" } = {}) {
 
 async function releasePoolAccounts(docs) {
   if (!docs.length) return;
-  await AvailableAccount.updateMany(
+  const result = await AvailableAccount.updateMany(
     { _id: { $in: docs.map((d) => d._id) } },
     { $set: { status: "available", claimedAt: null, claimedNote: "" } },
   ).catch(() => {});
+  if (result) {
+    await recordPoolUsage(
+      docs.map((d) => d._id),
+      { event: "released", actor: "auto-farm" },
+    );
+  }
 }
 
 // Containers currently in use by live auto-farm tasks (the capacity gate).
-async function activeAutoBotCount() {
+async function activeAutoBotCount(ctx) {
+  if (ctx && ctx.hostState) return ctx.hostState.activeBots.length;
   const rows = await AutoFarmTask.find(
     { status: "active" },
     { bots: 1 },
@@ -916,24 +1003,48 @@ async function recycleSoldOutAccounts(af, progress) {
     if (fresh && fresh.lastScanStatus === "ok") {
       // Still ours → back to the pool. The claimedNote matches the preferGame
       // affinity regex so it re-farms the same game preferentially.
-      await AvailableAccount.updateOne(
+      const result = await AvailableAccount.updateOne(
         { _id: e.pool._id, status: "claimed" },
         {
           $set: {
             status: "available",
             claimedAt: null,
-            claimedNote: e.game ? "recycled after " + e.game : "recycled after sale",
+            claimedNote: e.game
+              ? "recycled after " + e.game
+              : "recycled after sale",
           },
         },
       );
-      recycled++;
+      if (result.modifiedCount || result.nModified) {
+        await recordPoolUsage(e.pool._id, {
+          event: "recycled",
+          actor: "auto-farm",
+          game: e.game || "",
+          note: e.game ? "recycled after " + e.game : "recycled after sale",
+        });
+        await recordAutoFarmEvent({
+          type: "recycled",
+          game: e.game || "",
+          count: 1,
+          reason: e.game ? "recycled after " + e.game : "recycled after sale",
+          actor: "recycleSoldOutAccounts",
+        });
+        recycled++;
+      }
     } else {
       // Buyer changed the password (or token died) — never redeploy it.
-      await AvailableAccount.updateOne(
+      const result = await AvailableAccount.updateOne(
         { _id: e.pool._id },
         { $set: { claimedNote: "sold — token reclaimed by buyer" } },
       );
-      reclaimed++;
+      if (result.modifiedCount || result.nModified) {
+        await recordPoolUsage(e.pool._id, {
+          event: "sold",
+          actor: "auto-farm",
+          note: "sold — token reclaimed by buyer",
+        });
+        reclaimed++;
+      }
     }
   }
   if (recycled || reclaimed) {
@@ -941,7 +1052,9 @@ async function recycleSoldOutAccounts(af, progress) {
       "Recycle: " +
         recycled +
         " sold-out account(s) returned to the pool" +
-        (reclaimed ? "; " + reclaimed + " skipped (token reclaimed by buyer)" : "") +
+        (reclaimed
+          ? "; " + reclaimed + " skipped (token reclaimed by buyer)"
+          : "") +
         ".",
     );
     try {
@@ -959,11 +1072,172 @@ async function recycleSoldOutAccounts(af, progress) {
   return recycled;
 }
 
+function uniqueTaskBots(rows, hostId) {
+  const seen = new Set();
+  const out = [];
+  for (const task of rows || []) {
+    for (const bot of task.bots || []) {
+      if (hostId && bot.host !== hostId) continue;
+      const key = bot.host + "|" + bot.container;
+      if (!bot.host || !bot.container || seen.has(key)) continue;
+      seen.add(key);
+      out.push(bot);
+    }
+  }
+  return out;
+}
+
+// One batched, post-wake/park view of every auto-owned config. This replaces
+// the per-campaign exists/readFile loops. If a host snapshot fails, callers
+// fall back to the old conservative live reads rather than trusting partial
+// data and creating replacement bots from an incomplete view.
+async function buildDecisionHostState(taskRows, af, farmHost, opts = {}) {
+  const started = Date.now();
+  const grouped = new Map();
+  for (const task of taskRows || []) {
+    for (const bot of task.bots || []) {
+      if (!bot.host || !bot.file) continue;
+      if (!grouped.has(bot.host)) grouped.set(bot.host, new Set());
+      grouped.get(bot.host).add(bot.file);
+    }
+  }
+  const hostRows = await mapWithConcurrency(
+    [...grouped.entries()],
+    DECISION_READ_CONCURRENCY,
+    async ([hostId, fileSet]) => {
+      const host = hosts.resolveHost(hostId);
+      if (!host) return [hostId, { ok: false, error: "unknown host" }];
+      if ((opts.skipHosts || new Set()).has(hostId)) {
+        return [hostId, { ok: false, error: "host already known offline" }];
+      }
+      let calls = 0;
+      try {
+        calls++;
+        const docker = await hosts.dockerPs(host);
+        calls++;
+        const raw = await hosts.readFiles(host, [...fileSet]);
+        const configs = new Map();
+        const files = new Set();
+        const missing = new Set();
+        for (const file of fileSet) {
+          const entry = raw[file];
+          if (!entry || !entry.ok) {
+            if (entry && /not found/i.test(entry.error || ""))
+              missing.add(file);
+            continue;
+          }
+          files.add(file);
+          try {
+            configs.set(file, JSON.parse(entry.text));
+          } catch {
+            /* existence remains known; malformed configs offer no seats */
+          }
+        }
+        return [hostId, { ok: true, docker, files, missing, configs, calls }];
+      } catch (error) {
+        return [
+          hostId,
+          {
+            ok: false,
+            calls,
+            error: error.message || String(error),
+          },
+        ];
+      }
+    },
+  );
+  const byHost = new Map(hostRows);
+  const activeTasks = (taskRows || []).filter(
+    (task) => task.status === "active",
+  );
+  const activeBots = uniqueTaskBots(activeTasks);
+  const farmRow = farmHost && byHost.get(farmHost.id);
+  let freeSeats = 0;
+  if (farmRow && farmRow.ok && af.consolidate !== false) {
+    for (const bot of uniqueTaskBots(activeTasks, farmHost.id)) {
+      const data = farmRow.configs.get(bot.file);
+      if (!data) continue;
+      freeSeats += Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
+    }
+  }
+  const seatCounter = createSeatCounter({
+    maxAutoBots: af.maxAutoBots,
+    accountsPerBot: af.accountsPerBot,
+    activeContainers: activeBots.length,
+    freeSeats,
+  });
+  const activeBotKeys = new Set(
+    activeBots.map((bot) => bot.host + "|" + bot.container),
+  );
+  return {
+    byHost,
+    activeBots,
+    seatCounter,
+    elapsedMs: Date.now() - started,
+    hostCalls: hostRows.reduce((n, [, row]) => n + (row.calls || 0), 0),
+    fileCount: [...grouped.values()].reduce((n, files) => n + files.size, 0),
+    hasFile(hostId, file, container) {
+      const row = byHost.get(hostId);
+      if (!row || !row.ok) return null;
+      if (row.missing.has(file)) return false;
+      if (!row.files.has(file)) return null;
+      return container
+        ? Object.prototype.hasOwnProperty.call(row.docker, container)
+        : true;
+    },
+    config(hostId, file) {
+      const row = byHost.get(hostId);
+      return row && row.ok ? row.configs.get(file) || null : null;
+    },
+    setConfig(hostId, file, data) {
+      if (!data) return;
+      let row = byHost.get(hostId);
+      if (!row || !row.ok) {
+        row = {
+          ok: true,
+          docker: {},
+          files: new Set(),
+          missing: new Set(),
+          configs: new Map(),
+          calls: row ? row.calls || 0 : 0,
+        };
+        byHost.set(hostId, row);
+      }
+      row.files.add(file);
+      row.missing.delete(file);
+      row.configs.set(file, data);
+    },
+    activateBot(bot, data) {
+      if (!bot || !bot.host || !bot.container) return false;
+      if (data && bot.file) this.setConfig(bot.host, bot.file, data);
+      const key = bot.host + "|" + bot.container;
+      if (activeBotKeys.has(key)) return false;
+      activeBotKeys.add(key);
+      activeBots.push(bot);
+      const row = byHost.get(bot.host);
+      if (row && row.ok) {
+        row.docker[bot.container] = { state: "running", status: "started" };
+      }
+      const config =
+        data || (bot.file ? this.config(bot.host, bot.file) : null);
+      const seatsFree = config
+        ? Math.max(0, af.accountsPerBot - botFactory.usedSeats(config))
+        : 0;
+      seatCounter.addContainer(1, seatsFree);
+      return true;
+    },
+  };
+}
+
 // Free seats inside containers that active auto-farm tasks already run on
 // this host. A "seat" is one enabled TwitchUsers slot out of accountsPerBot.
 // Unreadable configs count as zero free seats (never over-promise capacity).
-async function autoSeatCapacity(host, af) {
+async function autoSeatCapacity(host, af, ctx) {
   if (!host || af.consolidate === false) return 0;
+  if (ctx && ctx.hostState) {
+    const row = ctx.hostState.byHost.get(host.id);
+    if (row && row.ok) return ctx.hostState.seatCounter.freeSeats();
+  }
   const rows = await AutoFarmTask.find(
     { status: "active" },
     { bots: 1 },
@@ -993,33 +1267,27 @@ async function autoSeatCapacity(host, af) {
 // many games at once. Returns { placed, remaining }; placed entries carry
 // the task.bots row plus the accounts that landed there. Every filled
 // container is restarted once so TwitchDropsBot reloads its config.
-async function fillExistingBots(host, claimed, game, af) {
+async function fillExistingBots(host, claimed, game, af, ctx) {
   const placed = [];
   let remaining = claimed.slice();
   if (!remaining.length || af.consolidate === false) {
     return { placed, remaining };
   }
-  const rows = await AutoFarmTask.find(
-    { status: "active" },
-    { bots: 1 },
-  ).lean();
-  const seen = new Set();
-  const containers = [];
-  for (const t of rows) {
-    for (const b of t.bots || []) {
-      if (b.host !== host.id) continue;
-      const key = b.host + "|" + b.container;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      containers.push(b);
-    }
-  }
+  const containers =
+    ctx && ctx.hostState
+      ? ctx.hostState.activeBots.filter((bot) => bot.host === host.id)
+      : uniqueTaskBots(
+          await AutoFarmTask.find({ status: "active" }, { bots: 1 }).lean(),
+          host.id,
+        );
   for (const b of containers) {
     if (!remaining.length) break;
     let freeSeats = 0;
     let present = new Set();
     try {
-      const data = JSON.parse(await hosts.readFile(host, b.file));
+      const cached =
+        ctx && ctx.hostState ? ctx.hostState.config(host.id, b.file) : null;
+      const data = cached || JSON.parse(await hosts.readFile(host, b.file));
       freeSeats = Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
       const users =
         data.TwitchSettings && Array.isArray(data.TwitchSettings.TwitchUsers)
@@ -1050,6 +1318,10 @@ async function fillExistingBots(host, claimed, game, af) {
       const taken = batch.filter((a) => landed.has(a.username));
       if (!taken.length) continue;
       remaining = remaining.filter((a) => !taken.includes(a));
+      if (ctx && ctx.hostState) {
+        ctx.hostState.seatCounter.consumeExisting(r.added);
+        if (r.data) ctx.hostState.setConfig(host.id, b.file, r.data);
+      }
       if (r.changed) {
         await hosts
           .dockerContainer(host, "restart", b.container)
@@ -1140,6 +1412,20 @@ async function expireStalePlans() {
       },
     },
   );
+  const expiredReason =
+    "Campaign ended before this plan was executed — nothing was spent and there is nothing left to farm. Cleared automatically.";
+  for (const t of stale) {
+    if (!dead.some((id) => String(id) === String(t._id))) continue;
+    await recordAutoFarmEvent({
+      type: "plan_expired",
+      game: t.game,
+      campaignId: t.campaignId,
+      taskId: t._id,
+      count: 1,
+      reason: expiredReason,
+      actor: "expireStalePlans",
+    });
+  }
   return dead.length;
 }
 
@@ -1238,7 +1524,7 @@ async function processCampaign(c, ctx) {
     // upsert keeps the unique (game, campaignId) index happy on retries
     return AutoFarmTask.findOneAndUpdate(
       { game, campaignId: c.campaignId },
-      { $set: { ...base, ...fields } },
+      { $set: { ...base, ...fields, decidedAt: new Date() } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
   }
@@ -1317,7 +1603,9 @@ async function processCampaign(c, ctx) {
   }
 
   // 4) Reuse-first: weekly campaigns restart the game's existing auto-bot.
-  let reusable = await reusableTaskForGame(game);
+  let reusable = ctx.reusableMap
+    ? ctx.reusableMap.get(game) || null
+    : await reusableTaskForGame(game);
   if (reusable) {
     // Retired bots (deleted container, config renamed .done-*) can't be
     // restarted — drop them; if none survive, fall through to a fresh plan
@@ -1327,7 +1615,13 @@ async function processCampaign(c, ctx) {
       const h = hosts.resolveHost(b.host);
       if (!h) continue;
       try {
-        if (await hosts.exists(h, b.file)) live.push(b);
+        const cached =
+          ctx.hostState && ctx.hostState.hasFile(b.host, b.file, b.container);
+        if (
+          cached === true ||
+          (cached == null && (await hosts.exists(h, b.file)))
+        )
+          live.push(b);
       } catch {
         /* host unreachable — treat as not reusable */
       }
@@ -1363,6 +1657,7 @@ async function processCampaign(c, ctx) {
       try {
         await botFactory.startContainer(hosts.resolveHost(b.host), b.container);
         started.push(b.container);
+        if (ctx.hostState) ctx.hostState.activateBot(b);
       } catch (e) {
         failed.push(b.container + ": " + e.message);
       }
@@ -1398,6 +1693,29 @@ async function processCampaign(c, ctx) {
       error: failed.join("; "),
       executedAt: new Date(),
     });
+    if (started.length) {
+      await recordAutoFarmEvent({
+        type: "task_started",
+        game,
+        campaignId: c.campaignId,
+        taskId: reuseTask._id,
+        host: host && host.id,
+        count: mine.length,
+        reason,
+        actor: "processCampaign",
+      });
+    } else if (failed.length) {
+      await recordAutoFarmEvent({
+        type: "task_failed",
+        game,
+        campaignId: c.campaignId,
+        taskId: reuseTask._id,
+        host: host && host.id,
+        count: failed.length,
+        reason: failed.join("; "),
+        actor: "processCampaign",
+      });
+    }
     // Top-up: the reused accounts stack this game's drops event over event and
     // sell as the stacked bundle — but demand above what they freely cover is
     // worth FRESH pool accounts too, which farm only this event and sell it
@@ -1555,9 +1873,9 @@ async function processCampaign(c, ctx) {
 
   // 6) Capacity gate: free SEATS, not just container slots — running bots
   // with spare TwitchUsers slots can absorb accounts without new containers.
-  const activeBots = await activeAutoBotCount();
+  const activeBots = await activeAutoBotCount(ctx);
   const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
+  const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
   const seatCapacity = slotsFree * af.accountsPerBot + freeSeats;
   if (seatCapacity < 1) {
     await record({
@@ -1690,9 +2008,9 @@ async function executeTask(task, ctx, { append = false } = {}) {
   // approved by hand days later) can have consumed every slot. Without this
   // term nothing bounded the createBot loop below at all — which is how 31
   // containers came to exist on the Pi under a maxAutoBots of 6.
-  const activeBots = await activeAutoBotCount();
+  const activeBots = await activeAutoBotCount(ctx);
   const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
+  const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
   const capacity = slotsFree * af.accountsPerBot + freeSeats;
   if (capacity < 1) {
     throw new Error(
@@ -1721,12 +2039,44 @@ async function executeTask(task, ctx, { append = false } = {}) {
     );
   }
 
+  // Reuse-only games (World of Tanks / UFL) never draw a fresh pool account:
+  // they may only reuse accounts already farmed on that same game, so the claim
+  // is restricted to the game's own "recycled after <game>" pool entries.
+  const reuseOnly = settings.isReuseOnlyGame(game);
   const claimed = await claimPoolAccounts(
     n,
     "auto-farm: " + game + " (" + task.campaignId + ")",
-    { preferGame: game },
+    { preferGame: game, recycledOnly: reuseOnly },
   );
   if (!claimed.length) {
+    // Reuse-only game with none of its own recycled accounts free right now:
+    // there is nothing to spend and, by design, nothing fresh is allowed. Record
+    // a clean, retryable skip instead of leaving a stuck "planned" plan behind —
+    // it re-decides and deploys the moment one of its accounts recycles back.
+    // Append mode is the reuse top-up: it must NOT rewrite the active reuse
+    // task's status, so it keeps throwing (its caller swallows that and the
+    // reuse stands on its restarted bots alone).
+    if (reuseOnly && !append) {
+      await AutoFarmTask.updateOne(
+        { _id: task._id },
+        {
+          $set: {
+            status: "skipped",
+            decision: "skip_reuse_only",
+            dryRun: false,
+            plannedAccounts: 0,
+            reason:
+              "Reuse-only game (" +
+              game +
+              "): no fresh pool accounts are ever spent here — only accounts " +
+              "already farmed on this game. None of its own recycled accounts " +
+              "are free right now; will retry when one recycles back to the pool.",
+            executedAt: new Date(),
+          },
+        },
+      ).catch(() => {});
+      return { decision: "skip_reuse_only", bots: [], accounts: 0 };
+    }
     // Same reasoning as the reserve-floor guard above: the claim won nothing,
     // so nothing is owned and nothing is lost. Keep the task "planned" and
     // retryable rather than burning it. The genuine terminal "failed" write
@@ -1741,7 +2091,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
     // Pack into free seats of running auto-bots first — one container can
     // farm many games via per-account FavouriteGames, and every container
     // we don't create is RAM the Pi keeps.
-    const packed = await fillExistingBots(host, claimed, game, af);
+    const packed = await fillExistingBots(host, claimed, game, af, ctx);
     for (const pl of packed.placed) {
       bots.push(pl.bot);
       for (const a of pl.accounts) deployed.push(a);
@@ -1757,6 +2107,16 @@ async function executeTask(task, ctx, { append = false } = {}) {
         startRunning: true,
       });
       created++;
+      if (ctx && ctx.hostState) {
+        ctx.hostState.activateBot(
+          {
+            host: bot.host,
+            file: bot.file,
+            container: bot.container,
+          },
+          bot.config,
+        );
+      }
       bots.push({
         host: bot.host,
         file: bot.file,
@@ -1826,6 +2186,57 @@ async function executeTask(task, ctx, { append = false } = {}) {
       },
     },
   );
+  if (ok && !append) {
+    try {
+      const autoLister = require("./autoLister");
+      const research = await MarketResearch.findOne({ game: task.game }).lean();
+      await stampPreorderSet(
+        {
+          ...task.toObject(),
+          status: "active",
+          assignedAccounts: finalAccounts,
+        },
+        {
+          DropSet,
+          campaignItems: autoLister.campaignItems,
+          derivePrice: autoLister.derivePrice,
+          research,
+        },
+      );
+      catalogRoutes.invalidateCatalogCache();
+    } catch (err) {
+      console.error("catalog preorder stamp failed:", err.message);
+    }
+  }
+  if (append) {
+    if (deployed.length) {
+      await recordAutoFarmEvent({
+        type: "topped_up",
+        game,
+        campaignId: task.campaignId,
+        taskId: task._id,
+        host: host.id,
+        count: deployed.length,
+        reason: "fresh accounts added to reused task",
+        actor: "executeTask",
+      });
+    }
+  } else {
+    await recordAutoFarmEvent({
+      type: ok ? "task_started" : "task_failed",
+      game,
+      campaignId: task.campaignId,
+      taskId: task._id,
+      host: host.id,
+      count: ok ? deployed.length : claimed.length,
+      reason: ok
+        ? deployed.length +
+          " account(s) deployed" +
+          (error ? "; " + error.trim() : "")
+        : error.trim() || "Bot creation failed",
+      actor: "executeTask",
+    });
+  }
   await tg(
     (ok ? "🤖 Auto-farm LIVE — " : "🤖 Auto-farm FAILED — ") +
       game +
@@ -1846,7 +2257,11 @@ async function executeTask(task, ctx, { append = false } = {}) {
         : "Could not create bots") +
       (error ? "\nIssues: " + error : ""),
   );
-  if (!ok) throw new Error(error || "Bot creation failed");
+  if (!ok) {
+    const failure = new Error(error || "Bot creation failed");
+    failure.autoFarmEventRecorded = true;
+    throw failure;
+  }
   return { bots, accounts: deployed.length };
 }
 
@@ -1871,7 +2286,7 @@ async function reapRetiredBots(af, host, progress) {
   if (af.deleteFinishedBots === false || !host) return 0;
   const done = await AutoFarmTask.find(
     { status: "completed", "bots.0": { $exists: true } },
-    { bots: 1, game: 1, assignedAccounts: 1 },
+    { bots: 1, game: 1, campaignId: 1, assignedAccounts: 1 },
   ).lean();
   if (!done.length) return 0;
   const active = await AutoFarmTask.find(
@@ -1901,6 +2316,17 @@ async function reapRetiredBots(af, host, progress) {
         await botFactory.stopContainer(h, b.container).catch(() => {});
         await botFactory.deleteBot(h, b.file, b.container);
         reaped++;
+        await recordAutoFarmEvent({
+          type: "reaped",
+          game: t.game,
+          campaignId: t.campaignId,
+          taskId: t._id,
+          host: h.id,
+          container: b.container,
+          count: 1,
+          reason: "retired completed-task bot",
+          actor: "reapRetiredBots",
+        });
         progress("Reaped leftover bot " + b.container + " (" + t.game + ")");
       } catch {
         /* best-effort — retried next tick while the config exists */
@@ -1948,6 +2374,13 @@ async function reapRetiredBots(af, host, progress) {
         (u) => !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
       );
       if (back.length) {
+        const poolRows = await AvailableAccount.find(
+          {
+            usernameLower: { $in: back.map((u) => u.toLowerCase()) },
+            status: "claimed",
+          },
+          { _id: 1 },
+        ).lean();
         const r = await AvailableAccount.updateMany(
           {
             usernameLower: { $in: back.map((u) => u.toLowerCase()) },
@@ -1962,6 +2395,16 @@ async function reapRetiredBots(af, host, progress) {
           },
         );
         recycled = (r && r.modifiedCount) || 0;
+        if (recycled) {
+          await recordPoolUsage(
+            poolRows.map((row) => row._id),
+            {
+              event: "recycled",
+              actor: "retro-reaper",
+              note: "recycled by retro-reaper",
+            },
+          );
+        }
       }
     }
   } catch {
@@ -2043,6 +2486,19 @@ async function repackAutoBots(af, host, progress) {
     progress: (m) => progress(m),
   });
   if (r.skipped) return null;
+  await recordAutoFarmEvent({
+    type: "repacked",
+    host: host.id,
+    count: (r.retired || []).length,
+    reason:
+      p.before.containers +
+      " containers → " +
+      p.after.containers +
+      ", " +
+      r.movedAccounts +
+      " account(s) moved",
+    actor: "repackAutoBots",
+  });
   await tg(
     "🧹 Auto-farm REPACK — " +
       (host.label || host.id) +
@@ -2139,6 +2595,15 @@ async function repriceEndedTasks() {
     const r = await repriceTask(t, tg);
     if (r && r.repriced) {
       done++;
+      await recordAutoFarmEvent({
+        type: "listed",
+        game: t.game,
+        campaignId: t.campaignId,
+        taskId: t._id,
+        count: r.repriced.released || 0,
+        reason: "post-event reprice to $" + r.repriced.price,
+        actor: "repriceEndedTasks",
+      });
       progress(t.game + " repriced to $" + r.repriced.price);
     } else if (r && r.skipped) {
       progress(t.game + " reprice skipped: " + r.skipped, "warn");
@@ -2278,6 +2743,13 @@ async function completeEndedTasks() {
           );
         }
         if (back.length) {
+          const poolRows = await AvailableAccount.find(
+            {
+              usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
+              status: "claimed",
+            },
+            { _id: 1 },
+          ).lean();
           const r = await AvailableAccount.updateMany(
             {
               usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
@@ -2292,6 +2764,26 @@ async function completeEndedTasks() {
             },
           );
           recycled = (r && r.modifiedCount) || 0;
+          if (recycled) {
+            await recordPoolUsage(
+              poolRows.map((row) => row._id),
+              {
+                event: "recycled",
+                actor: "auto-farm",
+                game: t.game,
+                note: "recycled after " + t.game,
+              },
+            );
+            await recordAutoFarmEvent({
+              type: "recycled",
+              game: t.game,
+              campaignId: t.campaignId,
+              taskId: t._id,
+              count: recycled,
+              reason: "recycled after " + t.game,
+              actor: "completeEndedTasks",
+            });
+          }
         }
       } catch {
         /* best-effort — accounts stay claimed, owner can release manually */
@@ -2301,11 +2793,31 @@ async function completeEndedTasks() {
     t.completedAt = new Date();
     await t.save().catch(() => {});
     completed++;
+    await recordAutoFarmEvent({
+      type: "task_completed",
+      game: t.game,
+      campaignId: t.campaignId,
+      taskId: t._id,
+      count: (t.assignedAccounts || []).length,
+      reason: "campaign ended",
+      actor: "completeEndedTasks",
+    });
     // Event over = supply fixed: apply the post-event scarcity markup and
     // rebuild the listing as a stacked bundle of every campaign this game's
     // accounts have farmed. A failure here is picked up by repriceEndedTasks
     // on a later tick \u2014 see why that retry had to exist in its comment.
-    await repriceTask(t, tg);
+    const repriced = await repriceTask(t, tg);
+    if (repriced && repriced.repriced) {
+      await recordAutoFarmEvent({
+        type: "listed",
+        game: t.game,
+        campaignId: t.campaignId,
+        taskId: t._id,
+        count: repriced.repriced.released || 0,
+        reason: "post-event reprice to $" + repriced.repriced.price,
+        actor: "completeEndedTasks",
+      });
+    }
     await tg(
       "🤖 Auto-farm DONE — " +
         t.game +
@@ -2333,9 +2845,60 @@ async function runOnce() {
   progressBegin();
   try {
     const af = cfg();
+    const catalogChanges = await catalogRoutes
+      .updateAutofarmCatalogStates()
+      .catch((e) => {
+        progress("Catalog state refresh failed: " + e.message, "warn");
+        return 0;
+      });
+    if (catalogChanges) {
+      progress("Updated " + catalogChanges + " event catalog listing(s).");
+    }
+    if (
+      !state.lastCatalogVariantSyncAt ||
+      Date.now() - state.lastCatalogVariantSyncAt >= CATALOG_VARIANT_SYNC_MS
+    ) {
+      const started = catalogRoutes.startVariantSync({
+        apply: true,
+        source: "auto-farm",
+        syncEventSets: true,
+        onFinish(job) {
+          if (job.error) {
+            progress(
+              "Scheduled catalog inventory sync failed: " + job.error,
+              "warn",
+            );
+          } else {
+            state.lastCatalogVariantSyncAt = Date.now();
+            progress(
+              "Scheduled catalog inventory sync completed: " +
+                (job.result?.count || 0) +
+                " profile(s) across " +
+                (job.result?.games || 0) +
+                " game(s); " +
+                (job.result?.eventSets?.stocked || 0) +
+                " stocked event set(s).",
+            );
+          }
+          recordAutoFarmEvent({
+            type: "catalog_sync",
+            count: Number(job.result?.count) || 0,
+            actor: "auto-farm",
+            reason: job.error
+              ? `failed: ${job.error}`
+              : `${Number(job.result?.games) || 0} games; ${Number(job.result?.eventSets?.stocked) || 0} stocked event sets`,
+          });
+        },
+      });
+      if (started) {
+        progress("Started scheduled catalog inventory sync (6-hour cycle).");
+      } else {
+        progress("Scheduled catalog sync skipped: another sync is running.");
+      }
+    }
     if (!af.enabled) {
       progress("Auto farmer is disabled in settings — nothing to do.", "warn");
-      state.lastSummary = { enabled: false };
+      state.lastSummary = { enabled: false, catalogChanges };
       return state.lastSummary;
     }
     progress(
@@ -2440,6 +3003,22 @@ async function runOnce() {
       );
     }
 
+    // Read the auto-task registry once after wake/park has finished mutating
+    // containers. The same rows feed the manual-stash exclusion, reusable-task
+    // lookup and the batched host snapshot below.
+    const autoTasks = await AutoFarmTask.find(
+      { "bots.0": { $exists: true } },
+      {
+        status: 1,
+        game: 1,
+        campaignId: 1,
+        createdAt: 1,
+        assignedAccounts: 1,
+        bots: 1,
+      },
+    )
+      .sort({ createdAt: -1 })
+      .lean();
     // Candidates: live campaigns not yet decided, plus retryable skips.
     const now = new Date();
     const live = await TwitchCampaign.find({
@@ -2459,6 +3038,30 @@ async function runOnce() {
     // re-announce an unchanged verdict on every tick, forever. Passing the prior
     // task down lets processCampaign tell a NEW decision from a repeat of one.
     const priorTasks = new Map();
+    const existingKeys = live
+      .filter((c) => c.game && !settings.isNoClaimGame(c.game))
+      .map((c) => ({ game: c.game, campaignId: c.campaignId }));
+    const existingRows = existingKeys.length
+      ? await AutoFarmTask.find(
+          {
+            $or: existingKeys.map((x) => ({
+              game: x.game,
+              campaignId: x.campaignId,
+            })),
+          },
+          {
+            game: 1,
+            campaignId: 1,
+            status: 1,
+            decision: 1,
+            rescanRequested: 1,
+            bots: 1,
+          },
+        ).lean()
+      : [];
+    const existingByKey = new Map(
+      existingRows.map((row) => [row.game + "|" + row.campaignId, row]),
+    );
     let noClaimSkipped = 0;
     for (const c of live) {
       if (!c.game) continue;
@@ -2470,10 +3073,7 @@ async function runOnce() {
         noClaimSkipped++;
         continue;
       }
-      const existing = await AutoFarmTask.findOne({
-        game: c.game,
-        campaignId: c.campaignId,
-      }).lean();
+      const existing = existingByKey.get(c.game + "|" + c.campaignId);
       if (!existing) {
         candidates.push(c);
       } else if (
@@ -2502,37 +3102,98 @@ async function runOnce() {
       );
     progress(candidates.length + " campaign(s) to decide this tick.");
 
-    // Prefetch decision inputs once per candidate: live-refreshed market
-    // research (Gameflip/GGSel/Plati when stale) + our own sales history.
-    const infoMap = new Map();
-    for (const c of candidates) {
-      progress(
-        "Researching " + c.game + " (markets + own sales history)\u2026",
-      );
-      const research = await freshResearchForGame(c.game);
-      const sales = await internalSalesForGame(c.game);
-      infoMap.set(c.campaignId, { research, sales });
-      progress(
-        c.game +
-          ": " +
-          (research && research.scannedAt
-            ? "market demand " +
-              (research.demandScore != null ? research.demandScore : "?")
-            : "no market data") +
-          ", " +
-          sales.count +
-          " own sale(s) in 45d" +
-          (sales.revenue > 0 ? " worth $" + sales.revenue.toFixed(2) : "") +
-          ".",
-      );
+    const reusableMap = new Map();
+    const candidateGames = new Set(candidates.map((c) => c.game));
+    for (const task of autoTasks) {
+      if (
+        candidateGames.has(task.game) &&
+        ["active", "completed", "stopped"].includes(task.status) &&
+        !reusableMap.has(task.game)
+      ) {
+        reusableMap.set(task.game, task);
+      }
     }
+    const snapshotTasks = [];
+    const snapshotTaskIds = new Set();
+    const tasksToSnapshot =
+      candidates.length && hostOnline
+        ? [
+            ...autoTasks.filter((t) => t.status === "active"),
+            ...reusableMap.values(),
+          ]
+        : [];
+    for (const task of tasksToSnapshot) {
+      const key = String(task._id || task.game + "|" + task.campaignId);
+      if (snapshotTaskIds.has(key)) continue;
+      snapshotTaskIds.add(key);
+      snapshotTasks.push(task);
+    }
+    const skipSnapshotHosts = new Set();
+    if (host && !hostOnline) skipSnapshotHosts.add(host.id);
+    const hostState = await buildDecisionHostState(snapshotTasks, af, host, {
+      skipHosts: skipSnapshotHosts,
+    });
+    progress(
+      "Auto-host snapshot: " +
+        hostState.fileCount +
+        " config file(s), " +
+        hostState.hostCalls +
+        " host call(s) in " +
+        hostState.elapsedMs +
+        "ms.",
+      "info",
+    );
+
+    // Prefetch decision inputs once per game, with bounded parallel reads. Two
+    // campaigns for one game share the exact same market and sales snapshot.
+    const infoMap = new Map();
+    const researchGames = [...new Set(candidates.map((c) => c.game))];
+    let researched = 0;
+    const researchedRows = await mapWithConcurrency(
+      researchGames,
+      DECISION_READ_CONCURRENCY,
+      async (game) => {
+        const [research, sales] = await Promise.all([
+          freshResearchForGame(game),
+          internalSalesForGame(game),
+        ]);
+        researched++;
+        progress(
+          "Researched " +
+            game +
+            " (" +
+            researched +
+            "/" +
+            researchGames.length +
+            ").",
+        );
+        progress(
+          game +
+            ": " +
+            (research && research.scannedAt
+              ? "market demand " +
+                (research.demandScore != null ? research.demandScore : "?")
+              : "no market data") +
+            ", " +
+            sales.count +
+            " own sale(s) in 45d" +
+            (sales.revenue > 0 ? " worth $" + sales.revenue.toFixed(2) : "") +
+            ".",
+        );
+        return { game, research, sales };
+      },
+    );
+    const infoByGame = new Map(
+      researchedRows.map((row) => [
+        row.game,
+        { research: row.research, sales: row.sales },
+      ]),
+    );
+    for (const c of candidates)
+      infoMap.set(c.campaignId, infoByGame.get(c.game));
 
     // Snapshot which games manual bots are farming right now (one config
     // sweep across all hosts per tick; auto-bot files excluded via registry).
-    const autoTasks = await AutoFarmTask.find(
-      { "bots.0": { $exists: true } },
-      { bots: 1 },
-    ).lean();
     const autoKeys = new Set();
     for (const t of autoTasks) {
       for (const b of t.bots || []) autoKeys.add(b.host + "|" + b.file);
@@ -2604,11 +3265,23 @@ async function runOnce() {
     }
     const budgetMap = fairShare(requests, spendable);
 
+    // Phase timing (scan visibility): mark boundaries so "Scan complete" can
+    // report where the tick spent its wall-clock. Timestamps only, no logic change.
+    const decideStartMs = Date.now();
     const results = [];
-    for (const c of candidates) {
+    for (let index = 0; index < candidates.length; index++) {
+      const c = candidates[index];
       try {
         progress(
-          "Deciding " + c.game + " (" + (c.name || c.campaignId) + ")\u2026",
+          "Deciding " +
+            c.game +
+            " (" +
+            (index + 1) +
+            "/" +
+            candidates.length +
+            ", " +
+            (c.name || c.campaignId) +
+            ")\u2026",
         );
         const r = await processCampaign(c, {
           af,
@@ -2620,16 +3293,42 @@ async function runOnce() {
           archiveHolders,
           owned,
           priorTasks,
+          reusableMap,
+          hostState,
         });
         progress(
-          c.game + " \u2192 " + (r && r.decision ? r.decision : "done") + ".",
+          "Decided " +
+            (index + 1) +
+            "/" +
+            candidates.length +
+            ": " +
+            c.game +
+            " \u2192 " +
+            (r && r.decision ? r.decision : "done") +
+            ".",
         );
         results.push({ game: c.game, ...r });
       } catch (e) {
         progress(c.game + " FAILED: " + e.message, "error");
+        if (!e.autoFarmEventRecorded) {
+          await recordAutoFarmEvent({
+            type: "task_failed",
+            game: c.game,
+            campaignId: c.campaignId,
+            count: 1,
+            reason: e.message || String(e),
+            actor: "processCampaign",
+          });
+        }
         results.push({ game: c.game, error: e.message });
       }
     }
+    const sweepStartMs = Date.now();
+    progress(
+      "Decisions done (" +
+        results.length +
+        " campaign(s)); running maintenance sweeps…",
+    );
     // Suspension sweep runs before the dead-token reaper, because the reaper
     // cannot tell the two apart and its "keep it, the owner will re-auth" rule is
     // exactly wrong for an account Twitch has deleted: it holds its task slot and
@@ -2703,12 +3402,23 @@ async function runOnce() {
     // Refill sweep: every LISTED active task gets its markets topped up —
     // sold-out (or shorted) gameflip/plati/ggsel stock is refilled from
     // spare accounts, then the post-event holdback, no delist/relist.
+    const listStartMs = Date.now();
     if (!af.dryRun) {
       const autoListerR = require("./autoLister");
       const listed = await AutoFarmTask.find({
         status: "active",
         "listing.externalId": { $nin: ["", null] },
       });
+      // Visibility: this sweep makes serial marketplace API calls (Gameflip
+      // rate-limits hard, so it is deliberately NOT parallelized) and used to
+      // log only when it topped stock up — the long silent stretch that made a
+      // tick feel stalled. Announce the workload + heartbeat every few tasks.
+      if (listed.length) {
+        progress(
+          "Refilling markets on " + listed.length + " listed task(s)…",
+        );
+      }
+      let refillDone = 0;
       for (const t of listed) {
         try {
           const acts = await autoListerR.refillMarkets(t, {
@@ -2747,6 +3457,16 @@ async function runOnce() {
         } catch (e) {
           progress("Re-list " + t.game + " failed: " + e.message, "warn");
         }
+        refillDone += 1;
+        if (listed.length > 8 && refillDone % 10 === 0) {
+          progress(
+            "Refill progress: " +
+              refillDone +
+              "/" +
+              listed.length +
+              " task(s) checked…",
+          );
+        }
       }
     }
 
@@ -2769,6 +3489,15 @@ async function runOnce() {
           dryRun: af.dryRun,
         });
         if (r.listed) {
+          await recordAutoFarmEvent({
+            type: "listed",
+            game: t.game,
+            campaignId: t.campaignId,
+            taskId: t._id,
+            count: r.listed.qty || 0,
+            reason: r.listed.title + " ($" + r.listed.price + ")",
+            actor: "listActivatedTask",
+          });
           progress(
             t.game +
               " LISTED: " +
@@ -2839,6 +3568,15 @@ async function runOnce() {
           { "stackListing.externalId": { $exists: false } },
         ],
       }).lean();
+      // Visibility: same serial, rate-limited API tail as the refill sweep.
+      if (stackable.length) {
+        progress(
+          "Checking " +
+            stackable.length +
+            " task(s) for stacked bundles…",
+        );
+      }
+      let stackDone = 0;
       for (const t of stackable) {
         try {
           const r = await autoLister.listStackedBundle(t._id, {});
@@ -2873,10 +3611,41 @@ async function runOnce() {
             "warn",
           );
         }
+        stackDone += 1;
+        if (stackable.length > 8 && stackDone % 10 === 0) {
+          progress(
+            "Stacked-bundle progress: " +
+              stackDone +
+              "/" +
+              stackable.length +
+              " task(s) checked…",
+          );
+        }
       }
     }
 
-    progress("Scan complete: " + results.length + " decision(s) this tick.");
+    // Per-phase wall-clock so "it takes forever" is attributable at a glance:
+    // decide = campaign decisions; sweeps = suspension/dead-token/backfill/
+    // reaper/recycle/repack; listing = serial marketplace refill + stacked
+    // bundle API calls (the unavoidably slow, rate-limited path).
+    const scanEndMs = Date.now();
+    const phaseSecs = (a, b) => Math.max(0, Math.round((a - b) / 1000));
+    progress(
+      "Scan complete: " +
+        results.length +
+        " decision(s) this tick. Timing — decide " +
+        phaseSecs(sweepStartMs, decideStartMs) +
+        "s · sweeps " +
+        phaseSecs(listStartMs, sweepStartMs) +
+        "s · listing " +
+        phaseSecs(scanEndMs, listStartMs) +
+        "s · total " +
+        phaseSecs(
+          scanEndMs,
+          progressLog.startedAt ? progressLog.startedAt.getTime() : scanEndMs,
+        ) +
+        "s.",
+    );
 
     // Pool starvation is the one condition that silently stops everything: with
     // spendable at 0 no campaign can be decided and no active task can be
@@ -2926,6 +3695,7 @@ async function runOnce() {
       poolSpendable: spendable,
       candidates: candidates.length,
       completed,
+      catalogChanges,
       results,
     };
     return state.lastSummary;
@@ -3013,6 +3783,15 @@ async function reapDeadTokenAssignments(af, progress) {
       );
       await task.save();
       unassigned += weightLogins.size;
+      await recordAutoFarmEvent({
+        type: "dead_token_pulled",
+        game: task.game,
+        campaignId: task.campaignId,
+        taskId: task._id,
+        count: weightLogins.size,
+        reason: "dead-token accounts removed from task assignments",
+        actor: "reapDeadTokenAssignments",
+      });
       progress(
         "Reaped " +
           weightLogins.size +
@@ -3173,9 +3952,14 @@ async function backfillActiveTasks(af, host, progress) {
         have +
         ")\u2026",
     );
+    // Reuse-only games (World of Tanks / UFL) top up ONLY from their own
+    // "recycled after <game>" accounts — never a fresh pool account. Every
+    // other game keeps the original unscoped claim, so nothing else changes.
+    const reuseOnly = settings.isReuseOnlyGame(task.game);
     const claimed = await claimPoolAccounts(
       n,
       "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",
+      reuseOnly ? { preferGame: task.game, recycledOnly: true } : {},
     );
     if (!claimed.length) continue;
 
@@ -3253,6 +4037,16 @@ async function backfillActiveTasks(af, host, progress) {
     }
     await task.save();
     added += deployed.length;
+    await recordAutoFarmEvent({
+      type: "topped_up",
+      game: task.game,
+      campaignId: task.campaignId,
+      taskId: task._id,
+      host: host.id,
+      count: deployed.length,
+      reason: "backfilled toward target " + target,
+      actor: "backfillActiveTasks",
+    });
     progress(
       task.game +
         " backfilled: now " +
@@ -3313,6 +4107,7 @@ function status() {
     lastRun: state.lastRun,
     lastError: state.lastError,
     lastSummary: state.lastSummary,
+    nextRunAt: state.nextRunAt,
     intervalMinutes: TICK_MS / 60000,
     progress: {
       runId: progressLog.runId,
@@ -3328,15 +4123,18 @@ function start() {
   if (state.started) return;
   state.started = true;
   const tick = async () => {
+    state.nextRunAt = null;
     try {
       await runOnce();
     } catch (err) {
       console.error("autoFarmer error:", err.message);
     }
     const t = setTimeout(tick, TICK_MS);
+    state.nextRunAt = new Date(Date.now() + TICK_MS);
     if (t.unref) t.unref();
   };
   const t = setTimeout(tick, FIRST_TICK_DELAY_MS);
+  state.nextRunAt = new Date(Date.now() + FIRST_TICK_DELAY_MS);
   if (t.unref) t.unref();
 }
 
@@ -3360,4 +4158,7 @@ module.exports = {
   internalSalesForGame,
   resolveFarmHost,
   isStranded,
+  mapWithConcurrency,
+  createSeatCounter,
+  buildDecisionHostState,
 };

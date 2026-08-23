@@ -17,6 +17,7 @@
 const BotAccount = require("../models/BotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
 const { encrypt, decrypt } = require("./secretBox");
+const { recordPoolUsage } = require("./poolUsageLog");
 
 async function fillBotPasswordsFromPool(logins) {
   const wanted = Array.isArray(logins)
@@ -90,16 +91,30 @@ async function markDeployedPoolAccountsClaimed(logins, note) {
     ];
   }
   if (!lowers.length) return 0;
+  // Capture the rows about to flip so the usage trail can name them: updateMany
+  // returns only a count, and after it runs their status is no longer
+  // "available" to re-query. Same before/after pattern the recycle paths use.
+  const claimedNote = note || "in use by a bot (auto-marked)";
+  const flipping = await AvailableAccount.find(
+    { usernameLower: { $in: lowers }, status: "available" },
+    { _id: 1 },
+  ).lean();
   const r = await AvailableAccount.updateMany(
     { usernameLower: { $in: lowers }, status: "available" },
     {
       $set: {
         status: "claimed",
         claimedAt: new Date(),
-        claimedNote: note || "in use by a bot (auto-marked)",
+        claimedNote,
       },
     },
   );
+  if (r.modifiedCount && flipping.length) {
+    await recordPoolUsage(
+      flipping.map((f) => f._id),
+      { event: "claimed", actor: "bot-deploy", note: claimedNote },
+    );
+  }
   return r.modifiedCount || 0;
 }
 
