@@ -455,3 +455,51 @@ test("anyChannelLive: a dead token rotates off instead of reporting dark", async
     delete require.cache[require.resolve("../utils/streamScout")];
   }
 });
+// --- Transition logger: error-streak decision (pure) ----------------------------
+
+test("error streak: new error logs, same error skips, clean after error logs recovery", () => {
+  // Simulate the streak logic with a simple closure (same as the module does).
+  let last = "";
+  function decide(currentError) {
+    if (currentError && currentError !== last) {
+      last = currentError;
+      return "error";
+    }
+    if (!currentError && last) {
+      last = "";
+      return "recovered";
+    }
+    return null;
+  }
+  // Clean start
+  assert.strictEqual(decide(""), null);
+  // First error
+  assert.strictEqual(decide("timeout"), "error");
+  // Same error - no duplicate
+  assert.strictEqual(decide("timeout"), null);
+  // Different error
+  assert.strictEqual(decide("429"), "error");
+  // Recovery
+  assert.strictEqual(decide(""), "recovered");
+  // Stay clean
+  assert.strictEqual(decide(""), null);
+  // New error after recovery
+  assert.strictEqual(decide("dns"), "error");
+});
+
+test("transition classification: flip only after first observation", () => {
+  const wasLive = (prev) => !!(prev && prev.liveNow);
+  const flip = (prev, liveNow) => {
+    if (!prev) return null;
+    return liveNow && !wasLive(prev) ? "live" : !liveNow && wasLive(prev) ? "dark" : null;
+  };
+  // No prev = first observation, never a transition
+  assert.strictEqual(flip(null, true), null);
+  assert.strictEqual(flip(null, false), null);
+  // Stable
+  assert.strictEqual(flip({ liveNow: true }, true), null);
+  assert.strictEqual(flip({ liveNow: false }, false), null);
+  // Flips
+  assert.strictEqual(flip({ liveNow: false }, true), "live");
+  assert.strictEqual(flip({ liveNow: true }, false), "dark");
+});

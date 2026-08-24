@@ -33,6 +33,7 @@ const BotAccount = require("../models/BotAccount");
 const { getStreamsLive, getGameDropsLive } = require("./twitchWatch");
 const { fetchCampaignDetails } = require("./twitchInventory");
 const settings = require("./settings");
+const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 
 const TICK_MS = Number(process.env.STREAM_SCOUT_TICK_MS) || 3 * 60 * 1000; // 3 min
 // A failed pass retries on a short fuse rather than waiting a full interval —
@@ -48,6 +49,9 @@ const state = {
   lastRun: null,
   lastError: "",
   lastCounts: { tracked: 0, gated: 0, live: 0, transitions: 0, errors: 0 },
+  // Last pass error already recorded - scout_error events are bounded to one
+  // per error STREAK (a repeating 60s retry fuse must not spam the log).
+  lastLoggedError: "",
 };
 
 // campaignId -> { channels: [login], fetchedAt: ms }
@@ -288,7 +292,14 @@ async function runOnce() {
 
       // A real dark→live flip on a gated campaign is worth an immediate wake
       // nudge (cuts wake latency from ~10min tick to ~one Scout pass).
-      if (gate.enabled && liveNow && !wasLive) transitions.push(c);
+      // Durable transition log - records both directions regardless of gate
+      // switch so the observation history is complete even during rollout.
+      if (prev && liveNow && !wasLive) {
+        if (gate.enabled) transitions.push(c);
+        await logTransition(c, "scout_live", prev, now, liveChannels);
+      } else if (prev && !liveNow && wasLive) {
+        await logTransition(c, "scout_dark", prev, now, liveChannels);
+      }
     }
 
     // Drop rows for campaigns we no longer track (ended, or de-opted).
@@ -305,9 +316,11 @@ async function runOnce() {
     return counts;
   } catch (e) {
     state.lastError = (e && e.message) || String(e);
+    passError = state.lastError;
     counts.errors++;
     return counts;
   } finally {
+    await logErrorStreak();
     state.lastCounts = counts;
     state.lastRun = new Date();
     state.running = false;
@@ -368,4 +381,70 @@ function start() {
 
 // anyChannelLive exported for tests (it is the safety-critical failure path:
 // a swallowed error there would read as a confident "dark" verdict).
+
+// -- Transition logger -------------------------------------------------------
+// Every liveness FLIP lands in AutoFarmEvent - the same collection the
+// Auto-farm tab's Lifecycle panel renders. One timeline answers "Scout saw
+// it go live -> bots woke". Best-effort: never throws into the pass.
+
+function fmtDur(ms) {
+  if (!(ms >= 0)) return "?";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return m + "m";
+  return Math.floor(m / 60) + "h " + (m % 60) + "m";
+}
+
+async function logTransition(campaign, kind, prev, now, liveChannels) {
+  try {
+    let reason = "";
+    if (kind === "scout_live") {
+      const darkFor =
+        prev && prev.darkSince ? fmtDur(now - new Date(prev.darkSince)) : "?";
+      const ch = (liveChannels || []).slice(0, 5);
+      reason =
+        "went LIVE after " +
+        darkFor +
+        " dark - " +
+        ch.join(", ") +
+        (liveChannels.length > 5 ? " +" + (liveChannels.length - 5) + " more" : "");
+    } else {
+      const liveFor =
+        prev && prev.lastLiveAt ? fmtDur(now - new Date(prev.lastLiveAt)) : "?";
+      reason = "went dark after ~" + liveFor + " live";
+    }
+    await recordAutoFarmEvent({
+      type: kind,
+      game: campaign.game,
+      campaignId: campaign.campaignId,
+      count: (liveChannels || []).length,
+      reason,
+    });
+  } catch {
+    /* best effort */
+  }
+}
+
+// Bounded error-streak logging: one event per error change, not per 60s retry.
+async function logErrorStreak() {
+  try {
+    const err = state.lastError;
+    if (err && err !== state.lastLoggedError) {
+      state.lastLoggedError = err;
+      await recordAutoFarmEvent({
+        type: "scout_error",
+        count: state.lastCounts.errors,
+        reason: ("Scout pass error: " + err).slice(0, 200),
+      });
+    } else if (!err && state.lastLoggedError) {
+      state.lastLoggedError = "";
+      await recordAutoFarmEvent({
+        type: "scout_recovered",
+        reason: "Scout passes healthy again",
+      });
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
 module.exports = { start, runOnce, status, anyChannelLive };
