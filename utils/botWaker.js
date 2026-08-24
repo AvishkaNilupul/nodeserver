@@ -240,18 +240,16 @@ async function wakeFinishedBots(hostId, opts = {}) {
   const states = await hosts.dockerPs(host).catch(() => null);
   if (!states) return { woken: [], checked: 0 };
 
-  // No-claim games (Overwatch/Rainbow Six) are farmed by the standalone
-  // no-claim system now, so a new campaign for one must never RESUME a parked
-  // old-system bot. The filter belongs HERE and not inside wakeTrigger:
-  // stopFinishedBots calls the same helper to decide whether it is safe to
-  // PARK, and on that path a live no-claim campaign must still hold a bot that
-  // is assigned that game UP. Old-system containers were never un-assigned
-  // these games (twitchbotx32 on the Pi is 70 accounts of Rainbow Six), and
-  // parking through such a campaign loses its drops permanently — this very
-  // filter is what then refuses to wake the bot again.
-  const campaigns = (await liveCampaigns()).filter(
-    (c) => !settings.isNoClaimGame(c.game),
-  );
+  // Old-system bots re-wake on their games' campaigns INCLUDING no-claim
+  // (Overwatch/Rainbow Six). Owner's decision 2026-08-24: the SERVER runs no
+  // no-claim system, so its OW bots (x17/x20) must resume via the old system;
+  // parking with no wake path would strand them. stopFinishedBots' newer-campaign
+  // guard already refuses to park THROUGH a live campaign, so resuming on the
+  // next one loses nothing. (Previously this filtered no-claim campaigns out to
+  // defer them to the standalone no-claim system.) CAVEAT: the Pi also runs a
+  // no-claim bot (noclaim-bot-2) alongside old-system OW/R6 bots, so OW/R6 there
+  // can be double-farmed — retire whichever side is unwanted.
+  const campaigns = await liveCampaigns();
   // Real-time stream liveness (utils/streamScout.js). Empty/absent when the
   // Scout isn't running or nothing is gated — in which case every gate helper
   // below fails toward farming and wake behaves exactly as before.
