@@ -12,6 +12,7 @@ const AutoFarmSnapshot = require("../models/AutoFarmSnapshot");
 const AutoFarmEvent = require("../models/AutoFarmEvent");
 const BotAccount = require("../models/BotAccount");
 const autoFarmSnapshot = require("../utils/autoFarmSnapshot");
+const allocationForecast = require("../utils/allocationForecast");
 const { recordAutoFarmEvent } = require("../utils/autoFarmEventLog");
 
 const router = express.Router();
@@ -192,6 +193,41 @@ router.get(
         .limit(limit)
         .lean();
       res.json({ success: true, events });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// READ-ONLY allocation forecast for the Auto farm tab: per live/upcoming event,
+// how many pool accounts the engine will pool + farm, with demand/coverage/
+// revenue context. Heavier than the other sub-endpoints (per-game aggregations
+// + a handful of live Twitch reads), so the whole payload is memoised for
+// ~60s here; the module holds a separate 6h cache for the static drop details,
+// so Twitch is hit at most once per campaign per 6h no matter the load.
+let forecastCache = { at: 0, windowDays: 0, payload: null };
+const FORECAST_TTL_MS = 60 * 1000;
+router.get(
+  "/auto-farm/watcher/forecast",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const windowDays = Math.max(
+        1,
+        Math.min(60, Math.floor(Number(req.query.windowDays) || 14)),
+      );
+      const fresh =
+        forecastCache.payload &&
+        forecastCache.windowDays === windowDays &&
+        Date.now() - forecastCache.at < FORECAST_TTL_MS;
+      const forecast = fresh
+        ? forecastCache.payload
+        : await allocationForecast.getAllocationForecast({ windowDays });
+      if (!fresh) {
+        forecastCache = { at: Date.now(), windowDays, payload: forecast };
+      }
+      res.set("Cache-Control", "private, no-cache");
+      res.json({ success: true, cached: fresh, forecast });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }

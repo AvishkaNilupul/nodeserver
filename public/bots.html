@@ -353,6 +353,7 @@
   let _afWatcherBuiltAt = "";
   let _afEvents = [];
   let _afDecisions = [];
+  let _afForecast = null;
   let _afLegacy = (() => { try { return localStorage.getItem("autoFarmView") === "legacy"; } catch (e) { return false; } })();
   let _allLoading = false;     // guards overlapping All-bots refreshes
   let _rentedLoading = false;  // guards overlapping Rented refreshes
@@ -1216,11 +1217,81 @@
     return '<details class="panel af-section" id="afDecisionsPanel" ontoggle="if(this.open&&!this.dataset.loaded){this.dataset.loaded=\'1\';afLoadDecisions()}"><summary class="ph"><b>Decisions</b><span class="count">Today: ' + total + " decided → " + farm + " farm · " + reuse + " reuse · " + afNum(s.skipped) + ' skipped</span></summary><div class="pb"><div class="af-row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="muted" style="font-size:12.5px">' + esc(detail) + '</span><span class="af-actions"><input class="af-filter" id="afDecisionSearch" placeholder="Search game or campaign"><select class="af-filter" id="afDecisionType"><option value="">All decisions</option><option value="farm">Farm</option><option value="reuse_existing">Reuse</option><option value="skip_low_demand">Low demand</option><option value="skip_ends_soon">Ends soon</option><option value="skip_no_capacity">No capacity</option><option value="skip_no_accounts">No accounts</option><option value="skip_reuse_only">Reuse only</option><option value="failed">Failed</option></select><button class="btn-sm btn-ghost" onclick="afLoadDecisions()">Load</button></span></div><div id="afDecisionBody">' + afDecisionRows() + "</div></div></details>";
   }
 
+  // ---- Allocation forecast (read-only): how many pool accounts each live &
+  // upcoming event will farm. Data from GET /auto-farm/watcher/forecast. ----
+  function afFcMinsUntil(d) { return d ? (new Date(d).getTime() - Date.now()) / 60000 : null; }
+  function afFcWhen(ev) {
+    if (ev.state === "SCHEDULED") { const m = afFcMinsUntil(ev.startAt); return m == null ? "start TBD" : "starts " + afFmtMins(m); }
+    const m = afFcMinsUntil(ev.endAt); return m == null ? "no end date" : "ends " + afFmtMins(m);
+  }
+  function afFcDecisionChip(ev) {
+    const map = {
+      farm: ["on", "FARM"], probe: ["", "PROBE"],
+      skip_low_demand: ["off", "LOW DEMAND"], skip_already_covered: ["", "COVERED"],
+      skip_no_accounts: ["off", "NO POOL"], skip_no_capacity: ["off", "NO SEATS"],
+      skip_ends_soon: ["", "ENDS SOON"], skip_host_offline: ["off", "HOST OFF"],
+      skip_reuse_only: ["", "REUSE ONLY"], reuse_existing: ["on", "REUSE"], pending: ["", "PENDING"],
+    };
+    const m = map[ev.decision] || ["", String(ev.decision || "?").toUpperCase()];
+    return '<span class="chip ' + m[0] + '">' + esc(m[1]) + "</span>";
+  }
+  function afFcMoney(v) { v = afNum(v); return v > 0 ? "$" + (Math.round(v * 100) / 100).toLocaleString() : "—"; }
+  function afForecastSummary(sm) {
+    const bn = sm.bottleneck || {};
+    const bnClass = bn.key === "healthy" ? "on" : (bn.key === "demand" ? "" : "off");
+    const notes = esc(bn.hint || "") + (sm.dryRun ? " · engine in DRY-RUN (plans not executed)" : "") + (sm.liveTokenOk ? "" : " · live Twitch lookups unavailable — ETAs from cache/DB only");
+    return '<div class="af-row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="chip ' + bnClass + '">' + esc(bn.label || "—") + '</span><span class="muted" style="font-size:12.5px">' + notes + "</span></div>" +
+      '<div class="af-metrics" style="padding:12px 14px">' +
+      '<div class="af-metric"><b>' + afNum(sm.spendable) + '</b><span>Spendable pool</span><div class="af-bar"><i style="width:' + afPct(sm.ready ? sm.spendable / sm.ready * 100 : 0) + '%"></i></div></div>' +
+      '<div class="af-metric"><b>' + afNum(sm.freeSeats) + " / " + afNum(sm.globalSeatCap) + '</b><span>Free seats</span></div>' +
+      '<div class="af-metric"><b>' + afNum(sm.totalProjected) + " / " + afNum(sm.totalWanted) + '</b><span>Projected / demand (live)</span></div>' +
+      '<div class="af-metric"><b>' + afFcMoney(sm.totalRevenue) + '</b><span>Est. revenue in flight</span></div>' +
+      '<div class="af-metric"><b>' + afNum(sm.liveCount) + " · " + afNum(sm.scheduledCount) + '</b><span>Live · scheduled</span></div></div>';
+  }
+  function afForecastCard(ev) {
+    const ps = ev.poolSplit || {};
+    const sales = ev.sales || {};
+    const demandBits = [];
+    if (ev.demandScore != null) demandBits.push("demand " + afNum(ev.demandScore));
+    if (sales.count) demandBits.push(sales.count + " sale" + (sales.count === 1 ? "" : "s") + (sales.revenue ? " · $" + sales.revenue : "") + (sales.avgPrice ? " · $" + sales.avgPrice + " avg" : ""));
+    const stateChip = '<span class="chip ' + (ev.state === "LIVE" ? "on" : "") + '">' + esc(ev.state) + "</span>";
+    return '<div class="af-game"><div class="af-game-h"><b>' + esc(ev.game || "—") + "</b>" + stateChip + afFcDecisionChip(ev) +
+      '<span class="muted">' + esc(ev.campaignName || ev.campaignId || "") + '</span><span class="muted" style="margin-left:auto">' + esc(afFcWhen(ev)) + "</span></div>" +
+      '<div class="af-metrics" style="padding:12px 14px">' +
+      '<div class="af-metric"><b>' + afNum(ev.projected) + " / " + afNum(ev.demandTarget) + '</b><span>' + (ev.state === "LIVE" ? "Pooled / target" : "Est. pooled / target") + "</span></div>" +
+      '<div class="af-metric"><b>' + afNum(ps.covered) + " · " + afNum(ps.farmingNow) + " · " + afNum(ps.freshToPool) + '</b><span>Covered · farming · fresh</span></div>' +
+      '<div class="af-metric"><b>' + afFcMoney(ev.estRevenue) + '</b><span>Est. revenue</span></div>' +
+      '<div class="af-metric"><b>' + (ev.dropItemCount == null ? "—" : afNum(ev.dropItemCount)) + '</b><span>Drops</span></div>' +
+      '<div class="af-metric"><b>' + (ev.requiredMinutesWatched ? afFmtMins(ev.requiredMinutesWatched) : "—") + '</b><span>Full watch</span></div></div>' +
+      (demandBits.length || ev.reason ? '<div class="af-row" style="padding:0 14px 12px"><span class="muted" style="font-size:12px">' + esc(demandBits.join(" · ")) + (demandBits.length && ev.reason ? " — " : "") + esc(ev.reason || "") + "</span></div>" : "") +
+      "</div>";
+  }
+  function afForecastRows() {
+    if (!_afForecast) return '<div class="empty" style="padding:20px">Loading…</div>';
+    const f = _afForecast; const evs = f.events || [];
+    const head = afForecastSummary(f.summary || {});
+    if (!evs.length) return head + '<div class="empty" style="padding:20px">No live or upcoming events in the window.</div>';
+    return head + '<div style="padding:6px 0">' + evs.map(afForecastCard).join("") + "</div>";
+  }
+  function afForecastHtml() {
+    return '<section class="panel af-section"><div class="ph"><b>Allocation forecast</b><span class="count">how many pool accounts each live &amp; upcoming event will farm</span><span class="af-actions"><select class="af-filter" id="afForecastWindow" onchange="afLoadForecast()"><option value="7">Next 7 days</option><option value="14" selected>Next 14 days</option><option value="30">Next 30 days</option></select><button class="btn-sm btn-ghost" onclick="afLoadForecast()">Refresh</button></span></div><div class="pb" id="afForecastBody">' + afForecastRows() + "</div></section>";
+  }
+
   function renderAutoFarmWatcher(snap) {
     snap = snap || {};
-    $("bots").innerHTML = '<div id="afWatcherRoot">' + afRenderHeader(snap) + afAttentionHtml(snap) + afFarmingHtml(snap) + afLifecycleHtml() + afDecisionsHtml(snap) + "</div>";
-    setTimeout(function () { if (CURRENT_HOST === AUTOFARM_TAB && !_afLegacy) afLoadLifecycle(); }, 0);
+    $("bots").innerHTML = '<div id="afWatcherRoot">' + afRenderHeader(snap) + afAttentionHtml(snap) + afFarmingHtml(snap) + afForecastHtml(snap) + afLifecycleHtml() + afDecisionsHtml(snap) + "</div>";
+    setTimeout(function () { if (CURRENT_HOST === AUTOFARM_TAB && !_afLegacy) { afLoadLifecycle(); afLoadForecast(); } }, 0);
   }
+
+  window.afLoadForecast = async function () {
+    const win = $("afForecastWindow") ? $("afForecastWindow").value : "14";
+    if ($("afForecastBody")) $("afForecastBody").innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+    try {
+      const r = await api("/auto-farm/watcher/forecast?windowDays=" + encodeURIComponent(win));
+      _afForecast = r.forecast || r;
+      if ($("afForecastBody")) $("afForecastBody").innerHTML = afForecastRows();
+    } catch (e) { if ($("afForecastBody")) $("afForecastBody").innerHTML = '<div class="empty" style="padding:20px">' + esc(e.message) + "</div>"; }
+  };
 
   window.afLoadLifecycle = async function () {
     const type = $("afEventType") ? $("afEventType").value : "";

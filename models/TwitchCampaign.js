@@ -19,6 +19,14 @@ const twitchCampaignSchema = new mongoose.Schema(
     lastSeenAt: { type: Date, default: Date.now },
     notifiedAt: { type: Date, default: null },
     startedNotifiedAt: { type: Date, default: null },
+    // Static drop facts, filled lazily by the allocation forecast the first time
+    // it reads this campaign's live details (utils/twitchInventory.fetchCampaignDetails)
+    // and cached here so repeat forecast loads stay DB-only. requiredMinutesWatched
+    // is the full watch time to earn EVERY time-based drop (the max threshold);
+    // dropItemCount is how many time-based drops the campaign grants. Null = not
+    // yet fetched (forecast falls back to DB-only for that row).
+    requiredMinutesWatched: { type: Number, default: null },
+    dropItemCount: { type: Number, default: null },
   },
   { timestamps: true },
 );

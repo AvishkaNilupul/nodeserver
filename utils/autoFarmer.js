@@ -4136,4 +4136,12 @@ module.exports = {
   mapWithConcurrency,
   createSeatCounter,
   buildDecisionHostState,
+  // exported for the read-only allocation forecast (utils/allocationForecast.js).
+  // The forecast reuses the SAME clamp-chain helpers the tick uses so its numbers
+  // match the engine by construction; all are pure/DB-only (no host SSH).
+  countReadyPool,
+  marketStockFloor,
+  researchForGame,
+  archiveHoldersByGame,
+  ownedAccounts,
 };
