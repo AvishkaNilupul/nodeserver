@@ -373,6 +373,38 @@ a dark gap → replaced with a batched `users(logins)` query (chunks of 100, ear
 `twitchWatch.getStreamsLive`, (3) null array entries for dead logins filtered. Graphify not
 yet refreshed; not committed to GitHub yet.
 
+## 13c. Follow-on fixes (2026-08-24) — idle-no-campaign park + Phase 2 category gating
+
+Prompted by a real observation: `twitchbotx36`/`x40` on the Pi were ON, "farming
+nothing" — 50 fresh Rocket League accounts each, all `notStarted`, with **no active
+RL campaign at all** (the "Kai x Speed Play RL!" campaign expired). The stream gate
+didn't touch them (RL not gated; category-wide, not channel-locked) and
+`stopFinishedBots` won't park a `notStarted` bot. Two gaps, two fixes:
+
+**Fix #1 — idle-no-campaign park (`botWaker.parkIdleNoCampaignBots`, setting
+`parkIdleNoCampaignBots`, default OFF, ENABLED on prod 2026-08-24).** Parks a RUNNING
+bot whose assigned games have ZERO active campaign — nothing to farm, pure idle RAM —
+which `stopFinishedBots` deliberately skips (never-started ≠ finished). Wakes on the
+normal new-campaign trigger (with grace). Safety: INCLUSIVE bidirectional-substring
+game↔campaign match (`gameMatchesCampaign`, via `normGameName`) so a farming bot
+("overwatch" vs "Overwatch 2") is never read as idle; no-claim games excluded; requires
+a FRESH verdict with zero working AND zero unknown; any uncertainty keeps the bot up.
+Dry-run on the live fleet: parks ONLY x36/x40, all 17 other bots KEEP.
+
+**Fix #2 — Phase 2 category gating (`twitchWatch.getGameDropsLive` +
+streamScout category mode, opt-in via `streamGatedGames[game]={mode:"category"}`,
+default OFF).** For a gated game with NO ACL (category-wide, e.g. Rocket League), the
+Scout checks the game's Drops-filtered directory
+(`game(name){streams(options:{systemFilters:[DROPS_ENABLED]})}` — validated live) for
+any live drops channel; none ⇒ dark ⇒ the existing `parkIdleBots` (idle_no_stream) path
+parks it. No botWaker change needed — category-mode games get a `gated:true` liveness
+row the gate already consumes. Inert until an active category campaign exists for a
+`mode:"category"` game.
+
+502 tests pass (+ gameMatchesCampaign + reason round-trip tests). Deployed to prod
+off-by-default via targeted copy (autoFarmer re-reconciled onto the catalog version);
+fix #1 then enabled.
+
 ## 13. Review checklist (what Claude checks after the build)
 - [ ] Scout is read-only and tokenless (or borrows read-only) — never watches, never claims.
 - [ ] `streamGate` **defaults off**; with it off there is **zero** behaviour change (Scout

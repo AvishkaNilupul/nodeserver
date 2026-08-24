@@ -13,6 +13,7 @@ const {
   liveIsFresh,
   isGateableGame,
   gatedDark,
+  gameMatchesCampaign,
 } = require("../utils/botWaker");
 const { classifyBotCompletion } = require("../utils/farmCompletion");
 const settings = require("../utils/settings");
@@ -293,4 +294,31 @@ test("park↔wake reason string round-trips (idle_no_stream matcher)", () => {
   const reason = "idle_no_stream — no assigned broadcast is live";
   assert.match(reason, /idle_no_stream/i);
   assert.doesNotMatch(reason, /manual/i);
+});
+
+// --- idle-no-campaign: inclusive game↔campaign matching (auto-farm safety) ----
+
+test("gameMatchesCampaign catches divergent labels (no false negatives)", () => {
+  // The whole point: a false negative would park a farming bot. These divergent
+  // pairs MUST match so such a bot is seen as having a campaign.
+  assert.ok(gameMatchesCampaign("overwatch", "Overwatch 2"));
+  assert.ok(gameMatchesCampaign("Overwatch 2", "overwatch"));
+  assert.ok(
+    gameMatchesCampaign("rainbow six siege", "Tom Clancy's Rainbow Six Siege"),
+  );
+  assert.ok(gameMatchesCampaign("Rocket League", "rocket league"));
+  assert.ok(gameMatchesCampaign("NARAKA: BLADEPOINT", "naraka bladepoint"));
+});
+
+test("gameMatchesCampaign separates genuinely different games", () => {
+  assert.strictEqual(gameMatchesCampaign("Rocket League", "Marvel Rivals"), false);
+  assert.strictEqual(gameMatchesCampaign("Rust", "Warframe"), false);
+  assert.strictEqual(gameMatchesCampaign("rocket league", ""), false);
+  assert.strictEqual(gameMatchesCampaign("", "rocket league"), false);
+});
+
+test("idle_no_campaign reason wakes with grace (manual-style), not liveness", () => {
+  const reason = "idle_no_campaign — no active campaign for its games";
+  assert.match(reason, /manual|idle_no_campaign/i); // gets PARK_CAMPAIGN_GRACE
+  assert.doesNotMatch(reason, /idle_no_stream/i); // NOT the liveness-wake branch
 });

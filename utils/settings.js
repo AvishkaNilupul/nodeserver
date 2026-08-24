@@ -146,6 +146,19 @@ const AUTO_FARM_DEFAULTS = {
   // keeping a truly-finished bot up a bit longer (safe) — never stranding one.
   // See docs/STREAM-SCOUT-PLAN.md §9 Phase 3 and utils/farmCompletion.js.
   verifyEarnedBeforePark: false,
+  // Idle-no-campaign park (utils/botWaker.js parkIdleNoCampaignBots): park a
+  // RUNNING bot whose assigned games have NO active drop campaign at all — it
+  // has literally nothing to farm, so it is pure idle RAM. This is distinct from
+  // stopFinishedBots (which needs a FINISHED verdict and refuses to touch a
+  // never-started bot) and from the stream gate (which needs an active-but-dark
+  // campaign): it is the "deployed, nothing to farm" case, e.g. 50 fresh Rocket
+  // League accounts sitting idle after the RL campaign ended. Wakes via the
+  // normal new-campaign trigger. Ships OFF. Campaign presence is matched
+  // INCLUSIVELY (bidirectional substring, e.g. config "overwatch" ↔ campaign
+  // "Overwatch 2") so a farming bot is never mistaken for idle; no-claim games
+  // are excluded (they are owned by the no-claim system and wakeFinishedBots
+  // won't wake them). Fail toward farming: any uncertainty keeps the bot up.
+  parkIdleNoCampaignBots: false,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

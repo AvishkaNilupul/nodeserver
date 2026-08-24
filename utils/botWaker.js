@@ -289,11 +289,12 @@ async function wakeFinishedBots(hostId, opts = {}) {
     } else {
       // Auto parks are protected at park time (stopFinishedBots refuses to park
       // into a campaign newer than the scan its verdict rests on), so a strict
-      // "started after the park" comparison is safe for them. A MANUAL park has
-      // no such check — a campaign already running when the operator stopped the
-      // bot would never wake it, because nothing newer ever arrives. Manual
-      // entries therefore get the same broadcast grace the park path uses.
-      const graceMs = /manual/i.test(entry.reason || "")
+      // "started after the park" comparison is safe for them. A MANUAL park —
+      // and an idle_no_campaign park (parked precisely because NOTHING was
+      // active) — has no such protection, so a campaign already running at park
+      // time would never wake it. Those entries get the broadcast grace so a
+      // just-appeared campaign still wakes them.
+      const graceMs = /manual|idle_no_campaign/i.test(entry.reason || "")
         ? PARK_CAMPAIGN_GRACE_MS
         : 0;
       trigger = wakeTrigger(games, entry.parkedAt, campaigns, graceMs);
@@ -596,16 +597,133 @@ async function parkIdleBots(hostId, opts = {}) {
   return { parked };
 }
 
+// Inclusive game↔campaign match. Config game labels and TwitchCampaign game
+// labels diverge ("overwatch" vs "Overwatch 2"), so an exact-equality test
+// produces FALSE NEGATIVES — and a false negative here ("this game has no
+// campaign") would park a farming bot. Bidirectional substring catches the
+// divergent pairs. The opposite error (false positive: thinking a campaign
+// exists when it doesn't) only keeps a bot up, which is the safe direction.
+function gameMatchesCampaign(botGame, campaignGame) {
+  // Punctuation-insensitive ("NARAKA: BLADEPOINT" vs "naraka bladepoint") — more
+  // matching only ever keeps a bot up (the safe direction).
+  const a = settings.normGameName(botGame);
+  const b = settings.normGameName(campaignGame);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+// Park a RUNNING bot whose assigned games have NO active drop campaign at all —
+// it has literally nothing to farm, so it is pure idle RAM. This is the case
+// stopFinishedBots deliberately will not touch (a never-started bot is "not
+// started", not "finished") and the stream gate does not cover (there is no
+// active campaign to be dark). Example: 50 fresh Rocket League accounts left
+// running after the RL campaign ended. Wakes on the normal new-campaign trigger
+// (with grace — see wakeFinishedBots).
+//
+// SAFETY (fail toward farming):
+//   * INCLUSIVE campaign matching, so a farming bot is never read as idle.
+//   * Skip any bot with a no-claim game (owned by the no-claim system; not
+//     wakeable here) — never strand one.
+//   * Require a FRESH verdict with zero working AND zero unknown accounts, so a
+//     stale scan or an in-flight drop can never be parked.
+//   * Any error / uncertainty leaves the bot running.
+async function parkIdleNoCampaignBots(hostId, opts = {}) {
+  const log = typeof opts.progress === "function" ? opts.progress : () => {};
+  if (!settings.getAutoFarm().parkIdleNoCampaignBots) return { parked: [] };
+  const host = hosts.resolveHost(hostId);
+  if (!host) return { parked: [] };
+
+  const states = await hosts.dockerPs(host).catch(() => null);
+  if (!states) return { parked: [] };
+  const running = Object.keys(states).filter(
+    (name) =>
+      (name === "twitchbot" || /^twitchbotx\d+$/.test(name)) &&
+      states[name].state === "running",
+  );
+  if (!running.length) return { parked: [] };
+
+  // The campaign set a parked bot could be woken by — wakeFinishedBots filters
+  // no-claim, so match against the same filtered set to keep park/wake symmetric.
+  const campaigns = (await liveCampaigns()).filter(
+    (c) => !settings.isNoClaimGame(c.game),
+  );
+  const parked = [];
+
+  for (const container of running) {
+    const file = fileForContainer(container);
+    if (!file) continue;
+    let games;
+    try {
+      games = gamesOf(JSON.parse(await hosts.readFile(host, file)));
+    } catch {
+      continue; // config unreadable — leave it running
+    }
+    if (!games.size) continue; // empties are stopFinishedBots' job
+    // A no-claim game means the no-claim system owns it and wakeFinishedBots
+    // won't wake it — never park such a bot here.
+    if ([...games].some((g) => settings.isNoClaimGame(g))) continue;
+    // Does ANY assigned game have an active campaign (inclusive match)? If so,
+    // there is work or imminent work — keep it up.
+    const hasCampaign = [...games].some((g) =>
+      campaigns.some((c) => gameMatchesCampaign(g, c.game)),
+    );
+    if (hasCampaign) continue;
+
+    // No campaign for any assigned game. Confirm it isn't mid-farm on a fresh
+    // verdict before parking (guards against a stale campaign catalog).
+    let verdict;
+    try {
+      verdict = await botCompletion(host.id, file, { freshMs: STOP_FRESH_MS });
+    } catch {
+      continue; // can't confirm idle — leave running
+    }
+    if (verdict.working > 0 || verdict.unknown > 0) continue;
+
+    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    try {
+      await hosts.dockerContainer(host, "stop", container);
+      const gameList = [...games];
+      await recordParked(host.id, container, {
+        games: gameList,
+        accounts: verdict.total,
+        reason: "idle_no_campaign — no active campaign for its games",
+      });
+      await recordAutoFarmEvent({
+        type: "parked",
+        game: gameList.join(", "),
+        host: host.id,
+        container,
+        count: verdict.total,
+        reason: "idle_no_campaign — no active campaign for its games",
+        actor: "parkIdleNoCampaignBots",
+      });
+      parked.push({ container, accounts: verdict.total, games: gameList });
+      log(
+        "Parked " +
+          container +
+          " — no active campaign for its games [" +
+          gameList.join(", ") +
+          "]; wakes when one starts.",
+      );
+    } catch (e) {
+      log("Could not stop " + container + ": " + (e.message || e), "warn");
+    }
+  }
+  return { parked };
+}
+
 module.exports = {
   wakeFinishedBots,
   stopFinishedBots,
   parkIdleBots,
+  parkIdleNoCampaignBots,
   recordParked,
   readRegistry,
   wakeTrigger,
   liveWakeTrigger,
   gatedDark,
   isGateableGame,
+  gameMatchesCampaign,
   liveIsFresh,
   fileForContainer,
   gamesOf,

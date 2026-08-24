@@ -286,6 +286,44 @@ async function getStreamsLive(token, logins, opts = {}) {
   return live;
 }
 
+// Category-wide drops liveness: which drops-enabled channels are live in a
+// game's directory right now. This is the Phase-2 signal for games whose drops
+// are NOT channel-locked (no ACL) — e.g. Rocket League — so the Stream Scout can
+// gate them on "is any drops stream live" the way it gates esports on the ACL.
+// Queried by game NAME (we have the campaign's game name, not its slug); an
+// empty result means no drops stream is live for that game. Verified live:
+// game(name){streams(options:{systemFilters:[DROPS_ENABLED]})} works.
+const GAME_DROPS_QUERY =
+  "query($name:String!,$first:Int!){ game(name:$name){ id streams(first:$first, " +
+  "options:{sort:VIEWER_COUNT, systemFilters:[DROPS_ENABLED]}){ edges{ node{ " +
+  "id viewersCount broadcaster{ login } } } } } }";
+
+async function getGameDropsLive(token, gameName, opts = {}) {
+  const first = Math.max(1, Math.min(DIRECTORY_PAGE_MAX, opts.first || 5));
+  const { status, parsed } = await gqlRequest({
+    token,
+    clientId: opts.clientId,
+    host: opts.host || null,
+    identity: opts.identity,
+    body: [
+      { query: GAME_DROPS_QUERY, variables: { name: String(gameName), first } },
+    ],
+  });
+  if (parsed?.errors?.length) {
+    if (authFailedFrom(status, parsed)) {
+      const e = new Error("Token invalid/expired reading game directory");
+      e.code = "token_invalid";
+      throw e;
+    }
+    throw gqlError(parsed.errors);
+  }
+  const edges = parsed?.data?.game?.streams?.edges || [];
+  return edges
+    .map((e) => e && e.node && e.node.broadcaster && e.node.broadcaster.login)
+    .filter(Boolean)
+    .map((l) => String(l).toLowerCase());
+}
+
 // Who am I — needed for the minute-watched payload's user_id, and doubles as a
 // cheap token liveness probe.
 const CURRENT_USER_QUERY = "query { currentUser { id login } }";
@@ -669,6 +707,7 @@ module.exports = {
   watchSession,
   getStreamInfo,
   getStreamsLive,
+  getGameDropsLive,
   getCurrentUser,
   discoverChannels,
   activeDropGames,

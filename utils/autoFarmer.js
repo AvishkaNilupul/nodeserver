@@ -2879,6 +2879,7 @@ async function runOnce() {
     const woken = [];
     const parked = [];
     const parkedIdle = [];
+    const parkedNoCampaign = [];
     for (const h of hosts.listHosts()) {
       try {
         const w = await botWaker.wakeFinishedBots(h.id, { progress });
@@ -2899,6 +2900,17 @@ async function runOnce() {
       } catch (e) {
         progress(
           "Idle-stream park failed on " + h.id + ": " + (e.message || e),
+          "warn",
+        );
+      }
+      // Idle-no-campaign park (utils/botWaker.js): park bots whose games have no
+      // active campaign at all. Self-guards on af.parkIdleNoCampaignBots.
+      try {
+        const p = await botWaker.parkIdleNoCampaignBots(h.id, { progress });
+        for (const x of p.parked) parkedNoCampaign.push({ ...x, host: h.id });
+      } catch (e) {
+        progress(
+          "Idle-no-campaign park failed on " + h.id + ": " + (e.message || e),
           "warn",
         );
       }
@@ -2950,6 +2962,20 @@ async function runOnce() {
           " MB: " +
           parkedIdle.map((x) => x.host + "/" + x.container).join(", ") +
           "\nThey restart automatically the moment an assigned channel goes live.",
+      );
+    }
+    if (parkedNoCampaign.length) {
+      const accts = parkedNoCampaign.reduce((s, x) => s + (x.accounts || 0), 0);
+      await tg(
+        "🅿️ Idle-no-campaign — parked " +
+          parkedNoCampaign.length +
+          " bot(s) with nothing to farm, holding " +
+          accts +
+          " account(s), freeing roughly " +
+          Math.round(parkedNoCampaign.length * 130) +
+          " MB: " +
+          parkedNoCampaign.map((x) => x.host + "/" + x.container).join(", ") +
+          "\nThey restart automatically when a campaign for their games starts.",
       );
     }
 
