@@ -500,11 +500,17 @@ async function scanAccount(acc, worker) {
     }
   }
   acc.dropCount = await DropLog.countDocuments({ account: acc._id });
-  // Farming-progress bookkeeping (see BotAccount.inProgressCount). Only
-  // UNCLAIMED entries count as work left: a claimed drop is already in the
-  // account's inventory and needs no further watch time. Recorded, not acted
-  // on — read the caveat on the schema fields before anything stops a bot.
-  const pending = (inProgress || []).filter((d) => !d.claimed);
+  // Farming-progress bookkeeping (see BotAccount.inProgressCount). "Pending" =
+  // work still left, which means unclaimed AND not yet complete. A claimed drop
+  // is already in inventory; a drop at 100% but UNCLAIMED is also done farming —
+  // no-claim games (Overwatch/R6) never claim, and esports/event drops arrive
+  // with requiredMinutes=0 so they land complete instantly. Counting those kept
+  // finished no-claim bots looking permanently "working", so they never parked
+  // (this is exactly why twitchbotx20 read as farming when it was done). A drop
+  // is pending only while it still needs watch time: required>0 and current<required.
+  const pending = (inProgress || []).filter(
+    (d) => !d.claimed && (d.required || 0) > 0 && (d.current || 0) < d.required,
+  );
   acc.inProgressCount = pending.length;
   acc.inProgressGames = [
     ...new Set(pending.map((d) => d.game).filter(Boolean)),
