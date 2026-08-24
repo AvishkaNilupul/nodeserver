@@ -119,6 +119,33 @@ const AUTO_FARM_DEFAULTS = {
   // owner is nudged by Telegram to re-mint their token. Never deletes anything.
   // ON by default. See reapDeadTokenAssignments in utils/autoFarmer.js.
   reapDeadAssignments: true,
+  // Stream Scout (utils/streamScout.js): gate bot wake/park on whether a
+  // qualifying stream is actually LIVE right now, not just the campaign
+  // calendar. Ships OFF. When on, a campaign whose game matches a
+  // streamGatedGames key is only farmed while one of its allowed channels is
+  // live — and the allow-list comes from the campaign's OWN ACL, so the signal
+  // matches exactly what the .NET bot watches (confirmed: it self-steers to
+  // campaign.Allow.Channels — see docs/STREAM-SCOUT-PLAN.md §13a). Fail toward
+  // farming everywhere: any uncertainty (Scout down/stale, no ACL) is treated
+  // as watchable, so a missing signal never blocks a wake or forces a park.
+  streamGate: false,
+  // Which games to gate. Keyed by a keyword matched as a SUBSTRING of the
+  // normalised game label (exactly like noClaimGames): { "rainbow six": {} }
+  // opts the game in and gates on the campaign's real ACL channels. Add
+  // { "channels": ["login", ...] } to force an explicit channel list instead of
+  // (or in addition to) the ACL. An EMPTY map means nothing is gated — zero
+  // behaviour change even with streamGate on.
+  streamGatedGames: {},
+  // Verify-earned before park: make the "finished" verdict require that each
+  // account actually HOLDS a drop for every one of its assigned games (checked
+  // against DropLog by game), not just that it earned SOME drop globally
+  // (rec.dropCount) — the correctness hole where a bot that never farmed its
+  // assigned game (e.g. no stream was ever live) could still be parked as
+  // "finished". Ships OFF: with it off the verdict is exactly as before. When
+  // on, the park bar is strictly higher, so the only failure direction is
+  // keeping a truly-finished bot up a bit longer (safe) — never stranding one.
+  // See docs/STREAM-SCOUT-PLAN.md §9 Phase 3 and utils/farmCompletion.js.
+  verifyEarnedBeforePark: false,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
@@ -209,6 +236,42 @@ function isReuseOnlyGame(game) {
   return list.some((x) => normGameName(x) === g);
 }
 
+// Stream-gate master switch + the opted-in game map, read fresh each call so a
+// live settings edit takes effect without a restart (the maxAutoBots pattern).
+function getStreamGate() {
+  const af = getAutoFarm();
+  return {
+    enabled: !!af.streamGate,
+    games:
+      af.streamGatedGames && typeof af.streamGatedGames === "object"
+        ? af.streamGatedGames
+        : {},
+  };
+}
+
+// The gate entry for a game, or null if the game is not opted into
+// stream-gating. Keyword matched as a SUBSTRING of the normalised label (like
+// isNoClaimGame), so "rainbow six" catches "Tom Clancy's Rainbow Six Siege".
+// The entry may carry an explicit { channels: [...] } override; an empty entry
+// ({}) means "gate on the campaign's own ACL channels".
+function streamGatedGameEntry(game) {
+  const games = getStreamGate().games;
+  const g = normGameName(game);
+  if (!g) return null;
+  for (const key of Object.keys(games)) {
+    const k = normGameName(key);
+    if (k && g.includes(k)) {
+      const val = games[key];
+      return val && typeof val === "object" ? val : {};
+    }
+  }
+  return null;
+}
+
+function isStreamGatedGame(game) {
+  return streamGatedGameEntry(game) != null;
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -219,4 +282,7 @@ module.exports = {
   normGameName,
   isNoClaimGame,
   isReuseOnlyGame,
+  getStreamGate,
+  streamGatedGameEntry,
+  isStreamGatedGame,
 };

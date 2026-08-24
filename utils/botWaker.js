@@ -26,6 +26,7 @@
 // never touched — someone stopped it by hand and it stays stopped.
 const hosts = require("./botHosts");
 const TwitchCampaign = require("../models/TwitchCampaign");
+const CampaignLiveState = require("../models/CampaignLiveState");
 const { botCompletion } = require("./farmCompletion");
 const settings = require("./settings");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
@@ -43,6 +44,87 @@ const REGISTRY = "parked-bots.json";
 // unaffected — it passes graceMs 0.
 const PARK_CAMPAIGN_GRACE_MS =
   Number(process.env.BOT_PARK_CAMPAIGN_GRACE_MS) || 48 * 60 * 60 * 1000; // 48h
+
+// --- Stream-gate (utils/streamScout.js) ---------------------------------------
+// A CampaignLiveState row older than this is treated as UNKNOWN, and every
+// unknown resolves toward farming (wake, don't park). So a Scout outage can
+// never strand a bot: stale liveness ⇒ behave exactly like the un-gated system.
+const LIVE_STALE_MS =
+  Number(process.env.STREAM_LIVE_STALE_MS) || 20 * 60 * 1000; // 20 min
+// How long every one of a container's gated campaigns must be continuously DARK
+// before the idle-no-stream gate parks it. Hysteresis so a brief between-matches
+// gap doesn't thrash park↔wake. Waking has no such delay — it is instant.
+const PARK_AFTER_DARK_MS =
+  Number(process.env.BOT_PARK_AFTER_DARK_MS) || 20 * 60 * 1000; // 20 min
+
+function liveIsFresh(row) {
+  return !!(
+    row &&
+    row.checkedAt &&
+    Date.now() - new Date(row.checkedAt).getTime() < LIVE_STALE_MS
+  );
+}
+
+// A game the stream-gate may act on: opted-in AND wakeable by this module. We
+// deliberately EXCLUDE no-claim games — wakeFinishedBots filters their campaigns
+// out (they are owned by the standalone no-claim system), so gating/parking one
+// here would strand it off forever. Keeping the gate's park side and wake side
+// over the SAME game set is what preserves the wake/park symmetry that §4 of
+// docs/STREAM-SCOUT-PLAN.md warns about.
+function isGateableGame(game) {
+  return (
+    settings.getStreamGate().enabled &&
+    settings.isStreamGatedGame(game) &&
+    !settings.isNoClaimGame(game)
+  );
+}
+
+async function liveStateByCampaign() {
+  const rows = await CampaignLiveState.find(
+    {},
+    {
+      campaignId: 1,
+      game: 1,
+      gated: 1,
+      liveNow: 1,
+      lastLiveAt: 1,
+      darkSince: 1,
+      checkedAt: 1,
+    },
+  ).lean();
+  const m = new Map();
+  for (const r of rows) m.set(r.campaignId, r);
+  return m;
+}
+
+// Should we HOLD a normal (finished-park) wake because the triggering campaign
+// is a gated one that is confidently dark right now? Only a FRESH, gated row
+// that says liveNow:false holds the wake; anything uncertain fails toward
+// farming (wake now, the idle gate can park it again later if still dark).
+function gatedDark(campaign, liveMap) {
+  if (!isGateableGame(campaign.game)) return false;
+  const row = liveMap.get(campaign.campaignId);
+  if (!row || !row.gated || !liveIsFresh(row)) return false; // uncertain → wake
+  return row.liveNow !== true;
+}
+
+// Wake key for an idle_no_stream park: a LIVENESS transition, never startAt (the
+// campaign started days ago, so startAt would leave the bot parked through a
+// resumed broadcast — the §4 trap). Wake when any assigned gated campaign is
+// live now, went live after the park, or has gone stale/unknown (fail toward
+// farming).
+function liveWakeTrigger(games, parkedAt, campaigns, liveMap) {
+  const since = parkedAt ? new Date(parkedAt).getTime() : 0;
+  for (const c of campaigns || []) {
+    if (!games.has(norm(c.game))) continue;
+    const row = liveMap.get(c.campaignId);
+    if (!row || !row.gated) return c; // no gated row → wake (fail toward farming)
+    if (!liveIsFresh(row)) return c; // stale → wake
+    if (row.liveNow === true) return c;
+    if (row.lastLiveAt && new Date(row.lastLiveAt).getTime() > since) return c;
+  }
+  return null;
+}
 
 // twitchbotx7 -> config_07.json (inverse of botFactory.containerForFile)
 function fileForContainer(container) {
@@ -170,6 +252,10 @@ async function wakeFinishedBots(hostId, opts = {}) {
   const campaigns = (await liveCampaigns()).filter(
     (c) => !settings.isNoClaimGame(c.game),
   );
+  // Real-time stream liveness (utils/streamScout.js). Empty/absent when the
+  // Scout isn't running or nothing is gated — in which case every gate helper
+  // below fails toward farming and wake behaves exactly as before.
+  const liveMap = await liveStateByCampaign();
   const woken = [];
   let dirty = false;
 
@@ -192,16 +278,30 @@ async function wakeFinishedBots(hostId, opts = {}) {
     } catch {
       continue; // config unreadable — leave it parked, try again next tick
     }
-    // Auto parks are protected at park time (stopFinishedBots refuses to park
-    // into a campaign newer than the scan its verdict rests on), so a strict
-    // "started after the park" comparison is safe for them. A MANUAL park has
-    // no such check — a campaign already running when the operator stopped the
-    // bot would never wake it, because nothing newer ever arrives. Manual
-    // entries therefore get the same broadcast grace the park path uses.
-    const graceMs = /manual/i.test(entry.reason || "")
-      ? PARK_CAMPAIGN_GRACE_MS
-      : 0;
-    const trigger = wakeTrigger(games, entry.parkedAt, campaigns, graceMs);
+    // An idle_no_stream park (utils/streamScout.js) was made because every
+    // assigned gated campaign went DARK, not because farming finished. Its
+    // campaign started days ago, so the normal startAt-based wakeTrigger would
+    // leave it parked straight through a resumed broadcast (the §4 trap). It
+    // must wake on a LIVENESS transition instead.
+    let trigger;
+    if (/idle_no_stream/i.test(entry.reason || "")) {
+      trigger = liveWakeTrigger(games, entry.parkedAt, campaigns, liveMap);
+    } else {
+      // Auto parks are protected at park time (stopFinishedBots refuses to park
+      // into a campaign newer than the scan its verdict rests on), so a strict
+      // "started after the park" comparison is safe for them. A MANUAL park has
+      // no such check — a campaign already running when the operator stopped the
+      // bot would never wake it, because nothing newer ever arrives. Manual
+      // entries therefore get the same broadcast grace the park path uses.
+      const graceMs = /manual/i.test(entry.reason || "")
+        ? PARK_CAMPAIGN_GRACE_MS
+        : 0;
+      trigger = wakeTrigger(games, entry.parkedAt, campaigns, graceMs);
+      // Don't wake into a gated broadcast that is confidently dark right now —
+      // it would only idle-poll. Hold until a channel is live. (Uncertain /
+      // stale liveness never holds — gatedDark returns false and we wake.)
+      if (trigger && gatedDark(trigger, liveMap)) trigger = null;
+    }
     if (!trigger) continue;
 
     await hosts.restoreRestartPolicy(host, container).catch(() => {});
@@ -283,6 +383,9 @@ async function stopFinishedBots(hostId, opts = {}) {
   );
   if (!running.length) return { stopped: [] };
   const campaigns = await liveCampaigns();
+  // When on, the "finished" verdict requires a real drop per assigned game
+  // (utils/farmCompletion.js), not just a global dropCount. Read once per sweep.
+  const requireEarned = !!settings.getAutoFarm().verifyEarnedBeforePark;
 
   const stopped = [];
   for (const container of running) {
@@ -290,7 +393,10 @@ async function stopFinishedBots(hostId, opts = {}) {
     if (!file) continue;
     let verdict;
     try {
-      verdict = await botCompletion(host.id, file, { freshMs: STOP_FRESH_MS });
+      verdict = await botCompletion(host.id, file, {
+        freshMs: STOP_FRESH_MS,
+        requireEarned,
+      });
     } catch {
       continue;
     }
@@ -370,12 +476,137 @@ async function stopFinishedBots(hostId, opts = {}) {
   return { stopped };
 }
 
+// Park a RUNNING bot that is only waiting for a broadcast — every one of its
+// assigned games is stream-gated and confidently DARK, so it is watching
+// nothing and just idle-polling Twitch. This is the RAM/bandwidth win the Stream
+// Scout unlocks; it is INDEPENDENT of stopFinishedBots (that one parks *finished*
+// bots; this one parks *idle-waiting* ones).
+//
+// The safety rules mirror docs/STREAM-SCOUT-PLAN.md §3c/§6:
+//   * Never touch a bot with in-progress work (verdict.working > 0).
+//   * Only park when EVERY assigned game is gateable (opted-in, non-no-claim) —
+//     a container also farming an always-watchable game has real work to do. And
+//     "gateable" excludes no-claim games precisely so the bot stays wakeable.
+//   * Require a FRESH, gated, dark liveness row for every assigned campaign, dark
+//     for at least PARK_AFTER_DARK_MS. Any uncertainty (missing/stale row, or a
+//     live channel) aborts the park — fail toward farming.
+// A bot parked here is recorded with reason "idle_no_stream", which wakes on a
+// LIVENESS transition (see wakeFinishedBots), never on startAt.
+async function parkIdleBots(hostId, opts = {}) {
+  const log = typeof opts.progress === "function" ? opts.progress : () => {};
+  if (!settings.getStreamGate().enabled) return { parked: [] };
+  const host = hosts.resolveHost(hostId);
+  if (!host) return { parked: [] };
+
+  const states = await hosts.dockerPs(host).catch(() => null);
+  if (!states) return { parked: [] };
+  const running = Object.keys(states).filter(
+    (name) =>
+      (name === "twitchbot" || /^twitchbotx\d+$/.test(name)) &&
+      states[name].state === "running",
+  );
+  if (!running.length) return { parked: [] };
+
+  const campaigns = (await liveCampaigns()).filter(
+    (c) => !settings.isNoClaimGame(c.game),
+  );
+  const liveMap = await liveStateByCampaign();
+  const parked = [];
+
+  for (const container of running) {
+    const file = fileForContainer(container);
+    if (!file) continue;
+    let games;
+    try {
+      games = gamesOf(JSON.parse(await hosts.readFile(host, file)));
+    } catch {
+      continue; // config unreadable — leave it running
+    }
+    // No games (handled by stopFinishedBots) or any non-gateable game (real,
+    // always-watchable work) → not an idle-waiting bot.
+    if (!games.size) continue;
+    if (![...games].every((g) => isGateableGame(g))) continue;
+
+    const myCampaigns = campaigns.filter(
+      (c) => games.has(norm(c.game)) && isGateableGame(c.game),
+    );
+    if (!myCampaigns.length) continue; // no active gated campaign for its games
+
+    // Every assigned gated campaign must be confidently dark long enough.
+    let ok = true;
+    for (const c of myCampaigns) {
+      const row = liveMap.get(c.campaignId);
+      if (!row || !row.gated || !liveIsFresh(row)) {
+        ok = false;
+        break;
+      } // uncertain
+      if (row.liveNow === true) {
+        ok = false;
+        break;
+      } // a channel is live — don't park
+      const darkMs = row.darkSince
+        ? Date.now() - new Date(row.darkSince).getTime()
+        : 0;
+      if (darkMs < PARK_AFTER_DARK_MS) {
+        ok = false;
+        break;
+      } // not dark long enough (hysteresis)
+    }
+    if (!ok) continue;
+
+    // Never park a bot that is actively farming something right now.
+    let verdict;
+    try {
+      verdict = await botCompletion(host.id, file, { freshMs: STOP_FRESH_MS });
+    } catch {
+      continue; // can't confirm it's idle — leave it running
+    }
+    if (verdict.working > 0) continue;
+
+    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    try {
+      await hosts.dockerContainer(host, "stop", container);
+      const gameList = [...games];
+      await recordParked(host.id, container, {
+        games: gameList,
+        accounts: verdict.total,
+        reason: "idle_no_stream — no assigned broadcast is live",
+      });
+      await recordAutoFarmEvent({
+        type: "parked",
+        game: gameList.join(", "),
+        host: host.id,
+        container,
+        count: verdict.total,
+        reason: "idle_no_stream — no assigned broadcast is live",
+        actor: "parkIdleBots",
+      });
+      parked.push({ container, accounts: verdict.total, games: gameList });
+      log(
+        "Parked " +
+          container +
+          " — waiting for a stream; no assigned broadcast is live [" +
+          gameList.join(", ") +
+          "].",
+      );
+    } catch (e) {
+      log("Could not stop " + container + ": " + (e.message || e), "warn");
+    }
+  }
+  return { parked };
+}
+
 module.exports = {
   wakeFinishedBots,
   stopFinishedBots,
+  parkIdleBots,
   recordParked,
   readRegistry,
   wakeTrigger,
+  liveWakeTrigger,
+  gatedDark,
+  isGateableGame,
+  liveIsFresh,
   fileForContainer,
   gamesOf,
 };

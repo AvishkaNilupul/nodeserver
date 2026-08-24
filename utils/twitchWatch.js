@@ -251,6 +251,41 @@ async function getStreamInfo(token, login, opts = {}) {
   };
 }
 
+// Batch liveness: which of these channel logins are live right now. One GQL
+// request per call (chunk the caller's list), so a campaign whose ACL lists
+// hundreds of channels costs a handful of requests, not one per channel — see
+// utils/streamScout.js. Twitch returns a null array entry for a login that does
+// not exist, so those are skipped. Returns a Set of live logins (lowercased).
+const STREAMS_LIVE_QUERY =
+  "query($logins:[String!]){ users(logins:$logins){ id login stream{ id } } }";
+
+async function getStreamsLive(token, logins, opts = {}) {
+  const list = (Array.isArray(logins) ? logins : [])
+    .map((l) => String(l || "").toLowerCase())
+    .filter(Boolean);
+  const live = new Set();
+  if (!list.length) return live;
+  const { status, parsed } = await gqlRequest({
+    token,
+    clientId: opts.clientId,
+    host: opts.host || null,
+    identity: opts.identity,
+    body: [{ query: STREAMS_LIVE_QUERY, variables: { logins: list } }],
+  });
+  if (parsed?.errors?.length) {
+    if (authFailedFrom(status, parsed)) {
+      const e = new Error("Token invalid/expired reading stream liveness");
+      e.code = "token_invalid";
+      throw e;
+    }
+    throw gqlError(parsed.errors);
+  }
+  for (const u of parsed?.data?.users || []) {
+    if (u && u.stream && u.stream.id) live.add(String(u.login || "").toLowerCase());
+  }
+  return live;
+}
+
 // Who am I — needed for the minute-watched payload's user_id, and doubles as a
 // cheap token liveness probe.
 const CURRENT_USER_QUERY = "query { currentUser { id login } }";
@@ -633,6 +668,7 @@ async function watchSession(token, opts = {}) {
 module.exports = {
   watchSession,
   getStreamInfo,
+  getStreamsLive,
   getCurrentUser,
   discoverChannels,
   activeDropGames,

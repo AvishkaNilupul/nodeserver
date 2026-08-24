@@ -69,6 +69,7 @@ const zeusxTokenRefresher = require("./utils/zeusxTokenRefresher");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
+const streamScout = require("./utils/streamScout");
 const autoFarmer = require("./utils/autoFarmer");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
@@ -697,6 +698,11 @@ mongoose
     // Drops radar: Twitch drop-campaign watcher (new farmable campaigns)
     // and Epic free-games watcher, both alerting via Telegram + the tab.
     campaignWatcher.start();
+    // Stream Scout: real-time "is a channel-locked drop watchable right now?"
+    // signal that lets botWaker park idle containers during broadcast gaps and
+    // wake them when a stream goes live. Self-guards on autoFarm.streamGate +
+    // streamGatedGames — a no-op (no Twitch calls) until a game is opted in.
+    streamScout.start();
     epicWatcher.start();
     // Auto-farmer: turns new drop campaigns into running bots on the farm
     // host (or dry-run plans) - fully gated by the superadmin settings

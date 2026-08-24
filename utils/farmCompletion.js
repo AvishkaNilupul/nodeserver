@@ -58,9 +58,23 @@ function gamesForUser(user, configLevel) {
 // Pure, batch-friendly half of botCompletion. A fleet watcher can read every
 // config on a host in one hosts.readFiles() call and every referenced account
 // in one Mongo query, then apply the exact same completion rules per bot.
+//
+// VERIFY-EARNED (opts.requireEarned + opts.dropGamesByLogin):
+// Without it, an account with no in-progress work on its assigned games is
+// "finished" as long as it earned SOME drop globally (rec.dropCount). That is
+// the hole this closes: a bot that never farmed its assigned game (no stream was
+// ever live) still looked finished. With requireEarned on, `dropGamesByLogin`
+// (login → Set of normalised games the account actually HOLDS a drop for, from
+// DropLog) is consulted: an account missing a drop for any assigned game is
+// counted as notStarted (not finished), so the bot stays up until it has really
+// earned every game. Fail-safe: a login we can't resolve falls back to the
+// dropCount rule, so a missing map can only keep a bot up, never strand it.
 function classifyBotCompletion(data, rows, opts = {}) {
   const freshMs = Number(opts.freshMs) || FRESH_MS;
   const nowMs = opts.now == null ? Date.now() : new Date(opts.now).getTime();
+  const requireEarned = !!opts.requireEarned && opts.dropGamesByLogin != null;
+  const dropGamesByLogin =
+    opts.dropGamesByLogin instanceof Map ? opts.dropGamesByLogin : null;
   const configLevel = Array.isArray(data && data.FavouriteGames)
     ? data.FavouriteGames
     : [];
@@ -103,9 +117,21 @@ function classifyBotCompletion(data, rows, opts = {}) {
     const onAssigned = onlyFavourites
       ? pendingGames.filter((g) => mine.includes(g))
       : pendingGames;
-    if (onAssigned.length) out.working.push(label);
-    else if (!rec.dropCount) out.notStarted.push(label);
-    else out.finished.push(label);
+    if (onAssigned.length) {
+      out.working.push(label);
+    } else if (requireEarned && dropGamesByLogin && (rec.login || u.Login)) {
+      // Per-game evidence: finished only when the account holds a drop for every
+      // game it was assigned. Missing any → it hasn't actually farmed that game.
+      const held =
+        dropGamesByLogin.get(norm(rec.login || u.Login)) || new Set();
+      const missing = mine.filter((g) => !held.has(g));
+      if (missing.length) out.notStarted.push(label);
+      else out.finished.push(label);
+    } else if (!rec.dropCount) {
+      out.notStarted.push(label);
+    } else {
+      out.finished.push(label);
+    }
   }
 
   const total = users.length;
@@ -175,7 +201,35 @@ async function botCompletion(hostId, file, opts = {}) {
         },
       ).lean()
     : [];
-  return { host: host.id, file, ...classifyBotCompletion(data, rows, opts) };
+
+  // Verify-earned: build login → {games actually held} from DropLog so the
+  // classifier can require a real drop per assigned game. Only when asked (the
+  // extra query is skipped for the default global-dropCount verdict).
+  let dropGamesByLogin = null;
+  if (opts.requireEarned) {
+    const logins = rows.map((r) => r.login).filter(Boolean);
+    dropGamesByLogin = new Map();
+    if (logins.length) {
+      const DropLog = require("../models/DropLog");
+      const drops = await DropLog.find(
+        { login: { $in: logins } },
+        { login: 1, game: 1 },
+      ).lean();
+      for (const d of drops) {
+        const key = norm(d.login);
+        const g = norm(d.game);
+        if (!key || !g) continue;
+        if (!dropGamesByLogin.has(key)) dropGamesByLogin.set(key, new Set());
+        dropGamesByLogin.get(key).add(g);
+      }
+    }
+  }
+
+  return {
+    host: host.id,
+    file,
+    ...classifyBotCompletion(data, rows, { ...opts, dropGamesByLogin }),
+  };
 }
 
 module.exports = {

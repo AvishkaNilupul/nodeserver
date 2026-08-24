@@ -458,8 +458,18 @@ async function fetchDropCampaigns(token, arg) {
 // Full details of one campaign (time-based drops + benefit names/images) —
 // what the auto-lister needs to name the items in a listing BEFORE any
 // account has farmed them. Raw query (no persisted hash needed).
+//
+// `allow { channels }` is the campaign's ACL: for a channel-locked (esports)
+// drop this is the exact list of channels that credit it, and it is what the
+// .NET bot itself watches (SelectBroadcasterAsync reads campaign.Allow.Channels
+// — see docs/STREAM-SCOUT-PLAN.md §13a). utils/streamScout.js gates wake/park on
+// the liveness of these same channels, so the Scout's signal matches what the
+// container actually farms. `isEnabled:false` or an empty list = not
+// channel-locked (watchable in the game directory), which the Scout treats as
+// non-gated / always-watchable.
 const CAMPAIGN_DETAILS_QUERY =
   "query($dropID: ID!) { currentUser { dropCampaign(id: $dropID) { id name " +
+  "allow { isEnabled channels { id name displayName } } " +
   "game { displayName } timeBasedDrops { id name requiredMinutesWatched " +
   "benefitEdges { benefit { id name imageAssetURL game { displayName name } } } } } } }";
 

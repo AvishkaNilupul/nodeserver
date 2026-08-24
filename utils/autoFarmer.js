@@ -2878,6 +2878,7 @@ async function runOnce() {
     // further down.
     const woken = [];
     const parked = [];
+    const parkedIdle = [];
     for (const h of hosts.listHosts()) {
       try {
         const w = await botWaker.wakeFinishedBots(h.id, { progress });
@@ -2885,6 +2886,19 @@ async function runOnce() {
       } catch (e) {
         progress(
           "Wake check failed on " + h.id + ": " + (e.message || e),
+          "warn",
+        );
+      }
+      // Stream-gate idle park (utils/streamScout.js): park bots that are only
+      // waiting for a broadcast. Self-guards on af.streamGate (cheap no-op when
+      // off) and is INDEPENDENT of stopFinishedBots below — it parks idle-waiting
+      // bots, not finished ones.
+      try {
+        const p = await botWaker.parkIdleBots(h.id, { progress });
+        for (const x of p.parked) parkedIdle.push({ ...x, host: h.id });
+      } catch (e) {
+        progress(
+          "Idle-stream park failed on " + h.id + ": " + (e.message || e),
           "warn",
         );
       }
@@ -2922,6 +2936,20 @@ async function runOnce() {
           parked.map((x) => x.host + "/" + x.container).join(", ") +
           "\nThey restart automatically when a new campaign for their games " +
           "goes live.",
+      );
+    }
+    if (parkedIdle.length) {
+      const accts = parkedIdle.reduce((s, x) => s + (x.accounts || 0), 0);
+      await tg(
+        "📺 Stream-gate — parked " +
+          parkedIdle.length +
+          " bot(s) waiting for a broadcast, holding " +
+          accts +
+          " account(s), freeing roughly " +
+          Math.round(parkedIdle.length * 130) +
+          " MB: " +
+          parkedIdle.map((x) => x.host + "/" + x.container).join(", ") +
+          "\nThey restart automatically the moment an assigned channel goes live.",
       );
     }
 

@@ -279,11 +279,17 @@ function deriveBotState({
   // stopped container entirely on some host adapters, so PARKED must precede
   // the generic missing-container DOWN verdict.
   if (parked && (!docker || docker.state !== "running")) {
+    // A stream-gate idle park (utils/streamScout.js) is a distinct, expected
+    // state: the campaign is live but no assigned channel is broadcasting right
+    // now. Surface it separately so it doesn't read as "finished" or "off/broken".
+    const idleNoStream = /idle_no_stream/i.test(parked.reason || "");
     return {
-      state: "PARKED",
+      state: idleNoStream ? "WAITING_FOR_STREAM" : "PARKED",
       reason: parked.reason || "parked by auto-farm",
       parkedAt: parked.parkedAt || null,
-      wakeCondition: "new live campaign for an assigned game",
+      wakeCondition: idleNoStream
+        ? "an assigned channel goes live"
+        : "new live campaign for an assigned game",
     };
   }
   if (!docker)
@@ -439,7 +445,9 @@ function buildPayload({
       hostObservedAt: host && host.observedAt ? host.observedAt : null,
       actions: {
         restart: !!(detail && detail.docker),
-        wake: derived.state === "PARKED",
+        wake:
+          derived.state === "PARKED" ||
+          derived.state === "WAITING_FOR_STREAM",
       },
     };
   });

@@ -207,8 +207,10 @@
   .af-state.stalled,.af-state.degraded { background:#fffbeb; color:var(--yellow); border-color:#fde68a; }
   .af-state.down { background:#fef2f2; color:var(--red); }
   .af-state.parked,.af-state.unknown { background:var(--surface-2); color:var(--muted); }
+  .af-state.waiting_for_stream { background:#ecfeff; color:#0891b2; border-color:#a5f3fc; }
   html[data-theme="dark"] .af-state.farming{background:rgba(52,211,153,.14);}
   html[data-theme="dark"] .af-state.done_idle{background:rgba(99,102,241,.18);}
+  html[data-theme="dark"] .af-state.waiting_for_stream{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.3);}
   html[data-theme="dark"] .af-state.stalled,html[data-theme="dark"] .af-state.degraded{background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);}
   html[data-theme="dark"] .af-state.down{background:rgba(248,113,113,.14);}
   .af-filter { padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); font:inherit; font-size:12.5px; }
@@ -1009,7 +1011,7 @@
   function afPct(v) { return Math.max(0, Math.min(100, afNum(v))); }
   function afStateChip(state) {
     const s = String(state || "UNKNOWN").toUpperCase();
-    return '<span class="chip af-state ' + s.toLowerCase() + '">' + esc(s.replace("_", " ")) + "</span>";
+    return '<span class="chip af-state ' + s.toLowerCase() + '">' + esc(s.replace(/_/g, " ")) + "</span>";
   }
   function afTaskId(row) { return row.taskId || row._id || row.id || (row.task && (row.task._id || row.task.id)) || ""; }
   function afActionAllowed(row, name) {
