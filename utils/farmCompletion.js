@@ -24,6 +24,7 @@
 // stoppable when there are none of either.
 const hosts = require("./botHosts");
 const BotAccount = require("../models/BotAccount");
+const settings = require("./settings");
 
 // Stale scans are worthless for this decision — a verdict from before the
 // current campaign started would happily stop a bot that is mid-drop.
@@ -59,22 +60,82 @@ function gamesForUser(user, configLevel) {
 // config on a host in one hosts.readFiles() call and every referenced account
 // in one Mongo query, then apply the exact same completion rules per bot.
 //
-// VERIFY-EARNED (opts.requireEarned + opts.dropGamesByLogin):
+// VERIFY-EARNED (opts.requireEarned + opts.heldByLogin [+ opts.expectedByGame]):
 // Without it, an account with no in-progress work on its assigned games is
 // "finished" as long as it earned SOME drop globally (rec.dropCount). That is
 // the hole this closes: a bot that never farmed its assigned game (no stream was
-// ever live) still looked finished. With requireEarned on, `dropGamesByLogin`
-// (login → Set of normalised games the account actually HOLDS a drop for, from
+// ever live) still looked finished. With requireEarned on, `heldByLogin`
+// (login → {games, benefitIds, itemKeys} the account actually HOLDS, from
 // DropLog) is consulted: an account missing a drop for any assigned game is
 // counted as notStarted (not finished), so the bot stays up until it has really
-// earned every game. Fail-safe: a login we can't resolve falls back to the
-// dropCount rule, so a missing map can only keep a bot up, never strand it.
+// earned every game. When `expectedByGame` is supplied (built from the
+// persisted per-campaign manifests, models/CampaignDrops.js), the account must
+// additionally hold every expected drop of every ACTIVE campaign of its games —
+// the owner's "check everyone farmed everything correctly before sleeping".
+// Fail-safe: a login we can't resolve counts as notStarted (keeps the bot up),
+// so missing evidence can only ever keep a bot up, never strand it.
+// Inclusive game↔game match, mirroring botWaker.gameMatchesCampaign so a
+// config "overwatch" and a DropLog "Overwatch 2" still count as the same game.
+// A false positive here only keeps a bot up (the safe direction).
+function gameMatches(a, b) {
+  const x = settings.normGameName(a);
+  const y = settings.normGameName(b);
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+function heldGamesMatch(heldGames, g) {
+  for (const h of heldGames || []) if (gameMatches(h, g)) return true;
+  return false;
+}
+
+// Any expected drop of any ACTIVE campaign of the assigned games missing from
+// the account's held set → the bot is NOT fully farmed, keep it up. Matched by
+// benefitId with itemKey (normalised name|game) as the fallback. A game with
+// no persisted manifest skips the per-campaign check entirely — the per-game
+// check below is still applied, and a missing manifest can only ever keep a
+// bot up (fail toward farming).
+function missingExpectedDrops(held, mine, expectedByGame) {
+  if (!expectedByGame) return false;
+  for (const g of mine) {
+    const exp = expectedByGame.get(g);
+    if (!exp || !exp.length) continue;
+    for (const e of exp) {
+      const okBenefit = !!e.benefitId && held.benefitIds.has(e.benefitId);
+      const okItem = !!e.itemKey && held.itemKeys.has(e.itemKey);
+      if (!okBenefit && !okItem) return true;
+    }
+  }
+  return false;
+}
+
 function classifyBotCompletion(data, rows, opts = {}) {
   const freshMs = Number(opts.freshMs) || FRESH_MS;
   const nowMs = opts.now == null ? Date.now() : new Date(opts.now).getTime();
-  const requireEarned = !!opts.requireEarned && opts.dropGamesByLogin != null;
-  const dropGamesByLogin =
+  // Verify-earned evidence. heldByLogin is the rich shape botCompletion builds
+  // (games + benefitIds + itemKeys per login); the legacy dropGamesByLogin
+  // map (login → Set of games) is still accepted and converted so existing
+  // callers/tests keep working unchanged.
+  const legacy =
     opts.dropGamesByLogin instanceof Map ? opts.dropGamesByLogin : null;
+  const heldByLogin =
+    opts.heldByLogin instanceof Map
+      ? opts.heldByLogin
+      : legacy
+        ? new Map(
+            [...legacy].map(([login, games]) => [
+              login,
+              {
+                games: games instanceof Set ? games : new Set(),
+                benefitIds: new Set(),
+                itemKeys: new Set(),
+              },
+            ]),
+          )
+        : null;
+  const requireEarned = !!opts.requireEarned && heldByLogin != null;
+  const expectedByGame =
+    opts.expectedByGame instanceof Map ? opts.expectedByGame : null;
   const configLevel = Array.isArray(data && data.FavouriteGames)
     ? data.FavouriteGames
     : [];
@@ -119,14 +180,27 @@ function classifyBotCompletion(data, rows, opts = {}) {
       : pendingGames;
     if (onAssigned.length) {
       out.working.push(label);
-    } else if (requireEarned && dropGamesByLogin && (rec.login || u.Login)) {
-      // Per-game evidence: finished only when the account holds a drop for every
-      // game it was assigned. Missing any → it hasn't actually farmed that game.
+    } else if (requireEarned && heldByLogin && (rec.login || u.Login)) {
       const held =
-        dropGamesByLogin.get(norm(rec.login || u.Login)) || new Set();
-      const missing = mine.filter((g) => !held.has(g));
-      if (missing.length) out.notStarted.push(label);
-      else out.finished.push(label);
+        heldByLogin.get(norm(rec.login || u.Login)) || {
+          games: new Set(),
+          benefitIds: new Set(),
+          itemKeys: new Set(),
+        };
+      // Per-game evidence: finished only when the account holds a drop for
+      // every game it was assigned (INCLUSIVE label match — "overwatch" must
+      // match a "Overwatch 2" DropLog row). Missing any → it hasn't farmed it.
+      const missing = mine.filter((g) => !heldGamesMatch(held.games, g));
+      if (missing.length) {
+        out.notStarted.push(label);
+      } else if (missingExpectedDrops(held, mine, expectedByGame)) {
+        // Per-campaign completeness: the account is missing drops its active
+        // campaigns expect (e.g. a never-live game farmed nothing, or only
+        // some of a multi-drop event). Keep the bot up until truly finished.
+        out.notStarted.push(label);
+      } else {
+        out.finished.push(label);
+      }
     } else if (!rec.dropCount) {
       out.notStarted.push(label);
     } else {
@@ -202,34 +276,93 @@ async function botCompletion(hostId, file, opts = {}) {
       ).lean()
     : [];
 
-  // Verify-earned: build login → {games actually held} from DropLog so the
-  // classifier can require a real drop per assigned game. Only when asked (the
-  // extra query is skipped for the default global-dropCount verdict).
-  let dropGamesByLogin = null;
+  // Verify-earned: build login → {games + benefitIds + itemKeys actually
+  // held} from DropLog, and game → expected drops from the persisted campaign
+  // manifests (models/CampaignDrops.js), so the classifier can require a real
+  // drop per assigned game AND per active campaign. Only when asked (the extra
+  // queries are skipped for the default global-dropCount verdict).
+  let heldByLogin = null;
+  let expectedByGame = null;
   if (opts.requireEarned) {
     const logins = rows.map((r) => r.login).filter(Boolean);
-    dropGamesByLogin = new Map();
+    heldByLogin = new Map();
     if (logins.length) {
       const DropLog = require("../models/DropLog");
       const drops = await DropLog.find(
         { login: { $in: logins } },
-        { login: 1, game: 1 },
+        { login: 1, game: 1, benefitId: 1, itemKey: 1 },
       ).lean();
       for (const d of drops) {
         const key = norm(d.login);
+        if (!key) continue;
+        let h = heldByLogin.get(key);
+        if (!h) {
+          h = { games: new Set(), benefitIds: new Set(), itemKeys: new Set() };
+          heldByLogin.set(key, h);
+        }
         const g = norm(d.game);
-        if (!key || !g) continue;
-        if (!dropGamesByLogin.has(key)) dropGamesByLogin.set(key, new Set());
-        dropGamesByLogin.get(key).add(g);
+        if (g) h.games.add(g);
+        if (d.benefitId) h.benefitIds.add(String(d.benefitId));
+        if (d.itemKey) h.itemKeys.add(String(d.itemKey));
       }
     }
+    expectedByGame = await buildExpectedByGame(data);
   }
 
   return {
     host: host.id,
     file,
-    ...classifyBotCompletion(data, rows, { ...opts, dropGamesByLogin }),
+    ...classifyBotCompletion(data, rows, { ...opts, heldByLogin, expectedByGame }),
   };
+}
+
+// Expected drops per ASSIGNED game, from the persisted manifests of every
+// ACTIVE campaign whose game matches the config label inclusively. Keyed by
+// the same normalised label classifyBotCompletion uses for `mine`, so a config
+// "naraka" and a campaign "NARAKA: BLADEPOINT" land on the same key.
+async function buildExpectedByGame(data) {
+  const configLevel = Array.isArray(data && data.FavouriteGames)
+    ? data.FavouriteGames
+    : [];
+  const assigned = new Set();
+  for (const u of usersOf(data)) {
+    if (!u || u.Enabled === false) continue;
+    for (const g of gamesForUser(u, configLevel)) assigned.add(g);
+  }
+  if (!assigned.size) return new Map();
+  const now = new Date();
+  const TwitchCampaign = require("../models/TwitchCampaign");
+  const CampaignDrops = require("../models/CampaignDrops");
+  const camps = await TwitchCampaign.find(
+    {
+      active: true,
+      status: "ACTIVE",
+      $or: [{ endAt: null }, { endAt: { $gt: now } }],
+    },
+    { campaignId: 1, game: 1 },
+  ).lean();
+  const manis = await CampaignDrops.find({
+    campaignId: { $in: camps.map((c) => c.campaignId) },
+  }).lean();
+  const byCampaign = new Map(manis.map((m) => [m.campaignId, m]));
+  const out = new Map();
+  for (const g of assigned) {
+    const expected = [];
+    const seen = new Set();
+    for (const c of camps) {
+      if (!gameMatches(g, c.game)) continue;
+      const m = byCampaign.get(c.campaignId);
+      if (!m || !Array.isArray(m.drops)) continue;
+      for (const d of m.drops) {
+        const key = String(d.benefitId || "") + "|" + String(d.itemKey || "");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        expected.push({ benefitId: d.benefitId || "", itemKey: d.itemKey || "" });
+      }
+    }
+    if (expected.length) out.set(g, expected);
+  }
+  return out;
 }
 
 module.exports = {

@@ -4,7 +4,13 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { fileForContainer, gamesOf, wakeTrigger } = require("../utils/botWaker");
+const {
+  fileForContainer,
+  gamesOf,
+  wakeTrigger,
+  wakeCandidates,
+  gatedDark,
+} = require("../utils/botWaker");
 
 const PARKED = "2026-07-28T14:00:00.000Z";
 const games = new Set(["delta force", "fortnite"]);
@@ -276,4 +282,81 @@ test("park grace still respects the game filter", () => {
     null,
     "a grace-window campaign for another game is ignored",
   );
+});
+
+// --- Stream-gate follow-up fixes (2026-08-25) --------------------------------
+
+test("wakeCandidates matches labels inclusively (naraka -> NARAKA: BLADEPOINT)", () => {
+  const games = new Set(["naraka"]);
+  const parkedAt = "2026-08-24T10:00:00Z";
+  const campaigns = [
+    { campaignId: "nbpl", game: "NARAKA: BLADEPOINT", name: "NBPL", startAt: "2026-08-24T11:00:00Z" },
+  ];
+  const c = wakeCandidates(games, parkedAt, campaigns, 0);
+  assert.strictEqual(c.length, 1);
+  assert.strictEqual(c[0].campaignId, "nbpl");
+});
+
+test("wakeCandidates returns every candidate, not just the first", () => {
+  const games = new Set(["rocket league"]);
+  const parkedAt = "2026-08-24T10:00:00Z";
+  const campaigns = [
+    { campaignId: "c1", game: "Rocket League", name: "A", startAt: "2026-08-24T12:00:00Z" },
+    { campaignId: "c2", game: "Rocket League", name: "B", startAt: "2026-08-24T11:00:00Z" },
+    { campaignId: "c3", game: "Sea of Thieves", name: "C", startAt: "2026-08-24T13:00:00Z" },
+  ];
+  const c = wakeCandidates(games, parkedAt, campaigns, 0);
+  assert.deepStrictEqual(c.map((x) => x.campaignId), ["c1", "c2"]);
+});
+
+test("wakeCandidates honours the grace floor", () => {
+  const games = new Set(["rocket league"]);
+  const parkedAt = "2026-08-24T10:00:00Z";
+  const campaigns = [
+    { campaignId: "old", game: "Rocket League", name: "Old", startAt: "2026-08-24T09:30:00Z" },
+    { campaignId: "new", game: "Rocket League", name: "New", startAt: "2026-08-24T11:00:00Z" },
+  ];
+  // grace 2h: the campaign that started 30 min BEFORE the park also counts.
+  const withGrace = wakeCandidates(games, parkedAt, campaigns, 2 * 60 * 60 * 1000);
+  assert.strictEqual(withGrace.length, 2);
+  // no grace: only the campaign strictly newer than the park.
+  const noGrace = wakeCandidates(games, parkedAt, campaigns, 0);
+  assert.deepStrictEqual(noGrace.map((x) => x.campaignId), ["new"]);
+});
+
+test("a dark gated candidate does not block a later farmable one", () => {
+  const settings = require("../utils/settings");
+  const o1 = settings.getStreamGate;
+  const o2 = settings.isStreamGatedGame;
+  const o3 = settings.isNoClaimGame;
+  settings.getStreamGate = () => ({ enabled: true, games: { "rainbow six": {} } });
+  settings.isStreamGatedGame = (g) => String(g).toLowerCase().includes("rainbow six");
+  settings.isNoClaimGame = () => false;
+  try {
+    // This is exactly the wakeFinishedBots loop: skip gatedDark candidates,
+    // wake on the first farmable one. A mixed bot (gated + ungated game) must
+    // not be held by a dark gated campaign while its ungated game has a new
+    // campaign.
+    const games = new Set(["rainbow six siege", "sea of thieves"]);
+    const parkedAt = "2026-08-24T10:00:00Z";
+    const campaigns = [
+      { campaignId: "r6", game: "Rainbow Six Siege", name: "R6 EWC", startAt: "2026-08-24T11:00:00Z" },
+      { campaignId: "sot", game: "Sea of Thieves", name: "SoT", startAt: "2026-08-24T11:30:00Z" },
+    ];
+    const liveMap = new Map([
+      ["r6", { campaignId: "r6", gated: true, liveNow: false, checkedAt: new Date(), lastLiveAt: null }],
+    ]);
+    const candidates = wakeCandidates(games, parkedAt, campaigns, 0);
+    let trigger = null;
+    for (const cand of candidates) {
+      if (gatedDark(cand, liveMap)) continue;
+      trigger = cand;
+      break;
+    }
+    assert.strictEqual(trigger.campaignId, "sot");
+  } finally {
+    settings.getStreamGate = o1;
+    settings.isStreamGatedGame = o2;
+    settings.isNoClaimGame = o3;
+  }
 });

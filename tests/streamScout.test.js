@@ -322,3 +322,136 @@ test("idle_no_campaign reason wakes with grace (manual-style), not liveness", ()
   assert.match(reason, /manual|idle_no_campaign/i); // gets PARK_CAMPAIGN_GRACE
   assert.doesNotMatch(reason, /idle_no_stream/i); // NOT the liveness-wake branch
 });
+
+// --- verify-earned: per-campaign manifest + inclusive labels (2026-08-25) -----
+
+test("verify-earned holds a bot missing an expected campaign drop", () => {
+  // accta holds the game but not the campaign's expected benefit; acctb holds
+  // everything. Only acctb may park.
+  const heldByLogin = new Map([
+    ["accta", { games: new Set(["rocket league"]), benefitIds: new Set(["b1"]), itemKeys: new Set(["trophy|rocket league"]) }],
+    ["acctb", { games: new Set(["rocket league"]), benefitIds: new Set(["b1", "b2"]), itemKeys: new Set(["trophy|rocket league", "wheels|rocket league"]) }],
+  ]);
+  const expectedByGame = new Map([
+    ["rocket league", [{ benefitId: "b1", itemKey: "trophy|rocket league" }, { benefitId: "b2", itemKey: "wheels|rocket league" }]],
+  ]);
+  const v = classifyBotCompletion(cfg, accts, {
+    requireEarned: true,
+    heldByLogin,
+    expectedByGame,
+  });
+  assert.strictEqual(v.finished, 1);
+  assert.strictEqual(v.notStarted, 1);
+  assert.strictEqual(v.stoppable, false);
+});
+
+test("verify-earned parks once every expected campaign drop is held", () => {
+  const heldByLogin = new Map([
+    ["accta", { games: new Set(["rocket league"]), benefitIds: new Set(["b1", "b2"]), itemKeys: new Set() }],
+    ["acctb", { games: new Set(["rocket league"]), benefitIds: new Set(["b1", "b2"]), itemKeys: new Set() }],
+  ]);
+  const expectedByGame = new Map([
+    ["rocket league", [{ benefitId: "b1", itemKey: "" }, { benefitId: "b2", itemKey: "" }]],
+  ]);
+  const v = classifyBotCompletion(cfg, accts, {
+    requireEarned: true,
+    heldByLogin,
+    expectedByGame,
+  });
+  assert.strictEqual(v.finished, 2);
+  assert.strictEqual(v.stoppable, true);
+});
+
+test("verify-earned matches held-game labels inclusively (overwatch vs Overwatch 2)", () => {
+  const owCfg = {
+    FavouriteGames: ["overwatch"],
+    TwitchSettings: {
+      OnlyFavouriteGames: true,
+      TwitchUsers: [{ ClientSecret: "s1", Login: "accta", Enabled: true }],
+    },
+  };
+  const owAccts = [
+    {
+      clientSecret: "s1",
+      login: "accta",
+      inProgressCount: 0,
+      inProgressGames: [],
+      dropCount: 2,
+      lastScanStatus: "ok",
+      lastScanAt: new Date(),
+    },
+  ];
+  // DropLog rows carry the Twitch label "Overwatch 2"; the config says
+  // "overwatch". Must still count as held (previously a permanent notStarted).
+  const heldByLogin = new Map([
+    ["accta", { games: new Set(["overwatch 2"]), benefitIds: new Set(["b1"]), itemKeys: new Set() }],
+  ]);
+  const v = classifyBotCompletion(owCfg, owAccts, {
+    requireEarned: true,
+    heldByLogin,
+  });
+  assert.strictEqual(v.finished, 1);
+  assert.strictEqual(v.stoppable, true);
+});
+
+test("verify-earned: a missing manifest never holds a bot (game check still applies)", () => {
+  // expectedByGame has an entry for the game but with no expected drops → the
+  // per-game check alone decides, and holding the game is enough.
+  const heldByLogin = new Map([
+    ["accta", { games: new Set(["rocket league"]), benefitIds: new Set(), itemKeys: new Set() }],
+    ["acctb", { games: new Set(["rocket league"]), benefitIds: new Set(), itemKeys: new Set() }],
+  ]);
+  const v = classifyBotCompletion(cfg, accts, {
+    requireEarned: true,
+    heldByLogin,
+    expectedByGame: new Map([["rocket league", []]]),
+  });
+  assert.strictEqual(v.finished, 2);
+  assert.strictEqual(v.stoppable, true);
+});
+
+// --- Stream Scout: liveness-read errors must fail toward farming (2026-08-25) --
+
+test("anyChannelLive: a non-token error throws (never a silent dark verdict)", async () => {
+  const twitchWatch = require("../utils/twitchWatch");
+  const orig = twitchWatch.getStreamsLive;
+  twitchWatch.getStreamsLive = async () => {
+    const e = new Error("Twitch liveness read failed (HTTP 429)");
+    e.code = "twitch_http";
+    throw e;
+  };
+  try {
+    delete require.cache[require.resolve("../utils/streamScout")];
+    const streamScout = require("../utils/streamScout");
+    await assert.rejects(
+      () => streamScout.anyChannelLive(["chan1", "chan2"], ["tok1", "tok2"]),
+      /HTTP 429/,
+    );
+  } finally {
+    twitchWatch.getStreamsLive = orig;
+    delete require.cache[require.resolve("../utils/streamScout")];
+  }
+});
+
+test("anyChannelLive: a dead token rotates off instead of reporting dark", async () => {
+  const twitchWatch = require("../utils/twitchWatch");
+  const orig = twitchWatch.getStreamsLive;
+  twitchWatch.getStreamsLive = async (tok) => {
+    if (tok === "dead") {
+      const e = new Error("Token invalid/expired reading stream liveness");
+      e.code = "token_invalid";
+      throw e;
+    }
+    return new Set(["chan1"]);
+  };
+  try {
+    delete require.cache[require.resolve("../utils/streamScout")];
+    const streamScout = require("../utils/streamScout");
+    const res = await streamScout.anyChannelLive(["chan1", "chan2"], ["dead", "good"]);
+    assert.strictEqual(res.liveNow, true);
+    assert.deepStrictEqual(res.liveChannels, ["chan1"]);
+  } finally {
+    twitchWatch.getStreamsLive = orig;
+    delete require.cache[require.resolve("../utils/streamScout")];
+  }
+});

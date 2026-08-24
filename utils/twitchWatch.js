@@ -280,6 +280,15 @@ async function getStreamsLive(token, logins, opts = {}) {
     }
     throw gqlError(parsed.errors);
   }
+  // An HTTP-level failure (429/5xx) or a non-JSON body reads as NO data. It
+  // must never be mistaken for "nothing is live" — that would let a Twitch
+  // outage park gated bots through the Scout. Throw so callers can fail
+  // toward farming (treat as watchable) instead of seeing an empty result.
+  if (!parsed?.data && status >= 400) {
+    const e = new Error("Twitch liveness read failed (HTTP " + status + ")");
+    e.code = "twitch_http";
+    throw e;
+  }
   for (const u of parsed?.data?.users || []) {
     if (u && u.stream && u.stream.id) live.add(String(u.login || "").toLowerCase());
   }
@@ -316,6 +325,13 @@ async function getGameDropsLive(token, gameName, opts = {}) {
       throw e;
     }
     throw gqlError(parsed.errors);
+  }
+  // Same fail-toward-farming rule as getStreamsLive: an HTTP-level failure is
+  // NOT "no drops stream is live", it is an error the Scout must surface.
+  if (!parsed?.data && status >= 400) {
+    const e = new Error("Twitch game-directory read failed (HTTP " + status + ")");
+    e.code = "twitch_http";
+    throw e;
   }
   const edges = parsed?.data?.game?.streams?.edges || [];
   return edges

@@ -136,9 +136,12 @@ async function anyChannelLive(channels, tokens) {
           tokenIdx++;
           continue; // retry this chunk with the next token
         }
-        // Last-token failure: give up on this chunk. A pass that can't confirm
-        // liveness resolves toward farming at the caller.
-        done = true;
+        // Every OTHER failure — a dead last token, a 429/5xx, a network blip —
+        // must NOT be allowed to read as "the channel is dark": that would let
+        // a Twitch outage park gated bots (the §6 fail-toward-farming contract).
+        // Throw so the caller records the error and marks the campaign
+        // watchable for this pass.
+        throw e;
       }
     }
     if (liveChannels.length) break; // one live channel is enough
@@ -163,6 +166,11 @@ async function runOnce() {
   if (state.running) return state.lastCounts;
   state.running = true;
   const counts = { tracked: 0, gated: 0, live: 0, transitions: 0, errors: 0 };
+  // First error seen this pass — surfaced on state.lastError so the loop
+  // retries on the short fuse (RETRY_MS) instead of waiting a full tick, and
+  // so an outage stays visible even when the failing campaign's row is
+  // written as watchable.
+  let passError = "";
   try {
     const gate = settings.getStreamGate();
     const haveGames = Object.keys(gate.games || {}).length > 0;
@@ -228,6 +236,7 @@ async function runOnce() {
           counts.errors++;
           liveNow = true; // fail toward farming
           lastError = (e && e.message) || String(e);
+          if (!passError) passError = lastError;
         }
       } else {
         // Category mode (Phase 2): is any drops-enabled channel live in the
@@ -253,6 +262,7 @@ async function runOnce() {
             counts.errors++;
             liveNow = true; // fail toward farming
             lastError = (e && e.message) || String(e);
+            if (!passError) passError = lastError;
             done = true;
           }
         }
@@ -291,7 +301,7 @@ async function runOnce() {
     counts.transitions = transitions.length;
     if (transitions.length) await nudgeWake(transitions);
 
-    state.lastError = "";
+    state.lastError = passError;
     return counts;
   } catch (e) {
     state.lastError = (e && e.message) || String(e);
@@ -356,4 +366,6 @@ function start() {
   setTimeout(loop, 15 * 1000);
 }
 
-module.exports = { start, runOnce, status };
+// anyChannelLive exported for tests (it is the safety-critical failure path:
+// a swallowed error there would read as a confident "dark" verdict).
+module.exports = { start, runOnce, status, anyChannelLive };

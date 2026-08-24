@@ -420,3 +420,44 @@ fix #1 then enabled.
       snapshot doc — no new compute on the request path.
 - [ ] `WAITING_FOR_STREAM` state renders and is distinct from PARKED/DONE_IDLE.
 - [ ] `npm test` green; no change to auto-farm *decision* logic beyond the wake/park gate.
+
+## 13d. Bug-fix pass (2026-08-25) — review findings fixed
+
+A code review + live-prod verification pass (branch `feature/stream-scout` worktree)
+found and fixed four issues plus the verify-earned upgrade:
+
+1. **Error-swallowing in the liveness read (`utils/streamScout.js`).** `anyChannelLive`
+   swallowed every non-token error (a 429/5xx/network blip, or an all-tokens-dead
+   pass) and returned `liveNow:false` — which the Scout then wrote as a FRESH,
+   confident-dark row, letting a Twitch outage park gated bots after
+   `PARK_AFTER_DARK_MS` with zero error trail (the §6 fail-toward-farming contract,
+   inverted). Fixed: non-rotatable failures now throw; `runOnce` catches them and
+   marks the campaign watchable + records `counts.errors`/`lastError` (and the
+   short retry fuse now fires on per-campaign errors too). Also hardened
+   `twitchWatch.getStreamsLive` / `getGameDropsLive` to throw on HTTP-level
+   failures instead of returning an empty (="dark") result.
+2. **Dark gated campaign suppressed a whole wake (`utils/botWaker.js`).** The wake
+   path checked `gatedDark` on the FIRST trigger campaign only and nulled the whole
+   wake — a mixed bot (gated + ungated games) could miss the ungated game's drops
+   until the gated channel came back. Fixed: `wakeCandidates` collects every
+   candidate; the loop skips dark-gated ones and wakes on the first farmable.
+3. **Park/wake matching asymmetry.** `parkIdleNoCampaignBots` matched inclusively
+   (`gameMatchesCampaign`) but every wake path matched exactly, so a relabeled new
+   campaign ("naraka" vs "NARAKA: BLADEPOINT") could strand a parked bot. Fixed:
+   `wakeTrigger`/`liveWakeTrigger` now use the same inclusive bidirectional match.
+4. **Stop-before-record in all three park paths.** A registry write failure after a
+   successful `docker stop` left the bot parked but unwakeable. Fixed: record the
+   park FIRST (a failed stop self-heals — wakeFinishedBots drops entries whose
+   container is running), and undo the restart-policy change if the stop fails.
+5. **Verify-earned upgraded to per-campaign completeness.** `farmCompletion` now
+   checks not just "holds a drop for every assigned game" but "holds every expected
+   drop of every ACTIVE campaign of its games", against a persisted manifest
+   (`models/CampaignDrops.js`, refreshed read-only by `campaignWatcher` ~6h TTL,
+   network-neutral until `verifyEarnedBeforePark` is on) — matched by `benefitId`
+   with `itemKey` fallback. Held-game labels also match inclusively ("overwatch"
+   vs DropLog "Overwatch 2"), so a finished bot is no longer held forever by label
+   drift, and a never-live game's bot can no longer be parked as "finished".
+
+All four park/wake fixes fail toward farming (keep a bot up on any uncertainty).
+523 tests pass (+10 new: wake candidates/gatedDark skip, per-campaign verify,
+inclusive labels, liveness error propagation/token rotation); ESLint clean.

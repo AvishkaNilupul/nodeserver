@@ -116,7 +116,7 @@ function gatedDark(campaign, liveMap) {
 function liveWakeTrigger(games, parkedAt, campaigns, liveMap) {
   const since = parkedAt ? new Date(parkedAt).getTime() : 0;
   for (const c of campaigns || []) {
-    if (!games.has(norm(c.game))) continue;
+    if (!anyGameMatches(games, c.game)) continue;
     const row = liveMap.get(c.campaignId);
     if (!row || !row.gated) return c; // no gated row → wake (fail toward farming)
     if (!liveIsFresh(row)) return c; // stale → wake
@@ -161,8 +161,20 @@ function gamesOf(data) {
   return out;
 }
 
-// The decision itself, kept pure so it can be tested without docker or Mongo.
-// Returns the campaign that justifies waking, or null.
+// True when any of the bot's assigned games matches a campaign game. Uses the
+// same INCLUSIVE bidirectional rule as parkIdleNoCampaignBots (gameMatchesCampaign)
+// so the wake path can never miss a campaign whose label drifted ("naraka" vs
+// "NARAKA: BLADEPOINT") — a false positive here only wakes a bot early (RAM
+// cost, safe direction); a false negative strands it off forever.
+function anyGameMatches(games, campaignGame) {
+  for (const g of games || []) {
+    if (gameMatchesCampaign(g, campaignGame)) return true;
+  }
+  return false;
+}
+
+// Every campaign that could justify waking this bot, in catalog order. The
+// decision itself, kept pure so it can be tested without docker or Mongo.
 //
 // A campaign with no startAt is treated as a wake trigger: unknown timing on a
 // live campaign for a game we farm is exactly the case where guessing "old"
@@ -173,16 +185,21 @@ function gamesOf(data) {
 // campaign strictly newer than the park wakes a bot). The PARK path passes
 // PARK_CAMPAIGN_GRACE_MS so a bot isn't parked into a just-started campaign
 // whose broadcast drops haven't landed yet.
-function wakeTrigger(games, parkedAt, campaigns, graceMs = 0) {
+function wakeCandidates(games, parkedAt, campaigns, graceMs = 0) {
   const since = parkedAt ? new Date(parkedAt).getTime() : 0;
-  if (!Number.isFinite(since)) return null;
+  if (!Number.isFinite(since)) return [];
   const floor = since - (Number(graceMs) || 0);
+  const out = [];
   for (const c of campaigns || []) {
-    if (!games.has(norm(c.game))) continue;
-    if (!c.startAt) return c;
-    if (new Date(c.startAt).getTime() > floor) return c;
+    if (!anyGameMatches(games, c.game)) continue;
+    if (!c.startAt) out.push(c);
+    else if (new Date(c.startAt).getTime() > floor) out.push(c);
   }
-  return null;
+  return out;
+}
+
+function wakeTrigger(games, parkedAt, campaigns, graceMs = 0) {
+  return wakeCandidates(games, parkedAt, campaigns, graceMs)[0] || null;
 }
 
 async function readRegistry() {
@@ -295,11 +312,20 @@ async function wakeFinishedBots(hostId, opts = {}) {
       const graceMs = /manual|idle_no_campaign/i.test(entry.reason || "")
         ? PARK_CAMPAIGN_GRACE_MS
         : 0;
-      trigger = wakeTrigger(games, entry.parkedAt, campaigns, graceMs);
-      // Don't wake into a gated broadcast that is confidently dark right now —
-      // it would only idle-poll. Hold until a channel is live. (Uncertain /
-      // stale liveness never holds — gatedDark returns false and we wake.)
-      if (trigger && gatedDark(trigger, liveMap)) trigger = null;
+      // Try every candidate, not just the first: a confidently-dark gated
+      // campaign must not suppress a wake that one of the bot's OTHER games
+      // justifies (a mixed bot would otherwise miss the ungated game's drops
+      // until the gated channel came back).
+      for (const cand of wakeCandidates(
+        games,
+        entry.parkedAt,
+        campaigns,
+        graceMs,
+      )) {
+        if (gatedDark(cand, liveMap)) continue;
+        trigger = cand;
+        break;
+      }
     }
     if (!trigger) continue;
 
@@ -428,11 +454,14 @@ async function stopFinishedBots(hostId, opts = {}) {
         continue;
       }
     }
-    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    // Record FIRST: if the stop below succeeds, an unrecorded park is a bot
+    // that can never be woken again. If the stop FAILS, the registry entry is
+    // harmless — wakeFinishedBots deletes entries whose container is running,
+    // so the next tick self-heals it.
+    const parkReason = empty
+      ? "no enabled accounts left in the config"
+      : "all accounts finished their assigned games";
     try {
-      await hosts.dockerContainer(host, "stop", container);
-      // Record BEFORE reporting success: an unrecorded park is a bot that can
-      // never be woken again.
       await recordParked(host.id, container, {
         // An empty container records no games: there is nothing in it for a new
         // campaign to farm, so it must not be woken by one. (wakeFinishedBots
@@ -440,13 +469,21 @@ async function stopFinishedBots(hostId, opts = {}) {
         // just makes the registry honest about why it is parked.)
         games: empty ? [] : verdict.assignedGames,
         accounts: verdict.total,
-        reason: empty
-          ? "no enabled accounts left in the config"
-          : "all accounts finished their assigned games",
+        reason: parkReason,
       });
-      const parkReason = empty
-        ? "no enabled accounts left in the config"
-        : "all accounts finished their assigned games";
+    } catch (e) {
+      log(
+        "Could not record park for " +
+          container +
+          " — leaving it running: " +
+          (e.message || e),
+        "warn",
+      );
+      continue;
+    }
+    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    try {
+      await hosts.dockerContainer(host, "stop", container);
       await recordAutoFarmEvent({
         type: "parked",
         game: empty ? "" : (verdict.assignedGames || []).join(", "),
@@ -469,6 +506,10 @@ async function stopFinishedBots(hostId, opts = {}) {
               "].",
       );
     } catch (e) {
+      // Stop failed — undo the restart-policy change so a docker daemon
+      // restart can't strand a still-running bot. The registry entry self-heals
+      // next tick (wakeFinishedBots drops entries whose container is running).
+      await hosts.restoreRestartPolicy(host, container).catch(() => {});
       log("Could not stop " + container + ": " + (e.message || e), "warn");
     }
   }
@@ -562,15 +603,28 @@ async function parkIdleBots(hostId, opts = {}) {
     }
     if (verdict.working > 0) continue;
 
-    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    // Record FIRST — an unrecorded park is a bot that can never be woken
+    // again; a failed stop self-heals via the running-container cleanup.
+    const gameList = [...games];
     try {
-      await hosts.dockerContainer(host, "stop", container);
-      const gameList = [...games];
       await recordParked(host.id, container, {
         games: gameList,
         accounts: verdict.total,
         reason: "idle_no_stream — no assigned broadcast is live",
       });
+    } catch (e) {
+      log(
+        "Could not record park for " +
+          container +
+          " — leaving it running: " +
+          (e.message || e),
+        "warn",
+      );
+      continue;
+    }
+    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    try {
+      await hosts.dockerContainer(host, "stop", container);
       await recordAutoFarmEvent({
         type: "parked",
         game: gameList.join(", "),
@@ -589,6 +643,7 @@ async function parkIdleBots(hostId, opts = {}) {
           "].",
       );
     } catch (e) {
+      await hosts.restoreRestartPolicy(host, container).catch(() => {});
       log("Could not stop " + container + ": " + (e.message || e), "warn");
     }
   }
@@ -677,15 +732,28 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
     }
     if (verdict.working > 0 || verdict.unknown > 0) continue;
 
-    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    // Record FIRST — an unrecorded park is a bot that can never be woken
+    // again; a failed stop self-heals via the running-container cleanup.
+    const gameList = [...games];
     try {
-      await hosts.dockerContainer(host, "stop", container);
-      const gameList = [...games];
       await recordParked(host.id, container, {
         games: gameList,
         accounts: verdict.total,
         reason: "idle_no_campaign — no active campaign for its games",
       });
+    } catch (e) {
+      log(
+        "Could not record park for " +
+          container +
+          " — leaving it running: " +
+          (e.message || e),
+        "warn",
+      );
+      continue;
+    }
+    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    try {
+      await hosts.dockerContainer(host, "stop", container);
       await recordAutoFarmEvent({
         type: "parked",
         game: gameList.join(", "),
@@ -704,6 +772,7 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
           "]; wakes when one starts.",
       );
     } catch (e) {
+      await hosts.restoreRestartPolicy(host, container).catch(() => {});
       log("Could not stop " + container + ": " + (e.message || e), "warn");
     }
   }
@@ -718,6 +787,8 @@ module.exports = {
   recordParked,
   readRegistry,
   wakeTrigger,
+  wakeCandidates,
+  anyGameMatches,
   liveWakeTrigger,
   gatedDark,
   isGateableGame,

@@ -8,10 +8,21 @@
 // uses; the query is read-only).
 const BotAccount = require("../models/BotAccount");
 const TwitchCampaign = require("../models/TwitchCampaign");
-const { fetchDropCampaigns } = require("./twitchInventory");
+const CampaignDrops = require("../models/CampaignDrops");
+const { fetchDropCampaigns, fetchCampaignDetails, itemKeyFor } = require("./twitchInventory");
 const { sendTelegram } = require("./telegram");
+const settings = require("./settings");
 
 const TICK_MS = 2 * 60 * 60 * 1000; // every 2 hours
+// How often a campaign's expected-drops manifest (models/CampaignDrops.js) is
+// re-fetched. A campaign's drop list is static for its lifetime, so 6h is far
+// more than enough — this only bounds how long a newly-spotted campaign waits
+// before verify-earned can check against its real drops.
+const MANIFEST_TTL_MS = 6 * 60 * 60 * 1000;
+// Don't hammer Twitch with per-campaign detail reads — space them out and cap
+// the backlog a single pass will chew through.
+const MANIFEST_POLITE_MS = 250;
+const MANIFEST_PASS_MAX = 40;
 // A failed pass (every borrowed token integrity-gated, network blip) used to
 // wait a full interval before trying again, so campaign discovery — and with
 // it bot waking and auto-farm decisions — stalled for hours. Errors retry on
@@ -23,7 +34,7 @@ const state = {
   running: false,
   lastRun: null,
   lastError: "",
-  lastCounts: { active: 0, upcoming: 0, new: 0, started: 0, ended: 0 },
+  lastCounts: { active: 0, upcoming: 0, new: 0, started: 0, ended: 0, manifests: 0 },
 };
 
 // Prefer accounts whose last scan succeeded; fall back to trying a few others
@@ -49,6 +60,98 @@ async function fetchWithAnyToken() {
     }
   }
   throw lastErr || new Error("Campaign query failed on every token");
+}
+
+// One healthy token for read-only detail queries (same rule the Scout's
+// borrowTokens uses: prefer accounts whose last scan succeeded).
+async function borrowToken() {
+  const acc = await BotAccount.findOne({
+    clientSecret: { $exists: true, $ne: "" },
+    lastScanStatus: "ok",
+  })
+    .sort({ lastScanAt: -1 })
+    .lean();
+  return acc ? String(acc.clientSecret || "").trim() : null;
+}
+
+// Persist each ACTIVE campaign's expected drops so the finished verdict can
+// verify an account actually holds THIS campaign's drops before parking
+// (utils/farmCompletion.js requireEarned). Read-only, ~6h TTL, and failures
+// are logged but NEVER break the catalog refresh below.
+async function refreshDropsManifests() {
+  // No verify-earned, no manifests — keeps the watcher network-neutral while
+  // the switch is off (the Scout's "no calls until configured" principle).
+  if (!settings.getAutoFarm().verifyEarnedBeforePark) return 0;
+  const now = new Date();
+  const active = await TwitchCampaign.find(
+    {
+      active: true,
+      status: "ACTIVE",
+      $or: [{ endAt: null }, { endAt: { $gt: now } }],
+    },
+    { campaignId: 1, game: 1, name: 1 },
+  ).lean();
+  if (!active.length) return 0;
+  const ids = active.map((c) => c.campaignId);
+  const existing = await CampaignDrops.find(
+    { campaignId: { $in: ids } },
+    { campaignId: 1, fetchedAt: 1 },
+  ).lean();
+  const freshIds = new Set(
+    existing
+      .filter(
+        (m) =>
+          m.fetchedAt &&
+          now - new Date(m.fetchedAt).getTime() < MANIFEST_TTL_MS,
+      )
+      .map((m) => m.campaignId),
+  );
+  const need = active
+    .filter((c) => !freshIds.has(c.campaignId))
+    .slice(0, MANIFEST_PASS_MAX);
+  if (!need.length) return 0;
+  const token = await borrowToken();
+  if (!token) return 0;
+  let done = 0;
+  for (const c of need) {
+    try {
+      const camp = await fetchCampaignDetails(token, c.campaignId);
+      const drops = ((camp && camp.timeBasedDrops) || []).map((d) => {
+        const edge = (d.benefitEdges && d.benefitEdges[0]) || {};
+        const b = edge.benefit || {};
+        const bg = b.game || camp.game || null;
+        const name = b.name || d.name || "";
+        const game = bg ? bg.displayName || bg.name || "" : "";
+        return {
+          benefitId: String(b.id || d.id || ""),
+          dropId: String(d.id || ""),
+          name,
+          itemKey: itemKeyFor(name, game),
+        };
+      });
+      await CampaignDrops.updateOne(
+        { campaignId: c.campaignId },
+        {
+          $set: {
+            game: c.game,
+            name: c.name,
+            drops,
+            fetchedAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      done++;
+    } catch (e) {
+      console.error(
+        "Campaign drops manifest failed for " + c.campaignId + ": " + (e.message || e),
+      );
+    }
+    if (MANIFEST_POLITE_MS > 0) {
+      await new Promise((r) => setTimeout(r, MANIFEST_POLITE_MS));
+    }
+  }
+  return done;
 }
 
 function normalize(c) {
@@ -163,12 +266,22 @@ async function runOnce() {
       ).catch(() => {});
     }
 
+    // Verify-earned manifests: additive and failure-tolerant, so a Twitch
+    // hiccup here can never break the catalog refresh above.
+    let manifests = 0;
+    try {
+      manifests = await refreshDropsManifests();
+    } catch (e) {
+      console.error("Campaign drops manifest refresh failed:", e.message || e);
+    }
+
     state.lastCounts = {
       active,
       upcoming,
       new: fresh.length,
       started: wentLive.length,
       ended: gone.modifiedCount || 0,
+      manifests,
     };
     state.lastError = "";
     return state.lastCounts;
