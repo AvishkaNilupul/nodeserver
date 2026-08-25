@@ -281,6 +281,25 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
           parsed = null;
         }
       }
+      // Newline-delimited JSON: a sequence of JSON objects one per line with no
+      // commas between them (the shape the token fetcher / bot-config export
+      // hands over, each account saved on its own line). The bracket-wrap above
+      // only accepts a single object or a comma-separated sequence, so parse
+      // each line on its own. Only applied when every non-empty line is a JSON
+      // object; otherwise the colon-delimited supplier path below still runs.
+      if (!parsed) {
+        const jsonLines = trimmed
+          .split(/\r?\n/)
+          .map((l) => l.trim().replace(/^[*-]\s+/, "").replace(/,\s*$/, ""))
+          .filter(Boolean);
+        if (jsonLines.length && jsonLines.every((l) => l.startsWith("{"))) {
+          try {
+            parsed = jsonLines.map((l) => JSON.parse(l));
+          } catch {
+            parsed = null;
+          }
+        }
+      }
       if (parsed) {
         list = parsed;
       } else {
