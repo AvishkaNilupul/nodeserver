@@ -33,6 +33,7 @@ const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
 const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
+const noclaimWatcher = require("../utils/noclaimWatcher");
 
 const router = express.Router();
 
@@ -74,6 +75,12 @@ async function sh(script, { timeout = 30000, input } = {}) {
 const containerFor = (id) => CONTAINER_PREFIX + id;
 const botDir = (id) => BOTS_DIR + "/" + id;
 const configPath = (id) => botDir(id) + "/Configuration/config.json";
+// Markers the auto-power watcher (utils/noclaimWatcher.js) reads. `.autostopped`
+// = the watcher parked this bot on a dark game (resume when live). `.operatoroff`
+// = the operator hit Stop (stay off until Restart/Create). Restart / Create
+// clear BOTH so manual control always wins.
+const markerPath = (id) => botDir(id) + "/.autostopped";
+const operatorMarkerPath = (id) => botDir(id) + "/.operatoroff";
 
 // buildSetGridImage writes the cover to a temp file (it's built to feed the
 // marketplace uploaders a path); the social generator only needs to SHOW it in
@@ -166,6 +173,29 @@ router.post("/api/noclaim-farm/games", requireSuperadmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Auto power (utils/noclaimWatcher.js): the master switch + live status. When
+// on, the watcher starts a game's no-claim bots only while a qualifying stream
+// is live and stops them otherwise (RAM saver, like the Stream Scout).
+// ---------------------------------------------------------------------------
+router.get("/api/noclaim-farm/auto", requireSuperadmin, (req, res) => {
+  res.json({
+    success: true,
+    enabled: !!settings.getAutoFarm().noClaimStreamGate,
+    status: noclaimWatcher.status(),
+  });
+});
+
+router.post("/api/noclaim-farm/auto", requireSuperadmin, async (req, res) => {
+  try {
+    const enabled = !!req.body.enabled;
+    const saved = await settings.setAutoFarm({ noClaimStreamGate: enabled });
+    res.json({ success: true, enabled: !!saved.noClaimStreamGate });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Reuse-only game list (World of Tanks / UFL): the auto-farmer may farm these
 // but must never spend a FRESH pool account on them — it only reuses accounts
 // already used for that same game. Same single-source-of-truth pattern as the
@@ -230,7 +260,7 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
       `echo "PS_START"; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null; echo "PS_END"; ` +
       `echo "BOTS_START"; for d in ${hosts.shq(BOTS_DIR)}/*/Configuration/config.json; do [ -f "$d" ] || continue; ` +
       `id=$(basename $(dirname $(dirname "$d"))); ` +
-      `game=$(sed -n 's/.*"FavouriteGames"[^]]*\\[[^"]*"\\([^"]*\\)".*/\\1/p' "$d" | head -1); ` +
+      `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
       `n=$(grep -c '"ClientSecret"' "$d"); ` +
       `echo "$id|$game|$n"; done; echo "BOTS_END"`;
     const out = await sh(script, { timeout: 25000 });
@@ -658,9 +688,13 @@ router.post(
   async (req, res) => {
     try {
       const id = String(req.params.id).replace(/[^0-9]/g, "");
-      await sh(`docker stop ${hosts.shq(containerFor(id))} 2>/dev/null || true`, {
-        timeout: 25000,
-      });
+      // Mark it operator-off so the auto-power watcher won't cold-start it back
+      // on the next live event — an explicit Stop stays stopped until Restart.
+      await sh(
+        `docker stop ${hosts.shq(containerFor(id))} 2>/dev/null || true; ` +
+          `touch ${hosts.shq(operatorMarkerPath(id))} 2>/dev/null || true`,
+        { timeout: 25000 },
+      );
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
@@ -686,8 +720,12 @@ router.post(
       // `docker restart` errors if the container doesn't exist; surface that
       // clearly rather than silently swallowing it, so the UI can tell the
       // operator to re-create the bot (its container may have been removed).
+      // Clear both auto-power markers: a manual Restart means the operator is
+      // taking control, so the watcher manages this bot fresh from here (neither
+      // "parked by me" nor "operator-off" applies once they restart it).
       const out = await sh(
-        `docker restart ${hosts.shq(containerFor(id))} 2>&1 || echo "__ERR__"`,
+        `rm -f ${hosts.shq(markerPath(id))} ${hosts.shq(operatorMarkerPath(id))} 2>/dev/null || true; ` +
+          `docker restart ${hosts.shq(containerFor(id))} 2>&1 || echo "__ERR__"`,
         { timeout: 40000 },
       );
       if (out.includes("__ERR__"))

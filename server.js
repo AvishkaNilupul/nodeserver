@@ -70,6 +70,7 @@ const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
 const streamScout = require("./utils/streamScout");
+const noclaimWatcher = require("./utils/noclaimWatcher");
 const autoFarmer = require("./utils/autoFarmer");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
@@ -703,6 +704,11 @@ mongoose
     // wake them when a stream goes live. Self-guards on autoFarm.streamGate +
     // streamGatedGames — a no-op (no Twitch calls) until a game is opted in.
     streamScout.start();
+    // No-claim auto power: the same live/dark RAM saver as the Stream Scout, but
+    // for the standalone no-claim system's own containers (noclaim-bot-* on the
+    // Pi). Self-guards on autoFarm.noClaimStreamGate — no Twitch calls / no SSH
+    // until it is flipped on from the No-claim farming page.
+    noclaimWatcher.start();
     epicWatcher.start();
     // Auto-farmer: turns new drop campaigns into running bots on the farm
     // host (or dry-run plans) - fully gated by the superadmin settings

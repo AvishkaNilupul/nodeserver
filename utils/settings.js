@@ -159,6 +159,19 @@ const AUTO_FARM_DEFAULTS = {
   // are excluded (they are owned by the no-claim system and wakeFinishedBots
   // won't wake them). Fail toward farming: any uncertainty keeps the bot up.
   parkIdleNoCampaignBots: false,
+  // No-claim auto power (utils/noclaimWatcher.js): the RAM-saving equivalent of
+  // the Stream Scout, but for the STANDALONE no-claim system's own containers
+  // (noclaim-bot-* on the Pi) rather than the managed bots. When on, it starts
+  // a game's no-claim bots only while a qualifying stream for that game (OW /
+  // R6) is actually live, and stops them (docker stop) during broadcast gaps or
+  // when the game has no active campaign at all — the biggest RAM win, since OW
+  // is dark most of the time. Which games it manages = noClaimGames (shared).
+  // Ships OFF: zero container activity until flipped on. Fail toward farming
+  // everywhere (any Twitch/catalog uncertainty keeps the bots up), stops only
+  // after a confident-dark hysteresis window, and it only auto-starts a bot it
+  // itself stopped (an operator Stop stays stopped) — so it never fights manual
+  // control. See utils/noclaimWatcher.js.
+  noClaimStreamGate: false,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
@@ -285,6 +298,12 @@ function isStreamGatedGame(game) {
   return streamGatedGameEntry(game) != null;
 }
 
+// No-claim auto-power master switch, read fresh each call (live-editable, like
+// getStreamGate). The games it manages are noClaimGames — no separate list.
+function getNoClaimGate() {
+  return { enabled: !!getAutoFarm().noClaimStreamGate };
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -298,4 +317,5 @@ module.exports = {
   getStreamGate,
   streamGatedGameEntry,
   isStreamGatedGame,
+  getNoClaimGate,
 };
