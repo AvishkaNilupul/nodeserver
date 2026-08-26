@@ -34,6 +34,29 @@ test("decideActions: cold-starts a never-touched stopped bot when live", () => {
   assert.deepStrictEqual(decideActions(bots, verdict).starts, ["9"]);
 });
 
+test("decideActions: an uncertain verdict never cold-starts a stopped bot", () => {
+  // No active campaign + an unverifiable catalog (e.g. the boot window before
+  // campaignWatcher's first pass) => uncertain, not live. A stopped bot stays
+  // stopped so a restart can't wake the fleet for a non-existent campaign.
+  const bots = [
+    { id: "1", game: "Overwatch", running: false, autostopped: true, operatorOff: false },
+    { id: "9", game: "Overwatch", running: false, autostopped: false, operatorOff: false },
+  ];
+  const verdict = { overwatch: { live: true, uncertain: true, canStop: false } };
+  const { starts, stops } = decideActions(bots, verdict);
+  assert.deepStrictEqual(starts, []); // uncertain -> do NOT wake parked bots
+  assert.deepStrictEqual(stops, []);
+});
+
+test("decideActions: an uncertain verdict keeps a running bot up (fail toward farming)", () => {
+  const bots = [{ id: "2", game: "Overwatch", running: true, autostopped: false, operatorOff: false }];
+  // uncertain resolves with canStop:false (never park a running bot when unsure).
+  const verdict = { overwatch: { live: true, uncertain: true, canStop: false } };
+  const { starts, stops } = decideActions(bots, verdict);
+  assert.deepStrictEqual(starts, []);
+  assert.deepStrictEqual(stops, []); // running + uncertain -> leave running
+});
+
 test("decideActions: never auto-starts a bot the operator stopped", () => {
   // .operatoroff marker => explicit Stop; stays down even when the game is live.
   const bots = [{ id: "3", game: "Overwatch", running: false, autostopped: false, operatorOff: true }];

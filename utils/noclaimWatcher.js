@@ -165,7 +165,13 @@ async function gameVerdicts() {
     .filter(Boolean);
   const verdict = {};
   for (const k of keywords) {
-    verdict[k] = { live: true, hadCampaign: false, checked: false, error: "" };
+    verdict[k] = {
+      live: true,
+      hadCampaign: false,
+      checked: false,
+      error: "",
+      uncertain: false,
+    };
   }
   if (!keywords.length) return verdict;
 
@@ -193,9 +199,23 @@ async function gameVerdicts() {
     v.hadCampaign = forGame.length > 0;
 
     if (!forGame.length) {
-      // Nothing to farm. Dark only if the catalog is fresh enough to trust;
-      // otherwise fail toward farming (keep bots up).
-      v.live = !catalogFresh;
+      // No active campaign for this game — there is literally nothing to farm
+      // (no drops to earn), regardless of whether any stream is live. So we
+      // must NEVER cold-start a stopped bot here. When the catalog is fresh we
+      // trust "no campaign" as genuinely dark. When it is NOT fresh — e.g. the
+      // boot window before campaignWatcher's first pass has run, or a watcher
+      // stall — mark the game UNCERTAIN rather than "live": keep any running
+      // bot up (fail toward farming) but do not WAKE a parked one on an
+      // unverifiable signal. Without this, every process restart woke all bots
+      // for ~20 min to farm a campaign that does not exist (campaignWatcher's
+      // first pass lags the no-claim watcher's by ~15s at boot, so lastRun is
+      // briefly null → catalogFresh false → live).
+      if (catalogFresh) {
+        v.live = false;
+      } else {
+        v.live = true;
+        v.uncertain = true;
+      }
       continue;
     }
     if (!tokens.length) {
@@ -301,8 +321,11 @@ function pi() {
 // verdict, decide which to start and which to stop. `verdict[gameKey]` carries
 // { live, canStop } where canStop already folds in the dark-hysteresis. A bot
 // whose game matches no managed keyword is left untouched.
-//   START: game live + bot stopped + NOT operator-off (cold-start / resume /
-//          reboot-recovery — but never override an explicit Stop).
+//   START: game CONFIRMED-live + bot stopped + NOT operator-off (cold-start /
+//          resume / reboot-recovery — but never override an explicit Stop, and
+//          never on an `uncertain` verdict, i.e. no active campaign + an
+//          unverifiable catalog, so a restart's boot window can't wake bots for
+//          a campaign that does not exist).
 //   STOP:  game confidently dark + bot running.
 function decideActions(bots, verdict) {
   const starts = [];
@@ -317,7 +340,7 @@ function decideActions(bots, verdict) {
   for (const b of bots) {
     const v = match(b.game);
     if (!v) continue; // unknown game — never touch
-    if (v.live && !b.running && !b.operatorOff) {
+    if (v.live && !v.uncertain && !b.running && !b.operatorOff) {
       starts.push(b.id);
     } else if (v.canStop && b.running) {
       stops.push(b.id);
@@ -424,6 +447,7 @@ async function runOnce() {
     state.games = keys.map((k) => ({
       game: k,
       live: verdict[k].live,
+      uncertain: verdict[k].uncertain,
       hadCampaign: verdict[k].hadCampaign,
       canStop: verdict[k].canStop,
       darkForMs: verdict[k].darkForMs,
