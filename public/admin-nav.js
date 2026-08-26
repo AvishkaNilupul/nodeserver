@@ -154,6 +154,12 @@
           superOnly: true,
         },
         {
+          href: "/spent-accounts.html",
+          label: "Spent accounts",
+          icon: ICONS.accountPool,
+          superOnly: true,
+        },
+        {
           href: "/account-stash.html",
           label: "Account stash",
           icon: ICONS.accountStash,

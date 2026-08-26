@@ -34,6 +34,7 @@ const webbotFarmRoutes = require("./routes/webbotFarmRoutes");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
+const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
 const stashRoutes = require("./routes/stashRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
@@ -420,6 +421,10 @@ app.get("/account-stash.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "account-stash.html"));
 });
 
+app.get("/spent-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "spent-accounts.html"));
+});
+
 // Marketplace integrity guard (superadmin only) — review queue for the
 // background checker's findings.
 app.get("/integrity.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -617,6 +622,7 @@ app.use(enforce2fa, noclaimFarmRoutes);
 app.use(enforce2fa, webbotFarmRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
+app.use(enforce2fa, spentAccountsRoutes);
 app.use(enforce2fa, autoFarmRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);

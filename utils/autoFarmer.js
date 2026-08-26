@@ -27,6 +27,7 @@ const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
+const { normGame } = require("./gameLabel");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
@@ -737,6 +738,10 @@ async function claimPoolAccounts(
   { preferGame = "", recycledOnly = false } = {},
 ) {
   const claimed = [];
+  const noteMatch = String(note || "").match(
+    /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
+  );
+  const targetGame = normGame(preferGame || (noteMatch && noteMatch[1]) || "");
   const passes = [];
   if (preferGame) {
     const esc = String(preferGame).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -748,7 +753,11 @@ async function claimPoolAccounts(
   for (const extra of passes) {
     while (claimed.length < n) {
       const doc = await AvailableAccount.findOneAndUpdate(
-        { ...readyPoolQuery(), ...extra },
+        {
+          ...readyPoolQuery(),
+          ...extra,
+          ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+        },
         {
           $set: {
             status: "claimed",
@@ -760,15 +769,12 @@ async function claimPoolAccounts(
       );
       if (!doc) break;
       claimed.push(doc);
-      const match = String(note || "").match(
-        /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
-      );
       await recordPoolUsage(doc._id, {
         event: "claimed",
         actor: "auto-farm",
         note,
-        game: preferGame || (match && match[1]) || "",
-        campaignId: (match && match[2]) || "",
+        game: preferGame || (noteMatch && noteMatch[1]) || "",
+        campaignId: (noteMatch && noteMatch[2]) || "",
       });
     }
     if (claimed.length >= n) break;

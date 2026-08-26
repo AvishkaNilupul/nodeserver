@@ -37,6 +37,11 @@ const availableAccountSchema = new mongoose.Schema(
     claimedAt: { type: Date, default: null },
     claimedNote: { type: String, default: "" },
 
+    // Games already delivered to a buyer on this login. Missing legacy fields
+    // are treated as an empty set; manual spent-account recycling stamps this
+    // list so claim-time allocation never re-farms a sold game.
+    soldGames: { type: [String], default: [] },
+
     // Append-only trail of pool usage. Writers cap this to the newest 50
     // entries so long-lived accounts cannot grow the document unbounded.
     usageHistory: {
