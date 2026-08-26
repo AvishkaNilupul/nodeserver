@@ -118,13 +118,18 @@ const marketplaceListingSchema = new mongoose.Schema(
 // isNew; post-save fires AFTER the write, never throws and is never awaited — a
 // logging failure can never affect the listing. systemLog is required lazily to
 // avoid any model load-order cycle.
-marketplaceListingSchema.pre("save", function (next) {
+// Mongoose 9 (kareem 3) dropped callback-style middleware: a pre("save") hook is
+// never passed a `next` — it must be synchronous (return undefined) or async
+// (return a promise). The old `function (next) { …; next(); }` form threw
+// `TypeError: next is not a function` on EVERY MarketplaceListing.save()/.create(),
+// which silently broke all auto-listing publishes and post-event reprices (doc
+// saves), while query updates (updateOne/findOneAndUpdate) kept working and hid it.
+marketplaceListingSchema.pre("save", function () {
   try {
     this.$locals.wasNew = this.isNew;
   } catch {
     /* ignore */
   }
-  next();
 });
 marketplaceListingSchema.post("save", function (doc) {
   try {
