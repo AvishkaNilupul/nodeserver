@@ -33,6 +33,7 @@ const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
 const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
+const { logEvent, actorFromReq } = require("../utils/systemLog");
 const noclaimWatcher = require("../utils/noclaimWatcher");
 
 const router = express.Router();
@@ -400,6 +401,16 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
       { timeout: 20000 },
     );
 
+    logEvent({
+      category: "noclaim",
+      action: "bot_created",
+      actor: actorFromReq(req),
+      subject: containerFor(id),
+      game: game || "",
+      count: claimed.length,
+      detail:
+        "no-claim bot " + id + " created with " + claimed.length + " account(s)",
+    });
     res.json({
       success: true,
       id,
@@ -734,6 +745,12 @@ router.post(
           message:
             "No container to restart — it may have been removed. Release and re-create the bot.",
         });
+      logEvent({
+        category: "noclaim",
+        action: "bot_restarted",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+      });
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
@@ -784,6 +801,14 @@ router.post(
         `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true; rm -rf ${hosts.shq(botDir(id))}`,
         { timeout: 25000 },
       );
+      logEvent({
+        category: "noclaim",
+        action: "bot_released",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+        count: released,
+        detail: "released " + released + " account(s) back to the pool",
+      });
       res.json({ success: true, released });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });

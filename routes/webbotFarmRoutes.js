@@ -31,6 +31,7 @@ const WebBotAccount = require("../models/WebBotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
 const { encrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
+const { logEvent, actorFromReq } = require("../utils/systemLog");
 const webbotTwitch = require("../utils/webbotTwitch");
 
 const router = express.Router();
@@ -240,8 +241,160 @@ router.get("/api/webbot-farm/pool", requireSuperadmin, async (req, res) => {
   }
 });
 
+// Parse one supplier line into { user, pass, token }. The account format the
+// feeder is built for is `user:pass:token` where the TOKEN is the web session
+// token (the 30-char kimne… OAuth token) — so we treat the token as the LAST
+// colon field and the password as everything between the first field and it.
+// That keeps a password with a stray ":" from stealing the token slot. Also
+// accepts `user:token` and a bare `token`.
+function parseFeedLine(line) {
+  const parts = line.split(":");
+  if (parts.length >= 3) {
+    return { user: parts[0].trim(), pass: parts.slice(1, -1).join(":"), token: parts[parts.length - 1].trim() };
+  }
+  if (parts.length === 2) {
+    return { user: parts[0].trim(), pass: "", token: parts[1].trim() };
+  }
+  return { user: "", pass: "", token: parts[0].trim() };
+}
+
+// A web session token is a 30-ish char alphanumeric string. Reject anything
+// with an "@" (an email footer line) or other punctuation so junk lines don't
+// become dead accounts.
+function looksLikeToken(t) {
+  return /^[A-Za-z0-9]{20,60}$/.test(t || "");
+}
+
+// Validate an array of WebBotAccount docs against Twitch with bounded
+// concurrency, writing login/twitchId/status back. Returns {checked, ok, dead}.
+async function validateAccounts(docs, { concurrency = 8 } = {}) {
+  let ok = 0;
+  let dead = 0;
+  let next = 0;
+  async function worker() {
+    while (next < docs.length) {
+      const doc = docs[next++];
+      try {
+        const who = await webbotTwitch.validateToken(doc.webToken);
+        doc.login = who.login || doc.login;
+        doc.twitchId = who.twitchId || doc.twitchId;
+        doc.lastStatus = "idle";
+        doc.lastStatusMessage = `token valid · ${who.login}${who.expiresIn ? ` · expires_in ${who.expiresIn}s` : " · no expiry"}`;
+        doc.lastCheckedAt = new Date();
+        await doc.save();
+        ok++;
+      } catch (e) {
+        if (e && e.code === "token_invalid") {
+          doc.lastStatus = "dead";
+          doc.lastStatusMessage = "token invalid";
+          doc.lastCheckedAt = new Date();
+          await doc.save();
+          dead++;
+        }
+        // transient (network / non-401) errors leave the row "pending" for a retry
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, docs.length) }, worker));
+  return { checked: docs.length, ok, dead };
+}
+
+// ---------------------------------------------------------------------------
+// FEEDER — the primary intake for the web-token farm. Paste supplier lines in
+// `user:pass:token` (or `user:token` / `token`) form; each becomes a row in the
+// standalone WebBotAccount registry (this farm's OWN storage — it never spends
+// or reads the shared AvailableAccount pool). Tokens are validated live on
+// intake (bounded), so the bot creator only ever sees accounts known to be
+// alive. Large pastes beyond `validateLimit` are stored "pending" and can be
+// checked later with /validate-idle.
+// ---------------------------------------------------------------------------
+router.post("/api/webbot-farm/feed", requireSuperadmin, async (req, res) => {
+  try {
+    const text = String(req.body.text || "");
+    const doValidate = req.body.validate !== false;
+    const validateLimit = Math.max(0, Math.min(500, parseInt(req.body.validateLimit, 10) || 120));
+    const skipped = [];
+    let duplicate = 0;
+    const createdDocs = [];
+    const seenInPaste = new Set();
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const { user, pass, token } = parseFeedLine(line);
+      if (!looksLikeToken(token)) {
+        skipped.push({ reason: "no valid token", line: line.slice(0, 40) });
+        continue;
+      }
+      if (seenInPaste.has(token)) { duplicate++; continue; }
+      seenInPaste.add(token);
+      const exists = await WebBotAccount.findOne({ webToken: token }, { _id: 1 }).lean();
+      if (exists) { duplicate++; continue; }
+      const doc = await WebBotAccount.create({
+        webToken: token,
+        credUsername: user || "",
+        credPasswordEnc: pass ? encrypt(pass) : "",
+        hasPassword: !!pass,
+        enabled: true,
+        lastStatus: "pending",
+      });
+      createdDocs.push(doc);
+    }
+
+    let validated = null;
+    if (doValidate && createdDocs.length) {
+      validated = await validateAccounts(createdDocs.slice(0, validateLimit));
+    }
+    if (createdDocs.length) {
+      logEvent({
+        category: "webbot",
+        action: "accounts_fed",
+        actor: actorFromReq(req),
+        count: createdDocs.length,
+        detail:
+          "fed " +
+          createdDocs.length +
+          " account(s); " +
+          duplicate +
+          " dup, " +
+          skipped +
+          " skipped",
+      });
+    }
+    res.json({
+      success: true,
+      fed: createdDocs.length,
+      duplicate,
+      skipped,
+      validated, // {checked, ok, dead} or null
+      pending: createdDocs.length - (validated ? validated.checked : 0),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Bulk-validate accounts still "pending" (fed but not yet checked, e.g. from a
+// large paste). Bounded concurrency; caps at `limit` per call.
+router.post("/api/webbot-farm/validate-idle", requireSuperadmin, async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, parseInt(req.body.limit, 10) || 200));
+    const docs = await WebBotAccount.find({
+      lastStatus: "pending",
+      webToken: { $gt: "" },
+    })
+      .sort({ createdAt: 1 })
+      .limit(limit);
+    if (!docs.length) return res.json({ success: true, checked: 0, ok: 0, dead: 0 });
+    const r = await validateAccounts(docs);
+    res.json({ success: true, ...r });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Seed accounts from pasted lines (user:pass:token / user:token / token).
+// Legacy fast intake (no validation) — the UI now uses /feed instead.
 // ---------------------------------------------------------------------------
 router.post("/api/webbot-farm/seed", requireSuperadmin, async (req, res) => {
   try {
@@ -458,6 +611,15 @@ router.post("/api/webbot-farm/bots", requireSuperadmin, async (req, res) => {
       timeout: 20000,
     });
 
+    logEvent({
+      category: "webbot",
+      action: "bot_created",
+      actor: actorFromReq(req),
+      subject: containerFor(id),
+      game: game || "",
+      count: picked.length,
+      detail: "webbot " + id + " created with " + picked.length + " account(s)",
+    });
     res.json({
       success: true,
       id,
@@ -558,6 +720,12 @@ router.post("/api/webbot-farm/bots/:id/stop", requireSuperadmin, async (req, res
     const id = String(req.params.id);
     if (!validId(id)) return res.status(400).json({ success: false, message: "bad id" });
     await sh(`docker stop ${hosts.shq(containerFor(id))} 2>/dev/null || true`, { timeout: 25000 });
+    logEvent({
+      category: "webbot",
+      action: "bot_stopped",
+      actor: actorFromReq(req),
+      subject: containerFor(id),
+    });
     res.json({ success: true });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
@@ -569,6 +737,12 @@ router.post("/api/webbot-farm/bots/:id/start", requireSuperadmin, async (req, re
     const id = String(req.params.id);
     if (!validId(id)) return res.status(400).json({ success: false, message: "bad id" });
     await sh(`docker start ${hosts.shq(containerFor(id))} 2>/dev/null || true`, { timeout: 25000 });
+    logEvent({
+      category: "webbot",
+      action: "bot_started",
+      actor: actorFromReq(req),
+      subject: containerFor(id),
+    });
     res.json({ success: true });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
@@ -590,6 +764,14 @@ router.post("/api/webbot-farm/bots/:id/release", requireSuperadmin, async (req, 
       { botId: id },
       { $set: { botId: "", pinnedGame: "", currentGame: "", currentChannel: "", lastStatus: "idle", lastStatusMessage: "" } },
     );
+    logEvent({
+      category: "webbot",
+      action: "bot_released",
+      actor: actorFromReq(req),
+      subject: containerFor(id),
+      count: r.modifiedCount || 0,
+      detail: "released " + (r.modifiedCount || 0) + " account(s) to idle",
+    });
     res.json({ success: true, released: r.modifiedCount || 0 });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
