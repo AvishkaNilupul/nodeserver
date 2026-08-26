@@ -256,19 +256,31 @@ function publicRow(row) {
   return safe;
 }
 
-async function findOneForRecycle(body) {
-  const selector = body && body.id ? { _id: body.id } : { usernameLower: String(body && body.login || "").trim().toLowerCase() };
-  if (!selector._id && !selector.usernameLower) return null;
-  const rows = await gatherSpentAccounts();
-  return rows.find((row) => {
-    if (!row._pool) return false;
-    return String(row._pool._id) === String(selector._id) || row._pool.usernameLower === selector.usernameLower;
-  }) || null;
+// Pure matcher: pick the row for a {login} or {id} body out of an existing
+// gatherSpentAccounts() snapshot. No DB access, so a bulk request can match
+// every requested account against ONE gather.
+function matchRow(rows, body) {
+  const id = body && body.id != null && String(body.id) !== "" ? String(body.id) : null;
+  const loginLower = String((body && body.login) || "").trim().toLowerCase();
+  if (!id && !loginLower) return null;
+  return (
+    rows.find((row) => {
+      if (!row._pool) return false;
+      return (
+        (id && String(row._pool._id) === id) ||
+        (loginLower && row._pool.usernameLower === loginLower)
+      );
+    }) || null
+  );
 }
 
-async function recycleOne(body) {
-  const row = await findOneForRecycle(body);
-  if (!row) return { login: String(body && body.login || ""), recycled: false, status: "not_found", reason: "spent account not found" };
+// Recycle a single row taken from a gatherSpentAccounts() snapshot. The live
+// rescan and the status:"claimed" guarded update keep this correct even if the
+// snapshot is a few seconds stale, so a batch can share one gather.
+async function recycleRow(row) {
+  if (!row) {
+    return { login: "", recycled: false, status: "not_found", reason: "spent account not found" };
+  }
   const login = row.username;
   if (row.outOfScope || !row.botId) {
     return { login, recycled: false, status: "out_of_scope", reason: "needs pool import — no BotAccount to rescan" };
@@ -326,6 +338,15 @@ async function recycleOne(body) {
   return { login, recycled: true, status: "recycled", soldGames };
 }
 
+async function recycleOne(body) {
+  const rows = await gatherSpentAccounts();
+  const row = matchRow(rows, body);
+  if (!row) {
+    return { login: String((body && body.login) || ""), recycled: false, status: "not_found", reason: "spent account not found" };
+  }
+  return recycleRow(row);
+}
+
 router.get("/spent-accounts/list", requireSuperadmin, async (_req, res) => {
   try {
     const accounts = await gatherSpentAccounts();
@@ -348,14 +369,43 @@ router.post("/spent-accounts/recycle", requireSuperadmin, async (req, res) => {
 });
 
 router.post("/spent-accounts/recycle-bulk", requireSuperadmin, async (req, res) => {
-  const values = Array.isArray(req.body) ? req.body : (req.body && (req.body.logins || req.body.accounts));
-  const list = Array.isArray(values) ? values.slice(0, RECYCLE_BATCH) : [];
-  if (!list.length) return res.status(400).json({ success: false, message: "Provide an array of logins or account ids" });
-  const results = [];
-  for (const value of list) {
-    results.push(await recycleOne(typeof value === "string" ? { login: value } : (value || {})));
+  try {
+    const values = Array.isArray(req.body) ? req.body : (req.body && (req.body.logins || req.body.accounts));
+    const raw = Array.isArray(values) ? values : [];
+    // Normalize to {login|id} bodies and drop duplicates so one account is never
+    // rescanned twice in a single batch.
+    const seen = new Set();
+    const unique = [];
+    for (const value of raw) {
+      const body = typeof value === "string" ? { login: value } : (value || {});
+      const hasId = body.id != null && String(body.id) !== "";
+      const loginLower = String(body.login || "").trim().toLowerCase();
+      if (!hasId && !loginLower) continue;
+      const key = hasId ? "id:" + String(body.id) : "login:" + loginLower;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(body);
+    }
+    if (!unique.length) {
+      return res.status(400).json({ success: false, message: "Provide an array of logins or account ids" });
+    }
+    const capped = unique.length > RECYCLE_BATCH;
+    const bodies = unique.slice(0, RECYCLE_BATCH);
+    const rows = await gatherSpentAccounts(); // ONE gather for the whole batch
+    const results = [];
+    for (const body of bodies) {
+      const row = matchRow(rows, body);
+      results.push(
+        row
+          ? await recycleRow(row)
+          : { login: String(body.login || ""), recycled: false, status: "not_found", reason: "spent account not found" },
+      );
+    }
+    res.json({ success: results.some((result) => result.recycled), results, capped });
+  } catch (err) {
+    console.error("spent-accounts recycle-bulk error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
   }
-  res.json({ success: results.some((result) => result.recycled), results, capped: Array.isArray(values) && values.length > RECYCLE_BATCH });
 });
 
 module.exports = router;
