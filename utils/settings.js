@@ -218,11 +218,35 @@ function getAutoFarm() {
   return out;
 }
 
-async function setAutoFarm(patch) {
+async function setAutoFarm(patch, opts = {}) {
   const s = loadSettings();
   const cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  s.autoFarm = { ...AUTO_FARM_DEFAULTS, ...cur, ...(patch || {}) };
+  const next = { ...AUTO_FARM_DEFAULTS, ...cur, ...(patch || {}) };
+  s.autoFarm = next;
   await saveSettings(s);
+  // Audit which settings actually changed (before→after) — this is the record
+  // that was missing when purgeSuspended was found flipped with no trace of who.
+  // Best-effort and lazily-required so it can never break a settings write or
+  // fight module load order (settings.js is required very early).
+  try {
+    const changed = {};
+    for (const k of Object.keys(patch || {})) {
+      if (JSON.stringify(cur[k]) !== JSON.stringify(next[k]))
+        changed[k] = { from: cur[k], to: next[k] };
+    }
+    if (Object.keys(changed).length) {
+      require("./systemLog").logEvent({
+        category: "settings",
+        action: "settings_changed",
+        actor: opts.actor || "system",
+        subject: Object.keys(changed).join(","),
+        detail: "changed: " + Object.keys(changed).join(", "),
+        meta: changed,
+      });
+    }
+  } catch (e) {
+    /* never block a settings write on its audit */
+  }
   return s.autoFarm;
 }
 

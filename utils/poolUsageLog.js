@@ -1,5 +1,6 @@
 const AvailableAccount = require("../models/AvailableAccount");
 const PoolUsageEvent = require("../models/PoolUsageEvent");
+const { logEvent } = require("./systemLog");
 
 // Best-effort audit trail: never make the pool transition that this records
 // fail just because the history write was unavailable.
@@ -53,6 +54,18 @@ async function recordPoolUsage(idOrIds, entry) {
   } catch (e) {
     console.error("recordPoolUsage event log failed:", e.message);
   }
+
+  // Mirror ONE summary row into the unified audit log (not one per account, to
+  // keep the feed readable). Fire-and-forget, best-effort (utils/systemLog.js).
+  logEvent({
+    category: "pool",
+    action: doc.event || "unknown",
+    actor: doc.actor || "system",
+    game: doc.game || "",
+    host: doc.host || "",
+    count: ids.length,
+    detail: doc.note || "",
+  });
 }
 
 module.exports = { recordPoolUsage };

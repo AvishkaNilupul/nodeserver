@@ -89,6 +89,9 @@ const {
   submitLimiter,
   uploadLimiter,
 } = require("./utils/rateLimit");
+const activityRoutes = require("./routes/activityRoutes");
+const fleetSnapshot = require("./utils/fleetSnapshot");
+const auditRequest = require("./middleware/auditRequest");
 
 const app = express();
 const server = http.createServer(app);
@@ -200,6 +203,13 @@ io.engine.use(sessionMiddleware);
 // requests and shouldn't hit this ceiling. Anonymous IPs are still capped, and
 // Socket.IO is skipped so live chat isn't throttled.
 app.use(globalLimiter);
+
+// Audit every MUTATING request (who did what, where) into the unified activity
+// log. Mounted after the session middleware (so it can read the actor) and after
+// express.json (so it can summarize the body); it hooks res 'finish' and is
+// fire-and-forget, so it can never block or break a request. See
+// middleware/auditRequest.js + utils/systemLog.js.
+app.use(auditRequest);
 
 // =========================
 // Image upload (image types only)
@@ -566,6 +576,12 @@ app.get("/reseller.html", requireReseller, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "reseller.html"));
 });
 
+// The system-wide audit log is superadmin-only; gate the page before static
+// (its API is gated separately in activityRoutes).
+app.get("/activity.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "activity.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -624,6 +640,7 @@ app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
 app.use(enforce2fa, spentAccountsRoutes);
 app.use(enforce2fa, autoFarmRoutes);
+app.use(enforce2fa, activityRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
@@ -715,6 +732,10 @@ mongoose
     // Pi). Self-guards on autoFarm.noClaimStreamGate — no Twitch calls / no SSH
     // until it is flipped on from the No-claim farming page.
     noclaimWatcher.start();
+    // Fleet metric history: a periodic snapshot of account / pool / listing
+    // counts so a future "the count dropped" question can be answered from data
+    // instead of guesswork. See utils/fleetSnapshot.js.
+    fleetSnapshot.start();
     epicWatcher.start();
     // Auto-farmer: turns new drop campaigns into running bots on the farm
     // host (or dry-run plans) - fully gated by the superadmin settings

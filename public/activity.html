@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Activity Log</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .themebtn{cursor:pointer;}
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; overflow-y:auto; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .nav .me .who { line-height: 1.2; min-width: 0; }
+  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+
+  .page { flex: 1; overflow-y: auto; padding: 26px 30px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+
+  button { padding: 9px 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(180deg, var(--accent2), var(--accent)); color: #fff; font-weight: 600; font-family: inherit; font-size: 13.5px; }
+  button:hover { opacity: 0.94; }
+  .btn-ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); }
+  .btn-ghost:hover { background: var(--surface-2); opacity:1; }
+  .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
+
+  .panel { background: var(--surface); border:1px solid var(--line); border-radius: 16px; box-shadow: 0 1px 2px rgba(16,24,40,0.04); margin-bottom: 20px; padding: 16px 18px; }
+  .panel h2 { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .panel .sub { margin-bottom: 12px; }
+
+  .metricrow { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  .mstat { background: var(--surface-2); border:1px solid var(--line); border-radius: 12px; padding: 8px 14px; cursor:pointer; }
+  .mstat.active { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.12); }
+  .mstat b { font-size: 18px; display:block; }
+  .mstat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+  .chartwrap { width:100%; overflow-x:auto; }
+  svg.chart { width:100%; height:200px; display:block; }
+  .chart .grid { stroke: var(--line); stroke-width:1; }
+  .chart .axis { fill: var(--muted); font-size: 10px; }
+  .chart polyline { fill:none; stroke: var(--accent); stroke-width:2; }
+
+  .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin: 4px 0 14px; }
+  .toolbar input, .toolbar select { padding: 8px 11px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface); color: var(--ink); font-size: 13px; outline:none; font-family:inherit; }
+  .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
+  .toolbar input { width: 150px; }
+
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align:left; padding: 9px 12px; border-bottom:1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.03em; position: sticky; top:0; background: var(--surface); }
+  tr:last-child td { border-bottom:none; }
+  td.det { color: var(--muted); font-size:12px; max-width: 360px; white-space: normal; word-break: break-word; }
+  .tablewrap { background: var(--surface); border:1px solid var(--line); border-radius:16px; overflow:hidden; }
+  .cat { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px; font-weight:600; background: var(--surface-2); border:1px solid var(--line); white-space:nowrap; }
+  .sev-warn td { background: rgba(251,191,36,.07); }
+  .sev-error td { background: rgba(248,113,113,.09); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
+  .empty { padding: 40px; text-align:center; color: var(--muted); }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links"></nav>
+  <div class="me">
+    <div class="av" id="meAvatar">--</div>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Activity Log</h1>
+      <div class="sub">Every state change and mutating action across the system — plus fleet-count history — so any anomaly is explainable.</div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+      <button class="themebtn btn-ghost btn-sm" title="Toggle theme">🌓</button>
+      <button class="btn-ghost btn-sm" id="refreshBtn">Refresh</button>
+    </div>
+  </div>
+
+  <!-- Fleet metric history -->
+  <div class="panel" style="margin-top:18px;">
+    <h2>Fleet counts over time</h2>
+    <div class="sub">Pick a metric to plot. Snapshots are captured every ~20 minutes.</div>
+    <div class="metricrow" id="metricRow"></div>
+    <div class="chartwrap"><svg class="chart" id="chart" viewBox="0 0 900 200" preserveAspectRatio="none"></svg></div>
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <select id="metricHours">
+        <option value="24">Last 24h</option>
+        <option value="72" selected>Last 3 days</option>
+        <option value="168">Last 7 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Event feed -->
+  <div class="toolbar">
+    <select id="fCategory"><option value="">All categories</option></select>
+    <select id="fSeverity"><option value="">Any severity</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select>
+    <input id="fActor" placeholder="Actor (e.g. admin:…)" />
+    <input id="fAction" placeholder="Action" />
+    <input id="fSubject" placeholder="Subject (login/game/…)" />
+    <select id="fWindow"><option value="24">24h</option><option value="168" selected>7d</option><option value="720">30d</option><option value="">All</option></select>
+    <select id="fLimit"><option value="200">200 rows</option><option value="500">500</option><option value="1000">1000</option></select>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Time</th><th>Category</th><th>Action</th><th>Actor</th><th>Subject</th><th>Count</th><th>Detail</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<script src="/theme.js"></script>
+<script src="/admin-nav.js"></script>
+<script>
+(function () {
+  var METRICS = [
+    { key: "botOk", label: "Healthy bots" },
+    { key: "botTotal", label: "Bots total" },
+    { key: "botSuspended", label: "Banned" },
+    { key: "botTokenInvalid", label: "Token invalid" },
+    { key: "botUndeployed", label: "Undeployed" },
+    { key: "poolAvailable", label: "Pool available" },
+    { key: "poolTotal", label: "Pool total" },
+    { key: "dropLogEntries", label: "Log entries" },
+  ];
+  var selectedMetric = "botOk";
+  var snapshots = [];
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]; }); }
+  function fmtTime(t) { var d = new Date(t); return d.toLocaleString(); }
+
+  async function getJSON(url) {
+    var r = await fetch(url, { credentials: "same-origin" });
+    if (r.status === 401 || r.status === 403) { location.href = "/login.html"; throw new Error("unauth"); }
+    return r.json();
+  }
+
+  // ---- metric chart ----
+  function latest(key) {
+    for (var i = snapshots.length - 1; i >= 0; i--) {
+      var m = snapshots[i].metrics || {};
+      if (m[key] != null) return m[key];
+    }
+    return "—";
+  }
+  function renderMetricRow() {
+    el("metricRow").innerHTML = METRICS.map(function (m) {
+      return '<div class="mstat' + (m.key === selectedMetric ? " active" : "") + '" data-k="' + m.key + '"><b>' + esc(latest(m.key)) + '</b><span>' + esc(m.label) + "</span></div>";
+    }).join("");
+    Array.prototype.forEach.call(document.querySelectorAll(".mstat"), function (c) {
+      c.addEventListener("click", function () { selectedMetric = c.getAttribute("data-k"); renderMetricRow(); drawChart(); });
+    });
+  }
+  function drawChart() {
+    var svg = el("chart");
+    var W = 900, H = 200, padL = 46, padB = 18, padT = 10, padR = 8;
+    var pts = snapshots.map(function (s) { return { t: new Date(s.at).getTime(), v: (s.metrics || {})[selectedMetric] }; }).filter(function (p) { return typeof p.v === "number"; });
+    if (pts.length < 2) { svg.innerHTML = '<text x="20" y="30" class="axis">Not enough snapshots yet — first ones appear ~20 min apart.</text>'; return; }
+    var minT = pts[0].t, maxT = pts[pts.length - 1].t;
+    var minV = Infinity, maxV = -Infinity;
+    pts.forEach(function (p) { if (p.v < minV) minV = p.v; if (p.v > maxV) maxV = p.v; });
+    if (minV === maxV) { minV = minV - 1; maxV = maxV + 1; }
+    var x = function (t) { return padL + (maxT === minT ? 0 : (t - minT) / (maxT - minT)) * (W - padL - padR); };
+    var y = function (v) { return padT + (1 - (v - minV) / (maxV - minV)) * (H - padT - padB); };
+    var poly = pts.map(function (p) { return x(p.t).toFixed(1) + "," + y(p.v).toFixed(1); }).join(" ");
+    var g = "";
+    for (var i = 0; i <= 4; i++) {
+      var yy = padT + (i / 4) * (H - padT - padB);
+      var vv = Math.round(maxV - (i / 4) * (maxV - minV));
+      g += '<line class="grid" x1="' + padL + '" y1="' + yy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + yy.toFixed(1) + '"></line>';
+      g += '<text class="axis" x="4" y="' + (yy + 3).toFixed(1) + '">' + vv + "</text>";
+    }
+    g += '<text class="axis" x="' + padL + '" y="' + (H - 4) + '">' + new Date(minT).toLocaleString() + "</text>";
+    g += '<text class="axis" x="' + (W - padR) + '" y="' + (H - 4) + '" text-anchor="end">' + new Date(maxT).toLocaleString() + "</text>";
+    svg.innerHTML = g + '<polyline points="' + poly + '"></polyline>';
+  }
+  async function loadMetrics() {
+    try {
+      var d = await getJSON("/activity/metrics?hours=" + el("metricHours").value);
+      snapshots = (d && d.snapshots) || [];
+      renderMetricRow(); drawChart();
+    } catch (e) { /* handled in getJSON */ }
+  }
+
+  // ---- event feed ----
+  async function loadFacets() {
+    try {
+      var d = await getJSON("/activity/facets");
+      var sel = el("fCategory");
+      (d.categories || []).forEach(function (c) { var o = document.createElement("option"); o.value = c; o.textContent = c; sel.appendChild(o); });
+    } catch (e) {}
+  }
+  async function loadEvents() {
+    var q = [];
+    if (el("fCategory").value) q.push("category=" + encodeURIComponent(el("fCategory").value));
+    if (el("fSeverity").value) q.push("severity=" + encodeURIComponent(el("fSeverity").value));
+    if (el("fActor").value.trim()) q.push("actor=" + encodeURIComponent(el("fActor").value.trim()));
+    if (el("fAction").value.trim()) q.push("action=" + encodeURIComponent(el("fAction").value.trim()));
+    if (el("fSubject").value.trim()) q.push("subject=" + encodeURIComponent(el("fSubject").value.trim()));
+    if (el("fWindow").value) q.push("from=" + new Date(Date.now() - Number(el("fWindow").value) * 3600000).toISOString());
+    q.push("limit=" + el("fLimit").value);
+    var body = el("rows");
+    body.innerHTML = '<tr><td colspan="7" class="empty">Loading…</td></tr>';
+    try {
+      var d = await getJSON("/activity/events?" + q.join("&"));
+      var ev = (d && d.events) || [];
+      if (!ev.length) { body.innerHTML = '<tr><td colspan="7" class="empty">No events match.</td></tr>'; return; }
+      body.innerHTML = ev.map(function (e) {
+        var detail = e.detail || "";
+        if (e.meta && Object.keys(e.meta).length) detail += (detail ? "  " : "") + JSON.stringify(e.meta);
+        if (e.method) detail = e.method + " " + (e.route || "") + " → " + e.status + (detail ? "  " + detail : "");
+        var subj = e.subject || (e.game || "") || (e.container || "");
+        return '<tr class="sev-' + esc(e.severity || "info") + '">' +
+          "<td>" + esc(fmtTime(e.at)) + "</td>" +
+          '<td><span class="cat">' + esc(e.category || "") + "</span></td>" +
+          "<td>" + esc(e.action || "") + "</td>" +
+          '<td class="mono">' + esc(e.actor || "") + "</td>" +
+          "<td>" + esc(subj) + "</td>" +
+          "<td>" + (e.count ? esc(e.count) : "") + "</td>" +
+          '<td class="det">' + esc(detail) + "</td>" +
+          "</tr>";
+      }).join("");
+    } catch (e) { body.innerHTML = '<tr><td colspan="7" class="empty">Failed to load.</td></tr>'; }
+  }
+
+  function refreshAll() { loadMetrics(); loadEvents(); }
+
+  ["fCategory", "fSeverity", "fWindow", "fLimit"].forEach(function (id) { el(id).addEventListener("change", loadEvents); });
+  ["fActor", "fAction", "fSubject"].forEach(function (id) {
+    var t; el(id).addEventListener("input", function () { clearTimeout(t); t = setTimeout(loadEvents, 350); });
+  });
+  el("metricHours").addEventListener("change", loadMetrics);
+  el("refreshBtn").addEventListener("click", refreshAll);
+
+  loadFacets();
+  refreshAll();
+})();
+</script>
+</body>
+</html>

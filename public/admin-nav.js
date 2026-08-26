@@ -253,6 +253,12 @@
       icon: ICONS.admins,
       items: [
         {
+          href: "/activity.html",
+          label: "Activity log",
+          icon: '<path d="M3 12h4l3 8 4-16 3 8h4"></path>',
+          superOnly: true,
+        },
+        {
           href: "/backup.html",
           label: "Backup",
           icon: ICONS.backup,
