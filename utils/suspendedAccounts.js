@@ -37,6 +37,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const accountState = require("./twitchAccountState");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
+const { logEvent } = require("./systemLog");
 
 // Statuses worth re-probing: Twitch refused the token, or the scan errored in a
 // way that may have been a suspension all along. "ok" accounts are never probed
@@ -580,6 +581,32 @@ async function purgeSuspended({ dryRun = false, onProgress } = {}) {
   report.deletedDrops = drops.deletedCount || 0;
   const del = await BotAccount.deleteMany({ _id: { $in: ids } });
   report.deletedAccounts = del.deletedCount || 0;
+  if (report.deletedAccounts) {
+    // The durable record that was missing when ~500 accounts vanished with no
+    // trace: exactly which suspended bot accounts the purge deleted, and when.
+    logEvent({
+      category: "suspended",
+      action: "purged",
+      actor: "system",
+      severity: "warn",
+      count: report.deletedAccounts,
+      detail:
+        "deleted " +
+        report.deletedAccounts +
+        " suspended bot account(s) + " +
+        report.deletedDrops +
+        " drop row(s); kept " +
+        kept.length,
+      meta: {
+        logins: doomed
+          .map((d) => d.acc.login)
+          .filter(Boolean)
+          .slice(0, 50),
+        deletedDrops: report.deletedDrops,
+        kept: kept.length,
+      },
+    });
+  }
   if (onProgress) {
     onProgress(
       "Purged " +
@@ -641,6 +668,29 @@ async function purgeSuspendedPool({ dryRun = false, onProgress } = {}) {
   report.deletedDrops = drops.deletedCount || 0;
   const res = await AvailableAccount.deleteMany({ _id: { $in: ids } });
   report.deleted = res.deletedCount || 0;
+  if (report.deleted) {
+    const delSet = new Set(ids.map(String));
+    logEvent({
+      category: "suspended",
+      action: "purged_pool",
+      actor: "system",
+      severity: "warn",
+      count: report.deleted,
+      detail:
+        "deleted " +
+        report.deleted +
+        " suspended pool account(s) + " +
+        report.deletedDrops +
+        " drop row(s)",
+      meta: {
+        usernames: rows
+          .filter((r) => delSet.has(String(r._id)))
+          .map((r) => r.usernameLower)
+          .filter(Boolean)
+          .slice(0, 50),
+      },
+    });
+  }
   if (onProgress) {
     onProgress(
       "Purged " +
@@ -710,6 +760,44 @@ async function sweep({
           ? " " + retired.warnings.length + " need(s) a manual look."
           : ""),
     ).catch(() => {});
+  }
+  // One audit row per sweep that actually did something (best-effort). A quiet
+  // sweep (all zeros) writes nothing, so the feed stays a record of real change.
+  try {
+    const newlyDead = (bots.suspended || 0) + (pool.suspended || 0);
+    const freed = (released && released.unassigned) || 0;
+    const delBots = (purged && purged.deletedAccounts) || 0;
+    const delPool = (purgedPool && purgedPool.deleted) || 0;
+    const detached = (retired && retired.detached) || 0;
+    if (newlyDead || freed || delBots || delPool || detached) {
+      logEvent({
+        category: "suspended",
+        action: "sweep",
+        actor: "tick",
+        severity: newlyDead ? "warn" : "info",
+        count: newlyDead,
+        detail:
+          "confirmed gone: " +
+          (bots.suspended || 0) +
+          " bot / " +
+          (pool.suspended || 0) +
+          " pool; slots freed: " +
+          freed +
+          (delBots || delPool
+            ? "; deleted " + delBots + " bot + " + delPool + " pool"
+            : ""),
+        meta: {
+          newlyDeadBots: bots.suspended || 0,
+          newlyDeadPool: pool.suspended || 0,
+          releasedSlots: freed,
+          purgedBots: delBots,
+          purgedPool: delPool,
+          retiredListings: detached,
+        },
+      });
+    }
+  } catch {
+    /* audit is best-effort */
   }
   return { bots, pool, released, evicted, retired, purged, purgedPool };
 }

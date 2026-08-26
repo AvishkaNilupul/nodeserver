@@ -40,6 +40,7 @@ const { fetchInventory, itemKeyFor } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 const accountState = require("./twitchAccountState");
 const suspendedAccounts = require("./suspendedAccounts");
+const { logEvent } = require("./systemLog");
 const { stopFarmingGame } = require("./farmControl");
 
 // Marketplace claim tags: a DropLog reserved with one of these is merely
@@ -398,9 +399,50 @@ async function upsertDrops(accountId, accountModel, login, drops) {
 // leaves it due and backs the worker off. Every other outcome, including a real
 // Twitch rejection, is recorded on the row exactly as the single-machine path
 // always did.
+
+// Audit only MEANINGFUL account-health transitions (ban / bad-token / recovery),
+// never routine scans or transient "error" flaps. Best-effort, fire-and-forget.
+function logStatusChange(acc, prev, worker) {
+  try {
+    const next = acc.lastScanStatus;
+    if (next === prev) return;
+    let action = null;
+    let severity = "warn";
+    if (next === "suspended" && prev !== "suspended") action = "suspended";
+    else if (
+      next === "token_invalid" &&
+      prev !== "token_invalid" &&
+      prev !== "suspended"
+    )
+      action = "token_invalid";
+    else if (
+      next === "ok" &&
+      (prev === "token_invalid" || prev === "suspended")
+    ) {
+      action = "recovered";
+      severity = "info";
+    }
+    if (!action) return;
+    logEvent({
+      category: "accounts",
+      action,
+      actor: "scanner",
+      severity,
+      subject: acc.login || "",
+      subjectId: acc._id,
+      host: worker && worker.host ? worker.host.id || "" : "",
+      container: acc.container || "",
+      detail: (prev || "?") + " → " + next,
+    });
+  } catch {
+    /* never break a scan on its audit */
+  }
+}
+
 async function scanAccount(acc, worker) {
   const host = worker.host.transport === "local" ? null : worker.host;
   const now = new Date();
+  const prevStatus = acc.lastScanStatus;
   let inv;
   try {
     inv = await fetchInventory(acc.clientSecret, { host });
@@ -435,6 +477,7 @@ async function scanAccount(acc, worker) {
       }
     }
     await acc.save();
+    logStatusChange(acc, prevStatus, worker);
     worker.errors++;
     state.sessionErrors++;
     state.lastError = acc.lastScanError;
@@ -547,6 +590,7 @@ async function scanAccount(acc, worker) {
   acc.lastScanStatus = "ok";
   acc.lastScanError = "";
   await acc.save();
+  logStatusChange(acc, prevStatus, worker);
   worker.newDrops += newDrops;
   state.sessionNewDrops += newDrops;
   return { ok: true, newDrops, total: acc.dropCount };
