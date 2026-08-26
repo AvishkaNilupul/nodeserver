@@ -17,6 +17,7 @@ const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
+const { logEvent } = require("./systemLog");
 const {
   removeAccountFromConfig,
   restartConfigContainer,
@@ -157,6 +158,21 @@ async function sweepOnce() {
       const out = await stopRenterFarming(r, host);
       r.botStoppedAt = new Date();
       await r.save();
+      logEvent({
+        category: "renting",
+        action: "lease_ended",
+        actor: "renterExpiry",
+        subject: r.username || "",
+        host: r.botHost || "",
+        container: r.botFile || "",
+        detail:
+          out.mode === "stopped"
+            ? "lease ended — bot " + r.botFile + " stopped"
+            : "lease ended — " +
+              out.removed +
+              " account(s) pulled off shared bot " +
+              r.botFile,
+      });
       console.log(
         "[renterExpiry] stopped farming for expired renter " + r.username,
       );
