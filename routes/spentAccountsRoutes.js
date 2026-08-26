@@ -16,6 +16,11 @@ const router = express.Router();
 const MARKET_CLAIM_TAGS = new Set(["gameflip", "ggsel", "digiseller", "funpay", "zeusx"]);
 const DAY_MS = 86400000;
 const RECYCLE_BATCH = 20;
+// Only these persisted scan statuses prove the buyer took the account over. A
+// transient "already being scanned" / "Account not found" / timeout / network
+// "error" must NEVER brand a healthy account — the continuous scanner runs
+// against these same logins, so a scan collision is expected, not a dead token.
+const DEAD_TOKEN_STATUSES = new Set(["token_invalid", "suspended"]);
 
 function isRealSale(drop) {
   if (!drop.soldAt) return false;
@@ -268,16 +273,31 @@ async function recycleOne(body) {
   try {
     scanResult = await dropScanner.scanAccountNow(row.botId);
   } catch {
-    // The persisted scan status below is the authority, including failures.
+    // Treated as "could not verify" below — never as a dead token.
   }
   const fresh = await BotAccount.findById(row.botId, { lastScanStatus: 1 }).lean();
-  if (!scanResult || scanResult.ok !== true || !fresh || fresh.lastScanStatus !== "ok") {
-    await AvailableAccount.updateOne(
-      { _id: row._pool._id },
-      { $set: { claimedNote: "sold — token reclaimed by buyer" } },
-    );
-    await recordPoolUsage(row._pool._id, { event: "sold", actor: "spent-accounts", note: "sold — token reclaimed by buyer" });
-    return { login, recycled: false, status: "token_reclaimed", reason: "token reclaimed by buyer" };
+  const status = fresh && fresh.lastScanStatus;
+  // Recycle only on a positive, fresh "token still works" signal.
+  const healthy = !!scanResult && scanResult.ok === true && status === "ok";
+  if (!healthy) {
+    if (DEAD_TOKEN_STATUSES.has(status)) {
+      // A scan actually reached Twitch and the token is gone/suspended — the
+      // buyer reclaimed it. Brand it so it never resurfaces as recyclable.
+      await AvailableAccount.updateOne(
+        { _id: row._pool._id },
+        { $set: { claimedNote: "sold — token reclaimed by buyer" } },
+      );
+      await recordPoolUsage(row._pool._id, { event: "sold", actor: "spent-accounts", note: "sold — token reclaimed by buyer" });
+      return { login, recycled: false, status: "token_reclaimed", reason: "token reclaimed by buyer" };
+    }
+    // Transient (mid-scan collision, stale id, timeout, network error). Do NOT
+    // brand a healthy account — surface the reason and let the operator retry.
+    return {
+      login,
+      recycled: false,
+      status: "rescan_unverified",
+      reason: (scanResult && scanResult.error) || "rescan could not confirm the token — try again",
+    };
   }
   const soldGames = [...new Set((row.soldDetails || []).map((detail) => detail.gameKey).filter(Boolean))];
   const update = await AvailableAccount.updateOne(
