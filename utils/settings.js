@@ -19,12 +19,14 @@ const AUTO_FARM_DEFAULTS = {
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
   // Games that CANNOT be sold via the normal click-claim-then-sell flow
-  // (Overwatch, Rainbow Six): the auto-farmer must NOT farm OR list them — they
-  // are handled by the standalone no-claim farming system instead. These are
-  // loose keywords matched as a SUBSTRING of the normalised game label (see
-  // isNoClaimGame), so "overwatch" also catches "Overwatch 2" and "rainbow six"
-  // catches "Tom Clancy's Rainbow Six Siege". Editable from that tab.
-  noClaimGames: ["overwatch", "rainbow six"],
+  // (Overwatch, Rainbow Six, Call of Duty): the auto-farmer must NOT farm OR
+  // list them — they are handled by the standalone no-claim farming system
+  // instead. These are loose keywords matched as a SUBSTRING of the normalised
+  // game label (see isNoClaimGame), so "overwatch" also catches "Overwatch 2",
+  // "rainbow six" catches "Tom Clancy's Rainbow Six Siege", and "call of duty"
+  // catches every CoD title (e.g. "Call of Duty: Warzone", "Call of Duty: Black
+  // Ops 6"). Editable from that tab.
+  noClaimGames: ["overwatch", "rainbow six", "call of duty"],
   // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
   // account on — World of Tanks and UFL sell too thin to be worth burning new
   // accounts. For these, the brain only ever REUSES accounts it has already
