@@ -31,6 +31,8 @@ const twitchInventory = require("../utils/twitchInventory");
 const { buildSocialPost } = require("../utils/socialPost");
 const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
+const BotAccount = require("../models/BotAccount");
+const NoclaimSpentAccount = require("../models/NoclaimSpentAccount");
 const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
@@ -815,5 +817,299 @@ router.post(
     }
   },
 );
+
+// ===========================================================================
+// SPENT accounts (sold / connected) — scan, remove, and view.
+//
+// Some accounts sitting in a no-claim bot are no longer worth farming:
+//   * SOLD — the account was delivered to a buyer (Shop / reseller / bulk, or a
+//     recycled sold-game marker). Detected from the account DB by clientSecret.
+//   * CONNECTED — the account has been linked to a game account (e.g. an
+//     Overwatch login connected to Battle.net). Once connected, the drop is
+//     delivered to the buyer's game account, so continuing to farm it is waste.
+//     Detected from the LIVE Twitch inventory (isAccountConnected).
+//
+// The operator scans a bot, reviews the flagged accounts, then removes them.
+// Removal rewrites the bot's config WITHOUT them and restarts the container
+// (or stops it if none are left), then logs each into NoclaimSpentAccount so
+// the page's "Spent" view keeps a history. Per the operator's choice this does
+// NOT touch the pool / BotAccount rows — the accounts simply stop being farmed
+// here and are left for the global Spent-accounts tab to recycle manually.
+// ===========================================================================
+
+async function readConfigRaw(id) {
+  return await sh(
+    `[ -f ${hosts.shq(configPath(id))} ] && cat ${hosts.shq(configPath(id))} || echo ''`,
+    { timeout: 15000 },
+  );
+}
+
+// Which of the given clientSecrets belong to accounts already sold, keyed by
+// clientSecret. A BotAccount sale marker (shop / reseller / bulk) wins over a
+// pool-row marker; a pool row with soldGames set means it previously delivered
+// that game.
+async function soldMapForSecrets(secrets) {
+  const map = new Map();
+  const uniq = [...new Set((secrets || []).filter(Boolean))];
+  if (!uniq.length) return map;
+  const [bots, pool] = await Promise.all([
+    BotAccount.find(
+      { clientSecret: { $in: uniq } },
+      { clientSecret: 1, soldAt: 1, soldBulkOrderId: 1, resellerId: 1 },
+    ).lean(),
+    AvailableAccount.find(
+      { clientSecret: { $in: uniq } },
+      { clientSecret: 1, soldGames: 1, claimedNote: 1 },
+    ).lean(),
+  ]);
+  for (const b of bots) {
+    let why = "";
+    if (b.soldAt) why = "shop sale";
+    else if (b.resellerId) why = "reseller";
+    else if (b.soldBulkOrderId) why = "bulk order";
+    if (why) map.set(b.clientSecret, { sold: true, why });
+  }
+  for (const p of pool) {
+    if (map.has(p.clientSecret)) continue; // BotAccount signal already wins
+    if (Array.isArray(p.soldGames) && p.soldGames.length) {
+      map.set(p.clientSecret, { sold: true, why: "sold-game marker" });
+    } else if (/^sold/i.test(String(p.claimedNote || ""))) {
+      map.set(p.clientSecret, { sold: true, why: "sold note" });
+    }
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Scan ONE bot for spent accounts (sold via DB + connected via live Twitch).
+// Scoped to one bot per call — a Twitch query per account — so the page can
+// sweep the fleet bot-by-bot without a single giant, timeout-prone request.
+// ---------------------------------------------------------------------------
+router.get("/api/noclaim-farm/spent/scan", requireSuperadmin, async (req, res) => {
+  try {
+    const id = String(req.query.botId || "").replace(/[^0-9]/g, "");
+    if (!id) return res.status(400).json({ success: false, message: "botId required" });
+    const raw = await readConfigRaw(id);
+    if (!raw) return res.status(404).json({ success: false, message: "No such bot." });
+    const cfg = JSON.parse(raw);
+    const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
+    const game = (cfg.FavouriteGames || [])[0] || "";
+    const sold = await soldMapForSecrets(users.map((u) => u.ClientSecret));
+
+    // Live connected/token check, one GQL per account, egressing via the Pi
+    // with bounded concurrency (same fan-out as the Drops tab).
+    const host = pi();
+    const CONCURRENCY = 5;
+    const live = new Array(users.length);
+    let next = 0;
+    async function worker() {
+      while (next < users.length) {
+        const i = next++;
+        const u = users[i];
+        try {
+          const inv = await twitchInventory.fetchInventory(u.ClientSecret, { host });
+          const connected =
+            (inv.inProgress || []).some((d) => d.connected) ||
+            (inv.drops || []).some((d) => d.connected);
+          live[i] = { connected, tokenStatus: "ok", tokenError: "" };
+        } catch (e) {
+          live[i] = {
+            connected: false,
+            tokenStatus: e && e.code ? e.code : "error",
+            tokenError: (e && e.message) || "error",
+          };
+        }
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, users.length) }, worker),
+    );
+
+    const spent = [];
+    users.forEach((u, i) => {
+      const s = sold.get(u.ClientSecret) || { sold: false, why: "" };
+      const l = live[i] || {};
+      if (!s.sold && !l.connected) return;
+      spent.push({
+        clientSecret: u.ClientSecret || "",
+        login: u.Login || "",
+        twitchId: u.Id || "",
+        sold: !!s.sold,
+        soldWhy: s.why || "",
+        connected: !!l.connected,
+        tokenStatus: l.tokenStatus || "",
+        tokenError: l.tokenError || "",
+      });
+    });
+    res.json({
+      success: true,
+      botId: id,
+      game,
+      scanned: users.length,
+      spent,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Remove selected spent accounts from ONE bot: rewrite the config without them,
+// restart the container (or stop it if none remain), and log each into the
+// spent view. Does NOT modify pool / BotAccount rows (operator's choice).
+// Body: { botId, accounts: [{ clientSecret, login, twitchId, sold, soldWhy,
+//         connected, tokenStatus }] } — the rows from a scan.
+// ---------------------------------------------------------------------------
+router.post("/api/noclaim-farm/spent/remove", requireSuperadmin, async (req, res) => {
+  try {
+    const id = String(req.body.botId || "").replace(/[^0-9]/g, "");
+    if (!id) return res.status(400).json({ success: false, message: "botId required" });
+    const picked = Array.isArray(req.body.accounts) ? req.body.accounts : [];
+    const bySecret = new Map();
+    for (const a of picked) {
+      const cs = String((a && a.clientSecret) || "");
+      if (cs) bySecret.set(cs, a);
+    }
+    if (!bySecret.size)
+      return res.status(400).json({ success: false, message: "No accounts selected." });
+
+    const raw = await readConfigRaw(id);
+    if (!raw) return res.status(404).json({ success: false, message: "No such bot." });
+    const cfg = JSON.parse(raw);
+    const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
+    const game = (cfg.FavouriteGames || [])[0] || "";
+
+    const removed = users.filter((u) => bySecret.has(u.ClientSecret));
+    if (!removed.length)
+      return res
+        .status(409)
+        .json({ success: false, message: "None of those accounts are on this bot." });
+    const kept = users.filter((u) => !bySecret.has(u.ClientSecret));
+
+    // Authoritative sold reason from the DB (the client-supplied flags are only
+    // a fallback for the connected/token detail the DB doesn't hold).
+    const sold = await soldMapForSecrets(removed.map((u) => u.ClientSecret));
+
+    // Rewrite the config without the removed users, keeping every other field.
+    // No-claim containers run --user 0:0, so the config stays chmod 600 (a 644
+    // here would be the wrong direction — see the migration notes).
+    cfg.TwitchSettings.TwitchUsers = kept;
+    const newRaw = JSON.stringify(cfg, null, 2);
+    await sh(
+      `cat > ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
+      { timeout: 20000, input: newRaw },
+    );
+
+    // Restart so the container drops the removed accounts' watch threads; if the
+    // bot is now empty, stop it (a 0-account config just tight-loops).
+    let action;
+    if (kept.length > 0) {
+      await sh(`docker restart ${hosts.shq(containerFor(id))} 2>/dev/null || true`, {
+        timeout: 40000,
+      });
+      action = "restarted";
+    } else {
+      await sh(`docker stop ${hosts.shq(containerFor(id))} 2>/dev/null || true`, {
+        timeout: 25000,
+      });
+      action = "stopped";
+    }
+
+    // Log each removal into the spent view (one row per login; a re-sweep
+    // refreshes it rather than duplicating).
+    const actor = actorFromReq(req);
+    const at = new Date();
+    for (const u of removed) {
+      const meta = bySecret.get(u.ClientSecret) || {};
+      const s = sold.get(u.ClientSecret) || { sold: false, why: "" };
+      const loginLower = String(u.Login || "").toLowerCase();
+      await NoclaimSpentAccount.updateOne(
+        loginLower
+          ? { loginLower }
+          : { twitchId: String(u.Id || ""), login: u.Login || "" },
+        {
+          $set: {
+            login: u.Login || "",
+            loginLower,
+            twitchId: String(u.Id || ""),
+            game,
+            botId: id,
+            container: containerFor(id),
+            sold: !!(s.sold || meta.sold),
+            connected: !!meta.connected,
+            soldWhy: s.why || meta.soldWhy || "",
+            tokenStatus: meta.tokenStatus || "",
+            actor,
+            sweptAt: at,
+          },
+        },
+        { upsert: true },
+      );
+    }
+    logEvent({
+      category: "noclaim",
+      action: "spent_removed",
+      actor,
+      subject: containerFor(id),
+      game: game || "",
+      count: removed.length,
+      detail:
+        "removed " +
+        removed.length +
+        " spent (sold/connected) account(s) from no-claim bot " +
+        id,
+    });
+    res.json({ success: true, removed: removed.length, remaining: kept.length, action });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The spent view: everything removed so far (history), newest first.
+// ---------------------------------------------------------------------------
+router.get("/api/noclaim-farm/spent/list", requireSuperadmin, async (req, res) => {
+  try {
+    const rows = await NoclaimSpentAccount.find(
+      {},
+      {
+        login: 1,
+        twitchId: 1,
+        game: 1,
+        botId: 1,
+        container: 1,
+        sold: 1,
+        connected: 1,
+        soldWhy: 1,
+        tokenStatus: 1,
+        sweptAt: 1,
+      },
+    )
+      .sort({ sweptAt: -1 })
+      .limit(500)
+      .lean();
+    res.json({ success: true, accounts: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Dismiss one row from the spent view (or all of them). Purely a UI cleanup —
+// it removes the history record, not any account.
+router.delete("/api/noclaim-farm/spent/:id", requireSuperadmin, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    if (id === "all") {
+      const r = await NoclaimSpentAccount.deleteMany({});
+      return res.json({ success: true, deleted: r.deletedCount || 0 });
+    }
+    if (!/^[a-f0-9]{24}$/i.test(id))
+      return res.status(400).json({ success: false, message: "bad id" });
+    await NoclaimSpentAccount.deleteOne({ _id: id });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 module.exports = router;

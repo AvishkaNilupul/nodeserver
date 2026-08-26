@@ -161,6 +161,22 @@
     <div class="bd"><div id="bots"><div class="muted">Loading…</div></div></div>
   </div>
 
+  <!-- Spent (sold / connected) -->
+  <div class="panel">
+    <div class="hd"><b>Spent accounts</b> <span class="muted" style="margin-left:auto;">sold or connected — not worth farming</span></div>
+    <div class="bd">
+      <div class="muted" style="margin-bottom:11px;">
+        Scans every bot for accounts that are <b>sold</b> (delivered to a buyer) or <b>connected</b> to a game account (the drop is already on the buyer's account). Review them, then remove them — this rewrites the bot's config without them and restarts it (or stops the bot if it's left empty). Pool rows are left untouched; recycle them from the <b>Spent accounts</b> tab.
+      </div>
+      <div class="tagrow" style="margin-bottom:12px;">
+        <button class="btn primary sm" id="scanSpentBtn">Scan bots for spent</button>
+        <span class="muted" id="scanSpentStatus"></span>
+      </div>
+      <div id="spentCandidates"></div>
+      <div id="spentHistory" style="margin-top:18px;"></div>
+    </div>
+  </div>
+
   <!-- No-claim game list -->
   <div class="panel">
     <div class="hd"><b>No-claim games</b> <span class="muted" style="margin-left:auto;">excluded from the normal auto-farmer &amp; auto-lister</span></div>
@@ -188,6 +204,7 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;',
 async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j={};try{j=await r.json();}catch(e){}if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
 
 var openBots = {}; // id -> {tab, loadedAccounts, loadedDrops}
+var allBots = []; // last state sweep, used by the spent scanner
 var pollT=null;
 
 async function loadState(force){
@@ -197,6 +214,7 @@ async function loadState(force){
     $('stRunning').textContent=j.bots.filter(b=>b.running).length;
     $('stImg').textContent=j.imageBuilt?'ready':(j.provisioning?'building…':'none');
     $('botsCount').textContent=j.bots.length+' bot'+(j.bots.length===1?'':'s')+(j.provisioning?' · building…':'');
+    allBots=j.bots||[];
     renderBots(j.bots,force);
     // keep polling only while something is building/running
     var active=j.provisioning||j.bots.some(b=>b.running);
@@ -521,7 +539,102 @@ $('createBtn').onclick=async function(){
   }catch(e){ toast('Create failed: '+e.message); $('createHint').textContent=''; }
   finally{ this.disabled=false; }
 };
-$('refreshBtn').onclick=function(){ loadState(true); loadPool(); loadAuto(); };
+$('refreshBtn').onclick=function(){ loadState(true); loadPool(); loadAuto(); loadSpentHistory(); };
+
+// --- spent (sold / connected) ---
+// A candidate is one account flagged sold (DB) or connected (live Twitch). The
+// scanner walks every bot in series so each request stays bounded; the rows
+// accumulate into one review table with checkboxes.
+var spentRows=[]; // {botId, game, clientSecret, login, twitchId, sold, soldWhy, connected, tokenStatus, tokenError}
+
+async function scanSpent(){
+  var btn=$('scanSpentBtn'), stt=$('scanSpentStatus');
+  var bots=allBots.slice();
+  if(!bots.length){ stt.textContent='No bots to scan.'; return; }
+  btn.disabled=true; spentRows=[]; renderSpentCandidates();
+  var errs=0;
+  for(var i=0;i<bots.length;i++){
+    var b=bots[i];
+    stt.textContent='Scanning bot #'+b.id+' ('+(i+1)+'/'+bots.length+')…';
+    try{
+      var j=await api('/api/noclaim-farm/spent/scan?botId='+encodeURIComponent(b.id));
+      (j.spent||[]).forEach(function(a){ a.botId=j.botId; a.game=j.game; spentRows.push(a); });
+      renderSpentCandidates();
+    }catch(e){ errs++; }
+  }
+  stt.textContent=spentRows.length+' spent account'+(spentRows.length===1?'':'s')+' across '+bots.length+' bot'+(bots.length===1?'':'s')+(errs?' · '+errs+' bot(s) errored':'');
+  btn.disabled=false; renderSpentCandidates();
+}
+
+function reasonChips(a){
+  var h='';
+  if(a.sold) h+='<span class="chip off">sold'+(a.soldWhy?' · '+esc(a.soldWhy):'')+'</span> ';
+  if(a.connected) h+='<span class="chip warn">connected</span> ';
+  if(a.tokenStatus&&a.tokenStatus!=='ok') h+='<span class="chip">token '+esc(a.tokenStatus)+'</span>';
+  return h||'<span class="muted">—</span>';
+}
+
+function renderSpentCandidates(){
+  var c=$('spentCandidates');
+  if(!spentRows.length){ c.innerHTML='<div class="muted">No spent accounts found yet — scan above.</div>'; return; }
+  var h='<div class="tagrow" style="margin-bottom:8px;">'+
+        '<span class="muted">'+spentRows.length+' candidate'+(spentRows.length===1?'':'s')+' — review, then remove</span>'+
+        '<button class="btn danger sm" id="removeSpentBtn" style="margin-left:auto;">Remove selected</button>'+
+        '</div>'+
+        '<table><thead><tr><th style="width:26px;"><input type="checkbox" id="spentAll" checked></th>'+
+        '<th>Login</th><th>Bot</th><th>Game</th><th>Reason</th></tr></thead><tbody>';
+  spentRows.forEach(function(a,i){
+    h+='<tr><td><input type="checkbox" class="spentck" data-i="'+i+'" checked></td>'+
+       '<td>'+esc(a.login)+'</td><td class="muted">#'+esc(a.botId)+'</td>'+
+       '<td>'+esc(a.game||'')+'</td><td class="tagrow">'+reasonChips(a)+'</td></tr>';
+  });
+  h+='</tbody></table>';
+  c.innerHTML=h;
+  $('spentAll').onchange=function(){ var on=this.checked; c.querySelectorAll('.spentck').forEach(function(x){ x.checked=on; }); };
+  $('removeSpentBtn').onclick=removeSpent;
+}
+
+async function removeSpent(){
+  var c=$('spentCandidates'), picked=[];
+  c.querySelectorAll('.spentck').forEach(function(x){ if(x.checked) picked.push(spentRows[+x.getAttribute('data-i')]); });
+  if(!picked.length){ toast('Select at least one account.'); return; }
+  if(!confirm('Remove '+picked.length+' account(s) from their no-claim bots? Each bot is rewritten and restarted (or stopped if empty). Pool rows are left untouched.')) return;
+  var btn=$('removeSpentBtn'); btn.disabled=true;
+  var byBot={}; picked.forEach(function(a){ (byBot[a.botId]=byBot[a.botId]||[]).push(a); });
+  var removed=0, fails=0;
+  for(var botId in byBot){
+    try{ var j=await api('/api/noclaim-farm/spent/remove',{method:'POST',body:JSON.stringify({botId:botId,accounts:byBot[botId]})}); removed+=j.removed||0; }
+    catch(e){ fails++; }
+  }
+  var gone=new Set(picked.map(function(a){ return a.clientSecret; }));
+  spentRows=spentRows.filter(function(a){ return !gone.has(a.clientSecret); });
+  renderSpentCandidates();
+  toast('Removed '+removed+' account(s)'+(fails?' · '+fails+' bot(s) failed':'')+'.');
+  btn.disabled=false;
+  await loadState(true); await loadPool(); await loadSpentHistory();
+}
+
+async function loadSpentHistory(){
+  var el=$('spentHistory');
+  try{
+    var j=await api('/api/noclaim-farm/spent/list'); var rows=j.accounts||[];
+    var h='<div class="tagrow" style="margin-bottom:8px;"><b style="font-size:13px;">Removed</b>'+
+          '<span class="muted">'+rows.length+'</span>'+
+          (rows.length?'<button class="btn ghost sm" id="clearSpentBtn" style="margin-left:auto;">Clear list</button>':'')+'</div>';
+    if(!rows.length){ el.innerHTML=h+'<div class="muted">Nothing removed yet.</div>'; return; }
+    h+='<table><thead><tr><th>Login</th><th>Game</th><th>From</th><th>Reason</th><th>When</th><th></th></tr></thead><tbody>';
+    rows.forEach(function(a){
+      h+='<tr><td>'+esc(a.login)+'</td><td>'+esc(a.game||'')+'</td><td class="muted">#'+esc(a.botId)+'</td>'+
+         '<td class="tagrow">'+reasonChips(a)+'</td>'+
+         '<td class="muted">'+(a.sweptAt?new Date(a.sweptAt).toLocaleString():'')+'</td>'+
+         '<td><button class="btn ghost sm" data-del="'+esc(a._id)+'" title="Dismiss from list">×</button></td></tr>';
+    });
+    h+='</tbody></table>'; el.innerHTML=h;
+    var cb=$('clearSpentBtn'); if(cb) cb.onclick=async function(){ if(!confirm('Clear the removed list? This only clears the view — it does not affect any account.')) return; try{ await api('/api/noclaim-farm/spent/all',{method:'DELETE'}); loadSpentHistory(); }catch(e){ toast('Failed: '+e.message); } };
+    el.querySelectorAll('button[data-del]').forEach(function(b){ b.onclick=async function(){ try{ await api('/api/noclaim-farm/spent/'+b.getAttribute('data-del'),{method:'DELETE'}); loadSpentHistory(); }catch(e){ toast('Failed: '+e.message); } }; });
+  }catch(e){ el.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
+}
+$('scanSpentBtn').onclick=scanSpent;
 
 // --- auto power ---
 function fmtMin(ms){ if(!(ms>0)) return ''; var m=Math.round(ms/60000); return m<60?m+'m':(Math.floor(m/60)+'h '+(m%60)+'m'); }
@@ -554,7 +667,7 @@ $('autoToggle').onchange=async function(){
   finally{ this.disabled=false; }
 };
 
-(async function(){ await loadGames(); await loadPool(); await loadState(); await loadAuto(); })();
+(async function(){ await loadGames(); await loadPool(); await loadState(); await loadAuto(); await loadSpentHistory(); })();
 </script>
 <script src="/admin-nav.js"></script>
 </body>
