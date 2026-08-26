@@ -217,6 +217,13 @@ async function gatherSpentAccounts() {
       eligibility.recyclable = false;
       eligibility.reason = "no BotAccount available for a fresh rescan";
     }
+    // An already-dead token can never pass the recycle-time rescan, so don't
+    // dangle it as "ready" — the operator would click and just get branded.
+    const resolvedStatus = (bot && bot.lastScanStatus) || account.lastCheckStatus || "";
+    if (eligibility.recyclable && DEAD_TOKEN_STATUSES.has(resolvedStatus)) {
+      eligibility.recyclable = false;
+      eligibility.reason = "token " + resolvedStatus + " — reclaimed by buyer, cannot recycle";
+    }
     const cooldownAt = newestDeliveredAt ? new Date(new Date(newestDeliveredAt).getTime() + cooldownDays * DAY_MS) : null;
     const daysLeft = cooldownAt ? Math.max(0, Math.ceil((cooldownAt.getTime() - now) / DAY_MS)) : null;
     return {
