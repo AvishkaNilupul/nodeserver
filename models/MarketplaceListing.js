@@ -111,4 +111,49 @@ const marketplaceListingSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Best-effort audit: log every listing CREATION into the unified activity log
+// (utils/systemLog.js), in one place, covering all publish paths (auto-lister +
+// relist chain + manual). All listing creates go through .create()/.save(), so a
+// save hook catches them; insertMany is never used for listings. pre-save stashes
+// isNew; post-save fires AFTER the write, never throws and is never awaited — a
+// logging failure can never affect the listing. systemLog is required lazily to
+// avoid any model load-order cycle.
+marketplaceListingSchema.pre("save", function (next) {
+  try {
+    this.$locals.wasNew = this.isNew;
+  } catch {
+    /* ignore */
+  }
+  next();
+});
+marketplaceListingSchema.post("save", function (doc) {
+  try {
+    if (!doc.$locals || !doc.$locals.wasNew) return;
+    require("../utils/systemLog").logEvent({
+      category: "listings",
+      action: "published",
+      actor: doc.origin === "auto" ? "autoLister" : "system",
+      subject: doc.marketplace || "",
+      subjectId: doc._id,
+      count: 1,
+      detail:
+        (doc.origin || "manual") +
+        " " +
+        (doc.marketplace || "") +
+        " listing" +
+        (doc.price ? " $" + doc.price : "") +
+        (doc.accountLogin ? " (" + doc.accountLogin + ")" : ""),
+      meta: {
+        marketplace: doc.marketplace,
+        origin: doc.origin,
+        externalId: doc.externalId,
+        setId: String(doc.set || ""),
+        price: doc.price,
+      },
+    });
+  } catch {
+    /* audit is best-effort */
+  }
+});
+
 module.exports = mongoose.model("MarketplaceListing", marketplaceListingSchema);

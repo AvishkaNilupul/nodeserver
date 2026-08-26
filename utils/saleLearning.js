@@ -18,6 +18,7 @@
 // Every path that learns a listing was bought comes here instead.
 const MarketplaceListing = require("../models/MarketplaceListing");
 const SaleSignal = require("../models/SaleSignal");
+const { logEvent } = require("./systemLog");
 
 // Distinct games a drop set sells. A bundle covering three games is three
 // games' worth of demand evidence when it sells, one per game — never one
@@ -95,6 +96,32 @@ async function recordListingSale({
       }
     }
   }
+  // Central audit of a real marketplace SALE — one place that covers every
+  // platform (gameflip + Plati/GGSel quantity), since both funnel through here.
+  logEvent({
+    category: "sales",
+    action: "sold",
+    actor: "fulfiller",
+    subject: listing.marketplace || "",
+    count: n,
+    game: games[0] || "",
+    detail:
+      "sold " +
+      n +
+      " unit(s) of " +
+      (listing.title || "listing") +
+      " on " +
+      (listing.marketplace || "?") +
+      (priceUsd ? " @ $" + priceUsd : ""),
+    meta: {
+      marketplace: listing.marketplace || "",
+      games,
+      units: n,
+      priceUsd: Number(priceUsd) || Number(listing.price) || 0,
+      listingId: String(listing._id),
+      login: listing.accountLogin || "",
+    },
+  });
   return written;
 }
 
