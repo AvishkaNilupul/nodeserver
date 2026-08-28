@@ -20,6 +20,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
         "probe", // unknown game -> small market-test batch
         "reuse_existing", // weekly campaign -> restarted the game's existing auto-bot
         "skip_low_demand", // research says items don't sell
+        "skip_probe_budget", // cold-start probe candidate held off by the concurrency budget (retryable)
         "skip_ends_soon", // campaign too close to its end to be worth accounts
         "skip_no_accounts", // pool at/below reserve floor, nothing to spend
         "skip_no_capacity", // Pi at max auto containers (may be retried later)

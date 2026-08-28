@@ -145,6 +145,7 @@ const RETRYABLE = new Set([
   "skip_host_offline",
   "skip_already_covered", // covered accounts may sell — demand reopens
   "skip_reuse_only", // reuse-only game — retries once one of its own accounts recycles back to the pool
+  "skip_probe_budget", // cold-start candidate held off by the concurrency budget — retries when a probe slot frees
 ]);
 
 const state = {
@@ -1589,6 +1590,9 @@ async function processCampaign(c, ctx) {
   // while. A game already probing is never blocked by its own budget slot (the
   // count excludes it), so an in-flight probe is never re-skipped mid-run.
   let probeAllowed = true;
+  // Blocked purely by the concurrency budget (retryable) vs. by the
+  // post-failure cooldown (terminal for the cooldown window).
+  let probeBudgetBlocked = false;
   if (af.probeColdStart) {
     const cooldownCut = new Date(
       Date.now() - Math.max(0, Number(af.probeCooldownDays) || 0) * 86400000,
@@ -1603,41 +1607,53 @@ async function processCampaign(c, ctx) {
       status: { $in: ["active", "planned"] },
       game: { $ne: game },
     });
-    probeAllowed =
-      !recentlyFailed && otherProbes < (Number(af.probeMaxGames) || 0);
+    const underBudget = otherProbes < (Number(af.probeMaxGames) || 0);
+    probeAllowed = !recentlyFailed && underBudget;
+    probeBudgetBlocked = !recentlyFailed && !underBudget;
   }
   const alloc = demandAllocation(research, af, sales, { probeAllowed });
   if (alloc.skip) {
-    // A cold-start game held back by the budget/cooldown is NOT a proven dud —
-    // say so, so the log doesn't claim "items don't sell" about a game we
-    // simply chose not to probe right now.
+    // A cold-start candidate held off by the BUDGET is queued, not rejected —
+    // record a RETRYABLE decision so it flows into a probe slot the moment one
+    // frees (a probe graduates or the stop-loss expires one). Cooldown holds and
+    // genuine low demand stay terminal. Never claim "items don't sell" about a
+    // game we simply chose not to probe yet.
+    const budgetHold = alloc.probeBlocked && probeBudgetBlocked;
+    const decision = budgetHold ? "skip_probe_budget" : "skip_low_demand";
     const reason = alloc.probeBlocked
-      ? "Untested market, but probing is held off right now (budget full or " +
-        "within the post-failure cooldown) — no accounts spent; will retry."
+      ? budgetHold
+        ? "Untested market — " +
+          (Number(af.probeMaxGames) || 0) +
+          " probes already running (budget full); queued, retries when a slot frees."
+        : "Untested market, but within the post-failure cooldown — no accounts spent."
       : "Effective demand " +
         alloc.demand +
         " (market research + " +
         internalSales +
         " own recent sales) — items for this game don't sell; not worth pool accounts.";
     await record({
-      decision: "skip_low_demand",
+      decision,
       status: "skipped",
       reason,
       demandScore: alloc.demand,
       hadResearch: true,
       internalSales,
     });
-    await tg(
-      "🤖 Auto-farm SKIP — " +
-        game +
-        "\n" +
-        (alloc.probeBlocked
-          ? "Untested market — probing held off (budget/cooldown). No accounts spent."
-          : "Effective demand " +
-            alloc.demand +
-            " (items not salable). No accounts spent."),
-    );
-    return { decision: "skip_low_demand" };
+    // A budget hold re-decides every tick, so telegraphing it would spam. Only
+    // announce the terminal verdicts.
+    if (!budgetHold) {
+      await tg(
+        "🤖 Auto-farm SKIP — " +
+          game +
+          "\n" +
+          (alloc.probeBlocked
+            ? "Untested market — probing held off (cooldown). No accounts spent."
+            : "Effective demand " +
+              alloc.demand +
+              " (items not salable). No accounts spent."),
+      );
+    }
+    return { decision };
   }
   const demandScore = research ? Number(research.demandScore || 0) : null;
 
