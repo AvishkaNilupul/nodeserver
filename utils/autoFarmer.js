@@ -4131,10 +4131,16 @@ async function backfillActiveTasks(af, host, progress) {
       );
       break;
     }
+    // A probe is a deliberately small market test (target = probeSize) — never
+    // top it up to the market-shelf floor the way a proven farm is stocked, or
+    // backfill would silently inflate every probe to marketStockFloor the tick
+    // after it is created (decision path already exempts probes; this is the
+    // matching exemption on the backfill side).
+    const floor = task.decision === "probe" ? 0 : marketStockFloor(af);
     const target = Math.min(
       Math.max(
         Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
-        marketStockFloor(af),
+        floor,
       ),
       af.maxPerGame * SALES_CAP_MULT_MAX,
     );
