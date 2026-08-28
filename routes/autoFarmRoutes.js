@@ -360,6 +360,15 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
       patch.accountsPerBot = clamp(b.accountsPerBot, 1, 200);
     if ("poolReserve" in b) patch.poolReserve = clamp(b.poolReserve, 0, 500);
     if ("probeSize" in b) patch.probeSize = clamp(b.probeSize, 1, 30);
+    // Cold-start probing (probe games research scores low ONLY because their
+    // market is untested — ≈0 rival sellers) + its 30-day stop-loss. Ships OFF.
+    if ("probeColdStart" in b) patch.probeColdStart = !!b.probeColdStart;
+    if ("probeMaxSellers" in b)
+      patch.probeMaxSellers = clamp(b.probeMaxSellers, 0, 20);
+    if ("probeMaxGames" in b) patch.probeMaxGames = clamp(b.probeMaxGames, 0, 50);
+    if ("probeMaxDays" in b) patch.probeMaxDays = clamp(b.probeMaxDays, 1, 365);
+    if ("probeCooldownDays" in b)
+      patch.probeCooldownDays = clamp(b.probeCooldownDays, 0, 365);
     if ("perMarketStock" in b)
       patch.perMarketStock = clamp(b.perMarketStock, 1, 10);
     if ("maxAutoBots" in b) patch.maxAutoBots = clamp(b.maxAutoBots, 1, 50);

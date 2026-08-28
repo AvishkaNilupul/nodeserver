@@ -622,7 +622,11 @@ function capForGame(af, internalSales = 0) {
   );
 }
 
-function demandAllocation(research, af, internalSales = 0) {
+function demandAllocation(research, af, internalSales = 0, opts = {}) {
+  // The caller gates probing on the global budget + per-game cooldown; when it
+  // passes nothing (or probeColdStart is off) probing is simply allowed, which
+  // preserves the original unknown-game probe behaviour exactly.
+  const probeAllowed = opts.probeAllowed !== false;
   const cap = capForGame(af, internalSales);
   const sales = salesOf(internalSales);
   const pf = priceFactor(sales.avgPrice);
@@ -634,6 +638,14 @@ function demandAllocation(research, af, internalSales = 0) {
     sales.count > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(sales.count) * pf : 0;
   const priceNote =
     sales.avgPrice > 0 ? " at $" + sales.avgPrice.toFixed(2) + " avg" : "";
+  const probeBatch = (tierNote, coldStart) => ({
+    cap,
+    target: Math.min(af.probeSize, cap),
+    tierNote,
+    probe: true,
+    coldStart: !!coldStart,
+    effective: Math.round(salesBoost),
+  });
   if (!research || research.scannedAt == null) {
     if (salesBoost >= DEMAND_HALF) {
       // No market data but our own sales history says it sells.
@@ -652,12 +664,14 @@ function demandAllocation(research, af, internalSales = 0) {
         effective: Math.round(salesBoost),
       };
     }
+    // No market data at all — the original unknown-game probe. When the budget
+    // or cooldown blocks it (cold-start feature on), fall through to a skip.
+    if (probeAllowed) return probeBatch("no market data — probe batch", false);
     return {
-      cap,
-      target: Math.min(af.probeSize, cap),
-      tierNote: "no market data — probe batch",
-      probe: true,
+      skip: true,
+      demand: Math.round(salesBoost),
       effective: Math.round(salesBoost),
+      probeBlocked: true,
     };
   }
   const market = Number(research.demandScore || 0);
@@ -686,6 +700,33 @@ function demandAllocation(research, af, internalSales = 0) {
       tierNote: "demand " + d + salesNote + " (moderate) — half allocation",
       effective: d,
     };
+  }
+  // Below the demand floor. Normally a skip — but a low score can mean two very
+  // different things. With real rivals selling it, the market has spoken: skip.
+  // With ~no sellers, the market is simply UNTESTED (a brand-new release nobody
+  // lists yet), so the score is a cold-start artefact, not proof it won't sell.
+  // When cold-start probing is on and the budget/cooldown allow it, probe such
+  // a game with a small batch and let real sales decide. One sale lifts it over
+  // the floor via salesBoost and it graduates on its own; none in 30 days and
+  // the stop-loss sweep tears it down.
+  const sellers = Number(research.sellers || 0);
+  if (af.probeColdStart && sellers <= Number(af.probeMaxSellers || 0)) {
+    // A probe candidate: untested market, not a proven dud. Probe it unless the
+    // global budget or the post-failure cooldown says not right now (in which
+    // case it's a probeBlocked skip, not a "doesn't sell" skip).
+    if (probeAllowed) {
+      return probeBatch(
+        "demand " +
+          d +
+          " but only " +
+          sellers +
+          " rival seller" +
+          (sellers === 1 ? "" : "s") +
+          " — untested market, probing",
+        true,
+      );
+    }
+    return { skip: true, demand: d, effective: d, probeBlocked: true };
   }
   return { skip: true, demand: d, effective: d };
 }
@@ -1541,17 +1582,47 @@ async function processCampaign(c, ctx) {
   // The task log records the plain count, which is what the AutoFarmTask
   // schema has always stored and what every alert reads.
   const internalSales = sales.count;
-  const alloc = demandAllocation(research, af, sales);
+  // Cold-start probing budget + per-game cooldown (both inert unless
+  // af.probeColdStart). The global budget caps how many DIFFERENT games probe
+  // at once — a runaway guard for a calendar full of new releases. The cooldown
+  // keeps a game the stop-loss already gave up on from being re-probed for a
+  // while. A game already probing is never blocked by its own budget slot (the
+  // count excludes it), so an in-flight probe is never re-skipped mid-run.
+  let probeAllowed = true;
+  if (af.probeColdStart) {
+    const cooldownCut = new Date(
+      Date.now() - Math.max(0, Number(af.probeCooldownDays) || 0) * 86400000,
+    );
+    const recentlyFailed = await AutoFarmTask.exists({
+      game,
+      probeOutcome: "expired",
+      completedAt: { $gte: cooldownCut },
+    });
+    const otherProbes = await AutoFarmTask.countDocuments({
+      decision: "probe",
+      status: { $in: ["active", "planned"] },
+      game: { $ne: game },
+    });
+    probeAllowed =
+      !recentlyFailed && otherProbes < (Number(af.probeMaxGames) || 0);
+  }
+  const alloc = demandAllocation(research, af, sales, { probeAllowed });
   if (alloc.skip) {
-    await record({
-      decision: "skip_low_demand",
-      status: "skipped",
-      reason:
-        "Effective demand " +
+    // A cold-start game held back by the budget/cooldown is NOT a proven dud —
+    // say so, so the log doesn't claim "items don't sell" about a game we
+    // simply chose not to probe right now.
+    const reason = alloc.probeBlocked
+      ? "Untested market, but probing is held off right now (budget full or " +
+        "within the post-failure cooldown) — no accounts spent; will retry."
+      : "Effective demand " +
         alloc.demand +
         " (market research + " +
         internalSales +
-        " own recent sales) — items for this game don't sell; not worth pool accounts.",
+        " own recent sales) — items for this game don't sell; not worth pool accounts.";
+    await record({
+      decision: "skip_low_demand",
+      status: "skipped",
+      reason,
       demandScore: alloc.demand,
       hadResearch: true,
       internalSales,
@@ -1559,9 +1630,12 @@ async function processCampaign(c, ctx) {
     await tg(
       "🤖 Auto-farm SKIP — " +
         game +
-        "\nEffective demand " +
-        alloc.demand +
-        " (items not salable). No accounts spent.",
+        "\n" +
+        (alloc.probeBlocked
+          ? "Untested market — probing held off (budget/cooldown). No accounts spent."
+          : "Effective demand " +
+            alloc.demand +
+            " (items not salable). No accounts spent."),
     );
     return { decision: "skip_low_demand" };
   }
@@ -1921,7 +1995,10 @@ async function processCampaign(c, ctx) {
       : "";
   const reason =
     (alloc.probe
-      ? "New game with no sales history — farming a small probe batch to test the market. "
+      ? (alloc.coldStart
+          ? alloc.tierNote +
+            " — farming a small probe batch to test the market. "
+          : "New game with no sales history — farming a small probe batch to test the market. ")
       : alloc.tierNote + ". ") +
     "Plan: " +
     accounts +
@@ -2184,6 +2261,11 @@ async function executeTask(task, ctx, { append = false } = {}) {
         assignedAccounts: finalAccounts,
         error: error.trim(),
         executedAt: new Date(),
+        // Anchor the stop-loss clock the first time a probe goes active, and
+        // never move it again (backfill re-stamps executedAt, this survives).
+        ...(ok && task.decision === "probe" && !task.probeStartedAt
+          ? { probeStartedAt: new Date() }
+          : {}),
       },
     },
   );
@@ -2768,6 +2850,14 @@ async function completeEndedTasks() {
         /* best-effort — accounts stay claimed, owner can release manually */
       }
     }
+    // A probe whose campaign ends with 0 real sales failed its test — stamp the
+    // cooldown marker so a later campaign for the same game isn't re-probed
+    // straight away (expireStaleProbes reads probeOutcome). A probe that sold at
+    // least once leaves no marker: its own sales lift future campaigns over the
+    // demand floor and it graduates to a normal farm.
+    if (t.decision === "probe" && salesOf(await internalSalesForGame(t.game)).count === 0) {
+      t.probeOutcome = "expired";
+    }
     t.status = "completed";
     t.completedAt = new Date();
     await t.save().catch(() => {});
@@ -2778,7 +2868,7 @@ async function completeEndedTasks() {
       campaignId: t.campaignId,
       taskId: t._id,
       count: (t.assignedAccounts || []).length,
-      reason: "campaign ended",
+      reason: t.probeOutcome === "expired" ? "probe ended — 0 sales" : "campaign ended",
       actor: "completeEndedTasks",
     });
     // Event over = supply fixed: apply the post-event scarcity markup and
@@ -2814,6 +2904,150 @@ async function completeEndedTasks() {
     );
   }
   return completed;
+}
+
+// Stop-loss for cold-start probes (utils/settings.js probeColdStart). A probe
+// whose Twitch campaign ends within the window is already torn down and marked
+// by completeEndedTasks; this sweep catches the rarer probe whose campaign is
+// still LIVE past probeMaxDays (long-running or permanent drop campaigns), so a
+// losing bet can't tie up accounts forever. 0 real sales = failed → stop the
+// bots, release the accounts to the pool, and stamp the cooldown marker. A
+// probe that has sold at least once is left alone (its sales graduate it).
+async function expireStaleProbes(af, progress) {
+  if (!af.probeColdStart) return 0;
+  const maxDays = Math.max(1, Number(af.probeMaxDays) || 30);
+  const cutoff = new Date(Date.now() - maxDays * 86400000);
+  const stale = await AutoFarmTask.find({
+    status: "active",
+    decision: "probe",
+    probeStartedAt: { $ne: null, $lte: cutoff },
+  });
+  if (!stale.length) return 0;
+  let expired = 0;
+  for (const t of stale) {
+    // Still selling? leave it — the stop-loss only fires on a cold trail.
+    if (salesOf(await internalSalesForGame(t.game)).count > 0) continue;
+    // Never touch a container a co-tenant task shares: switching just this
+    // probe's accounts off needs the per-account FavouriteGames edit
+    // completeEndedTasks does, and doing it wrong is what caused the
+    // duplicate-container loop. Defer those to the normal campaign-end path.
+    const others = await AutoFarmTask.find(
+      { status: "active", _id: { $ne: t._id } },
+      { bots: 1 },
+    ).lean();
+    const sharedKeys = new Set();
+    for (const o of others)
+      for (const b of o.bots || []) sharedKeys.add(b.host + "|" + b.container);
+    if ((t.bots || []).some((b) => sharedKeys.has(b.host + "|" + b.container))) {
+      progress(
+        "Probe stop-loss: " +
+          t.game +
+          " past " +
+          maxDays +
+          "d with 0 sales but shares a container — deferring to campaign end.",
+      );
+      continue;
+    }
+    const stopped = [];
+    for (const b of t.bots || []) {
+      const h = hosts.resolveHost(b.host);
+      if (!h) continue;
+      try {
+        await botFactory.stopContainer(h, b.container);
+        stopped.push(b.container);
+      } catch {
+        /* container may already be gone */
+      }
+      if (af.deleteFinishedBots !== false) {
+        try {
+          await botFactory.deleteBot(h, b.file, b.container);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    // Release the accounts to the pool — except any a buyer already holds (0
+    // sales makes this rare, but a connected/sold drop still spares it).
+    let recycled = 0;
+    if (t.assignedAccounts && t.assignedAccounts.length) {
+      try {
+        const sold = await unrecyclableLogins(t.assignedAccounts);
+        const back = t.assignedAccounts.filter(
+          (u) => !sold.has(String(u).toLowerCase()),
+        );
+        if (back.length) {
+          const lower = back.map((u) => String(u).toLowerCase());
+          const poolRows = await AvailableAccount.find(
+            { usernameLower: { $in: lower }, status: "claimed" },
+            { _id: 1 },
+          ).lean();
+          const r = await AvailableAccount.updateMany(
+            { usernameLower: { $in: lower }, status: "claimed" },
+            {
+              $set: {
+                status: "available",
+                claimedAt: null,
+                claimedNote: "recycled — probe expired (0 sales)",
+              },
+            },
+          );
+          recycled = (r && r.modifiedCount) || 0;
+          if (recycled) {
+            await recordPoolUsage(
+              poolRows.map((row) => row._id),
+              {
+                event: "recycled",
+                actor: "auto-farm",
+                game: t.game,
+                note: "probe expired — 0 sales in " + maxDays + "d",
+              },
+            );
+          }
+        }
+      } catch {
+        /* best-effort — accounts stay claimed, owner can release manually */
+      }
+    }
+    t.status = "completed";
+    t.completedAt = new Date();
+    t.probeOutcome = "expired";
+    await t.save().catch(() => {});
+    expired++;
+    await recordAutoFarmEvent({
+      type: "task_completed",
+      game: t.game,
+      campaignId: t.campaignId,
+      taskId: t._id,
+      count: (t.assignedAccounts || []).length,
+      reason: "probe expired — 0 sales in " + maxDays + "d",
+      actor: "expireStaleProbes",
+    });
+    progress(
+      "Probe stop-loss: " +
+        t.game +
+        " — " +
+        maxDays +
+        "d, 0 sales. Stopped " +
+        stopped.length +
+        " bot(s), recycled " +
+        recycled +
+        " account(s).",
+    );
+    await tg(
+      "🤖 Auto-farm PROBE EXPIRED — " +
+        t.game +
+        "\nNo sales in " +
+        maxDays +
+        " days. Stopped the probe" +
+        (recycled
+          ? " and recycled " + recycled + " account(s) to the pool"
+          : "") +
+        ". Won't re-probe for " +
+        (Number(af.probeCooldownDays) || 0) +
+        " days.",
+    );
+  }
+  return expired;
 }
 
 /* -------------------------------- tick --------------------------------- */
@@ -3372,6 +3606,14 @@ async function runOnce() {
         await recycleSoldOutAccounts(af, progress);
       } catch (e) {
         progress("Recycle failed: " + e.message, "warn");
+      }
+      // Probe stop-loss (opt-in): give up a cold-start probe that has run
+      // probeMaxDays with 0 real sales. No-op unless af.probeColdStart.
+      try {
+        const gaveUp = await expireStaleProbes(af, progress);
+        if (gaveUp) progress("Probe stop-loss: gave up on " + gaveUp + " probe(s).");
+      } catch (e) {
+        progress("Probe stop-loss failed: " + e.message, "warn");
       }
       // Repack sweep: merge half-empty auto containers back together.
       try {

@@ -15,6 +15,18 @@ const AUTO_FARM_DEFAULTS = {
   accountsPerBot: 10, // accounts per container
   poolReserve: 20, // never draw the pool below this many ready accounts
   probeSize: 5, // batch size for unknown games (market test)
+  // Cold-start probing (utils/autoFarmer.js). Ships OFF. When on, a game that
+  // research scores below the demand floor is still farmed as a small probe
+  // batch IF its low score comes from an UNTESTED market (≈0 rival sellers) —
+  // a brand-new release nobody sells yet, not a proven dud. A game that scores
+  // low WITH real sellers keeps skipping. A winning probe graduates on its own
+  // (one real sale lifts it over the floor via salesBoost); a losing one is
+  // torn down by the stop-loss sweep and won't re-probe until the cooldown.
+  probeColdStart: false, // master switch for cold-start probing + stop-loss
+  probeMaxSellers: 1, // "untested" = at most this many distinct rival sellers
+  probeMaxGames: 8, // global cap on concurrent probe tasks (runaway guard)
+  probeMaxDays: 30, // stop-loss: expire a probe with 0 real sales after N days
+  probeCooldownDays: 90, // after a probe expires for a game, don't re-probe it for N days
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this

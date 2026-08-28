@@ -693,6 +693,28 @@
           </label>
         </div>
         <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afProbeColdStart" />
+          <label
+            for="afProbeColdStart"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Probe new games (cold-start) &mdash; when research scores a game
+            below the demand floor ONLY because its market is untested (at most
+            &ldquo;Probe max sellers&rdquo; rival sellers, i.e. a brand-new
+            release nobody lists yet), still farm a small probe batch to test
+            it. A game that scores low WITH real sellers keeps skipping. A probe
+            that sells graduates to a normal farm on its own; one that makes no
+            sales in &ldquo;Probe give-up&rdquo; days is torn down, its accounts
+            recycled, and it isn&rsquo;t re-probed for the cooldown. &ldquo;Probe
+            max games&rdquo; caps how many run at once.
+          </label>
+        </div>
+        <div class="switch" style="margin-top: 10px">
           <input type="checkbox" id="afZeusxAuto" />
           <label
             for="afZeusxAuto"
@@ -762,6 +784,22 @@
           <div class="field" style="max-width: 150px">
             <label>Probe batch size</label>
             <input type="number" id="afProbeSize" min="1" max="30" />
+          </div>
+          <div class="field" style="max-width: 150px">
+            <label>Probe max sellers</label>
+            <input type="number" id="afProbeMaxSellers" min="0" max="20" />
+          </div>
+          <div class="field" style="max-width: 150px">
+            <label>Probe max games</label>
+            <input type="number" id="afProbeMaxGames" min="0" max="50" />
+          </div>
+          <div class="field" style="max-width: 150px">
+            <label>Probe give-up (days)</label>
+            <input type="number" id="afProbeMaxDays" min="1" max="365" />
+          </div>
+          <div class="field" style="max-width: 150px">
+            <label>Probe re-try cooldown (days)</label>
+            <input type="number" id="afProbeCooldownDays" min="0" max="365" />
           </div>
           <div>
             <label>Stock per market (floor)</label>
@@ -1461,6 +1499,15 @@
           $("afAccountsPerBot").value = st.accountsPerBot;
           $("afPoolReserve").value = st.poolReserve;
           $("afProbeSize").value = st.probeSize;
+          $("afProbeColdStart").checked = !!st.probeColdStart;
+          $("afProbeMaxSellers").value =
+            st.probeMaxSellers != null ? st.probeMaxSellers : 1;
+          $("afProbeMaxGames").value =
+            st.probeMaxGames != null ? st.probeMaxGames : 8;
+          $("afProbeMaxDays").value =
+            st.probeMaxDays != null ? st.probeMaxDays : 30;
+          $("afProbeCooldownDays").value =
+            st.probeCooldownDays != null ? st.probeCooldownDays : 90;
           $("afPerMarketStock").value = st.perMarketStock || 3;
           $("afMaxAutoBots").value = st.maxAutoBots;
           $("afMinHoursLeft").value = st.minHoursLeft;
@@ -1498,6 +1545,11 @@
             accountsPerBot: $("afAccountsPerBot").value,
             poolReserve: $("afPoolReserve").value,
             probeSize: $("afProbeSize").value,
+            probeColdStart: $("afProbeColdStart").checked,
+            probeMaxSellers: $("afProbeMaxSellers").value,
+            probeMaxGames: $("afProbeMaxGames").value,
+            probeMaxDays: $("afProbeMaxDays").value,
+            probeCooldownDays: $("afProbeCooldownDays").value,
             perMarketStock: $("afPerMarketStock").value,
             maxAutoBots: $("afMaxAutoBots").value,
             minHoursLeft: $("afMinHoursLeft").value,

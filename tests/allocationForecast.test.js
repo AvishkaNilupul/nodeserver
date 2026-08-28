@@ -99,6 +99,65 @@ test("wantedFor: PROBE tier forces floor to 0 → min(probeSize, cap)", () => {
   assert.equal(wantedFor(alloc, AF), 5);
 });
 
+// Cold-start probing: a researched game scoring below the demand floor is a
+// probe (not a skip) ONLY when its low score comes from an untested market
+// (≈0 rival sellers) AND the feature is on AND the caller allows it.
+const AF_COLD = { ...AF, probeColdStart: true, probeMaxSellers: 1 };
+
+test("cold-start: low demand + 0 sellers + feature on → probe", () => {
+  const alloc = autoFarmer.demandAllocation(
+    { demandScore: 4, sellers: 0, scannedAt: new Date() },
+    AF_COLD,
+    { count: 0 },
+    { probeAllowed: true },
+  );
+  assert.equal(alloc.probe, true);
+  assert.equal(alloc.coldStart, true);
+  assert.equal(alloc.target, 5); // min(probeSize, cap)
+});
+
+test("cold-start: low demand but real sellers → still skip (proven dud)", () => {
+  const alloc = autoFarmer.demandAllocation(
+    { demandScore: 4, sellers: 9, scannedAt: new Date() },
+    AF_COLD,
+    { count: 0 },
+    { probeAllowed: true },
+  );
+  assert.equal(alloc.skip, true);
+  assert.ok(!alloc.probe);
+  assert.ok(!alloc.probeBlocked);
+});
+
+test("cold-start: feature OFF → untested game still skips (unchanged behaviour)", () => {
+  const alloc = autoFarmer.demandAllocation(
+    { demandScore: 4, sellers: 0, scannedAt: new Date() },
+    AF, // probeColdStart absent
+    { count: 0 },
+    { probeAllowed: true },
+  );
+  assert.equal(alloc.skip, true);
+  assert.ok(!alloc.probe);
+});
+
+test("cold-start: candidate blocked by budget/cooldown → probeBlocked skip", () => {
+  const alloc = autoFarmer.demandAllocation(
+    { demandScore: 4, sellers: 0, scannedAt: new Date() },
+    AF_COLD,
+    { count: 0 },
+    { probeAllowed: false },
+  );
+  assert.equal(alloc.skip, true);
+  assert.equal(alloc.probeBlocked, true);
+});
+
+test("cold-start: no-research probe honours probeAllowed=false → probeBlocked", () => {
+  const alloc = autoFarmer.demandAllocation(null, AF_COLD, { count: 0 }, {
+    probeAllowed: false,
+  });
+  assert.equal(alloc.skip, true);
+  assert.equal(alloc.probeBlocked, true);
+});
+
 test("wantedFor: HALF tier composes target with the REAL marketStockFloor", () => {
   // d = market 20 → half tier, target = ceil(cap/2) = 15. The engine's request
   // builder is min(max(target, floor), cap); assert wantedFor reproduces it

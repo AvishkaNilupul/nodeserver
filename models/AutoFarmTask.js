@@ -105,6 +105,20 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // mode silently drops undeclared paths on $set (see `bots.shared` above).
     rescanRequested: { type: Boolean, default: false },
 
+    // Cold-start probe lifecycle (utils/autoFarmer.js, gated by
+    // af.probeColdStart). "" while a probe runs or for non-probe tasks;
+    // "expired" once the stop-loss sweep tears a probe down after N days with 0
+    // real sales — the marker that keeps expireStaleProbes' cooldown from
+    // re-probing the same game. (A winning probe never gets a marker: its own
+    // sales lift it over the demand floor and it graduates to a normal farm.)
+    // Declared here or Mongoose strict mode drops it on $set (see bots.shared).
+    probeOutcome: { type: String, enum: ["", "expired"], default: "" },
+    // When a probe task FIRST went active — the stable anchor the 30-day
+    // stop-loss measures against. Unlike executedAt (re-stamped on every
+    // backfill top-up, so a periodically-refilled probe would never age),
+    // this is written once and never moved.
+    probeStartedAt: { type: Date, default: null },
+
     // When the brain most recently made (or re-made) the decision on this
     // campaign. createdAt answers when the row first appeared; updatedAt also
     // moves for listing/backfill bookkeeping, so neither is a truthful watcher
