@@ -867,6 +867,7 @@
       skip_host_offline: ["SKIP · host offline", "off"],
       skip_already_covered: ["SKIP · already covered", "off"],
       skip_reuse_only: ["SKIP · reuse only", "off"],
+      skip_probe_budget: ["PROBE · queued (budget)", "off"],
     };
     const m = map[t.decision] || [t.decision, ""];
     return '<span class="chip ' + m[1] + '">' + esc(m[0]) + "</span>";
@@ -1214,7 +1215,7 @@
     const counts = s.byDecision || {};
     const farm = afNum(counts.farm) + afNum(counts.probe);
     const reuse = afNum(counts.reuse_existing);
-    return '<details class="panel af-section" id="afDecisionsPanel" ontoggle="if(this.open&&!this.dataset.loaded){this.dataset.loaded=\'1\';afLoadDecisions()}"><summary class="ph"><b>Decisions</b><span class="count">Today: ' + total + " decided → " + farm + " farm · " + reuse + " reuse · " + afNum(s.skipped) + ' skipped</span></summary><div class="pb"><div class="af-row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="muted" style="font-size:12.5px">' + esc(detail) + '</span><span class="af-actions"><input class="af-filter" id="afDecisionSearch" placeholder="Search game or campaign"><select class="af-filter" id="afDecisionType"><option value="">All decisions</option><option value="farm">Farm</option><option value="reuse_existing">Reuse</option><option value="skip_low_demand">Low demand</option><option value="skip_ends_soon">Ends soon</option><option value="skip_no_capacity">No capacity</option><option value="skip_no_accounts">No accounts</option><option value="skip_reuse_only">Reuse only</option><option value="failed">Failed</option></select><button class="btn-sm btn-ghost" onclick="afLoadDecisions()">Load</button></span></div><div id="afDecisionBody">' + afDecisionRows() + "</div></div></details>";
+    return '<details class="panel af-section" id="afDecisionsPanel" ontoggle="if(this.open&&!this.dataset.loaded){this.dataset.loaded=\'1\';afLoadDecisions()}"><summary class="ph"><b>Decisions</b><span class="count">Today: ' + total + " decided → " + farm + " farm · " + reuse + " reuse · " + afNum(s.skipped) + ' skipped</span></summary><div class="pb"><div class="af-row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="muted" style="font-size:12.5px">' + esc(detail) + '</span><span class="af-actions"><input class="af-filter" id="afDecisionSearch" placeholder="Search game or campaign"><select class="af-filter" id="afDecisionType"><option value="">All decisions</option><option value="farm">Farm</option><option value="reuse_existing">Reuse</option><option value="skip_low_demand">Low demand</option><option value="skip_probe_budget">Probe queued</option><option value="skip_ends_soon">Ends soon</option><option value="skip_no_capacity">No capacity</option><option value="skip_no_accounts">No accounts</option><option value="skip_reuse_only">Reuse only</option><option value="failed">Failed</option></select><button class="btn-sm btn-ghost" onclick="afLoadDecisions()">Load</button></span></div><div id="afDecisionBody">' + afDecisionRows() + "</div></div></details>";
   }
 
   // ---- Allocation forecast (read-only): how many pool accounts each live &
@@ -1231,6 +1232,7 @@
       skip_no_accounts: ["off", "NO POOL"], skip_no_capacity: ["off", "NO SEATS"],
       skip_ends_soon: ["", "ENDS SOON"], skip_host_offline: ["off", "HOST OFF"],
       skip_reuse_only: ["", "REUSE ONLY"], reuse_existing: ["on", "REUSE"], pending: ["", "PENDING"],
+      skip_probe_budget: ["", "PROBE QUEUED"],
     };
     const m = map[ev.decision] || ["", String(ev.decision || "?").toUpperCase()];
     return '<span class="chip ' + m[0] + '">' + esc(m[1]) + "</span>";
