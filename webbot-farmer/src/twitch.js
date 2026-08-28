@@ -96,9 +96,15 @@ export function getChannelShell(session, login) {
   });
 }
 
+// Sends the FULL query text (not a persisted-query hash). The web client's
+// persisted hash is only pre-cached on the GQL edges that particular client
+// has warmed; a bot that ONLY ever sends the hash and hits a cold edge (e.g.
+// from a different region than the browser that registered it) gets
+// `PersistedQueryNotFound` on every call, forever, and never credits watch
+// time. Sending the full query is edge-independent and always resolves.
 export function getPlaybackAccessToken(session, login) {
   return gqlOne(session, {
-    operationName: "PlaybackAccessToken",
+    operationName: "PlaybackAccessToken_Template",
     variables: {
       isLive: true,
       login,
@@ -106,13 +112,18 @@ export function getPlaybackAccessToken(session, login) {
       vodID: "",
       playerType: "site",
     },
-    extensions: {
-      persistedQuery: {
-        version: 1,
-        sha256Hash:
-          "0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712",
-      },
-    },
+    query: `query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {
+      streamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) {
+        value
+        signature
+        __typename
+      }
+      videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) {
+        value
+        signature
+        __typename
+      }
+    }`,
   });
 }
 
@@ -147,17 +158,26 @@ export function getInventory(session) {
   });
 }
 
+// Full query text for the same edge-cache reason as PlaybackAccessToken above:
+// the persisted hash returns `PersistedQueryNotFound` on a cold GQL edge. This
+// call is non-fatal (progress is also read from getInventory), but sending the
+// full query keeps the per-channel progress log accurate from any region.
 export function getDropCurrentSession(session, channelId, channelLogin) {
   return gqlOne(session, {
     operationName: "DropCurrentSessionContext",
     variables: { channelID: String(channelId), channelLogin: String(channelLogin) },
-    extensions: {
-      persistedQuery: {
-        version: 1,
-        sha256Hash:
-          "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b",
-      },
-    },
+    query: `query DropCurrentSessionContext($channelID: ID, $channelLogin: String) {
+      currentUser {
+        id
+        dropCurrentSession(channelID: $channelID, channelLogin: $channelLogin) {
+          channel { id displayName }
+          game { id displayName }
+          currentMinutesWatched
+          requiredMinutesWatched
+          dropID
+        }
+      }
+    }`,
   });
 }
 
