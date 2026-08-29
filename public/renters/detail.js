@@ -76,40 +76,144 @@
     if (chosen && rs.some((r) => String(r.username || "") === chosen)) sel.value = chosen;
   }
 
+  // The overview list is paginated (20 per page) so a large roster never renders
+  // into the DOM all at once. Search narrows by username; both reset to page 1.
+  const RENTER_PAGE_SIZE = 20;
+  let renterPage = 1;
+  let renterSearch = "";
+  let renterTotal = 0;
+  let renterPages = 1;
+
+  function renterGroup(r) {
+    if (r.status === "suspended") return "Suspended";
+    if (r.expired) return "Expired";
+    return "Active";
+  }
+  const RENTER_GROUPS = ["Active", "Suspended", "Expired"];
+
+  function renterRowHtml(r) {
+    const id = esc(r.id);
+    // The original esc()'d the whole thing, which HTML-escaped its own
+    // "no bot" markup and printed the tags as visible text. Only the
+    // runtime value needs escaping.
+    const bot = r.botFile ? esc(r.botFile) : '<span class="muted">no bot</span>';
+    return '<div class="row"><div><div class="nm">' + esc(r.username) + ' ' + RT.statusBadge(r) + '</div>' +
+        '<div class="meta">' + bot + ' · ' + num(r.used) + '/' + num(r.maxAccounts) + ' accounts' +
+          (r.pendingAccounts ? ' · ' + num(r.pendingAccounts) + ' pending' : '') + '</div></div>' +
+      '<div class="meta">Access: ' + RT.fmtDate(r.accessStart) + ' → ' + RT.fmtDate(r.accessEnd) + '<br>' +
+        esc(RT.remaining(r.accessEnd)) + '</div>' +
+      '<div class="meta">Last in: ' + (r.lastLoginAt ? esc(new Date(r.lastLoginAt).toLocaleDateString()) : "never") + '</div>' +
+      '<div class="acts"><button class="btn ghost sm" data-act="openRenter" data-id="' + id + '">Manage</button>' +
+        (r.status === "suspended"
+          ? '<button class="btn sm" data-act="setSusp" data-val="false" data-id="' + id + '">Unsuspend</button>'
+          : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend</button>') +
+      '</div></div>';
+  }
+
   async function loadRenters() {
     try {
-      const d = await api("/renters");
+      const params = new URLSearchParams();
+      params.set("page", String(renterPage));
+      params.set("limit", String(RENTER_PAGE_SIZE));
+      if (renterSearch) params.set("search", renterSearch);
+      const d = await api("/renters?" + params.toString());
       const rs = d.renters || [];
-      quickRenters = rs.slice();
-      fillRenterSelect(rs);
-      const blocked = rs.filter((r) => r.status === "suspended" || r.expired).length;
-      RT.setMetric("Renters", rs.length, blocked ? blocked + " blocked or expired" : "All access active", blocked ? "warn" : "good");
+      renterTotal = Number(d.total != null ? d.total : rs.length);
+      renterPages = Math.max(1, Math.ceil(renterTotal / RENTER_PAGE_SIZE));
+      const blocked = Number(d.blocked != null ? d.blocked : rs.filter((r) => r.status === "suspended" || r.expired).length);
+      RT.setMetric("Renters", renterTotal, blocked ? blocked + " blocked or expired" : "All access active", blocked ? "warn" : "good");
+      // Keep the Quick-farm picker in sync with the FULL roster (cheap, and it
+      // must NOT be derived from this paginated response). Runs even when the
+      // page is empty — a search that matches nothing still leaves the picker
+      // fully populated.
+      loadRenterOptions();
       if (!rs.length) {
-        $("renters").innerHTML = '<div class="muted" style="padding:6px 2px">No renters yet.</div>';
+        $("renters").innerHTML =
+          '<div class="muted" style="padding:6px 2px">' +
+          (renterSearch ? "No renters match that search." : "No renters yet.") + "</div>";
+        renderRenterPager();
         return;
       }
-      $("renters").innerHTML = rs.map((r) => {
-        const id = esc(r.id);
-        // The original esc()'d the whole thing, which HTML-escaped its own
-        // "no bot" markup and printed the tags as visible text. Only the
-        // runtime value needs escaping.
-        const bot = r.botFile ? esc(r.botFile) : '<span class="muted">no bot</span>';
-        return '<div class="row"><div><div class="nm">' + esc(r.username) + ' ' + RT.statusBadge(r) + '</div>' +
-            '<div class="meta">' + bot + ' · ' + num(r.used) + '/' + num(r.maxAccounts) + ' accounts' +
-              (r.pendingAccounts ? ' · ' + num(r.pendingAccounts) + ' pending' : '') + '</div></div>' +
-          '<div class="meta">Access: ' + RT.fmtDate(r.accessStart) + ' → ' + RT.fmtDate(r.accessEnd) + '<br>' +
-            esc(RT.remaining(r.accessEnd)) + '</div>' +
-          '<div class="meta">Last in: ' + (r.lastLoginAt ? esc(new Date(r.lastLoginAt).toLocaleDateString()) : "never") + '</div>' +
-          '<div class="acts"><button class="btn ghost sm" data-act="openRenter" data-id="' + id + '">Manage</button>' +
-            (r.status === "suspended"
-              ? '<button class="btn sm" data-act="setSusp" data-val="false" data-id="' + id + '">Unsuspend</button>'
-              : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend</button>') +
-          '</div></div>';
-      }).join("");
+      // Group the page by lease state so the list reads as an org chart rather
+      // than one undifferentiated wall of rows.
+      const groups = new Map();
+      for (const r of rs) {
+        const g = renterGroup(r);
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g).push(r);
+      }
+      $("renters").innerHTML = RENTER_GROUPS
+        .filter((g) => groups.has(g))
+        .map((g) => {
+          const rows = groups.get(g);
+          return '<div class="group-head">' + esc(g) + " · " + rows.length + "</div>" +
+            rows.map(renterRowHtml).join("");
+        })
+        .join("");
+      renderRenterPager();
     } catch (e) {
       RT.setMetric("Renters", "—", "Unavailable", "alert");
       $("renters").innerHTML = '<div class="muted">' + esc(e.message) + '</div>';
     }
+  }
+
+  function renderRenterPager() {
+    const prev = $("renterPrev");
+    const next = $("renterNext");
+    const info = $("renterPageInfo");
+    if (prev) prev.disabled = renterPage <= 1;
+    if (next) next.disabled = renterPage >= renterPages;
+    if (info) {
+      info.textContent = renterTotal
+        ? "Page " + renterPage + " / " + renterPages + " · " + renterTotal + " renter(s)"
+        : "";
+    }
+  }
+
+  // Quick-farm renter picker needs the FULL roster even though the overview
+  // list is paginated — /renters/options is the cheap id+username endpoint.
+  async function loadRenterOptions() {
+    try {
+      const d = await api("/renters/options");
+      quickRenters = (d.renters || []).map((r) => ({
+        id: String(r.id),
+        username: r.username,
+        status: r.status,
+        expired: r.expired,
+      }));
+      fillRenterSelect(quickRenters);
+    } catch (e) {
+      // The picker is a convenience; a failed roster must not take the
+      // overview list down with it.
+    }
+  }
+
+  // Search + pagination for the overview list. Static elements, owned by this
+  // module; boot.js owns the section Refresh wiring only.
+  const renterSearchInput = $("renterSearch");
+  const renterSearchBtn = $("renterSearchBtn");
+  const renterPrevBtn = $("renterPrev");
+  const renterNextBtn = $("renterNext");
+  const applyRenterSearch = () => {
+    renterSearch = (renterSearchInput ? renterSearchInput.value : "").trim();
+    renterPage = 1;
+    loadRenters();
+  };
+  if (renterSearchBtn) renterSearchBtn.addEventListener("click", applyRenterSearch);
+  if (renterSearchInput) {
+    renterSearchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") applyRenterSearch();
+    });
+  }
+  if (renterPrevBtn) {
+    renterPrevBtn.addEventListener("click", () => {
+      if (renterPage > 1) { renterPage -= 1; loadRenters(); }
+    });
+  }
+  if (renterNextBtn) {
+    renterNextBtn.addEventListener("click", () => {
+      if (renterPage < renterPages) { renterPage += 1; loadRenters(); }
+    });
   }
 
   async function setSusp(id, suspend) {
@@ -178,8 +282,14 @@
     const assigned = !!(bot && bot.assigned);
     const bots = RT.state.BOTS || [];
 
+    // Show accounts as used/capacity when the stack's cap is known (a rental
+    // stack always reports one); fall back to the bare count otherwise.
+    const acctTxt =
+      assigned && bot.capacity != null
+        ? (bot.accounts || 0) + "/" + bot.capacity + " accounts"
+        : (bot.accounts || 0) + " account(s)";
     const botMeta = assigned
-      ? esc((bot.hostLabel || "") + " · " + (bot.file || "") + " · " + (bot.accounts || 0) + " account(s)") +
+      ? esc((bot.hostLabel || "") + " · " + (bot.file || "") + " · " + acctTxt) +
         ((bot.sharedWith || []).length ? ' · <b>shared with ' + esc(bot.sharedWith.join(", ")) + '</b>' : '')
       : "no bot yet";
 
@@ -212,7 +322,10 @@
         '<b>Bot</b> ' + RT.botStatusHtml(bot) +
         '<span class="muted">' + botMeta + '</span>' +
         (assigned
-          ? '<span style="flex:1"></span>' +
+          ? '<span class="muted" style="font-size:12px;margin-left:6px">Cap</span>' +
+            '<input id="eCap" type="number" min="1" max="100" value="' + (bot.capacity == null ? '' : Number(bot.capacity)) + '" style="width:56px" title="Rental stack capacity — how many accounts this bot may hold"/>' +
+            '<button class="btn ghost sm" id="eCapBtn" data-act="setStackCap" data-id="' + id + '">Set</button>' +
+            '<span style="flex:1"></span>' +
             '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + id + '">Start</button>' +
             '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + id + '">Restart</button>' +
             '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + id + '">Stop</button>' +
@@ -589,6 +702,38 @@
     }
   }
 
+  // ---- bot: stack capacity ----
+
+  // Change how many accounts the renter's rental stack may hold. This is the
+  // per-config cap that actually gates account writes (separate from the
+  // renter's "Account limit"). The stack can be shared, so a change here shifts
+  // every co-renter's free-slot count — hence the botPicker reload afterwards.
+  async function setStackCap(id) {
+    const capacity = intVal("eCap");
+    if (!(capacity >= 1 && capacity <= 100)) {
+      toast("Capacity must be a whole number between 1 and 100");
+      return;
+    }
+    const btn = $("eCapBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "Setting…"; }
+    try {
+      const d = await api("/renters/" + id + "/stack-capacity", {
+        method: "PUT",
+        body: JSON.stringify({ capacity }),
+      });
+      toast("Capacity set to " + d.capacity +
+        (d.remaining != null ? " · " + d.remaining + " slot(s) free" : ""));
+      await RT.reloadMany(["renters", "bots", "botPicker"]);
+      // Like manualAdd/addFromPool: a failed refresh leaves this button on
+      // screen, so its busy state must be undone here.
+      const ok = await open(id);
+      if (!ok && btn) { btn.disabled = false; btn.textContent = "Set"; }
+    } catch (e) {
+      toast(e.message);
+      if (btn) { btn.disabled = false; btn.textContent = "Set"; }
+    }
+  }
+
   // ---- save / password / delete ----
 
   async function saveRenter(id) {
@@ -670,6 +815,7 @@
   RT.on("saveRenter", (el, ds) => { saveRenter(ds.id); });
   RT.on("createRenterBot", (el, ds) => { createRenterBot(ds.id); });
   RT.on("assignBot", (el, ds) => { assignBot(ds.id); });
+  RT.on("setStackCap", (el, ds) => { setStackCap(ds.id); });
   RT.on("quickFarm", () => { quickFarm(); });
   RT.on("manualAdd", (el, ds) => { manualAdd(ds.id); });
   RT.on("previewPool", (el, ds) => { previewPool(ds.id); });

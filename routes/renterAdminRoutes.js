@@ -46,6 +46,9 @@ const { recordPoolUsage } = require("../utils/poolUsageLog");
 const {
   listStacks,
   requireStack,
+  findStack,
+  setStackCapacity,
+  normalizeCapacity,
   stackKey,
   chooseAvailableStack,
 } = require("../utils/renterBotStacks");
@@ -59,6 +62,7 @@ const {
   provisionEmptyConfig,
   getConfigGames,
   removeAccountFromConfig,
+  countConfigAccounts,
 } = require("./botConfigRoutes");
 
 const router = express.Router();
@@ -69,6 +73,12 @@ function botWriteStatus(err) {
     return 409;
   }
   return 500;
+}
+
+// Escape user input before it becomes a regex, so a search term like "a.b"
+// matches a literal dot instead of any character.
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // Pending-account totals per renter, for the list view.
@@ -133,20 +143,77 @@ async function renterListView(r, pmap, umap) {
   };
 }
 
-// LIST renters.
+// LIST renters — the overview "Renters" panel. Paginated (20 per page by
+// default) with an optional ?search= on username, so a large roster is not
+// rendered into the overview DOM all at once. The Quick-farm renter picker
+// needs the FULL roster regardless, so it uses the cheap /renters/options
+// endpoint instead of this one.
+const RENTER_PAGE_SIZE = 20;
+
 router.get("/renters", requireSuperadmin, async (req, res) => {
   try {
-    const [renters, pmap, umap] = await Promise.all([
-      Renter.find({}).sort({ createdAt: -1 }).lean(),
+    const q = {};
+    const search = String(req.query.search || "").trim();
+    if (search) q.username = { $regex: escapeRegExp(search), $options: "i" };
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.limit, 10) || RENTER_PAGE_SIZE),
+    );
+    const skip = (page - 1) * limit;
+    const [total, blocked, renters, pmap] = await Promise.all([
+      Renter.countDocuments(q),
+      // Fleet-wide blocked count for the overview metric — computed over every
+      // renter, never just the page's rows (accessEnd null = open-ended, so
+      // $lte excludes it naturally).
+      Renter.countDocuments({
+        $or: [{ status: "suspended" }, { accessEnd: { $lte: new Date() } }],
+      }),
+      Renter.find(q).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       pendingByRenter(),
-      usedByRenter(null),
     ]);
+    // Depends on the page's ids, so it runs after the find above resolves.
+    const umap = await usedByRenter(renters.map((r) => r._id));
     const out = await Promise.all(
       renters.map((r) => renterListView(r, pmap, umap)),
     );
-    res.json({ success: true, renters: out });
+    res.json({
+      success: true,
+      renters: out,
+      total,
+      page,
+      limit,
+      pages: Math.max(1, Math.ceil(total / limit)),
+      blocked,
+    });
   } catch (err) {
     console.error("renters list error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Lightweight full roster for the Quick-farm renter picker: id + username +
+// lease state only, no pending/used aggregates. Keeps the picker complete now
+// that the overview list is paginated. Registered before /renters/:id so
+// "options" is never swallowed by the :id param.
+router.get("/renters/options", requireSuperadmin, async (req, res) => {
+  try {
+    const rows = await Renter.find({}, { username: 1, status: 1, accessEnd: 1 })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({
+      success: true,
+      renters: rows.map((r) => ({
+        id: String(r._id),
+        username: r.username,
+        status: r.status,
+        // The picker labels suspended/expired renters, so options must carry
+        // the same lease state the list rows show.
+        expired: !!(r.accessEnd && new Date(r.accessEnd) <= new Date()),
+      })),
+    });
+  } catch (err) {
+    console.error("renter options error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -273,11 +340,26 @@ router.get("/renters/bots", requireSuperadmin, async (req, res) => {
 // aren't probed once per bot).
 router.get("/renter-bots", requireSuperadmin, async (req, res) => {
   try {
-    const renters = await Renter.find({ botFile: { $gt: "" } })
-      .sort({ createdAt: -1 })
-      .lean();
+    const q = { botFile: { $gt: "" } };
+    const search = String(req.query.search || "").trim();
+    if (search) q.username = { $regex: escapeRegExp(search), $options: "i" };
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.limit, 10) || RENTER_PAGE_SIZE),
+    );
+    const skip = (page - 1) * limit;
+    const [total, renters, shared] = await Promise.all([
+      Renter.countDocuments(q),
+      Renter.find(q).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      // Sharing is a property of the WHOLE fleet: "shared ×N" must count
+      // every renter on a config, not just the rows on this page. Projection
+      // only, so it stays cheap even though it reads the full roster.
+      Renter.find({ botFile: { $gt: "" } }, { botHost: 1, botFile: 1 }).lean(),
+    ]);
+    // These depend on the page's ids, so they run after the find above.
     const ids = renters.map((r) => r._id);
-    const [accAgg, dropAgg] = await Promise.all([
+    const [accAgg, dropAgg, fleetBad] = await Promise.all([
       RenterAccount.aggregate([
         { $match: { renter: { $in: ids } } },
         {
@@ -298,6 +380,13 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         { $match: { renter: { $in: ids } } },
         { $group: { _id: "$renter", n: { $sum: 1 } } },
       ]),
+      // Fleet-wide token-issue count for the overview metric. Must not be
+      // derived from the page's rows: a search or a page boundary would
+      // otherwise undercount it. Indexed on lastScanStatus.
+      RenterAccount.aggregate([
+        { $match: { lastScanStatus: "token_invalid" } },
+        { $count: "n" },
+      ]),
     ]);
     const accMap = new Map(accAgg.map((a) => [String(a._id), a.n]));
     const badMap = new Map(accAgg.map((a) => [String(a._id), a.bad || 0]));
@@ -305,7 +394,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
 
     // How many renters share each config, so the overview can flag shared bots.
     const shareCount = new Map();
-    for (const r of renters) {
+    for (const r of shared) {
       const k = (r.botHost || "") + "|" + r.botFile;
       shareCount.set(k, (shareCount.get(k) || 0) + 1);
     }
@@ -335,7 +424,15 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
         sharedBy: shareCount.get((r.botHost || "") + "|" + r.botFile) || 1,
       });
     }
-    res.json({ success: true, bots });
+    res.json({
+      success: true,
+      bots,
+      total,
+      page,
+      limit,
+      pages: Math.max(1, Math.ceil(total / limit)),
+      tokenIssues: fleetBad.length ? fleetBad[0].n : 0,
+    });
   } catch (err) {
     console.error("renter-bots list error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -876,12 +973,15 @@ async function renterBotStatus(renter) {
     running = null;
   }
   const sharers = await otherSharers(renter);
+  const stack = await findStack(host.id, renter.botFile);
   return {
     assigned: true,
     running,
     accounts,
+    host: host.id,
     hostLabel: host.label,
     file: renter.botFile,
+    capacity: stack ? stack.capacity : null,
     sharedWith: sharers.map((s) => s.username),
   };
 }
@@ -896,6 +996,97 @@ router.get("/renters/:id/bot", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// Change the account CAPACITY of the rental stack this renter is on. This is
+// the per-config cap (RenterBotStack.capacity) that actually gates how many
+// Twitch accounts the bot may hold — a different limit from Renter.maxAccounts,
+// which only sizes the renter's own pool quota. Bounded 1..100. A stack can be
+// shared by several renters, so this affects every renter on the same config;
+// the UI surfaces that. Refuses to drop the cap below what the config already
+// holds, which would leave the stack permanently full and unable to accept adds.
+router.put(
+  "/renters/:id/stack-capacity",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: "Bad renter id" });
+      }
+      const r = await Renter.findById(req.params.id);
+      if (!r)
+        return res.status(404).json({ success: false, message: "Not found" });
+      if (!r.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "This renter has no bot assigned." });
+      }
+      const host = hosts.resolveHost(r.botHost);
+      if (!host) {
+        return res.status(400).json({
+          success: false,
+          message: "Unknown host for this renter's bot.",
+        });
+      }
+
+      const capacity = normalizeCapacity(req.body && req.body.capacity);
+      if (capacity == null) {
+        return res.status(400).json({
+          success: false,
+          message: "Capacity must be a whole number between 1 and 100.",
+        });
+      }
+
+      // Must already be a registered rental stack (clear 409 otherwise).
+      await requireStack(host.id, r.botFile);
+
+      // Never set the cap below what the config physically holds. Best effort —
+      // an unreadable host simply skips this guard, since capacity is a DB value
+      // and the add-time assertCapacity re-checks against the live config anyway.
+      let current = null;
+      try {
+        current = await countConfigAccounts(host, r.botFile);
+      } catch {
+        current = null;
+      }
+      if (current != null && capacity < current) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This bot already holds " +
+            current +
+            " account(s). Set the capacity to " +
+            current +
+            " or higher.",
+        });
+      }
+
+      const row = await setStackCapacity(host.id, r.botFile, capacity);
+      if (!row) {
+        return res.status(409).json({
+          success: false,
+          message: "That config is not a dedicated rental stack.",
+        });
+      }
+      res.json({
+        success: true,
+        capacity: row.capacity,
+        used: current,
+        remaining: current == null ? null : Math.max(0, row.capacity - current),
+      });
+    } catch (err) {
+      const status =
+        err && ["not_rental_stack", "bad_capacity"].includes(err.code)
+          ? 409
+          : 500;
+      if (status === 500) {
+        console.error("renter stack-capacity error:", err.message);
+      }
+      res
+        .status(status)
+        .json({ success: false, message: err.message || "Server error" });
+    }
+  },
+);
 
 // LIVE LOGS for a renter's bot — the same docker-logs tail the operator's Bots
 // page offers (/bot-configs/logs/:file), but the container is always derived
@@ -1108,6 +1299,98 @@ async function resolveAccountCreds(acc) {
   return out;
 }
 
+// Batch form of resolveAccountCreds for the roster list. Resolves every
+// account's password/email with 3 queries total (one per source) instead of the
+// old per-account N+1 — the roster fetched up to 500 accounts and awaited
+// resolveAccountCreds for each, i.e. up to ~1500 sequential Mongo round trips
+// against a shared-tier Atlas that serialises concurrent queries. That is why
+// the Accounts tab took forever.
+//
+// Precedence per account is identical to resolveAccountCreds: the renter's own
+// submission (newest batch first), then the account pool, then the operator's
+// BotAccount record. Submissions are keyed by renter + login because two
+// renters may hold the same username and one page can contain both.
+async function resolveAccountsCreds(accs) {
+  if (!accs.length) return [];
+  const renterIds = [...new Set(accs.map((a) => a.renter))];
+  const lowerSet = new Set(
+    accs.map((a) => String(a.login || "").toLowerCase()).filter(Boolean),
+  );
+
+  // 1. Renter submissions — newest batch wins per (renter, login).
+  const subs = await RenterSubmission.find(
+    { renter: { $in: renterIds }, accountsEnc: { $gt: "" } },
+    { renter: 1, accountsEnc: 1 },
+  )
+    .sort({ createdAt: -1 })
+    .lean();
+  const subMap = new Map(); // "renterId|loginLower" -> creds
+  for (const s of subs) {
+    let parsed;
+    try {
+      parsed = JSON.parse(decrypt(s.accountsEnc) || "[]");
+    } catch {
+      continue;
+    }
+    for (const a of parsed || []) {
+      const l = String(a.username || "").toLowerCase();
+      const key = String(s.renter) + "|" + l;
+      if (l && a.password && !subMap.has(key)) {
+        subMap.set(key, {
+          password: a.password,
+          email: a.email || "",
+          source: "renter submission",
+        });
+      }
+    }
+  }
+
+  // 2. The account pool.
+  const poolMap = new Map();
+  if (lowerSet.size) {
+    const poolRows = await AvailableAccount.find({
+      usernameLower: { $in: [...lowerSet] },
+    }).lean();
+    for (const p of poolRows) {
+      const pw = p.password ? decrypt(p.password) : "";
+      if (pw) {
+        poolMap.set(p.usernameLower, {
+          password: pw,
+          email: p.email ? decrypt(p.email) || "" : "",
+          source: "account pool",
+        });
+      }
+    }
+  }
+
+  // 3. The operator's own record.
+  const botMap = new Map();
+  const logins = accs.map((a) => String(a.login || ""));
+  if (logins.some(Boolean)) {
+    const botRows = await BotAccount.find({ login: { $in: logins } }).lean();
+    for (const b of botRows) {
+      const pw = b.credPassword ? decrypt(b.credPassword) : "";
+      if (pw) {
+        botMap.set(String(b.login || "").toLowerCase(), {
+          password: pw,
+          email: b.credEmail ? decrypt(b.credEmail) || "" : "",
+          source: "bot account",
+        });
+      }
+    }
+  }
+
+  return accs.map((a) => {
+    const lower = String(a.login || "").toLowerCase();
+    return (
+      subMap.get(String(a.renter) + "|" + lower) ||
+      poolMap.get(lower) ||
+      botMap.get(lower) ||
+      { password: "", email: "", source: "" }
+    );
+  });
+}
+
 // REVEAL one renter account's live credentials — Twitch login, the auth token
 // the bot runs on (ClientSecret), and the password if it is stored anywhere.
 // Superadmin only, and never returned by the roster endpoint: the renter's own
@@ -1144,7 +1427,11 @@ router.get("/renter-accounts/:id/creds", requireSuperadmin, async (req, res) => 
 // renting system's own account list. Renter accounts are deliberately absent
 // from the Drops Archive (separate tenant inventory), so this is the only
 // place the operator can see username + password + client token together.
-// Superadmin only; ?renter=<id> narrows it to one renter.
+// Superadmin only; ?renter=<id> narrows it to one renter. Paginated
+// (20 per page by default) with ?page= / ?limit= and ?search= on login so the
+// Accounts tab loads a page of rows instead of the whole (potentially
+// thousands-row) roster. Credentials are resolved in batches — see
+// resolveAccountsCreds.
 router.get("/renter-accounts", requireSuperadmin, async (req, res) => {
   try {
     const q = {};
@@ -1152,19 +1439,27 @@ router.get("/renter-accounts", requireSuperadmin, async (req, res) => {
     if (rid && rid !== "all" && mongoose.isValidObjectId(rid)) {
       q.renter = new mongoose.Types.ObjectId(rid);
     }
-    const accs = await RenterAccount.find(q).sort({ login: 1 }).limit(500).lean();
+    const search = String(req.query.search || "").trim();
+    if (search) q.login = { $regex: escapeRegExp(search), $options: "i" };
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.limit, 10) || RENTER_PAGE_SIZE),
+    );
+    const skip = (page - 1) * limit;
+    const [total, accs] = await Promise.all([
+      RenterAccount.countDocuments(q),
+      RenterAccount.find(q).sort({ login: 1 }).skip(skip).limit(limit).lean(),
+    ]);
     const renters = await Renter.find(
       { _id: { $in: [...new Set(accs.map((a) => String(a.renter)))] } },
       { username: 1 },
     ).lean();
     const rmap = new Map(renters.map((r) => [String(r._id), r.username]));
-    const out = [];
-    for (const a of accs) {
-      // Credentials come from wherever this account's password lives (renter
-      // submission / pool / operator record) — same resolver the single-account
-      // reveal uses.
-      const creds = await resolveAccountCreds(a);
-      out.push({
+    const credsList = await resolveAccountsCreds(accs);
+    const out = accs.map((a, i) => {
+      const creds = credsList[i] || { password: "", email: "", source: "" };
+      return {
         id: String(a._id),
         renterId: String(a.renter),
         renter: rmap.get(String(a.renter)) || "",
@@ -1181,9 +1476,16 @@ router.get("/renter-accounts", requireSuperadmin, async (req, res) => {
         farmUntil: a.farmUntil || null,
         farmEndedAt: a.farmEndedAt || null,
         addedAt: a.createdAt || null,
-      });
-    }
-    res.json({ success: true, accounts: out });
+      };
+    });
+    res.json({
+      success: true,
+      accounts: out,
+      total,
+      page,
+      limit,
+      pages: Math.max(1, Math.ceil(total / limit)),
+    });
   } catch (err) {
     console.error("renter-accounts list error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });

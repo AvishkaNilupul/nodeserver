@@ -20,6 +20,8 @@ module.exports = [
         clearTimeout: "readonly",
         Buffer: "readonly",
         URL: "readonly",
+        URLSearchParams: "readonly",
+        setImmediate: "readonly",
       },
     },
     rules: {
