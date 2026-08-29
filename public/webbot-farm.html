@@ -116,7 +116,8 @@
   </div>
 
   <div class="banner">
-    🧪 <b>Isolated.</b> Bots run the web-token farmer in their own Pi dir (<code>/home/avishka/webbot-drops-farm</code>) as one Docker container each, farming one game via spade pings — touching <b>no</b> listings / scanner / Drop Archive / other bots. Accounts come from the standalone <code>WebBotAccount</code> registry (seed or pull-from-pool below).
+    🧪 <b>Isolated.</b> Bots run the web-token farmer in their own Pi dir (<code>/home/avishka/webbot-drops-farm</code>) as one Docker container each, farming one game via spade pings — touching <b>no</b> listings / scanner / Drop Archive / other bots.
+    <br>📥 <b>Own storage.</b> Accounts live in the standalone <code>WebBotAccount</code> registry — <b>fed</b> from <code>user:pass:token</code> supplier lines below (validated live on intake). This farm has its <b>own</b> pool and never spends the shared account pool.
     <br>⚠️ <b>Farm-only:</b> web tokens can't clear Twitch's integrity gate to <b>claim</b>, so completed drops show as <span class="chip warn">ready · needs external claim</span>.
   </div>
 
@@ -127,6 +128,24 @@
     <div class="stat"><b id="stReady">–</b><span>Ready · unclaimed</span></div>
     <div class="stat"><b id="stAccts">–</b><span>Total accounts</span></div>
     <div class="stat"><b id="stImg">–</b><span>Image</span></div>
+  </div>
+
+  <!-- Feeder -->
+  <div class="panel">
+    <div class="hd"><b>Feed accounts</b> <span class="chip" style="margin-left:6px;">own storage</span> <span class="muted" id="feedNote" style="margin-left:auto;"></span></div>
+    <div class="bd">
+      <label for="feedText">Paste supplier lines — <code>user:pass:token</code> (token = the web session token) · one per line</label>
+      <textarea id="feedText" rows="5" placeholder="username:password:sessiontoken&#10;username:password:sessiontoken"></textarea>
+      <div style="margin-top:9px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;text-transform:none;font-weight:500;color:var(--ink);font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="feedValidate" checked style="width:auto;" /> Validate tokens on intake
+        </label>
+        <button class="btn primary" id="feedBtn">Feed accounts</button>
+        <button class="btn ghost sm" id="valIdleBtn" title="Validate accounts fed earlier but not yet checked">Validate pending</button>
+        <span class="muted" id="feedResult"></span>
+      </div>
+      <div class="muted" style="margin-top:8px;">Stored in this farm's <b>own</b> <code>WebBotAccount</code> registry — never the shared account pool. Live tokens land as <b>idle</b> and are ready to bot; dead tokens are flagged and skipped by the creator.</div>
+    </div>
   </div>
 
   <!-- Create bot -->
@@ -163,9 +182,8 @@
       <div class="bd">
         <div style="display:flex;gap:20px;flex-wrap:wrap;">
           <div style="flex:1;min-width:280px;">
-            <label for="seedText">Seed — paste <code>user:pass:token</code> / <code>user:token</code> / <code>token</code></label>
-            <textarea id="seedText" rows="4" placeholder="username:password:webtoken&#10;webtoken"></textarea>
-            <div style="margin-top:8px;"><button class="btn primary sm" id="seedBtn">Seed accounts</button></div>
+            <label>Add accounts</label>
+            <div class="muted">Use the <b>Feed accounts</b> panel above to add <code>user:pass:token</code> lines into this farm's own storage.</div>
           </div>
           <div style="min-width:240px;">
             <label>Pull from account pool <span id="poolNote" class="muted" style="text-transform:none;font-weight:400;"></span></label>
@@ -173,14 +191,28 @@
               <input id="pullCount" type="number" min="1" max="200" value="5" style="width:100px;" />
               <button class="btn ghost sm" id="pullBtn">Pull</button>
             </div>
-            <div class="muted" style="margin-top:6px;">Reserve-guarded; released on delete.</div>
+            <div class="muted" style="margin-top:6px;">Optional / legacy — reserve-guarded, released on delete. The feeder above is the primary intake.</div>
           </div>
         </div>
-        <div style="overflow-x:auto;margin-top:14px;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px;">
+          <input id="acctSearch" type="search" placeholder="Search account name or token…" style="flex:1;min-width:220px;" />
+          <span class="muted" id="acctTotal"></span>
+        </div>
+        <div style="overflow-x:auto;margin-top:10px;">
           <table>
-            <thead><tr><th>Account</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
-            <tbody id="rows"><tr><td colspan="5" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+            <thead><tr><th>Account</th><th>Password</th><th>Client secret</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="7" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
           </table>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;">
+          <button class="btn ghost sm" id="acctPrev">← Prev</button>
+          <span class="muted" id="acctPage">–</span>
+          <button class="btn ghost sm" id="acctNext">Next →</button>
+          <select id="acctPageSize" title="Accounts per page" style="margin-left:auto;">
+            <option value="20" selected>20 per page</option>
+            <option value="50">50 per page</option>
+            <option value="100">100 per page</option>
+          </select>
         </div>
       </div>
     </details>
@@ -202,6 +234,7 @@ async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Co
 var openBots={}; // id -> active tab
 var pollT=null;
 var botIndex={}; // id -> {game,count,dead}
+var acctPage=1, acctPages=1, acctQuery='', acctSearchT=null;
 
 function contChip(c){
   if(!c) return '<span class="chip warn">starting…</span>';
@@ -337,6 +370,13 @@ async function rebuild(){
 }
 
 // ---- Accounts management ----
+function acctParams(){
+  var p=new URLSearchParams();
+  p.set('page',acctPage);
+  p.set('pageSize',parseInt($('acctPageSize').value,10)||20);
+  if(acctQuery) p.set('q',acctQuery);
+  return p.toString();
+}
 function statusChip(a){
   var m={ok:['on','farming'],attaching:['warn','attaching'],idle:['','idle'],pending:['','pending'],dead:['off','dead'],error:['off','error']}[a.lastStatus]||['','?'];
   return '<span class="chip '+m[0]+'">'+esc(m[1])+'</span>';
@@ -348,13 +388,24 @@ function claimCell(a){
 }
 async function loadAccounts(){
   try{
-    var j=await api('/api/webbot-farm/accounts');
-    $('acctCount').textContent=j.accounts.length+' account'+(j.accounts.length===1?'':'s');
+    var reqPage=acctPage;
+    var j=await api('/api/webbot-farm/accounts?'+acctParams());
+    var total=j.total||0, pages=j.pages||1;
+    if(acctPage>pages) acctPage=pages; // page shrank (delete / filter)
+    acctPages=pages;
+    if(!j.accounts.length && reqPage>1 && total>0){ acctPage=Math.min(reqPage-1,pages); return loadAccounts(); }
+    $('acctCount').textContent=total+' account'+(total===1?'':'s');
+    $('acctTotal').textContent=total+' account'+(total===1?'':'s');
+    $('acctPage').textContent='page '+acctPage+' of '+pages;
+    $('acctPrev').disabled=acctPage<=1;
+    $('acctNext').disabled=acctPage>=pages;
     var rows=$('rows');
-    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">No accounts — seed or pull below.</td></tr>'; return; }
+    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+(acctQuery?'No accounts match “'+esc(acctQuery)+'”.':'No accounts — seed or pull below.')+'</td></tr>'; return; }
     rows.innerHTML=j.accounts.map(function(a){
       return '<tr>'+
-        '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b> <span class="mono">…'+esc(a.tokenTail)+'</span>'+(a.fromPool?' <span class="chip">pool</span>':'')+(a.enabled?'':' <span class="chip off">disabled</span>')+'</td>'+
+        '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b>'+(a.fromPool?' <span class="chip">pool</span>':'')+(a.enabled?'':' <span class="chip off">disabled</span>')+'</td>'+
+        '<td class="mono">'+(a.password?esc(a.password):'<span class="muted">–</span>')+'</td>'+
+        '<td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(a.webToken)+'">'+esc(a.webToken)+'</td>'+
         '<td>'+statusChip(a)+'</td>'+
         '<td>'+(a.botId?'<span class="chip">bot '+esc(a.botId)+'</span>':'<span class="muted">idle</span>')+'</td>'+
         '<td>'+claimCell(a)+'</td>'+
@@ -365,7 +416,7 @@ async function loadAccounts(){
           (a.botId?'':'<button class="btn danger sm" data-aact="delete" data-id="'+a.id+'">Delete</button>')+
         '</div></td></tr>';
     }).join('');
-  }catch(e){ $('rows').innerHTML='<tr><td colspan="5"><span class="chip off">'+esc(e.message)+'</span></td></tr>'; }
+  }catch(e){ $('rows').innerHTML='<tr><td colspan="7"><span class="chip off">'+esc(e.message)+'</span></td></tr>'; }
 }
 async function acctAct(el){
   var id=el.getAttribute('data-id'), a=el.getAttribute('data-aact');
@@ -378,13 +429,30 @@ async function acctAct(el){
     await loadAccounts(); await load();
   }catch(e){ toast('Failed: '+e.message); el.disabled=false; }
 }
-async function seed(){
-  var text=$('seedText').value.trim(); if(!text){ toast('Paste account lines first.'); return; }
-  var btn=$('seedBtn'); btn.disabled=true; btn.textContent='Seeding…';
-  try{ var j=await api('/api/webbot-farm/seed',{method:'POST',body:JSON.stringify({text:text})});
-    var m='Seeded '+j.created+' new'; if(j.duplicate) m+=' · '+j.duplicate+' dup'; if(j.skipped&&j.skipped.length) m+=' · '+j.skipped.length+' skipped';
-    toast(m); $('seedText').value=''; await loadAccounts(); await load();
-  }catch(e){ toast('Seed failed: '+e.message); } finally{ btn.disabled=false; btn.textContent='Seed accounts'; }
+async function feed(){
+  var text=$('feedText').value.trim(); if(!text){ toast('Paste account lines first.'); return; }
+  var validate=$('feedValidate').checked;
+  var btn=$('feedBtn'); btn.disabled=true; btn.textContent=validate?'Feeding & validating…':'Feeding…';
+  $('feedResult').textContent='';
+  try{ var j=await api('/api/webbot-farm/feed',{method:'POST',body:JSON.stringify({text:text,validate:validate})});
+    var m='Fed '+j.fed+' new';
+    if(j.validated) m+=' · '+j.validated.ok+' live'+(j.validated.dead?' · '+j.validated.dead+' dead':'');
+    if(j.pending) m+=' · '+j.pending+' pending';
+    if(j.duplicate) m+=' · '+j.duplicate+' dup';
+    if(j.skipped&&j.skipped.length) m+=' · '+j.skipped.length+' skipped';
+    $('feedResult').textContent=m; toast(m);
+    if(j.fed) $('feedText').value='';
+    await loadAccounts(); await load();
+  }catch(e){ toast('Feed failed: '+e.message); $('feedResult').textContent=e.message; }
+  finally{ btn.disabled=false; btn.textContent='Feed accounts'; }
+}
+async function validateIdle(){
+  var btn=$('valIdleBtn'); btn.disabled=true; var old=btn.textContent; btn.textContent='Validating…';
+  try{ var j=await api('/api/webbot-farm/validate-idle',{method:'POST',body:JSON.stringify({limit:500})});
+    var m=j.checked?('Checked '+j.checked+' · '+j.ok+' live'+(j.dead?' · '+j.dead+' dead':'')):'No pending accounts.';
+    $('feedResult').textContent=m; toast(m); await loadAccounts(); await load();
+  }catch(e){ toast('Validate failed: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent=old; }
 }
 async function pull(){
   var count=parseInt($('pullCount').value,10)||0; if(!count){ toast('How many to pull?'); return; }
@@ -404,9 +472,18 @@ $('bots').addEventListener('click',function(e){
 $('rows').addEventListener('click',function(e){ var b=e.target.closest('button[data-aact]'); if(b) acctAct(b); });
 $('createBtn').onclick=createBot;
 $('rebuildBtn').onclick=rebuild;
-$('seedBtn').onclick=seed;
+$('feedBtn').onclick=feed;
+$('valIdleBtn').onclick=validateIdle;
 $('pullBtn').onclick=pull;
 $('refreshBtn').onclick=function(){load();loadPool();};
+$('acctSearch').addEventListener('input',function(){
+  var v=this.value.trim();
+  clearTimeout(acctSearchT);
+  acctSearchT=setTimeout(function(){ acctQuery=v; acctPage=1; loadAccounts(); },300);
+});
+$('acctPrev').onclick=function(){ if(acctPage>1){ acctPage--; loadAccounts(); } };
+$('acctNext').onclick=function(){ if(acctPage<acctPages){ acctPage++; loadAccounts(); } };
+$('acctPageSize').onchange=function(){ acctPage=1; loadAccounts(); };
 load(); loadPool();
 </script>
 <script src="/admin-nav.js"></script>
