@@ -13,7 +13,12 @@ const { fetchDropCampaigns, fetchCampaignDetails, itemKeyFor } = require("./twit
 const { sendTelegram } = require("./telegram");
 const settings = require("./settings");
 
-const TICK_MS = 2 * 60 * 60 * 1000; // every 2 hours
+// Fast discovery: short flash/tournament drop campaigns can appear and end
+// within a few hours, so poll the campaign dashboard every 10 minutes to catch
+// them while there's still time to farm. Each tick is one dashboard fetch;
+// per-campaign manifest reads stay gated by MANIFEST_TTL_MS (6h) below, so the
+// only added cost is the lightweight dashboard poll.
+const TICK_MS = 10 * 60 * 1000; // every 10 minutes
 // How often a campaign's expected-drops manifest (models/CampaignDrops.js) is
 // re-fetched. A campaign's drop list is static for its lifetime, so 6h is far
 // more than enough — this only bounds how long a newly-spotted campaign waits

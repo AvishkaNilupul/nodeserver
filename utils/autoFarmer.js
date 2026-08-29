@@ -1657,26 +1657,13 @@ async function processCampaign(c, ctx) {
   }
   const demandScore = research ? Number(research.demandScore || 0) : null;
 
-  // 2) Time gate. Forced games (af.forceGames — e.g. EWC daily R6 drops) skip
-  // this: their campaigns are deliberately short, so the ends-soon rule would
-  // otherwise skip every one.
+  // 2) Time window. Computed here, but the ends-soon SKIP is DEFERRED to step 4b
+  // (after the reuse-first block). A short campaign can still be farmed by
+  // RESTARTING already-warm bots — they carry accumulated watch-time and finish
+  // a drop that fresh accounts never could in a few hours — so the 12h floor must
+  // gate only the FRESH-account path, not reuse. Forced games (af.forceGames)
+  // bypass it entirely, at step 4b.
   const hrs = hoursLeft(c.endAt);
-  if (hrs < af.minHoursLeft && !isForcedGame(game, af)) {
-    await record({
-      decision: "skip_ends_soon",
-      status: "skipped",
-      reason:
-        "Campaign ends in " +
-        Math.max(0, Math.round(hrs)) +
-        "h (< " +
-        af.minHoursLeft +
-        "h) — too late to farm meaningfully.",
-      demandScore,
-      hadResearch: !!research,
-      internalSales,
-    });
-    return { decision: "skip_ends_soon" };
-  }
 
   // 3) Host gate.
   if (!hostOnline) {
@@ -1816,7 +1803,17 @@ async function processCampaign(c, ctx) {
       Math.max(0, (Number(alloc.target) || 0) - mine.length),
       budgetMap.get(key) || 0,
     );
-    if (started.length && Number.isFinite(topUp) && topUp >= 1) {
+    // Fresh top-up accounts start from zero watch-time, so on a short campaign
+    // (below the 12h floor) they can't finish the drop — topping up there would
+    // waste pool accounts on a window they can't complete. Reuse alone still
+    // farms the event. Forced games keep their existing top-up behaviour.
+    const topUpAllowed = hrs >= af.minHoursLeft || isForcedGame(game, af);
+    if (
+      started.length &&
+      Number.isFinite(topUp) &&
+      topUp >= 1 &&
+      topUpAllowed
+    ) {
       try {
         reuseTask.plannedAccounts = topUp;
         const r = await executeTask(reuseTask, ctx, { append: true });
@@ -1838,6 +1835,29 @@ async function processCampaign(c, ctx) {
         (c.name || c.campaignId),
     );
     return { decision: "reuse_existing" };
+  }
+
+  // 4b) Time gate — FRESH-account path only. Reuse already returned above, so
+  // reaching here means the only way to farm this campaign is to spend FRESH
+  // pool accounts, which cannot finish a drop that ends in a few hours. A short
+  // campaign for a game with no warm bots to reuse stops here rather than burning
+  // accounts on a window it can't complete. Forced games bypass (their campaigns
+  // are deliberately short and farmed by design).
+  if (hrs < af.minHoursLeft && !isForcedGame(game, af)) {
+    await record({
+      decision: "skip_ends_soon",
+      status: "skipped",
+      reason:
+        "Campaign ends in " +
+        Math.max(0, Math.round(hrs)) +
+        "h (< " +
+        af.minHoursLeft +
+        "h) and no warm bots to reuse — too late to farm with fresh accounts.",
+      demandScore,
+      hadResearch: !!research,
+      internalSales,
+    });
+    return { decision: "skip_ends_soon" };
   }
 
   // 5) Coverage gate: how much of this game's demand is ALREADY covered by
