@@ -34,6 +34,12 @@
   let LOADED = false;    // first successful load happened
   let inflight = null;   // de-dupes overlapping loads (Refresh spam / double wiring)
   let inflightSel = null; // the #accFilter value `inflight` is fetching for
+  const PAGE_SIZE = 20;  // rows per page — the roster can be thousands of rows
+  let PAGE = 1;          // current page, owned here so Refresh keeps the page
+  let TOTAL = 0;         // total matching rows (unfiltered when no search/filter)
+  let PAGES = 1;
+  let SEARCH = "";       // applied login search (set by the Search button/Enter)
+  let lastFilter = null; // #accFilter value at last load — a change resets PAGE
 
   // Modal-first lookup: the modal renderer needs ROWS to win, so accFarm /
   // accRemove (which read only login + farmUntil, present in BOTH payloads) use
@@ -60,20 +66,28 @@
     return (el && el.value) || "all";
   };
 
-  // Coalescing is keyed on the filter value: two Refresh clicks for the same
-  // renter share one request, but an #accFilter change mid-flight must NOT get
-  // the in-flight promise for the OLD filter back (the section would keep the
-  // previous renter's rows while the dropdown read the new one, with no
-  // re-fetch). A different value chains a fresh load onto the current one, so
-  // the newest filter renders last and wins.
+  const searchVal = () => {
+    const el = RT.$("accSearch");
+    return (el && el.value.trim()) || "";
+  };
+
+  // Coalescing is keyed on filter + page + search: two Refresh clicks for the
+  // same view share one request, but a filter/page/search change mid-flight
+  // must NOT get the in-flight promise for the OLD view back (the section would
+  // keep the previous rows). A different key chains a fresh load onto the
+  // current one, so the newest view renders last and wins.
   function load() {
     const sel = filterVal();
-    if (inflight && inflightSel === sel) return inflight;
+    // A filter change means the paging context is gone — jump back to page 1
+    // before the fetch (boot.js calls this loader directly on filter change).
+    if (sel !== lastFilter) { lastFilter = sel; PAGE = 1; }
+    const key = sel + "|" + PAGE + "|" + SEARCH;
+    if (inflight && inflightSel === key) return inflight;
     const p = inflight
-      ? inflight.catch(() => {}).then(() => doLoad(sel))
-      : doLoad(sel);
+      ? inflight.catch(() => {}).then(() => doLoad(sel, PAGE, SEARCH))
+      : doLoad(sel, PAGE, SEARCH);
     inflight = p;
-    inflightSel = sel;
+    inflightSel = key;
     p.catch(() => {}).then(() => {
       // Only the newest load clears the slot; an older link in the chain
       // finishing must not unlock a still-running successor.
@@ -82,12 +96,17 @@
     return p;
   }
 
-  async function doLoad(sel) {
+  async function doLoad(sel, page, search) {
     try {
-      const d = await RT.api(
-        "/renter-accounts" + (sel !== "all" ? "?renter=" + encodeURIComponent(sel) : "")
-      );
+      const params = new URLSearchParams();
+      if (sel !== "all") params.set("renter", sel);
+      params.set("page", String(page));
+      params.set("limit", String(PAGE_SIZE));
+      if (search) params.set("search", search);
+      const d = await RT.api("/renter-accounts?" + params.toString());
       ACCS = d.accounts || [];
+      TOTAL = Number(d.total != null ? d.total : ACCS.length);
+      PAGES = Math.max(1, Math.ceil(TOTAL / PAGE_SIZE));
     } catch (e) {
       RT.$("rentAccs").innerHTML = '<div class="muted">' + RT.esc(e.message) + "</div>";
       return;
@@ -99,13 +118,29 @@
   }
 
   function render() {
-    RT.$("accTotal").textContent = ACCS.length ? ACCS.length + " account(s)" : "";
+    RT.$("accTotal").textContent = TOTAL ? TOTAL + " account(s)" : "";
     if (!ACCS.length) {
-      RT.$("rentAccs").innerHTML = '<div class="muted">No renter accounts yet.</div>';
+      RT.$("rentAccs").innerHTML =
+        '<div class="muted">' + (SEARCH ? "No accounts match that search." : "No renter accounts yet.") + "</div>";
+      renderPager();
       return;
     }
     RT.$("rentAccs").innerHTML =
       '<div class="rows">' + ACCS.map(sectionRow).join("") + "</div>";
+    renderPager();
+  }
+
+  function renderPager() {
+    const prev = RT.$("accPrev");
+    const next = RT.$("accNext");
+    const info = RT.$("accPageInfo");
+    if (prev) prev.disabled = PAGE <= 1;
+    if (next) next.disabled = PAGE >= PAGES;
+    if (info) {
+      info.textContent = TOTAL
+        ? "Page " + PAGE + " / " + PAGES + " · " + TOTAL + " account(s)"
+        : "";
+    }
   }
 
   function sectionRow(a) {
@@ -296,6 +331,36 @@
       SHOW = !SHOW;
       revealBtn.textContent = SHOW ? "Hide secrets" : "Show secrets";
       render();
+    });
+  }
+
+  // Search + pagination controls. Static elements, owned by this module; boot.js
+  // owns the section's Load/Refresh/#accFilter wiring and must not double-bind
+  // these. A search always starts back at page 1.
+  const searchBtn = RT.$("accSearchBtn");
+  if (searchBtn) {
+    searchBtn.addEventListener("click", () => {
+      SEARCH = searchVal();
+      PAGE = 1;
+      return load();
+    });
+  }
+  const searchInput = RT.$("accSearch");
+  if (searchInput) {
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { SEARCH = searchVal(); PAGE = 1; load(); }
+    });
+  }
+  const prevBtn = RT.$("accPrev");
+  if (prevBtn) {
+    prevBtn.addEventListener("click", () => {
+      if (PAGE > 1) { PAGE -= 1; load(); }
+    });
+  }
+  const nextBtn = RT.$("accNext");
+  if (nextBtn) {
+    nextBtn.addEventListener("click", () => {
+      if (PAGE < PAGES) { PAGE += 1; load(); }
     });
   }
 
