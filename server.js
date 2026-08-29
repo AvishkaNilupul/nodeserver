@@ -36,7 +36,6 @@ const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
-const stashRoutes = require("./routes/stashRoutes");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
@@ -57,11 +56,8 @@ const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
-const stashAging = require("./utils/stashAging");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
-const japaneseRoutes = require("./routes/japaneseRoutes");
-const japaneseLearnRoutes = require("./routes/japaneseLearnRoutes");
 const dropScanner = require("./utils/dropScanner");
 const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
@@ -163,12 +159,6 @@ app.use(
     },
   }),
 );
-// The Japanese study state is synced as one JSON blob that can exceed the
-// default cap once a user has a large deck plus custom words/sentences; parse
-// it with a roomier limit before the global 100kb parser (which then skips the
-// already-parsed body). Everything else stays at 100kb.
-app.use("/japanese/state", express.json({ limit: "2mb" }));
-app.use("/learn/state", express.json({ limit: "2mb" }));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 
@@ -427,10 +417,6 @@ app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
 });
 
-app.get("/account-stash.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "account-stash.html"));
-});
-
 app.get("/spent-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "spent-accounts.html"));
 });
@@ -469,13 +455,6 @@ app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
 // Market research (superadmin only) — rank games by real twitch-drop demand.
 app.get("/research.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "research.html"));
-});
-
-// Guides (superadmin only) — long-form operator playbooks rendered for
-// reading. Must be a guarded route: anything left to the static handler
-// below would be served without auth.
-app.get("/guides.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "guides.html"));
 });
 
 // Bulk orders manager (superadmin only) — reserve N accounts for one buyer,
@@ -535,20 +514,6 @@ app.get("/catalog-admin.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "catalog-admin.html"));
 });
 
-// Personal Japanese (JLPT N5) study tab. Self-contained learning app
-// (kana / kanji / vocab / grammar + spaced repetition) with progress kept
-// client-side in the browser's localStorage.
-app.get("/japanese.html", requireAdmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "japanese.html"));
-});
-
-// Public guest entry to the same learning app. No admin login — the page asks
-// for an access code (generated in the app's Students tab) and the code-scoped
-// API in japaneseLearnRoutes does the rest.
-app.get("/learn", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "japanese.html"));
-});
-
 // Mobile seller app shell (also wrapped by the Android app). Served without a
 // guard, like the login page: the SPA renders its own sign-in and every data
 // API it calls is session-gated, so the bare shell exposes nothing.
@@ -594,11 +559,6 @@ app.get("/", (req, res) => {
 // =========================
 // Routes
 // =========================
-// Guest learning API must come before the admin-guarded routers below:
-// app.use(requireAdmin, ...) runs its middleware on every request regardless
-// of whether that router matches the path, so anything mounted after it 401s
-// without an admin session.
-app.use(japaneseLearnRoutes);
 // Public reads plus self-guarded superadmin controls. This must be before the
 // blanket requireAdmin routers below so anonymous catalog visitors can read it.
 app.use(catalogRoutes);
@@ -622,12 +582,6 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
-// Mounted BEFORE the requireAdmin cascade below because stashRoutes contains
-// the bearer-authenticated POST /account-stash/ingest for the browser account
-// automator — requireAdmin runs unconditionally for every request and would
-// 401 any bearer-only call before it could reach the router. Other stash
-// routes self-guard with requireSuperadmin, so their position doesn't matter.
-app.use(enforce2fa, stashRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -649,7 +603,6 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
-app.use(enforce2fa, japaneseRoutes);
 
 // =========================
 // Socket.IO
@@ -752,11 +705,6 @@ mongoose
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();
-    // Account aging: walks stashed accounts through settle -> warm-up ->
-    // active -> mature so they arrive in the pool with some history behind
-    // them. Every set is opted out until switched on individually, so this
-    // is a no-op on a fresh install (see utils/stashAging.js).
-    stashAging.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

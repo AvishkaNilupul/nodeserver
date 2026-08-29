@@ -86,20 +86,10 @@
     accountPool:
       '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>' +
       '<path d="M7 11V7a5 5 0 0 1 10 0v4"></path>',
-    accountStash:
-      '<path d="M3 7l1.5 12a2 2 0 0 0 2 1.8h11a2 2 0 0 0 2-1.8L21 7"></path>' +
-      '<path d="M2 7h20M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>',
     banned:
       '<circle cx="12" cy="12" r="10"></circle>' +
       '<line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
-    guides:
-      '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>' +
-      '<path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>',
-    japanese:
-      '<path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 ' +
-      '1 0 0 1-1-1v-2"></path><path d="M8 4v16"></path>' +
-      '<path d="M11 9h6M14 9v6M11 14h6"></path>',
   };
 
   // Every href this script manages (either as a standalone link or grouped
@@ -157,12 +147,6 @@
           href: "/spent-accounts.html",
           label: "Spent accounts",
           icon: ICONS.accountPool,
-          superOnly: true,
-        },
-        {
-          href: "/account-stash.html",
-          label: "Account stash",
-          icon: ICONS.accountStash,
           superOnly: true,
         },
         {
@@ -293,18 +277,6 @@
     },
   ];
   var STANDALONE = [
-    {
-      href: "/guides.html",
-      label: "Guides",
-      icon: ICONS.guides,
-      superOnly: true,
-    },
-    {
-      href: "/japanese.html",
-      label: "Japanese N5",
-      icon: ICONS.japanese,
-      superOnly: false,
-    },
     {
       href: "/settings.html",
       label: "Settings",
