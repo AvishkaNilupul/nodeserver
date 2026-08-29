@@ -6,7 +6,9 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const dropScanner = require("../utils/dropScanner");
+const hosts = require("../utils/botHosts");
 const settings = require("../utils/settings");
+const twitchInventory = require("../utils/twitchInventory");
 const { normGame } = require("../utils/gameLabel");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { recordAutoFarmEvent } = require("../utils/autoFarmEventLog");
@@ -21,6 +23,20 @@ const RECYCLE_BATCH = 20;
 // "error" must NEVER brand a healthy account — the continuous scanner runs
 // against these same logins, so a scan collision is expected, not a dead token.
 const DEAD_TOKEN_STATUSES = new Set(["token_invalid", "suspended"]);
+
+// The standalone no-claim bots farm pool accounts directly (no BotAccount row),
+// so a no-claim-spent account has nothing to rescan with except its own token.
+// The spent scan already routes those GQL calls through the Pi; recycle does the
+// same so the fresh check comes from the same egress the account farmed on.
+function resolvePiHost() {
+  const host = hosts.resolveHost("pi");
+  if (!host) {
+    const e = new Error('Pi host "pi" is not configured.');
+    e.status = 503;
+    throw e;
+  }
+  return host;
+}
 
 function isRealSale(drop) {
   if (!drop.soldAt) return false;
@@ -47,7 +63,7 @@ async function gatherSpentAccounts() {
   const [pool, listingRows, botRows] = await Promise.all([
     AvailableAccount.find(
       { status: { $in: ["claimed", "available"] } },
-      { username: 1, usernameLower: 1, status: 1, claimedAt: 1, claimedNote: 1, soldGames: 1, lastCheckStatus: 1 },
+      { username: 1, usernameLower: 1, status: 1, claimedAt: 1, claimedNote: 1, soldGames: 1, lastCheckStatus: 1, clientSecret: 1 },
     ).lean(),
     MarketplaceListing.find(
       { status: "active", $or: [{ accountLogin: { $ne: "" } }, { "units.0": { $exists: true } }] },
@@ -197,6 +213,7 @@ async function gatherSpentAccounts() {
     })[0] || null;
     const facts = {
       claimedNote: account.claimedNote,
+      noClaimSpent: /^spent — no-claim/i.test(String(account.claimedNote || "")),
       availableDrops: available,
       deliveredDrops: deliveredCount,
       soldUnconnectedDrops: soldUnconnectedCount,
@@ -283,6 +300,15 @@ async function recycleRow(row) {
   }
   const login = row.username;
   if (row.outOfScope || !row.botId) {
+    // A no-claim-spent account has no BotAccount to rescan with, but its pool
+    // row carries the token it farmed on — verify that token directly instead
+    // of refusing it. Everything else (eligibility, guarded update) is shared.
+    if (row._facts && row._facts.noClaimSpent && row._pool && row._pool.clientSecret) {
+      if (!row.recyclable) {
+        return { login, recycled: false, status: "not_eligible", reason: row.reason || "not eligible" };
+      }
+      return recycleNoClaimRow(row);
+    }
     return { login, recycled: false, status: "out_of_scope", reason: "needs pool import — no BotAccount to rescan" };
   }
   if (!row.recyclable) {
@@ -318,7 +344,12 @@ async function recycleRow(row) {
       reason: (scanResult && scanResult.error) || "rescan could not confirm the token — try again",
     };
   }
-  const soldGames = [...new Set((row.soldDetails || []).map((detail) => detail.gameKey).filter(Boolean))];
+  // Merge with whatever the pool row already excluded (e.g. a no-claim-spent
+  // stamp written by the no-claim remove flow) — the derived set alone would
+  // drop games that were spent without a DropLog delivery record.
+  const derived = [...new Set((row.soldDetails || []).map((detail) => detail.gameKey).filter(Boolean))];
+  const prior = Array.isArray(row._pool && row._pool.soldGames) ? row._pool.soldGames : [];
+  const soldGames = [...new Set([...prior, ...derived])];
   const update = await AvailableAccount.updateOne(
     { _id: row._pool._id, status: "claimed" },
     {
@@ -335,6 +366,75 @@ async function recycleRow(row) {
   }
   await recordPoolUsage(row._pool._id, { event: "recycled", actor: "spent-accounts", note: "recycled — sold games excluded", game: "" });
   await recordAutoFarmEvent({ type: "recycled", count: 1, actor: "spentAccountsTab", reason: "manual recycle" });
+  return { login, recycled: true, status: "recycled", soldGames };
+}
+
+// Recycle a spent account pulled from the standalone no-claim bots: verify the
+// pool row's own token (fresh GQL via the Pi), then return it to the pool with
+// the sold games excluded — the same end state the managed-bot path produces.
+// A dead/reclaimed token is branded so it never resurfaces as recyclable; a
+// transient Twitch error is NOT branded (fail closed, let the operator retry).
+async function recycleNoClaimRow(row) {
+  const login = row.username;
+  let healthy = false;
+  let tokenDead = false;
+  let error = "";
+  try {
+    const inv = await twitchInventory.fetchInventory(row._pool.clientSecret, {
+      host: resolvePiHost(),
+    });
+    healthy = !!(inv && inv.twitchId);
+  } catch (e) {
+    if (e && e.code === "token_invalid") tokenDead = true;
+    else error = (e && e.message) || String(e);
+  }
+  if (tokenDead) {
+    await AvailableAccount.updateOne(
+      { _id: row._pool._id },
+      { $set: { claimedNote: "sold — token reclaimed by buyer" } },
+    );
+    await recordPoolUsage(row._pool._id, {
+      event: "sold",
+      actor: "spent-accounts",
+      note: "sold — token reclaimed by buyer",
+    });
+    return { login, recycled: false, status: "token_reclaimed", reason: "token reclaimed by buyer" };
+  }
+  if (!healthy) {
+    return {
+      login,
+      recycled: false,
+      status: "rescan_unverified",
+      reason: error || "rescan could not confirm the token — try again",
+    };
+  }
+  const soldGames = [...new Set((Array.isArray(row._pool.soldGames) ? row._pool.soldGames : []).filter(Boolean))];
+  const update = await AvailableAccount.updateOne(
+    { _id: row._pool._id, status: "claimed" },
+    {
+      $set: {
+        status: "available",
+        claimedAt: null,
+        claimedNote: "recycled — spent (never re-farm sold games)",
+        soldGames,
+      },
+    },
+  );
+  if (!(update.modifiedCount || update.nModified)) {
+    return { login, recycled: false, status: "not_eligible", reason: "pool row changed before recycle" };
+  }
+  await recordPoolUsage(row._pool._id, {
+    event: "recycled",
+    actor: "spent-accounts",
+    note: "recycled — sold games excluded",
+    game: "",
+  });
+  await recordAutoFarmEvent({
+    type: "recycled",
+    count: 1,
+    actor: "spentAccountsTab",
+    reason: "manual recycle (no-claim)",
+  });
   return { login, recycled: true, status: "recycled", soldGames };
 }
 

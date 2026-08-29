@@ -140,14 +140,28 @@ function buildConfig(accounts, game) {
   );
 }
 
+// Accounts recycled back to the pool carry soldGames (the canonical game they
+// were spent on). Never re-claim one whose spent game matches the keyword the
+// operator is creating a bot for — substring semantics like isNoClaimGame, so
+// "rainbow six" also matches a soldGames entry of "rainbow six siege".
+function soldGameExclusion(game) {
+  const g = settings.normGameName(game);
+  if (!g) return {};
+  const esc = g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ +/g, "\\s+");
+  return { soldGames: { $not: { $regex: esc } } };
+}
+
 // Ready pool query — mirrors the auto-farmer's definition so the two systems
-// agree on what "ready" means (verified token, available, not suspended).
-function readyPoolQuery() {
-  return {
+// agree on what "ready" means (verified token, available, not suspended). When
+// a game is given, accounts already spent for that game are excluded.
+function readyPoolQuery(game) {
+  const q = {
     status: "available",
     clientSecret: { $gt: "" },
     lastCheckStatus: { $in: ["", "ok"] },
   };
+  Object.assign(q, soldGameExclusion(game));
+  return q;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +341,7 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
 
     // Reserve guard: never draw the shared pool below the auto-farm reserve.
     const reserve = settings.getAutoFarm().poolReserve || 0;
-    const ready = await AvailableAccount.countDocuments(readyPoolQuery());
+    const ready = await AvailableAccount.countDocuments(readyPoolQuery(game));
     if (ready - count < reserve) {
       return res.status(409).json({
         success: false,
@@ -351,7 +365,7 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
     const note = `${CLAIM_NOTE_PREFIX}:${game}`;
     for (let i = 0; i < count; i++) {
       const doc = await AvailableAccount.findOneAndUpdate(
-        readyPoolQuery(),
+        readyPoolQuery(game),
         { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
         { new: true, sort: { lastCheckAt: -1 } },
       );
@@ -1045,6 +1059,53 @@ router.post("/api/noclaim-farm/spent/remove", requireSuperadmin, async (req, res
         },
         { upsert: true },
       );
+    }
+
+    // Send the removed accounts onward to the global Spent-accounts (recycle)
+    // tab: stamp the pool row with the game + a "spent" note so
+    // gatherSpentAccounts() lists them there, where the recycler can rescan the
+    // pool token directly (no-claim accounts have no BotAccount to rescan
+    // with). Status STAYS claimed — nothing re-farms them here or in the
+    // auto-farmer until the operator recycles them from that tab.
+    const secrets = removed.map((u) => u.ClientSecret).filter(Boolean);
+    if (secrets.length) {
+      const rows = await AvailableAccount.find(
+        { clientSecret: { $in: secrets } },
+        { clientSecret: 1, soldGames: 1 },
+      ).lean();
+      const rowBySecret = new Map(rows.map((r) => [r.clientSecret, r]));
+      const stampGame = settings.normGameName(game);
+      const writes = [];
+      const stampedIds = [];
+      for (const u of removed) {
+        const r = rowBySecret.get(u.ClientSecret);
+        if (!r) continue;
+        const games = new Set(
+          (Array.isArray(r.soldGames) ? r.soldGames : []).filter(Boolean),
+        );
+        if (stampGame) games.add(stampGame);
+        writes.push({
+          updateOne: {
+            filter: { _id: r._id, status: "claimed" },
+            update: {
+              $set: {
+                claimedNote: "spent — no-claim removed " + (game || ""),
+                soldGames: [...games],
+              },
+            },
+          },
+        });
+        stampedIds.push(r._id);
+      }
+      if (writes.length) {
+        await AvailableAccount.bulkWrite(writes);
+        await recordPoolUsage(stampedIds, {
+          event: "spent",
+          actor: actorFromReq(req),
+          note: "spent — no-claim removed (awaiting recycle)",
+          game: stampGame || "",
+        });
+      }
     }
     logEvent({
       category: "noclaim",

@@ -17,12 +17,24 @@ function spentAccountEligibility(facts = {}) {
     cooldownPassed: false,
   });
   const note = String(facts.claimedNote || "").trim();
+  // Accounts pulled out of the standalone no-claim bots (sold/connected) have
+  // no DropLog delivery history — the spent signal IS the pool-row stamp the
+  // no-claim remove writes. For those, "delivered" is implied, the cooldown is
+  // anchored to the removal, and any DropLog "available" rows are stale
+  // pre-delivery snapshots (the account is connected/sold, so the drops are on
+  // the buyer's side), so they become recyclable immediately instead of being
+  // rejected forever on "no delivered drops" / "still has N drops left to
+  // sell" / "within the 14-day cooldown". Every other guard still applies
+  // (rented, recycled, on listing, deployed, sold-but-undelivered drops).
+  const noClaimSpent = !!facts.noClaimSpent;
   if (/^rented to/i.test(note)) return reject("rented to a renter");
   if (/^recycled/i.test(note)) return reject("already recycled");
-  if ((Number(facts.availableDrops) || 0) > 0) {
+  if ((Number(facts.availableDrops) || 0) > 0 && !noClaimSpent) {
     return reject("still has " + Number(facts.availableDrops) + " drop(s) left to sell");
   }
-  if ((Number(facts.deliveredDrops) || 0) < 1) return reject("no delivered drops");
+  if ((Number(facts.deliveredDrops) || 0) < 1 && !noClaimSpent) {
+    return reject("no delivered drops");
+  }
   if ((Number(facts.soldUnconnectedDrops) || 0) > 0) {
     return reject(
       "has " + Number(facts.soldUnconnectedDrops) + " sold drop(s) awaiting delivery",
@@ -31,11 +43,9 @@ function spentAccountEligibility(facts = {}) {
   if (facts.onActiveListing) return reject("on an active marketplace listing");
   if (facts.deployed) return reject("still deployed to a bot");
 
-  const passed = cooldownPassedAt(
-    facts.newestDeliveredAt,
-    facts.cooldownDays,
-    facts.now,
-  );
+  const passed = noClaimSpent
+    ? true
+    : cooldownPassedAt(facts.newestDeliveredAt, facts.cooldownDays, facts.now);
   return {
     recyclable: passed,
     reason: passed ? "" : "within the " + (Number(facts.cooldownDays) || 0) + "-day cooldown",

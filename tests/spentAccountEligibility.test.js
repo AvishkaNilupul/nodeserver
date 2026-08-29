@@ -48,6 +48,46 @@ test("cooldown is inclusive at the exact boundary", () => {
   assert.strictEqual(spentAccountEligibility({ ...ok(), newestDeliveredAt: daysAgo(3) }).cooldownPassed, false);
 });
 
+test("no-claim-spent accounts are recyclable without delivery history or cooldown", () => {
+  const base = {
+    ...ok(),
+    claimedNote: "spent — no-claim removed Overwatch",
+    deliveredDrops: 0,
+    availableDrops: 424,
+    newestDeliveredAt: null,
+    noClaimSpent: true,
+  };
+  assert.deepStrictEqual(spentAccountEligibility(base), {
+    recyclable: true,
+    reason: "",
+    cooldownPassed: true,
+  });
+});
+
+test("no-claim-spent accounts still respect the other guards", () => {
+  const base = {
+    ...ok(),
+    claimedNote: "spent — no-claim removed Overwatch",
+    deliveredDrops: 0,
+    availableDrops: 424,
+    newestDeliveredAt: null,
+    noClaimSpent: true,
+  };
+  const cases = [
+    { claimedNote: "rented to bob" },
+    { claimedNote: "recycled — spent" },
+    { soldUnconnectedDrops: 1 },
+    { onActiveListing: true },
+    { deployed: true },
+  ];
+  for (const over of cases) {
+    const result = spentAccountEligibility({ ...base, ...over });
+    assert.strictEqual(result.recyclable, false);
+    assert.ok(result.reason);
+    assert.strictEqual(result.cooldownPassed, false);
+  }
+});
+
 test("missing facts fail closed", () => {
   assert.strictEqual(spentAccountEligibility().recyclable, false);
   assert.strictEqual(spentAccountEligibility({}).cooldownPassed, false);
