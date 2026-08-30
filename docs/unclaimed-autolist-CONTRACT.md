@@ -146,3 +146,9 @@ never be handed to two buyers on different platforms.
   unit whose delivery code the platform still holds (e.g. a delisted
   predecessor) and publishes the next in the chain instead of blocking the
   item.
+
+- **Run lock works on MongoDB driver 7 (fixed 2026-08-30).** `acquireRunLock`
+  checked `findOneAndUpdate`'s `{ value }` ModifyResult shape, but driver 7
+  returns the document itself — so every run reported "another process is
+  running" while still stamping the lock, and the engine never ran its
+  scan/check. The check now accepts either return shape (`r.value || r`).
