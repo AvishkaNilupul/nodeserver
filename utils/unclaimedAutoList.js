@@ -42,7 +42,7 @@ const webbotTwitch = require("./webbotTwitch");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
-const { derivePrice } = require("./autoLister");
+const { derivePrice, buildTitle } = require("./autoLister");
 const { digisellerDeliveryCode } = require("./digisellerFulfiller");
 const { ggselDeliveryCode } = require("./ggselFulfiller");
 const { gameflipDeliveryCode } = require("./gameflipFulfiller");
@@ -183,8 +183,20 @@ function signatureFor(game, drops) {
 }
 
 // Listing copy — the account and its unclaimed drops, with the connect-and-
-// claim instructions that make the no-claim model work for the buyer.
-function listingTitle(game) {
+// House title style, exactly like the auto-lister:
+//   "{Game} Twitch Drops ({N} Items) — {Item A} + {Item B} +{N-2} more"
+// so a buyer sees the item and its drops, not a vague "drop account".
+function listingTitle(game, drops) {
+  const items = Array.isArray(drops)
+    ? drops.filter((d) => d && String(d.name || "").trim())
+    : [];
+  if (items.length) {
+    return buildTitle({
+      game: String(game || "Twitch").trim(),
+      items,
+      campaignName: "",
+    });
+  }
   return (game ? String(game).trim() : "Twitch") + " drop account — unclaimed";
 }
 
@@ -550,7 +562,7 @@ async function credentialForLedger(ledger) {
 async function publishGameflipUnit(set, cand, drops, price, img) {
   const game = cand.game || (drops[0] && drops[0].game) || set.coverGame || "";
   const r = await mp.gameflipPublish({
-    title: listingTitle(game),
+    title: listingTitle(game, drops),
     description: listingDescription(game, drops, cand.login),
     priceUsd: price,
     imagePath: img || undefined,
@@ -561,7 +573,7 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
     marketplace: "gameflip",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(game),
+    title: listingTitle(game, drops),
     description: listingDescription(game, drops, cand.login),
     price,
     status: "active",
@@ -577,7 +589,7 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
 
 async function publishDigisellerProduct(set, units, game, drops, price, img, categoryId) {
   const r = await mp.digisellerPublish({
-    title: listingTitle(game),
+    title: listingTitle(game, drops),
     description: listingDescription(game, drops, ""),
     priceUsd: price,
     categories: [
@@ -625,7 +637,7 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
     marketplace: "digiseller",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(game),
+    title: listingTitle(game, drops),
     description: listingDescription(game, drops, ""),
     price,
     status: "active",
@@ -654,7 +666,7 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
 
 async function publishGgselOffer(set, units, game, drops, price, img, categoryId) {
   const r = await mp.ggselPublish({
-    title: listingTitle(game),
+    title: listingTitle(game, drops),
     description: listingDescription(game, drops, ""),
     priceUsd: price,
     categoryId,
@@ -669,7 +681,7 @@ async function publishGgselOffer(set, units, game, drops, price, img, categoryId
     marketplace: "ggsel",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(game),
+    title: listingTitle(game, drops),
     description: listingDescription(game, drops, ""),
     price,
     status: "active",
@@ -758,18 +770,15 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
   if (!setId) return { published: false, reason: "no set" };
   const set = await DropSet.findById(setId).lean();
   if (!set) return { published: false, reason: "no set" };
-  const waiting = await UnclaimedAccount.find({
+  const waitingList = await UnclaimedAccount.find({
     set: setId,
     market: "gameflip",
     status: "listed",
     loginLower: { $ne: String(excludeLogin || "").toLowerCase() },
   })
     .sort({ listedAt: 1, _id: 1 })
-    .limit(1)
     .lean();
-  if (!waiting.length) return { published: false, reason: "no waiting unit" };
-  const cred = await credentialForLedger(waiting);
-  if (!cred.password) return { published: false, reason: "no password" };
+  if (!waitingList.length) return { published: false, reason: "no waiting unit" };
   const drops = (set.items || []).map((i) => ({
     name: i.name,
     game: i.game,
@@ -778,43 +787,65 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
     itemKey: i.itemKey,
   }));
   const game = set.coverGame || (drops[0] && drops[0].game) || "";
-  let img = "";
-  try {
-    img = await buildSetGridImage(set);
-  } catch {
-    img = "";
-  }
-  const cand = {
-    source: waiting.source,
-    id: waiting.poolAccountId || waiting.webBotAccountId || "",
-    poolAccountId: waiting.poolAccountId,
-    login: cred.login,
-    password: cred.password,
-    game,
-  };
-  const row = await publishGameflipUnit(set, cand, drops, Number(set.price) || 0, img);
-  if (img) await fsp.unlink(img).catch(() => {});
-  await UnclaimedAccount.updateOne(
-    { _id: waiting._id },
-    {
-      $set: {
-        listingIds: [...new Set([...(waiting.listingIds || []), String(row._id)])],
-        note: "unclaimed auto-list — live unit",
-      },
-    },
-  ).catch(() => {});
-  if (opts.log !== false) {
-    logEvent({
-      category: "unclaimed",
-      action: "relisted",
-      actor: "unclaimedAutoList",
-      subject: cred.login,
+  for (const waiting of waitingList) {
+    const cred = await credentialForLedger(waiting);
+    if (!cred.password) continue;
+    let img = "";
+    try {
+      img = await buildSetGridImage(set);
+    } catch {
+      img = "";
+    }
+    const cand = {
+      source: waiting.source,
+      id: waiting.poolAccountId || waiting.webBotAccountId || "",
+      poolAccountId: waiting.poolAccountId,
+      login: cred.login,
+      password: cred.password,
       game,
-      detail:
-        "gameflip successor published for unclaimed item " + game + " ($" + (Number(set.price) || 0).toFixed(2) + ")",
-    });
+    };
+    try {
+      const row = await publishGameflipUnit(
+        set,
+        cand,
+        drops,
+        Number(set.price) || 0,
+        img,
+      );
+      if (img) await fsp.unlink(img).catch(() => {});
+      await UnclaimedAccount.updateOne(
+        { _id: waiting._id },
+        {
+          $set: {
+            listingIds: [...new Set([...(waiting.listingIds || []), String(row._id)])],
+            note: "unclaimed auto-list — live unit",
+          },
+        },
+      ).catch(() => {});
+      if (opts.log !== false) {
+        logEvent({
+          category: "unclaimed",
+          action: "relisted",
+          actor: "unclaimedAutoList",
+          subject: cred.login,
+          game,
+          detail:
+            "gameflip successor published for unclaimed item " + game + " ($" + (Number(set.price) || 0).toFixed(2) + ")",
+        });
+      }
+      return { published: true, row, login: cred.login };
+    } catch (e) {
+      if (img) await fsp.unlink(img).catch(() => {});
+      // A unit whose delivery code the platform still holds (e.g. a delisted
+      // predecessor) cannot be republished — skip it and try the next in the
+      // chain rather than blocking the whole item.
+      console.error(
+        "unclaimedAutoList successor publish failed for " + (cred.login || waiting.loginLower || "?") + ":",
+        e.message,
+      );
+    }
   }
-  return { published: true, row, login: cred.login };
+  return { published: false, reason: "no publishable waiting unit" };
 }
 
 // ---------------------------------------------------------------------------

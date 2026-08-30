@@ -58,10 +58,19 @@ test("plainPassword: decrypts secretBox and strips legacy plain: prefix", () => 
   assert.strictEqual(plainPassword(null), "");
 });
 
-test("listing copy: title is short and description carries the claim steps", () => {
-  const title = listingTitle("Overwatch", "acct_1");
-  assert.ok(title.includes("Overwatch"));
+test("listing copy: title is auto-lister style and description carries the claim steps", () => {
+  const title = listingTitle("Overwatch", [
+    { name: "Pachimonarch Icon" },
+    { name: "Battle Pass Tier Skip" },
+    { name: "Crown Jewels Spray" },
+  ]);
+  assert.strictEqual(
+    title,
+    "Overwatch Twitch Drops (3 Items) — Pachimonarch Icon + Battle Pass Tier Skip +1 more",
+  );
   assert.ok(title.length <= 120);
+  assert.strictEqual(listingTitle("Overwatch", []), "Overwatch drop account — unclaimed");
+  assert.strictEqual(listingTitle("Overwatch", "acct_1"), "Overwatch drop account — unclaimed");
   const desc = listingDescription(
     "Overwatch",
     [{ name: "Lootbox", game: "Overwatch" }],

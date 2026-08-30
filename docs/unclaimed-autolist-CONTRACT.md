@@ -139,3 +139,10 @@ never be handed to two buyers on different platforms.
   not a listed gameflip ledger of its set. The Auto-list panel shows
   "integrity ok" or a red count, and `/api/unclaimed-auto/state` carries the
   full issue list.
+
+- **Listing titles use the auto-lister's `buildTitle` style** — "{Game} Twitch
+  Drops ({N} Items) — {Item A} + {Item B} +{N-2} more" — so a buyer sees the
+  drops, not a vague "drop account". The Gameflip successor skips a waiting
+  unit whose delivery code the platform still holds (e.g. a delisted
+  predecessor) and publishes the next in the chain instead of blocking the
+  item.
