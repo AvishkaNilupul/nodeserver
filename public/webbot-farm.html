@@ -243,6 +243,16 @@ function contChip(c){
   return '<span class="chip">'+esc(c.state||'?')+'</span>';
 }
 
+function updateBotChip(id){
+  var sp=document.querySelector('#bots .row[data-bid="'+id+'"] .sp');
+  if(!sp) return;
+  var b=botIndex[id];
+  sp.innerHTML=contChip(b.cont)+
+    (b.cont&&!b.cont.running?'<button class="btn ghost sm" data-bact="start" data-bid="'+id+'">Start</button>':'')+
+    '<button class="btn ghost sm" data-bact="stop" data-bid="'+id+'">Stop</button>'+
+    '<button class="btn danger sm" data-bact="release" data-bid="'+id+'">Release</button>';
+}
+
 function renderBots(){
   var el=$('bots'); var ids=Object.keys(botIndex);
   if(!ids.length){ el.innerHTML='<div class="muted">No bots yet. Create one above.</div>'; return; }
@@ -294,9 +304,8 @@ async function botsStatus(){
     var j=await api('/api/webbot-farm/bots-status');
     $('stImg').textContent=j.imageBuilt?'ready':(j.provisioning?'building…':'none');
     var running=0;
-    Object.keys(botIndex).forEach(function(id){ botIndex[id].cont=j.containers[id]||null; if(j.containers[id]&&j.containers[id].running) running++; });
+    Object.keys(botIndex).forEach(function(id){ botIndex[id].cont=j.containers[id]||null; if(j.containers[id]&&j.containers[id].running) running++; updateBotChip(id); });
     $('stRunning').textContent=running;
-    renderBots();
     var active=j.provisioning||Object.values(j.containers).some(c=>c.running);
     if(active&&!pollT) pollT=setInterval(botsStatus,6000);
     if(!active&&pollT){clearInterval(pollT);pollT=null;}
@@ -466,7 +475,7 @@ async function loadPool(){ try{ var j=await api('/api/webbot-farm/pool'); $('poo
 // ---- Event wiring ----
 $('bots').addEventListener('click',function(e){
   var ba=e.target.closest('button[data-bact]'); if(ba){ botAct(ba); return; }
-  var tb=e.target.closest('.tab[data-tab]'); if(tb){ loadBotTab(tb.getAttribute('data-bid'),tb.getAttribute('data-tab')); renderBots(); return; }
+  var tb=e.target.closest('.tab[data-tab]'); if(tb){ openBots[tb.getAttribute('data-bid')]=tb.getAttribute('data-tab'); renderBots(); return; }
   var row=e.target.closest('.row[data-bid]'); if(row){ var id=row.getAttribute('data-bid'); if(openBots[id]) delete openBots[id]; else openBots[id]='drops'; renderBots(); }
 });
 $('rows').addEventListener('click',function(e){ var b=e.target.closest('button[data-aact]'); if(b) acctAct(b); });
