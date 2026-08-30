@@ -1891,7 +1891,11 @@ async function acquireRunLock() {
       { $set: { holder: String(process.pid), at: now } },
       { returnDocument: "after" },
     );
-    return !!(r && r.value && String(r.value.holder) === String(process.pid));
+    // Driver 7 returns the document itself; older drivers return a
+    // { value } ModifyResult — accept either so the takeover check works
+    // on both.
+    const doc = r && (r.value || r);
+    return !!(doc && String(doc.holder) === String(process.pid));
   } catch (e) {
     console.error("unclaimedAutoList acquireRunLock failed:", e.message);
     return true; // lock infra down — fail OPEN so a tick can still run alone
