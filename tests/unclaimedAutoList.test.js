@@ -83,6 +83,39 @@ test("listing copy: title is auto-lister style and description carries the claim
   assert.ok(desc.includes("acct_1"));
 });
 
+test("listing copy: duplicate-name drops collapse to one item in the title", () => {
+  const drops = [
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+  ];
+  const title = listingTitle("Rainbow Six Siege", drops);
+  assert.strictEqual(
+    title,
+    "Rainbow Six Siege Twitch Drops (1 Item) — Alpha Pack",
+  );
+  const desc = listingDescription("Rainbow Six Siege", drops, "acct_1");
+  assert.ok(desc.includes("Unclaimed drops (1):\nAlpha Pack"));
+  assert.strictEqual(desc.match(/Alpha Pack/g).length, 1);
+});
+
+test("dedupeSetItems: keys are lowercased like signatureFor (case-safe dedupe)", () => {
+  const items = dedupeSetItems(
+    [
+      { name: "Alpha Pack", itemKey: "Alpha Pack|R6" },
+      { name: "Alpha Pack", itemKey: "alpha pack|r6" },
+      { name: "Charm", itemKey: "Charm|R6" },
+    ],
+    "R6",
+  );
+  assert.strictEqual(items.length, 2);
+  assert.deepStrictEqual(
+    items.map((i) => i.itemKey),
+    ["alpha pack|r6", "charm|r6"],
+  );
+});
+
 test("signatureFor: same game + same drops = same item; order and case agnostic", () => {
   const a = signatureFor("Overwatch", [
     { name: "Crown Jewels Spray", itemKey: "crown jewels spray|overwatch" },

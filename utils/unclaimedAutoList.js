@@ -190,7 +190,10 @@ function dedupeSetItems(drops, game) {
   const seen = new Set();
   const items = [];
   for (const d of drops || []) {
-    const key = String(d.itemKey || d.name || "").trim();
+    // Lowercased exactly like signatureFor: the signature is the set's
+    // identity, and findUnclaimedSet matches items.itemKey with $all — a
+    // case mismatch would silently create a duplicate set per account again.
+    const key = String(d.itemKey || d.name || "").trim().toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
     items.push({
@@ -204,14 +207,30 @@ function dedupeSetItems(drops, game) {
   return items;
 }
 
+// The drops a listing TITLE/DESCRIPTION should show: one entry per unique
+// itemKey (same dedupe rule as signatureFor / dedupeSetItems), preserving the
+// first-seen drop so buildTitle sees exactly the set's items. Without this an
+// account holding "Alpha Pack" from four campaigns lists as
+// "Alpha Pack + Alpha Pack +2 more" — the set is one item, so is the title.
+function uniqueDrops(drops) {
+  const seen = new Set();
+  const out = [];
+  for (const d of drops || []) {
+    if (!d || !String(d.name || "").trim()) continue;
+    const key = String(d.itemKey || d.name || "").trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  return out;
+}
+
 // Listing copy — the account and its unclaimed drops, with the connect-and-
 // House title style, exactly like the auto-lister:
 //   "{Game} Twitch Drops ({N} Items) — {Item A} + {Item B} +{N-2} more"
 // so a buyer sees the item and its drops, not a vague "drop account".
 function listingTitle(game, drops) {
-  const items = Array.isArray(drops)
-    ? drops.filter((d) => d && String(d.name || "").trim())
-    : [];
+  const items = uniqueDrops(drops);
   if (items.length) {
     return buildTitle({
       game: String(game || "Twitch").trim(),
@@ -229,9 +248,7 @@ function listingDescription(game, drops, login) {
       "account and receive them yourself.",
   ];
   if (game) lines.push("Game: " + game);
-  const names = (drops || [])
-    .map((d) => (d && d.name ? d.name : ""))
-    .filter(Boolean);
+  const names = uniqueDrops(drops).map((d) => d.name).filter(Boolean);
   if (names.length) {
     lines.push("Unclaimed drops (" + names.length + "):");
     lines.push(names.join(", "));
