@@ -160,3 +160,11 @@ never be handed to two buyers on different platforms.
   size check never matched. `dedupeSetItems()` now collapses a set to one item
   per unique itemKey (keyed by name when no itemKey), matching the signature
   exactly — one listing per marketplace per item, never one per inventory slot.
+
+- **Titles/descriptions dedupe drops exactly like the set (fixed 2026-08-30).**
+  `listingTitle`/`listingDescription` previously passed the raw inventory to
+  `buildTitle`, so an account holding "Alpha Pack" from four campaigns listed
+  as "(4 Items) — Alpha Pack + Alpha Pack +2 more" while its set held one item.
+  Both now dedupe by lowercase itemKey (same rule as `signatureFor` /
+  `dedupeSetItems`), and `dedupeSetItems` stores lowercase keys so
+  `findUnclaimedSet`'s `$all` match can never case-miss into a duplicate set.
