@@ -115,20 +115,11 @@
           superOnly: true,
         },
         {
-          href: "/noclaim-farm.html",
-          label: "No-claim farming",
+          href: "/unclaimed-farms.html",
+          label: "Unclaimed farms",
           icon:
             '<path d="M12 2v6M12 22v-6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 ' +
             '12h6M22 12h-6M4.9 19.1l4.2-4.2M14.9 9.1l4.2-4.2"></path>',
-          superOnly: true,
-        },
-        {
-          href: "/webbot-farm.html",
-          label: "Web-token farm",
-          icon:
-            '<circle cx="12" cy="12" r="10"></circle>' +
-            '<path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 ' +
-            '10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>',
           superOnly: true,
         },
         {

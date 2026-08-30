@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unclaimed farms</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; overflow-y:auto; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+  .nav .me .who b { font-size: 13.5px; display: block; } .nav .me .who span { font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 24px 28px; min-width: 0; display:flex; flex-direction:column; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .banner { margin: 14px 0; padding: 11px 14px; border-radius: 12px; border:1px solid var(--line); background: var(--surface-2); font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .banner b { color: var(--ink); }
+
+  .tabs { display:flex; gap:6px; margin: 14px 0 12px; flex-wrap:wrap; }
+  .tab { font-size:13px; padding:8px 16px; border-radius:10px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer; font-weight:600; }
+  .tab.active { background:var(--accent); color:#fff; border-color:transparent; }
+
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin: 0 0 14px; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 9px 15px; }
+  .stat b { font-size: 18px; display:block; } .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 16px; }
+  .panel .hd { padding: 12px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .panel .hd b { font-size: 14.5px; } .panel .bd { padding: 14px 16px; }
+
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line); }
+  th { font-size:10.5px; text-transform:uppercase; color:var(--muted); }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size:11.5px; }
+  .muted { color:var(--muted); font-size:12.5px; }
+  .chip { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border:1px solid var(--line); color: var(--muted); background: var(--surface-2); display:inline-block; }
+  .chip.on { color: var(--green); border-color: rgba(5,150,105,.35); }
+  .chip.off { color: var(--red); border-color: rgba(220,38,38,.35); }
+  .chip.warn { color: var(--yellow); border-color: rgba(180,83,9,.35); }
+
+  .btn { border:none; border-radius: 10px; padding: 9px 15px; font-size: 13px; font-weight: 600; cursor: pointer; font-family:inherit; }
+  .btn.primary { background: var(--accent); color: #fff; } .btn.primary:hover{filter:brightness(1.06);}
+  .btn.ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); } .btn.ghost:hover{background:var(--surface-2);}
+  .btn.danger { background: var(--surface); color: var(--red); border:1px solid var(--line); } .btn.danger:hover{background:#fef2f2;border-color:#fecaca;}
+  .btn.sm { padding: 6px 10px; font-size: 11.5px; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  .sec { flex:1; min-height:0; }
+  .sec.hidden { display:none; }
+  .sec iframe { width:100%; height:100%; min-height:560px; border:1px solid var(--line); border-radius:12px; background:var(--surface); }
+  .pager { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+  code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links"></nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout" onclick="toggleTheme()" title="Toggle dark mode"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Unclaimed farms</h1>
+      <div class="sub">No-claim farm + web-token farm — auto-listed, auto-sold, expiry-aware.</div>
+    </div>
+  </div>
+
+  <div class="banner">
+    🛒 <b>Auto-list.</b> Accounts from both farms with 100%-unclaimed drops are listed automatically on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel, ZeusX per settings), one account per buyer, and sold with auto-delivery. When drops expire the listings are delisted and the account goes <b>back to the pool</b> — but only after <b>all</b> of its drops are gone; a drop a buyer claimed = sold, never pool-returned.
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-sec="autolist">Auto-list</button>
+    <button class="tab" data-sec="noclaim">No-claim farm</button>
+    <button class="tab" data-sec="webbot">Web-token farm</button>
+  </div>
+
+  <section class="sec" id="sec-autolist">
+    <div class="stats">
+      <div class="stat"><b id="stListed">–</b><span>Listed accounts</span></div>
+      <div class="stat"><b id="stRows">–</b><span>Live listing rows</span></div>
+      <div class="stat"><b id="stSold">–</b><span>Sold</span></div>
+      <div class="stat"><b id="stExpired">–</b><span>Expired</span></div>
+      <div class="stat"><b id="stReleased">–</b><span>Back to pool</span></div>
+      <div class="stat"><b id="stSkipped">–</b><span>Skipped</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="hd">
+        <b>Auto-list engine</b>
+        <span class="chip" id="stEngine">–</span>
+        <span class="muted" id="stLastRun" style="margin-left:auto;"></span>
+      </div>
+      <div class="bd" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <button class="btn primary sm" id="scanBtn">Scan &amp; list now</button>
+        <button class="btn ghost sm" id="refreshBtn">Check expiry / sales</button>
+        <button class="btn ghost sm" id="pauseBtn">Pause auto</button>
+        <span class="muted" id="runResult"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="hd"><b>Accounts</b> <span class="muted" id="acctTotal" style="margin-left:auto;"></span></div>
+      <div class="bd">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <input id="acctSearch" type="search" placeholder="Search login…" style="flex:1;min-width:200px;padding:8px 11px;border-radius:10px;border:1.5px solid var(--line);background:var(--surface-2);color:var(--ink);font-size:13px;outline:none;" />
+          <select id="acctStatus" style="padding:8px 11px;border-radius:10px;border:1.5px solid var(--line);background:var(--surface-2);color:var(--ink);font-size:13px;outline:none;">
+            <option value="">All statuses</option>
+            <option value="listed">Listed</option>
+            <option value="sold">Sold</option>
+            <option value="expired">Expired</option>
+            <option value="released">Back to pool</option>
+            <option value="skipped">Skipped</option>
+          </select>
+        </div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Account</th><th>Source</th><th>Game</th><th>Drops</th><th>Status</th><th>Listed</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody id="acctRows"><tr><td colspan="7" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button class="btn ghost sm" id="acctPrev">← Prev</button>
+          <span class="muted" id="acctPage">–</span>
+          <button class="btn ghost sm" id="acctNext">Next →</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="hd"><b>Live listing rows</b> <span class="muted" id="listTotal" style="margin-left:auto;"></span></div>
+      <div class="bd">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Market</th><th>Title</th><th>Account</th><th>Price</th><th>Status</th><th>Updated</th></tr></thead>
+            <tbody id="listRows"><tr><td colspan="6" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec hidden" id="sec-noclaim"></section>
+  <section class="sec hidden" id="sec-webbot"></section>
+</main>
+
+<script src="/theme.js"></script>
+<script src="/admin-nav.js"></script>
+<script>
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j=await r.json().catch(function(){return {};});if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
+function fmt(d){if(!d)return '–';try{return new Date(d).toLocaleString();}catch(e){return '–';}}
+function chipFor(status){
+  var m={listed:['on','listed'],sold:['off','sold'],expired:['warn','expired'],released:['','back to pool'],skipped:['warn','skipped']}[status]||['','?'+status];
+  return '<span class="chip '+m[0]+'">'+m[1]+'</span>';
+}
+
+var acctPage=1, acctPages=1, acctQuery='', acctStatus='', acctSearchT=null;
+var secLoaded={};
+
+function switchSec(sec){
+  document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('active',b.dataset.sec===sec);});
+  ['autolist','noclaim','webbot'].forEach(function(s){
+    var el=$('sec-'+s); if(!el) return;
+    el.classList.toggle('hidden', s!==sec);
+  });
+  if(sec==='autolist'){ loadState(); loadAccounts(); loadListings(); }
+  if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
+  if(sec==='webbot' && !secLoaded.webbot){ secLoaded.webbot=true; $('sec-webbot').innerHTML='<iframe src="/webbot-farm.html?embed=1" title="Web-token farm"></iframe>'; }
+}
+
+async function loadState(){
+  try{
+    var j=await api('/api/unclaimed-auto/state');
+    var c=j.counts||{}, st=j.state||{};
+    $('stListed').textContent=c.listed||0;
+    $('stRows').textContent=c.activeRows||0;
+    $('stSold').textContent=c.sold||0;
+    $('stExpired').textContent=c.expired||0;
+    $('stReleased').textContent=c.released||0;
+    $('stSkipped').textContent=c.skipped||0;
+    $('stEngine').textContent=(st.paused?'paused':(st.enabled?'auto on':'off'));
+    $('stEngine').className='chip '+(st.paused?'warn':(st.enabled?'on':'off'));
+    var lr=st.lastRun;
+    $('stLastRun').textContent=lr
+      ? ('last run '+(lr.tookMs!=null?Math.round(lr.tookMs/1000)+'s':'')+
+         (lr.scan?' · listed '+((lr.scan.listed)||0):'')+
+         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0):''))
+      : 'never run';
+    $('pauseBtn').textContent=st.paused?'Resume auto':'Pause auto';
+  }catch(e){ $('stEngine').textContent='state error'; }
+}
+
+function acctParams(){
+  var p=new URLSearchParams();
+  p.set('page',acctPage); p.set('pageSize',50);
+  if(acctStatus) p.set('status',acctStatus);
+  if(acctQuery) p.set('q',acctQuery);
+  return p.toString();
+}
+
+async function loadAccounts(){
+  try{
+    var j=await api('/api/unclaimed-auto/accounts?'+acctParams());
+    var total=j.total||0, pages=j.pages||1;
+    if(acctPage>pages && pages>0){ acctPage=pages; return loadAccounts(); }
+    acctPages=pages;
+    $('acctTotal').textContent=total+' account'+(total===1?'':'s');
+    $('acctPage').textContent='page '+acctPage+' of '+pages;
+    $('acctPrev').disabled=acctPage<=1;
+    $('acctNext').disabled=acctPage>=pages;
+    var rows=$('acctRows');
+    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+(acctQuery||acctStatus?'No matching accounts.':'Nothing listed yet — run “Scan &amp; list now”.')+'</td></tr>'; return; }
+    rows.innerHTML=j.accounts.map(function(a){
+      var note=a.note?'<div class="muted" style="font-size:11px;">'+esc(a.note)+'</div>':'';
+      var acts='<button class="btn danger sm" data-sell="'+a.id+'">Sell</button> <button class="btn ghost sm" data-delist="'+a.id+'">Delist</button>';
+      if(a.status!=='listed') acts='–';
+      return '<tr>'+
+        '<td><b>'+esc(a.login||'(no login)')+'</b>'+note+'</td>'+
+        '<td><span class="chip">'+esc(a.source)+'</span></td>'+
+        '<td>'+esc(a.game||'–')+'</td>'+
+        '<td>'+(a.drops&&a.drops.length?esc(a.drops.length)+' drops':'–')+'</td>'+
+        '<td>'+chipFor(a.status)+'</td>'+
+        '<td class="muted">'+fmt(a.listedAt||a.updatedAt)+'</td>'+
+        '<td style="text-align:right;white-space:nowrap;">'+acts+'</td>'+
+      '</tr>';
+    }).join('');
+  }catch(e){ $('acctRows').innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+async function loadListings(){
+  try{
+    var j=await api('/api/unclaimed-auto/listings');
+    var rows=j.rows||[];
+    $('listTotal').textContent=rows.length+' row'+(rows.length===1?'':'s');
+    var el=$('listRows');
+    if(!rows.length){ el.innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">No unclaimed listing rows.</td></tr>'; return; }
+    el.innerHTML=rows.map(function(r){
+      var chip=r.status==='active'?'<span class="chip on">active</span>':(r.status==='sold'?'<span class="chip off">sold</span>':'<span class="chip warn">'+esc(r.status)+'</span>');
+      return '<tr>'+
+        '<td><span class="chip">'+esc(r.marketplace)+'</span> <span class="mono">'+esc(r.externalId)+'</span></td>'+
+        '<td>'+esc(r.title||'')+'</td>'+
+        '<td>'+esc(r.accountLogin||'–')+'</td>'+
+        '<td>$'+esc(Number(r.price||0).toFixed(2))+'</td>'+
+        '<td>'+chip+'</td>'+
+        '<td class="muted">'+fmt(r.updatedAt)+'</td>'+
+      '</tr>';
+    }).join('');
+  }catch(e){ $('listRows').innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+async function busy(btn, fn){
+  if(btn) btn.disabled=true;
+  try{ var msg=await fn(); if(msg) $('runResult').textContent=msg; }
+  catch(e){ $('runResult').textContent='Error: '+e.message; }
+  finally{ if(btn) btn.disabled=false; }
+}
+
+document.querySelectorAll('.tab').forEach(function(b){ b.addEventListener('click',function(){ switchSec(b.dataset.sec); }); });
+
+$('scanBtn').addEventListener('click',function(){
+  busy(this, async function(){
+    var r=await api('/api/unclaimed-auto/scan',{method:'POST',body:'{}'});
+    loadState(); loadAccounts(); loadListings();
+    return 'scan done — listed '+(r.result&&r.result.scan&&r.result.scan.listed||0)+' new';
+  });
+});
+$('refreshBtn').addEventListener('click',function(){
+  busy(this, async function(){
+    var r=await api('/api/unclaimed-auto/refresh',{method:'POST',body:'{}'});
+    loadState(); loadAccounts(); loadListings();
+    var c=r.result&&r.result.check||{};
+    return 'check done — sold '+((c.sold)||0)+', expired '+((c.expired)||0)+', released '+((c.released)||0);
+  });
+});
+$('pauseBtn').addEventListener('click',function(){
+  var paused=$('pauseBtn').textContent.indexOf('Pause')===0;
+  busy(this, async function(){
+    await api('/api/unclaimed-auto/pause',{method:'POST',body:JSON.stringify({paused:paused})});
+    loadState();
+    return paused?'auto paused':'auto resumed';
+  });
+});
+$('acctPrev').addEventListener('click',function(){ if(acctPage>1){acctPage--;loadAccounts();} });
+$('acctNext').addEventListener('click',function(){ if(acctPage<acctPages){acctPage++;loadAccounts();} });
+$('acctSearch').addEventListener('input',function(){
+  clearTimeout(acctSearchT);
+  acctSearchT=setTimeout(function(){ acctQuery=$('acctSearch').value.trim(); acctPage=1; loadAccounts(); },300);
+});
+$('acctStatus').addEventListener('change',function(){ acctStatus=this.value; acctPage=1; loadAccounts(); });
+
+document.addEventListener('click',function(e){
+  var t=e.target;
+  if(t.dataset&&t.dataset.sell){
+    if(!confirm('Mark this account SOLD? It stops farming and is never returned to the pool.')) return;
+    busy(null, async function(){
+      await api('/api/unclaimed-auto/sell/'+t.dataset.sell,{method:'POST',body:'{}'});
+      loadAccounts(); loadListings(); loadState();
+      return 'marked sold';
+    });
+  }
+  if(t.dataset&&t.dataset.delist){
+    if(!confirm('Delist ALL rows for this account? It goes back to the pool only if you choose release.')) return;
+    busy(null, async function(){
+      await api('/api/unclaimed-auto/delist/'+t.dataset.delist,{method:'POST',body:JSON.stringify({release:true})});
+      loadAccounts(); loadListings(); loadState();
+      return 'delisted';
+    });
+  }
+});
+
+switchSec('autolist');
+</script>
+</body>
+</html>

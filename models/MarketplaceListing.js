@@ -27,7 +27,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     externalId: { type: String, required: true },
     // Who created this listing. "auto" = published by the auto-farmer
     // (utils/autoLister.js) or by the relist chain succeeding an auto listing;
-    // "manual" = published by the owner from the Listings page.
+    // "manual" = published by the owner from the Listings page;
+    // "unclaimed" = published by the unclaimed-farms auto-lister
+    // (utils/unclaimedAutoList.js) for a no-claim / web-token farm account.
+    // Only "auto" rows are ever repriced.
     //
     // This is what scopes automatic price changes: the post-event scarcity
     // markup only ever touches origin:"auto" rows, so the owner's own hand-made
@@ -36,7 +39,7 @@ const marketplaceListingSchema = new mongoose.Schema(
     // which is the safe way to be wrong.
     origin: {
       type: String,
-      enum: ["auto", "manual"],
+      enum: ["auto", "manual", "unclaimed"],
       default: "manual",
       index: true,
     },

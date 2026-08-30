@@ -31,6 +31,8 @@ const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const webbotFarmRoutes = require("./routes/webbotFarmRoutes");
+const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
+const unclaimedAutoList = require("./utils/unclaimedAutoList");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
@@ -399,14 +401,42 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
+// Combined Unclaimed farms tab: auto-list panel + the two farm consoles
+// embedded as sections (?embed=1 hides each page's own sidebar).
+app.get("/unclaimed-farms.html", requireSuperadmin, enforce2fa, async (req, res) => {
+  try {
+    res.sendFile(path.join(__dirname, "public", "unclaimed-farms.html"));
+  } catch {
+    res.status(500).send("failed to read unclaimed-farms.html");
+  }
+});
+
+async function serveFarmPage(req, res, file) {
+  const fsp = require("fs/promises");
+  try {
+    const raw = await fsp.readFile(path.join(__dirname, "public", file), "utf8");
+    if (req.query.embed === "1") {
+      // Embed mode (inside the combined tab): hide the page's own sidebar —
+      // the wrapper page already renders the console nav.
+      res
+        .type("html")
+        .send(raw.replace('<aside class="nav"', '<aside class="nav" style="display:none"'));
+    } else {
+      res.type("html").send(raw);
+    }
+  } catch {
+    res.status(500).send("failed to read " + file);
+  }
+}
+
 app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "noclaim-farm.html"));
+  serveFarmPage(req, res, "noclaim-farm.html");
 });
 
 // Web-token farm (superadmin only) — standalone TEST console for the
 // web-client-OAuth drop farmer, driven by the standalone WebBotAccount model.
 app.get("/webbot-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "webbot-farm.html"));
+  serveFarmPage(req, res, "webbot-farm.html");
 });
 
 app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -590,6 +620,7 @@ app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, noclaimFarmRoutes);
 app.use(enforce2fa, webbotFarmRoutes);
+app.use(enforce2fa, unclaimedAutoRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
 app.use(enforce2fa, spentAccountsRoutes);
@@ -685,6 +716,10 @@ mongoose
     // Pi). Self-guards on autoFarm.noClaimStreamGate — no Twitch calls / no SSH
     // until it is flipped on from the No-claim farming page.
     noclaimWatcher.start();
+    // Unclaimed-farms auto-listing: lists + sells no-claim and web-token
+    // accounts, delists on expiry and returns all-expired accounts to the
+    // pool. Self-guards on autoFarm.unclaimedAutoList + the pause flag.
+    unclaimedAutoList.start();
     // Fleet metric history: a periodic snapshot of account / pool / listing
     // counts so a future "the count dropped" question can be answered from data
     // instead of guesswork. See utils/fleetSnapshot.js.

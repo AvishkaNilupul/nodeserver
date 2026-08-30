@@ -39,6 +39,11 @@ const AUTO_FARM_DEFAULTS = {
   // catches every CoD title (e.g. "Call of Duty: Warzone", "Call of Duty: Black
   // Ops 6"). Editable from that tab.
   noClaimGames: ["overwatch", "rainbow six", "call of duty"],
+  // Unclaimed-farms auto-listing (utils/unclaimedAutoList.js): auto-list and
+  // auto-sell accounts from the no-claim farm + web-token farm on the same
+  // marketplaces the auto-farmer uses. Ships ON per the owner's build request;
+  // pause from the Unclaimed farms tab (writes unclaimedAutoListPaused).
+  unclaimedAutoList: true,
   // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
   // account on — World of Tanks and UFL sell too thin to be worth burning new
   // accounts. For these, the brain only ever REUSES accounts it has already
