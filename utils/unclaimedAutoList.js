@@ -182,6 +182,28 @@ function signatureFor(game, drops) {
   return { game: g, keys, key: g + "|" + keys.join(",") };
 }
 
+// A set's items are ONE row per unique drop (an account can hold several
+// copies of the same drop — e.g. "Alpha Pack" from different campaigns — and
+// the signature dedupes them, so the items must too, or findUnclaimedSet's
+// size check never matches and every account gets its own set/listing).
+function dedupeSetItems(drops, game) {
+  const seen = new Set();
+  const items = [];
+  for (const d of drops || []) {
+    const key = String(d.itemKey || d.name || "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    items.push({
+      itemKey: key,
+      name: d.name || "Reward",
+      game: d.game || game,
+      image: d.imageURL || "",
+      qty: 1,
+    });
+  }
+  return items;
+}
+
 // Listing copy — the account and its unclaimed drops, with the connect-and-
 // House title style, exactly like the auto-lister:
 //   "{Game} Twitch Drops ({N} Items) — {Item A} + {Item B} +{N-2} more"
@@ -465,13 +487,7 @@ async function createUnclaimedSet(signature, game, drops, price) {
   return DropSet.create({
     name: (game || "Twitch") + " drops — unclaimed",
     note: SET_NOTE,
-    items: (drops || []).map((d) => ({
-      itemKey: d.itemKey || d.name,
-      name: d.name || "Reward",
-      game: d.game || game,
-      image: d.imageURL || "",
-      qty: 1,
-    })),
+    items: dedupeSetItems(drops, game),
     price,
     listed: false,
     custom: true,
@@ -1974,6 +1990,7 @@ module.exports = {
   sellableDropsFromWebbotInv,
   plainPassword,
   signatureFor,
+  dedupeSetItems,
   listingTitle,
   listingDescription,
   activeListingsForLogin,

@@ -14,6 +14,7 @@ const {
   listingTitle,
   listingDescription,
   signatureFor,
+  dedupeSetItems,
 } = require("../utils/unclaimedAutoList");
 
 test("no-claim inventory: only 100%-unclaimed drops are sellable", () => {
@@ -107,4 +108,34 @@ test("signatureFor: a different drop makes it a different item", () => {
   ]);
   assert.notStrictEqual(withSkip.key, withoutSkip.key);
   assert.strictEqual(signatureFor("", []).key, "|");
+});
+
+test("dedupeSetItems: duplicate drops collapse to one item per key", () => {
+  const drops = [
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+  ];
+  const items = dedupeSetItems(drops, "Rainbow Six Siege");
+  assert.strictEqual(items.length, 1);
+  assert.strictEqual(items[0].itemKey, "alpha pack|rainbow six siege");
+  assert.strictEqual(items[0].name, "Alpha Pack");
+  assert.strictEqual(items[0].game, "Rainbow Six Siege");
+  // Keeps distinct items; a drop without an itemKey is keyed by name (same
+  // fallback as signatureFor), and a drop with neither is dropped.
+  const mixed = dedupeSetItems(
+    [
+      { name: "Alpha Pack", itemKey: "alpha pack|r6" },
+      { name: "Charm", itemKey: "charm|r6" },
+      { name: "No key drop", itemKey: "" },
+      { name: "", itemKey: "" },
+    ],
+    "R6",
+  );
+  assert.strictEqual(mixed.length, 3);
+  assert.deepStrictEqual(
+    mixed.map((i) => i.name),
+    ["Alpha Pack", "Charm", "No key drop"],
+  );
 });
