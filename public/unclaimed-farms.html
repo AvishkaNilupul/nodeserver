@@ -97,7 +97,7 @@
   </div>
 
   <div class="banner">
-    🛒 <b>Auto-list.</b> Accounts from both farms with 100%-unclaimed drops are listed automatically on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel, ZeusX per settings), one account per buyer, and sold with auto-delivery. When drops expire the listings are delisted and the account goes <b>back to the pool</b> — but only after <b>all</b> of its drops are gone; a drop a buyer claimed = sold, never pool-returned.
+    🛒 <b>Auto-list.</b> One listing per item (a game + its drop set), fed by accounts from both farms with 100%-unclaimed drops, on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel — ZeusX stays manual). When a unit sells, Gameflip relists the next account and Digiseller/GGSel restock the same product — one account per buyer. A sold account is spent, never pool-returned; when <b>all</b> of an account's drops expire its unit is removed and the account goes <b>back to the pool</b>.
   </div>
 
   <div class="tabs">
@@ -120,6 +120,7 @@
       <div class="hd">
         <b>Auto-list engine</b>
         <span class="chip" id="stEngine">–</span>
+        <span class="chip" id="stIntegrity">–</span>
         <span class="muted" id="stLastRun" style="margin-left:auto;"></span>
       </div>
       <div class="bd" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
@@ -213,6 +214,9 @@ async function loadState(){
     $('stSkipped').textContent=c.skipped||0;
     $('stEngine').textContent=(st.paused?'paused':(st.enabled?'auto on':'off'));
     $('stEngine').className='chip '+(st.paused?'warn':(st.enabled?'on':'off'));
+    var int=j.integrity||{};
+    $('stIntegrity').textContent=(int.ok?'integrity ok':('integrity '+((int.count)||0)+' issue'+(int.count===1?'':'s')));
+    $('stIntegrity').className='chip '+(int.ok?'on':'off');
     var lr=st.lastRun;
     $('stLastRun').textContent=lr
       ? ('last run '+(lr.tookMs!=null?Math.round(lr.tookMs/1000)+'s':'')+

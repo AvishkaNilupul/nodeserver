@@ -8,6 +8,14 @@ const mongoose = require("mongoose");
 // the account's MarketplaceListing rows are sold/delisted and the account has
 // left the bot. State changes are logged here with timestamps; the live
 // sellable inventory is NEVER stored as truth — it is re-read on every pass.
+//
+// One item-set (a game + an exact set of unclaimed drops) is published as ONE
+// listing per marketplace, and the ledger rows for that set are its stock
+// units: Gameflip exposes one "live" unit at a time (a relist chain), while
+// Digiseller/GGSel attach every unit as a delivery code on one product. Each
+// account is attached to exactly one marketplace (split round-robin), so a
+// sale on one platform can never hand out an account a buyer already received
+// elsewhere.
 const unclaimedAccountSchema = new mongoose.Schema(
   {
     // Where the account came from: "noclaim" (Pi no-claim bot config) or
@@ -44,6 +52,20 @@ const unclaimedAccountSchema = new mongoose.Schema(
         },
       ],
       default: [],
+    },
+
+    // The item-set's DropSet (ONE per game + exact drop set). Stock units of
+    // the same set share it.
+    set: { type: mongoose.Schema.Types.ObjectId, ref: "DropSet", default: null },
+
+    // Which marketplace this account is attached to as a stock unit:
+    // "gameflip" (live unit or waiting in the relist chain), "digiseller" or
+    // "ggsel" (a delivery-code unit on the set's product). "" while deciding.
+    market: {
+      type: String,
+      enum: ["", "gameflip", "digiseller", "ggsel"],
+      default: "",
+      index: true,
     },
 
     // Lifecycle. listed -> sold | expired; expired -> released once the pool

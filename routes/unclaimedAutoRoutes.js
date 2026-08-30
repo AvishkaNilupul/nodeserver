@@ -21,7 +21,7 @@ const router = express.Router();
 // live unclaimed rows.
 router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
   try {
-    const [listed, sold, expired, released, skipped, activeRows, soldRows] =
+    const [listed, sold, expired, released, skipped, activeRows, soldRows, integrity] =
       await Promise.all([
         UnclaimedAccount.countDocuments({ status: "listed" }),
         UnclaimedAccount.countDocuments({ status: "sold" }),
@@ -30,11 +30,13 @@ router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
         UnclaimedAccount.countDocuments({ status: "skipped" }),
         MarketplaceListing.countDocuments({ origin: engine.ORIGIN, status: "active" }),
         MarketplaceListing.countDocuments({ origin: engine.ORIGIN, status: "sold" }),
+        engine.consistencyIssues(),
       ]);
     res.json({
       success: true,
       state: engine.status(),
       counts: { listed, sold, expired, released, skipped, activeRows, soldRows },
+      integrity,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -66,6 +68,8 @@ router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) =
         twitchId: a.twitchId,
         game: a.game,
         botId: a.botId,
+        set: a.set ? String(a.set) : "",
+        market: a.market || "",
         status: a.status,
         note: a.note,
         drops: a.drops || [],
@@ -149,11 +153,7 @@ router.post("/api/unclaimed-auto/sell/:id", requireSuperadmin, async (req, res) 
       return res
         .status(409)
         .json({ success: false, message: "account is not listed (" + ledger.status + ")" });
-    const rows = await MarketplaceListing.find({
-      origin: engine.ORIGIN,
-      accountLogin: ledger.login,
-    }).lean();
-    await engine.spendAccount(ledger, "manual mark sold", { rows });
+    await engine.spendAccount(ledger, "manual mark sold");
     logEvent({
       category: "unclaimed",
       action: "manual_sold",
@@ -178,42 +178,19 @@ router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res
     const ledger = await UnclaimedAccount.findById(id).lean();
     if (!ledger)
       return res.status(404).json({ success: false, message: "no such account" });
-    const rows = await MarketplaceListing.find({
-      origin: engine.ORIGIN,
-      accountLogin: ledger.login,
-    }).lean();
-    const active = rows.filter((r) => r.status === "active");
-    const results = await engine.delistRowsForAccount(active);
-    const allOk = results.every((r) => r.ok);
     const release = !!req.body.release;
-    if (release && allOk) {
-      const ok = await engine.releaseToPool(ledger);
-      await UnclaimedAccount.updateOne(
-        { _id: ledger._id },
-        {
-          $set: {
-            status: ok ? "released" : "expired",
-            expiredAt: new Date(),
-            releasedAt: ok ? new Date() : null,
-            note: "operator delisted" + (ok ? " + returned to pool" : ""),
-          },
-        },
-      );
-    } else {
-      await UnclaimedAccount.updateOne(
-        { _id: ledger._id },
-        { $set: { status: allOk ? "expired" : "listed", note: "operator delisted" } },
-      );
-    }
+    const ok = await engine.expireAccount(ledger, { release });
     logEvent({
       category: "unclaimed",
       action: "manual_delist",
       actor: actorFromReq(req),
       subject: ledger.login || id,
       game: ledger.game || "",
-      detail: "operator delisted " + active.length + " row(s)" + (release ? " + pool return" : ""),
+      detail:
+        "operator removed " + (ledger.market || "?") + " unit" +
+        (release ? " + pool return" : ""),
     });
-    res.json({ success: true, delisted: results.length, allOk, released: release && allOk });
+    res.json({ success: true, released: ok });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

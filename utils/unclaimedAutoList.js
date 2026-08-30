@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// UNCLAIMED-FARMS AUTO-LISTING engine.
+// UNCLAIMED-FARMS AUTO-LISTING engine (v2).
 //
 // Lists + sells accounts from the TWO unclaimed-drops farms on the same
 // marketplaces the auto-farmer uses:
@@ -13,14 +13,28 @@
 // the buyer connects their own game account and claims — that is the whole
 // no-claim model.
 //
+// LISTING MODEL (v2, after the owner's correction): an "item" is ONE game +
+// ONE exact set of drops. All ready accounts for an item share ONE listing per
+// marketplace — never one listing per account:
+//   * Gameflip has no quantity, so it runs a relist chain: one live unit is on
+//     sale; when it sells/expires the next waiting unit is published as the
+//     successor ("list it again").
+//   * Digiseller / GGSel are quantity products: every ready account is attached
+//     as one delivery-code unit on the single product. A sale consumes a unit
+//     (the platform fulfils it); the next ready account joins as new stock.
+// Accounts are split round-robin across the enabled marketplaces, so one
+// account is only ever attached to one market and can never be handed to two
+// buyers on different platforms.
+//
 // Lifecycle per account (ledger: models/UnclaimedAccount.js):
-//   candidate -> listed (rows published, origin:"unclaimed") ->
-//     sold   (buyer paid / a listed drop flipped to claimed) -> spent path
-//     expired (all drops gone) -> delist all rows -> released back to pool
+//   listed (one unit of an item on one market) ->
+//     sold   (its unit sold / buyer claimed) -> spent path (never pool-return)
+//     expired (all drops gone) -> unit removed -> released back to pool
 // Rules: never claim, never reprice, never touch origin "auto"/"manual" rows,
-// one account = one buyer, pool return only after ALL drops expired.
+// and only return an account to the pool after ALL of its drops expired.
 // ---------------------------------------------------------------------------
 const fsp = require("fs/promises");
+const mongoose = require("mongoose");
 const hosts = require("./botHosts");
 const settings = require("./settings");
 const twitchInventory = require("./twitchInventory");
@@ -46,6 +60,7 @@ const MarketResearch = require("../models/MarketResearch");
 const NoclaimSpentAccount = require("../models/NoclaimSpentAccount");
 
 const ORIGIN = "unclaimed";
+const SET_NOTE = "Unclaimed auto-list";
 const HOST_ID = "pi";
 const BASE = "/home/avishka/twitchbot-noclaim";
 const BOTS_DIR = BASE + "/bots";
@@ -55,9 +70,17 @@ const containerFor = (id) => CONTAINER_PREFIX + id;
 
 const TICK_MS = 10 * 60 * 1000;
 const SCAN_LIMIT = 60; // candidate inventory checks per scan pass
-const CHECK_LIMIT = 30; // listed accounts re-verified per expiry/sale pass
-const RETRY_LIMIT = 5; // secondary-market retries per scan pass
+const CHECK_LIMIT = 40; // listed accounts re-verified per expiry/sale pass
 const CONCURRENCY = 5;
+
+// Cross-process run lock. The 10-minute tick and a manual "scan now" click are
+// separate processes, and two overlapping scans race the market split (the same
+// account ends up attached to two marketplaces). A Mongo doc is the mutex:
+// whoever sets `at` first owns the run, and a crashed holder is taken over
+// after LOCK_TTL_MS. See acquireRunLock/releaseRunLock below.
+const RUN_LOCK_COLLECTION = "unclaimedrunlock";
+const RUN_LOCK_ID = "run";
+const RUN_LOCK_TTL_MS = 15 * 60 * 1000;
 
 let running = false;
 let lastRun = null;
@@ -127,13 +150,6 @@ function plainPassword(enc) {
 // `password` (secretBox-encrypted); newer rows use `credPasswordEnc`. The
 // no-claim console reads `password` the same way (routes/noclaimFarmRoutes.js
 // per-bot accounts), so both are checked, password first.
-// Numeric-friendly bot sort key ("3" < "10" < webbot-bot-1 < idle "").
-function padBot(id) {
-  const n = parseInt(String(id || ""), 10);
-  if (Number.isFinite(n)) return String(n).padStart(8, "0");
-  return "zz" + String(id || "");
-}
-
 function poolPassword(poolRow) {
   if (!poolRow) return "";
   let pw = "";
@@ -144,6 +160,26 @@ function poolPassword(poolRow) {
   }
   if (!pw) pw = plainPassword(poolRow.credPasswordEnc);
   return pw || "";
+}
+
+// Numeric-friendly bot sort key ("3" < "10" < webbot-bot-1 < idle "").
+function padBot(id) {
+  const n = parseInt(String(id || ""), 10);
+  if (Number.isFinite(n)) return String(n).padStart(8, "0");
+  return "zz" + String(id || "");
+}
+
+// "The same item" = one game + the exact same set of drop itemKeys.
+function signatureFor(game, drops) {
+  const g = String(game || "").trim().toLowerCase();
+  const keys = [
+    ...new Set(
+      (drops || [])
+        .map((d) => String(d.itemKey || d.name || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ].sort();
+  return { game: g, keys, key: g + "|" + keys.join(",") };
 }
 
 // Listing copy — the account and its unclaimed drops, with the connect-and-
@@ -182,13 +218,20 @@ async function activeListingsForLogin(login) {
   if (!l) return [];
   const esc = l.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const rows = await MarketplaceListing.find(
-    { status: "active", accountLogin: new RegExp(esc, "i") },
-    { marketplace: 1, externalId: 1, origin: 1, accountLogin: 1 },
+    {
+      status: "active",
+      $or: [
+        { accountLogin: new RegExp(esc, "i") },
+        { "units.login": new RegExp("^" + esc + "$", "i") },
+      ],
+    },
+    { marketplace: 1, externalId: 1, origin: 1, accountLogin: 1, units: 1 },
   ).lean();
   return rows.filter((r) =>
     String(r.accountLogin || "")
       .split(/[,\s]+/)
-      .some((x) => x.toLowerCase() === l),
+      .some((x) => x.toLowerCase() === l) ||
+    (r.units || []).some((u) => String(u.login || "").toLowerCase() === l),
   );
 }
 
@@ -226,6 +269,10 @@ async function soldMapForSecrets(secrets) {
   }
   return map;
 }
+
+// ---------------------------------------------------------------------------
+// Transport helpers
+// ---------------------------------------------------------------------------
 
 function pi() {
   const host = hosts.resolveHost(HOST_ID);
@@ -268,9 +315,7 @@ async function mapLimit(items, n, fn) {
       out[i] = await fn(items[i], i);
     }
   }
-  await Promise.all(
-    Array.from({ length: Math.min(n, items.length) }, worker),
-  );
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
   return out;
 }
 
@@ -337,7 +382,6 @@ async function collectWebbotCandidates() {
       currentGame: 1,
       pinnedGame: 1,
       botId: 1,
-      dropsReadyUnclaimed: 1,
     },
   ).lean();
   const out = [];
@@ -364,17 +408,24 @@ async function inventoryForCandidate(cand) {
     const inv = await twitchInventory.fetchInventory(cand.clientSecret, {
       host: pi(),
     });
-    return { inv, sellable: sellableDropsFromNoClaimInv(inv), login: inv.login || cand.login };
+    return {
+      inv,
+      sellable: sellableDropsFromNoClaimInv(inv),
+      login: inv.login || cand.login,
+    };
   }
   const inv = await webbotTwitch.fetchInventory(cand.webToken);
   return { inv, sellable: sellableDropsFromWebbotInv(inv), login: cand.login };
 }
 
 // ---------------------------------------------------------------------------
-// Publishing
+// Item sets (ONE DropSet per game + exact drop set)
 // ---------------------------------------------------------------------------
 
-async function marketsForGame(game) {
+// The enabled marketplaces for a game, in split-priority order. ZeusX is NOT
+// included: it is a manual hand-over market for the auto-farm and has no
+// auto-sell path, so unclaimed stock is not published there.
+async function enabledMarketsForGame(game) {
   const af = settings.getAutoFarm();
   const markets = ["gameflip"];
   if (af.platiCategoryId) markets.push("digiseller");
@@ -386,26 +437,25 @@ async function marketsForGame(game) {
   }
   if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   if (ggselCategoryId) markets.push("ggsel");
-  let zeusxEnabled = false;
-  if (af.zeusxAuto) {
-    try {
-      zeusxEnabled = !!(await mp.zeusxResolveCategory(game).catch(() => null));
-    } catch {
-      zeusxEnabled = false;
-    }
-  }
-  if (zeusxEnabled) markets.push("zeusx");
-  return { markets, ggselCategoryId, zeusxEnabled };
+  return { markets, ggselCategoryId };
 }
 
-async function createAccountSet(cand, drops, price) {
-  const game = cand.game || (drops[0] && drops[0].game) || "";
+async function findUnclaimedSet(signature) {
+  if (!signature || !signature.keys || !signature.keys.length) return null;
+  return DropSet.findOne({
+    note: SET_NOTE,
+    "items.itemKey": { $all: signature.keys },
+    items: { $size: signature.keys.length },
+  }).lean();
+}
+
+async function createUnclaimedSet(signature, game, drops, price) {
   return DropSet.create({
-    name: (game || "Twitch") + " — unclaimed (" + (cand.login || cand.id || "acct") + ")",
-    note: "Unclaimed auto-list — " + cand.source + " farm",
-    items: drops.map((d) => ({
+    name: (game || "Twitch") + " drops — unclaimed",
+    note: SET_NOTE,
+    items: (drops || []).map((d) => ({
       itemKey: d.itemKey || d.name,
-      name: d.name,
+      name: d.name || "Reward",
       game: d.game || game,
       image: d.imageURL || "",
       qty: 1,
@@ -414,430 +464,523 @@ async function createAccountSet(cand, drops, price) {
     listed: false,
     custom: true,
     coverGame: game,
-    accountScopeLogins: [cand.login || ""].filter(Boolean),
   });
 }
 
-// Publish one account to one market. Returns { externalId, url } or throws.
-async function publishOneMarket({
-  marketplace,
-  cand,
-  drops,
-  price,
-  img,
-  ggselCategoryId,
-}) {
-  const game = cand.game || (drops[0] && drops[0].game) || "";
-  const login = cand.login || "";
-  const password = cand.password || "";
-  const title = listingTitle(game, login);
-  const description = listingDescription(game, drops, login);
-
-  if (marketplace === "gameflip") {
-    const r = await mp.gameflipPublish({
-      title,
-      description,
-      priceUsd: price,
-      imagePath: img || undefined,
-      autoDeliverCode: gameflipDeliveryCode(login, password),
-    });
-    return { externalId: r.externalId, url: r.url || "" };
+// Find or create the item's set. Two concurrent workers for the same signature
+// could race a duplicate create; the winner check below collapses them.
+async function ensureUnclaimedSet(signature, game, drops, price) {
+  const existing = await findUnclaimedSet(signature);
+  if (existing) return existing;
+  const created = await createUnclaimedSet(signature, game, drops, price);
+  const winner = await findUnclaimedSet(signature);
+  if (winner && String(winner._id) !== String(created._id)) {
+    await DropSet.deleteOne({ _id: created._id }).catch(() => {});
+    return winner;
   }
-  if (marketplace === "digiseller") {
-    const af = settings.getAutoFarm();
-    const attributes = af.platiAttributes || [];
-    const r = await mp.digisellerPublish({
-      title,
-      description,
-      priceUsd: price,
-      categories: [{ owner: 1, categoryId: af.platiCategoryId, attributes }],
-    });
-    let contentIds = [];
-    try {
-      const added = await mp.digisellerAddContent(
-        r.externalId,
-        [digisellerDeliveryCode(login, password)],
-      );
-      contentIds = (added && added.contentIds) || [];
-    } catch (err) {
-      await mp.digisellerDelist(r.externalId).catch(() => {});
-      throw err;
-    }
-    if (img) await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
-    return {
-      externalId: r.externalId,
-      url: r.url || "",
-      units: [
-        {
-          contentId: contentIds[0] || "",
-          accountId: cand.id || "",
-          login,
-          addedAt: new Date(),
-        },
-      ],
-    };
-  }
-  if (marketplace === "ggsel") {
-    const r = await mp.ggselPublish({
-      title,
-      description,
-      priceUsd: price,
-      categoryId: ggselCategoryId,
-      delivery: "auto",
-      coverImagePath: img || undefined,
-      products: [ggselDeliveryCode(login, password)],
-    });
-    return { externalId: r.externalId, url: r.url || "" };
-  }
-  if (marketplace === "zeusx") {
-    const af = settings.getAutoFarm();
-    const r = await mp.zeusxPublish({
-      title,
-      description,
-      priceUsd: price,
-      game,
-      coverImagePath: img || undefined,
-      autoDeliverAccounts: af.zeusxAutoDeliver
-        ? [{ login, password, email: "" }]
-        : undefined,
-      quantity: af.zeusxAutoDeliver ? undefined : 1,
-    });
-    return { externalId: r.externalId, url: r.url || "" };
-  }
-  throw new Error("unknown marketplace " + marketplace);
+  return created;
 }
 
-function rowForMarket(marketplace, set, cand, price, r, extra) {
-  const base = {
-    set: set._id,
+// ---------------------------------------------------------------------------
+// Row + ledger queries
+// ---------------------------------------------------------------------------
+
+async function activeRowForSetMarket(setId, marketplace) {
+  if (!setId || !marketplace) return null;
+  return MarketplaceListing.findOne({
+    origin: ORIGIN,
+    set: setId,
     marketplace,
+    status: "active",
+  }).lean();
+}
+
+async function listedLedgersForSetMarket(setId, market) {
+  if (!setId || !market) return [];
+  return UnclaimedAccount.find({ set: setId, market, status: "listed" })
+    .sort({ listedAt: 1, _id: 1 })
+    .lean();
+}
+
+// The marketplace row this ledger is (or was) a unit of.
+async function rowForLedger(ledger) {
+  if (!ledger || !ledger.set) return null;
+  if (ledger.market) {
+    const row = await MarketplaceListing.findOne({
+      origin: ORIGIN,
+      set: ledger.set,
+      marketplace: ledger.market,
+      status: { $in: ["active", "sold"] },
+    }).lean();
+    if (row) return row;
+  }
+  return MarketplaceListing.findOne({
+    origin: ORIGIN,
+    set: ledger.set,
+    marketplace: "gameflip",
+    status: { $in: ["active", "sold"] },
+  }).lean();
+}
+
+// Rebuild a credential object for a ledger row (pool row / webbot row).
+async function credentialForLedger(ledger) {
+  if (!ledger) return { login: "", password: "" };
+  if (ledger.source === "noclaim" && ledger.poolAccountId) {
+    const pool = await AvailableAccount.findById(ledger.poolAccountId).lean();
+    if (pool) {
+      return { login: ledger.login || pool.login || "", password: poolPassword(pool) };
+    }
+  }
+  if (ledger.source === "webbot" && ledger.webBotAccountId) {
+    const wb = await WebBotAccount.findById(ledger.webBotAccountId).lean();
+    if (wb) {
+      return {
+        login: ledger.login || wb.login || "",
+        password: plainPassword(wb.credPasswordEnc),
+      };
+    }
+  }
+  return { login: ledger.login || "", password: "" };
+}
+
+// ---------------------------------------------------------------------------
+// Publishing (ONE listing per item per marketplace)
+// ---------------------------------------------------------------------------
+
+async function publishGameflipUnit(set, cand, drops, price, img) {
+  const game = cand.game || (drops[0] && drops[0].game) || set.coverGame || "";
+  const r = await mp.gameflipPublish({
+    title: listingTitle(game),
+    description: listingDescription(game, drops, cand.login),
+    priceUsd: price,
+    imagePath: img || undefined,
+    autoDeliverCode: gameflipDeliveryCode(cand.login, cand.password),
+  });
+  return MarketplaceListing.create({
+    set: set._id,
+    marketplace: "gameflip",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(cand.game || (cand.drops && cand.drops[0] && cand.drops[0].game) || "", cand.login),
-    description: listingDescription(
-      cand.game || (cand.drops && cand.drops[0] && cand.drops[0].game) || "",
-      cand.drops || [],
-      cand.login,
-    ),
+    title: listingTitle(game),
+    description: listingDescription(game, drops, cand.login),
     price,
     status: "active",
     origin: ORIGIN,
-    note: "unclaimed auto-list — " + cand.source + " farm",
-    autoDeliver: marketplace !== "zeusx" || (settings.getAutoFarm().zeusxAutoDeliver ? true : false),
-    accountId: cand.id || "",
-    accountLogin: cand.login || "",
-    qtyRemaining: 0, // one account per listing — never relist another account
-    qtyTarget: 0, // the guardian must not feed/top-up these
-  };
-  if (extra && extra.units) base.units = extra.units;
-  return base;
+    autoDeliver: true,
+    accountId: cand.id || cand.poolAccountId || "",
+    accountLogin: cand.login,
+    qtyRemaining: 0, // the engine relists; the fulfiller must never (archive stock differs)
+    qtyTarget: 0,
+    note: "unclaimed auto-list — live unit",
+  });
 }
 
-// Publish the account on every configured market, creating the ledger + rows.
-// Returns { set, rows, errors }.
-async function listAccount(cand, drops) {
-  const game = cand.game || (drops[0] && drops[0].game) || "";
-  const research = await MarketResearch.findOne({ game }).lean().catch(() => null);
-  const price = derivePrice(research);
-  const set = await createAccountSet(cand, drops, price);
+async function publishDigisellerProduct(set, units, game, drops, price, img, categoryId) {
+  const r = await mp.digisellerPublish({
+    title: listingTitle(game),
+    description: listingDescription(game, drops, ""),
+    priceUsd: price,
+    categories: [
+      {
+        owner: 1,
+        categoryId,
+        attributes: settings.getAutoFarm().platiAttributes || [],
+      },
+    ],
+  });
+  let contentIds = [];
+  try {
+    // Digiseller's content-add API only commits the first ~17 lines of a big
+    // batch (verified live: a 56-line add left 17 in stock), so feed units in
+    // small chunks and record every contentId in order — the only handle to
+    // delete a specific unit later.
+    const CHUNK = 12;
+    for (let i = 0; i < units.length; i += CHUNK) {
+      const slice = units.slice(i, i + CHUNK);
+      const added = await mp.digisellerAddContent(
+        r.externalId,
+        slice.map((u) => digisellerDeliveryCode(u.login, u.password)),
+      );
+      const ids = (added && added.contentIds) || [];
+      if (ids.length !== slice.length) {
+        throw new Error(
+          "digiseller content add returned " +
+            ids.length +
+            " ids for " +
+            slice.length +
+            " lines (product " +
+            r.externalId +
+            ")",
+        );
+      }
+      contentIds.push(...ids);
+    }
+  } catch (err) {
+    await mp.digisellerDelist(r.externalId).catch(() => {});
+    throw err;
+  }
+  if (img) await mp.digisellerUploadImage(r.externalId, img).catch(() => {});
+  const row = await MarketplaceListing.create({
+    set: set._id,
+    marketplace: "digiseller",
+    externalId: r.externalId,
+    url: r.url || "",
+    title: listingTitle(game),
+    description: listingDescription(game, drops, ""),
+    price,
+    status: "active",
+    origin: ORIGIN,
+    accountId: units[0] && (units[0].id || units[0].poolAccountId || ""),
+    accountLogin: units.map((u) => u.login).join(", "),
+    qtyRemaining: 0,
+    qtyTarget: 0,
+    units: units.map((u, i) => ({
+      contentId: contentIds[i] || "",
+      accountId: u.id || u.poolAccountId || "",
+      login: u.login,
+      addedAt: new Date(),
+    })),
+    note: "unclaimed auto-list — stock product",
+  });
+  const stock = await mp.digisellerProductStock(r.externalId).catch(() => null);
+  if (stock != null) {
+    await MarketplaceListing.updateOne(
+      { _id: row._id },
+      { $set: { lastStock: stock } },
+    ).catch(() => {});
+  }
+  return row;
+}
 
+async function publishGgselOffer(set, units, game, drops, price, img, categoryId) {
+  const r = await mp.ggselPublish({
+    title: listingTitle(game),
+    description: listingDescription(game, drops, ""),
+    priceUsd: price,
+    categoryId,
+    delivery: "auto",
+    coverImagePath: img || undefined,
+    products: units.map((u) => ggselDeliveryCode(u.login, u.password)),
+  });
+  await mp.ggselEnableAutoselling(r.externalId).catch(() => {});
+  await mp.ggselFinalizeStock(r.externalId).catch(() => {});
+  const row = await MarketplaceListing.create({
+    set: set._id,
+    marketplace: "ggsel",
+    externalId: r.externalId,
+    url: r.url || "",
+    title: listingTitle(game),
+    description: listingDescription(game, drops, ""),
+    price,
+    status: "active",
+    origin: ORIGIN,
+    accountId: units[0] && (units[0].id || units[0].poolAccountId || ""),
+    accountLogin: units.map((u) => u.login).join(", "),
+    qtyRemaining: 0,
+    qtyTarget: 0,
+    units: units.map((u) => ({
+      contentId: "",
+      accountId: u.id || u.poolAccountId || "",
+      login: u.login,
+      addedAt: new Date(),
+    })),
+    note: "unclaimed auto-list — stock offer",
+  });
+  const stock = await mp.ggselOfferStock(r.externalId).catch(() => null);
+  if (stock != null) {
+    await MarketplaceListing.updateOne(
+      { _id: row._id },
+      { $set: { lastStock: stock } },
+    ).catch(() => {});
+  }
+  return row;
+}
+
+async function publishProduct(set, market, units, game, drops, price, img, ggselCategoryId) {
+  if (market === "digiseller") {
+    return publishDigisellerProduct(
+      set,
+      units,
+      game,
+      drops,
+      price,
+      img,
+      settings.getAutoFarm().platiCategoryId,
+    );
+  }
+  return publishGgselOffer(set, units, game, drops, price, img, ggselCategoryId);
+}
+
+// Attach one more stock unit to an existing quantity product.
+async function addUnitToRow(row, cand) {
+  if (row.marketplace === "digiseller") {
+    const added = await mp.digisellerAddContent(row.externalId, [
+      digisellerDeliveryCode(cand.login, cand.password),
+    ]);
+    const contentId = ((added && added.contentIds) || [])[0] || "";
+    const units = [
+      ...(row.units || []),
+      {
+        contentId,
+        accountId: cand.id || cand.poolAccountId || "",
+        login: cand.login,
+        addedAt: new Date(),
+      },
+    ];
+    await MarketplaceListing.updateOne(
+      { _id: row._id, status: "active" },
+      { $set: { units, accountLogin: units.map((u) => u.login).join(", ") } },
+    );
+    return;
+  }
+  if (row.marketplace === "ggsel") {
+    await mp.ggselAddProducts(row.externalId, [ggselDeliveryCode(cand.login, cand.password)]);
+    await mp.ggselFinalizeStock(row.externalId).catch(() => {});
+    const units = [
+      ...(row.units || []),
+      {
+        contentId: "",
+        accountId: cand.id || cand.poolAccountId || "",
+        login: cand.login,
+        addedAt: new Date(),
+      },
+    ];
+    await MarketplaceListing.updateOne(
+      { _id: row._id, status: "active" },
+      { $set: { units, accountLogin: units.map((u) => u.login).join(", ") } },
+    );
+  }
+}
+
+// Publish the next waiting Gameflip unit as the chain's new live listing.
+// `excludeLogin` is the unit that just left (sold/expired) — never it.
+async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
+  if (!setId) return { published: false, reason: "no set" };
+  const set = await DropSet.findById(setId).lean();
+  if (!set) return { published: false, reason: "no set" };
+  const waiting = await UnclaimedAccount.find({
+    set: setId,
+    market: "gameflip",
+    status: "listed",
+    loginLower: { $ne: String(excludeLogin || "").toLowerCase() },
+  })
+    .sort({ listedAt: 1, _id: 1 })
+    .limit(1)
+    .lean();
+  if (!waiting.length) return { published: false, reason: "no waiting unit" };
+  const cred = await credentialForLedger(waiting);
+  if (!cred.password) return { published: false, reason: "no password" };
+  const drops = (set.items || []).map((i) => ({
+    name: i.name,
+    game: i.game,
+    campaign: "",
+    imageURL: i.image || "",
+    itemKey: i.itemKey,
+  }));
+  const game = set.coverGame || (drops[0] && drops[0].game) || "";
   let img = "";
   try {
     img = await buildSetGridImage(set);
   } catch {
     img = "";
   }
-
-  const { markets, ggselCategoryId } = await marketsForGame(game);
-  const rows = [];
-  const errors = {};
-
-  // Gameflip first — it is the anchor market; a Gameflip failure aborts the
-  // account so nothing is published half-way.
-  const gfIndex = markets.indexOf("gameflip");
-  if (gfIndex >= 0) {
-    try {
-      const r = await publishOneMarket({
-        marketplace: "gameflip",
-        set,
-        cand: { ...cand, drops },
-        drops,
-        price,
-        img,
-        ggselCategoryId,
-      });
-      const row = await MarketplaceListing.create(
-        rowForMarket("gameflip", set, { ...cand, drops }, price, r),
-      );
-      rows.push(row);
-      markets.splice(gfIndex, 1);
-    } catch (e) {
-      errors.gameflip = e.message;
-    }
-  }
-  if (!rows.length) {
-    // Anchor publish failed — no partial state: remove the set and retry next
-    // pass (the account is untouched).
-    await DropSet.deleteOne({ _id: set._id }).catch(() => {});
-    if (img) await fsp.unlink(img).catch(() => {});
-    throw new Error("Gameflip publish failed: " + (errors.gameflip || "no market"));
-  }
-
-  for (const marketplace of markets) {
-    try {
-      const r = await publishOneMarket({
-        marketplace,
-        set,
-        cand: { ...cand, drops },
-        drops,
-        price,
-        img,
-        ggselCategoryId,
-      });
-      const extra = r.units ? { units: r.units } : {};
-      const row = await MarketplaceListing.create(
-        rowForMarket(marketplace, set, { ...cand, drops }, price, r, extra),
-      );
-      rows.push(row);
-    } catch (e) {
-      errors[marketplace] = e.message;
-    }
-  }
+  const cand = {
+    source: waiting.source,
+    id: waiting.poolAccountId || waiting.webBotAccountId || "",
+    poolAccountId: waiting.poolAccountId,
+    login: cred.login,
+    password: cred.password,
+    game,
+  };
+  const row = await publishGameflipUnit(set, cand, drops, Number(set.price) || 0, img);
   if (img) await fsp.unlink(img).catch(() => {});
-
-  // Record stock baselines for the quantity markets we will sale-detect from.
-  for (const row of rows) {
-    if (row.marketplace === "digiseller" || row.marketplace === "ggsel") {
-      try {
-        const stock =
-          row.marketplace === "digiseller"
-            ? await mp.digisellerProductStockDetailed(row.externalId)
-            : await mp.ggselOfferStockDetailed(row.externalId);
-        await MarketplaceListing.updateOne(
-          { _id: row._id },
-          { $set: { lastStock: stock && stock.stock != null ? stock.stock : 1 } },
-        ).catch(() => {});
-      } catch {
-        /* baseline read is best-effort */
-      }
-    }
-  }
-
-  const ledger = await UnclaimedAccount.findOneAndUpdate(
-    { loginLower: String(cand.login || "").toLowerCase(), source: cand.source },
-    {
-      $set: {
-        source: cand.source,
-        login: cand.login || "",
-        loginLower: String(cand.login || "").toLowerCase(),
-        twitchId: cand.twitchId || "",
-        game,
-        poolAccountId: cand.poolAccountId || "",
-        webBotAccountId: cand.source === "webbot" ? cand.id || "" : "",
-        botId: cand.botId || "",
-        container: cand.container || "",
-        drops: drops.map((d) => ({
-          name: d.name,
-          game: d.game || game,
-          campaign: d.campaign || "",
-          itemKey: d.itemKey || d.name,
-        })),
-        status: "listed",
-        note: Object.keys(errors).length
-          ? "listed; secondary errors: " + JSON.stringify(errors)
-          : "",
-        listingIds: rows.map((r) => String(r._id)),
-        listingExternalIds: rows.map((r) => r.externalId),
-        listedAt: new Date(),
-        lastCheckedAt: new Date(),
-      },
-    },
-    { upsert: true, new: true },
-  );
-
-  logEvent({
-    category: "unclaimed",
-    action: "listed",
-    actor: "unclaimedAutoList",
-    subject: cand.login || cand.id || "",
-    game: game || "",
-    count: rows.length,
-    detail:
-      cand.source +
-      " account " +
-      (cand.login || cand.id || "") +
-      " auto-listed on " +
-      rows.map((r) => r.marketplace).join(", ") +
-      " ($" +
-      price +
-      ")",
-  });
-  return { set, rows, errors, ledger };
-}
-
-// Retry secondary markets that failed at publish time for an already-listed
-// account (same price/title/set — only the missing markets are attempted).
-async function retrySecondaries(ledger) {
-  if (ledger.status !== "listed") return { retried: 0 };
-  const existing = await MarketplaceListing.find(
-    { _id: { $in: (ledger.listingIds || []).filter(Boolean) }, origin: ORIGIN },
-    { marketplace: 1, status: 1, set: 1 },
-  ).lean();
-  if (!existing.length) return { retried: 0 };
-  const have = new Set(existing.map((r) => r.marketplace));
-  const set = await DropSet.findById(existing[0].set).lean();
-  if (!set) return { retried: 0 };
-  const game = ledger.game || (set.items && set.items[0] && set.items[0].game) || "";
-  const { markets, ggselCategoryId } = await marketsForGame(game);
-  const missing = markets.filter((m) => !have.has(m));
-  const failed = new Set();
-  let retried = 0;
-  for (const marketplace of missing) {
-    const cand = {
-      source: ledger.source,
-      id: ledger.source === "webbot" ? ledger.webBotAccountId : ledger.poolAccountId,
-      login: ledger.login,
-      password: "", // filled below from the stored account
-      game,
-    };
-    if (ledger.source === "noclaim") {
-      const pool = await AvailableAccount.findById(ledger.poolAccountId).lean();
-      if (pool) cand.password = poolPassword(pool);
-    } else {
-      const wb = await WebBotAccount.findById(ledger.webBotAccountId).lean();
-      if (wb) cand.password = plainPassword(wb.credPasswordEnc);
-    }
-    if (!cand.password) continue;
-    try {
-      const drops = set.items.map((i) => ({
-        name: i.name,
-        game: i.game,
-        campaign: "",
-        imageURL: i.image,
-        itemKey: i.itemKey,
-      }));
-      const r = await publishOneMarket({
-        marketplace,
-        set,
-        cand: { ...cand, drops },
-        drops,
-        price: Number(set.price) || 0,
-        img: "",
-        ggselCategoryId,
-      });
-      await MarketplaceListing.create(
-        rowForMarket(marketplace, set, { ...cand, drops }, Number(set.price) || 0, r),
-      );
-      await MarketplaceListing.updateOne(
-        { _id: existing[0]._id },
-        { $set: { lastError: "" } },
-      ).catch(() => {});
-      have.add(marketplace);
-      retried++;
-    } catch (e) {
-      failed.add(marketplace);
-      await MarketplaceListing.updateOne(
-        { _id: existing[0]._id },
-        { $set: { lastError: "secondary " + marketplace + ": " + e.message } },
-      ).catch(() => {});
-    }
-  }
-  const stillMissing = markets.filter((m) => !have.has(m) && !failed.has(m));
   await UnclaimedAccount.updateOne(
-    { _id: ledger._id },
+    { _id: waiting._id },
     {
       $set: {
-        note: stillMissing.length
-          ? "listed; secondary errors: " + JSON.stringify(stillMissing)
-          : "",
+        listingIds: [...new Set([...(waiting.listingIds || []), String(row._id)])],
+        note: "unclaimed auto-list — live unit",
       },
     },
   ).catch(() => {});
-  return { retried };
-}
-
-// ---------------------------------------------------------------------------
-// Lifecycle: expiry, pool return, spent
-// ---------------------------------------------------------------------------
-
-async function delistRowsForAccount(rows) {
-  const results = [];
-  for (const row of rows) {
-    if (row.status !== "active") {
-      results.push({ row, ok: true });
-      continue;
-    }
-    let ok = true;
-    try {
-      if (row.marketplace === "gameflip") await mp.gameflipDelist(row.externalId);
-      else if (row.marketplace === "digiseller") await mp.digisellerDelist(row.externalId);
-      else if (row.marketplace === "ggsel") await mp.ggselDelist(row.externalId);
-      else if (row.marketplace === "zeusx") await mp.zeusxDelist(row.externalId);
-    } catch (e) {
-      ok = false;
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        { $set: { lastError: "auto-delist: " + e.message } },
-      ).catch(() => {});
-    }
-    if (ok) {
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        { $set: { status: "delisted" } },
-      ).catch(() => {});
-    }
-    results.push({ row, ok });
+  if (opts.log !== false) {
+    logEvent({
+      category: "unclaimed",
+      action: "relisted",
+      actor: "unclaimedAutoList",
+      subject: cred.login,
+      game,
+      detail:
+        "gameflip successor published for unclaimed item " + game + " ($" + (Number(set.price) || 0).toFixed(2) + ")",
+    });
   }
-  return results;
+  return { published: true, row, login: cred.login };
 }
 
-// Release an account whose drops all expired. No-claim -> pool row back to
-// available; webbot -> idle in its own registry.
-async function releaseToPool(ledger) {
-  if (ledger.source === "noclaim" && ledger.poolAccountId) {
-    const r = await AvailableAccount.updateOne(
-      { _id: ledger.poolAccountId, status: "claimed" },
-      {
-        $set: {
-          status: "available",
-          claimedNote: "expired — unclaimed auto-list release",
-        },
-      },
-    );
-    const cur = await AvailableAccount.findById(ledger.poolAccountId, {
-      status: 1,
+// ---------------------------------------------------------------------------
+// Unit removal + marketplace repair
+// ---------------------------------------------------------------------------
+
+// Remove this ledger's unit from its marketplace listing.
+//  - gameflip: delist the live row (if this unit was the live one) and publish
+//    the next waiting unit as the successor.
+//  - digiseller: delete the unit's content line; delist the product if it is
+//    now empty.
+//  - ggsel: GGSel cannot delete one unit; rebuild the offer without this unit
+//    when healthy units remain, else take the whole offer down.
+async function removeUnitFromRow(row, ledger, opts = {}) {
+  if (!row || !ledger) return { ok: true, removed: false };
+  const login = String(ledger.login || "").toLowerCase();
+  if (row.marketplace === "gameflip") {
+    if (String(row.accountLogin || "").toLowerCase() !== login) {
+      return { ok: true, removed: false }; // not the live unit — never exposed
+    }
+    if (row.status === "active") {
+      await mp.gameflipDelist(row.externalId).catch(() => {});
+      await MarketplaceListing.updateOne(
+        { _id: row._id, status: "active" },
+        { $set: { status: "delisted", lastError: "" } },
+      ).catch(() => {});
+    }
+    await publishGameflipSuccessor(row.set, ledger.login, { log: opts.log !== false });
+    return { ok: true, removed: true };
+  }
+  // A platform sale: the buyer already got this unit from the platform, so
+  // its code is gone from the product and the stock read is the truth. Only
+  // the ledger changes (to sold) — leave the row's bookkeeping untouched.
+  if (opts.removeFromProduct === false) {
+    return { ok: true, removed: true };
+  }
+  const was = (row.units || []).length;
+  const units = (row.units || []).filter(
+    (u) => String(u.login || "").toLowerCase() !== login,
+  );
+  const removed = units.length < was;
+  if (!removed) return { ok: true, removed: false };
+  if (row.marketplace === "digiseller") {
+    if (opts.removeFromProduct !== false) {
+      const unit = (row.units || []).find(
+        (u) => String(u.login || "").toLowerCase() === login,
+      );
+      if (unit && unit.contentId) {
+        await mp.digisellerRemoveContent(row.externalId, unit.contentId).catch(
+          () => {},
+        );
+      }
+    }
+    await MarketplaceListing.updateOne(
+      { _id: row._id, status: "active" },
+      { $set: { units, accountLogin: units.map((u) => u.login).join(", ") } },
+    ).catch(() => {});
+    if (!units.length) {
+      await mp.digisellerDelist(row.externalId).catch(() => {});
+      await MarketplaceListing.updateOne(
+        { _id: row._id, status: "active" },
+        { $set: { status: "delisted", lastError: "" } },
+      ).catch(() => {});
+    } else {
+      const stock = await mp.digisellerProductStock(row.externalId).catch(() => null);
+      if (stock != null) {
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          { $set: { lastStock: stock } },
+        ).catch(() => {});
+      }
+    }
+  }
+  if (row.marketplace === "ggsel") {
+    if (units.length) {
+      await rebuildGgselOffer(row, units).catch((e) =>
+        console.error("unclaimedAutoList ggsel rebuild failed:", e.message),
+      );
+    } else {
+      await mp.ggselDelist(row.externalId).catch(() => {});
+      await MarketplaceListing.updateOne(
+        { _id: row._id, status: "active" },
+        { $set: { status: "delisted", lastError: "" } },
+      ).catch(() => {});
+    }
+  }
+  return { ok: true, removed };
+}
+
+// GGSel cannot delete a single unit, so a unit that must come off (expired /
+// claimed) forces a clean rebuild of the offer with only the healthy units.
+async function rebuildGgselOffer(oldRow, remainingUnits) {
+  const set = await DropSet.findById(oldRow.set).lean();
+  if (!set) return;
+  const game = (set.items && set.items[0] && set.items[0].game) || set.coverGame || "";
+  const drops = (set.items || []).map((i) => ({
+    name: i.name,
+    game: i.game,
+    campaign: "",
+    imageURL: i.image || "",
+    itemKey: i.itemKey,
+  }));
+  const units = [];
+  for (const u of remainingUnits) {
+    const ledger = await UnclaimedAccount.findOne({
+      loginLower: String(u.login || "").toLowerCase(),
+      set: set._id,
+      status: "listed",
     }).lean();
-    if ((r.matchedCount || 0) > 0 || (cur && cur.status !== "claimed")) {
-      await recordPoolUsage([ledger.poolAccountId], {
-        event: "released",
-        actor: "unclaimedAutoList",
-        note: "expired — unclaimed auto-list release",
-        game: ledger.game || "",
-      }).catch(() => {});
-      return true;
+    const cred = ledger ? await credentialForLedger(ledger) : null;
+    if (cred && cred.password && cred.login) {
+      units.push({ login: cred.login, password: cred.password, id: ledger.poolAccountId || ledger.webBotAccountId || "" });
     }
-    return false;
   }
-  if (ledger.source === "webbot" && ledger.webBotAccountId) {
-    await WebBotAccount.updateOne(
-      { _id: ledger.webBotAccountId },
-      { $set: { botId: "", pinnedGame: "", lastStatus: "idle" } },
-    );
-    return true;
+  await mp.ggselDelist(oldRow.externalId).catch(() => {});
+  await MarketplaceListing.updateOne(
+    { _id: oldRow._id, status: "active" },
+    { $set: { status: "delisted", lastError: "rebuilt after unit removal" } },
+  ).catch(() => {});
+  if (!units.length) return;
+  let img = "";
+  try {
+    img = await buildSetGridImage(set);
+  } catch {
+    img = "";
   }
-  return false;
+  const { ggselCategoryId } = await enabledMarketsForGame(game);
+  const row = await publishGgselOffer(
+    set,
+    units,
+    game,
+    drops,
+    Number(set.price) || 0,
+    img,
+    ggselCategoryId,
+  );
+  if (img) await fsp.unlink(img).catch(() => {});
+  await UnclaimedAccount.updateMany(
+    { set: set._id, market: "ggsel", status: "listed" },
+    { $addToSet: { listingIds: String(row._id) } },
+  ).catch(() => {});
 }
 
-// SPENT path: the buyer owns it (a sale was detected, or a listed drop flipped
-// to claimed). Stop farming it, stamp the pool row so the recycler sees it,
-// NEVER return it to the pool.
-async function spendAccount(ledger, reason, { rows = [] } = {}) {
+// ---------------------------------------------------------------------------
+// Lifecycle: spent, expiry + pool return
+// ---------------------------------------------------------------------------
+
+// SPENT path: the buyer owns this account (a sale was detected, or a listed
+// drop flipped to claimed). Stop farming it, remove its unit from its listing
+// (unless the platform already consumed it), stamp the pool row so the
+// recycler sees it, NEVER return it to the pool.
+async function spendAccount(ledger, reason, opts = {}) {
   const at = new Date();
-  // The buyer owns this account now — every OTHER live row for it must come
-  // down so no second buyer can ever be handed the same account.
-  const activeOthers = (rows || []).filter((r) => r.status === "active");
-  if (activeOthers.length) {
-    await delistRowsForAccount(activeOthers);
+  try {
+    const row = await rowForLedger(ledger);
+    if (row) {
+      // `removeFromProduct:false` — the platform already handed this unit to
+      // the buyer (a real sale), so its code is gone from the product; only
+      // the row bookkeeping needs to drop it.
+      await removeUnitFromRow(row, ledger, {
+        removeFromProduct: opts.removeFromProduct !== false,
+        log: false,
+      });
+    }
+  } catch (e) {
+    console.error("unclaimedAutoList spend remove-unit failed:", e.message);
   }
   if (ledger.source === "noclaim") {
     const secrets = [];
@@ -918,7 +1061,9 @@ async function spendAccount(ledger, reason, { rows = [] } = {}) {
     // Also log into the no-claim spent view so the No-claim section shows it.
     const loginLower = String(ledger.login || "").toLowerCase();
     await NoclaimSpentAccount.updateOne(
-      loginLower ? { loginLower } : { twitchId: ledger.twitchId || "", login: ledger.login || "" },
+      loginLower
+        ? { loginLower }
+        : { twitchId: ledger.twitchId || "", login: ledger.login || "" },
       {
         $set: {
           login: ledger.login || "",
@@ -963,7 +1108,7 @@ async function spendAccount(ledger, reason, { rows = [] } = {}) {
     actor: "unclaimedAutoList",
     subject: ledger.login || ledger._id || "",
     game: ledger.game || "",
-    count: rows.length || 1,
+    count: 1,
     detail:
       "sold (" + reason + ") — " + (ledger.source || "") + " account " + (ledger.login || ""),
   });
@@ -979,11 +1124,273 @@ async function spendAccount(ledger, reason, { rows = [] } = {}) {
   ).catch((e) => console.error("unclaimed sale notify error:", e.message));
 }
 
+// EXPIRY path: all of this account's drops are gone. Remove its unit from its
+// listing and return it to the pool (only ever after ALL drops expired).
+async function expireAccount(ledger, opts = {}) {
+  const release = opts.release !== false;
+  try {
+    const row = await rowForLedger(ledger);
+    if (row) {
+      await removeUnitFromRow(row, ledger, { removeFromProduct: true, log: false });
+    }
+  } catch (e) {
+    console.error("unclaimedAutoList expire remove-unit failed:", e.message);
+  }
+  const ok = release ? await releaseToPool(ledger) : false;
+  const at = new Date();
+  await UnclaimedAccount.updateOne(
+    { _id: ledger._id, status: "listed" },
+    {
+      $set: {
+        status: ok ? "released" : "expired",
+        expiredAt: at,
+        releasedAt: ok ? at : null,
+        note: ok ? "drops expired — delisted + returned to pool" : "drops expired — delisted",
+        lastCheckedAt: at,
+      },
+    },
+  ).catch(() => {});
+  logEvent({
+    category: "unclaimed",
+    action: "expired",
+    actor: "unclaimedAutoList",
+    subject: ledger.login || ledger._id || "",
+    game: ledger.game || "",
+    count: 1,
+    detail:
+      "drops expired — delisted + " +
+      (ok ? "returned to pool" : "pool return pending") +
+      " (" + (ledger.source || "") + ")",
+  });
+  return ok;
+}
+
+// Release an account whose drops all expired. No-claim -> pool row back to
+// available; webbot -> idle in its own registry.
+async function releaseToPool(ledger) {
+  if (!ledger) return false;
+  if (ledger.source === "noclaim" && ledger.poolAccountId) {
+    const r = await AvailableAccount.updateOne(
+      { _id: ledger.poolAccountId, status: "claimed" },
+      {
+        $set: {
+          status: "available",
+          claimedNote: "expired — unclaimed auto-list release",
+        },
+      },
+    );
+    const cur = await AvailableAccount.findById(ledger.poolAccountId, {
+      status: 1,
+    }).lean();
+    if ((r.matchedCount || 0) > 0 || (cur && cur.status !== "claimed")) {
+      await recordPoolUsage([ledger.poolAccountId], {
+        event: "released",
+        actor: "unclaimedAutoList",
+        note: "expired — unclaimed auto-list release",
+        game: ledger.game || "",
+      }).catch(() => {});
+      return true;
+    }
+    return false;
+  }
+  if (ledger.source === "webbot" && ledger.webBotAccountId) {
+    await WebBotAccount.updateOne(
+      { _id: ledger.webBotAccountId },
+      { $set: { botId: "", pinnedGame: "", lastStatus: "idle" } },
+    );
+    return true;
+  }
+  return false;
+}
+
+// Delist a set of rows (used by the operator override). Marks each row
+// delisted after the platform confirms, records failures in lastError.
+async function delistRowsForAccount(rows) {
+  const results = [];
+  for (const row of rows) {
+    if (!row || row.status !== "active") {
+      results.push({ row, ok: true });
+      continue;
+    }
+    let ok = true;
+    try {
+      if (row.marketplace === "gameflip") await mp.gameflipDelist(row.externalId);
+      else if (row.marketplace === "digiseller") await mp.digisellerDelist(row.externalId);
+      else if (row.marketplace === "ggsel") await mp.ggselDelist(row.externalId);
+    } catch (e) {
+      ok = false;
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        { $set: { lastError: "auto-delist: " + e.message } },
+      ).catch(() => {});
+    }
+    if (ok) {
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        { $set: { status: "delisted" } },
+      ).catch(() => {});
+    }
+    results.push({ row, ok });
+  }
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 // Passes
 // ---------------------------------------------------------------------------
 
-// Scan candidates + list new sellable accounts, and retry failed secondaries.
+// Which enabled market gets the next ready account. Balance by fewest listed
+// units; a set with no live Gameflip unit gets its next account first so a
+// sold/expired chain restarts immediately.
+async function pickMarketForSet(setId, markets) {
+  if (!markets || !markets.length) return "";
+  const info = [];
+  for (const m of markets) {
+    const n = await UnclaimedAccount.countDocuments({
+      set: setId,
+      market: m,
+      status: "listed",
+    });
+    const active = await activeRowForSetMarket(setId, m);
+    info.push({ m, n, active: !!active });
+  }
+  const gf = info.find((x) => x.m === "gameflip");
+  if (gf && !gf.active) return "gameflip";
+  info.sort((a, b) => a.n - b.n || markets.indexOf(a.m) - markets.indexOf(b.m));
+  return info[0].m;
+}
+
+async function ledgerAccount(cand, set, market, row, sellable, game, price, note) {
+  const login = cand.login || "";
+  const loginLower = String(login).toLowerCase();
+  const existing = await UnclaimedAccount.findOne({ loginLower, source: cand.source }).lean();
+  if (existing && existing.status === "listed" && existing.market && existing.market !== market) {
+    // Defense-in-depth: a listed ledger already committed to one marketplace
+    // must never be re-pointed at another — one account, one buyer.
+    logEvent({
+      category: "unclaimed",
+      action: "skip",
+      actor: "unclaimedAutoList",
+      subject: login,
+      detail:
+        "login already listed on " + existing.market + " — refused re-attach to " + market,
+    });
+    return existing;
+  }
+  return UnclaimedAccount.findOneAndUpdate(
+    { loginLower, source: cand.source },
+    {
+      $set: {
+        source: cand.source,
+        login,
+        loginLower,
+        twitchId: cand.twitchId || "",
+        game,
+        set: set._id,
+        poolAccountId: cand.poolAccountId || "",
+        webBotAccountId: cand.source === "webbot" ? cand.id || "" : "",
+        botId: cand.botId || "",
+        container: cand.container || "",
+        drops: (sellable || []).map((d) => ({
+          name: d.name,
+          game: d.game || game,
+          campaign: d.campaign || "",
+          itemKey: d.itemKey || d.name,
+        })),
+        status: "listed",
+        note: note || "",
+        listingIds: row ? [String(row._id)] : [],
+        listingExternalIds: row && row.externalId ? [String(row.externalId)] : [],
+        listedAt: new Date(),
+        lastCheckedAt: new Date(),
+      },
+      $setOnInsert: { market },
+    },
+    { upsert: true, new: true },
+  );
+}
+
+// Read-only integrity check: every active unclaimed row's units must match the
+// ledgers committed to that marketplace, and no login may sit on two markets.
+// Returns { ok, issues: [...] } so the panel can surface drift immediately.
+async function consistencyIssues() {
+  const issues = [];
+  const rows = await MarketplaceListing.find(
+    { origin: ORIGIN, status: "active" },
+    { marketplace: 1, set: 1, accountLogin: 1, units: 1 },
+  ).lean();
+  // Keyed by set+marketplace: several items (game + drop set) share the same
+  // marketplace, so a per-market map would collapse them and misreport.
+  const rowBySetMarket = new Map();
+  for (const r of rows) {
+    const uniq = new Map();
+    for (const u of r.units || []) {
+      const l = String(u.login || "").toLowerCase();
+      if (l && !uniq.has(l)) uniq.set(l, u);
+    }
+    rowBySetMarket.set(String(r.set) + ":" + r.marketplace, {
+      row: r,
+      logins: new Set(uniq.keys()),
+    });
+  }
+  const seen = new Map(); // login -> first market seen on
+  for (const [key, { logins }] of rowBySetMarket.entries()) {
+    const market = key.slice(key.indexOf(":") + 1);
+    for (const l of logins) {
+      if (seen.has(l) && seen.get(l) !== market) {
+        issues.push({
+          type: "cross-market",
+          login: l,
+          detail: "on " + seen.get(l) + " and " + market,
+        });
+      } else if (!seen.has(l)) {
+        seen.set(l, market);
+      }
+    }
+  }
+  const ledgers = await UnclaimedAccount.find(
+    { status: "listed" },
+    { loginLower: 1, market: 1, set: 1, source: 1 },
+  ).lean();
+  for (const l of ledgers) {
+    if (!l.market) continue;
+    if (l.market === "gameflip") {
+      // The relist chain keeps waiting units unpublished — off-row is normal.
+      continue;
+    }
+    const mine = rowBySetMarket.get(String(l.set) + ":" + l.market);
+    if (!mine) {
+      issues.push({ type: "missing", login: l.loginLower, detail: "listed " + l.market + " but on no row" });
+    } else if (!mine.logins.has(l.loginLower)) {
+      issues.push({
+        type: "wrong-market",
+        login: l.loginLower,
+        detail: "ledger " + l.market + " but not on its set's row (" + String(l.set) + ")",
+      });
+    }
+  }
+  for (const entry of rowBySetMarket.values()) {
+    if (entry.row.marketplace !== "gameflip") continue;
+    const live = String(entry.row.accountLogin || "").toLowerCase();
+    if (!live) continue;
+    const liveIsLedger = ledgers.some(
+      (l) =>
+        l.loginLower === live &&
+        l.market === "gameflip" &&
+        String(l.set) === String(entry.row.set),
+    );
+    if (!liveIsLedger) {
+      issues.push({
+        type: "bad-live-unit",
+        login: live,
+        detail: "gameflip live unit is not a listed gameflip ledger of its set",
+      });
+    }
+  }
+  return { ok: issues.length === 0, count: issues.length, issues: issues.slice(0, 50) };
+}
+
+// Scan candidates + list new sellable accounts into their item's ONE listing.
 async function scanAndListPass() {
   const cands = [];
   try {
@@ -1025,9 +1432,7 @@ async function scanAndListPass() {
     { status: { $in: ["listed", "sold"] } },
     { loginLower: 1, source: 1 },
   ).lean();
-  const already = new Set(
-    ledgered.map((l) => l.source + ":" + (l.loginLower || "")),
-  );
+  const already = new Set(ledgered.map((l) => l.source + ":" + (l.loginLower || "")));
   const soldBySecret = await soldMapForSecrets(secrets);
 
   const work = [];
@@ -1036,7 +1441,7 @@ async function scanAndListPass() {
     if (already.has(key)) continue;
     if (!c.login && c.source === "noclaim") continue; // config without login
     if (c.source === "noclaim" && soldBySecret.get(c.clientSecret)) continue;
-    if (c.password === "" && c.source === "webbot") continue; // nothing to sell
+    if (c.source === "webbot" && c.password === "") continue; // nothing to sell
     work.push(c);
   }
   // Ready no-claim bot accounts scan first (numeric bot id, so bot 3-6 come
@@ -1050,9 +1455,10 @@ async function scanAndListPass() {
 
   let listed = 0;
   const skipped = [];
+  const setLocks = new Map(); // signature key -> promise chain (serialize per set)
+
   await mapLimit(batch, CONCURRENCY, async (cand) => {
     try {
-      if (cand.source === "webbot" && !cand.password) return;
       if (cand.source === "webbot" && !cand.login) {
         try {
           const v = await webbotTwitch.validateToken(cand.webToken);
@@ -1063,125 +1469,276 @@ async function scanAndListPass() {
         }
       }
       const active = await activeListingsForLogin(cand.login);
-      if (active.length) {
-        await noteSkipped(cand, "already on active listing(s)");
-        return;
-      }
+      if (active.length) return; // already on an active listing somewhere
       let inv;
       try {
         inv = await inventoryForCandidate(cand);
       } catch {
-        // token trouble / transport — leave it for next pass, don't churn the
-        // ledger with per-pass noise
-        return;
+        return; // token trouble / transport — leave it for next pass
       }
       const sellable = inv.sellable || [];
       if (!sellable.length) return; // still farming / nothing ready
-      if (!inv.login && cand.source === "noclaim") return;
       const login = inv.login || cand.login;
-      const password = cand.source === "noclaim" ? cand.password : cand.password;
-      if (!password) {
-        await noteSkipped({ ...cand, login }, "no stored password — cannot sell");
-        return;
-      }
+      const password = cand.password;
+      if (!password) return;
+      if (!login) return;
       const withLogin = { ...cand, login, password };
       const existing = await UnclaimedAccount.findOne({
         source: withLogin.source,
         loginLower: String(login).toLowerCase(),
       }).lean();
       if (existing && (existing.status === "listed" || existing.status === "sold")) return;
-      await listAccount(withLogin, sellable);
-      listed++;
+
+      const game = cand.game || (sellable[0] && sellable[0].game) || "";
+      const signature = signatureFor(game, sellable);
+      if (!signature.key) return;
+      const prev = setLocks.get(signature.key) || Promise.resolve();
+      const run = prev.then(async () => {
+        const research = await MarketResearch.findOne({ game }).lean().catch(() => null);
+        const price = derivePrice(research);
+        const set = await ensureUnclaimedSet(signature, game, sellable, price);
+        const { markets, ggselCategoryId } = await enabledMarketsForGame(game);
+        const market = await pickMarketForSet(set._id, markets);
+        if (!market) {
+          skipped.push({ login, error: "no enabled marketplace" });
+          return;
+        }
+        // One account, one buyer — re-check under the set lock before any
+        // publish/attach: the login must not already be a listed ledger unit
+        // (same login from both farms) nor on another active unclaimed row.
+        const loginEsc = String(login).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const dupLedger = await UnclaimedAccount.exists({
+          loginLower: String(login).toLowerCase(),
+          status: "listed",
+        });
+        if (dupLedger) {
+          skipped.push({ login, error: "already listed elsewhere — skipped" });
+          return;
+        }
+        const dupRow = await MarketplaceListing.exists({
+          origin: ORIGIN,
+          status: "active",
+          $or: [
+            { accountLogin: new RegExp("(?:^|[,\\s])" + loginEsc + "(?:$|[,\\s])", "i") },
+            { "units.login": new RegExp("^" + loginEsc + "$", "i") },
+          ],
+        });
+        if (dupRow) {
+          skipped.push({ login, error: "already on another active listing — skipped" });
+          return;
+        }
+        let row = await activeRowForSetMarket(set._id, market);
+        if (market === "gameflip") {
+          if (!row) {
+            let img = "";
+            try {
+              img = await buildSetGridImage(set);
+            } catch {
+              img = "";
+            }
+            row = await publishGameflipUnit(set, withLogin, sellable, price, img);
+            if (img) await fsp.unlink(img).catch(() => {});
+            await ledgerAccount(
+              withLogin,
+              set,
+              "gameflip",
+              row,
+              sellable,
+              game,
+              price,
+              "unclaimed auto-list — live unit",
+            );
+          } else {
+            await ledgerAccount(
+              withLogin,
+              set,
+              "gameflip",
+              row,
+              sellable,
+              game,
+              price,
+              "unclaimed auto-list — waiting unit",
+            );
+          }
+        } else {
+          if (!row) {
+            let img = "";
+            try {
+              img = await buildSetGridImage(set);
+            } catch {
+              img = "";
+            }
+            row = await publishProduct(
+              set,
+              market,
+              [withLogin],
+              game,
+              sellable,
+              price,
+              img,
+              ggselCategoryId,
+            );
+            if (img) await fsp.unlink(img).catch(() => {});
+          } else {
+            await addUnitToRow(row, withLogin);
+          }
+          await ledgerAccount(
+            withLogin,
+            set,
+            market,
+            row,
+            sellable,
+            game,
+            price,
+            "unclaimed auto-list — stock unit",
+          );
+        }
+        listed++;
+        logEvent({
+          category: "unclaimed",
+          action: "listed",
+          actor: "unclaimedAutoList",
+          subject: login,
+          game: game || "",
+          detail:
+            (cand.source || "") +
+            " account " +
+            login +
+            " = " +
+            market +
+            " unit of " +
+            (game || "?") +
+            " ($" +
+            price +
+            ")",
+        });
+      });
+      setLocks.set(signature.key, run.catch(() => {}));
+      await run;
     } catch (e) {
       skipped.push({ login: cand.login || cand.id || "", error: e.message });
     }
   });
 
-  // Retry secondaries for a few listed accounts with missing markets.
-  let retried = 0;
-  const pendingSecondaries = await UnclaimedAccount.find(
-    { status: "listed", note: /secondary errors|listed; secondary/i },
-    { login: 1, source: 1, poolAccountId: 1, webBotAccountId: 1, game: 1, _id: 1, loginLower: 1 },
-  )
-    .sort({ listedAt: 1 })
-    .limit(RETRY_LIMIT)
-    .lean();
-  for (const led of pendingSecondaries) {
-    const r = await retrySecondaries(led).catch(() => ({ retried: 0 }));
-    retried += r.retried || 0;
+  const repaired = await repairGameflipChains();
+  return { candidates: work.length, scanned: batch.length, listed, repaired, skipped };
+}
+
+// Sets with gameflip ledgers but no live row get a live unit published again
+// (heals a chain after a sale/expiry with no successor, or a failed publish).
+async function repairGameflipChains() {
+  const setIds = await UnclaimedAccount.distinct("set", {
+    market: "gameflip",
+    status: "listed",
+  });
+  let repaired = 0;
+  for (const setId of setIds) {
+    if (!setId) continue;
+    const active = await MarketplaceListing.findOne({
+      origin: ORIGIN,
+      set: setId,
+      marketplace: "gameflip",
+      status: "active",
+    }).lean();
+    if (active) continue;
+    const r = await publishGameflipSuccessor(setId, "", { log: false }).catch(
+      () => ({ published: false }),
+    );
+    if (r && r.published) repaired++;
+  }
+  return repaired;
+}
+
+// Rebuild a credential-bearing candidate object for a listed ledger (used by
+// the expiry/sale pass to re-read live inventory).
+async function candForLedger(ledger) {
+  if (ledger.source === "noclaim") {
+    const pool = ledger.poolAccountId
+      ? await AvailableAccount.findById(ledger.poolAccountId).lean()
+      : null;
+    if (!pool || !pool.clientSecret) return null;
+    return {
+      source: "noclaim",
+      login: ledger.login,
+      clientSecret: pool.clientSecret,
+      password: poolPassword(pool),
+    };
+  }
+  const wb = ledger.webBotAccountId
+    ? await WebBotAccount.findById(ledger.webBotAccountId).lean()
+    : null;
+  if (!wb || !wb.webToken) return null;
+  return {
+    source: "webbot",
+    login: ledger.login,
+    webToken: wb.webToken,
+    password: plainPassword(wb.credPasswordEnc),
+  };
+}
+
+// Expiry + sale pass:
+//   A) quantity-market sales (a stock drop on the item's product)
+//   B) per-ledger: claimed -> spent; all drops gone -> expired + pool return;
+//      Gameflip live row sold -> spent + successor
+//   C) Gameflip chain repair
+async function expirySalePass() {
+  const out = { checked: 0, sold: 0, expired: 0, released: 0, repaired: 0 };
+
+  // A) Quantity-market sale detection (row-level; a stock drop is one event).
+  const qtyRows = await MarketplaceListing.find({
+    origin: ORIGIN,
+    marketplace: { $in: ["digiseller", "ggsel"] },
+    status: "active",
+  }).lean();
+  for (const row of qtyRows) {
+    try {
+      const stock =
+        row.marketplace === "digiseller"
+          ? await mp.digisellerProductStock(row.externalId)
+          : await mp.ggselOfferStock(row.externalId);
+      if (stock === null) continue;
+      const last = row.lastStock == null ? stock : Number(row.lastStock);
+      const dropped = last - stock;
+      await MarketplaceListing.updateOne(
+        { _id: row._id },
+        { $set: { lastStock: stock } },
+      ).catch(() => {});
+      if (dropped <= 0) continue;
+      const set = await DropSet.findById(row.set).lean();
+      if (set) {
+        await recordListingSale({
+          listing: row,
+          set,
+          units: dropped,
+          priceUsd: Number(row.price) || 0,
+        }).catch(() => {});
+      }
+      for (let i = 0; i < dropped; i++) {
+        const victim = await oldestListedUnit(row);
+        if (!victim) break;
+        out.sold++;
+        // The platform already consumed this unit — do not remove its code
+        // from the product, only from our bookkeeping.
+        await spendAccount(victim, row.marketplace + " sale", {
+          removeFromProduct: false,
+        });
+      }
+    } catch (e) {
+      console.error("unclaimedAutoList quantity sale check failed:", e.message);
+    }
   }
 
-  return { candidates: work.length, scanned: batch.length, listed, retried, skipped };
-}
-
-async function noteSkipped(cand, note) {
-  await UnclaimedAccount.updateOne(
-    {
-      source: cand.source,
-      loginLower: String(cand.login || "").toLowerCase(),
-    },
-    {
-      $set: {
-        source: cand.source,
-        login: cand.login || "",
-        loginLower: String(cand.login || "").toLowerCase(),
-        twitchId: cand.twitchId || "",
-        game: cand.game || "",
-        poolAccountId: cand.poolAccountId || "",
-        webBotAccountId: cand.source === "webbot" ? cand.id || "" : "",
-        botId: cand.botId || "",
-        container: cand.container || "",
-        status: "skipped",
-        note,
-        lastCheckedAt: new Date(),
-      },
-    },
-    { upsert: true },
-  ).catch(() => {});
-}
-
-// Verify listed accounts against live inventory: detect sales on the quantity
-// markets, flip spent accounts (buyer took a drop), delist + pool-return
-// accounts whose drops all expired.
-async function expirySalePass() {
-  const listed = await UnclaimedAccount.find({ status: "listed" })
-    .sort({ listedAt: 1 })
+  // B) Per-ledger claimed / expiry / Gameflip-sale checks.
+  const ledgers = await UnclaimedAccount.find({ status: "listed" })
+    .sort({ lastCheckedAt: 1, _id: 1 })
     .limit(CHECK_LIMIT)
     .lean();
-  let checked = 0;
-  let sold = 0;
-  let expired = 0;
-  let released = 0;
-
-  await mapLimit(listed, CONCURRENCY, async (ledger) => {
+  await mapLimit(ledgers, CONCURRENCY, async (ledger) => {
     try {
-      // Load the account credential + live inventory.
-      let cand = null;
-      if (ledger.source === "noclaim") {
-        const pool = ledger.poolAccountId
-          ? await AvailableAccount.findById(ledger.poolAccountId).lean()
-          : null;
-        if (!pool || !pool.clientSecret) return;
-        cand = {
-          source: "noclaim",
-          login: ledger.login,
-          clientSecret: pool.clientSecret,
-          password: poolPassword(pool),
-        };
-      } else {
-        const wb = ledger.webBotAccountId
-          ? await WebBotAccount.findById(ledger.webBotAccountId).lean()
-          : null;
-        if (!wb || !wb.webToken) return;
-        cand = {
-          source: "webbot",
-          login: ledger.login,
-          webToken: wb.webToken,
-          password: plainPassword(wb.credPasswordEnc),
-        };
-      }
-      let sellable = [];
+      const cand = await candForLedger(ledger);
+      if (!cand) return;
       let inv = null;
+      let sellable = [];
       try {
         inv = await inventoryForCandidate(cand);
         sellable = inv.sellable || [];
@@ -1194,77 +1751,24 @@ async function expirySalePass() {
         return;
       }
 
-      // Rows for this account.
-      const rows = await MarketplaceListing.find(
-        { origin: ORIGIN, accountLogin: ledger.login },
-        {
-          _id: 1,
-          marketplace: 1,
-          externalId: 1,
-          status: 1,
-          price: 1,
-          lastStock: 1,
-          set: 1,
-          qtyTarget: 1,
-        },
-      ).lean();
-      const activeRows = rows.filter((r) => r.status === "active");
-
-      // 1) Quantity-market sale detection (Digiseller/GGSel sell natively).
-      for (const row of activeRows) {
-        if (row.marketplace !== "digiseller" && row.marketplace !== "ggsel") continue;
-        try {
-          const stock =
-            row.marketplace === "digiseller"
-              ? await mp.digisellerProductStockDetailed(row.externalId)
-              : await mp.ggselOfferStockDetailed(row.externalId);
-          const remaining = stock && stock.stock != null ? stock.stock : null;
-          if (remaining !== null) {
-            const last = row.lastStock == null ? remaining : Number(row.lastStock);
-            if (remaining < last) {
-              const set = await DropSet.findById(row.set).lean();
-              await MarketplaceListing.updateOne(
-                { _id: row._id, status: "active" },
-                { $set: { status: "sold" } },
-              );
-              if (set) {
-                await recordListingSale({
-                  listing: row,
-                  set,
-                  units: 1,
-                  priceUsd: Number(row.price) || 0,
-                }).catch(() => {});
-              }
-              sendTelegram(
-                "💰 SOLD on " + row.marketplace + " (unclaimed auto-list)\n\n" +
-                  (ledger.login || "?") + "\n$" + (Number(row.price) || 0).toFixed(2),
-              ).catch(() => {});
-              sold++;
-              await spendAccount(ledger, row.marketplace + " sale", { rows });
-              return;
-            }
-            await MarketplaceListing.updateOne(
-              { _id: row._id },
-              { $set: { lastStock: remaining } },
-            ).catch(() => {});
-          }
-        } catch {
-          /* platform read failed — leave the row alone this pass */
+      // Gameflip sale: the fulfiller marked the live row sold — the buyer got
+      // the code. Spend the live unit; removeUnitFromRow publishes the
+      // successor (it sees the row is already sold and skips the delist).
+      if (ledger.market === "gameflip") {
+        const soldRow = await MarketplaceListing.findOne({
+          origin: ORIGIN,
+          set: ledger.set,
+          marketplace: "gameflip",
+          status: "sold",
+          accountLogin: ledger.login,
+        }).lean();
+        if (soldRow) {
+          out.sold++;
+          await spendAccount(ledger, "gameflip sale", { removeFromProduct: false });
+          return;
         }
       }
 
-      // 2) A marketplace already marked one of our rows sold (Gameflip's
-      // fulfiller, or a manual ZeusX hand-over marked from the panel) — the
-      // buyer owns this account now.
-      const soldRow = rows.find((r) => r.status === "sold");
-      if (soldRow) {
-        sold++;
-        await spendAccount(ledger, soldRow.marketplace + " sale", { rows });
-        return;
-      }
-
-      // 3) A listed drop flipped to claimed = the buyer connected and took it
-      // (spent — never pool-return a claimed account).
       const ledgerKeys = new Set(
         (ledger.drops || []).map((d) => String(d.name || "").toLowerCase()),
       );
@@ -1279,43 +1783,20 @@ async function expirySalePass() {
         );
       }
       if (claimedNow) {
-        sold++;
-        await spendAccount(ledger, "buyer claimed a listed drop", { rows });
+        out.sold++;
+        await spendAccount(ledger, "buyer claimed a listed drop");
         return;
       }
 
-      // 4) Everything expired -> delist + release to pool.
+      // Everything expired -> remove unit + release to pool.
       if (!sellable.length) {
-        const results = await delistRowsForAccount(activeRows);
-        const allOk = results.every((r) => r.ok);
-        await UnclaimedAccount.updateOne(
-          { _id: ledger._id },
-          { $set: { status: "expired", expiredAt: new Date(), note: allOk ? "drops expired — delisted" : "drops expired — delist pending" } },
-        ).catch(() => {});
-        expired++;
-        if (allOk) {
-          const ok = await releaseToPool(ledger);
-          if (ok) {
-            await UnclaimedAccount.updateOne(
-              { _id: ledger._id, status: "expired" },
-              { $set: { status: "released", releasedAt: new Date() } },
-            ).catch(() => {});
-            released++;
-          }
-        }
-        logEvent({
-          category: "unclaimed",
-          action: "expired",
-          actor: "unclaimedAutoList",
-          subject: ledger.login || ledger._id || "",
-          game: ledger.game || "",
-          count: activeRows.length,
-          detail: "drops expired — delisted + returned to pool (" + ledger.source + ")",
-        });
+        out.expired++;
+        const ok = await expireAccount(ledger);
+        if (ok) out.released++;
         return;
       }
 
-      checked++;
+      out.checked++;
       await UnclaimedAccount.updateOne(
         { _id: ledger._id },
         {
@@ -1336,29 +1817,83 @@ async function expirySalePass() {
     }
   });
 
-  return { checked, sold, expired, released };
+  // C) Heal Gameflip chains whose live row sold/expired without a successor.
+  out.repaired = await repairGameflipChains();
+  return out;
+}
+
+// FIFO victim for a quantity-market sale: the oldest listed unit of the row.
+async function oldestListedUnit(row) {
+  const logins = (row.units || [])
+    .map((u) => String(u.login || "").toLowerCase())
+    .filter(Boolean);
+  if (!logins.length) return null;
+  const ledgers = await UnclaimedAccount.find({
+    set: row.set,
+    market: row.marketplace,
+    status: "listed",
+    loginLower: { $in: logins },
+  })
+    .sort({ listedAt: 1, _id: 1 })
+    .lean();
+  return ledgers[0] || null;
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+// Acquire the cross-process run lock. Returns true when THIS process owns the
+// run; false when another process is mid-run (or its lock has not gone stale).
+async function acquireRunLock() {
+  try {
+    const col = mongoose.connection.db.collection(RUN_LOCK_COLLECTION);
+    await col.updateOne(
+      { _id: RUN_LOCK_ID },
+      { $setOnInsert: { holder: "", at: new Date(0) } },
+      { upsert: true },
+    );
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - RUN_LOCK_TTL_MS);
+    const r = await col.findOneAndUpdate(
+      { _id: RUN_LOCK_ID, $or: [{ at: null }, { at: { $lt: cutoff } }] },
+      { $set: { holder: String(process.pid), at: now } },
+      { returnDocument: "after" },
+    );
+    return !!(r && r.value && String(r.value.holder) === String(process.pid));
+  } catch (e) {
+    console.error("unclaimedAutoList acquireRunLock failed:", e.message);
+    return true; // lock infra down — fail OPEN so a tick can still run alone
+  }
+}
+
+// Release the lock ONLY if this process still holds it (never clobber a
+// newer holder after our TTL was taken over).
+async function releaseRunLock() {
+  try {
+    await mongoose.connection.db
+      .collection(RUN_LOCK_COLLECTION)
+      .deleteOne({ _id: RUN_LOCK_ID, holder: String(process.pid) })
+      .catch(() => {});
+  } catch {
+    /* best-effort */
+  }
+}
+
 async function runOnce(opts = {}) {
   if (running) return { skipped: "already running", lastRun };
+  const held = await acquireRunLock();
+  if (!held) return { skipped: "another process is running" };
   running = true;
   const startedAt = new Date();
   try {
     const scan = opts.scan !== false ? await scanAndListPass() : null;
     const check = opts.check !== false ? await expirySalePass() : null;
-    lastRun = {
-      at: startedAt,
-      scan,
-      check,
-      tookMs: Date.now() - startedAt.getTime(),
-    };
+    lastRun = { at: startedAt, scan, check, tookMs: Date.now() - startedAt.getTime() };
     return lastRun;
   } finally {
     running = false;
+    await releaseRunLock();
   }
 }
 
@@ -1403,23 +1938,34 @@ module.exports = {
   sellableDropsFromNoClaimInv,
   sellableDropsFromWebbotInv,
   plainPassword,
+  signatureFor,
   listingTitle,
   listingDescription,
   activeListingsForLogin,
   soldMapForSecrets,
   // engine
-  listAccount,
-  retrySecondaries,
+  ensureUnclaimedSet,
+  publishGameflipUnit,
+  publishProduct,
+  addUnitToRow,
+  removeUnitFromRow,
+  rebuildGgselOffer,
   spendAccount,
+  expireAccount,
   releaseToPool,
   delistRowsForAccount,
+  publishGameflipSuccessor,
+  oldestListedUnit,
   collectNoClaimCandidates,
   collectWebbotCandidates,
   inventoryForCandidate,
   runOnce,
+  acquireRunLock,
+  releaseRunLock,
   status,
   start,
   isPaused,
+  consistencyIssues,
   ORIGIN,
   TICK_MS,
   SCAN_LIMIT,
