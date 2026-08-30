@@ -152,3 +152,11 @@ never be handed to two buyers on different platforms.
   returns the document itself — so every run reported "another process is
   running" while still stamping the lock, and the engine never ran its
   scan/check. The check now accepts either return shape (`r.value || r`).
+
+- **Duplicate-name drops group into ONE item per set (fixed 2026-08-30).** R6
+  accounts with four identical `Alpha Pack` drops were published as four
+  separate Gameflip listings because `createUnclaimedSet` kept one row per
+  inventory entry while `signatureFor` dedupes keys, so the find-existing-set
+  size check never matched. `dedupeSetItems()` now collapses a set to one item
+  per unique itemKey (keyed by name when no itemKey), matching the signature
+  exactly — one listing per marketplace per item, never one per inventory slot.
