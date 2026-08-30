@@ -477,10 +477,11 @@ router.get(
       // the pool — decrypt here for the operator to list the account manually.
       const secrets = users.map((u) => u.ClientSecret).filter(Boolean);
       const pwMap = new Map();
+      const soldMap = new Map();
       if (secrets.length) {
         const rows = await AvailableAccount.find(
           { clientSecret: { $in: secrets } },
-          { clientSecret: 1, password: 1 },
+          { clientSecret: 1, password: 1, manualSold: 1 },
         ).lean();
         for (const r of rows) {
           let pw = "";
@@ -490,6 +491,7 @@ router.get(
             pw = "";
           }
           pwMap.set(r.clientSecret, pw);
+          soldMap.set(r.clientSecret, !!r.manualSold);
         }
       }
       // Surface the credentials so the operator can list manually — this whole
@@ -499,12 +501,41 @@ router.get(
         twitchId: u.Id || "",
         password: pwMap.get(u.ClientSecret) || "",
         clientSecret: u.ClientSecret || "",
+        manualSold: !!soldMap.get(u.ClientSecret),
       }));
       res.json({
         success: true,
         game: (cfg.FavouriteGames || [])[0] || "",
         accounts,
       });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Manual "sold" tick — the operator handed this account to a buyer BY HAND.
+// The tick is memory only: the account keeps farming and nothing else changes.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/accounts/:secret/manual-sold",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const secret = String(req.params.secret || "").trim();
+      if (!secret)
+        return res.status(400).json({ success: false, message: "bad secret" });
+      const sold = !!req.body.sold;
+      const r = await AvailableAccount.updateOne(
+        { clientSecret: secret },
+        { $set: { manualSold: sold } },
+      );
+      if (!r.matchedCount)
+        return res
+          .status(404)
+          .json({ success: false, message: "No pool account with that secret." });
+      res.json({ success: true, manualSold: sold });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }

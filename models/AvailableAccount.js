@@ -105,6 +105,11 @@ const availableAccountSchema = new mongoose.Schema(
     dropCount: { type: Number, default: 0 },
 
     source: { type: String, default: "" },
+
+    // Operator tick in the farm consoles: "sold by hand" — the account keeps
+    // farming; the mark is only so the human remembers it already went to a
+    // buyer (a manual hand-over, not a platform auto-sale).
+    manualSold: { type: Boolean, default: false, index: true },
   },
   { timestamps: true },
 );

@@ -66,6 +66,11 @@ const webBotAccountSchema = new mongoose.Schema(
     // Operator hint — force this account onto a specific game (bypasses
     // auto-picker). Empty = auto.
     pinnedGame: { type: String, default: "" },
+
+    // Operator tick in the farm console: "sold by hand" — the account keeps
+    // farming; the mark is only so the human remembers it already went to a
+    // buyer (a manual hand-over, not a platform auto-sale).
+    manualSold: { type: Boolean, default: false, index: true },
   },
   { timestamps: true },
 );

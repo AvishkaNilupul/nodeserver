@@ -57,6 +57,8 @@
   .chip.on { color: var(--green); background:#ecfdf5; border-color:transparent; }
   .chip.off { color: var(--red); background:#fef2f2; border-color:transparent; }
   .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
+  tr.soldrow td { background: rgba(248,113,113,.07); }
+  tr.soldrow td:first-child { box-shadow: inset 3px 0 0 var(--red); }
 
   .bot { border:1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow:hidden; }
   .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; }
@@ -382,9 +384,11 @@ async function loadAccounts(id,c){
             '<button class="btn ghost sm" data-exp="json">Export JSON</button>'+
             '<button class="btn ghost sm" data-exp="copy">Copy user:pass</button>'+
           '</div>';
-    h+='<table><thead><tr><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
+    h+='<table><thead><tr><th style="width:46px;">Sold</th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
     j.accounts.forEach(function(a){
-      h+='<tr><td>'+esc(a.login)+'</td><td class="mono">'+(a.password?esc(a.password):'<span class="muted">—</span>')+'</td>'+
+      h+='<tr'+(a.manualSold?' class="soldrow"':'')+'>'+
+         '<td><input type="checkbox" class="msold" data-secret="'+esc(a.clientSecret)+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td>'+
+         '<td>'+esc(a.login)+'</td><td class="mono">'+(a.password?esc(a.password):'<span class="muted">—</span>')+'</td>'+
          '<td class="mono">'+esc(a.twitchId)+'</td>'+
          '<td class="mono">'+esc(a.clientSecret)+'</td></tr>';
     });
@@ -392,6 +396,19 @@ async function loadAccounts(id,c){
     c.innerHTML=h;
     c.querySelectorAll('button[data-exp]').forEach(function(btn){
       btn.onclick=function(){ exportAccounts(id,btn.getAttribute('data-exp')); };
+    });
+    c.querySelectorAll('input.msold').forEach(function(cb){
+      cb.onchange=async function(){
+        var secret=cb.getAttribute('data-secret');
+        cb.disabled=true;
+        try{
+          await api('/api/noclaim-farm/accounts/'+encodeURIComponent(secret)+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
+          if(acctCache[id]&&acctCache[id].accounts) acctCache[id].accounts.forEach(function(a){ if(a.clientSecret===secret) a.manualSold=cb.checked; });
+          var tr=cb.closest('tr'); if(tr) tr.classList.toggle('soldrow',cb.checked);
+          toast(cb.checked?'Marked sold ✓':'Cleared sold');
+        }catch(e){ cb.checked=!cb.checked; toast(e.message); }
+        cb.disabled=false;
+      };
     });
   }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
 }

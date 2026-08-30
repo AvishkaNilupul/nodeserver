@@ -72,15 +72,16 @@ test("listing copy: title is auto-lister style and description carries the claim
   assert.ok(title.length <= 120);
   assert.strictEqual(listingTitle("Overwatch", []), "Overwatch drop account — unclaimed");
   assert.strictEqual(listingTitle("Overwatch", "acct_1"), "Overwatch drop account — unclaimed");
-  const desc = listingDescription(
-    "Overwatch",
-    [{ name: "Lootbox", game: "Overwatch" }],
-    "acct_1",
-  );
+  const desc = listingDescription("Overwatch", [
+    { name: "Lootbox", game: "Overwatch" },
+  ]);
   assert.ok(desc.includes("Lootbox"));
   assert.ok(desc.includes("UNCLAIMED"));
   assert.ok(desc.includes("twitch.tv/drops/inventory"));
-  assert.ok(desc.includes("acct_1"));
+  // SECURITY: the public description must never name the account — credentials
+  // only travel as the platform auto-delivery code after the order.
+  assert.ok(!desc.includes("Account:"));
+  assert.ok(!/(^|\s)acct_[0-9a-z]+/i.test(desc));
 });
 
 test("listing copy: duplicate-name drops collapse to one item in the title", () => {

@@ -29,7 +29,7 @@ const hosts = require("../utils/botHosts");
 const settings = require("../utils/settings");
 const WebBotAccount = require("../models/WebBotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
-const { encrypt } = require("../utils/secretBox");
+const { encrypt, decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const webbotTwitch = require("../utils/webbotTwitch");
@@ -99,16 +99,21 @@ function readyPoolQuery() {
   };
 }
 
-// Safe DTO — never leaks the full web token or the stored password.
+// Superadmin-only DTO. Includes the full web token (client secret) and the
+// decrypted password so the operator can re-use them off-site (e.g. claim
+// drops in a real browser). Never sent to non-superadmin routes.
 function toDTO(a) {
   return {
     id: String(a._id),
     login: a.login || "",
     twitchId: a.twitchId || "",
+    webToken: a.webToken || "",
+    password: decrypt(a.credPasswordEnc),
     tokenTail: tail(a.webToken),
     credUsername: a.credUsername || "",
     hasPassword: !!a.hasPassword,
     enabled: a.enabled !== false,
+    manualSold: !!a.manualSold,
     lastStatus: a.lastStatus || "pending",
     lastStatusMessage: a.lastStatusMessage || "",
     currentGame: a.currentGame || "",
@@ -217,16 +222,42 @@ router.get("/api/webbot-farm/bots-status", requireSuperadmin, async (req, res) =
 });
 
 // ---------------------------------------------------------------------------
-// Full account list (for the management table).
+// Paged account list (for the management table). Supports ?page=, ?pageSize=
+// and ?q= (name/token search) so the table loads 20 at a time instead of the
+// whole collection.
 // ---------------------------------------------------------------------------
 router.get("/api/webbot-farm/accounts", requireSuperadmin, async (req, res) => {
   try {
-    const rows = await WebBotAccount.find({}).sort({ updatedAt: -1 }).lean();
-    res.json({ success: true, accounts: rows.map(toDTO) });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
+    const q = String(req.query.q || "").trim();
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(escapeRegExp(q), "i");
+      filter.$or = [{ login: rx }, { credUsername: rx }, { webToken: rx }];
+    }
+    const total = await WebBotAccount.countDocuments(filter);
+    const rows = await WebBotAccount.find(filter)
+      .sort({ updatedAt: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean();
+    res.json({
+      success: true,
+      accounts: rows.map(toDTO),
+      total,
+      page,
+      pageSize,
+      pages: Math.max(1, Math.ceil(total / pageSize)),
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // ---------------------------------------------------------------------------
 // Pool availability (cheap count for the pull control).
@@ -879,6 +910,20 @@ router.post("/api/webbot-farm/accounts/:id/clear-claimblock", requireSuperadmin,
     if (!doc) return;
     doc.claimBlocked = false;
     doc.dropsReadyUnclaimed = 0;
+    await doc.save();
+    res.json({ success: true, account: toDTO(doc) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Manual "sold" tick — the operator handed this account to a buyer BY HAND.
+// The tick is memory only: the account keeps farming and nothing else changes.
+router.post("/api/webbot-farm/accounts/:id/manual-sold", requireSuperadmin, async (req, res) => {
+  try {
+    const doc = await findAccount(req, res);
+    if (!doc) return;
+    doc.manualSold = !!req.body.sold;
     await doc.save();
     res.json({ success: true, account: toDTO(doc) });
   } catch (err) {
