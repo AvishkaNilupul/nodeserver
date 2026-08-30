@@ -168,3 +168,11 @@ never be handed to two buyers on different platforms.
   Both now dedupe by lowercase itemKey (same rule as `signatureFor` /
   `dedupeSetItems`), and `dedupeSetItems` stores lowercase keys so
   `findUnclaimedSet`'s `$all` match can never case-miss into a duplicate set.
+
+- **Public descriptions never name the account (fixed 2026-08-31).** An earlier
+  version appended `Account: <login>` to the Gameflip description — publishing
+  the login to anyone browsing the marketplace. Credentials travel ONLY as the
+  platform auto-delivery code (`gameflipDeliveryCode` / `digisellerDeliveryCode`
+  / `ggselDeliveryCode`), handed to the buyer after the order, exactly like the
+  auto-farm. `listingDescription(game, drops)` no longer takes a login at all;
+  live Gameflip rows were re-patched in place via `gameflipReprice` and verified.
