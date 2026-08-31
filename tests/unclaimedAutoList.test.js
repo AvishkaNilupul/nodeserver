@@ -15,6 +15,9 @@ const {
   listingDescription,
   signatureFor,
   dedupeSetItems,
+  gameCapKey,
+  chooseCapReleases,
+  allocateCapKeep,
   manualSoldKey,
   filterManualSoldLedgers,
 } = require("../utils/unclaimedAutoList");
@@ -117,6 +120,83 @@ test("listing copy: duplicate-name drops collapse to one item in the title", () 
   const desc = listingDescription("Rainbow Six Siege", drops, "acct_1");
   assert.ok(desc.includes("Unclaimed drops (1):\nAlpha Pack"));
   assert.strictEqual(desc.match(/Alpha Pack/g).length, 1);
+});
+
+test("cap key normalises game labels: Overwatch and overwatch are one game", () => {
+  assert.strictEqual(gameCapKey("Overwatch"), gameCapKey("overwatch"));
+  assert.strictEqual(
+    gameCapKey("Tom Clancy's Rainbow Six Siege"),
+    "tom clancy s rainbow six siege",
+  );
+  assert.strictEqual(gameCapKey("Call of Duty: Black Ops 7"), "call of duty black ops 7");
+  assert.strictEqual(gameCapKey(""), "");
+  assert.strictEqual(gameCapKey(null), "");
+  assert.strictEqual(gameCapKey("   "), "");
+});
+
+test("cap trim keeps live units and the oldest listed, releases the newest", () => {
+  const ledgers = [
+    { loginLower: "a", listedAt: new Date("2026-08-01"), market: "gameflip" },
+    { loginLower: "b", listedAt: new Date("2026-08-02"), market: "gameflip" },
+    { loginLower: "c", listedAt: new Date("2026-08-03"), market: "ggsel" },
+    { loginLower: "d", listedAt: new Date("2026-08-04"), market: "digiseller" },
+    { loginLower: "e", listedAt: new Date("2026-08-05"), market: "ggsel" },
+  ];
+  const releases = chooseCapReleases(ledgers, 3, new Set(["b"]));
+  assert.ok(releases.has("d"));
+  assert.ok(releases.has("e"));
+  assert.ok(!releases.has("a"));
+  assert.ok(!releases.has("b"));
+  assert.ok(!releases.has("c"));
+});
+
+test("cap trim releases everything when cap is zero", () => {
+  const ledgers = [
+    { loginLower: "a", listedAt: new Date("2026-08-01"), market: "gameflip" },
+    { loginLower: "b", listedAt: new Date("2026-08-02"), market: "ggsel" },
+  ];
+  // Live units are never released (they are on sale right now); everything
+  // else is, no matter how small the cap.
+  const releases = chooseCapReleases(ledgers, 0, new Set(["a"]));
+  assert.deepStrictEqual(releases, new Set(["b"]));
+  assert.deepStrictEqual(chooseCapReleases([], 10, new Set()), new Set());
+});
+
+test("cap trim keeps every set alive with a fair share of the cap", () => {
+  const ledgers = [
+    { loginLower: "a1", set: "s1", listedAt: new Date("2026-08-01") },
+    { loginLower: "a2", set: "s1", listedAt: new Date("2026-08-02") },
+    { loginLower: "a3", set: "s1", listedAt: new Date("2026-08-03") },
+    { loginLower: "b1", set: "s2", listedAt: new Date("2026-08-01") },
+    { loginLower: "b2", set: "s2", listedAt: new Date("2026-08-02") },
+    { loginLower: "b3", set: "s2", listedAt: new Date("2026-08-03") },
+    { loginLower: "b4", set: "s2", listedAt: new Date("2026-08-04") },
+    { loginLower: "c1", set: "s3", listedAt: new Date("2026-08-01") },
+    { loginLower: "c2", set: "s3", listedAt: new Date("2026-08-02") },
+    { loginLower: "c3", set: "s3", listedAt: new Date("2026-08-03") },
+  ];
+  // 10 listed, cap 6: s1 keeps ~2, s2 keeps ~2-3, s3 keeps ~1-2; the oldest in
+  // each set win. Live unit "b1" is always kept.
+  const keep = allocateCapKeep(ledgers, 6, new Set(["b1"]));
+  assert.strictEqual(keep.size, 6);
+  assert.ok(keep.has("b1"));
+  // Every set still has at least one account on sale.
+  assert.ok(["a1", "a2", "a3"].some((x) => keep.has(x)));
+  assert.ok(["b2", "b3", "b4"].some((x) => keep.has(x)));
+  assert.ok(["c1", "c2", "c3"].some((x) => keep.has(x)));
+  // Oldest-first inside a set: with one s3 slot, c1 (oldest) wins and the
+  // newest (c3) is released.
+  assert.ok(keep.has("c1"));
+  assert.ok(!keep.has("c3"));
+});
+
+test("cap keep with zero slots only keeps live units", () => {
+  const ledgers = [
+    { loginLower: "a", set: "s1", listedAt: new Date("2026-08-01") },
+    { loginLower: "b", set: "s1", listedAt: new Date("2026-08-02") },
+  ];
+  assert.deepStrictEqual(allocateCapKeep(ledgers, 0, new Set(["a"])), new Set(["a"]));
+  assert.deepStrictEqual(allocateCapKeep(ledgers, 0, new Set()), new Set());
 });
 
 test("dedupeSetItems: keys are lowercased like signatureFor (case-safe dedupe)", () => {

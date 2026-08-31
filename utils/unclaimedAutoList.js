@@ -73,6 +73,101 @@ const SCAN_LIMIT = 60; // candidate inventory checks per scan pass
 const CHECK_LIMIT = 40; // listed accounts re-verified per expiry/sale pass
 const CONCURRENCY = 5;
 
+// Per-game listing cap: only this many accounts per game may be attached to
+// listings across ALL marketplaces at once. The rest stay unlisted so the
+// operator can still sell them by hand; when one of the listed accounts sells,
+// the freed slot is picked up by the next scan pass (restock-on-sale keeps
+// working). Counted by normalised game label, so "Overwatch" and "overwatch"
+// are the same game.
+const GAME_CAP = 70;
+
+function gameCapKey(game) {
+  return settings.normGameName(game);
+}
+
+// Which listed accounts to release when a game is over GAME_CAP. Live Gameflip
+// units (the accounts actually on sale right now) are always kept; the rest of
+// the cap is filled with the OLDEST listed accounts (first in line to sell),
+// and the newest are released for manual sale. Pure so the trim script and the
+// tests share one rule.
+// ledgers: [{ loginLower, listedAt, market }] — status "listed" only.
+// liveLogins: Set of loginLower that are live Gameflip units (must stay).
+// Returns a Set of loginLower to release.
+function chooseCapReleases(ledgers, cap, liveLogins) {
+  const n = Math.max(0, Number(cap) || 0);
+  const keep = new Set();
+  for (const l of ledgers || []) {
+    if (liveLogins && liveLogins.has(l.loginLower)) keep.add(l.loginLower);
+  }
+  const sorted = [...(ledgers || [])].sort((a, b) => {
+    const ta = a.listedAt ? new Date(a.listedAt).getTime() : 0;
+    const tb = b.listedAt ? new Date(b.listedAt).getTime() : 0;
+    return ta - tb || String(a.loginLower || "").localeCompare(String(b.loginLower || ""));
+  });
+  for (const l of sorted) {
+    if (keep.size >= n) break;
+    keep.add(l.loginLower);
+  }
+  return new Set(
+    (ledgers || [])
+      .filter((l) => !keep.has(l.loginLower))
+      .map((l) => l.loginLower),
+  );
+}
+
+// Fair-share version of the cap for the one-time trim: keep the live Gameflip
+// units, then fill the remaining slots PROPORTIONALLY across the game's sets
+// (oldest listed first inside each set) so no listing is drained dry while
+// another hogs the whole cap. Pure + exported for the trim script and tests.
+// ledgers: listed ledgers of ONE game, each with { set, loginLower, listedAt }.
+// liveLogins: Set of loginLower that are live Gameflip units (always kept).
+// Returns a Set of loginLower to KEEP.
+function allocateCapKeep(ledgers, cap, liveLogins) {
+  const n = Math.max(0, Number(cap) || 0);
+  const all = ledgers || [];
+  const kept = new Set(
+    all.filter((l) => liveLogins && liveLogins.has(l.loginLower)).map((l) => l.loginLower),
+  );
+  const rest = all.filter((l) => !kept.has(l.loginLower));
+  const slots = Math.max(0, n - kept.size);
+  if (slots <= 0 || !rest.length) return kept;
+
+  const bySet = new Map();
+  for (const l of rest) {
+    const k = String(l.set || "");
+    if (!bySet.has(k)) bySet.set(k, []);
+    bySet.get(k).push(l);
+  }
+  const counts = [...bySet.entries()].map(([k, arr]) => [k, arr.length]);
+  const total = counts.reduce((m, [, c]) => m + c, 0);
+  const share = new Map();
+  let allocated = 0;
+  for (const [k, c] of counts) {
+    const s = Math.floor((c / total) * slots);
+    share.set(k, s);
+    allocated += s;
+  }
+  // Leftover slots go round-robin to the biggest sets (oldest first inside).
+  let left = slots - allocated;
+  const order = [...counts].sort((a, b) => b[1] - a[1]);
+  let i = 0;
+  while (left > 0 && order.length) {
+    share.set(order[i % order.length][0], (share.get(order[i % order.length][0]) || 0) + 1);
+    left--;
+    i++;
+  }
+  for (const [k, arr] of bySet) {
+    const want = Math.min(arr.length, share.get(k) || 0);
+    const sorted = [...arr].sort((a, b) => {
+      const ta = a.listedAt ? new Date(a.listedAt).getTime() : 0;
+      const tb = b.listedAt ? new Date(b.listedAt).getTime() : 0;
+      return ta - tb || String(a.loginLower || "").localeCompare(String(b.loginLower || ""));
+    });
+    for (const l of sorted.slice(0, want)) kept.add(l.loginLower);
+  }
+  return kept;
+}
+
 // Cross-process run lock. The 10-minute tick and a manual "scan now" click are
 // separate processes, and two overlapping scans race the market split (the same
 // account ends up attached to two marketplaces). A Mongo doc is the mutex:
@@ -1029,6 +1124,39 @@ async function removeUnitFromRow(row, ledger, opts = {}) {
   return { ok: true, removed };
 }
 
+// Every ACTIVE unclaimed row that carries this login (as a live unit or as a
+// stock-unit login). The v1 era published several rows per set, so one account
+// can sit on multiple rows; anything that must take an account off sale has to
+// scrub ALL of them, or a leftover offer can still hand the account out.
+async function rowsForLogin(login) {
+  const l = String(login || "").trim().toLowerCase();
+  if (!l) return [];
+  const esc = l.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return MarketplaceListing.find({
+    origin: ORIGIN,
+    status: "active",
+    $or: [
+      { accountLogin: new RegExp("(?:^|[,\\s])" + esc + "(?:$|[,\\s])", "i") },
+      { "units.login": new RegExp("^" + esc + "$", "i") },
+    ],
+  }).lean();
+}
+
+// Remove one login from EVERY active row that carries it. Root-cause fix for
+// the duplicate-row era: rowForLedger's findOne only ever cleaned the first
+// matching row, leaving manual-sold / released accounts deliverable through
+// the leftover duplicates.
+async function removeLoginFromAllRows(ledger, opts = {}) {
+  if (!ledger || !ledger.login) return { rows: 0, removed: 0 };
+  const rows = await rowsForLogin(ledger.login);
+  let removed = 0;
+  for (const row of rows) {
+    const r = await removeUnitFromRow(row, ledger, opts);
+    if (r && r.removed) removed++;
+  }
+  return { rows: rows.length, removed };
+}
+
 // GGSel cannot delete a single unit, so a unit that must come off (expired /
 // claimed) forces a clean rebuild of the offer with only the healthy units.
 async function rebuildGgselOffer(oldRow, remainingUnits) {
@@ -1612,6 +1740,21 @@ async function scanAndListPass() {
   const already = new Set(ledgered.map((l) => l.source + ":" + (l.loginLower || "")));
   const soldBySecret = await soldMapForSecrets(secrets);
 
+  // Per-game cap bookkeeping for THIS pass. A fresh count each pass, then the
+  // in-pass reservation map below increments as units are attached, so a batch
+  // of the same game can never overshoot the cap.
+  const gameListed = new Map();
+  {
+    const listedRows = await UnclaimedAccount.find(
+      { status: "listed" },
+      { game: 1 },
+    ).lean();
+    for (const l of listedRows) {
+      const k = gameCapKey(l.game);
+      if (k) gameListed.set(k, (gameListed.get(k) || 0) + 1);
+    }
+  }
+
   const work = [];
   for (const c of cands) {
     const key = c.source + ":" + String(c.login || "").toLowerCase();
@@ -1640,6 +1783,32 @@ async function scanAndListPass() {
   let listed = 0;
   const skipped = [];
   const setLocks = new Map(); // signature key -> promise chain (serialize per set)
+  const gameLocks = new Map(); // game key -> promise chain (serialize cap slots)
+
+  // Reserve one of the game's GAME_CAP slots (serialized per game so parallel
+  // workers of the same game can't both take the last slot). Returns false when
+  // the game is at cap — the account stays unlisted for manual sale.
+  const reserveGameSlot = (gkey, login) => {
+    const prev = gameLocks.get(gkey) || Promise.resolve();
+    const run = prev.then(() => {
+      const cur = gameListed.get(gkey) || 0;
+      if (cur >= GAME_CAP) {
+        skipped.push({
+          login,
+          error: "game at cap (" + GAME_CAP + ") — kept unlisted for manual sale",
+        });
+        return false;
+      }
+      gameListed.set(gkey, cur + 1);
+      return true;
+    });
+    gameLocks.set(gkey, run.catch(() => true));
+    return run;
+  };
+  const releaseGameSlot = (gkey) => {
+    const cur = gameListed.get(gkey) || 0;
+    if (cur > 0) gameListed.set(gkey, cur - 1);
+  };
 
   await mapLimit(batch, CONCURRENCY, async (cand) => {
     try {
@@ -1687,115 +1856,128 @@ async function scanAndListPass() {
           skipped.push({ login, error: "no enabled marketplace" });
           return;
         }
-        // One account, one buyer — re-check under the set lock before any
-        // publish/attach: the login must not already be a listed ledger unit
-        // (same login from both farms) nor on another active unclaimed row.
-        const loginEsc = String(login).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const dupLedger = await UnclaimedAccount.exists({
-          loginLower: String(login).toLowerCase(),
-          status: "listed",
-        });
-        if (dupLedger) {
-          skipped.push({ login, error: "already listed elsewhere — skipped" });
-          return;
-        }
-        const dupRow = await MarketplaceListing.exists({
-          origin: ORIGIN,
-          status: "active",
-          $or: [
-            { accountLogin: new RegExp("(?:^|[,\\s])" + loginEsc + "(?:$|[,\\s])", "i") },
-            { "units.login": new RegExp("^" + loginEsc + "$", "i") },
-          ],
-        });
-        if (dupRow) {
-          skipped.push({ login, error: "already on another active listing — skipped" });
-          return;
-        }
-        let row = await activeRowForSetMarket(set._id, market);
-        if (market === "gameflip") {
-          if (!row) {
-            let img = "";
-            try {
-              img = await buildSetGridImage(set);
-            } catch {
-              img = "";
-            }
-            row = await publishGameflipUnit(set, withLogin, sellable, price, img);
-            if (img) await fsp.unlink(img).catch(() => {});
-            await ledgerAccount(
-              withLogin,
-              set,
-              "gameflip",
-              row,
-              sellable,
-              game,
-              price,
-              "unclaimed auto-list — live unit",
-            );
-          } else {
-            await ledgerAccount(
-              withLogin,
-              set,
-              "gameflip",
-              row,
-              sellable,
-              game,
-              price,
-              "unclaimed auto-list — waiting unit",
-            );
+        // Per-game cap: reserve a slot BEFORE any publish/attach. At cap, the
+        // account stays unlisted (the operator can still sell it by hand); a
+        // sale frees the slot for the next pass's restock.
+        const gkey = gameCapKey(game || set.coverGame || "");
+        if (!gkey) return;
+        const reserved = await reserveGameSlot(gkey, login);
+        if (!reserved) return;
+        let slotUsed = false;
+        try {
+          // One account, one buyer — re-check under the set lock before any
+          // publish/attach: the login must not already be a listed ledger unit
+          // (same login from both farms) nor on another active unclaimed row.
+          const loginEsc = String(login).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const dupLedger = await UnclaimedAccount.exists({
+            loginLower: String(login).toLowerCase(),
+            status: "listed",
+          });
+          if (dupLedger) {
+            skipped.push({ login, error: "already listed elsewhere — skipped" });
+            return;
           }
-        } else {
-          if (!row) {
-            let img = "";
-            try {
-              img = await buildSetGridImage(set);
-            } catch {
-              img = "";
+          const dupRow = await MarketplaceListing.exists({
+            origin: ORIGIN,
+            status: "active",
+            $or: [
+              { accountLogin: new RegExp("(?:^|[,\\s])" + loginEsc + "(?:$|[,\\s])", "i") },
+              { "units.login": new RegExp("^" + loginEsc + "$", "i") },
+            ],
+          });
+          if (dupRow) {
+            skipped.push({ login, error: "already on another active listing — skipped" });
+            return;
+          }
+          let row = await activeRowForSetMarket(set._id, market);
+          if (market === "gameflip") {
+            if (!row) {
+              let img = "";
+              try {
+                img = await buildSetGridImage(set);
+              } catch {
+                img = "";
+              }
+              row = await publishGameflipUnit(set, withLogin, sellable, price, img);
+              if (img) await fsp.unlink(img).catch(() => {});
+              await ledgerAccount(
+                withLogin,
+                set,
+                "gameflip",
+                row,
+                sellable,
+                game,
+                price,
+                "unclaimed auto-list — live unit",
+              );
+            } else {
+              await ledgerAccount(
+                withLogin,
+                set,
+                "gameflip",
+                row,
+                sellable,
+                game,
+                price,
+                "unclaimed auto-list — waiting unit",
+              );
             }
-            row = await publishProduct(
+          } else {
+            if (!row) {
+              let img = "";
+              try {
+                img = await buildSetGridImage(set);
+              } catch {
+                img = "";
+              }
+              row = await publishProduct(
+                set,
+                market,
+                [withLogin],
+                game,
+                sellable,
+                price,
+                img,
+                ggselCategoryId,
+              );
+              if (img) await fsp.unlink(img).catch(() => {});
+            } else {
+              await addUnitToRow(row, withLogin);
+            }
+            await ledgerAccount(
+              withLogin,
               set,
               market,
-              [withLogin],
-              game,
+              row,
               sellable,
+              game,
               price,
-              img,
-              ggselCategoryId,
+              "unclaimed auto-list — stock unit",
             );
-            if (img) await fsp.unlink(img).catch(() => {});
-          } else {
-            await addUnitToRow(row, withLogin);
           }
-          await ledgerAccount(
-            withLogin,
-            set,
-            market,
-            row,
-            sellable,
-            game,
-            price,
-            "unclaimed auto-list — stock unit",
-          );
+          slotUsed = true;
+          listed++;
+          logEvent({
+            category: "unclaimed",
+            action: "listed",
+            actor: "unclaimedAutoList",
+            subject: login,
+            game: game || "",
+            detail:
+              (cand.source || "") +
+              " account " +
+              login +
+              " = " +
+              market +
+              " unit of " +
+              (game || "?") +
+              " ($" +
+              price +
+              ")",
+          });
+        } finally {
+          if (!slotUsed) releaseGameSlot(gkey);
         }
-        listed++;
-        logEvent({
-          category: "unclaimed",
-          action: "listed",
-          actor: "unclaimedAutoList",
-          subject: login,
-          game: game || "",
-          detail:
-            (cand.source || "") +
-            " account " +
-            login +
-            " = " +
-            market +
-            " unit of " +
-            (game || "?") +
-            " ($" +
-            price +
-            ")",
-        });
       });
       setLocks.set(signature.key, run.catch(() => {}));
       await run;
@@ -1899,12 +2081,10 @@ async function expirySalePass() {
         .lean()
     : [];
   const removeMarkedLedger = async (ledger) => {
-    // Delist the gameflip live unit + successor, remove the digiseller content
-    // line / rebuild the ggsel offer, then park the ledger as "removed".
-    const row = await rowForLedger(ledger);
-    if (row) {
-      await removeUnitFromRow(row, ledger, { removeFromProduct: true, log: false });
-    }
+    // Delist/remove this login from EVERY active row that carries it (the
+    // gameflip live unit + successor, digiseller content line(s), ggsel offer
+    // rebuild(s)), then park the ledger as "removed".
+    await removeLoginFromAllRows(ledger, { removeFromProduct: true, log: false });
     out.manualSoldRemoved++;
     await UnclaimedAccount.updateOne(
       { _id: ledger._id, status: "listed" },
@@ -2223,6 +2403,9 @@ module.exports = {
   plainPassword,
   signatureFor,
   dedupeSetItems,
+  gameCapKey,
+  chooseCapReleases,
+  allocateCapKeep,
   listingTitle,
   listingDescription,
   activeListingsForLogin,
@@ -2233,6 +2416,8 @@ module.exports = {
   publishProduct,
   addUnitToRow,
   removeUnitFromRow,
+  rowsForLogin,
+  removeLoginFromAllRows,
   rebuildGgselOffer,
   spendAccount,
   expireAccount,
@@ -2251,6 +2436,7 @@ module.exports = {
   isPaused,
   consistencyIssues,
   ORIGIN,
+  GAME_CAP,
   TICK_MS,
   SCAN_LIMIT,
   CHECK_LIMIT,

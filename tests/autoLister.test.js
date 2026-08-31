@@ -85,6 +85,33 @@ test("post-event description leads with scarcity and drops the countdown", () =>
   assert.ok(!d.includes("unobtainable"));
 });
 
+// One house description is published to several marketplaces; the closing
+// support line must name the site the buyer is actually on, so a GGSel or
+// Digiseller product never tells buyers to message the seller "on Gameflip".
+test("description names the marketplace the buyer is actually on", () => {
+  const base = {
+    game: "Black Desert",
+    items,
+    campaignName: "Heidel Ball",
+    postEvent: false,
+  };
+  const gf = buildDescription({ ...base, marketplace: "gameflip" });
+  const gg = buildDescription({ ...base, marketplace: "ggsel" });
+  const ds = buildDescription({ ...base, marketplace: "digiseller" });
+  const zx = buildDescription({ ...base, marketplace: "zeusx" });
+  const neutral = buildDescription(base);
+  assert.ok(gf.includes("message me here on Gameflip"));
+  assert.ok(!/on (GGSel|Digiseller|ZeusX)/.test(gf));
+  assert.ok(gg.includes("message me here on GGSel"));
+  assert.ok(!gg.includes("Gameflip"));
+  assert.ok(ds.includes("message me here on Digiseller"));
+  assert.ok(!ds.includes("Gameflip"));
+  assert.ok(zx.includes("message me here on ZeusX"));
+  assert.ok(!zx.includes("Gameflip"));
+  assert.ok(neutral.includes("message me here on the site"));
+  assert.ok(!neutral.includes("Gameflip"));
+});
+
 // Automatic repricing is only ever allowed to move the auto-farmer's OWN
 // prices. Listings the owner made by hand are their own stock at their own
 // price, and the post-event markup must not touch them even when they sit on a

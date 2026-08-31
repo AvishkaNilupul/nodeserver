@@ -211,7 +211,22 @@ function buildTitle({ game, items, campaignName }) {
 
 // House description: item list first, then the seller's standard sections
 // (check before buying / multi-purchase warning / activation window / pitch).
-function buildDescription({ game, items, campaignName, postEvent }) {
+// The closing support line names the marketplace the buyer is actually on —
+// "message me here on Gameflip" must never appear on a GGSel or Digiseller
+// product, and vice versa. marketplace is one of "gameflip", "digiseller",
+// "ggsel", "zeusx" (or anything else → a neutral line with no site name).
+function buildDescription({ game, items, campaignName, postEvent, marketplace }) {
+  const support = {
+    gameflip: "message me here on Gameflip",
+    digiseller: "message me here on Digiseller",
+    ggsel: "message me here on GGSel",
+    zeusx: "message me here on ZeusX",
+  };
+  const supportLine =
+    "Any issue or question — " +
+    (support[String(marketplace || "").toLowerCase()] ||
+      "message me here on the site") +
+    " before opening a dispute. I reply fast and always make it right.";
   const lines = [];
   if (postEvent) {
     lines.push(
@@ -258,8 +273,7 @@ function buildDescription({ game, items, campaignName, postEvent }) {
     "\ud83d\ude80 Seller's comment: instant auto-delivery, farmed by me, " +
       "clean accounts. Check my profile for more Twitch drop bundles.",
     "",
-    "\ud83d\udcac Any issue or question — message me here on Gameflip " +
-      "before opening a dispute. I reply fast and always make it right.",
+    "\ud83d\udcac " + supportLine,
   );
   return lines.join("\n").slice(0, 5000);
 }
@@ -1246,12 +1260,40 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     campaignName: task.campaignName,
     postEvent: false,
   });
-  const description = buildDescription({
-    game: task.game,
-    items,
-    campaignName: task.campaignName,
-    postEvent: false,
-  });
+  // One house description per marketplace: the closing support line names the
+  // site the buyer is actually on, so a GGSel/Digiseller/ZeusX product never
+  // tells a buyer to message the seller "on Gameflip".
+  const descriptions = {
+    gameflip: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "gameflip",
+    }),
+    digiseller: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "digiseller",
+    }),
+    ggsel: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "ggsel",
+    }),
+    zeusx: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "zeusx",
+    }),
+  };
+  const description = descriptions.gameflip;
 
   if (dryRun) {
     task.wouldList = { title, price, qty: split.listNow };
@@ -1380,7 +1422,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         const r = await publishPlatiShare({
           set,
           title,
-          description,
+          description: descriptions.digiseller,
           price,
           img,
           accounts: shares.plati,
@@ -1406,7 +1448,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         const r = await publishGgselShare({
           set,
           title,
-          description,
+          description: descriptions.ggsel,
           price,
           img,
           accounts: shares.ggsel,
@@ -1433,7 +1475,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         const r = await publishZeusxShare({
           set,
           title,
-          description,
+          description: descriptions.zeusx,
           price,
           img,
           accounts: shares.zeusx,
@@ -1577,12 +1619,30 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
     items,
     campaignName: task.campaignName,
   });
-  const description = buildDescription({
-    game: task.game,
-    items,
-    campaignName: task.campaignName,
-    postEvent: false,
-  });
+  const descriptions = {
+    gameflip: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "gameflip",
+    }),
+    digiseller: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "digiseller",
+    }),
+    ggsel: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "ggsel",
+    }),
+  };
+  const description = descriptions.gameflip;
 
   // Candidate accounts: everything this GAME's auto-farm tasks ever assigned
   // (the previous events' held-back stash lives on older tasks, not this one),
@@ -1723,7 +1783,7 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
         const r = await publishPlatiShare({
           set,
           title,
-          description,
+          description: descriptions.digiseller,
           price,
           img,
           accounts: shares.plati,
@@ -1746,7 +1806,7 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
         const r = await publishGgselShare({
           set,
           title,
-          description,
+          description: descriptions.ggsel,
           price,
           img,
           accounts: shares.ggsel,
@@ -1967,6 +2027,14 @@ async function onCampaignEnded(taskId) {
     items,
     campaignName: task.campaignName,
     postEvent: true,
+    marketplace: "gameflip",
+  });
+  const ggselDescription = buildDescription({
+    game: task.game,
+    items,
+    campaignName: task.campaignName,
+    postEvent: true,
+    marketplace: "ggsel",
   });
 
   // Persist the (possibly grown, possibly unchanged) items + the marked-up
@@ -2048,9 +2116,12 @@ async function onCampaignEnded(taskId) {
     if (s.marketplace === "ggsel") {
       try {
         // Text-only PATCH — omitting priceRub leaves the GGSel price untouched.
-        await mp.ggselUpdateOffer(s.externalId, { title, description });
+        await mp.ggselUpdateOffer(s.externalId, {
+          title,
+          description: ggselDescription,
+        });
         s.title = title;
-        s.description = description;
+        s.description = ggselDescription;
         await s.save();
         secondaryUpdated++;
       } catch (e) {
