@@ -96,7 +96,11 @@ async function main() {
   };
 
   if (APPLY) {
-    settings.setAutoFarm({ unclaimedAutoListPaused: true });
+    // MUST await — setAutoFarm is an async atomic write (tmp + rename). An
+    // un-awaited resume in the finally below loses the race with process.exit
+    // and strands the engine paused; every setAutoFarm here is awaited so both
+    // the pause and the resume are flushed to settings.json before we move on.
+    await settings.setAutoFarm({ unclaimedAutoListPaused: true });
     log("engine paused for description repair");
   }
 
@@ -226,7 +230,7 @@ async function main() {
     log(JSON.stringify(out, null, 2));
   } finally {
     if (APPLY) {
-      settings.setAutoFarm({ unclaimedAutoListPaused: false });
+      await settings.setAutoFarm({ unclaimedAutoListPaused: false });
       log("engine resumed");
     }
     await mongoose.disconnect();
