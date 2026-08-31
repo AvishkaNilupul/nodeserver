@@ -324,7 +324,7 @@ async function loadBotTab(id,tab){
       var j=await api('/api/webbot-farm/bots/'+id+'/accounts');
       if(!j.accounts.length){ box.innerHTML='<div class="muted">No accounts.</div>'; return; }
       box.innerHTML='<table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
-        j.accounts.map(a=>'<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — tick to remember this account is on sale"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table>';
+        j.accounts.map(a=>'<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table>';
       box.querySelectorAll('input.msold').forEach(function(cb){
         cb.onchange=function(){ toggleManualSold(cb,id); };
       });
@@ -423,7 +423,7 @@ async function loadAccounts(){
     rows.innerHTML=j.accounts.map(function(a){
       return '<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'">'+
         '<td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td>'+
-        '<td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — tick to remember this account is on sale"></td>'+
+        '<td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td>'+
         '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b>'+(a.fromPool?' <span class="chip">pool</span>':'')+(a.enabled?'':' <span class="chip off">disabled</span>')+'</td>'+
         '<td class="mono">'+(a.password?esc(a.password):'<span class="muted">–</span>')+'</td>'+
         '<td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(a.webToken)+'">'+esc(a.webToken)+'</td>'+

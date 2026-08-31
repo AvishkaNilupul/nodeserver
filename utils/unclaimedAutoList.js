@@ -1226,6 +1226,7 @@ async function spendAccount(ledger, reason, opts = {}) {
     { _id: ledger._id, status: "listed" },
     { $set: { status: "sold", soldAt: at, note: reason, lastCheckedAt: at } },
   ).catch(() => {});
+  await markOwnerUnlisted(ledger);
 
   logEvent({
     category: "unclaimed",
@@ -1275,6 +1276,7 @@ async function expireAccount(ledger, opts = {}) {
       },
     },
   ).catch(() => {});
+  await markOwnerUnlisted(ledger);
   logEvent({
     category: "unclaimed",
     action: "expired",
@@ -1385,6 +1387,52 @@ async function pickMarketForSet(setId, markets) {
   return info[0].m;
 }
 
+// Owner-row "listed" flag sync. The farm consoles show an auto tick next to
+// an account when the auto-lister has attached it to a listing, so the
+// operator can see it is on sale and never hand it over manually. The flag is
+// engine-owned: set when the ledger becomes listed, cleared when it leaves
+// "listed" (sold / expired / released / manual-sold removed). A manual tick
+// for a hand-made listing is left alone unless the engine owns that account.
+async function markOwnerListed(cand) {
+  if (!cand) return;
+  if (cand.source === "noclaim" && cand.poolAccountId) {
+    await AvailableAccount.updateOne(
+      { _id: cand.poolAccountId, listed: { $ne: true } },
+      { $set: { listed: true } },
+    ).catch(() => {});
+  } else if (cand.source === "webbot" && (cand.webBotAccountId || cand.id)) {
+    await WebBotAccount.updateOne(
+      { _id: cand.webBotAccountId || cand.id, listed: { $ne: true } },
+      { $set: { listed: true } },
+    ).catch(() => {});
+  }
+}
+
+async function markOwnerUnlisted(ledger) {
+  if (!ledger) return;
+  if (ledger.source === "noclaim" && ledger.poolAccountId) {
+    const still = await UnclaimedAccount.exists({
+      poolAccountId: ledger.poolAccountId,
+      status: "listed",
+    });
+    if (still) return;
+    await AvailableAccount.updateOne(
+      { _id: ledger.poolAccountId, listed: { $ne: false } },
+      { $set: { listed: false } },
+    ).catch(() => {});
+  } else if (ledger.source === "webbot" && ledger.webBotAccountId) {
+    const still = await UnclaimedAccount.exists({
+      webBotAccountId: ledger.webBotAccountId,
+      status: "listed",
+    });
+    if (still) return;
+    await WebBotAccount.updateOne(
+      { _id: ledger.webBotAccountId, listed: { $ne: false } },
+      { $set: { listed: false } },
+    ).catch(() => {});
+  }
+}
+
 async function ledgerAccount(cand, set, market, row, sellable, game, price, note) {
   const login = cand.login || "";
   const loginLower = String(login).toLowerCase();
@@ -1402,7 +1450,7 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
     });
     return existing;
   }
-  return UnclaimedAccount.findOneAndUpdate(
+  const created = await UnclaimedAccount.findOneAndUpdate(
     { loginLower, source: cand.source },
     {
       $set: {
@@ -1433,6 +1481,9 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
     },
     { upsert: true, new: true },
   );
+  // The account is now attached to a listing — auto-tick its console box.
+  await markOwnerListed(cand);
+  return created;
 }
 
 // Read-only integrity check: every active unclaimed row's units must match the
@@ -1865,6 +1916,7 @@ async function expirySalePass() {
         },
       },
     ).catch(() => {});
+    await markOwnerUnlisted(ledger);
     logEvent({
       category: "unclaimed",
       action: "manual_sold_removed",
@@ -1955,6 +2007,8 @@ async function expirySalePass() {
         await removeMarkedLedger(ledger);
         return;
       }
+      // The account is still on a listing — keep its console box auto-ticked.
+      await markOwnerListed(ledger);
       const cand = await candForLedger(ledger);
       if (!cand) return;
       let inv = null;
@@ -2162,6 +2216,8 @@ module.exports = {
   manualSoldKey,
   filterManualSoldLedgers,
   manualSoldOwnerKeys,
+  markOwnerListed,
+  markOwnerUnlisted,
   sellableDropsFromNoClaimInv,
   sellableDropsFromWebbotInv,
   plainPassword,
