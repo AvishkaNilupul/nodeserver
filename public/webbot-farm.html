@@ -63,6 +63,8 @@
   .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
   tr.soldrow td { background: rgba(248,113,113,.07); }
   tr.soldrow td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+  tr.listedrow td { background: rgba(5,150,105,.07); }
+  tr.listedrow td:first-child { box-shadow: inset 3px 0 0 var(--green); }
 
   .bot { border:1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow:hidden; }
   .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; }
@@ -202,7 +204,7 @@
         </div>
         <div style="overflow-x:auto;margin-top:10px;">
           <table>
-            <thead><tr><th>Account</th><th>Password</th><th>Client secret</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
+            <thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Account</th><th>Password</th><th>Client secret</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
             <tbody id="rows"><tr><td colspan="8" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
           </table>
         </div>
@@ -321,10 +323,13 @@ async function loadBotTab(id,tab){
     if(tab==='accounts'){
       var j=await api('/api/webbot-farm/bots/'+id+'/accounts');
       if(!j.accounts.length){ box.innerHTML='<div class="muted">No accounts.</div>'; return; }
-      box.innerHTML='<table><thead><tr><th style="width:46px;">Sold</th><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
-        j.accounts.map(a=>'<tr'+(a.manualSold?' class="soldrow"':'')+'><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table>';
+      box.innerHTML='<table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
+        j.accounts.map(a=>'<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — tick to remember this account is on sale"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table>';
       box.querySelectorAll('input.msold').forEach(function(cb){
         cb.onchange=function(){ toggleManualSold(cb,id); };
+      });
+      box.querySelectorAll('input.mlisted').forEach(function(cb){
+        cb.onchange=function(){ toggleListed(cb,id); };
       });
     } else if(tab==='drops'){
       var j=await api('/api/webbot-farm/bots/'+id+'/drops');
@@ -416,8 +421,9 @@ async function loadAccounts(){
     var rows=$('rows');
     if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="8" class="muted" style="padding:14px;">'+(acctQuery?'No accounts match “'+esc(acctQuery)+'”.':'No accounts — seed or pull below.')+'</td></tr>'; return; }
     rows.innerHTML=j.accounts.map(function(a){
-      return '<tr>'+
+      return '<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'">'+
         '<td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td>'+
+        '<td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — tick to remember this account is on sale"></td>'+
         '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b>'+(a.fromPool?' <span class="chip">pool</span>':'')+(a.enabled?'':' <span class="chip off">disabled</span>')+'</td>'+
         '<td class="mono">'+(a.password?esc(a.password):'<span class="muted">–</span>')+'</td>'+
         '<td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(a.webToken)+'">'+esc(a.webToken)+'</td>'+
@@ -439,6 +445,16 @@ async function toggleManualSold(cb,botId){
     await api('/api/webbot-farm/accounts/'+encodeURIComponent(cb.getAttribute('data-id'))+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
     var tr=cb.closest('tr'); if(tr) tr.classList.toggle('soldrow',cb.checked);
     toast(cb.checked?'Marked sold ✓':'Cleared sold');
+    if(botId) loadBotTab(botId,'accounts').catch(function(){});
+  }catch(e){ cb.checked=!cb.checked; toast(e.message); }
+  cb.disabled=false;
+}
+async function toggleListed(cb,botId){
+  cb.disabled=true;
+  try{
+    await api('/api/webbot-farm/accounts/'+encodeURIComponent(cb.getAttribute('data-id'))+'/listed',{method:'POST',body:JSON.stringify({listed:cb.checked})});
+    var tr=cb.closest('tr'); if(tr) tr.classList.toggle('listedrow',cb.checked);
+    toast(cb.checked?'Marked listed ✓':'Cleared listed');
     if(botId) loadBotTab(botId,'accounts').catch(function(){});
   }catch(e){ cb.checked=!cb.checked; toast(e.message); }
   cb.disabled=false;
@@ -495,7 +511,7 @@ $('bots').addEventListener('click',function(e){
   var row=e.target.closest('.row[data-bid]'); if(row){ var id=row.getAttribute('data-bid'); if(openBots[id]) delete openBots[id]; else openBots[id]='drops'; renderBots(); }
 });
 $('rows').addEventListener('click',function(e){ var b=e.target.closest('button[data-aact]'); if(b) acctAct(b); });
-$('rows').addEventListener('change',function(e){ var cb=e.target.closest('input.msold'); if(cb) toggleManualSold(cb); });
+$('rows').addEventListener('change',function(e){ var cb=e.target.closest('input.msold'); if(cb){ toggleManualSold(cb); return; } var lc=e.target.closest('input.mlisted'); if(lc) toggleListed(lc); });
 $('createBtn').onclick=createBot;
 $('rebuildBtn').onclick=rebuild;
 $('feedBtn').onclick=feed;

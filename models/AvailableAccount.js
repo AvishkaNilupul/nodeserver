@@ -110,6 +110,11 @@ const availableAccountSchema = new mongoose.Schema(
     // farming; the mark is only so the human remembers it already went to a
     // buyer (a manual hand-over, not a platform auto-sale).
     manualSold: { type: Boolean, default: false, index: true },
+
+    // Operator tick in the farm consoles: "listed" — memory only, so the
+    // human can see at a glance which accounts are on sale. The account keeps
+    // farming; nothing else changes.
+    listed: { type: Boolean, default: false, index: true },
   },
   { timestamps: true },
 );

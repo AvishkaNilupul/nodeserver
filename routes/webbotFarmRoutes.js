@@ -114,6 +114,7 @@ function toDTO(a) {
     hasPassword: !!a.hasPassword,
     enabled: a.enabled !== false,
     manualSold: !!a.manualSold,
+    listed: !!a.listed,
     lastStatus: a.lastStatus || "pending",
     lastStatusMessage: a.lastStatusMessage || "",
     currentGame: a.currentGame || "",
@@ -924,6 +925,20 @@ router.post("/api/webbot-farm/accounts/:id/manual-sold", requireSuperadmin, asyn
     const doc = await findAccount(req, res);
     if (!doc) return;
     doc.manualSold = !!req.body.sold;
+    await doc.save();
+    res.json({ success: true, account: toDTO(doc) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Manual "listed" tick — memory only, so the operator can see at a glance
+// which accounts are on sale. The account keeps farming; nothing else changes.
+router.post("/api/webbot-farm/accounts/:id/listed", requireSuperadmin, async (req, res) => {
+  try {
+    const doc = await findAccount(req, res);
+    if (!doc) return;
+    doc.listed = !!req.body.listed;
     await doc.save();
     res.json({ success: true, account: toDTO(doc) });
   } catch (err) {

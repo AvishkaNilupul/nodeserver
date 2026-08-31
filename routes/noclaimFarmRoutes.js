@@ -478,10 +478,11 @@ router.get(
       const secrets = users.map((u) => u.ClientSecret).filter(Boolean);
       const pwMap = new Map();
       const soldMap = new Map();
+      const listedMap = new Map();
       if (secrets.length) {
         const rows = await AvailableAccount.find(
           { clientSecret: { $in: secrets } },
-          { clientSecret: 1, password: 1, manualSold: 1 },
+          { clientSecret: 1, password: 1, manualSold: 1, listed: 1 },
         ).lean();
         for (const r of rows) {
           let pw = "";
@@ -492,6 +493,7 @@ router.get(
           }
           pwMap.set(r.clientSecret, pw);
           soldMap.set(r.clientSecret, !!r.manualSold);
+          listedMap.set(r.clientSecret, !!r.listed);
         }
       }
       // Surface the credentials so the operator can list manually — this whole
@@ -502,6 +504,7 @@ router.get(
         password: pwMap.get(u.ClientSecret) || "",
         clientSecret: u.ClientSecret || "",
         manualSold: !!soldMap.get(u.ClientSecret),
+        listed: !!listedMap.get(u.ClientSecret),
       }));
       res.json({
         success: true,
@@ -536,6 +539,32 @@ router.post(
           .status(404)
           .json({ success: false, message: "No pool account with that secret." });
       res.json({ success: true, manualSold: sold });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// Manual "listed" tick — memory only, so the operator can see at a glance
+// which accounts are on sale. The account keeps farming; nothing else changes.
+router.post(
+  "/api/noclaim-farm/accounts/:secret/listed",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const secret = String(req.params.secret || "").trim();
+      if (!secret)
+        return res.status(400).json({ success: false, message: "bad secret" });
+      const listed = !!req.body.listed;
+      const r = await AvailableAccount.updateOne(
+        { clientSecret: secret },
+        { $set: { listed } },
+      );
+      if (!r.matchedCount)
+        return res
+          .status(404)
+          .json({ success: false, message: "No pool account with that secret." });
+      res.json({ success: true, listed });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
