@@ -42,7 +42,7 @@ const webbotTwitch = require("./webbotTwitch");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
-const { derivePrice, buildTitle } = require("./autoLister");
+const { derivePrice, buildTitle, buildDescription } = require("./autoLister");
 const { digisellerDeliveryCode } = require("./digisellerFulfiller");
 const { ggselDeliveryCode } = require("./ggselFulfiller");
 const { gameflipDeliveryCode } = require("./gameflipFulfiller");
@@ -423,29 +423,36 @@ function listingTitle(game, drops) {
   return (game ? String(game).trim() : "Twitch") + " drop account — unclaimed";
 }
 
+// Reuse the auto-lister's house description so an unclaimed listing reads
+// EXACTLY like a normal auto-farm listing: an "Includes:" item list, the
+// connect-and-claim block, the standard buyer sections, and a support line
+// that names the marketplace the buyer is actually on ("message me here on
+// GGSel" must never appear on Gameflip, and vice versa). `marketplace` is one
+// of "gameflip" / "digiseller" / "ggsel" (undefined -> a neutral support line
+// with no site name). Drops are deduped to one item per set exactly as the
+// title/set are, so a four-campaign "Alpha Pack" is one line, not four.
+//
 // SECURITY: the public description must NEVER name the account — credentials
 // are attached as the platform's auto-delivery code and handed to the buyer
-// ONLY after the order completes (same model as the auto-farm). Earlier this
-// appended "Account: <login>", publishing the login to anyone browsing the
-// marketplace.
-function listingDescription(game, drops) {
-  const lines = [
-    "Twitch account with unclaimed Twitch Drops ready to claim. The drops are " +
-      "already earned (100%) and left UNCLAIMED so you can connect your own game " +
-      "account and receive them yourself.",
-  ];
-  if (game) lines.push("Game: " + game);
-  const names = uniqueDrops(drops).map((d) => d.name).filter(Boolean);
-  if (names.length) {
-    lines.push("Unclaimed drops (" + names.length + "):");
-    lines.push(names.join(", "));
+// ONLY after the order completes (same model as the auto-farm). It takes no
+// login at all.
+function listingDescription(game, drops, marketplace) {
+  const items = uniqueDrops(drops);
+  const g = String(game || "Twitch").trim();
+  if (!items.length) {
+    return (
+      "Twitch account with unclaimed Twitch Drops for " + g +
+      " — already earned (100%) and left unclaimed, so you connect your own " +
+      "game account and claim them yourself."
+    );
   }
-  lines.push(
-    "Delivery: you receive the Twitch account login + password. Log in, go to " +
-      "twitch.tv/drops/inventory, scroll to Received, click Connect on each item " +
-      "and follow the instructions to add it to your account.",
-  );
-  return lines.join("\n");
+  return buildDescription({
+    game: g,
+    items,
+    campaignName: "",
+    postEvent: false,
+    marketplace,
+  });
 }
 
 // Which active-listing logins would block a fresh listing (one account, one
@@ -784,7 +791,7 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
   const game = cand.game || (drops[0] && drops[0].game) || set.coverGame || "";
   const r = await mp.gameflipPublish({
     title: listingTitle(game, drops),
-    description: listingDescription(game, drops),
+    description: listingDescription(game, drops, "gameflip"),
     priceUsd: price,
     imagePath: img || undefined,
     autoDeliverCode: gameflipDeliveryCode(cand.login, cand.password),
@@ -795,7 +802,7 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
     externalId: r.externalId,
     url: r.url || "",
     title: listingTitle(game, drops),
-    description: listingDescription(game, drops),
+    description: listingDescription(game, drops, "gameflip"),
     price,
     status: "active",
     origin: ORIGIN,
@@ -811,7 +818,7 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
 async function publishDigisellerProduct(set, units, game, drops, price, img, categoryId) {
   const r = await mp.digisellerPublish({
     title: listingTitle(game, drops),
-    description: listingDescription(game, drops),
+    description: listingDescription(game, drops, "digiseller"),
     priceUsd: price,
     categories: [
       {
@@ -859,7 +866,7 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
     externalId: r.externalId,
     url: r.url || "",
     title: listingTitle(game, drops),
-    description: listingDescription(game, drops),
+    description: listingDescription(game, drops, "digiseller"),
     price,
     status: "active",
     origin: ORIGIN,
@@ -888,7 +895,7 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
 async function publishGgselOffer(set, units, game, drops, price, img, categoryId) {
   const r = await mp.ggselPublish({
     title: listingTitle(game, drops),
-    description: listingDescription(game, drops),
+    description: listingDescription(game, drops, "ggsel"),
     priceUsd: price,
     categoryId,
     delivery: "auto",
@@ -903,7 +910,7 @@ async function publishGgselOffer(set, units, game, drops, price, img, categoryId
     externalId: r.externalId,
     url: r.url || "",
     title: listingTitle(game, drops),
-    description: listingDescription(game, drops),
+    description: listingDescription(game, drops, "ggsel"),
     price,
     status: "active",
     origin: ORIGIN,

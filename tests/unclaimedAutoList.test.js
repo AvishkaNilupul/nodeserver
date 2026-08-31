@@ -81,7 +81,7 @@ test("plainPassword: decrypts secretBox and strips legacy plain: prefix", () => 
   assert.strictEqual(plainPassword(null), "");
 });
 
-test("listing copy: title is auto-lister style and description carries the claim steps", () => {
+test("listing copy: title is auto-lister style and description is the house template, per-marketplace", () => {
   const title = listingTitle("Overwatch", [
     { name: "Pachimonarch Icon" },
     { name: "Battle Pass Tier Skip" },
@@ -94,12 +94,22 @@ test("listing copy: title is auto-lister style and description carries the claim
   assert.ok(title.length <= 120);
   assert.strictEqual(listingTitle("Overwatch", []), "Overwatch drop account — unclaimed");
   assert.strictEqual(listingTitle("Overwatch", "acct_1"), "Overwatch drop account — unclaimed");
+  // The description now reuses the auto-lister's house template: an "Includes:"
+  // item list + the connect-and-claim block + a support line that names the
+  // marketplace the buyer is actually on.
   const desc = listingDescription("Overwatch", [
     { name: "Lootbox", game: "Overwatch" },
-  ]);
-  assert.ok(desc.includes("Lootbox"));
-  assert.ok(desc.includes("UNCLAIMED"));
-  assert.ok(desc.includes("twitch.tv/drops/inventory"));
+  ], "gameflip");
+  assert.ok(desc.includes("Includes:"));
+  assert.ok(desc.includes("- Lootbox"));
+  assert.ok(/press Connect/i.test(desc));
+  assert.ok(desc.includes("message me here on Gameflip"));
+  // Per-marketplace support line — never the wrong site's name.
+  const ggselDesc = listingDescription("Overwatch", [
+    { name: "Lootbox", game: "Overwatch" },
+  ], "ggsel");
+  assert.ok(ggselDesc.includes("message me here on GGSel"));
+  assert.ok(!ggselDesc.includes("message me here on Gameflip"));
   // SECURITY: the public description must never name the account — credentials
   // only travel as the platform auto-delivery code after the order.
   assert.ok(!desc.includes("Account:"));
@@ -118,8 +128,8 @@ test("listing copy: duplicate-name drops collapse to one item in the title", () 
     title,
     "Rainbow Six Siege Twitch Drops (1 Item) — Alpha Pack",
   );
-  const desc = listingDescription("Rainbow Six Siege", drops, "acct_1");
-  assert.ok(desc.includes("Unclaimed drops (1):\nAlpha Pack"));
+  const desc = listingDescription("Rainbow Six Siege", drops, "gameflip");
+  assert.ok(desc.includes("Includes:\n- Alpha Pack"));
   assert.strictEqual(desc.match(/Alpha Pack/g).length, 1);
 });
 

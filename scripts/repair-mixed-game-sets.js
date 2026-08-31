@@ -113,7 +113,7 @@ async function main() {
     const rows = await MarketplaceListing.find({ origin: engine.ORIGIN, status: "active", set: set._id }).lean();
     for (const row of rows) {
       const title = engine.listingTitle(newGame, kept.map((i) => ({ name: i.name, game: newGame, campaign: i.campaign || "", imageURL: i.image || "", itemKey: i.itemKey || i.name })));
-      const description = engine.listingDescription(newGame, kept.map((i) => ({ name: i.name, game: newGame, campaign: i.campaign || "", imageURL: i.image || "", itemKey: i.itemKey || i.name })));
+      const description = engine.listingDescription(newGame, kept.map((i) => ({ name: i.name, game: newGame, campaign: i.campaign || "", imageURL: i.image || "", itemKey: i.itemKey || i.name })), row.marketplace);
       if (row.marketplace === "ggsel") log("  row ggsel " + row.externalId + ": would update text in place");
       else if (row.marketplace === "gameflip") log("  row gameflip " + row.externalId + " (" + row.accountLogin + "): would delist + republish");
       else if (row.marketplace === "digiseller") log("  row digiseller " + row.externalId + ": " + (String(row.description || "").includes("Game: " + newGame) ? "description ok — no change" : "SKIP (no text-edit API)"));
@@ -152,7 +152,7 @@ async function main() {
       out.rows++;
       const drops = setItemsToDrops(kept);
       const title = engine.listingTitle(newGame, drops);
-      const description = engine.listingDescription(newGame, drops);
+      const description = engine.listingDescription(newGame, drops, row.marketplace);
       if (row.marketplace === "ggsel") {
         log("  ggsel " + row.externalId + ": update text in place");
         if (APPLY) {
