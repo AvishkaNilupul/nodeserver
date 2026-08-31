@@ -44,6 +44,9 @@ const INVENTORY_QUERY = `query Inventory {
         game { id displayName }
         timeBasedDrops {
           id name requiredMinutesWatched
+          benefitEdges {
+            benefit { id name imageAssetURL }
+          }
           self { currentMinutesWatched isClaimed dropInstanceID }
         }
       }
@@ -86,6 +89,7 @@ async function fetchInventory(webToken) {
   for (const c of campaigns) {
     for (const d of c.timeBasedDrops || []) {
       const s = d.self || {};
+      const b = (d.benefitEdges && d.benefitEdges[0] && d.benefitEdges[0].benefit) || {};
       const cur = s.currentMinutesWatched || 0;
       const req = d.requiredMinutesWatched || 0;
       const percent = req > 0 ? Math.min(100, Math.round((cur / req) * 100)) : 0;
@@ -94,6 +98,7 @@ async function fetchInventory(webToken) {
         campaign: c.name || "",
         game: c.game?.displayName || "",
         name: d.name || "",
+        imageURL: b.imageAssetURL || "",
         current: cur,
         required: req,
         percent,

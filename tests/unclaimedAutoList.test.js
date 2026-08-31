@@ -52,6 +52,22 @@ test("webbot inventory: only farmedUnclaimed drops are sellable", () => {
   assert.strictEqual(out[0].name, "Spray");
 });
 
+test("webbot inventory: drop image URL is carried into the sellable drop", () => {
+  const img = "https://static-cdn.jtvnw.net/twitch-quests-assets/REWARD/abc.png";
+  const out = sellableDropsFromWebbotInv({
+    drops: [
+      { name: "Daredevil Costume", game: "Marvel Rivals", percent: 100, farmedUnclaimed: true, imageURL: img },
+    ],
+  });
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].imageURL, img);
+  // A drop with no image yields an empty URL (text tile fallback), never junk.
+  const none = sellableDropsFromWebbotInv({
+    drops: [{ name: "No Art", game: "R6", percent: 100, farmedUnclaimed: true }],
+  });
+  assert.strictEqual(none[0].imageURL, "");
+});
+
 test("plainPassword: decrypts secretBox and strips legacy plain: prefix", () => {
   // A plain (non-encrypted) value is returned as-is.
   assert.strictEqual(plainPassword("hunter2"), "hunter2");

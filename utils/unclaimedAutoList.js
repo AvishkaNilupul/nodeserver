@@ -124,7 +124,7 @@ function sellableDropsFromWebbotInv(inv) {
         name: d.name || "Reward",
         game: d.game || "",
         campaign: d.campaign || "",
-        imageURL: "",
+        imageURL: d.imageURL || "",
         itemKey:
           String(d.name || "")
             .trim()
