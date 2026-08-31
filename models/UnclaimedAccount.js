@@ -73,7 +73,7 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // was recorded with a note so the panel shows why it never listed.
     status: {
       type: String,
-      enum: ["listed", "sold", "expired", "released", "skipped"],
+      enum: ["listed", "sold", "expired", "released", "skipped", "removed"],
       default: "skipped",
       index: true,
     },

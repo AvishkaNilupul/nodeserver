@@ -21,13 +21,14 @@ const router = express.Router();
 // live unclaimed rows.
 router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
   try {
-    const [listed, sold, expired, released, skipped, activeRows, soldRows, integrity] =
+    const [listed, sold, expired, released, skipped, removed, activeRows, soldRows, integrity] =
       await Promise.all([
         UnclaimedAccount.countDocuments({ status: "listed" }),
         UnclaimedAccount.countDocuments({ status: "sold" }),
         UnclaimedAccount.countDocuments({ status: "expired" }),
         UnclaimedAccount.countDocuments({ status: "released" }),
         UnclaimedAccount.countDocuments({ status: "skipped" }),
+        UnclaimedAccount.countDocuments({ status: "removed" }),
         MarketplaceListing.countDocuments({ origin: engine.ORIGIN, status: "active" }),
         MarketplaceListing.countDocuments({ origin: engine.ORIGIN, status: "sold" }),
         engine.consistencyIssues(),
@@ -35,7 +36,7 @@ router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
     res.json({
       success: true,
       state: engine.status(),
-      counts: { listed, sold, expired, released, skipped, activeRows, soldRows },
+      counts: { listed, sold, expired, released, skipped, removed, activeRows, soldRows },
       integrity,
     });
   } catch (err) {

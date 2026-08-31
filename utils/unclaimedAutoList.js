@@ -225,6 +225,57 @@ function uniqueDrops(drops) {
   return out;
 }
 
+// Ledger -> owner key used to match a manual-sold tick ("p:" = pool row for a
+// no-claim account, "w:" = WebBotAccount row for a webbot account).
+function manualSoldKey(ledger) {
+  if (!ledger) return "";
+  if (ledger.source === "noclaim" && ledger.poolAccountId) return "p:" + ledger.poolAccountId;
+  if (ledger.source === "webbot" && ledger.webBotAccountId) return "w:" + ledger.webBotAccountId;
+  return "";
+}
+
+// Drop ledgers whose owner row carries the manual-sold tick. Pure + exported
+// so the successor chain and the check pass share one rule.
+function filterManualSoldLedgers(ledgers, markedOwnerKeys) {
+  if (!markedOwnerKeys || markedOwnerKeys.size === 0) return ledgers || [];
+  return (ledgers || []).filter((l) => !markedOwnerKeys.has(manualSoldKey(l)));
+}
+
+// Batch-load which of these ledgers' owner rows carry the manual-sold tick.
+// Returns a Set of manualSoldKey() values ("p:<poolId>" / "w:<webBotId>").
+async function manualSoldOwnerKeys(ledgers) {
+  const marked = new Set();
+  const poolIds = [
+    ...new Set(
+      (ledgers || [])
+        .filter((l) => l && l.source === "noclaim" && l.poolAccountId)
+        .map((l) => l.poolAccountId),
+    ),
+  ];
+  const webIds = [
+    ...new Set(
+      (ledgers || [])
+        .filter((l) => l && l.source === "webbot" && l.webBotAccountId)
+        .map((l) => l.webBotAccountId),
+    ),
+  ];
+  if (poolIds.length) {
+    const rows = await AvailableAccount.find(
+      { _id: { $in: poolIds }, manualSold: true },
+      { _id: 1 },
+    ).lean();
+    for (const r of rows) marked.add("p:" + String(r._id));
+  }
+  if (webIds.length) {
+    const rows = await WebBotAccount.find(
+      { _id: { $in: webIds }, manualSold: true },
+      { _id: 1 },
+    ).lean();
+    for (const r of rows) marked.add("w:" + String(r._id));
+  }
+  return marked;
+}
+
 // Listing copy — the account and its unclaimed drops, with the connect-and-
 // House title style, exactly like the auto-lister:
 //   "{Game} Twitch Drops ({N} Items) — {Item A} + {Item B} +{N-2} more"
@@ -434,6 +485,7 @@ async function collectWebbotCandidates() {
       webToken: 1,
       credPasswordEnc: 1,
       hasPassword: 1,
+      manualSold: 1,
       currentGame: 1,
       pinnedGame: 1,
       botId: 1,
@@ -450,6 +502,7 @@ async function collectWebbotCandidates() {
       webToken: a.webToken,
       password: plainPassword(a.credPasswordEnc),
       hasPassword: !!a.hasPassword,
+      manualSold: !!a.manualSold,
       game: a.pinnedGame || a.currentGame || "",
       botId: a.botId || "",
     });
@@ -815,7 +868,11 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
   })
     .sort({ listedAt: 1, _id: 1 })
     .lean();
-  if (!waitingList.length) return { published: false, reason: "no waiting unit" };
+  // Never publish a unit the operator marked as sold-by-hand — the account
+  // keeps farming but its credentials must not be handed to another buyer.
+  const marked = await manualSoldOwnerKeys(waitingList);
+  const list = filterManualSoldLedgers(waitingList, marked);
+  if (!list.length) return { published: false, reason: "no waiting unit" };
   const drops = (set.items || []).map((i) => ({
     name: i.name,
     game: i.game,
@@ -824,7 +881,7 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
     itemKey: i.itemKey,
   }));
   const game = set.coverGame || (drops[0] && drops[0].game) || "";
-  for (const waiting of waitingList) {
+  for (const waiting of list) {
     const cred = await credentialForLedger(waiting);
     if (!cred.password) continue;
     let img = "";
@@ -1482,7 +1539,7 @@ async function scanAndListPass() {
   if (secrets.length) {
     const poolRows = await AvailableAccount.find(
       { clientSecret: { $in: secrets } },
-      { clientSecret: 1, password: 1, credPasswordEnc: 1, status: 1 },
+      { clientSecret: 1, password: 1, credPasswordEnc: 1, status: 1, manualSold: 1 },
     ).lean();
     for (const p of poolRows) poolBySecret.set(p.clientSecret, p);
   }
@@ -1495,9 +1552,10 @@ async function scanAndListPass() {
     }
   }
 
-  // Accounts already listed/sold are skipped (their drops are committed).
+  // Accounts already listed/sold/removed are skipped (their drops are
+  // committed, or they were sold by hand and must never be auto-sold again).
   const ledgered = await UnclaimedAccount.find(
-    { status: { $in: ["listed", "sold"] } },
+    { status: { $in: ["listed", "sold", "removed"] } },
     { loginLower: 1, source: 1 },
   ).lean();
   const already = new Set(ledgered.map((l) => l.source + ":" + (l.loginLower || "")));
@@ -1509,6 +1567,13 @@ async function scanAndListPass() {
     if (already.has(key)) continue;
     if (!c.login && c.source === "noclaim") continue; // config without login
     if (c.source === "noclaim" && soldBySecret.get(c.clientSecret)) continue;
+    // Manual-sold accounts (sold by the operator by hand) keep farming but are
+    // NEVER attached to an auto-listing — skip them entirely.
+    if (c.source === "noclaim") {
+      const pool = poolBySecret.get(c.clientSecret);
+      if (pool && pool.manualSold) continue;
+    }
+    if (c.source === "webbot" && c.manualSold) continue;
     if (c.source === "webbot" && c.password === "") continue; // nothing to sell
     work.push(c);
   }
@@ -1750,7 +1815,76 @@ async function candForLedger(ledger) {
 //      Gameflip live row sold -> spent + successor
 //   C) Gameflip chain repair
 async function expirySalePass() {
-  const out = { checked: 0, sold: 0, expired: 0, released: 0, repaired: 0 };
+  const out = { checked: 0, sold: 0, expired: 0, released: 0, repaired: 0, manualSoldRemoved: 0 };
+
+  // Manual-sold accounts (sold by the operator by hand) keep farming but must
+  // NEVER be auto-sold. Remove them from their listings FIRST — before any
+  // sale detection in this pass — so a marked unit can never be the one the
+  // platform hands to a buyer. Parked as "removed": NOT sold, NOT released.
+  const msPool = await AvailableAccount.find(
+    { manualSold: true },
+    { _id: 1 },
+  ).lean();
+  const msWeb = await WebBotAccount.find(
+    { manualSold: true },
+    { _id: 1 },
+  ).lean();
+  const msPoolIds = msPool.map((p) => String(p._id));
+  const msWebIds = msWeb.map((w) => String(w._id));
+  const markedKeys = new Set([
+    ...msPoolIds.map((id) => "p:" + id),
+    ...msWebIds.map((id) => "w:" + id),
+  ]);
+  const msLedgers = msPoolIds.length || msWebIds.length
+    ? await UnclaimedAccount.find({
+        status: "listed",
+        $or: [
+          { poolAccountId: { $in: msPoolIds } },
+          { webBotAccountId: { $in: msWebIds } },
+        ],
+      })
+        .sort({ lastCheckedAt: 1, _id: 1 })
+        .limit(CHECK_LIMIT)
+        .lean()
+    : [];
+  const removeMarkedLedger = async (ledger) => {
+    // Delist the gameflip live unit + successor, remove the digiseller content
+    // line / rebuild the ggsel offer, then park the ledger as "removed".
+    const row = await rowForLedger(ledger);
+    if (row) {
+      await removeUnitFromRow(row, ledger, { removeFromProduct: true, log: false });
+    }
+    out.manualSoldRemoved++;
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "listed" },
+      {
+        $set: {
+          status: "removed",
+          note: "manual sold — kept farming, removed from listings",
+          lastCheckedAt: new Date(),
+        },
+      },
+    ).catch(() => {});
+    logEvent({
+      category: "unclaimed",
+      action: "manual_sold_removed",
+      actor: "unclaimedAutoList",
+      subject: ledger.login || ledger._id || "",
+      game: ledger.game || "",
+      count: 1,
+      detail:
+        "manual-sold account removed from listing — kept farming (" +
+        (ledger.source || "") +
+        ")",
+    });
+  };
+  await mapLimit(msLedgers, CONCURRENCY, async (ledger) => {
+    try {
+      await removeMarkedLedger(ledger);
+    } catch (e) {
+      console.error("unclaimedAutoList manual-sold removal failed:", e.message);
+    }
+  });
 
   // A) Quantity-market sale detection (row-level; a stock drop is one event).
   const qtyRows = await MarketplaceListing.find({
@@ -1784,6 +1918,12 @@ async function expirySalePass() {
       for (let i = 0; i < dropped; i++) {
         const victim = await oldestListedUnit(row);
         if (!victim) break;
+        // A marked unit may still be listed if the tick flagged it mid-pass —
+        // remove it from the row instead of spending it as an auto-sale.
+        if (markedKeys.has(manualSoldKey(victim))) {
+          await removeMarkedLedger(victim);
+          continue;
+        }
         out.sold++;
         // The platform already consumed this unit — do not remove its code
         // from the product, only from our bookkeeping.
@@ -1796,13 +1936,25 @@ async function expirySalePass() {
     }
   }
 
-  // B) Per-ledger claimed / expiry / Gameflip-sale checks.
-  const ledgers = await UnclaimedAccount.find({ status: "listed" })
+  // B) Per-ledger claimed / expiry / Gameflip-sale checks. Marked ledgers
+  // were removed at the top of this pass; the guard below is belt-and-braces
+  // for an owner tick that lands while the pass is running.
+  const rest = await UnclaimedAccount.find({
+    status: "listed",
+    _id: { $nin: msLedgers.map((l) => l._id) },
+  })
     .sort({ lastCheckedAt: 1, _id: 1 })
-    .limit(CHECK_LIMIT)
+    .limit(Math.max(0, CHECK_LIMIT - msLedgers.length))
     .lean();
+  const ledgers = rest;
   await mapLimit(ledgers, CONCURRENCY, async (ledger) => {
     try {
+      // Manual-sold guard (see top of pass): never sell a marked ledger — if
+      // it is still listed here, remove it instead.
+      if (markedKeys.has(manualSoldKey(ledger))) {
+        await removeMarkedLedger(ledger);
+        return;
+      }
       const cand = await candForLedger(ledger);
       if (!cand) return;
       let inv = null;
@@ -2007,6 +2159,9 @@ function start() {
 
 module.exports = {
   // pure, tested
+  manualSoldKey,
+  filterManualSoldLedgers,
+  manualSoldOwnerKeys,
   sellableDropsFromNoClaimInv,
   sellableDropsFromWebbotInv,
   plainPassword,

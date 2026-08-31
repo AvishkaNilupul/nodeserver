@@ -15,6 +15,8 @@ const {
   listingDescription,
   signatureFor,
   dedupeSetItems,
+  manualSoldKey,
+  filterManualSoldLedgers,
 } = require("../utils/unclaimedAutoList");
 
 test("no-claim inventory: only 100%-unclaimed drops are sellable", () => {
@@ -172,4 +174,38 @@ test("dedupeSetItems: duplicate drops collapse to one item per key", () => {
     mixed.map((i) => i.name),
     ["Alpha Pack", "Charm", "No key drop"],
   );
+});
+
+test("manualSoldKey: owner key per source (p: pool / w: webbot)", () => {
+  assert.strictEqual(
+    manualSoldKey({ source: "noclaim", poolAccountId: "abc123" }),
+    "p:abc123",
+  );
+  assert.strictEqual(
+    manualSoldKey({ source: "webbot", webBotAccountId: "xyz789" }),
+    "w:xyz789",
+  );
+  // No owner ref or unknown source => no key (never treated as marked).
+  assert.strictEqual(manualSoldKey({ source: "noclaim" }), "");
+  assert.strictEqual(manualSoldKey({ source: "webbot", poolAccountId: "abc" }), "");
+  assert.strictEqual(manualSoldKey(null), "");
+});
+
+test("filterManualSoldLedgers: drops ledgers whose owner is manual-sold", () => {
+  const ledgers = [
+    { _id: "1", source: "noclaim", poolAccountId: "a" },
+    { _id: "2", source: "noclaim", poolAccountId: "b" },
+    { _id: "3", source: "webbot", webBotAccountId: "w1" },
+    { _id: "4", source: "webbot", webBotAccountId: "w2" },
+  ];
+  const marked = new Set(["p:b", "w:w2"]);
+  const kept = filterManualSoldLedgers(ledgers, marked);
+  assert.deepStrictEqual(
+    kept.map((l) => l._id),
+    ["1", "3"],
+  );
+  // Empty / null marked set keeps everything; null ledgers yields [].
+  assert.strictEqual(filterManualSoldLedgers(ledgers, null).length, 4);
+  assert.strictEqual(filterManualSoldLedgers(ledgers, new Set()).length, 4);
+  assert.deepStrictEqual(filterManualSoldLedgers(null, marked), []);
 });

@@ -114,6 +114,7 @@
       <div class="stat"><b id="stExpired">–</b><span>Expired</span></div>
       <div class="stat"><b id="stReleased">–</b><span>Back to pool</span></div>
       <div class="stat"><b id="stSkipped">–</b><span>Skipped</span></div>
+      <div class="stat"><b id="stRemoved">–</b><span>Manual sold</span></div>
     </div>
 
     <div class="panel">
@@ -143,6 +144,7 @@
             <option value="expired">Expired</option>
             <option value="released">Back to pool</option>
             <option value="skipped">Skipped</option>
+            <option value="removed">Manual sold (removed)</option>
           </select>
         </div>
         <div style="overflow-x:auto;">
@@ -184,7 +186,7 @@ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'
 async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j=await r.json().catch(function(){return {};});if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
 function fmt(d){if(!d)return '–';try{return new Date(d).toLocaleString();}catch(e){return '–';}}
 function chipFor(status){
-  var m={listed:['on','listed'],sold:['off','sold'],expired:['warn','expired'],released:['','back to pool'],skipped:['warn','skipped']}[status]||['','?'+status];
+  var m={listed:['on','listed'],sold:['off','sold'],expired:['warn','expired'],released:['','back to pool'],skipped:['warn','skipped'],removed:['off','manual sold']}[status]||['','?'+status];
   return '<span class="chip '+m[0]+'">'+m[1]+'</span>';
 }
 
@@ -212,6 +214,7 @@ async function loadState(){
     $('stExpired').textContent=c.expired||0;
     $('stReleased').textContent=c.released||0;
     $('stSkipped').textContent=c.skipped||0;
+    $('stRemoved').textContent=c.removed||0;
     $('stEngine').textContent=(st.paused?'paused':(st.enabled?'auto on':'off'));
     $('stEngine').className='chip '+(st.paused?'warn':(st.enabled?'on':'off'));
     var int=j.integrity||{};
@@ -221,7 +224,7 @@ async function loadState(){
     $('stLastRun').textContent=lr
       ? ('last run '+(lr.tookMs!=null?Math.round(lr.tookMs/1000)+'s':'')+
          (lr.scan?' · listed '+((lr.scan.listed)||0):'')+
-         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0):''))
+         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):''))
       : 'never run';
     $('pauseBtn').textContent=st.paused?'Resume auto':'Pause auto';
   }catch(e){ $('stEngine').textContent='state error'; }
@@ -306,7 +309,7 @@ $('refreshBtn').addEventListener('click',function(){
     var r=await api('/api/unclaimed-auto/refresh',{method:'POST',body:'{}'});
     loadState(); loadAccounts(); loadListings();
     var c=r.result&&r.result.check||{};
-    return 'check done — sold '+((c.sold)||0)+', expired '+((c.expired)||0)+', released '+((c.released)||0);
+    return 'check done — sold '+((c.sold)||0)+', expired '+((c.expired)||0)+', released '+((c.released)||0)+', removed '+((c.manualSoldRemoved)||0);
   });
 });
 $('pauseBtn').addEventListener('click',function(){
