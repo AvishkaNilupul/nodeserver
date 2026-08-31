@@ -302,6 +302,42 @@ function dedupeSetItems(drops, game) {
   return items;
 }
 
+// ONE listing = ONE game. An account can farm drops for several games at once
+// (a no-claim bot watches every FavouriteGame), but a listing must never
+// advertise another game's items under a single "Game:" line. Group the
+// account's sellable drops by their REAL game and pick one group to list:
+// the account's configured game when it has drops there, otherwise the
+// largest group (preferring a labeled group over unlabeled drops). Returns
+// { game, drops } where drops is ONLY that game's sellable drops.
+function pickListingGroup(preferredGame, drops) {
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const groups = new Map();
+  for (const d of drops || []) {
+    const key = norm(d.game) || "__unlabeled__";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  }
+  if (!groups.size) return { game: preferredGame || "", drops: drops || [] };
+  const preferred = norm(preferredGame);
+  let chosen;
+  if (preferred && groups.has(preferred)) chosen = groups.get(preferred);
+  if (!chosen) {
+    chosen = Array.from(groups.entries())
+      .sort((a, b) => {
+        const aEmpty = a[0] === "__unlabeled__";
+        const bEmpty = b[0] === "__unlabeled__";
+        if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+        return b[1].length - a[1].length;
+      })[0][1];
+  }
+  const game = (chosen[0] && chosen[0].game) || preferredGame || "";
+  return { game, drops: chosen };
+}
+
 // The drops a listing TITLE/DESCRIPTION should show: one entry per unique
 // itemKey (same dedupe rule as signatureFor / dedupeSetItems), preserving the
 // first-seen drop so buildTitle sees exactly the set's items. Without this an
@@ -1842,14 +1878,18 @@ async function scanAndListPass() {
       }).lean();
       if (existing && (existing.status === "listed" || existing.status === "sold")) return;
 
-      const game = cand.game || (sellable[0] && sellable[0].game) || "";
-      const signature = signatureFor(game, sellable);
+      // The account may hold farmed drops for several games (a no-claim bot
+      // watches every FavouriteGame). Group by the drops' REAL game and list
+      // only one game per account — otherwise a listing titled "Rainbow Six
+      // Siege" advertises Call of Duty / Delta Force drops.
+      const { game, drops } = pickListingGroup(cand.game, sellable);
+      const signature = signatureFor(game, drops);
       if (!signature.key) return;
       const prev = setLocks.get(signature.key) || Promise.resolve();
       const run = prev.then(async () => {
         const research = await MarketResearch.findOne({ game }).lean().catch(() => null);
         const price = derivePrice(research);
-        const set = await ensureUnclaimedSet(signature, game, sellable, price);
+        const set = await ensureUnclaimedSet(signature, game, drops, price);
         const { markets, ggselCategoryId } = await enabledMarketsForGame(game);
         const market = await pickMarketForSet(set._id, markets);
         if (!market) {
@@ -1898,14 +1938,14 @@ async function scanAndListPass() {
               } catch {
                 img = "";
               }
-              row = await publishGameflipUnit(set, withLogin, sellable, price, img);
+              row = await publishGameflipUnit(set, withLogin, drops, price, img);
               if (img) await fsp.unlink(img).catch(() => {});
               await ledgerAccount(
                 withLogin,
                 set,
                 "gameflip",
                 row,
-                sellable,
+                drops,
                 game,
                 price,
                 "unclaimed auto-list — live unit",
@@ -1916,7 +1956,7 @@ async function scanAndListPass() {
                 set,
                 "gameflip",
                 row,
-                sellable,
+                drops,
                 game,
                 price,
                 "unclaimed auto-list — waiting unit",
@@ -1935,7 +1975,7 @@ async function scanAndListPass() {
                 market,
                 [withLogin],
                 game,
-                sellable,
+                drops,
                 price,
                 img,
                 ggselCategoryId,
@@ -1949,7 +1989,7 @@ async function scanAndListPass() {
               set,
               market,
               row,
-              sellable,
+              drops,
               game,
               price,
               "unclaimed auto-list — stock unit",
@@ -2256,7 +2296,10 @@ async function expirySalePass() {
         {
           $set: {
             lastCheckedAt: new Date(),
-            drops: sellable.map((d) => ({
+            // Refresh the panel snapshot with the LISTED game's drops only
+            // (same rule as the scan pass), so a Rainbow Six listing never
+            // shows the account's Call of Duty drops.
+            drops: pickListingGroup(ledger.game, sellable).drops.map((d) => ({
               name: d.name,
               game: d.game || ledger.game,
               campaign: d.campaign || "",
@@ -2403,6 +2446,7 @@ module.exports = {
   plainPassword,
   signatureFor,
   dedupeSetItems,
+  pickListingGroup,
   gameCapKey,
   chooseCapReleases,
   allocateCapKeep,

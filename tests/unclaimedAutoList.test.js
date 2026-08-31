@@ -15,6 +15,7 @@ const {
   listingDescription,
   signatureFor,
   dedupeSetItems,
+  pickListingGroup,
   gameCapKey,
   chooseCapReleases,
   allocateCapKeep,
@@ -285,6 +286,57 @@ test("manualSoldKey: owner key per source (p: pool / w: webbot)", () => {
   assert.strictEqual(manualSoldKey({ source: "noclaim" }), "");
   assert.strictEqual(manualSoldKey({ source: "webbot", poolAccountId: "abc" }), "");
   assert.strictEqual(manualSoldKey(null), "");
+});
+
+test("pickListingGroup: one listing = one game — the account's configured game wins", () => {
+  const sellable = [
+    { name: "Alpha Pack", game: "Rainbow Six Siege" },
+    { name: "Armament Voucher", game: "Delta Force" },
+    { name: "Ammo Selection Pack Lv.4", game: "Delta Force" },
+  ];
+  const { game, drops } = pickListingGroup("Rainbow Six Siege", sellable);
+  assert.strictEqual(game, "Rainbow Six Siege");
+  assert.deepStrictEqual(
+    drops.map((d) => d.name),
+    ["Alpha Pack"],
+  );
+});
+
+test("pickListingGroup: configured game has no drops -> largest group wins", () => {
+  const sellable = [
+    { name: "Get Tactical Emblem", game: "Call of Duty: Modern Warfare 4" },
+    { name: "Clearing House CC", game: "Call of Duty: Modern Warfare 4" },
+    { name: "Alpha Pack", game: "Rainbow Six Siege" },
+  ];
+  // The bot was configured for Black Ops 7, but every drop is MW4 — the
+  // listing must be labeled by the drops' real game, not the config.
+  const { game, drops } = pickListingGroup("Call of Duty: Black Ops 7", sellable);
+  assert.strictEqual(game, "Call of Duty: Modern Warfare 4");
+  assert.strictEqual(drops.length, 2);
+  assert.ok(drops.every((d) => d.game === "Call of Duty: Modern Warfare 4"));
+});
+
+test("pickListingGroup: game labels are normalized before comparing", () => {
+  const sellable = [
+    { name: "Alpha Pack", game: "rainbow six siege" },
+    { name: "Charm", game: "Delta Force" },
+  ];
+  const { game, drops } = pickListingGroup("Rainbow Six Siege", sellable);
+  assert.strictEqual(drops.length, 1);
+  assert.strictEqual(drops[0].name, "Alpha Pack");
+});
+
+test("pickListingGroup: unlabeled drops fall back to the configured game", () => {
+  const sellable = [
+    { name: "Mystery Drop", game: "" },
+    { name: "Other Drop", game: "" },
+  ];
+  const { game, drops } = pickListingGroup("Overwatch", sellable);
+  assert.strictEqual(game, "Overwatch");
+  assert.strictEqual(drops.length, 2);
+  // Empty input / no drops => no crash, same game back.
+  assert.deepStrictEqual(pickListingGroup("Overwatch", []), { game: "Overwatch", drops: [] });
+  assert.deepStrictEqual(pickListingGroup("", []), { game: "", drops: [] });
 });
 
 test("filterManualSoldLedgers: drops ledgers whose owner is manual-sold", () => {
