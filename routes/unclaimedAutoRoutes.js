@@ -44,16 +44,21 @@ router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
   }
 });
 
-// Ledger view (paged, optional ?status= and ?q= login search).
+// Ledger view (paged, optional ?status=, ?q= login search, ?game= filter).
+// "held" maps to the listed+skipped bucket so the Drop archive's default
+// filter works here too.
 router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
     const status = String(req.query.status || "").trim();
     const q = String(req.query.q || "").trim().toLowerCase();
+    const game = String(req.query.game || "").trim();
     const filter = {};
-    if (status) filter.status = status;
+    if (status === "held") filter.status = { $in: ["listed", "skipped"] };
+    else if (status && status !== "all") filter.status = status;
     if (q) filter.loginLower = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    if (game) filter.game = game;
     const total = await UnclaimedAccount.countDocuments(filter);
     const rows = await UnclaimedAccount.find(filter)
       .sort({ listedAt: -1, updatedAt: -1 })
@@ -89,6 +94,125 @@ router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) =
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Unclaimed Drop archive — read-only browsing over UnclaimedAccount rows
+// (no-claim + web-token farms). Grouping is done in JS over a projected
+// find() (the collection is small; Atlas shared tier has allowDiskUse OFF),
+// and credentials are resolved per-account on demand only.
+// ---------------------------------------------------------------------------
+
+const ARCHIVE_ACCOUNT_PROJECTION = {
+  _id: 1,
+  login: 1,
+  source: 1,
+  game: 1,
+  drops: 1,
+  status: 1,
+  market: 1,
+  listedAt: 1,
+  soldAt: 1,
+};
+
+// ?status=: "held" (default, listed+skipped) | a raw status | "all"/empty.
+function archiveStatusParam(req) {
+  return String(req.query.status || "").trim().toLowerCase();
+}
+
+// By-item rollup: one row per distinct item key, with distinct-account and
+// total-unit counts (4x a drop on one account = accounts 1, units 4). The
+// per-status breakdown is only meaningful when the view is unfiltered.
+router.get("/api/unclaimed-auto/archive/by-item", requireSuperadmin, async (req, res) => {
+  try {
+    const status = archiveStatusParam(req);
+    const filter = engine.archiveStatusFilter(status) || {};
+    const rows = await UnclaimedAccount.find(filter, {
+      _id: 1,
+      game: 1,
+      status: 1,
+      drops: 1,
+    }).lean();
+    const withStatus = !status || status === "all";
+    res.json({ success: true, items: engine.groupArchiveByItem(rows, withStatus) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// By-game rollup: accounts + distinct item keys per game.
+router.get("/api/unclaimed-auto/archive/by-game", requireSuperadmin, async (req, res) => {
+  try {
+    const status = archiveStatusParam(req);
+    const filter = engine.archiveStatusFilter(status) || {};
+    const rows = await UnclaimedAccount.find(filter, {
+      _id: 1,
+      game: 1,
+      status: 1,
+      drops: 1,
+    }).lean();
+    const withStatus = !status || status === "all";
+    res.json({ success: true, games: engine.groupArchiveByGame(rows, withStatus) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Which accounts hold a given item (by item key). NO credentials here — the
+// frontend fetches them per account on click.
+router.get("/api/unclaimed-auto/archive/item-accounts", requireSuperadmin, async (req, res) => {
+  try {
+    const itemKey = String(req.query.itemKey || "").trim();
+    if (!itemKey)
+      return res.status(400).json({ success: false, message: "itemKey required" });
+    const filter = engine.archiveStatusFilter(archiveStatusParam(req)) || {};
+    filter["drops.itemKey"] = itemKey;
+    const rows = await UnclaimedAccount.find(filter, ARCHIVE_ACCOUNT_PROJECTION)
+      .sort({ listedAt: 1, _id: 1 })
+      .lean();
+    res.json({
+      success: true,
+      accounts: rows.map((a) => ({
+        id: String(a._id),
+        login: a.login,
+        source: a.source,
+        status: a.status,
+        market: a.market || "",
+        game: a.game,
+        drops: (a.drops || []).map((d) => d.name || ""),
+        listedAt: a.listedAt,
+        soldAt: a.soldAt,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// On-demand credential for one account (copy-password click only). Decrypts
+// with prod's CRED_SECRET via the engine helper — never in a list payload.
+router.get(
+  "/api/unclaimed-auto/archive/account/:id/credential",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!/^[a-f0-9]{24}$/i.test(id))
+        return res.status(400).json({ success: false, message: "bad id" });
+      const ledger = await UnclaimedAccount.findById(id).lean();
+      if (!ledger)
+        return res.status(404).json({ success: false, message: "no such account" });
+      const cred = await engine.credentialForLedger(ledger);
+      res.json({
+        success: true,
+        login: cred.login,
+        password: cred.password,
+        email: cred.email || "",
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
 
 // Live unclaimed listing rows (for the panel's "on sale now" table).
 router.get("/api/unclaimed-auto/listings", requireSuperadmin, async (req, res) => {

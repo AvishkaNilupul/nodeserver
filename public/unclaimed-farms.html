@@ -70,6 +70,27 @@
   .sec iframe { width:100%; height:100%; min-height:560px; border:1px solid var(--line); border-radius:12px; background:var(--surface); }
   .pager { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
   code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
+
+  .arc-bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .arc-bar .tabs { margin:0; }
+  .arc-bar input[type="search"], .arc-bar select {
+    padding:8px 11px; border-radius:10px; border:1.5px solid var(--line);
+    background:var(--surface-2); color:var(--ink); font-size:13px; outline:none;
+  }
+  .arc-bar input[type="search"] { flex:1; min-width:200px; }
+  tr.clickable { cursor:pointer; }
+  tr.clickable:hover td { background: var(--surface-2); }
+  .arc-chips { white-space:nowrap; }
+  .arc-chips .chip { margin-right:4px; }
+  .arc-game-chip a { text-decoration:none; color:inherit; font-weight:800; }
+
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:130; padding:48px 16px; overflow-y:auto; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:100%; max-width:820px; box-shadow:0 20px 50px rgba(0,0,0,.3); }
+  .modal > header { display:flex; align-items:center; gap:12px; padding:16px 20px; border-bottom:1px solid var(--line); }
+  .modal > header b { font-size:16px; }
+  .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
+  .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
 </style>
 </head>
 
@@ -104,6 +125,7 @@
     <button class="tab active" data-sec="autolist">Auto-list</button>
     <button class="tab" data-sec="noclaim">No-claim farm</button>
     <button class="tab" data-sec="webbot">Web-token farm</button>
+    <button class="tab" data-sec="archive">Drop archive</button>
   </div>
 
   <section class="sec" id="sec-autolist">
@@ -176,7 +198,80 @@
 
   <section class="sec hidden" id="sec-noclaim"></section>
   <section class="sec hidden" id="sec-webbot"></section>
+
+  <section class="sec hidden" id="sec-archive">
+    <div class="panel">
+      <div class="hd arc-bar">
+        <div class="tabs" id="arcTabs">
+          <button class="tab active" data-asec="item">By item</button>
+          <button class="tab" data-asec="game">By game</button>
+          <button class="tab" data-asec="accounts">Accounts</button>
+        </div>
+        <span id="arcGameChip" style="display:none;margin-left:auto;"></span>
+        <select id="arcStatus">
+          <option value="held">Held (listed + skipped)</option>
+          <option value="listed">Listed</option>
+          <option value="sold">Sold</option>
+          <option value="all">All</option>
+          <option value="expired">Expired</option>
+          <option value="released">Back to pool</option>
+          <option value="skipped">Skipped</option>
+          <option value="removed">Manual sold</option>
+        </select>
+        <input id="arcSearch" type="search" placeholder="Search items, games, logins…" />
+        <span class="muted" id="arcResult"></span>
+      </div>
+    </div>
+
+    <div class="panel" id="arcView-item">
+      <div class="hd"><b>By item</b> <span class="muted" id="arcItemTotal" style="margin-left:auto;"></span></div>
+      <div class="bd" style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Item</th><th>Game</th><th>Accounts</th><th>Units</th><th>Status</th></tr></thead>
+          <tbody id="arcItemRows"><tr><td colspan="5" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" id="arcView-game" style="display:none;">
+      <div class="hd"><b>By game</b> <span class="muted" id="arcGameTotal" style="margin-left:auto;"></span></div>
+      <div class="bd" style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Game</th><th>Accounts</th><th>Items</th><th>Status</th></tr></thead>
+          <tbody id="arcGameRows"><tr><td colspan="4" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" id="arcView-accounts" style="display:none;">
+      <div class="hd"><b>Accounts</b> <span class="muted" id="arcAcctTotal" style="margin-left:auto;"></span></div>
+      <div class="bd">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Account</th><th>Source</th><th>Game</th><th>Drops</th><th>Status</th><th>Listed</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody id="arcAcctRows"><tr><td colspan="7" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button class="btn ghost sm" id="arcAcctPrev">← Prev</button>
+          <span class="muted" id="arcAcctPage">–</span>
+          <button class="btn ghost sm" id="arcAcctNext">Next →</button>
+        </div>
+      </div>
+    </div>
+  </section>
 </main>
+
+<!-- Item -> accounts modal (mirrors the Drop Archive's delivery picker) -->
+<div class="modal-bg" id="arcItemBg">
+  <div class="modal">
+    <header>
+      <b id="arcItemTitle">Item</b>
+      <button class="x" id="arcItemClose">&times;</button>
+    </header>
+    <div class="mbody" id="arcItemBody"></div>
+  </div>
+</div>
 
 <script src="/theme.js"></script>
 <script src="/admin-nav.js"></script>
@@ -192,16 +287,20 @@ function chipFor(status){
 
 var acctPage=1, acctPages=1, acctQuery='', acctStatus='', acctSearchT=null;
 var secLoaded={};
+var arcSub='item', arcStatus='held', arcQuery='', arcSearchT=null;
+var arcPage=1, arcPages=1, arcGame='';
+var arcItemLoadedKey='', arcGameLoadedKey='';
 
 function switchSec(sec){
   document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('active',b.dataset.sec===sec);});
-  ['autolist','noclaim','webbot'].forEach(function(s){
+  ['autolist','noclaim','webbot','archive'].forEach(function(s){
     var el=$('sec-'+s); if(!el) return;
     el.classList.toggle('hidden', s!==sec);
   });
   if(sec==='autolist'){ loadState(); loadAccounts(); loadListings(); }
   if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
   if(sec==='webbot' && !secLoaded.webbot){ secLoaded.webbot=true; $('sec-webbot').innerHTML='<iframe src="/webbot-farm.html?embed=1" title="Web-token farm"></iframe>'; }
+  if(sec==='archive'){ secLoaded.archive=true; switchArcSub(arcSub); }
 }
 
 async function loadState(){
@@ -288,6 +387,203 @@ async function loadListings(){
   }catch(e){ $('listRows').innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
 }
 
+// ---------------------------------------------------------------------------
+// Drop archive — read-only browsing over UnclaimedAccount (no-claim + webbot
+// rows that never appear in the real Drop Archive). By item / By game /
+// Accounts share one status filter + search box; credentials are fetched per
+// account on click only.
+// ---------------------------------------------------------------------------
+
+function arcToast(msg){ var el=$('arcResult'); if(el) el.textContent=msg; }
+
+function switchArcSub(sub){
+  arcSub=sub;
+  document.querySelectorAll('#arcTabs .tab').forEach(function(b){ b.classList.toggle('active', b.dataset.asec===sub); });
+  ['item','game','accounts'].forEach(function(s){
+    var el=$('arcView-'+s);
+    if(el) el.style.display=(s===sub?'':'none');
+  });
+  loadArchiveView();
+}
+
+function loadArchiveView(){
+  if(arcSub==='item') loadArcItems();
+  else if(arcSub==='game') loadArcGames();
+  else loadArcAccounts();
+}
+
+function statusChips(byStatus){
+  if(!byStatus) return '';
+  return Object.keys(byStatus).filter(function(k){ return byStatus[k]>0; }).map(function(k){
+    var cls=k==='listed'?'on':(k==='sold'||k==='removed'?'off':'warn');
+    return '<span class="chip '+cls+'">'+esc(k)+' '+byStatus[k]+'</span>';
+  }).join(' ');
+}
+
+async function loadArcItems(){
+  try{
+    var key=arcStatus+'\u0000'+arcQuery;
+    if(arcItemLoadedKey===key) return;
+    arcItemLoadedKey=key;
+    var p=new URLSearchParams(); p.set('status',arcStatus);
+    var j=await api('/api/unclaimed-auto/archive/by-item?'+p.toString());
+    var items=(j.items||[]).filter(function(it){
+      if(!arcQuery) return true;
+      var q=arcQuery.toLowerCase();
+      return (it.name||'').toLowerCase().indexOf(q)>=0 || (it.game||'').toLowerCase().indexOf(q)>=0;
+    });
+    $('arcItemTotal').textContent=items.length+' item'+(items.length===1?'':'s');
+    var rows=$('arcItemRows');
+    if(!items.length){
+      rows.innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">'+(arcQuery?'No matching items.':'No unclaimed drops logged yet — run “Scan &amp; list now”.')+'</td></tr>';
+      return;
+    }
+    rows.innerHTML=items.map(function(it){
+      return '<tr class="clickable" data-itemkey="'+esc(it.itemKey)+'" data-itemname="'+esc(it.name||'')+'">'+
+        '<td><b>'+esc(it.name||'–')+'</b></td>'+
+        '<td>'+esc(it.game||'–')+'</td>'+
+        '<td>'+it.accounts+'</td>'+
+        '<td>'+it.units+'</td>'+
+        '<td class="arc-chips">'+(it.byStatus?statusChips(it.byStatus):'<span class="chip">'+esc(arcStatus)+'</span>')+'</td>'+
+      '</tr>';
+    }).join('');
+  }catch(e){ $('arcItemRows').innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+async function loadArcGames(){
+  try{
+    var key=arcStatus+'\u0000'+arcQuery;
+    if(arcGameLoadedKey===key) return;
+    arcGameLoadedKey=key;
+    var p=new URLSearchParams(); p.set('status',arcStatus);
+    var j=await api('/api/unclaimed-auto/archive/by-game?'+p.toString());
+    var games=(j.games||[]).filter(function(g){
+      if(!arcQuery) return true;
+      return (g.game||'').toLowerCase().indexOf(arcQuery.toLowerCase())>=0;
+    });
+    $('arcGameTotal').textContent=games.length+' game'+(games.length===1?'':'s');
+    var rows=$('arcGameRows');
+    if(!games.length){
+      rows.innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">'+(arcQuery?'No matching games.':'No games yet.')+'</td></tr>';
+      return;
+    }
+    rows.innerHTML=games.map(function(g){
+      return '<tr class="clickable" data-game="'+esc(g.game)+'">'+
+        '<td><b>'+esc(g.game||'(no game)')+'</b></td>'+
+        '<td>'+g.accounts+'</td>'+
+        '<td>'+g.items+'</td>'+
+        '<td class="arc-chips">'+(g.byStatus?statusChips(g.byStatus):'<span class="chip">'+esc(arcStatus)+'</span>')+'</td>'+
+      '</tr>';
+    }).join('');
+  }catch(e){ $('arcGameRows').innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+function renderArcGameChip(){
+  var el=$('arcGameChip');
+  if(!el) return;
+  if(arcGame){
+    el.style.display='';
+    el.innerHTML='<span class="chip arc-game-chip">game: '+esc(arcGame)+' <a href="javascript:;" data-cleargame title="Clear game filter">&times;</a></span>';
+  }else{
+    el.style.display='none';
+  }
+}
+
+async function loadArcAccounts(){
+  try{
+    var p=new URLSearchParams();
+    p.set('page',arcPage); p.set('pageSize',50);
+    p.set('status',arcStatus);
+    if(arcQuery) p.set('q',arcQuery);
+    if(arcGame) p.set('game',arcGame);
+    var j=await api('/api/unclaimed-auto/accounts?'+p.toString());
+    var total=j.total||0, pages=j.pages||1;
+    if(arcPage>pages && pages>0){ arcPage=pages; return loadArcAccounts(); }
+    arcPages=pages;
+    $('arcAcctTotal').textContent=total+' account'+(total===1?'':'s');
+    $('arcAcctPage').textContent='page '+arcPage+' of '+pages;
+    $('arcAcctPrev').disabled=arcPage<=1;
+    $('arcAcctNext').disabled=arcPage>=pages;
+    var rows=$('arcAcctRows');
+    if(!j.accounts.length){
+      rows.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+(arcQuery||arcGame?'No matching accounts.':'No accounts yet.')+'</td></tr>';
+      return;
+    }
+    rows.innerHTML=j.accounts.map(function(a){
+      var note=a.note?'<div class="muted" style="font-size:11px;">'+esc(a.note)+'</div>':'';
+      var acts='<button class="btn ghost sm" data-copypw="'+a.id+'" data-login="'+esc(a.login||'')+'">Copy password</button>';
+      return '<tr>'+
+        '<td><b>'+esc(a.login||'(no login)')+'</b>'+note+'</td>'+
+        '<td><span class="chip">'+esc(a.source)+'</span></td>'+
+        '<td>'+esc(a.game||'–')+'</td>'+
+        '<td>'+(a.drops&&a.drops.length?esc(a.drops.length)+' drops':'–')+'</td>'+
+        '<td>'+chipFor(a.status)+'</td>'+
+        '<td class="muted">'+fmt(a.listedAt||a.updatedAt)+'</td>'+
+        '<td style="text-align:right;white-space:nowrap;">'+acts+'</td>'+
+      '</tr>';
+    }).join('');
+  }catch(e){ $('arcAcctRows').innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+async function openArcItem(itemKey, itemName){
+  $('arcItemTitle').textContent=(itemName||itemKey);
+  $('arcItemBody').innerHTML='<div class="muted" style="padding:14px;">Loading…</div>';
+  $('arcItemBg').classList.add('show');
+  var d;
+  try{
+    var p=new URLSearchParams(); p.set('itemKey',itemKey); p.set('status',arcStatus);
+    d=await api('/api/unclaimed-auto/archive/item-accounts?'+p.toString());
+  }catch(e){
+    $('arcItemBody').innerHTML='<div class="muted" style="padding:14px;">'+esc(e.message)+'</div>';
+    return;
+  }
+  var accts=d.accounts||[];
+  var total=accts.reduce(function(s,a){ return s+(a.drops?a.drops.length:0); },0);
+  $('arcItemBody').innerHTML=
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">'+
+      '<span class="chip on">'+accts.length+' account'+(accts.length===1?'':'s')+'</span>'+
+      '<span class="chip">'+total+' drops</span>'+
+      '<span class="muted">'+esc(arcStatus==='all'?'all statuses':arcStatus)+'</span>'+
+    '</div>'+
+    '<div style="overflow-x:auto;"><table>'+
+      '<thead><tr><th>Login</th><th>Source</th><th>Game</th><th>Drops</th><th>Status</th><th>Market</th><th>Listed</th><th style="text-align:right;">Actions</th></tr></thead><tbody>'+
+      (accts.length?accts.map(function(a){
+        var dropTxt=a.drops&&a.drops.length
+          ? '<span title="'+esc(a.drops.slice(0,20).join(', '))+'">'+a.drops.length+'</span>'
+          : '–';
+        var acts='<button class="btn ghost sm" data-copylogin="'+a.id+'" data-login="'+esc(a.login||'')+'">Copy login</button> <button class="btn ghost sm" data-copypw="'+a.id+'" data-login="'+esc(a.login||'')+'">Copy password</button>';
+        return '<tr>'+
+          '<td><b>'+esc(a.login||'(no login)')+'</b></td>'+
+          '<td><span class="chip">'+esc(a.source)+'</span></td>'+
+          '<td>'+esc(a.game||'–')+'</td>'+
+          '<td>'+dropTxt+'</td>'+
+          '<td>'+chipFor(a.status)+'</td>'+
+          '<td>'+esc(a.market||'–')+'</td>'+
+          '<td class="muted">'+fmt(a.listedAt)+'</td>'+
+          '<td style="text-align:right;white-space:nowrap;">'+acts+'</td>'+
+        '</tr>';
+      }).join(''):'<tr><td colspan="8" class="muted" style="padding:14px;">No accounts hold this item.</td></tr>')+
+      '</tbody></table></div>';
+}
+
+// Async clipboard with a hidden-textarea fallback for mobile/blocked contexts.
+async function copyText(text){
+  try{
+    await navigator.clipboard.writeText(text);
+    return true;
+  }catch(e){
+    var ta=document.createElement('textarea');
+    ta.value=text;
+    ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok=document.execCommand('copy');
+    document.body.removeChild(ta);
+    if(!ok) throw new Error('copy blocked');
+    return true;
+  }
+}
+
 async function busy(btn, fn){
   if(btn) btn.disabled=true;
   try{ var msg=await fn(); if(msg) $('runResult').textContent=msg; }
@@ -295,7 +591,12 @@ async function busy(btn, fn){
   finally{ if(btn) btn.disabled=false; }
 }
 
-document.querySelectorAll('.tab').forEach(function(b){ b.addEventListener('click',function(){ switchSec(b.dataset.sec); }); });
+document.querySelectorAll('.tab').forEach(function(b){
+  b.addEventListener('click',function(){
+    if(b.dataset.asec) switchArcSub(b.dataset.asec);
+    else switchSec(b.dataset.sec);
+  });
+});
 
 $('scanBtn').addEventListener('click',function(){
   busy(this, async function(){
@@ -328,6 +629,16 @@ $('acctSearch').addEventListener('input',function(){
 });
 $('acctStatus').addEventListener('change',function(){ acctStatus=this.value; acctPage=1; loadAccounts(); });
 
+$('arcSearch').addEventListener('input',function(){
+  clearTimeout(arcSearchT);
+  arcSearchT=setTimeout(function(){ arcQuery=$('arcSearch').value.trim(); arcPage=1; loadArchiveView(); },300);
+});
+$('arcStatus').addEventListener('change',function(){ arcStatus=this.value; arcPage=1; loadArchiveView(); });
+$('arcAcctPrev').addEventListener('click',function(){ if(arcPage>1){arcPage--;loadArcAccounts();} });
+$('arcAcctNext').addEventListener('click',function(){ if(arcPage<arcPages){arcPage++;loadArcAccounts();} });
+$('arcItemClose').addEventListener('click',function(){ $('arcItemBg').classList.remove('show'); });
+$('arcItemBg').addEventListener('click',function(e){ if(e.target===this) this.classList.remove('show'); });
+
 document.addEventListener('click',function(e){
   var t=e.target;
   if(t.dataset&&t.dataset.sell){
@@ -345,6 +656,29 @@ document.addEventListener('click',function(e){
       loadAccounts(); loadListings(); loadState();
       return 'delisted';
     });
+  }
+  var itemRow=t.closest?t.closest('tr[data-itemkey]'):null;
+  if(itemRow){ openArcItem(itemRow.dataset.itemkey, itemRow.dataset.itemname); return; }
+  var gameRow=t.closest?t.closest('tr[data-game]'):null;
+  if(gameRow){ arcGame=gameRow.dataset.game; arcPage=1; renderArcGameChip(); switchArcSub('accounts'); return; }
+  if(t.dataset&&t.dataset.cleargame){ arcGame=''; arcPage=1; renderArcGameChip(); loadArcAccounts(); return; }
+  if(t.dataset&&t.dataset.copylogin){
+    copyText(t.dataset.login||'').then(function(){ arcToast('copied login'); },function(){ arcToast('copy failed'); });
+    return;
+  }
+  if(t.dataset&&t.dataset.copypw){
+    var btn=t;
+    btn.disabled=true;
+    (async function(){
+      try{
+        var d=await api('/api/unclaimed-auto/archive/account/'+btn.dataset.copypw+'/credential');
+        if(!d.password) throw new Error('no stored password for this account');
+        await copyText(d.password);
+        arcToast('copied password'+(d.login?' for '+d.login:''));
+      }catch(err){ arcToast('Error: '+err.message); }
+      finally{ btn.disabled=false; }
+    })();
+    return;
   }
 });
 

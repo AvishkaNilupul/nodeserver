@@ -234,6 +234,132 @@ function sellableDropsFromWebbotInv(inv) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Unclaimed Drop archive views (read-only browsing over UnclaimedAccount).
+// The collection is small, so the endpoints feed a projected find() output
+// into these pure grouping helpers — never a $group (Atlas shared tier has
+// allowDiskUse OFF). Exported so the views and the tests share one rule.
+// ---------------------------------------------------------------------------
+
+// "Held / available stock" = listed + skipped. Everything else
+// (sold/expired/released/removed) means the account's drops are gone.
+const ARCHIVE_HELD_STATUSES = ["listed", "skipped"];
+const ARCHIVE_STATUS_ZERO = {
+  listed: 0,
+  sold: 0,
+  expired: 0,
+  released: 0,
+  skipped: 0,
+  removed: 0,
+};
+
+// Map the archive views' ?status= onto a Mongo filter. Empty/"all" mean no
+// filter (the per-status breakdown is shown); "held" (the default) is the
+// listed+skipped bucket; any other value is a single raw status.
+function archiveStatusFilter(status) {
+  const raw = String(status || "").trim().toLowerCase();
+  if (!raw || raw === "all") return null;
+  if (raw === "held") return { status: { $in: ARCHIVE_HELD_STATUSES.slice() } };
+  return { status: raw };
+}
+
+// The stable key two drop copies share. Prefer the stored itemKey; legacy
+// rows without one fall back to a normalized `${game}|${name}` key.
+function archiveItemKey(drop, game) {
+  const d = drop || {};
+  const key = String(d.itemKey || "").trim();
+  if (key) return key;
+  return (
+    String(game || "").trim().toLowerCase() +
+    "|" +
+    String(d.name || "").trim().toLowerCase()
+  );
+}
+
+// Group a projected UnclaimedAccount result set by item for the By-item view.
+// rows: [{ _id, game, status, drops:[{ name, game, itemKey }] }].
+// withStatus also rolls up per-status ACCOUNT counts (one per holding account).
+function groupArchiveByItem(rows, withStatus) {
+  const items = new Map();
+  for (const row of rows || []) {
+    const game = String((row && row.game) || "").trim();
+    const status = (row && row.status) || "skipped";
+    const seen = new Set();
+    for (const drop of (row && row.drops) || []) {
+      const key = archiveItemKey(drop, game);
+      let it = items.get(key);
+      if (!it) {
+        it = {
+          itemKey: key,
+          name: String((drop && drop.name) || "").trim(),
+          game,
+          accounts: new Set(),
+          units: 0,
+          byStatus: withStatus ? Object.assign({}, ARCHIVE_STATUS_ZERO) : null,
+        };
+        items.set(key, it);
+      }
+      it.units += 1;
+      it.accounts.add(String(row._id));
+      if (it.byStatus && !seen.has(key)) {
+        it.byStatus[status] += 1;
+        seen.add(key);
+      }
+    }
+  }
+  return [...items.values()]
+    .map((it) => ({
+      itemKey: it.itemKey,
+      name: it.name,
+      game: it.game,
+      accounts: it.accounts.size,
+      units: it.units,
+      byStatus: it.byStatus,
+    }))
+    .sort(
+      (a, b) =>
+        b.accounts - a.accounts ||
+        b.units - a.units ||
+        String(a.itemKey).localeCompare(String(b.itemKey)),
+    );
+}
+
+// Group the same result set by game for the By-game view. `items` is the
+// count of DISTINCT item keys seen for the game.
+function groupArchiveByGame(rows, withStatus) {
+  const games = new Map();
+  for (const row of rows || []) {
+    const game = String((row && row.game) || "").trim();
+    const status = (row && row.status) || "skipped";
+    let g = games.get(game);
+    if (!g) {
+      g = {
+        game,
+        accounts: new Set(),
+        items: new Set(),
+        byStatus: withStatus ? Object.assign({}, ARCHIVE_STATUS_ZERO) : null,
+      };
+      games.set(game, g);
+    }
+    g.accounts.add(String(row._id));
+    for (const drop of (row && row.drops) || []) {
+      g.items.add(archiveItemKey(drop, game));
+    }
+    if (g.byStatus) g.byStatus[status] += 1;
+  }
+  return [...games.values()]
+    .map((g) => ({
+      game: g.game,
+      accounts: g.accounts.size,
+      items: g.items.size,
+      byStatus: g.byStatus,
+    }))
+    .sort(
+      (a, b) =>
+        b.accounts - a.accounts || String(a.game).localeCompare(String(b.game)),
+    );
+}
+
 // Stored credentials are secretBox-encrypted, except legacy webbot rows which
 // carry a "plain:" prefix. Return the usable plaintext or "".
 function plainPassword(enc) {
@@ -762,13 +888,27 @@ async function rowForLedger(ledger) {
   }).lean();
 }
 
+// The owner row's email, secretBox-encrypted where present. Pool rows carry
+// it under `email`; legacy/noclaim rows may use `credEmail`; webbot rows have
+// no email field at all. Absent values return "" — never a decrypt error.
+function ownerEmail(row) {
+  if (!row) return "";
+  const enc = row.credEmail || row.email || "";
+  return enc ? String(decrypt(enc) || "") : "";
+}
+
 // Rebuild a credential object for a ledger row (pool row / webbot row).
+// Passwords and emails are decrypted here, ON DEMAND — never in list payloads.
 async function credentialForLedger(ledger) {
-  if (!ledger) return { login: "", password: "" };
+  if (!ledger) return { login: "", password: "", email: "" };
   if (ledger.source === "noclaim" && ledger.poolAccountId) {
     const pool = await AvailableAccount.findById(ledger.poolAccountId).lean();
     if (pool) {
-      return { login: ledger.login || pool.login || "", password: poolPassword(pool) };
+      return {
+        login: ledger.login || pool.login || "",
+        password: poolPassword(pool),
+        email: ownerEmail(pool),
+      };
     }
   }
   if (ledger.source === "webbot" && ledger.webBotAccountId) {
@@ -777,10 +917,11 @@ async function credentialForLedger(ledger) {
       return {
         login: ledger.login || wb.login || "",
         password: plainPassword(wb.credPasswordEnc),
+        email: ownerEmail(wb),
       };
     }
   }
-  return { login: ledger.login || "", password: "" };
+  return { login: ledger.login || "", password: "", email: "" };
 }
 
 // ---------------------------------------------------------------------------
@@ -2457,8 +2598,13 @@ module.exports = {
   gameCapKey,
   chooseCapReleases,
   allocateCapKeep,
+  archiveStatusFilter,
+  archiveItemKey,
+  groupArchiveByItem,
+  groupArchiveByGame,
   listingTitle,
   listingDescription,
+  credentialForLedger,
   activeListingsForLogin,
   soldMapForSecrets,
   // engine
