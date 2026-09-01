@@ -54,11 +54,13 @@ router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) =
     const status = String(req.query.status || "").trim();
     const q = String(req.query.q || "").trim().toLowerCase();
     const game = String(req.query.game || "").trim();
+    const source = String(req.query.source || "").trim().toLowerCase();
     const filter = {};
     if (status === "held") filter.status = { $in: ["listed", "skipped"] };
     else if (status && status !== "all") filter.status = status;
     if (q) filter.loginLower = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     if (game) filter.game = game;
+    if (source === "noclaim" || source === "webbot") filter.source = source;
     const total = await UnclaimedAccount.countDocuments(filter);
     const rows = await UnclaimedAccount.find(filter)
       .sort({ listedAt: -1, updatedAt: -1 })
@@ -119,6 +121,12 @@ function archiveStatusParam(req) {
   return String(req.query.status || "").trim().toLowerCase();
 }
 
+// ?source=: "noclaim" | "webbot" restricts to one farm; anything else = both.
+function archiveSourceParam(req) {
+  const s = String(req.query.source || "").trim().toLowerCase();
+  return s === "noclaim" || s === "webbot" ? s : "";
+}
+
 // By-item rollup: one row per distinct item key, with distinct-account and
 // total-unit counts (4x a drop on one account = accounts 1, units 4). The
 // per-status breakdown is only meaningful when the view is unfiltered.
@@ -126,8 +134,11 @@ router.get("/api/unclaimed-auto/archive/by-item", requireSuperadmin, async (req,
   try {
     const status = archiveStatusParam(req);
     const filter = engine.archiveStatusFilter(status) || {};
+    const src = archiveSourceParam(req);
+    if (src) filter.source = src;
     const rows = await UnclaimedAccount.find(filter, {
       _id: 1,
+      source: 1,
       game: 1,
       status: 1,
       drops: 1,
@@ -144,8 +155,11 @@ router.get("/api/unclaimed-auto/archive/by-game", requireSuperadmin, async (req,
   try {
     const status = archiveStatusParam(req);
     const filter = engine.archiveStatusFilter(status) || {};
+    const src = archiveSourceParam(req);
+    if (src) filter.source = src;
     const rows = await UnclaimedAccount.find(filter, {
       _id: 1,
+      source: 1,
       game: 1,
       status: 1,
       drops: 1,
@@ -165,10 +179,17 @@ router.get("/api/unclaimed-auto/archive/item-accounts", requireSuperadmin, async
     if (!itemKey)
       return res.status(400).json({ success: false, message: "itemKey required" });
     const filter = engine.archiveStatusFilter(archiveStatusParam(req)) || {};
-    filter["drops.itemKey"] = itemKey;
-    const rows = await UnclaimedAccount.find(filter, ARCHIVE_ACCOUNT_PROJECTION)
+    const src = archiveSourceParam(req);
+    if (src) filter.source = src;
+    // Match with the SAME key logic as the by-item rollup (engine.archiveItemKey)
+    // rather than a raw `drops.itemKey` query, so a legacy drop with no stored
+    // itemKey still drills down under its normalized game|name fallback key.
+    const candidates = await UnclaimedAccount.find(filter, ARCHIVE_ACCOUNT_PROJECTION)
       .sort({ listedAt: 1, _id: 1 })
       .lean();
+    const rows = candidates.filter((a) =>
+      (a.drops || []).some((d) => engine.archiveItemKey(d, a.game) === itemKey),
+    );
     res.json({
       success: true,
       accounts: rows.map((a) => ({

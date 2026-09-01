@@ -162,3 +162,46 @@ test("by item and by game sort by accounts desc", () => {
   const items = groupArchiveByItem(rows, false);
   assert.strictEqual(items[0].itemKey, "item a1|game a");
 });
+
+function SRC(id, source, game, status, drops) {
+  return { _id: id, source, game, status, drops };
+}
+
+test("by item: bySource splits distinct accounts into no-claim vs web-token", () => {
+  const key = "pachimari icon|overwatch";
+  const rows = [
+    SRC("a1", "noclaim", "Overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+    SRC("a2", "webbot", "Overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+    SRC("a3", "webbot", "Overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+  ];
+  const items = groupArchiveByItem(rows, false);
+  assert.strictEqual(items.length, 1);
+  assert.strictEqual(items[0].accounts, 3);
+  assert.deepStrictEqual(items[0].bySource, { noclaim: 1, webbot: 2 });
+});
+
+test("by item: an unknown/blank source never inflates the split", () => {
+  const key = "pachimari icon|overwatch";
+  const rows = [
+    SRC("a1", "reseller", "Overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+    SRC("a2", "", "Overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+  ];
+  const items = groupArchiveByItem(rows, false);
+  assert.strictEqual(items[0].accounts, 2);
+  assert.deepStrictEqual(items[0].bySource, { noclaim: 0, webbot: 0 });
+});
+
+test("by game: folds game-name casing into ONE row and keeps the nice label", () => {
+  const key = "pachimari icon|overwatch";
+  const rows = [
+    SRC("a1", "noclaim", "Overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+    SRC("a2", "webbot", "overwatch", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+    SRC("a3", "webbot", "OVERWATCH", "listed", [{ name: "Pachimari Icon", itemKey: key }]),
+  ];
+  const games = groupArchiveByGame(rows, false);
+  assert.strictEqual(games.length, 1); // Overwatch / overwatch / OVERWATCH = one game
+  assert.strictEqual(games[0].game, "Overwatch"); // nicest spelling wins
+  assert.strictEqual(games[0].accounts, 3);
+  assert.strictEqual(games[0].items, 1);
+  assert.deepStrictEqual(games[0].bySource, { noclaim: 1, webbot: 2 });
+});

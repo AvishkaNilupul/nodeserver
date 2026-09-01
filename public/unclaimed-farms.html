@@ -218,6 +218,11 @@
           <option value="skipped">Skipped</option>
           <option value="removed">Manual sold</option>
         </select>
+        <select id="arcSource" title="Filter by farm">
+          <option value="">All farms</option>
+          <option value="noclaim">No-claim farm</option>
+          <option value="webbot">Web-token farm</option>
+        </select>
         <input id="arcSearch" type="search" placeholder="Search items, games, logins…" />
         <span class="muted" id="arcResult"></span>
       </div>
@@ -227,8 +232,8 @@
       <div class="hd"><b>By item</b> <span class="muted" id="arcItemTotal" style="margin-left:auto;"></span></div>
       <div class="bd" style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Item</th><th>Game</th><th>Accounts</th><th>Units</th><th>Status</th></tr></thead>
-          <tbody id="arcItemRows"><tr><td colspan="5" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          <thead><tr><th>Item</th><th>Game</th><th>Accounts</th><th>Farms</th><th>Units</th><th>Status</th></tr></thead>
+          <tbody id="arcItemRows"><tr><td colspan="6" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -237,8 +242,8 @@
       <div class="hd"><b>By game</b> <span class="muted" id="arcGameTotal" style="margin-left:auto;"></span></div>
       <div class="bd" style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Game</th><th>Accounts</th><th>Items</th><th>Status</th></tr></thead>
-          <tbody id="arcGameRows"><tr><td colspan="4" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          <thead><tr><th>Game</th><th>Accounts</th><th>Farms</th><th>Items</th><th>Status</th></tr></thead>
+          <tbody id="arcGameRows"><tr><td colspan="5" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -287,7 +292,7 @@ function chipFor(status){
 
 var acctPage=1, acctPages=1, acctQuery='', acctStatus='', acctSearchT=null;
 var secLoaded={};
-var arcSub='item', arcStatus='held', arcQuery='', arcSearchT=null;
+var arcSub='item', arcStatus='held', arcSource='', arcQuery='', arcSearchT=null;
 var arcPage=1, arcPages=1, arcGame='';
 var arcItemLoadedKey='', arcGameLoadedKey='';
 
@@ -403,6 +408,7 @@ function switchArcSub(sub){
     var el=$('arcView-'+s);
     if(el) el.style.display=(s===sub?'':'none');
   });
+  renderArcGameChip();
   loadArchiveView();
 }
 
@@ -419,6 +425,14 @@ function statusChips(byStatus){
     return '<span class="chip '+cls+'">'+esc(k)+' '+byStatus[k]+'</span>';
   }).join(' ');
 }
+// no-claim vs web-token split for a rollup row.
+function srcCell(bs){
+  if(!bs) return '<span class="muted">–</span>';
+  var parts=[];
+  if(bs.noclaim) parts.push('<span class="chip">no-claim '+bs.noclaim+'</span>');
+  if(bs.webbot) parts.push('<span class="chip">web-token '+bs.webbot+'</span>');
+  return parts.length?parts.join(' '):'<span class="muted">–</span>';
+}
 
 async function loadArcItems(){
   try{
@@ -426,6 +440,7 @@ async function loadArcItems(){
     if(arcItemLoadedKey===key) return;
     arcItemLoadedKey=key;
     var p=new URLSearchParams(); p.set('status',arcStatus);
+    if(arcSource) p.set('source',arcSource);
     var j=await api('/api/unclaimed-auto/archive/by-item?'+p.toString());
     var items=(j.items||[]).filter(function(it){
       if(!arcQuery) return true;
@@ -435,7 +450,7 @@ async function loadArcItems(){
     $('arcItemTotal').textContent=items.length+' item'+(items.length===1?'':'s');
     var rows=$('arcItemRows');
     if(!items.length){
-      rows.innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">'+(arcQuery?'No matching items.':'No unclaimed drops logged yet — run “Scan &amp; list now”.')+'</td></tr>';
+      rows.innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+(arcQuery?'No matching items.':'No unclaimed drops logged yet — run “Scan &amp; list now”.')+'</td></tr>';
       return;
     }
     rows.innerHTML=items.map(function(it){
@@ -443,11 +458,12 @@ async function loadArcItems(){
         '<td><b>'+esc(it.name||'–')+'</b></td>'+
         '<td>'+esc(it.game||'–')+'</td>'+
         '<td>'+it.accounts+'</td>'+
+        '<td class="arc-chips">'+srcCell(it.bySource)+'</td>'+
         '<td>'+it.units+'</td>'+
         '<td class="arc-chips">'+(it.byStatus?statusChips(it.byStatus):'<span class="chip">'+esc(arcStatus)+'</span>')+'</td>'+
       '</tr>';
     }).join('');
-  }catch(e){ $('arcItemRows').innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+  }catch(e){ $('arcItemRows').innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
 }
 
 async function loadArcGames(){
@@ -456,6 +472,7 @@ async function loadArcGames(){
     if(arcGameLoadedKey===key) return;
     arcGameLoadedKey=key;
     var p=new URLSearchParams(); p.set('status',arcStatus);
+    if(arcSource) p.set('source',arcSource);
     var j=await api('/api/unclaimed-auto/archive/by-game?'+p.toString());
     var games=(j.games||[]).filter(function(g){
       if(!arcQuery) return true;
@@ -464,24 +481,27 @@ async function loadArcGames(){
     $('arcGameTotal').textContent=games.length+' game'+(games.length===1?'':'s');
     var rows=$('arcGameRows');
     if(!games.length){
-      rows.innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">'+(arcQuery?'No matching games.':'No games yet.')+'</td></tr>';
+      rows.innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">'+(arcQuery?'No matching games.':'No games yet.')+'</td></tr>';
       return;
     }
     rows.innerHTML=games.map(function(g){
       return '<tr class="clickable" data-game="'+esc(g.game)+'">'+
         '<td><b>'+esc(g.game||'(no game)')+'</b></td>'+
         '<td>'+g.accounts+'</td>'+
+        '<td class="arc-chips">'+srcCell(g.bySource)+'</td>'+
         '<td>'+g.items+'</td>'+
         '<td class="arc-chips">'+(g.byStatus?statusChips(g.byStatus):'<span class="chip">'+esc(arcStatus)+'</span>')+'</td>'+
       '</tr>';
     }).join('');
-  }catch(e){ $('arcGameRows').innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+  }catch(e){ $('arcGameRows').innerHTML='<tr><td colspan="5" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
 }
 
 function renderArcGameChip(){
   var el=$('arcGameChip');
   if(!el) return;
-  if(arcGame){
+  // The game filter only applies to the Accounts view, so only surface the
+  // chip there — on By item / By game it would look active but do nothing.
+  if(arcGame && arcSub==='accounts'){
     el.style.display='';
     el.innerHTML='<span class="chip arc-game-chip">game: '+esc(arcGame)+' <a href="javascript:;" data-cleargame title="Clear game filter">&times;</a></span>';
   }else{
@@ -494,6 +514,7 @@ async function loadArcAccounts(){
     var p=new URLSearchParams();
     p.set('page',arcPage); p.set('pageSize',50);
     p.set('status',arcStatus);
+    if(arcSource) p.set('source',arcSource);
     if(arcQuery) p.set('q',arcQuery);
     if(arcGame) p.set('game',arcGame);
     var j=await api('/api/unclaimed-auto/accounts?'+p.toString());
@@ -634,6 +655,7 @@ $('arcSearch').addEventListener('input',function(){
   arcSearchT=setTimeout(function(){ arcQuery=$('arcSearch').value.trim(); arcPage=1; loadArchiveView(); },300);
 });
 $('arcStatus').addEventListener('change',function(){ arcStatus=this.value; arcPage=1; loadArchiveView(); });
+$('arcSource').addEventListener('change',function(){ arcSource=this.value; arcPage=1; arcItemLoadedKey=''; arcGameLoadedKey=''; loadArchiveView(); });
 $('arcAcctPrev').addEventListener('click',function(){ if(arcPage>1){arcPage--;loadArcAccounts();} });
 $('arcAcctNext').addEventListener('click',function(){ if(arcPage<arcPages){arcPage++;loadArcAccounts();} });
 $('arcItemClose').addEventListener('click',function(){ $('arcItemBg').classList.remove('show'); });
