@@ -644,6 +644,116 @@ async function gameflipReplaceCover(listingId, imagePath) {
   if (uploadErr) throw uploadErr;
 }
 
+// Delete every gallery photo that is NOT the cover_photo — the stale grids left
+// behind when a cover was replaced but the limiter rejected the cleanup delete
+// (a stale-photo delete right after an upload is the exact case gameflipReplace-
+// Cover gives up on). A photo-status delete touches neither cover_photo, price,
+// nor status, so Gameflip accepts it while the listing is onsale; only if it is
+// ever rejected as an onsale edit do we retry inside an off-sale window and
+// restore, using the same verified restore as the cover swap. Idempotent — a
+// listing already down to just its cover returns { deleted: 0 }.
+async function gameflipDeleteNonCoverPhotos(listingId) {
+  const keys = requireKeys("gameflip");
+  const patch = (body) =>
+    axios.patch(GF_API + "/listing/" + listingId, body, {
+      headers: {
+        ...gfHeaders(keys),
+        "Content-Type": "application/json-patch+json",
+      },
+      timeout: 20000,
+    });
+  const setStatus = (v) =>
+    patch([{ op: "replace", path: "/status", value: v }]);
+  const readPhotos = async () => {
+    const cur = await axios.get(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+    const d = (cur.data || {}).data || {};
+    const ph = d.photo || {};
+    const ids = Object.keys(ph).filter(
+      (k) => k !== d.cover_photo && ph[k] && ph[k].status === "active",
+    );
+    return { ids, status: d.status };
+  };
+
+  const first = await readPhotos();
+  if (!first.ids.length) return { deleted: 0, remaining: 0 };
+  const delOps = first.ids.map((id) => ({
+    op: "replace",
+    path: "/photo/" + id + "/status",
+    value: "deleted",
+  }));
+  // Backoff retries for the limiter, which 429s photo edits in bursts.
+  const tryDelete = async () => {
+    let err = null;
+    for (const w of [0, 15000, 45000, 90000]) {
+      if (w) await new Promise((r) => setTimeout(r, w));
+      try {
+        await patch(delOps);
+        return null;
+      } catch (e) {
+        err = e;
+        if (e.response && e.response.status === 429) continue;
+        return e; // non-429: surface (may be an onsale-edit rejection)
+      }
+    }
+    return err;
+  };
+
+  const onsale = first.status === "onsale";
+  let e1 = await tryDelete();
+  if (!e1) {
+    const after = await readPhotos();
+    return { deleted: first.ids.length - after.ids.length, remaining: after.ids.length };
+  }
+  // Non-429 failure. If it looks like an onsale-edit rejection, retry in an
+  // off-sale window; otherwise it is a real error.
+  const msg =
+    (e1.response && e1.response.data && JSON.stringify(e1.response.data)) ||
+    e1.message ||
+    "";
+  if (!onsale || !/onsale|status/i.test(msg)) {
+    throw apiError("Gameflip photo prune", e1);
+  }
+  await gfTakeOffSale(listingId, setStatus, "Gameflip photo prune");
+  const e2 = await tryDelete();
+  // Restore onsale with the same verified retry as gameflipReplaceCover.
+  let restored = false;
+  let restoreErr = null;
+  for (const w of [0, 20000, 60000, 120000]) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("onsale");
+    } catch (e) {
+      restoreErr = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) === "onsale") {
+        restored = true;
+        restoreErr = null;
+        break;
+      }
+      restoreErr = new Error('status settled on "ready" instead of "onsale" (rate-limited)');
+    } catch (e) {
+      restoreErr = e;
+    }
+  }
+  if (!restored) {
+    throw new Error(
+      "Gameflip listing " +
+        listingId +
+        " IS NOT BACK ON SALE after a photo prune — put it back on sale " +
+        "manually. " +
+        ((restoreErr && restoreErr.message) || "unknown error"),
+    );
+  }
+  if (e2) throw apiError("Gameflip photo prune", e2);
+  const after = await readPhotos();
+  return { deleted: first.ids.length - after.ids.length, remaining: after.ids.length };
+}
+
 async function gameflipDelist(listingId) {
   const keys = requireKeys("gameflip");
   try {
@@ -3540,6 +3650,7 @@ module.exports = {
   gameflipDelist,
   gameflipReprice,
   gameflipReplaceCover,
+  gameflipDeleteNonCoverPhotos,
   gameflipListingIdsByStatus,
   digisellerTest,
   digisellerCategories,
