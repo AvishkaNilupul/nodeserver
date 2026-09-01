@@ -32,6 +32,11 @@ const WebBotAccount = require("../models/WebBotAccount");
 
 const APPLY = process.argv.includes("--apply");
 const GGSEL_REPUBLISH = process.argv.includes("--ggsel-republish");
+// Restrict to specific externalIds, e.g. --only=102809776 (republish one offer).
+const onlyArg = (process.argv.find((a) => a.startsWith("--only=")) || "").split("=")[1] || "";
+const ONLY = onlyArg
+  ? new Set(onlyArg.split(",").map((s) => s.trim()).filter(Boolean))
+  : null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => console.log(m);
 
@@ -105,6 +110,7 @@ async function main() {
 
     for (const row of rows) {
       const mkt = row.marketplace;
+      if (ONLY && !ONLY.has(String(row.externalId))) continue;
       const set = await DropSet.findById(row.set).lean();
       if (!set) {
         out.errors.push(row.externalId + ": set not found");
