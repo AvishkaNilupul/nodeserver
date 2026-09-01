@@ -451,11 +451,9 @@ async function gameflipReprice(
     }
     await gfUploadPhoto(keys, listingId, imagePath);
     if (stale.length) {
-      const delOps = stale.map((id) => ({
-        op: "replace",
-        path: "/photo/" + id + "/status",
-        value: "deleted",
-      }));
+      // Remove the map entry — a `replace .../status = "deleted"` is rejected
+      // 400 by Gameflip, which is why stale covers used to accumulate.
+      const delOps = stale.map((id) => ({ op: "remove", path: "/photo/" + id }));
       for (const w of [0, 15000, 45000]) {
         if (w) await new Promise((r) => setTimeout(r, w));
         try {
@@ -587,11 +585,9 @@ async function gameflipReplaceCover(listingId, imagePath) {
   try {
     await gfUploadPhoto(keys, listingId, imagePath);
     if (stale.length) {
-      const ops = stale.map((id) => ({
-        op: "replace",
-        path: "/photo/" + id + "/status",
-        value: "deleted",
-      }));
+      // Remove the map entry — a `replace .../status = "deleted"` is rejected
+      // 400 by Gameflip, which is why stale covers used to accumulate.
+      const ops = stale.map((id) => ({ op: "remove", path: "/photo/" + id }));
       // Gameflip's limiter rejects the delete right after an upload; a stale
       // photo left behind is cosmetic, so retry a few times and give up.
       for (const w of [0, 15000, 45000]) {
@@ -679,11 +675,10 @@ async function gameflipDeleteNonCoverPhotos(listingId) {
 
   const first = await readPhotos();
   if (!first.ids.length) return { deleted: 0, remaining: 0 };
-  const delOps = first.ids.map((id) => ({
-    op: "replace",
-    path: "/photo/" + id + "/status",
-    value: "deleted",
-  }));
+  // Gameflip removes a gallery photo with a json-patch REMOVE of its map entry.
+  // (A `replace /photo/<id>/status = "deleted"` is rejected 400 "bad value" —
+  // that was the long-standing bug that let stale photos pile up.)
+  const delOps = first.ids.map((id) => ({ op: "remove", path: "/photo/" + id }));
   // Backoff retries for the limiter, which 429s photo edits in bursts.
   const tryDelete = async () => {
     let err = null;
