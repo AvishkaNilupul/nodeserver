@@ -112,6 +112,27 @@ Escape key -> `closeModal()` (original 848), and `RT.on("closeModal", ...)`.
 global Refresh never force-fetches a section the operator never opened — this
 preserves the original flag semantics exactly.
 
+## Pagination and search (added 2026-08-30)
+
+The overview's **Renters** and **Rented bots** panels and the **Accounts**
+section load 20 rows at a time instead of the whole collection. The modules own
+their page/search state and their own static controls (`*Search` /
+`*SearchBtn` / `*Prev` / `*Next` / `*PageInfo`); `boot.js` does not wire them.
+
+- `accounts.js` GETs `/renter-accounts?page=&limit=&search=&renter=`; a filter
+  change resets to page 1 (tracked inside `load()`), a search starts at page 1.
+- `detail.js` GETs `/renters?page=&limit=&search=` for the list (grouped into
+  Active / Suspended / Expired sections) and `/renters/options` (id+username
+  only) for the Quick-farm datalist — the datalist must never be derived from a
+  paginated page.
+- `bots.js` GETs `/renter-bots?page=&limit=&search=` and groups rows by host.
+  The token-issues metric comes from the response's fleet-wide `tokenIssues`,
+  never from summing the page's rows.
+
+Server side, `routes/renterAdminRoutes.js` returns `{ total, page, pages }` on
+all three list endpoints and resolves the accounts roster's credentials in 3
+batched queries (`resolveAccountsCreds`) instead of the old per-row N+1.
+
 ## `data-*` attribute convention
 
 - `data-act` — action name (required)

@@ -26,42 +26,83 @@
 
   // ---- rented bots overview ----
 
+  // The overview list is paginated (20 per page) + searchable by renter
+  // username, so a large fleet never renders into the DOM all at once.
+  const BOT_PAGE_SIZE = 20;
+  let botPage = 1;
+  let botSearch = "";
+  let botTotal = 0;
+  let botPages = 1;
+
+  function botRowHtml(b) {
+    // botPill lives in core.js; online===null must stay distinct from false.
+    const runPill = RT.botPill(b);
+    return '<div class="row" data-bot="' + esc(b.renterId) + '">' +
+      '<div><div class="nm">' + esc(b.username) + ' ' +
+        (b.status === "suspended" ? '<span class="badge suspended">Suspended</span>' : '') + '</div>' +
+        '<div class="meta">' + esc(b.hostLabel || b.host) + ' · ' + esc(b.file) +
+          (b.sharedBy > 1 ? ' · <b>shared ×' + num(b.sharedBy) + '</b>' : '') +
+          ' · ' + num(b.accounts) + ' account(s) · ' + num(b.drops) + ' drop(s)' +
+          (b.tokenIssues
+            ? ' · <span class="tokwarn">⚠ ' + num(b.tokenIssues) + ' token issue' +
+              (b.tokenIssues > 1 ? 's' : '') + '</span>'
+            : '') +
+        '</div></div>' +
+      '<div class="meta" data-pill="' + esc(b.renterId) + '">' + runPill + '</div>' +
+      '<div class="meta mono">' + esc(b.container || "") + '</div>' +
+      '<div class="acts">' +
+        '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + esc(b.renterId) + '">Start</button>' +
+        '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + esc(b.renterId) + '">Restart</button>' +
+        '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + esc(b.renterId) + '">Stop</button>' +
+        '<button class="btn ghost sm" data-act="botLogs" data-id="' + esc(b.renterId) + '">Logs</button>' +
+        '<button class="btn ghost sm" data-act="botManage" data-id="' + esc(b.renterId) + '">Manage</button>' +
+      '</div></div>';
+  }
+
   async function loadRentBots() {
     try {
-      const d = await api("/renter-bots");
+      const params = new URLSearchParams();
+      params.set("page", String(botPage));
+      params.set("limit", String(BOT_PAGE_SIZE));
+      if (botSearch) params.set("search", botSearch);
+      const d = await api("/renter-bots?" + params.toString());
       const bots = d.bots || [];
-      const issues = bots.reduce((sum, b) => sum + (Number(b.tokenIssues) || 0), 0);
-      RT.setMetric("Bots", bots.length, bots.length ? "Checking live state" : "No bots assigned", bots.length ? "" : "warn");
+      botTotal = Number(d.total != null ? d.total : bots.length);
+      botPages = Math.max(1, Math.ceil(botTotal / BOT_PAGE_SIZE));
+      // Fleet-wide token-issue count comes from the response, NOT from this
+      // page's rows — a search or a page boundary must not undercount it.
+      const issues = Number(
+        d.tokenIssues != null
+          ? d.tokenIssues
+          : bots.reduce((sum, b) => sum + (Number(b.tokenIssues) || 0), 0)
+      );
+      RT.setMetric("Bots", botTotal, botTotal ? "Checking live state" : "No bots assigned", botTotal ? "" : "warn");
       RT.setMetric("Issues", issues, issues ? "Requires attention" : "All tokens healthy", issues ? "alert" : "good");
       if (!bots.length) {
         $("rentBots").innerHTML =
-          '<div class="muted" style="padding:6px 2px">No rented bots yet. Create one from a renter’s <b>Manage</b> panel.</div>';
+          '<div class="muted" style="padding:6px 2px">' +
+          (botSearch
+            ? "No rented bots match that search."
+            : "No rented bots yet. Create one from a renter’s <b>Manage</b> panel.") +
+          "</div>";
+        renderBotPager();
         return;
       }
-      $("rentBots").innerHTML = bots.map((b) => {
-        // botPill lives in core.js; online===null must stay distinct from false.
-        const runPill = RT.botPill(b);
-        return '<div class="row" data-bot="' + esc(b.renterId) + '">' +
-          '<div><div class="nm">' + esc(b.username) + ' ' +
-            (b.status === "suspended" ? '<span class="badge suspended">Suspended</span>' : '') + '</div>' +
-            '<div class="meta">' + esc(b.hostLabel || b.host) + ' · ' + esc(b.file) +
-              (b.sharedBy > 1 ? ' · <b>shared ×' + num(b.sharedBy) + '</b>' : '') +
-              ' · ' + num(b.accounts) + ' account(s) · ' + num(b.drops) + ' drop(s)' +
-              (b.tokenIssues
-                ? ' · <span class="tokwarn">⚠ ' + num(b.tokenIssues) + ' token issue' +
-                  (b.tokenIssues > 1 ? 's' : '') + '</span>'
-                : '') +
-            '</div></div>' +
-          '<div class="meta" data-pill="' + esc(b.renterId) + '">' + runPill + '</div>' +
-          '<div class="meta mono">' + esc(b.container || "") + '</div>' +
-          '<div class="acts">' +
-            '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + esc(b.renterId) + '">Start</button>' +
-            '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + esc(b.renterId) + '">Restart</button>' +
-            '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + esc(b.renterId) + '">Stop</button>' +
-            '<button class="btn ghost sm" data-act="botLogs" data-id="' + esc(b.renterId) + '">Logs</button>' +
-            '<button class="btn ghost sm" data-act="botManage" data-id="' + esc(b.renterId) + '">Manage</button>' +
-          '</div></div>';
-      }).join("");
+      // Organize the page by host so the fleet reads machine-by-machine rather
+      // than as one undifferentiated wall of rows.
+      const groups = new Map();
+      for (const b of bots) {
+        const key = b.hostLabel || b.host || "Unknown host";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(b);
+      }
+      $("rentBots").innerHTML = [...groups.entries()]
+        .map(([host, rows]) =>
+          '<div class="group-head">' + esc(host) + " · " + rows.length + "</div>" +
+          rows.map(botRowHtml).join("")
+        )
+        .join("");
+      renderBotPager();
     } catch (e) {
       RT.setMetric("Bots", "—", "Unavailable", "alert");
       RT.setMetric("Issues", "—", "Unavailable", "alert");
@@ -72,6 +113,19 @@
     // check is the slow part (SSH to the Pi, ~3s cold). Nothing on this page
     // may wait for it.
     loadRentBotsLive();
+  }
+
+  function renderBotPager() {
+    const prev = $("botPrev");
+    const next = $("botNext");
+    const info = $("botPageInfo");
+    if (prev) prev.disabled = botPage <= 1;
+    if (next) next.disabled = botPage >= botPages;
+    if (info) {
+      info.textContent = botTotal
+        ? "Page " + botPage + " / " + botPages + " · " + botTotal + " bot(s)"
+        : "";
+    }
   }
 
   // Fetch the real container states and swap them into the already-painted
@@ -212,6 +266,34 @@
   }
 
   // ---- registration (no fetching at load) ----
+
+  // Search + pagination for the overview list. Static elements, owned by this
+  // module; boot.js owns the section Refresh wiring only.
+  const botSearchInput = $("botSearch");
+  const botSearchBtn = $("botSearchBtn");
+  const botPrevBtn = $("botPrev");
+  const botNextBtn = $("botNext");
+  const applyBotSearch = () => {
+    botSearch = (botSearchInput ? botSearchInput.value : "").trim();
+    botPage = 1;
+    loadRentBots();
+  };
+  if (botSearchBtn) botSearchBtn.addEventListener("click", applyBotSearch);
+  if (botSearchInput) {
+    botSearchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") applyBotSearch();
+    });
+  }
+  if (botPrevBtn) {
+    botPrevBtn.addEventListener("click", () => {
+      if (botPage > 1) { botPage -= 1; loadRentBots(); }
+    });
+  }
+  if (botNextBtn) {
+    botNextBtn.addEventListener("click", () => {
+      if (botPage < botPages) { botPage += 1; loadRentBots(); }
+    });
+  }
 
   RT.reload.bots = loadRentBots;
 

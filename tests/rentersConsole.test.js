@@ -130,6 +130,7 @@ const ROUTES = () => ({
   "/bot-configs/hosts": { hosts: [{ id: "local", label: "Server" }] },
   "/renters/bots": { bots: [] },
   "/renters": { renters: [] },
+  "/renters/options": { renters: [] },
   "/renter-bots": { bots: [] },
   "/renter-bots/live": { live: [] },
   "/renter-scan/progress": { progress: {} },
@@ -155,6 +156,8 @@ function boot(opts) {
     setTimeout(fn, ms) { return timers.push({ fn, ms }); },
     setInterval(fn, ms) { return timers.push({ fn, ms, repeat: true }); },
     clearTimeout() {}, clearInterval() {},
+    // Standard browser global the modules now use to build paged query strings.
+    URLSearchParams,
     confirm: () => true, prompt: () => null, alert: () => {},
     fetch(p, o) {
       const url = String(p);
@@ -249,8 +252,11 @@ test("all 8 modules load and window.RT matches the contract", async () => {
     assert.strictEqual(typeof (env.RT[p[0]] || {})[p[1]], "function", "RT." + p[0] + "." + p[1] + " missing");
   }
   // boot.js's first paint, not a hardcoded list of endpoints.
-  const urls = env.calls.map((c) => c.url);
+  const urls = env.calls.map((c) => c.url.split("?")[0]);
   for (const u of ["/shop/me", "/bot-configs/hosts", "/renters", "/renter-bots"]) assert.ok(urls.includes(u), "no first-paint call to " + u);
+  // The paginated overview still keeps the Quick-farm renter picker fed with
+  // the full roster via the cheap options endpoint.
+  assert.ok(urls.includes("/renters/options"), "no quick-farm roster fetch");
 });
 
 // ---- 2 + 3: registry integrity ---------------------------------------------
@@ -401,6 +407,83 @@ test("bot picker shows dedicated stack capacity and disables full stacks", async
   assert.ok(
     html.includes("Create a dedicated rental stack"),
     "the create action does not describe the isolation boundary",
+  );
+});
+
+// ---- 7: accounts pagination + search --------------------------------------
+
+test("accounts section fetches one page at a time and pages forward", async () => {
+  const acc = (id, login) => ({
+    id, login, password: "p", token: "t", renter: "tenant-a",
+    status: "ok", dropCount: 0, farmUntil: null, farmEndedAt: null,
+  });
+  const env = boot({
+    routes: {
+      "/renter-accounts?page=1&limit=20": {
+        accounts: [acc("a1", "user-a")], total: 25, page: 1, pages: 2,
+      },
+      "/renter-accounts?page=2&limit=20": {
+        accounts: [acc("a2", "user-b")], total: 25, page: 2, pages: 2,
+      },
+    },
+  });
+  await env.settle();
+  await env.RT.accounts.load();
+  await env.settle();
+  assert.ok(env.html("rentAccs").includes("user-a"), "page 1 did not render");
+  assert.ok(
+    env.calls.some((c) => c.url === "/renter-accounts?page=1&limit=20"),
+    "accounts load did not request a single page",
+  );
+  const next = env.doc.getElementById("accNext");
+  assert.ok(next, "accNext control missing");
+  for (const f of next._on.click) f({});
+  await env.settle();
+  assert.ok(env.html("rentAccs").includes("user-b"), "page 2 did not render after next");
+  assert.ok(
+    env.calls.some((c) => c.url === "/renter-accounts?page=2&limit=20"),
+    "no page-2 request",
+  );
+});
+
+test("overview renters list paginates, groups by status, and searches", async () => {
+  const r = (id, username, status, expired) => ({
+    id, username, status, expired,
+    maxAccounts: 10, used: 1, pendingAccounts: 0,
+    accessStart: null, accessEnd: null, lastLoginAt: null,
+    botFile: "config_01.json",
+  });
+  const env = boot({
+    routes: {
+      "/renters?page=1&limit=20": {
+        renters: [r("1", "alice", "active", false), r("2", "bob", "suspended", false)],
+        total: 25, page: 1, limit: 20, pages: 2, blocked: 1,
+      },
+      "/renters/options": {
+        renters: [{ id: "1", username: "alice" }, { id: "2", username: "bob" }],
+      },
+    },
+  });
+  await env.settle();
+  await env.settle();
+  const html = env.html("renters");
+  assert.ok(html.includes("Active · 1"), "active group header missing");
+  assert.ok(html.includes("Suspended · 1"), "suspended group header missing");
+  assert.ok(
+    env.doc.getElementById("renterPageInfo").textContent.includes("25"),
+    "page info does not show the roster total",
+  );
+  assert.ok(
+    env.calls.some((c) => c.url === "/renters?page=1&limit=20"),
+    "overview renters load did not request a single page",
+  );
+  // Search resets to page 1 and re-fetches with the search param.
+  env.doc.getElementById("renterSearch").value = "ali";
+  for (const f of env.doc.getElementById("renterSearchBtn")._on.click) f({});
+  await env.settle();
+  assert.ok(
+    env.calls.some((c) => c.url === "/renters?page=1&limit=20&search=ali"),
+    "search did not re-fetch with the term",
   );
 });
 
