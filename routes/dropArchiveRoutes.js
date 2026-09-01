@@ -1006,6 +1006,22 @@ router.post(
         warnings.push(...r.warnings);
       }
 
+      // Cross-mark into the Unclaimed farm. Handing this account to a buyer
+      // spends the WHOLE account, so any unclaimed-farm listing it still backs
+      // must come down too — not just the sold game. Flagging the matching pool
+      // row manualSold=true lets the unclaimed auto-list engine park those
+      // ledgers "removed" and delist them on its next pass (the same reactive
+      // path the no-claim / web-token consoles' manual-sold tick uses). Matched
+      // by the account's canonical clientSecret; a no-op when it isn't pooled.
+      let unclaimedFlagged = 0;
+      if (acc.clientSecret) {
+        const r = await AvailableAccount.updateOne(
+          { clientSecret: acc.clientSecret, manualSold: { $ne: true } },
+          { $set: { manualSold: true } },
+        ).catch(() => null);
+        unclaimedFlagged = (r && r.modifiedCount) || 0;
+      }
+
       bustDropCache();
       res.json({
         success: true,
@@ -1015,10 +1031,12 @@ router.post(
           " " +
           gameLabel +
           " drop(s) sold on " +
-          (acc.login || String(acc._id)),
+          (acc.login || String(acc._id)) +
+          (unclaimedFlagged ? " (also removed from the Unclaimed farm)" : ""),
         reserved: upd.modifiedCount,
         detached,
         warnings,
+        unclaimedFlagged,
       });
     } catch (err) {
       console.error("drops-archive mark-sold error:", err.message);
