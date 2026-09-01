@@ -22,18 +22,23 @@ test("archive status filter: held = listed+skipped, other statuses excluded", ()
   assert.deepStrictEqual(archiveStatusFilter("HELD"), {
     status: { $in: ["listed", "skipped"] },
   });
+  // Absent status defaults to the held bucket too.
+  assert.deepStrictEqual(archiveStatusFilter(""), {
+    status: { $in: ["listed", "skipped"] },
+  });
+  assert.deepStrictEqual(archiveStatusFilter(), {
+    status: { $in: ["listed", "skipped"] },
+  });
   const held = archiveStatusFilter("held").status.$in;
   for (const s of ["sold", "expired", "released", "removed"]) {
     assert.ok(!held.includes(s), s + " must not be in the held bucket");
   }
 });
 
-test("archive status filter: raw status passes through; all/empty means unfiltered", () => {
+test("archive status filter: raw status passes through; only 'all' means unfiltered", () => {
   assert.deepStrictEqual(archiveStatusFilter("sold"), { status: "sold" });
   assert.deepStrictEqual(archiveStatusFilter("listed"), { status: "listed" });
-  assert.deepStrictEqual(archiveStatusFilter(""), null);
   assert.deepStrictEqual(archiveStatusFilter("all"), null);
-  assert.deepStrictEqual(archiveStatusFilter(), null);
 });
 
 test("archive item key: prefers stored itemKey, falls back to normalized game|name", () => {

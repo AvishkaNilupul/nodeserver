@@ -253,13 +253,13 @@ const ARCHIVE_STATUS_ZERO = {
   removed: 0,
 };
 
-// Map the archive views' ?status= onto a Mongo filter. Empty/"all" mean no
-// filter (the per-status breakdown is shown); "held" (the default) is the
-// listed+skipped bucket; any other value is a single raw status.
+// Map the archive views' ?status= onto a Mongo filter. Empty/"held" (the
+// default) mean the listed+skipped bucket; "all" means no filter (the
+// per-status breakdown is shown); any other value is a single raw status.
 function archiveStatusFilter(status) {
   const raw = String(status || "").trim().toLowerCase();
-  if (!raw || raw === "all") return null;
-  if (raw === "held") return { status: { $in: ARCHIVE_HELD_STATUSES.slice() } };
+  if (!raw || raw === "held") return { status: { $in: ARCHIVE_HELD_STATUSES.slice() } };
+  if (raw === "all") return null;
   return { status: raw };
 }
 

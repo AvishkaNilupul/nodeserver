@@ -132,7 +132,7 @@ router.get("/api/unclaimed-auto/archive/by-item", requireSuperadmin, async (req,
       status: 1,
       drops: 1,
     }).lean();
-    const withStatus = !status || status === "all";
+    const withStatus = status === "all";
     res.json({ success: true, items: engine.groupArchiveByItem(rows, withStatus) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -150,7 +150,7 @@ router.get("/api/unclaimed-auto/archive/by-game", requireSuperadmin, async (req,
       status: 1,
       drops: 1,
     }).lean();
-    const withStatus = !status || status === "all";
+    const withStatus = status === "all";
     res.json({ success: true, games: engine.groupArchiveByGame(rows, withStatus) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
