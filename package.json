@@ -7,6 +7,10 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "migrate": "node scripts/migrate.js",
+    "graph:index": "graphify update . --scope auto --force --no-description --no-label",
+    "graph:update": "graphify update . --scope auto --no-description --no-label",
+    "graph:summary": "graphify summary .graphify/graph.json",
+    "graph:studio": "graphify studio export .graphify/studio --full-offline",
     "format": "prettier --write .",
     "lint": "eslint .",
     "test": "node --test tests/*.test.js"
@@ -37,6 +41,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@sentropic/graphify": "^0.17.1",
     "eslint": "^9.39.4",
     "mongodb-memory-server": "^11.2.0",
     "prettier": "^3.8.4"

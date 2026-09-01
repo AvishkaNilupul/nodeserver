@@ -1,5 +1,13 @@
 node_modules
 .env
+.env.local
+scripts/news-store.json
+
+# Graphify machine-local cache/worktree metadata. The reusable graph, report,
+# and studio remain tracked under .graphify/.
+.graphify/cache/
+.graphify/worktree.json
+.graphify/branch.json
 
 # macOS Finder metadata
 .DS_Store
@@ -73,3 +81,6 @@ android/app/build/
 android/key.properties
 *.jks
 *.keystore
+
+# Local paper-trading output (simulated order logs only)
+tools/pump-paper-bot/runs/
