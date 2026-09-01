@@ -16,6 +16,8 @@ const {
 } = require("../utils/poolPasswords");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const SaleSignal = require("../models/SaleSignal");
+const RenterAccount = require("../models/RenterAccount");
+const Renter = require("../models/Renter");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const { sameGame } = require("../utils/gameLabel");
 const accountState = require("../utils/twitchAccountState");
@@ -347,41 +349,136 @@ router.get("/drops-archive/progress", requireSuperadmin, async (req, res) => {
   }
 });
 
+// BotAccounts we've pulled out to a renter. When an operator account is moved
+// onto a rental (routes/renterAdminRoutes.js), its BotAccount trace is kept but
+// un-placed — configFile/container are cleared so auto-farm and fulfilment
+// won't grab it — which drops it out of the placed-only account list below and
+// makes it look like the account (and its whole drop history) vanished. It
+// didn't: the BotAccount and its DropLog rows are untouched, the account is
+// just farming for the renter now. This finds those accounts so the list can
+// still show them, badged "rented out".
+//
+// The account is matched to its live RenterAccount by clientSecret — the
+// account's canonical identity, the same join the pool/renter code uses
+// (utils/renterPoolEligibility, gatherPoolEligibility). Only un-placed
+// BotAccounts are returned (a token still in one of our own configs is already
+// shown by the normal filter and isn't rented out from our side).
+//
+// Returns { ids: [ObjectId], byId: Map(idString -> renter username) }.
+async function rentedOutAccountMap() {
+  const renterAccts = await RenterAccount.find(
+    {},
+    { clientSecret: 1, renter: 1 },
+  ).lean();
+  if (!renterAccts.length) return { ids: [], byId: new Map() };
+  const secrets = [
+    ...new Set(
+      renterAccts
+        .map((r) => String(r.clientSecret || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!secrets.length) return { ids: [], byId: new Map() };
+
+  // Renter display names for the badge.
+  const renterIds = [
+    ...new Set(renterAccts.map((r) => String(r.renter)).filter(Boolean)),
+  ];
+  const renters = await Renter.find(
+    { _id: { $in: renterIds } },
+    { username: 1 },
+  ).lean();
+  const nameById = new Map(renters.map((r) => [String(r._id), r.username || ""]));
+  const renterBySecret = new Map();
+  for (const r of renterAccts) {
+    const sec = String(r.clientSecret || "").trim();
+    if (sec && !renterBySecret.has(sec)) {
+      renterBySecret.set(sec, nameById.get(String(r.renter)) || "");
+    }
+  }
+
+  const bots = await BotAccount.find(
+    { clientSecret: { $in: secrets }, configFile: { $in: ["", null] } },
+    { _id: 1, clientSecret: 1 },
+  ).lean();
+  const ids = [];
+  const byId = new Map();
+  for (const b of bots) {
+    ids.push(b._id);
+    byId.set(
+      String(b._id),
+      renterBySecret.get(String(b.clientSecret || "").trim()) || "",
+    );
+  }
+  return { ids, byId };
+}
+
 // ------------------------------------------------------------------
 // Account list
 // ------------------------------------------------------------------
 router.get("/drops-archive/accounts", requireSuperadmin, async (req, res) => {
   try {
-    // Accounts with no configFile aren't wired into any bot — usually a
-    // stale leftover from a deleted/moved config (see stopIfNoAccounts /
-    // dedupeAccounts in botConfigRoutes.js, which already treat these as
-    // "not really placed" for the same reason). Left in, they show up as
-    // confusing duplicates of the same login's real, deployed account. Their
-    // drop history isn't hidden — By item/By game and the item drill-down
-    // still include them — this only trims the account-management list.
-    const q = { configFile: { $nin: ["", null] } };
     const search = String(req.query.search || "").trim();
-    if (search) {
-      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      q.$or = [{ login: re }, { credUsername: re }, { configFile: re }];
-    }
     const status = String(req.query.status || "").trim();
-    if (
-      ["ok", "token_invalid", "error", "pending", "suspended"].includes(status)
-    ) {
-      q.lastScanStatus = status;
-    } else {
-      // Bad-token accounts have their own tab; keep them out of the main list
-      // (and therefore out of the "search" the operator uses to build orders).
-      q.lastScanStatus = { $nin: BAD_STATUSES };
-    }
     const limit = Math.min(Number(req.query.limit) || 1000, 5000);
     const load = async () => {
+      // Accounts with no configFile aren't wired into any bot — usually a
+      // stale leftover from a deleted/moved config (see stopIfNoAccounts /
+      // dedupeAccounts in botConfigRoutes.js, which already treat these as
+      // "not really placed" for the same reason). Left in, they show up as
+      // confusing duplicates of the same login's real, deployed account. Their
+      // drop history isn't hidden — By item/By game and the item drill-down
+      // still include them — this only trims the account-management list.
+      //
+      // Exception: accounts we've pulled out to a renter are un-placed for a
+      // real reason and are still ours, so include them (badged "rented out")
+      // rather than let them silently disappear. See rentedOutAccountMap().
+      const rented = await rentedOutAccountMap();
+      const and = [
+        rented.ids.length
+          ? {
+              $or: [
+                { configFile: { $nin: ["", null] } },
+                { _id: { $in: rented.ids } },
+              ],
+            }
+          : { configFile: { $nin: ["", null] } },
+      ];
+      if (search) {
+        const re = new RegExp(
+          search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          "i",
+        );
+        and.push({ $or: [{ login: re }, { credUsername: re }, { configFile: re }] });
+      }
+      if (
+        ["ok", "token_invalid", "error", "pending", "suspended"].includes(
+          status,
+        )
+      ) {
+        and.push({ lastScanStatus: status });
+      } else {
+        // Bad-token accounts have their own tab; keep them out of the main list
+        // (and therefore out of the "search" the operator uses to build orders).
+        and.push({ lastScanStatus: { $nin: BAD_STATUSES } });
+      }
+      const q = and.length > 1 ? { $and: and } : and[0];
       const accounts = await BotAccount.find(q, PUBLIC_ACCOUNT_FIELDS)
         .sort({ login: 1 })
         .limit(limit)
         .lean();
-      return { success: true, accounts: accounts.map(publicAccount) };
+      return {
+        success: true,
+        accounts: accounts.map((a) => {
+          const pub = publicAccount(a);
+          const who = rented.byId.get(String(a._id));
+          if (who !== undefined) {
+            pub.rentedOut = true;
+            pub.rentedTo = who;
+          }
+          return pub;
+        }),
+      };
     };
     // The unfiltered list is what the page loads every time it opens, and it's
     // the same answer for every viewer — cache that one. Searches are typed
@@ -2080,41 +2177,55 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
     // cache immediately, so both variants stay fresh.
     const light = req.query.light === "1" || req.query.light === "true";
     const key = "sets:" + wantCustom + (light ? ":light" : "");
+    const match = { custom: wantCustom ? true : { $ne: true } };
     const payload = await cachedView(key, async () => {
-      // In light mode only the fields the list rows read are pulled from Mongo,
-      // so the query returns a fraction of the bytes (this archive is bound by
-      // bytes returned, not query time). `items.image` alone still lets us build
-      // the row thumbnails without the rest of each item snapshot.
-      const projection = light
-        ? {
-            name: 1,
-            note: 1,
-            price: 1,
-            listed: 1,
-            custom: 1,
-            coverStyle: 1,
-            coverGame: 1,
-            sourceType: 1,
-            sourceEventName: 1,
-            sourceCampaignIds: 1,
-            updatedAt: 1,
-            "items.image": 1,
-          }
-        : {};
-      const sets = await DropSet.find(
-        { custom: wantCustom ? true : { $ne: true } },
-        projection,
-      )
-        .sort({ updatedAt: -1 })
-        .lean();
-      return {
-        success: true,
-        sets: sets.map((s) => {
-          const base = {
+      if (light) {
+        // Light mode computes the item count and the first four thumbnail URLs
+        // on Atlas itself, so only those cross the wire — never the item arrays.
+        // Projecting `items.image` in a find() instead forces Mongo to walk and
+        // rebuild every item array server-side: measured at ~50s for this
+        // archive vs ~7s for this aggregation, for the same response bytes. The
+        // full items are fetched one set at a time from GET
+        // /drops-archive/sets/:id when a row is edited or published. Any edit is
+        // a write to /drops-archive/*, which clears the cache, so both the light
+        // and full variants stay fresh.
+        const rows = await DropSet.aggregate([
+          { $match: match },
+          {
+            $project: {
+              name: 1,
+              note: 1,
+              price: 1,
+              listed: 1,
+              custom: 1,
+              coverStyle: 1,
+              coverGame: 1,
+              sourceType: 1,
+              sourceEventName: 1,
+              sourceCampaignIds: 1,
+              updatedAt: 1,
+              itemCount: { $size: { $ifNull: ["$items", []] } },
+              // Slice to the first four FIRST, then map — so only four elements
+              // are ever materialised, not the whole array.
+              thumbs: {
+                $map: {
+                  input: { $slice: [{ $ifNull: ["$items", []] }, 4] },
+                  as: "i",
+                  in: { $ifNull: ["$$i.image", ""] },
+                },
+              },
+            },
+          },
+          // Sort the already-shrunk docs (memory-safe under Atlas no-diskUse).
+          { $sort: { updatedAt: -1 } },
+        ]);
+        return {
+          success: true,
+          sets: rows.map((s) => ({
             id: String(s._id),
             name: s.name,
             note: s.note || "",
-            itemCount: (s.items || []).length,
+            itemCount: Number(s.itemCount) || 0,
             price: Number(s.price) || 0,
             listed: !!s.listed,
             custom: !!s.custom,
@@ -2126,17 +2237,33 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
               ? s.sourceCampaignIds
               : [],
             updatedAt: s.updatedAt,
-          };
-          if (light) {
             // Just what a row's thumbnail strip renders — the first four images.
-            base.thumbs = (s.items || [])
-              .slice(0, 4)
-              .map((i) => i.image || "");
-          } else {
-            base.items = s.items || [];
-          }
-          return base;
-        }),
+            thumbs: Array.isArray(s.thumbs) ? s.thumbs : [],
+          })),
+        };
+      }
+      // Full mode (custom list / callers that need every item snapshot).
+      const sets = await DropSet.find(match).sort({ updatedAt: -1 }).lean();
+      return {
+        success: true,
+        sets: sets.map((s) => ({
+          id: String(s._id),
+          name: s.name,
+          note: s.note || "",
+          itemCount: (s.items || []).length,
+          price: Number(s.price) || 0,
+          listed: !!s.listed,
+          custom: !!s.custom,
+          coverStyle: s.coverStyle || "grid",
+          coverGame: s.coverGame || "",
+          sourceType: s.sourceType || "",
+          sourceEventName: s.sourceEventName || "",
+          sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
+            ? s.sourceCampaignIds
+            : [],
+          updatedAt: s.updatedAt,
+          items: s.items || [],
+        })),
       };
     });
     res.json(payload);

@@ -3030,7 +3030,19 @@
           attr(a.id) +
           '">' +
           esc(a.login || "(no login)") +
-          "</span></td>" +
+          "</span>" +
+          (a.rentedOut
+            ? ' <span class="chip" title="' +
+              attr(
+                "Pulled out to a renter" +
+                  (a.rentedTo ? " (" + a.rentedTo + ")" : "") +
+                  " — un-placed from your bots, but the account and its drop history are kept.",
+              ) +
+              '">rented out' +
+              (a.rentedTo ? ": " + esc(a.rentedTo) : "") +
+              "</span>"
+            : "") +
+          "</td>" +
           "<td>" +
           (a.credEmail
             ? esc(a.credEmail)

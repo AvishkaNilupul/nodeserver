@@ -296,6 +296,94 @@
         color: var(--ink);
         box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
       }
+      .game-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 10px;
+      }
+      .game-card {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .game-card:hover {
+        background: var(--surface-2);
+        border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+      }
+      .game-card-art {
+        width: 46px;
+        height: 46px;
+        border-radius: 10px;
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        object-fit: cover;
+        flex: none;
+      }
+      .game-card-art.ph {
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 17px;
+        font-weight: 700;
+      }
+      .game-card-body {
+        min-width: 0;
+        flex: 1;
+      }
+      .game-card-body b {
+        display: block;
+        font-size: 14px;
+        overflow-wrap: anywhere;
+      }
+      .game-card-counts {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .game-card-counts span {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 3px;
+      }
+      .game-card-counts b {
+        display: inline;
+        font-size: 12px;
+        color: var(--ink);
+      }
+      .game-card-counts .live b,
+      .game-card-counts .farmed b {
+        color: var(--green);
+      }
+      .game-card-counts .farming b {
+        color: var(--accent);
+      }
+      .game-card-counts .attention b {
+        color: var(--red);
+      }
+      .game-card-arrow {
+        flex: none;
+        color: var(--muted);
+        font-size: 20px;
+      }
+      .coverage-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 6px 12px;
+        font-size: 12.5px;
+        margin-bottom: 10px;
+      }
       .event-row {
         display: grid;
         grid-template-columns:
@@ -545,7 +633,6 @@
         border-collapse: collapse;
         font-size: 13.5px;
       }
-      #twList,
       #epList {
         max-width: 100%;
         overflow-x: auto;
@@ -883,11 +970,6 @@
         <div class="row">
           <button class="btn btn-primary" id="btnRun">Check now</button>
           <button class="btn" id="btnRefresh">Refresh</button>
-          <select id="twFilter">
-            <option value="">All campaigns</option>
-            <option value="ACTIVE">Live only</option>
-            <option value="UPCOMING">Upcoming only</option>
-          </select>
           <label
             style="
               font-size: 13px;
@@ -903,7 +985,14 @@
       <section class="card" id="eventCoverage">
         <div class="coverage-top">
           <div>
-            <h2>Event coverage</h2>
+            <button
+              class="btn btn-sm coverage-back"
+              id="eventBack"
+              style="display: none"
+            >
+              ← All games
+            </button>
+            <h2 id="coverageTitle">Event coverage</h2>
             <p class="hint" id="eventCount">Loading farm status…</p>
           </div>
           <div class="seg" id="eventFilters" aria-label="Event coverage filter">
@@ -939,15 +1028,6 @@
         </div>
         <div id="eventList"><div class="event-empty">Loading…</div></div>
       </section>
-
-      <div class="card">
-        <h2>Twitch drop campaigns</h2>
-        <p class="hint">
-          Everything on Twitch's drops dashboard — point the bot fleet at new
-          campaigns early to maximise farmed stock.
-        </p>
-        <div id="twList"><div class="muted">Loading…</div></div>
-      </div>
 
       <div class="card">
         <h2>Epic free games</h2>
@@ -1069,6 +1149,7 @@
       }
 
       var eventFilter = "all";
+      var currentGame = null;
       function farmLabel(state) {
         return (
           {
@@ -1117,41 +1198,153 @@
 
       function emptyMessage() {
         var query = $("eventSearch").value.trim();
-        if (query) return "No events match “" + esc(query) + "”.";
+        if (query)
+          return currentGame
+            ? "No events match “" + esc(query) + "”."
+            : "No games match “" + esc(query) + "”.";
         if (eventFilter === "farmed") {
           return $("showEnded").checked
-            ? "No farmed events found."
+            ? currentGame
+              ? "No farmed events found."
+              : "No farmed games found."
             : "No live or recently-finished events are fully farmed. " +
                 "Older farmed events have already ended — enable “show ended” to browse them.";
         }
-        if (eventFilter === "attention") return "Nothing needs attention right now.";
-        if (eventFilter === "planned") return "No events are planned right now.";
-        if (eventFilter === "farming") return "No events are farming right now.";
-        return "No events match this view.";
+        if (eventFilter === "attention")
+          return currentGame
+            ? "Nothing needs attention right now."
+            : "No games need attention right now.";
+        if (eventFilter === "planned")
+          return currentGame
+            ? "No events are planned right now."
+            : "No games are planned right now.";
+        if (eventFilter === "farming")
+          return currentGame
+            ? "No events are farming right now."
+            : "No games are farming right now.";
+        return currentGame
+          ? "No events match this view."
+          : "No games match this view.";
       }
 
-      function renderEventCoverage(rows) {
-        rows = rows || [];
-        var live = rows.filter(function (event) {
-          return event.active;
-        }).length;
-        var farming = rows.filter(function (event) {
-          return event.farm && event.farm.state === "farming";
-        }).length;
-        var farmed = rows.filter(function (event) {
-          return event.farm && event.farm.state === "farmed";
-        }).length;
-        var attention = rows.filter(eventNeedsAttention).length;
-        var campaigns = rows.reduce(function (sum, event) {
+      function gameOf(event) {
+        return String(event.game || "Unknown game");
+      }
+
+      function gameCounts(rows) {
+        return {
+          live: rows.filter(function (event) {
+            return event.active;
+          }).length,
+          farming: rows.filter(function (event) {
+            return event.farm && event.farm.state === "farming";
+          }).length,
+          farmed: rows.filter(function (event) {
+            return event.farm && event.farm.state === "farmed";
+          }).length,
+          attention: rows.filter(eventNeedsAttention).length,
+        };
+      }
+
+      function gameCampaigns(rows) {
+        return rows.reduce(function (sum, event) {
           return sum + (Number(event.campaignCount) || 0);
         }, 0);
-        $("eventLive").textContent = live;
-        $("eventFarming").textContent = farming;
-        $("eventFarmed").textContent = farmed;
-        $("eventAttention").textContent = attention;
-        $("eventCount").textContent =
-          rows.length + " events · " + campaigns + " Twitch campaigns";
+      }
 
+      function gameArt(name, rows) {
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].image) {
+            return (
+              '<img class="game-card-art" src="' +
+              esc(rows[i].image) +
+              '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">'
+            );
+          }
+        }
+        return (
+          '<span class="game-card-art ph">' +
+          esc(String(name || "?").charAt(0).toUpperCase()) +
+          "</span>"
+        );
+      }
+
+      function gameMatchesFilter(gameRows) {
+        if (eventFilter === "attention")
+          return gameRows.some(eventNeedsAttention);
+        if (eventFilter === "farming")
+          return gameRows.some(function (e) {
+            return e.farm && e.farm.state === "farming";
+          });
+        if (eventFilter === "farmed")
+          return gameRows.some(function (e) {
+            return e.farm && e.farm.state === "farmed";
+          });
+        if (eventFilter === "planned")
+          return gameRows.some(function (e) {
+            return e.farm && e.farm.state === "planned";
+          });
+        return true;
+      }
+
+      function renderGameGrid(games, names) {
+        var query = $("eventSearch").value.trim().toLowerCase();
+        var visible = names
+          .filter(function (name) {
+            if (!gameMatchesFilter(games[name])) return false;
+            if (!query) return true;
+            return name.toLowerCase().includes(query);
+          })
+          .sort(function (a, b) {
+            return a.localeCompare(b);
+          });
+        $("eventShown").textContent =
+          visible.length === names.length
+            ? visible.length + " games"
+            : visible.length + " of " + names.length + " games";
+        if (!visible.length) {
+          $("eventList").innerHTML =
+            '<div class="event-empty">' + emptyMessage() + "</div>";
+          return;
+        }
+        $("eventList").innerHTML =
+          '<div class="game-cards">' +
+          visible
+            .map(function (name) {
+              var gameRows = games[name];
+              var counts = gameCounts(gameRows);
+              return (
+                '<button class="game-card" data-game="' +
+                esc(name) +
+                '">' +
+                gameArt(name, gameRows) +
+                '<span class="game-card-body"><b>' +
+                esc(name) +
+                '</b><span class="game-card-counts">' +
+                '<span><b>' +
+                gameRows.length +
+                "</b> events</span>" +
+                '<span class="live"><b>' +
+                counts.live +
+                "</b> live</span>" +
+                '<span class="farming"><b>' +
+                counts.farming +
+                "</b> farming</span>" +
+                '<span class="farmed"><b>' +
+                counts.farmed +
+                "</b> farmed</span>" +
+                '<span class="attention"><b>' +
+                counts.attention +
+                "</b> attention</span>" +
+                "</span></span>" +
+                '<span class="game-card-arrow">›</span></button>'
+              );
+            })
+            .join("") +
+          "</div>";
+      }
+
+      function renderGameEvents(rows) {
         var query = $("eventSearch").value.trim().toLowerCase();
         var visible = rows.filter(function (event) {
           if (!eventMatchesFilter(event)) return false;
@@ -1256,6 +1449,42 @@
             );
           })
           .join("");
+      }
+
+      function renderEventCoverage(rows) {
+        rows = rows || [];
+        var games = {};
+        rows.forEach(function (event) {
+          var g = gameOf(event);
+          (games[g] = games[g] || []).push(event);
+        });
+        var names = Object.keys(games);
+        if (currentGame && names.indexOf(currentGame) === -1) {
+          currentGame = null;
+          try {
+            location.hash = "";
+          } catch (e) {}
+        }
+        var shown = currentGame ? games[currentGame] || [] : rows;
+        $("coverageTitle").textContent = currentGame
+          ? "Event coverage · " + currentGame
+          : "Event coverage";
+        $("eventBack").style.display = currentGame ? "" : "none";
+        var counts = gameCounts(shown);
+        $("eventLive").textContent = counts.live;
+        $("eventFarming").textContent = counts.farming;
+        $("eventFarmed").textContent = counts.farmed;
+        $("eventAttention").textContent = counts.attention;
+        $("eventCount").textContent =
+          shown.length +
+          " events · " +
+          gameCampaigns(shown) +
+          " Twitch campaigns";
+        if (currentGame) {
+          renderGameEvents(shown);
+        } else {
+          renderGameGrid(games, names);
+        }
       }
 
       var eventPreviewCache = {};
@@ -1428,57 +1657,6 @@
         }
       });
 
-      function renderTwitch(rows) {
-        var f = $("twFilter").value;
-        rows = (rows || []).filter(function (c) {
-          return !f || c.status === f;
-        });
-        if (!rows.length) {
-          $("twList").innerHTML =
-            '<div class="muted">Nothing here yet — run a check.</div>';
-          return;
-        }
-        $("twList").innerHTML =
-          "<table><thead><tr><th></th><th>Campaign</th><th>Status</th><th>Starts</th><th>Ends</th><th></th></tr></thead><tbody>" +
-          rows
-            .map(function (c) {
-              var live = c.status === "ACTIVE";
-              return (
-                "<tr" +
-                (c.active ? "" : ' style="opacity:.55"') +
-                "><td>" +
-                (c.boxArt || c.image
-                  ? '<img src="' +
-                    esc(c.boxArt || c.image) +
-                    '" style="width:38px;height:50px;object-fit:cover;border-radius:6px" loading="lazy">'
-                  : "") +
-                "</td><td><b>" +
-                esc(c.game || "—") +
-                '</b><div class="muted">' +
-                esc(c.name) +
-                "</div></td><td>" +
-                (c.active
-                  ? live
-                    ? '<b style="color:var(--green)">LIVE</b>'
-                    : '<b style="color:var(--accent)">upcoming</b>'
-                  : '<span class="muted">ended</span>') +
-                "</td><td>" +
-                esc(fmtDate(c.startAt)) +
-                "</td><td>" +
-                endCellFor(c.active, c.endAt) +
-                "</td><td>" +
-                (c.detailsURL
-                  ? '<a class="btn btn-sm" href="' +
-                    esc(c.detailsURL) +
-                    '" target="_blank" rel="noopener">Open</a>'
-                  : "") +
-                "</td></tr>"
-              );
-            })
-            .join("") +
-          "</tbody></table>";
-      }
-
       function renderEpic(rows) {
         if (!(rows || []).length) {
           $("epList").innerHTML =
@@ -1526,18 +1704,26 @@
       }
 
       var lastData = null;
+      function gameFromHash() {
+        try {
+          var m = (location.hash || "").match(/^#game\/(.+)$/);
+          return m ? decodeURIComponent(m[1]) : null;
+        } catch (e) {
+          return null;
+        }
+      }
+
       async function load() {
         try {
           var ended = $("showEnded").checked ? "?ended=1" : "";
           var j = await api("/api/radar/list" + ended);
           lastData = j;
           renderStatus(j.status);
+          currentGame = gameFromHash();
           renderEventCoverage(j.events);
-          renderTwitch(j.campaigns);
           renderEpic(j.epic);
         } catch (e) {
           $("eventList").innerHTML =
-            $("twList").innerHTML =
             $("epList").innerHTML =
               '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
         }
@@ -1586,8 +1772,28 @@
           });
         if (lastData) renderEventCoverage(lastData.events);
       });
-      $("twFilter").addEventListener("change", function () {
-        if (lastData) renderTwitch(lastData.campaigns);
+      $("eventList").addEventListener("click", function (e) {
+        var card = e.target.closest("[data-game]");
+        if (!card) return;
+        currentGame = card.getAttribute("data-game");
+        try {
+          location.hash = "game/" + encodeURIComponent(currentGame);
+        } catch (e2) {}
+        if (lastData) renderEventCoverage(lastData.events);
+      });
+      $("eventBack").addEventListener("click", function () {
+        currentGame = null;
+        try {
+          location.hash = "";
+        } catch (e2) {}
+        if (lastData) renderEventCoverage(lastData.events);
+      });
+      window.addEventListener("hashchange", function () {
+        var wanted = gameFromHash();
+        if (wanted !== currentGame) {
+          currentGame = wanted;
+          if (lastData) renderEventCoverage(lastData.events);
+        }
       });
       $("showEnded").addEventListener("change", load);
 
