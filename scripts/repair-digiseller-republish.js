@@ -52,7 +52,11 @@ async function main() {
   const log = (m) => console.log(m);
 
   if (APPLY) {
-    settings.setAutoFarm({ unclaimedAutoListPaused: true });
+    // MUST await — setAutoFarm is an async atomic write; an un-awaited resume in
+    // the finally below loses the race with process.exit and strands the engine
+    // paused (getAutoFarm reads settings.json fresh each call, so the whole fleet
+    // sees the stuck pause).
+    await settings.setAutoFarm({ unclaimedAutoListPaused: true });
     log("engine paused for digiseller republish");
   }
 
@@ -133,7 +137,7 @@ async function main() {
     log(JSON.stringify(out, null, 2));
   } finally {
     if (APPLY) {
-      settings.setAutoFarm({ unclaimedAutoListPaused: false });
+      await settings.setAutoFarm({ unclaimedAutoListPaused: false });
       log("engine resumed");
     }
     await mongoose.disconnect();
