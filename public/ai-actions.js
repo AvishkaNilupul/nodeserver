@@ -89,12 +89,34 @@
     log("Done. Those exact accounts are now pinned to " + game + ".", "ok");
   }
 
+  // Create new bot(s) for a game — from a specific login set or oldest-idle.
+  async function webbotCreate(action, log) {
+    const game = action.game;
+    const parts = (action.parts || []).map(Number).filter((n) => n > 0);
+    const logins = (action.logins || []).map(String).filter(Boolean);
+    if (!game || !parts.length) throw new Error("game and parts required");
+    log("Creating " + parts.length + " bot(s) for \"" + game + "\": " + parts.join(" + ") +
+      (logins.length ? " from " + logins.length + " specific accounts." : " from idle accounts."));
+    let idx = 0;
+    for (let i = 0; i < parts.length; i++) {
+      await waitProvisioningFree(log);
+      const body = { game, count: parts[i] };
+      if (logins.length) { body.logins = logins.slice(idx, idx + parts[i]); body.count = body.logins.length; idx += parts[i]; }
+      log("Creating bot " + (i + 1) + "/" + parts.length + ": " + game + " × " + body.count + "…");
+      const c = await j("POST", "/api/webbot-farm/bots", body);
+      log("  ✓ " + (c.message || ("bot " + c.id + " created with " + c.accounts + " accounts")), "ok");
+      if (logins.length && c.accounts !== body.count) log("  ⚠ asked " + body.count + " got " + c.accounts + " (some weren't idle/valid)", "err");
+    }
+    log("Done.", "ok");
+  }
+
   window.AIActions = {
     // run(action, log) — log(msg, cls) where cls is "" | "ok" | "err"
     async run(action, log) {
       if (!action || !action.type) throw new Error("no action");
       if (action.type === "webbot_split") return webbotSplit(action, log);
       if (action.type === "webbot_repin") return webbotRepin(action, log);
+      if (action.type === "webbot_create") return webbotCreate(action, log);
       throw new Error("unknown action type: " + action.type);
     },
     label(action) {
@@ -102,6 +124,8 @@
         return "Split bot " + action.botId + " (" + action.game + ")";
       if (action && action.type === "webbot_repin")
         return "Re-pin bot(s) " + (action.botIds || []).join(",") + " → " + action.game;
+      if (action && action.type === "webbot_create")
+        return "Create " + (action.parts || []).length + " " + action.game + " bot(s)";
       return action && action.type ? action.type : "action";
     },
   };

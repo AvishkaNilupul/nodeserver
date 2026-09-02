@@ -486,6 +486,27 @@ async function propose_webbot_repin(a = {}) {
   });
 }
 
+// EXECUTABLE proposal: create NEW web-farm bot(s) for a game — from idle
+// accounts (count only) or a specific login set the coworker identified.
+async function propose_webbot_create(a = {}) {
+  const game = String(a.game || "").trim();
+  let parts = Array.isArray(a.parts) ? a.parts.map((n) => parseInt(n, 10)).filter((n) => n > 0) : [];
+  const logins = Array.isArray(a.logins) ? a.logins.map((s) => String(s)).filter(Boolean) : [];
+  if (!game) return { error: "game is required" };
+  if (!parts.length && logins.length) parts = [logins.length];
+  if (!parts.length) return { error: "parts (e.g. [50,50]) is required" };
+  const src = logins.length ? `${logins.length} specific accounts` : "idle accounts";
+  return store.addProposal({
+    kind: "bots",
+    title: `Create ${parts.length} web-farm bot(s) for ${game} (${parts.join(" + ")})`,
+    detail: (a.reason ? a.reason + "\n\n" : "") +
+      `Create ${parts.length} new web-farm bot(s) — ${parts.join(" + ")} accounts — pinned to "${game}", using ${src}. Runs on the Pi via the existing create endpoint.`,
+    severity: "medium",
+    targets: [game],
+    action: { type: "webbot_create", game, parts, logins },
+  });
+}
+
 // Register the expanded tool set.
 TOOLS.push(
   { schema: { type: "function", function: {
@@ -587,6 +608,16 @@ TOOLS.push(
       reason: { type: "string" },
     }, required: ["botIds", "game"] },
   } }, impl: propose_webbot_repin },
+  { schema: { type: "function", function: {
+    name: "propose_webbot_create",
+    description: "File an EXECUTABLE proposal to create NEW web-farm bot(s) for a game (one-tap Approve & run). Use for 'make N bots for game X' / 'take these idle accounts and make bots'. parts is the account count per bot (e.g. [50,50] = two bots of 50). Pass `logins` to use a SPECIFIC set of idle accounts you identified (else it takes oldest-idle). Confirm idle availability with db_count/db_query on webbot_accounts (botId '') first.",
+    parameters: { type: "object", properties: {
+      game: { type: "string", description: "game to pin the new bots to" },
+      parts: { type: "array", items: { type: "number" }, description: "accounts per bot, e.g. [50,50]" },
+      logins: { type: "array", items: { type: "string" }, description: "optional exact account logins to use (idle); omit for oldest-idle" },
+      reason: { type: "string" },
+    }, required: ["game", "parts"] },
+  } }, impl: propose_webbot_create },
 );
 
 const SCHEMAS = TOOLS.map((t) => t.schema);
