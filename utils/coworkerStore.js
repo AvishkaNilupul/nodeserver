@@ -5,6 +5,7 @@
 const CoworkerMemory = require("../models/CoworkerMemory");
 const CoworkerLog = require("../models/CoworkerLog");
 const CoworkerProposal = require("../models/CoworkerProposal");
+const CoworkerChat = require("../models/CoworkerChat");
 
 const trunc = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "…" : s);
 const rx = (s) =>
@@ -114,6 +115,67 @@ async function readProposals(status = "open", limit = 20) {
   }));
 }
 
+// ---- Chats (server-side conversations + background-job turns) --------------
+const titleFrom = (text) =>
+  (String(text || "").replace(/\s+/g, " ").trim().slice(0, 60) || "New chat");
+
+async function createChat(actor, firstText) {
+  const doc = await CoworkerChat.create({
+    actor: actor || "",
+    title: titleFrom(firstText) || "New chat",
+  });
+  return String(doc._id);
+}
+
+async function listChats(actor, limit = 40) {
+  const rows = await CoworkerChat.find(actor ? { actor } : {})
+    .sort({ updatedAt: -1 })
+    .limit(Math.min(limit, 100))
+    .select("title updatedAt messages")
+    .lean();
+  return rows.map((c) => {
+    const last = c.messages[c.messages.length - 1];
+    return {
+      id: String(c._id),
+      title: c.title,
+      updatedAt: c.updatedAt,
+      count: c.messages.length,
+      running: !!(last && last.role === "assistant" && last.status === "running"),
+      snippet: trunc((last && last.content) || "", 90),
+    };
+  });
+}
+
+// Client-facing shape of one chat (messages with per-turn status/trace).
+async function getChatPublic(id) {
+  const c = await CoworkerChat.findById(id).lean().catch(() => null);
+  if (!c) return null;
+  return {
+    id: String(c._id),
+    title: c.title,
+    updatedAt: c.updatedAt,
+    messages: (c.messages || []).map((m) => ({
+      role: m.role,
+      content: m.content,
+      mode: m.mode,
+      trace: m.trace,
+      status: m.status,
+      error: m.error,
+      at: m.at,
+    })),
+  };
+}
+
+// The mutable mongoose doc, for the background job to write progress into.
+function getChatDoc(id) {
+  return CoworkerChat.findById(id);
+}
+
+async function deleteChat(id) {
+  await CoworkerChat.deleteOne({ _id: id });
+  return { deleted: true };
+}
+
 module.exports = {
   loadPromptMemories,
   recallMemory,
@@ -122,4 +184,10 @@ module.exports = {
   logRun,
   addProposal,
   readProposals,
+  createChat,
+  listChats,
+  getChatPublic,
+  getChatDoc,
+  deleteChat,
+  titleFrom,
 };

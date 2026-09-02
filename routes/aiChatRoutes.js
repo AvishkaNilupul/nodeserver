@@ -219,6 +219,100 @@ async function callModel(messages, { noTools = false } = {}) {
   return resp.json();
 }
 
+// Background-job turn runner. Runs an assistant turn (analyst tool loop, or a
+// plain chat reply) DETACHED from any HTTP request, writing progress and the
+// final answer straight into the saved chat doc. Because it's server-side, the
+// investigation keeps going and the answer is waiting even if the browser tab is
+// closed — the client just polls the chat until the running turn is done.
+async function runTurn(chatId) {
+  const doc = await store.getChatDoc(chatId).catch(() => null);
+  if (!doc) return;
+  const idx = doc.messages.length - 1;
+  const turn = doc.messages[idx];
+  if (!turn || turn.role !== "assistant" || turn.status !== "running") return;
+  const mode = turn.mode === "chat" ? "chat" : "analyst";
+  const t0 = Date.now();
+
+  // Reconstruct the model conversation from the saved messages (excluding this
+  // running placeholder). Only completed turns with content are included.
+  const prior = doc.messages
+    .slice(0, idx)
+    .filter((m) => m.content)
+    .map((m) => ({ role: m.role, content: m.content }));
+  const question = [...prior].reverse().find((m) => m.role === "user")?.content || "";
+
+  const trace = [];
+  let finalAnswer = "";
+  let errMsg = "";
+  try {
+    if (mode === "chat") {
+      const messages = [
+        { role: "system", content: "You are a helpful, concise assistant. Use Markdown for code and lists." },
+        ...prior,
+      ];
+      const data = await callModel(messages, { noTools: true });
+      finalAnswer = data?.choices?.[0]?.message?.content || "(no answer)";
+    } else {
+      const messages = [{ role: "system", content: await buildAnalystSystem() }, ...prior];
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        const data = await callModel(messages);
+        const choice = data.choices?.[0];
+        const msg = choice?.message || {};
+        const calls = msg.tool_calls || [];
+        if (choice?.finish_reason === "tool_calls" && calls.length) {
+          messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+          for (const call of calls) {
+            let args = {};
+            try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* keep {} */ }
+            const result = await runTool(call.function?.name, args);
+            trace.push({ tool: call.function?.name, ok: !result?.error });
+            messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 6000) });
+            // Persist progress so a polling client sees live tool chips.
+            turn.trace = trace.map((x) => x.tool);
+            turn.beatAt = new Date();
+            doc.markModified("messages");
+            await doc.save().catch(() => {});
+          }
+          continue;
+        }
+        let answer = msg.content || "";
+        if (!answer) {
+          messages.push({ role: "user", content: "Give your final answer now, as plain text." });
+          try { answer = (await callModel(messages, { noTools: true }))?.choices?.[0]?.message?.content || ""; }
+          catch { /* keep empty */ }
+        }
+        finalAnswer = answer || "(no answer)";
+        break;
+      }
+      if (!finalAnswer) finalAnswer = "(stopped after several investigation steps — ask me to continue or narrow the question)";
+    }
+  } catch (err) {
+    console.error("runTurn error:", err.message);
+    errMsg = err.message;
+  }
+
+  turn.content = finalAnswer;
+  turn.trace = trace.map((x) => x.tool);
+  turn.status = errMsg ? "error" : "done";
+  turn.error = errMsg;
+  turn.beatAt = new Date();
+  if (doc.title === "New chat" && question) doc.title = store.titleFrom(question);
+  doc.updatedAt = new Date();
+  doc.markModified("messages");
+  await doc.save().catch(() => {});
+
+  store.logRun({
+    question,
+    actor: doc.actor,
+    mode,
+    tools: trace.map((x) => x.tool),
+    answer: finalAnswer,
+    proposalCount: trace.filter((x) => x.tool === "propose" && x.ok).length,
+    durationMs: Date.now() - t0,
+    error: errMsg,
+  });
+}
+
 // Streamed as Server-Sent Events. A tool loop can run well past a reverse
 // proxy's default 60s read timeout, and the answer only exists at the very end
 // — so we emit a frame per tool (live progress) plus a 15s heartbeat to keep the
@@ -328,6 +422,85 @@ router.post("/ai-chat/agent", async (req, res) => {
 
 // Lets the page list which tools the analyst has (for the UI hint).
 router.get("/ai-chat/tools", (req, res) => res.json({ tools: toolNames }));
+
+// ---- Saved chats (server-side) + background-job turns ----------------------
+const actorOf = (req) => (req.session?.admin?.id ? "admin:" + req.session.admin.id : "admin");
+
+router.get("/ai-chat/chats", async (req, res) => {
+  try {
+    res.json({ chats: await store.listChats(actorOf(req), 60) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post("/ai-chat/chats", async (req, res) => {
+  try {
+    const id = await store.createChat(actorOf(req), req.body?.title);
+    res.json({ id });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get("/ai-chat/chats/:id", async (req, res) => {
+  try {
+    const doc = await store.getChatDoc(req.params.id).catch(() => null);
+    if (!doc) return res.status(404).json({ success: false, message: "not found" });
+    // Recover a turn orphaned by a server restart / crash (stuck "running").
+    const last = doc.messages[doc.messages.length - 1];
+    if (last && last.role === "assistant" && last.status === "running" &&
+        Date.now() - new Date(last.beatAt).getTime() > 180000) {
+      last.status = "error";
+      last.error = "interrupted (the server restarted while this was running) — ask again";
+      doc.markModified("messages");
+      await doc.save().catch(() => {});
+    }
+    res.json({ chat: await store.getChatPublic(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.delete("/ai-chat/chats/:id", async (req, res) => {
+  try {
+    res.json(await store.deleteChat(req.params.id));
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Append a user message and kick off a background turn. Returns immediately;
+// the client polls GET /ai-chat/chats/:id for the running turn's result.
+router.post("/ai-chat/chats/:id/ask", async (req, res) => {
+  if (!config.AI.apiKey) {
+    return res.status(503).json({ success: false, message: "AI chat is not configured (set AGENTROUTER_API_KEY)." });
+  }
+  try {
+    const text = String(req.body?.content || "").slice(0, 8000).trim();
+    if (!text) return res.status(400).json({ success: false, message: "empty message" });
+    const mode = req.body?.mode === "chat" ? "chat" : "analyst";
+    const doc = await store.getChatDoc(req.params.id).catch(() => null);
+    if (!doc) return res.status(404).json({ success: false, message: "chat not found" });
+    // Don't start a second turn while one is still running.
+    const last = doc.messages[doc.messages.length - 1];
+    if (last && last.role === "assistant" && last.status === "running") {
+      return res.status(409).json({ success: false, message: "a turn is already running" });
+    }
+    if (!doc.actor) doc.actor = actorOf(req);
+    const now = new Date();
+    doc.messages.push({ role: "user", content: text, at: now, status: "done" });
+    doc.messages.push({ role: "assistant", content: "", mode, trace: [], status: "running", at: now, beatAt: now });
+    if (doc.title === "New chat") doc.title = store.titleFrom(text);
+    doc.updatedAt = now;
+    await doc.save();
+    // Fire the background job (NOT awaited) — survives this request ending.
+    runTurn(String(doc._id)).catch((err) => console.error("runTurn(fire) error:", err.message));
+    res.json({ ok: true, chatId: String(doc._id) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 // Open change proposals the coworker has filed for the operator to review.
 router.get("/ai-chat/proposals", async (req, res) => {

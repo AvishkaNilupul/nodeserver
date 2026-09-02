@@ -14,17 +14,18 @@
     html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--user:#232a3a;color-scheme:dark;}
     *{margin:0;padding:0;box-sizing:border-box;}
     body{font-family:"Inter","Segoe UI",Tahoma,sans-serif;color:var(--ink);background:var(--bg);height:100dvh;display:flex;flex-direction:column;}
-    header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:10;}
+    header{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:30;flex-wrap:wrap;}
     header .title{font-weight:700;font-size:15px;}
     header .model{font-size:12px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);padding:2px 8px;border-radius:999px;}
     header .spacer{flex:1;}
-    .btn{cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:10px;padding:7px 12px;font-size:13px;font-weight:600;transition:background .15s;}
+    .btn{cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:10px;padding:7px 11px;font-size:13px;font-weight:600;transition:background .15s;text-decoration:none;display:inline-flex;align-items:center;gap:5px;}
     .btn:hover{background:var(--surface-2);}
-    .btn.icon{width:38px;height:38px;display:flex;align-items:center;justify-content:center;padding:0;font-size:16px;}
+    .btn.icon{width:38px;height:38px;justify-content:center;padding:0;font-size:17px;}
+    .btn.on{background:var(--accent);color:#fff;border-color:var(--accent);}
     main{flex:1;overflow-y:auto;padding:20px 0;}
     .wrap{max-width:760px;margin:0 auto;padding:0 16px;display:flex;flex-direction:column;gap:16px;}
     .msg{display:flex;gap:12px;align-items:flex-start;}
-    .msg .avatar{flex:0 0 30px;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;}
+    .msg .avatar{flex:0 0 30px;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;}
     .msg.user .avatar{background:var(--accent);}
     .msg.assistant .avatar{background:#0ea5e9;}
     .msg .bubble{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;line-height:1.6;overflow-wrap:anywhere;flex:1;}
@@ -35,24 +36,35 @@
     .bubble :not(pre)>code{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:1px 5px;}
     .bubble ul,.bubble ol{margin:6px 0 6px 20px;}
     .bubble a{color:var(--accent);}
+    .trace{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .trace .chip{font-size:11.5px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+    .trace .chip.bad{color:#dc2626;border-color:#dc2626;}
+    .working{color:var(--muted);font-size:13px;font-style:italic;}
+    .err{color:#dc2626;}
     .empty{color:var(--muted);text-align:center;margin-top:12vh;font-size:15px;line-height:1.7;}
     .empty b{color:var(--ink);font-size:20px;}
-    .cursor::after{content:"▋";animation:blink 1s steps(2) infinite;color:var(--muted);}
-    @keyframes blink{50%{opacity:0;}}
     footer{border-top:1px solid var(--line);background:var(--surface);padding:12px 0 max(12px,env(safe-area-inset-bottom));}
     .composer{max-width:760px;margin:0 auto;padding:0 16px;display:flex;gap:10px;align-items:flex-end;}
     textarea{flex:1;resize:none;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:14px;padding:12px 14px;font:inherit;font-size:14.5px;line-height:1.5;max-height:180px;outline:none;}
     textarea:focus{border-color:var(--accent);}
     .send{flex:0 0 auto;background:var(--accent);color:#fff;border:none;border-radius:14px;width:46px;height:46px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-    .send:hover{background:var(--accent-d);}
-    .send:disabled{opacity:.5;cursor:default;}
+    .send:hover{background:var(--accent-d);}.send:disabled{opacity:.5;cursor:default;}
     .hint{max-width:760px;margin:6px auto 0;padding:0 16px;font-size:11.5px;color:var(--muted);text-align:center;}
-    .err{color:#dc2626;}
-    .btn.on{background:var(--accent);color:#fff;border-color:var(--accent);}
-    .trace{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
-    .trace .chip{font-size:11.5px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
-    .trace .chip.bad{color:#dc2626;border-color:#dc2626;}
-    .working{color:var(--muted);font-size:13px;font-style:italic;}
+    /* chats panel */
+    .backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:40;}
+    .panel{position:fixed;top:0;left:0;bottom:0;width:min(320px,86vw);background:var(--surface);border-right:1px solid var(--line);z-index:50;display:flex;flex-direction:column;box-shadow:0 0 50px rgba(15,23,42,.3);}
+    .panel .phead{display:flex;align-items:center;gap:8px;padding:14px;border-bottom:1px solid var(--line);}
+    .panel .phead b{font-size:15px;flex:1;}
+    .panel .plist{flex:1;overflow-y:auto;padding:8px;}
+    .chatrow{display:flex;align-items:center;gap:8px;padding:10px 10px;border-radius:10px;cursor:pointer;}
+    .chatrow:hover{background:var(--surface-2);}
+    .chatrow.active{background:var(--surface-2);border:1px solid var(--line);}
+    .chatrow .ct{flex:1;min-width:0;}
+    .chatrow .ct .t{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .chatrow .ct .s{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .chatrow .dot{width:7px;height:7px;border-radius:50%;background:#0ea5e9;flex:0 0 7px;}
+    .chatrow .del{opacity:.5;font-size:15px;padding:2px 6px;border-radius:6px;}
+    .chatrow .del:hover{opacity:1;background:var(--line);}
   </style>
 </head>
 
@@ -60,276 +72,199 @@
   <header>
     <span class="title">AI Chat</span>
     <span class="model" id="model">…</span>
-    <button class="btn" id="mode" title="Toggle analyst mode (reads your logs &amp; events)">💬 Chat</button>
+    <button class="btn" id="mode" title="Analyst reads your logs, data &amp; code">💬 Chat</button>
     <span class="spacer"></span>
-    <button class="btn" id="new">New chat</button>
-    <button class="btn icon" id="theme" title="Toggle theme">◐</button>
+    <button class="btn icon" id="chatsBtn" title="Saved chats">☰</button>
+    <button class="btn icon" id="newBtn" title="New chat">＋</button>
+    <button class="btn icon" id="theme" title="Theme">◐</button>
     <a class="btn" href="/admin.html">Exit</a>
   </header>
 
-  <main id="main">
-    <div class="wrap" id="messages">
-      <div class="empty" id="empty"><b>Ask me anything</b><br />Powered by your DeepSeek key, running on your server.</div>
-    </div>
-  </main>
+  <main id="main"><div class="wrap" id="messages"></div></main>
 
   <footer>
     <div class="composer">
-      <textarea id="input" rows="1" placeholder="Message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <textarea id="input" rows="1" placeholder="Message…"></textarea>
       <button class="send" id="send" title="Send">↑</button>
     </div>
-    <div class="hint" id="hint">Conversations are saved only in this browser.</div>
+    <div class="hint">Chats are saved on the server — close the tab and come back; the answer keeps working.</div>
   </footer>
+
+  <div id="chatsWrap" hidden>
+    <div class="backdrop" id="backdrop"></div>
+    <div class="panel">
+      <div class="phead"><b>Chats</b><button class="btn icon" id="newBtn2" title="New chat">＋</button><button class="btn icon" id="closePanel">✕</button></div>
+      <div class="plist" id="plist"></div>
+    </div>
+  </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
     const messagesEl = $("messages"), inputEl = $("input"), sendBtn = $("send");
-    const STORE = "aiChatHistory";
-    let history = [];          // [{role, content}]
-    let busy = false, controller = null;
-    let analyst = false;       // analyst (tool-using) mode vs plain chat
+    let chatId = null, mode = "analyst", sending = false, pollTimer = null;
 
-    function applyMode(){
-      const b = $("mode");
-      b.textContent = analyst ? "🔎 Analyst" : "💬 Chat";
-      b.classList.toggle("on", analyst);
-      inputEl.placeholder = analyst
-        ? "Ask about your site…  e.g. \"anything failing today?\" or \"why did farming stop?\""
-        : "Message…  (Enter to send, Shift+Enter for a new line)";
-    }
-
-    // ---- tiny, safe Markdown (escape first, then a few constructs) ----
+    // ---------- markdown (escape then a few constructs) ----------
     function esc(s){return s.replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
-    function mdInline(s){
-      return s
-        .replace(/`([^`]+)`/g,(_,c)=>`<code>${c}</code>`)
-        .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
-        .replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>")
-        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    }
+    function mdInline(s){return s.replace(/`([^`]+)`/g,(_,c)=>`<code>${c}</code>`).replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>").replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>").replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');}
     function renderMarkdown(text){
-      const out = []; const lines = esc(text).split("\n");
-      let i = 0, listType = null;
-      const closeList = () => { if(listType){ out.push(`</${listType}>`); listType = null; } };
-      while(i < lines.length){
-        const line = lines[i];
-        const fence = line.match(/^```(.*)$/);
-        if(fence){
-          closeList(); const buf = []; i++;
-          while(i < lines.length && !/^```/.test(lines[i])){ buf.push(lines[i]); i++; }
-          i++; out.push(`<pre><code>${buf.join("\n")}</code></pre>`); continue;
-        }
-        const ul = line.match(/^\s*[-*]\s+(.*)$/);
-        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-        if(ul){ if(listType!=="ul"){closeList();out.push("<ul>");listType="ul";} out.push(`<li>${mdInline(ul[1])}</li>`); i++; continue; }
-        if(ol){ if(listType!=="ol"){closeList();out.push("<ol>");listType="ol";} out.push(`<li>${mdInline(ol[1])}</li>`); i++; continue; }
-        closeList();
-        if(line.trim()==="") { i++; continue; }
-        out.push(`<p>${mdInline(line)}</p>`); i++;
-      }
-      closeList();
-      return out.join("");
+      const out=[]; const lines=esc(text).split("\n"); let i=0,listType=null;
+      const closeList=()=>{if(listType){out.push(`</${listType}>`);listType=null;}};
+      while(i<lines.length){const line=lines[i];const fence=line.match(/^```(.*)$/);
+        if(fence){closeList();const buf=[];i++;while(i<lines.length&&!/^```/.test(lines[i])){buf.push(lines[i]);i++;}i++;out.push(`<pre><code>${buf.join("\n")}</code></pre>`);continue;}
+        const ul=line.match(/^\s*[-*]\s+(.*)$/);const ol=line.match(/^\s*\d+\.\s+(.*)$/);
+        if(ul){if(listType!=="ul"){closeList();out.push("<ul>");listType="ul";}out.push(`<li>${mdInline(ul[1])}</li>`);i++;continue;}
+        if(ol){if(listType!=="ol"){closeList();out.push("<ol>");listType="ol";}out.push(`<li>${mdInline(ol[1])}</li>`);i++;continue;}
+        closeList();if(line.trim()===""){i++;continue;}out.push(`<p>${mdInline(line)}</p>`);i++;}
+      closeList();return out.join("");
     }
 
-    function bubble(role){
-      const row = document.createElement("div");
-      row.className = "msg " + role;
-      row.innerHTML = `<div class="avatar">${role==="user"?"Y":"AI"}</div><div class="bubble"></div>`;
-      messagesEl.appendChild(row);
-      return row.querySelector(".bubble");
+    // ---------- api ----------
+    async function api(method, path, body){
+      const r = await fetch(path, { method, headers: body?{"Content-Type":"application/json"}:{}, body: body?JSON.stringify(body):undefined });
+      let j = {}; try{ j = await r.json(); }catch(e){}
+      if(!r.ok) throw new Error(j.message || (method+" "+path+" failed ("+r.status+")"));
+      return j;
     }
     function scrollDown(){ $("main").scrollTop = $("main").scrollHeight; }
+    function fmtTime(d){ try{ return new Date(d).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}); }catch(e){ return ""; } }
 
-    function paint(){
-      messagesEl.innerHTML = "";
-      if(!history.length){
-        const e = document.createElement("div"); e.className="empty";
-        e.innerHTML = "<b>Ask me anything</b><br />Powered by your DeepSeek key, running on your server.";
-        messagesEl.appendChild(e); return;
+    // ---------- render ----------
+    function chipsHtml(trace, working){
+      const chips = (trace||[]).map(t=>`<span class="chip">🔧 ${esc(t)}</span>`).join("");
+      return (chips?`<div class="trace">${chips}</div>`:"") + (working?'<div class="working">Investigating… reading your logs, data &amp; code</div>':"");
+    }
+    function assistantBody(m){
+      if(m.status==="running") return chipsHtml(m.trace, true);
+      if(m.status==="error") return chipsHtml(m.trace,false)+`<span class="err">⚠ ${esc(m.error||m.content||"failed")}</span>`;
+      return chipsHtml(m.trace,false) + renderMarkdown(m.content||"*(no answer)*");
+    }
+    function rowHtml(m){
+      const who = m.role==="user"?"user":"assistant";
+      return `<div class="msg ${who}"><div class="avatar">${who==="user"?"Y":"AI"}</div><div class="bubble">${m.role==="user"?esc(m.content).replace(/\n/g,"<br>"):assistantBody(m)}</div></div>`;
+    }
+    function renderChat(chat){
+      if(!chat || !chat.messages || !chat.messages.length){
+        messagesEl.innerHTML = '<div class="empty"><b>Ask me anything about your site</b><br />Marketplaces, pricing, listings, bots, sales — I read the data & code, remember, and propose fixes.</div>';
+        return;
       }
-      for(const m of history){ bubble(m.role).innerHTML = renderMarkdown(m.content); }
+      messagesEl.innerHTML = chat.messages.map(rowHtml).join("");
       scrollDown();
     }
+    function updateLastBubble(m){
+      const bubbles = messagesEl.querySelectorAll(".msg.assistant .bubble");
+      const el = bubbles[bubbles.length-1];
+      if(el){ el.innerHTML = assistantBody(m); scrollDown(); }
+    }
 
-    function save(){ try{ localStorage.setItem(STORE, JSON.stringify(history)); }catch(e){} }
-    function load(){ try{ history = JSON.parse(localStorage.getItem(STORE)||"[]"); }catch(e){ history=[]; } }
+    // ---------- polling ----------
+    function stopPoll(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+    function startPoll(){
+      stopPoll();
+      pollTimer = setInterval(async () => {
+        if(!chatId) return stopPoll();
+        try{
+          const { chat } = await api("GET", `/ai-chat/chats/${chatId}`);
+          const last = chat.messages[chat.messages.length-1];
+          if(last && last.role==="assistant" && last.status==="running"){ updateLastBubble(last); }
+          else { renderChat(chat); stopPoll(); loadChats(); }
+        }catch(e){ /* transient — keep polling */ }
+      }, 1800);
+    }
+
+    // ---------- actions ----------
+    async function openChat(id){
+      stopPoll();
+      chatId = id;
+      try{ localStorage.setItem("aiCurrentChat", id); }catch(e){}
+      const { chat } = await api("GET", `/ai-chat/chats/${id}`);
+      renderChat(chat);
+      const last = chat && chat.messages[chat.messages.length-1];
+      if(last && last.role==="assistant" && last.status==="running") startPoll();
+      highlightActive();
+    }
+    async function newChat(){
+      const { id } = await api("POST", "/ai-chat/chats");
+      closePanel();
+      await openChat(id);
+      inputEl.focus();
+      loadChats();
+    }
+    async function ensureChat(){ if(!chatId){ const { id } = await api("POST","/ai-chat/chats"); chatId=id; try{localStorage.setItem("aiCurrentChat",id);}catch(e){} } return chatId; }
 
     async function send(){
       const text = inputEl.value.trim();
-      if(!text || busy) return;
-      inputEl.value = ""; inputEl.style.height = "auto";
-      history.push({ role:"user", content:text }); save(); paint();
-      await runAssistant();
-    }
-
-    // Generate the assistant reply for the current history (whose last message
-    // is the user turn). Split out so an interrupted turn can be retried.
-    async function runAssistant(){
-      if(busy) return;
-      busy = true; sendBtn.disabled = true; sendBtn.textContent = analyst ? "…" : "■";
-      const outBubble = bubble("assistant");
+      if(!text || sending) return;
+      inputEl.value=""; inputEl.style.height="auto";
+      sending=true; sendBtn.disabled=true;
       try{
-        if(analyst) await runAnalyst(outBubble);
-        else await runStreaming(outBubble);
-      }finally{
-        outBubble.classList.remove("cursor");
-        busy = false; sendBtn.disabled = false; sendBtn.textContent = "↑";
-        controller = null; save();
-      }
+        await ensureChat();
+        // optimistic user bubble
+        messagesEl.insertAdjacentHTML("beforeend", rowHtml({role:"user",content:text}));
+        messagesEl.insertAdjacentHTML("beforeend", rowHtml({role:"assistant",status:"running",trace:[]}));
+        scrollDown();
+        await api("POST", `/ai-chat/chats/${chatId}/ask`, { content:text, mode });
+        startPoll();
+      }catch(e){
+        messagesEl.insertAdjacentHTML("beforeend", `<div class="msg assistant"><div class="avatar">AI</div><div class="bubble"><span class="err">⚠ ${esc(e.message)}</span></div></div>`);
+      }finally{ sending=false; sendBtn.disabled=false; inputEl.focus(); }
     }
 
-    // On load, if the last saved message is an unanswered question (the tab was
-    // closed while the analyst was still working — streaming can't resume), show
-    // a Retry rather than leaving a silent, answer-less turn.
-    function checkOrphan(){
-      if(busy || !history.length) return;
-      if(history[history.length-1].role !== "user") return;
-      const b = bubble("assistant");
-      b.innerHTML = '<span class="working">That question was interrupted (the tab closed before it finished). </span>';
-      const btn = document.createElement("button");
-      btn.className = "btn"; btn.textContent = "↻ Retry";
-      btn.style.marginTop = "6px";
-      btn.addEventListener("click", () => { const row = b.closest(".msg"); if(row) row.remove(); runAssistant(); });
-      b.appendChild(btn);
-      scrollDown();
-    }
-
-    // Plain chat: stream tokens as they arrive.
-    async function runStreaming(outBubble){
-      outBubble.classList.add("cursor");
-      let acc = "";
-      controller = new AbortController();
+    // ---------- chats panel ----------
+    async function loadChats(){
       try{
-        const resp = await fetch("/ai-chat/send", {
-          method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({ messages: history }), signal: controller.signal,
-        });
-        if(!resp.ok || !resp.body){
-          let msg = "Request failed (" + resp.status + ")";
-          try{ const j = await resp.json(); if(j.message) msg = j.message; }catch(e){}
-          throw new Error(msg);
-        }
-        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
-        for(;;){
-          const { done, value } = await reader.read();
-          if(done) break;
-          buf += dec.decode(value, { stream:true });
-          const parts = buf.split("\n"); buf = parts.pop();
-          for(const line of parts){
-            const t = line.trim();
-            if(!t || !t.startsWith("data:")) continue;
-            const data = t.slice(5).trim();
-            if(data === "[DONE]") continue;
-            try{ const json = JSON.parse(data); const delta = json.choices?.[0]?.delta?.content || "";
-              if(delta){ acc += delta; outBubble.innerHTML = renderMarkdown(acc); scrollDown(); }
-            }catch(e){}
-          }
-        }
-        if(!acc) acc = "*(no response)*";
-        history.push({ role:"assistant", content:acc });
-      }catch(err){
-        if(err.name === "AbortError"){ if(acc) history.push({ role:"assistant", content:acc }); }
-        else{ outBubble.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`; }
-      }
+        const { chats } = await api("GET","/ai-chat/chats");
+        $("plist").innerHTML = chats.length ? chats.map(c=>`
+          <div class="chatrow ${c.id===chatId?'active':''}" data-id="${c.id}">
+            ${c.running?'<span class="dot" title="working"></span>':''}
+            <div class="ct"><div class="t">${esc(c.title||"New chat")}</div><div class="s">${fmtTime(c.updatedAt)} · ${c.count} msg${c.snippet?" · "+esc(c.snippet):""}</div></div>
+            <span class="del" data-del="${c.id}" title="Delete">🗑</span>
+          </div>`).join("") : '<div class="empty" style="margin-top:20px;font-size:13px">No chats yet</div>';
+      }catch(e){ $("plist").innerHTML = `<div class="err" style="padding:12px">${esc(e.message)}</div>`; }
+    }
+    function highlightActive(){ document.querySelectorAll(".chatrow").forEach(r=>r.classList.toggle("active", r.dataset.id===chatId)); }
+    function openPanel(){ loadChats(); $("chatsWrap").hidden=false; }
+    function closePanel(){ $("chatsWrap").hidden=true; }
+
+    // ---------- mode + theme ----------
+    function applyMode(){
+      const b=$("mode");
+      b.textContent = mode==="analyst" ? "🔎 Analyst" : "💬 Chat";
+      b.classList.toggle("on", mode==="analyst");
+      inputEl.placeholder = mode==="analyst" ? 'Ask about your site… e.g. "anything failing today?"' : "Message…";
     }
 
-    // Analyst: server STREAMS a read-only tool loop over SSE — live tool chips
-    // then the final answer. Streaming (+ heartbeats) keeps the proxy connection
-    // alive so a long investigation never times out ("Load failed").
-    async function runAnalyst(outBubble){
-      outBubble.innerHTML = '<div class="trace" data-trace></div><div class="working">Investigating… reading your logs &amp; events</div>';
-      const traceEl = outBubble.querySelector('[data-trace]');
-      let workEl = outBubble.querySelector('.working');
-      let answered = false;
-      controller = new AbortController();
-      const addChip = (name, ok) => {
-        const c = document.createElement('span');
-        c.className = 'chip' + (ok === false ? ' bad' : '');
-        c.textContent = '🔧 ' + (name || '?');
-        traceEl.appendChild(c);
-      };
+    // ---------- events ----------
+    sendBtn.addEventListener("click", send);
+    inputEl.addEventListener("keydown", (e)=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
+    inputEl.addEventListener("input", ()=>{ inputEl.style.height="auto"; inputEl.style.height=Math.min(inputEl.scrollHeight,180)+"px"; });
+    $("mode").addEventListener("click", ()=>{ mode = mode==="analyst"?"chat":"analyst"; try{localStorage.setItem("aiChatMode",mode);}catch(e){} applyMode(); inputEl.focus(); });
+    $("newBtn").addEventListener("click", newChat);
+    $("newBtn2").addEventListener("click", newChat);
+    $("chatsBtn").addEventListener("click", openPanel);
+    $("closePanel").addEventListener("click", closePanel);
+    $("backdrop").addEventListener("click", closePanel);
+    $("plist").addEventListener("click", async (e)=>{
+      const del = e.target.closest("[data-del]");
+      if(del){ e.stopPropagation(); if(confirm("Delete this chat?")){ await api("DELETE",`/ai-chat/chats/${del.dataset.del}`); if(del.dataset.del===chatId){ chatId=null; try{localStorage.removeItem("aiCurrentChat");}catch(x){} await bootChat(); } loadChats(); } return; }
+      const row = e.target.closest(".chatrow");
+      if(row){ closePanel(); openChat(row.dataset.id); }
+    });
+    $("theme").addEventListener("click", ()=>{ const dark=document.documentElement.getAttribute("data-theme")==="dark"; if(dark){document.documentElement.removeAttribute("data-theme");localStorage.setItem("theme","light");}else{document.documentElement.setAttribute("data-theme","dark");localStorage.setItem("theme","dark");} });
+
+    // ---------- init ----------
+    async function bootChat(){
+      let saved=null; try{ saved=localStorage.getItem("aiCurrentChat"); }catch(e){}
+      if(saved){ try{ await openChat(saved); return; }catch(e){ /* deleted — fall through */ } }
+      // else open most recent, or create
       try{
-        const resp = await fetch("/ai-chat/agent", {
-          method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({ messages: history }), signal: controller.signal,
-        });
-        if(!resp.ok || !resp.body){
-          let m = "Request failed (" + resp.status + ")";
-          try{ const j = await resp.json(); if(j.message) m = j.message; }catch(e){}
-          throw new Error(m);
-        }
-        const reader = resp.body.getReader(); const dec = new TextDecoder();
-        let buf = "", ev = null;
-        for(;;){
-          const { done, value } = await reader.read();
-          if(done) break;
-          buf += dec.decode(value, { stream:true });
-          const lines = buf.split("\n"); buf = lines.pop();
-          for(const raw of lines){
-            const line = raw.replace(/\r$/, "");
-            if(!line || line.startsWith(":")) continue;            // blank or heartbeat
-            if(line.startsWith("event:")){ ev = line.slice(6).trim(); continue; }
-            if(!line.startsWith("data:")) continue;
-            let d = null; try{ d = JSON.parse(line.slice(5).trim()); }catch(e){}
-            if(ev === "tool"){ if(workEl) workEl.textContent = "🔧 running " + (d && d.tool || "…") + "…"; }
-            else if(ev === "tool_done"){ addChip(d && d.tool, d && d.ok); }
-            else if(ev === "done"){
-              answered = true;
-              if(workEl){ workEl.remove(); workEl = null; }
-              const ans = (d && d.answer) || "*(no answer)*";
-              const ansEl = document.createElement('div');
-              ansEl.innerHTML = renderMarkdown(ans);
-              outBubble.appendChild(ansEl);
-              const names = ((d && d.trace) || []).map(t=>t.tool);
-              const stored = (names.length ? "`🔧 " + names.join(" · ") + "`\n\n" : "") + ans;
-              history.push({ role:"assistant", content: stored });
-            }
-            else if(ev === "error"){ throw new Error(typeof d === "string" ? d : (d && d.message) || "error"); }
-            ev = null;
-            scrollDown();
-          }
-        }
-        if(!answered) throw new Error("connection closed before an answer");
-      }catch(err){
-        if(err.name === "AbortError") return;
-        if(workEl && workEl.parentNode) workEl.remove();
-        const e = document.createElement('div');
-        e.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`;
-        outBubble.appendChild(e);
-      }
+        const { chats } = await api("GET","/ai-chat/chats");
+        if(chats.length) await openChat(chats[0].id);
+        else await newChat();
+      }catch(e){ await newChat().catch(()=>{}); }
     }
-
-    // --- events ---
-    sendBtn.addEventListener("click", () => { if(busy && controller){ controller.abort(); } else { send(); } });
-    inputEl.addEventListener("keydown", (e) => {
-      if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
-    });
-    inputEl.addEventListener("input", () => {
-      inputEl.style.height = "auto";
-      inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + "px";
-    });
-    $("new").addEventListener("click", () => {
-      if(busy || !history.length || confirm("Start a new chat? This clears the current one.")){
-        history = []; save(); paint();
-      }
-    });
-    $("theme").addEventListener("click", () => {
-      const dark = document.documentElement.getAttribute("data-theme") === "dark";
-      if(dark){ document.documentElement.removeAttribute("data-theme"); localStorage.setItem("theme","light"); }
-      else { document.documentElement.setAttribute("data-theme","dark"); localStorage.setItem("theme","dark"); }
-    });
-
-    $("mode").addEventListener("click", () => {
-      analyst = !analyst;
-      try{ localStorage.setItem("aiChatMode", analyst ? "analyst" : "chat"); }catch(e){}
-      applyMode(); inputEl.focus();
-    });
-
-    // --- init ---
-    fetch("/ai-chat/config").then(r=>r.json()).then(c=>{ $("model").textContent = c.model || "AI"; }).catch(()=>{ $("model").textContent = "AI"; });
-    try{ analyst = localStorage.getItem("aiChatMode") === "analyst"; }catch(e){}
-    applyMode();
-    load(); paint(); checkOrphan(); inputEl.focus();
+    fetch("/ai-chat/config").then(r=>r.json()).then(c=>{ $("model").textContent=c.model||"AI"; }).catch(()=>{ $("model").textContent="AI"; });
+    try{ mode = localStorage.getItem("aiChatMode")==="chat" ? "chat" : "analyst"; }catch(e){}
+    applyMode(); bootChat(); inputEl.focus();
   </script>
 </body>
 
