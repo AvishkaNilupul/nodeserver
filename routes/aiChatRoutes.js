@@ -118,6 +118,7 @@ router.post("/ai-chat/send", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // stop nginx buffering the stream
   res.flushHeaders?.();
 
   try {
@@ -178,6 +179,11 @@ async function callModel(messages) {
   return resp.json();
 }
 
+// Streamed as Server-Sent Events. A tool loop can run well past a reverse
+// proxy's default 60s read timeout, and the answer only exists at the very end
+// — so we emit a frame per tool (live progress) plus a 15s heartbeat to keep the
+// connection from ever idling, and set X-Accel-Buffering:no so nginx forwards
+// bytes immediately instead of buffering the whole response.
 router.post("/ai-chat/agent", async (req, res) => {
   if (!config.AI.apiKey) {
     return res.status(503).json({
@@ -195,9 +201,21 @@ router.post("/ai-chat/agent", async (req, res) => {
   const messages = [{ role: "system", content: ANALYST_SYSTEM }];
   for (const m of incoming) if (m.role !== "system") messages.push(m);
 
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  const emit = (event, data) => {
+    try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* client gone */ }
+  };
+  let closed = false;
+  const heartbeat = setInterval(() => { if (!closed) { try { res.write(": ping\n\n"); } catch {} } }, 15000);
+  res.on("close", () => { closed = true; clearInterval(heartbeat); });
+
   const trace = [];
   try {
-    for (let round = 0; round < MAX_ROUNDS; round++) {
+    for (let round = 0; round < MAX_ROUNDS && !closed; round++) {
       const data = await callModel(messages);
       const choice = data.choices?.[0];
       const msg = choice?.message || {};
@@ -208,10 +226,13 @@ router.post("/ai-chat/agent", async (req, res) => {
         // before the matching tool results).
         messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
         for (const call of calls) {
+          if (closed) break;
           let args = {};
           try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* keep {} */ }
+          emit("tool", { tool: call.function?.name });
           const result = await runTool(call.function?.name, args);
           trace.push({ tool: call.function?.name, args, ok: !result?.error });
+          emit("tool_done", { tool: call.function?.name, ok: !result?.error });
           messages.push({
             role: "tool",
             tool_call_id: call.id,
@@ -222,17 +243,20 @@ router.post("/ai-chat/agent", async (req, res) => {
       }
 
       // No (more) tool calls — this is the final answer.
-      return res.json({ success: true, answer: msg.content || "", trace });
+      emit("done", { answer: msg.content || "", trace });
+      clearInterval(heartbeat);
+      return res.end();
     }
-    // Ran out of rounds — return whatever the last turn had.
-    return res.json({
-      success: true,
+    emit("done", {
       answer: "(stopped after several investigation steps — ask me to continue or narrow the question)",
       trace,
     });
   } catch (err) {
     console.error("ai-chat agent error:", err.message);
-    return res.status(502).json({ success: false, message: err.message, trace });
+    emit("error", err.message);
+  } finally {
+    clearInterval(heartbeat);
+    if (!closed) res.end();
   }
 });
 

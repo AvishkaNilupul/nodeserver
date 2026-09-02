@@ -211,28 +211,69 @@
       }
     }
 
-    // Analyst: server runs a read-only tool loop, then returns answer + trace.
+    // Analyst: server STREAMS a read-only tool loop over SSE — live tool chips
+    // then the final answer. Streaming (+ heartbeats) keeps the proxy connection
+    // alive so a long investigation never times out ("Load failed").
     async function runAnalyst(outBubble){
-      outBubble.innerHTML = '<div class="working">Investigating… reading your logs &amp; events</div>';
-      scrollDown();
+      outBubble.innerHTML = '<div class="trace" data-trace></div><div class="working">Investigating… reading your logs &amp; events</div>';
+      const traceEl = outBubble.querySelector('[data-trace]');
+      let workEl = outBubble.querySelector('.working');
+      let answered = false;
+      controller = new AbortController();
+      const addChip = (name, ok) => {
+        const c = document.createElement('span');
+        c.className = 'chip' + (ok === false ? ' bad' : '');
+        c.textContent = '🔧 ' + (name || '?');
+        traceEl.appendChild(c);
+      };
       try{
         const resp = await fetch("/ai-chat/agent", {
           method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({ messages: history }),
+          body: JSON.stringify({ messages: history }), signal: controller.signal,
         });
-        const j = await resp.json().catch(()=>({}));
-        if(!resp.ok || j.success === false) throw new Error(j.message || ("Request failed ("+resp.status+")"));
-        const traceHtml = (j.trace && j.trace.length)
-          ? '<div class="trace">' + j.trace.map(t=>`<span class="chip${t.ok?'':' bad'}">🔧 ${esc(t.tool||'?')}</span>`).join("") + '</div>'
-          : "";
-        const answer = j.answer || "*(no answer)*";
-        outBubble.innerHTML = traceHtml + renderMarkdown(answer);
-        // Persist the trace inline so it survives a reload/repaint.
-        const stored = (j.trace && j.trace.length ? "`🔧 " + j.trace.map(t=>t.tool).join(" · ") + "`\n\n" : "") + answer;
-        history.push({ role:"assistant", content: stored });
-        scrollDown();
+        if(!resp.ok || !resp.body){
+          let m = "Request failed (" + resp.status + ")";
+          try{ const j = await resp.json(); if(j.message) m = j.message; }catch(e){}
+          throw new Error(m);
+        }
+        const reader = resp.body.getReader(); const dec = new TextDecoder();
+        let buf = "", ev = null;
+        for(;;){
+          const { done, value } = await reader.read();
+          if(done) break;
+          buf += dec.decode(value, { stream:true });
+          const lines = buf.split("\n"); buf = lines.pop();
+          for(const raw of lines){
+            const line = raw.replace(/\r$/, "");
+            if(!line || line.startsWith(":")) continue;            // blank or heartbeat
+            if(line.startsWith("event:")){ ev = line.slice(6).trim(); continue; }
+            if(!line.startsWith("data:")) continue;
+            let d = null; try{ d = JSON.parse(line.slice(5).trim()); }catch(e){}
+            if(ev === "tool"){ if(workEl) workEl.textContent = "🔧 running " + (d && d.tool || "…") + "…"; }
+            else if(ev === "tool_done"){ addChip(d && d.tool, d && d.ok); }
+            else if(ev === "done"){
+              answered = true;
+              if(workEl){ workEl.remove(); workEl = null; }
+              const ans = (d && d.answer) || "*(no answer)*";
+              const ansEl = document.createElement('div');
+              ansEl.innerHTML = renderMarkdown(ans);
+              outBubble.appendChild(ansEl);
+              const names = ((d && d.trace) || []).map(t=>t.tool);
+              const stored = (names.length ? "`🔧 " + names.join(" · ") + "`\n\n" : "") + ans;
+              history.push({ role:"assistant", content: stored });
+            }
+            else if(ev === "error"){ throw new Error(typeof d === "string" ? d : (d && d.message) || "error"); }
+            ev = null;
+            scrollDown();
+          }
+        }
+        if(!answered) throw new Error("connection closed before an answer");
       }catch(err){
-        outBubble.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`;
+        if(err.name === "AbortError") return;
+        if(workEl && workEl.parentNode) workEl.remove();
+        const e = document.createElement('div');
+        e.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`;
+        outBubble.appendChild(e);
       }
     }
 
