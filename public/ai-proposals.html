@@ -88,7 +88,7 @@
       ].join("");
       let actions = "";
       if(p.status==="open"){
-        if(exec && p.action.type==="webbot_split")
+        if(exec)
           actions += `<button class="btn run" data-run="${p.id}">✓ Approve &amp; run</button>`;
         else
           actions += `<button class="btn on" data-done="${p.id}">✓ Mark done</button>`;
