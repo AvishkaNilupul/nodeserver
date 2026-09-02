@@ -262,7 +262,7 @@ async function runTurn(chatId) {
         const msg = choice?.message || {};
         const calls = msg.tool_calls || [];
         if (choice?.finish_reason === "tool_calls" && calls.length) {
-          messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+          messages.push(msg); // echo the assistant message VERBATIM — DeepSeek thinking mode requires reasoning_content be passed back with the tool_calls
           for (const call of calls) {
             let args = {};
             try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* keep {} */ }
@@ -375,7 +375,7 @@ router.post("/ai-chat/agent", async (req, res) => {
       if (choice?.finish_reason === "tool_calls" && calls.length) {
         // Record the assistant's tool-call turn verbatim (required by the API
         // before the matching tool results).
-        messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+        messages.push(msg); // echo the assistant message VERBATIM — DeepSeek thinking mode requires reasoning_content be passed back with the tool_calls
         for (const call of calls) {
           if (closed) break;
           let args = {};
