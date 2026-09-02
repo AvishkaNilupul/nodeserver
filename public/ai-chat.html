@@ -159,7 +159,13 @@
       if(!text || busy) return;
       inputEl.value = ""; inputEl.style.height = "auto";
       history.push({ role:"user", content:text }); save(); paint();
+      await runAssistant();
+    }
 
+    // Generate the assistant reply for the current history (whose last message
+    // is the user turn). Split out so an interrupted turn can be retried.
+    async function runAssistant(){
+      if(busy) return;
       busy = true; sendBtn.disabled = true; sendBtn.textContent = analyst ? "…" : "■";
       const outBubble = bubble("assistant");
       try{
@@ -170,6 +176,22 @@
         busy = false; sendBtn.disabled = false; sendBtn.textContent = "↑";
         controller = null; save();
       }
+    }
+
+    // On load, if the last saved message is an unanswered question (the tab was
+    // closed while the analyst was still working — streaming can't resume), show
+    // a Retry rather than leaving a silent, answer-less turn.
+    function checkOrphan(){
+      if(busy || !history.length) return;
+      if(history[history.length-1].role !== "user") return;
+      const b = bubble("assistant");
+      b.innerHTML = '<span class="working">That question was interrupted (the tab closed before it finished). </span>';
+      const btn = document.createElement("button");
+      btn.className = "btn"; btn.textContent = "↻ Retry";
+      btn.style.marginTop = "6px";
+      btn.addEventListener("click", () => { const row = b.closest(".msg"); if(row) row.remove(); runAssistant(); });
+      b.appendChild(btn);
+      scrollDown();
     }
 
     // Plain chat: stream tokens as they arrive.
@@ -307,7 +329,7 @@
     fetch("/ai-chat/config").then(r=>r.json()).then(c=>{ $("model").textContent = c.model || "AI"; }).catch(()=>{ $("model").textContent = "AI"; });
     try{ analyst = localStorage.getItem("aiChatMode") === "analyst"; }catch(e){}
     applyMode();
-    load(); paint(); inputEl.focus();
+    load(); paint(); checkOrphan(); inputEl.focus();
   </script>
 </body>
 

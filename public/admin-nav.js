@@ -90,6 +90,9 @@
       '<circle cx="12" cy="12" r="10"></circle>' +
       '<line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
+    aiChat:
+      '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 ' +
+      '2z"></path><path d="M9.5 9.5l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"></path>',
   };
 
   // Every href this script manages (either as a standalone link or grouped
@@ -268,6 +271,12 @@
     },
   ];
   var STANDALONE = [
+    {
+      href: "/ai-chat.html",
+      label: "AI Chat",
+      icon: ICONS.aiChat,
+      superOnly: false,
+    },
     {
       href: "/settings.html",
       label: "Settings",
