@@ -41,6 +41,11 @@
     .trace .chip.bad{color:#dc2626;border-color:#dc2626;}
     .working{color:var(--muted);font-size:13px;font-style:italic;}
     .err{color:#dc2626;}
+    .act{margin-top:10px;}
+    .btn.run{background:#16a34a;color:#fff;border-color:#16a34a;cursor:pointer;border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;border:1px solid #16a34a;}
+    .btn.run:disabled{opacity:.55;cursor:default;}
+    .runlog{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#0b0e14;color:#cfe3ff;border-radius:10px;padding:10px 12px;margin-top:8px;white-space:pre-wrap;max-height:240px;overflow-y:auto;}
+    .runlog .ok{color:#7ee787;} .runlog .err{color:#ff7b72;}
     .empty{color:var(--muted);text-align:center;margin-top:12vh;font-size:15px;line-height:1.7;}
     .empty b{color:var(--ink);font-size:20px;}
     footer{border-top:1px solid var(--line);background:var(--surface);padding:12px 0 max(12px,env(safe-area-inset-bottom));}
@@ -99,9 +104,11 @@
     </div>
   </div>
 
+  <script src="/ai-actions.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const messagesEl = $("messages"), inputEl = $("input"), sendBtn = $("send");
+    window.__chatActions = {};
     let chatId = null, mode = "analyst", sending = false, pollTimer = null;
 
     // ---------- markdown (escape then a few constructs) ----------
@@ -134,10 +141,17 @@
       const chips = (trace||[]).map(t=>`<span class="chip">🔧 ${esc(t)}</span>`).join("");
       return (chips?`<div class="trace">${chips}</div>`:"") + (working?'<div class="working">Investigating… reading your logs, data &amp; code</div>':"");
     }
+    function actionsHtml(m){
+      if(!m.actions || !m.actions.length || m.status!=="done" || !window.AIActions) return "";
+      return m.actions.map(a=>{
+        window.__chatActions[a.proposalId] = a.action;
+        return `<div class="act"><button class="btn run" data-runaction="${a.proposalId}">✓ Approve &amp; run: ${esc(AIActions.label(a.action))}</button><div class="runlog" id="alog-${a.proposalId}" hidden></div></div>`;
+      }).join("");
+    }
     function assistantBody(m){
       if(m.status==="running") return chipsHtml(m.trace, true);
       if(m.status==="error") return chipsHtml(m.trace,false)+`<span class="err">⚠ ${esc(m.error||m.content||"failed")}</span>`;
-      return chipsHtml(m.trace,false) + renderMarkdown(m.content||"*(no answer)*");
+      return chipsHtml(m.trace,false) + renderMarkdown(m.content||"*(no answer)*") + actionsHtml(m);
     }
     function rowHtml(m){
       const who = m.role==="user"?"user":"assistant";
@@ -233,6 +247,27 @@
       b.classList.toggle("on", mode==="analyst");
       inputEl.placeholder = mode==="analyst" ? 'Ask about your site… e.g. "anything failing today?"' : "Message…";
     }
+
+    // ---------- inline "Approve & run" ----------
+    messagesEl.addEventListener("click", async (e)=>{
+      const b = e.target.closest("[data-runaction]");
+      if(!b) return;
+      const pid = b.dataset.runaction;
+      const action = window.__chatActions[pid];
+      if(!action) return;
+      if(!confirm("Approve & run this now? It changes the live fleet.")) return;
+      b.disabled = true; b.textContent = "Running…";
+      const el = $("alog-"+pid);
+      const log = (m,c)=>{ if(el){ el.hidden=false; el.innerHTML += `<div class="${c||''}">${esc(m)}</div>`; el.scrollTop=el.scrollHeight; scrollDown(); } };
+      try{
+        await window.AIActions.run(action, log);
+        await api("POST", `/ai-chat/proposals/${pid}/status`, { status:"applied" });
+        log("Marked applied.", "ok"); b.textContent = "✓ Done";
+      }catch(err){
+        log("⚠ "+err.message, "err"); log("Left open — retry here or in 📋 Proposals.", "err");
+        b.disabled=false; b.textContent="✓ Approve & run";
+      }
+    });
 
     // ---------- events ----------
     sendBtn.addEventListener("click", send);

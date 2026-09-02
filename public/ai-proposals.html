@@ -64,6 +64,7 @@
     <div id="list"></div>
   </div>
 
+  <script src="/ai-actions.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     let filter = "open";
@@ -119,46 +120,13 @@
       el.innerHTML += `<div class="${cls||''}">${esc(msg)}</div>`; el.scrollTop = el.scrollHeight;
     }
 
-    // ---- executors (run in THIS authenticated browser via existing endpoints) ----
-    async function waitProvisioningFree(id){
-      for(let i=0;i<100;i++){
-        let s={}; try{ s = await api("GET","/api/webbot-farm/bots-status"); }catch(e){}
-        if(!s.provisioning) return;
-        if(i===0) logTo(id, "  …waiting for the Pi to finish provisioning the previous bot");
-        await new Promise(r=>setTimeout(r,3000));
-      }
-      throw new Error("timed out waiting for provisioning to free up");
-    }
-    async function runWebbotSplit(id, action){
-      const botId = String(action.botId), game = action.game;
-      logTo(id, `Reading web-farm state…`);
-      const state = await api("GET","/api/webbot-farm/state");
-      const bot = (state.bots||[]).find(b=>String(b.id)===botId);
-      if(!bot) throw new Error(`bot ${botId} not found (already released?)`);
-      const count = bot.count;
-      let parts = (action.parts && action.parts.length>=2) ? action.parts.slice() : null;
-      if(!parts){ const h=Math.floor(count/2); parts=[h, count-h]; }
-      logTo(id, `Bot ${botId}: ${count} accounts, game "${game}" → splitting into ${parts.join(" + ")}.`);
-      logTo(id, `Releasing bot ${botId}…`);
-      const rel = await api("POST", `/api/webbot-farm/bots/${botId}/release`);
-      logTo(id, `  ✓ released ${rel.released!=null?rel.released:""} accounts to idle`, "ok");
-      for(let i=0;i<parts.length;i++){
-        await waitProvisioningFree(id);
-        logTo(id, `Creating bot ${i+1}/${parts.length}: ${game} × ${parts[i]}…`);
-        const c = await api("POST", "/api/webbot-farm/bots", { game, count: parts[i] });
-        logTo(id, `  ✓ ${c.message||("bot "+c.id+" created with "+c.accounts+" accounts")}`, "ok");
-      }
-      logTo(id, `Done. Watch /webbot-farm.html for the two bots to finish provisioning on the Pi.`, "ok");
-    }
-
     async function approveRun(id, btn){
       const action = window.__actions[id];
       if(!action) return;
       if(!confirm("Approve & run this action now? It will release and recreate the bot on the Pi.")) return;
       btn.disabled = true; btn.textContent = "Running…";
       try{
-        if(action.type==="webbot_split") await runWebbotSplit(id, action);
-        else throw new Error("unknown action type: "+action.type);
+        await window.AIActions.run(action, (m,c)=>logTo(id, m, c));
         await api("POST", `/ai-chat/proposals/${id}/status`, { status: "applied" });
         logTo(id, "Marked applied.", "ok");
         setTimeout(load, 1200);

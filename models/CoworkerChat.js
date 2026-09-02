@@ -11,6 +11,9 @@ const messageSchema = new mongoose.Schema(
     content: { type: String, default: "" },
     mode: { type: String, default: "analyst" }, // assistant turns: analyst | chat
     trace: { type: [String], default: [] }, // tool names as they run
+    // Executable actions the coworker proposed in this turn — rendered inline as
+    // one-tap "Approve & run" buttons in the chat. {proposalId, title, action}.
+    actions: { type: [mongoose.Schema.Types.Mixed], default: [] },
     status: { type: String, enum: ["running", "done", "error"], default: "done" },
     error: { type: String, default: "" },
     at: { type: Date, default: Date.now },

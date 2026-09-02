@@ -98,7 +98,7 @@ async function addProposal({ kind, title, detail, targets, severity, fromQuestio
     actor: actor || "",
     action: action && typeof action === "object" ? action : null,
   });
-  return { proposed: String(doc._id), kind: doc.kind, title: doc.title, executable: !!doc.action };
+  return { proposed: String(doc._id), kind: doc.kind, title: doc.title, executable: !!doc.action, action: doc.action || null };
 }
 
 async function setProposalStatus(id, status, actor) {
@@ -184,6 +184,7 @@ async function getChatPublic(id) {
       content: m.content,
       mode: m.mode,
       trace: m.trace,
+      actions: m.actions || [],
       status: m.status,
       error: m.error,
       at: m.at,

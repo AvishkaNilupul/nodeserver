@@ -1,0 +1,65 @@
+// Shared client-side executor for coworker actions. Runs in the operator's OWN
+// authenticated browser, calling the SAME existing admin endpoints the manual
+// UI uses — no server-side executor, no auth bypass. Used by both the Proposals
+// inbox and inline "Approve & run" buttons in the AI chat.
+(function () {
+  async function j(method, path, body) {
+    const r = await fetch(path, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok || data.success === false) throw new Error(data.message || (method + " " + path + " (" + r.status + ")"));
+    return data;
+  }
+
+  async function waitProvisioningFree(log) {
+    for (let i = 0; i < 100; i++) {
+      let s = {};
+      try { s = await j("GET", "/api/webbot-farm/bots-status"); } catch (e) {}
+      if (!s.provisioning) return;
+      if (i === 0) log("  …waiting for the Pi to finish provisioning the previous bot", "");
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    throw new Error("timed out waiting for provisioning to free up");
+  }
+
+  async function webbotSplit(action, log) {
+    const botId = String(action.botId);
+    const game = action.game;
+    log("Reading web-farm state…");
+    const state = await j("GET", "/api/webbot-farm/state");
+    const bot = (state.bots || []).find((b) => String(b.id) === botId);
+    if (!bot) throw new Error("bot " + botId + " not found (already released?)");
+    const count = bot.count;
+    let parts = action.parts && action.parts.length >= 2 ? action.parts.slice() : null;
+    if (!parts) { const h = Math.floor(count / 2); parts = [h, count - h]; }
+    log("Bot " + botId + ": " + count + " accounts, game \"" + game + "\" → splitting into " + parts.join(" + ") + ".");
+    log("Releasing bot " + botId + "…");
+    const rel = await j("POST", "/api/webbot-farm/bots/" + botId + "/release");
+    log("  ✓ released " + (rel.released != null ? rel.released : "") + " accounts to idle", "ok");
+    for (let i = 0; i < parts.length; i++) {
+      await waitProvisioningFree(log);
+      log("Creating bot " + (i + 1) + "/" + parts.length + ": " + game + " × " + parts[i] + "…");
+      const c = await j("POST", "/api/webbot-farm/bots", { game, count: parts[i] });
+      log("  ✓ " + (c.message || ("bot " + c.id + " created with " + c.accounts + " accounts")), "ok");
+    }
+    log("Done. Watch /webbot-farm.html for the two bots to finish provisioning on the Pi.", "ok");
+  }
+
+  window.AIActions = {
+    // run(action, log) — log(msg, cls) where cls is "" | "ok" | "err"
+    async run(action, log) {
+      if (!action || !action.type) throw new Error("no action");
+      if (action.type === "webbot_split") return webbotSplit(action, log);
+      throw new Error("unknown action type: " + action.type);
+    },
+    label(action) {
+      if (action && action.type === "webbot_split")
+        return "Split bot " + action.botId + " (" + action.game + ")";
+      return action && action.type ? action.type : "action";
+    },
+  };
+})();

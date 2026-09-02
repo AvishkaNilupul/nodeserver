@@ -188,10 +188,14 @@ const ANALYST_BASE = [
   "approves and applies. Two ways to recommend:",
   "- `propose` — an advisory recommendation the operator does by hand (a code fix",
   "  with exact file + before/after, a price move, etc.).",
-  "- `propose_webbot_split` — an EXECUTABLE action: it becomes a one-tap 'Approve &",
-  "  run' button for the operator (splits a web-farm bot into halves). First",
-  "  confirm the bot's id/game/count with db_group on webbot_accounts.",
-  "Never claim you changed something — you propose, the operator approves & applies.",
+  "- `propose_webbot_split` — an EXECUTABLE action. When the operator asks you to",
+  "  SPLIT/DO it (e.g. 'split the web-farm bots with 100 accounts'), CALL this —",
+  "  an 'Approve & run' button then appears right in the chat for them to tap. Do",
+  "  NOT just describe the steps; file the action. First confirm the bot's",
+  "  id/game/count with db_group on webbot_accounts, and file one per bot.",
+  "Never claim you already changed something — you file the action; the operator",
+  "taps Approve & run. (More action types will be added; for anything without an",
+  "action tool yet, use `propose`.)",
 ].join("\n");
 
 async function buildAnalystSystem() {
@@ -247,6 +251,7 @@ async function runTurn(chatId) {
   const question = [...prior].reverse().find((m) => m.role === "user")?.content || "";
 
   const trace = [];
+  const turnActions = []; // executable actions the coworker proposed this turn
   let finalAnswer = "";
   let errMsg = "";
   try {
@@ -271,9 +276,15 @@ async function runTurn(chatId) {
             try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* keep {} */ }
             const result = await runTool(call.function?.name, args);
             trace.push({ tool: call.function?.name, ok: !result?.error });
+            // If the coworker filed an EXECUTABLE proposal, surface it inline as
+            // an Approve & run button on this chat turn.
+            if (result && result.proposed && result.action) {
+              turnActions.push({ proposalId: result.proposed, title: result.title, action: result.action });
+            }
             messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 6000) });
             // Persist progress so a polling client sees live tool chips.
             turn.trace = trace.map((x) => x.tool);
+            turn.actions = turnActions;
             turn.beatAt = new Date();
             doc.markModified("messages");
             await doc.save().catch(() => {});
@@ -306,6 +317,7 @@ async function runTurn(chatId) {
 
   turn.content = finalAnswer;
   turn.trace = trace.map((x) => x.tool);
+  turn.actions = turnActions;
   turn.status = errMsg ? "error" : "done";
   turn.error = errMsg;
   turn.beatAt = new Date();
