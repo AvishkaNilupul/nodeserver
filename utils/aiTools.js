@@ -10,8 +10,14 @@
 // Results are kept compact on purpose: prod Mongo is a bytes-bound Atlas shared
 // tier, and every byte returned also spends model context.
 const { execFile } = require("child_process");
+const path = require("path");
+const fs = require("fs");
 const SystemEvent = require("../models/SystemEvent");
 const FleetSnapshot = require("../models/FleetSnapshot");
+const store = require("./coworkerStore");
+
+// The repo root — code tools are sandboxed to this tree.
+const ROOT = path.resolve(__dirname, "..");
 
 const clamp = (n, lo, hi, dflt) => {
   const v = Number(n);
@@ -231,6 +237,291 @@ const TOOLS = [
     impl: pm2_status,
   },
 ];
+
+// ===========================================================================
+// Generic read-only DB access over a whitelist of collections.
+//
+// SECURITY: each collection lists ONLY safe fields to project — secrets
+// (passwords, clientSecret/tokens, access tokens, emails) are never in the
+// allow-list, so they cannot be returned or filtered on. Adding a collection is
+// one registry entry; nothing is queryable unless it's here.
+// ===========================================================================
+const M = (name) => require(`../models/${name}`);
+const REGISTRY = {
+  market_research: {
+    model: () => M("MarketResearch"),
+    desc: "Per-game market research: demand/competition/opportunity scores, sellers, offers, sales/week, revenue, and a recommendation. Best source for pricing & marketing decisions.",
+    fields: "game term campaign active upcoming count endAt farmedAccounts farmedItems ownActive ownSold observedRevenue sellers offers salesPerWeek demandTrend ownSales ownRevenue markets ownByMarket demandScore competitionScore opportunityScore recommendation scannedAt",
+    date: "scannedAt",
+  },
+  drop_sets: {
+    model: () => M("DropSet"),
+    desc: "Sellable bundles/sets: pricing (price, minPriceUsd floor), whether listed, catalog config, bulk discount. The price source of truth per set.",
+    fields: "itemKey name game qty price minPriceUsd listed publicCatalog publicFeatured publicPrice bulkMinQty bulkDiscountPct custom sourceType sourceEventName",
+    date: "",
+  },
+  marketplace_listings: {
+    model: () => M("MarketplaceListing"),
+    desc: "Live listings across marketplaces (plati, ggsel, zeusx, digiseller, g2g…): price, currency, status, stock (qtyRemaining/qtyTarget/unitsSold), auto-delivery, relist attempts, last error. Compare pricing & stock across marketplaces here.",
+    fields: "set marketplace origin externalId url title price currency status qtyRemaining qtyTarget unitsSold lastStock autoDelivery autoDeliver relistAttempts relistRetryAt lastError addedAt",
+    date: "addedAt",
+  },
+  autofarm_tasks: {
+    model: () => M("AutoFarmTask"),
+    desc: "Per-event auto-farm decisions: whether/why a game is being farmed, demand score, coverage, planned vs assigned accounts, status, per-marketplace listing state, errors.",
+    fields: "game campaignName campaignEndAt decision reason demandScore coverage plannedAccounts targetAccounts assignedAccounts status dryRun error decidedAt executedAt completedAt listing plati ggsel zeusx listedAt repricedAt postEvent",
+    date: "decidedAt",
+  },
+  drop_logs: {
+    model: () => M("DropLog"),
+    desc: "Individual farmed drops per account: game, item, when awarded, whether connected, sold status (soldAt/soldToUsername). Identified by login, never token.",
+    fields: "login name game itemKey count awardedAt connected state source soldAt soldToUsername firstSeenAt lastSeenAt",
+    date: "awardedAt",
+  },
+  pool_accounts: {
+    model: () => M("AvailableAccount"),
+    desc: "The shared account pool: status (available/claimed/suspended…), whether it has a stored password, which games it has sold, source, listed flag, drop count, last check. NO credentials.",
+    fields: "usernameLower status hasPassword soldGames source manualSold listed dropCount claimedAt claimedNote lastCheckAt lastCheckStatus suspendedAt",
+    date: "claimedAt",
+  },
+  bot_accounts: {
+    model: () => M("BotAccount"),
+    desc: "Deployed bot fleet: login, container, host (server/pi), enabled, scan status, drops in progress, sold status, suspension. NO credentials.",
+    fields: "login container host enabled status soldAt soldToUsername dropCount inProgressCount inProgressGames lastScanAt lastScanStatus lastScanError suspendedAt resellerId",
+    date: "lastScanAt",
+  },
+  sale_signals: {
+    model: () => M("SaleSignal"),
+    desc: "Confirmed real sales signals: game, item, marketplace, price (USD), when. The ground-truth demand signal for pricing/marketing.",
+    fields: "game gameKey itemKey name login source marketplace priceUsd at",
+    date: "at",
+  },
+  purchases: {
+    model: () => M("Purchase"),
+    desc: "Internal purchases/fulfilment: item, set, price, buyer, account login, refund status.",
+    fields: "itemKey name game count setId setName price buyerUsername accountLogin balanceAfter refundedAt",
+    date: "",
+  },
+  bulk_orders: {
+    model: () => M("BulkOrder"),
+    desc: "Bulk orders: account login, status, health, order number, set, quantity ordered, price, guarantee window. NO access tokens.",
+    fields: "accountLogin status dropCount orderNo setName qtyOrdered price buyerLabel guaranteeUntil active revealedAt",
+    date: "",
+  },
+};
+
+function projection(fields) {
+  const p = { _id: 0 };
+  for (const f of fields.split(/\s+/).filter(Boolean)) p[f] = 1;
+  return p;
+}
+function safeFilter(entry, where) {
+  const allowed = new Set(entry.fields.split(/\s+/).filter(Boolean));
+  const OPS = { gte: "$gte", lte: "$lte", gt: "$gt", lt: "$lt", ne: "$ne", in: "$in" };
+  const out = {};
+  for (const [k, v] of Object.entries(where || {})) {
+    if (!allowed.has(k)) continue; // silently ignore non-whitelisted (incl. secrets)
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const sub = {};
+      for (const [op, val] of Object.entries(v)) {
+        if (op === "regex") sub.$regex = new RegExp(String(val).slice(0, 60).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        else if (OPS[op]) sub[OPS[op]] = val;
+      }
+      if (Object.keys(sub).length) out[k] = sub;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+async function db_query(args = {}) {
+  const entry = REGISTRY[args.collection];
+  if (!entry) return { error: `unknown collection. available: ${Object.keys(REGISTRY).join(", ")}` };
+  const filter = safeFilter(entry, args.where);
+  if (args.since_minutes && entry.date) {
+    filter[entry.date] = { $gte: new Date(Date.now() - clamp(args.since_minutes, 1, 60 * 24 * 400, 1440) * 60000) };
+  }
+  const limit = clamp(args.limit, 1, 50, 20);
+  let q = entry.model().find(filter, projection(entry.fields));
+  if (args.sort) { const dir = args.sort_desc === false ? 1 : -1; q = q.sort({ [args.sort]: dir }); }
+  else if (entry.date) q = q.sort({ [entry.date]: -1 });
+  const rows = await q.limit(limit).lean();
+  // truncate any long strings to keep the payload lean
+  for (const r of rows) for (const k of Object.keys(r)) if (typeof r[k] === "string") r[k] = trunc(r[k], 200);
+  return { collection: args.collection, matched: rows.length, rows };
+}
+
+async function db_count(args = {}) {
+  const entry = REGISTRY[args.collection];
+  if (!entry) return { error: `unknown collection. available: ${Object.keys(REGISTRY).join(", ")}` };
+  const filter = safeFilter(entry, args.where);
+  if (args.since_minutes && entry.date) {
+    filter[entry.date] = { $gte: new Date(Date.now() - clamp(args.since_minutes, 1, 60 * 24 * 400, 1440) * 60000) };
+  }
+  return { collection: args.collection, count: await entry.model().countDocuments(filter) };
+}
+
+async function db_group(args = {}) {
+  const entry = REGISTRY[args.collection];
+  if (!entry) return { error: `unknown collection. available: ${Object.keys(REGISTRY).join(", ")}` };
+  const allowed = new Set(entry.fields.split(/\s+/).filter(Boolean));
+  if (!allowed.has(args.group_by)) return { error: `group_by must be one of: ${entry.fields}` };
+  const filter = safeFilter(entry, args.where);
+  if (args.since_minutes && entry.date) {
+    filter[entry.date] = { $gte: new Date(Date.now() - clamp(args.since_minutes, 1, 60 * 24 * 400, 1440) * 60000) };
+  }
+  const rows = await entry.model().aggregate([
+    { $match: filter },
+    { $group: { _id: `$${args.group_by}`, count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+    { $limit: 40 },
+  ]);
+  return { collection: args.collection, group_by: args.group_by, groups: rows.map((r) => ({ value: r._id, count: r.count })) };
+}
+
+// ---- Code tools (read-only, sandboxed to the repo, secrets blocked) ---------
+const CODE_BLOCK = /(^|\/)(node_modules|\.git|public\/uploads|public\/drop-images|_deploy_backup)/;
+const SECRET_FILE = /(\.env|\.pem$|\.key$|keystore|id_bothost|botHosts\.json|admins\.json)/i;
+function resolveInRepo(p) {
+  const abs = path.resolve(ROOT, String(p || "").replace(/^\/+/, ""));
+  if (!abs.startsWith(ROOT + path.sep)) return null; // escaped the repo
+  if (CODE_BLOCK.test(abs) || SECRET_FILE.test(abs)) return null;
+  return abs;
+}
+
+function read_code(args = {}) {
+  const abs = resolveInRepo(args.path);
+  if (!abs) return { error: "path not allowed (outside repo, or a secret/ignored file)" };
+  let text;
+  try { text = fs.readFileSync(abs, "utf8"); } catch (e) { return { error: "cannot read: " + e.message }; }
+  const all = text.split("\n");
+  const start = Math.max(1, clamp(args.start, 1, all.length, 1));
+  const count = clamp(args.lines, 1, 400, 200);
+  const slice = all.slice(start - 1, start - 1 + count);
+  return {
+    path: path.relative(ROOT, abs),
+    total_lines: all.length,
+    from: start,
+    to: start - 1 + slice.length,
+    content: slice.map((l, i) => `${start + i}\t${l}`).join("\n").slice(0, 12000),
+  };
+}
+
+function search_code(args = {}) {
+  const query = String(args.query || "").slice(0, 120);
+  if (!query) return { error: "query required" };
+  return new Promise((resolve) => {
+    const gArgs = [
+      "-rniE", query, ROOT,
+      "--include=*.js", "--include=*.html", "--include=*.json", "--include=*.md",
+      "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=_deploy_backup",
+      "--exclude=.env*", "-m", "3",
+    ];
+    execFile("grep", gArgs, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      const lines = (stdout || "").split("\n").filter(Boolean)
+        .filter((l) => !SECRET_FILE.test(l))
+        .slice(0, 40)
+        .map((l) => l.replace(ROOT + "/", "").slice(0, 240));
+      resolve({ query, matches: lines.length, results: lines });
+    });
+  });
+}
+
+// ---- Memory / log / proposal tools -----------------------------------------
+const recall_memory = (a = {}) => store.recallMemory(a.query, a.limit);
+const save_memory = (a = {}) => store.saveMemory(a);
+const read_log = (a = {}) => store.readLog(a.limit, a.query);
+const list_proposals = (a = {}) => store.readProposals(a.status, a.limit);
+async function propose(a = {}) {
+  return store.addProposal({
+    kind: a.kind, title: a.title, detail: a.detail,
+    targets: a.targets, severity: a.severity,
+  });
+}
+
+// Register the expanded tool set.
+TOOLS.push(
+  { schema: { type: "function", function: {
+    name: "db_query",
+    description: "Read rows from any whitelisted collection (marketplaces, pricing, listings, farming, drops, pool, bots, sales, research). Returns only safe fields. Call list_collections mentally via the descriptions here.",
+    parameters: { type: "object", properties: {
+      collection: { type: "string", enum: Object.keys(REGISTRY), description: Object.entries(REGISTRY).map(([k, v]) => `${k}: ${v.desc}`).join(" || ") },
+      where: { type: "object", description: "field→value equality, or field→{gte|lte|gt|lt|ne|in|regex: value}. Only whitelisted fields work." },
+      since_minutes: { type: "number", description: "restrict to rows newer than this (uses the collection's date field)" },
+      sort: { type: "string", description: "field to sort by (default: newest first)" },
+      sort_desc: { type: "boolean" },
+      limit: { type: "number", description: "max rows, default 20, cap 50" },
+    }, required: ["collection"] },
+  } }, impl: db_query },
+  { schema: { type: "function", function: {
+    name: "db_count",
+    description: "Count rows matching a filter in a whitelisted collection (e.g. how many listings are 'onsale' on plati). Cheap; use liberally.",
+    parameters: { type: "object", properties: {
+      collection: { type: "string", enum: Object.keys(REGISTRY) },
+      where: { type: "object" }, since_minutes: { type: "number" },
+    }, required: ["collection"] },
+  } }, impl: db_count },
+  { schema: { type: "function", function: {
+    name: "db_group",
+    description: "Group-and-count a collection by one field — the tool for COMPARING (listings per marketplace, sales per game, bots per host, pool per status).",
+    parameters: { type: "object", properties: {
+      collection: { type: "string", enum: Object.keys(REGISTRY) },
+      group_by: { type: "string", description: "a whitelisted field to group on" },
+      where: { type: "object" }, since_minutes: { type: "number" },
+    }, required: ["collection", "group_by"] },
+  } }, impl: db_group },
+  { schema: { type: "function", function: {
+    name: "read_code",
+    description: "Read a source file from the repo (read-only, secrets blocked). Use to investigate HOW something works or to prepare a code fix proposal.",
+    parameters: { type: "object", properties: {
+      path: { type: "string", description: "repo-relative path, e.g. routes/marketplaceRoutes.js" },
+      start: { type: "number", description: "1-based start line" },
+      lines: { type: "number", description: "lines to read, default 200, cap 400" },
+    }, required: ["path"] },
+  } }, impl: read_code },
+  { schema: { type: "function", function: {
+    name: "search_code",
+    description: "Grep the repo for a pattern (case-insensitive regex). Returns file:line matches. Use to locate where logic lives before read_code.",
+    parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  } }, impl: search_code },
+  { schema: { type: "function", function: {
+    name: "recall_memory",
+    description: "Search your own long-term memory (facts you've learned about this operation). Call early to reuse what you already know.",
+    parameters: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } } },
+  } }, impl: recall_memory },
+  { schema: { type: "function", function: {
+    name: "save_memory",
+    description: "Save a durable fact about this operation for future sessions (e.g. a recurring failure pattern, a pricing quirk). Use a stable short key so re-learning updates in place.",
+    parameters: { type: "object", properties: {
+      key: { type: "string", description: "short stable slug, e.g. plati-underprices-cod" },
+      topic: { type: "string", description: "pricing|listings|bots|farming|marketplaces|pool|sales|ops|code|domain" },
+      text: { type: "string", description: "the fact, concise" },
+      pinned: { type: "boolean", description: "pin if it should always be loaded" },
+    }, required: ["key", "text"] },
+  } }, impl: save_memory },
+  { schema: { type: "function", function: {
+    name: "read_log",
+    description: "Read your recent past investigations (question + tools + answer). Use for continuity — 'what did we find last time about X'.",
+    parameters: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } } },
+  } }, impl: read_log },
+  { schema: { type: "function", function: {
+    name: "list_proposals",
+    description: "List change proposals you've filed (open by default). Avoid filing a duplicate of something already open.",
+    parameters: { type: "object", properties: { status: { type: "string", enum: ["open", "applied", "dismissed", "all"] }, limit: { type: "number" } } },
+  } }, impl: list_proposals },
+  { schema: { type: "function", function: {
+    name: "propose",
+    description: "File a concrete change recommendation for the operator to review and apply (you cannot change prod yourself). For a code fix, put the exact file + a before/after or diff in detail. This is how you 'do' things.",
+    parameters: { type: "object", properties: {
+      kind: { type: "string", enum: ["code", "pricing", "listings", "bots", "ops", "marketing", "other"] },
+      title: { type: "string" },
+      detail: { type: "string", description: "what to change, why, and exactly how (file+diff for code)" },
+      targets: { type: "array", items: { type: "string" }, description: "short labels: file paths, logins, marketplaces, ids (never secrets)" },
+      severity: { type: "string", enum: ["low", "medium", "high"] },
+    }, required: ["title", "detail"] },
+  } }, impl: propose },
+);
 
 const SCHEMAS = TOOLS.map((t) => t.schema);
 const BY_NAME = Object.fromEntries(TOOLS.map((t) => [t.schema.function.name, t.impl]));

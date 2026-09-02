@@ -11,6 +11,7 @@
 const express = require("express");
 const config = require("../config/config");
 const { SCHEMAS, runTool, toolNames } = require("../utils/aiTools");
+const store = require("../utils/coworkerStore");
 
 const router = express.Router();
 
@@ -146,19 +147,57 @@ router.post("/ai-chat/send", async (req, res) => {
 // It CANNOT act on prod — only the read-only tool set is exposed. Non-streaming
 // so the tool round-trips stay simple; the page shows a tool trace then the
 // answer.
-const ANALYST_SYSTEM =
-  "You are the site's ops coworker — an analyst embedded in a Node/Express app " +
-  "that runs a Twitch drop-farming / account-selling operation. Investigate " +
-  "using the provided READ-ONLY tools before answering; never guess when a tool " +
-  "can tell you. Prefer event_summary first to see where problems are, then " +
-  "query_events to drill in, fleet_trend for count changes, pm2_status for " +
-  "process health. Be concise and concrete: cite timestamps, categories, hosts, " +
-  "and counts from the data. Known-routine noise (telegram poll errors, gameflip " +
-  "relist retries, campaignWatcher integrity checks, Mongoose deprecations) is " +
-  "NOT a failure — don't raise it unless asked. If the data is insufficient, say " +
-  "so. You cannot change anything; you observe and explain.";
+// The coworker's standing brief. Kept explicit and concrete because the model
+// is a smaller/cheaper one — clear guidance makes it perform well.
+const ANALYST_BASE = [
+  "You are the ops coworker for RedeemHub — a Twitch drop-farming and game-account",
+  "selling operation running on this Node/Express + MongoDB server. You are a sharp,",
+  "skeptical analyst who investigates with tools before answering and reasons across",
+  "subsystems the way a human operator would.",
+  "",
+  "THE OPERATION (pipeline): bots on hosts (server + a Raspberry Pi 'pi') farm Twitch",
+  "drops on pooled accounts → farmed drops become sellable sets/bundles → those get",
+  "listed & priced across many marketplaces (plati, ggsel, zeusx, digiseller, g2g,…)",
+  "→ buyers order and accounts are delivered. An auto-farm engine decides which games",
+  "to farm from demand/coverage; there are existing FAILSAFES (auto-heal, park-when-",
+  "farmed, Stream Scout, bot-health) that you must respect and never second-guess.",
+  "",
+  "YOUR TOOLS:",
+  "- recall_memory / read_log FIRST — reuse what you already know and found before.",
+  "- event_summary then query_events — the SystemEvent audit trail (what happened).",
+  "- fleet_trend — counts over time (drops? bans? pool draining?).",
+  "- pm2_status — process health.",
+  "- db_query / db_count / db_group — read marketplaces, pricing (drop_sets,",
+  "  marketplace_listings), farming (autofarm_tasks), demand (market_research,",
+  "  sale_signals), pool_accounts, bot_accounts, drops, orders. db_group is your",
+  "  COMPARE tool (per marketplace / game / host / status).",
+  "- read_code / search_code — inspect the actual source to explain behavior or",
+  "  prepare a fix. Never invent how the code works — read it.",
+  "- save_memory — when you learn something durable (a recurring failure, a pricing",
+  "  quirk), save it so next time is easier. Use stable short keys.",
+  "",
+  "HOW YOU WORK: investigate broadly — cost is not a concern, so use as many tool",
+  "calls as needed to actually compare and verify. Be concrete: cite timestamps,",
+  "counts, marketplaces, prices, hosts. Known-routine noise (telegram poll errors,",
+  "gameflip relist retries, campaignWatcher integrity checks, Mongoose deprecations)",
+  "is NOT a failure — ignore unless asked.",
+  "",
+  "YOU DO NOT CHANGE ANYTHING (propose-only). You cannot edit code, reprice, or touch",
+  "prod. When you'd recommend a change (a code fix, a price move, a bot action), call",
+  "the `propose` tool with a concrete, reviewable recommendation (for code: exact file",
+  "+ before/after). The operator reviews and applies it. Never claim you changed",
+  "something — you propose, they apply.",
+].join("\n");
 
-const MAX_ROUNDS = 6;
+async function buildAnalystSystem() {
+  let mem = "";
+  try { mem = await store.loadPromptMemories(); } catch { /* best effort */ }
+  return mem
+    ? ANALYST_BASE + "\n\nWHAT YOU'VE LEARNED (your memory — trust but re-verify if stale):\n" + mem
+    : ANALYST_BASE;
+}
+
+const MAX_ROUNDS = 12;
 
 async function callModel(messages, { noTools = false } = {}) {
   const resp = await fetch(`${config.AI.baseUrl}/chat/completions`, {
@@ -197,10 +236,17 @@ router.post("/ai-chat/agent", async (req, res) => {
     return res.status(400).json({ success: false, message: "No messages provided." });
   }
 
-  // Rebuild the message list with our analyst system prompt at the front
-  // (drop any client-sent system message).
-  const messages = [{ role: "system", content: ANALYST_SYSTEM }];
+  // Rebuild the message list with our analyst system prompt (which folds in the
+  // coworker's saved memory) at the front, dropping any client-sent system msg.
+  const messages = [{ role: "system", content: await buildAnalystSystem() }];
   for (const m of incoming) if (m.role !== "system") messages.push(m);
+
+  // For the audit log.
+  const t0 = Date.now();
+  const actor = req.session?.admin?.id ? "admin:" + req.session.admin.id : "admin";
+  const question = [...incoming].reverse().find((m) => m.role === "user")?.content || "";
+  let finalAnswer = "";
+  let errMsg = "";
 
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -252,24 +298,56 @@ router.post("/ai-chat/agent", async (req, res) => {
         try { answer = (await callModel(messages, { noTools: true }))?.choices?.[0]?.message?.content || ""; }
         catch { /* keep empty */ }
       }
-      emit("done", { answer: answer || "(no answer — please ask again)", trace });
+      finalAnswer = answer || "(no answer — please ask again)";
+      emit("done", { answer: finalAnswer, trace });
       clearInterval(heartbeat);
       return res.end();
     }
-    emit("done", {
-      answer: "(stopped after several investigation steps — ask me to continue or narrow the question)",
-      trace,
-    });
+    finalAnswer =
+      "(stopped after several investigation steps — ask me to continue or narrow the question)";
+    emit("done", { answer: finalAnswer, trace });
   } catch (err) {
     console.error("ai-chat agent error:", err.message);
+    errMsg = err.message;
     emit("error", err.message);
   } finally {
     clearInterval(heartbeat);
     if (!closed) res.end();
+    // Persist the investigation for continuity + audit (best-effort).
+    store.logRun({
+      question,
+      actor,
+      tools: trace.map((t) => t.tool),
+      answer: finalAnswer,
+      proposalCount: trace.filter((t) => t.tool === "propose" && t.ok).length,
+      durationMs: Date.now() - t0,
+      error: errMsg,
+    });
   }
 });
 
 // Lets the page list which tools the analyst has (for the UI hint).
 router.get("/ai-chat/tools", (req, res) => res.json({ tools: toolNames }));
+
+// Open change proposals the coworker has filed for the operator to review.
+router.get("/ai-chat/proposals", async (req, res) => {
+  try {
+    const status = ["open", "applied", "dismissed", "all"].includes(req.query.status)
+      ? req.query.status
+      : "open";
+    res.json({ proposals: await store.readProposals(status, 50) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Recent investigations (audit trail of the coworker itself).
+router.get("/ai-chat/log", async (req, res) => {
+  try {
+    res.json({ log: await store.readLog(Number(req.query.limit) || 20, req.query.q) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 module.exports = router;
