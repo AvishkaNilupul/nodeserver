@@ -308,6 +308,12 @@ const REGISTRY = {
     fields: "accountLogin status dropCount orderNo setName qtyOrdered price buyerLabel guaranteeUntil active revealedAt",
     date: "",
   },
+  webbot_accounts: {
+    model: () => M("WebBotAccount"),
+    desc: "The web-token 'web farm' bots: which bot (botId, '' = idle) each account is in, its game (pinnedGame), status, drops. GROUP BY botId to see each bot's size, by pinnedGame for games. NO tokens/creds.",
+    fields: "login botId pinnedGame currentGame enabled host lastStatus lastStatusMessage dropsClaimed dropsReadyUnclaimed manualSold listed fromPool twitchId",
+    date: "lastCheckedAt",
+  },
 };
 
 function projection(fields) {
@@ -440,6 +446,26 @@ async function propose(a = {}) {
   });
 }
 
+// EXECUTABLE proposal: split a web-farm bot into halves. Files an action the
+// operator runs with one tap (which drives the existing webbot-farm endpoints).
+async function propose_webbot_split(a = {}) {
+  const botId = String(a.botId || "").trim();
+  const game = String(a.game || "").trim();
+  if (!/^[0-9]+$/.test(botId) || !game) return { error: "botId (digits) and game are required" };
+  let parts = Array.isArray(a.parts) ? a.parts.map((n) => parseInt(n, 10)).filter((n) => n > 0) : [];
+  if (parts.length < 2) parts = []; // executor splits the live count evenly if unspecified
+  const label = parts.length ? parts.join(" + ") : "two equal halves";
+  return store.addProposal({
+    kind: "bots",
+    title: `Split web-farm bot ${botId} (${game}) into ${parts.length ? parts.length : 2}`,
+    detail: (a.reason ? a.reason + "\n\n" : "") +
+      `Release web-farm bot ${botId} (its accounts return to idle), then recreate as ${label} accounts, all game "${game}". Runs on the Pi via the existing webbot-farm endpoints; drop progress is server-side so nothing is lost.`,
+    severity: "medium",
+    targets: [`webbot-bot-${botId}`, game],
+    action: { type: "webbot_split", botId, game, parts },
+  });
+}
+
 // Register the expanded tool set.
 TOOLS.push(
   { schema: { type: "function", function: {
@@ -521,6 +547,16 @@ TOOLS.push(
       severity: { type: "string", enum: ["low", "medium", "high"] },
     }, required: ["title", "detail"] },
   } }, impl: propose },
+  { schema: { type: "function", function: {
+    name: "propose_webbot_split",
+    description: "File an EXECUTABLE proposal to split a web-farm ('web farm') bot into halves — the operator approves it with one tap and it runs on the Pi. First confirm the bot's id, game, and account count with db_group on webbot_accounts (group_by botId, and by pinnedGame). Use this ONLY for the web farm (WebBotAccount / webbot-bot-*), not the regular bot fleet.",
+    parameters: { type: "object", properties: {
+      botId: { type: "string", description: "the web-farm bot id, digits only (e.g. '2' for webbot-bot-2)" },
+      game: { type: "string", description: "the bot's game (pinnedGame), needed because release clears it" },
+      parts: { type: "array", items: { type: "number" }, description: "account counts per new bot, e.g. [50,50]. Omit to split the live count evenly in two." },
+      reason: { type: "string", description: "one line on why" },
+    }, required: ["botId", "game"] },
+  } }, impl: propose_webbot_split },
 );
 
 const SCHEMAS = TOOLS.map((t) => t.schema);

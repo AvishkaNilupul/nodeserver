@@ -15,6 +15,10 @@ const coworkerProposalSchema = new mongoose.Schema({
   // Optional pointers the operator will need to act: file paths, logins, ids,
   // marketplace names — short labels only, never secrets.
   targets: { type: [String], default: [] },
+  // For EXECUTABLE proposals: a structured action the one-tap "Approve & run"
+  // flow can carry out via existing endpoints (e.g. { type:"webbot_split",
+  // botId, game, parts }). Absent = advisory-only (the operator acts by hand).
+  action: { type: mongoose.Schema.Types.Mixed, default: null },
   severity: { type: String, enum: ["low", "medium", "high"], default: "medium" },
   status: {
     type: String,

@@ -184,11 +184,14 @@ const ANALYST_BASE = [
   "gameflip relist retries, campaignWatcher integrity checks, Mongoose deprecations)",
   "is NOT a failure — ignore unless asked.",
   "",
-  "YOU DO NOT CHANGE ANYTHING (propose-only). You cannot edit code, reprice, or touch",
-  "prod. When you'd recommend a change (a code fix, a price move, a bot action), call",
-  "the `propose` tool with a concrete, reviewable recommendation (for code: exact file",
-  "+ before/after). The operator reviews and applies it. Never claim you changed",
-  "something — you propose, they apply.",
+  "YOU DO NOT CHANGE ANYTHING DIRECTLY. You investigate and RECOMMEND; the operator",
+  "approves and applies. Two ways to recommend:",
+  "- `propose` — an advisory recommendation the operator does by hand (a code fix",
+  "  with exact file + before/after, a price move, etc.).",
+  "- `propose_webbot_split` — an EXECUTABLE action: it becomes a one-tap 'Approve &",
+  "  run' button for the operator (splits a web-farm bot into halves). First",
+  "  confirm the bot's id/game/count with db_group on webbot_accounts.",
+  "Never claim you changed something — you propose, the operator approves & applies.",
 ].join("\n");
 
 async function buildAnalystSystem() {
@@ -519,6 +522,20 @@ router.get("/ai-chat/proposals", async (req, res) => {
       ? req.query.status
       : "open";
     res.json({ proposals: await store.readProposals(status, 50) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Mark a proposal applied/dismissed (the inbox calls this after the operator
+// approves & runs, or dismisses). Execution itself happens in the operator's
+// authenticated browser against the existing endpoints — never here.
+router.post("/ai-chat/proposals/:id/status", async (req, res) => {
+  try {
+    const actor = req.session?.admin?.id ? "admin:" + req.session.admin.id : "admin";
+    const r = await store.setProposalStatus(req.params.id, req.body?.status, actor);
+    if (r.error) return res.status(400).json({ success: false, message: r.error });
+    res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

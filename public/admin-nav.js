@@ -93,6 +93,9 @@
     aiChat:
       '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 ' +
       '2z"></path><path d="M9.5 9.5l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"></path>',
+    proposals:
+      '<path d="M9 11l3 3L22 4"></path>' +
+      '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>',
   };
 
   // Every href this script manages (either as a standalone link or grouped
@@ -276,6 +279,12 @@
       label: "AI Chat",
       icon: ICONS.aiChat,
       superOnly: false,
+    },
+    {
+      href: "/ai-proposals.html",
+      label: "Coworker proposals",
+      icon: ICONS.proposals,
+      superOnly: true,
     },
     {
       href: "/settings.html",

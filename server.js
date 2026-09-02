@@ -588,6 +588,14 @@ app.get("/ai-chat.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "ai-chat.html"));
 });
 
+// Coworker Proposals inbox — superadmin-only, because approving a proposal can
+// run real actions (via the existing superadmin webbot-farm endpoints, in this
+// operator's own authenticated browser).
+app.get("/ai-proposals.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "ai-proposals.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================

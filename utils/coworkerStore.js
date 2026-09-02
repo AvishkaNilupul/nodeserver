@@ -86,7 +86,7 @@ async function logRun(entry) {
   }
 }
 
-async function addProposal({ kind, title, detail, targets, severity, fromQuestion, actor }) {
+async function addProposal({ kind, title, detail, targets, severity, fromQuestion, actor, action }) {
   if (!title || !detail) return { error: "title and detail are required" };
   const doc = await CoworkerProposal.create({
     kind: String(kind || "other").slice(0, 20),
@@ -96,8 +96,32 @@ async function addProposal({ kind, title, detail, targets, severity, fromQuestio
     severity: ["low", "medium", "high"].includes(severity) ? severity : "medium",
     fromQuestion: String(fromQuestion || "").slice(0, 300),
     actor: actor || "",
+    action: action && typeof action === "object" ? action : null,
   });
-  return { proposed: String(doc._id), kind: doc.kind, title: doc.title };
+  return { proposed: String(doc._id), kind: doc.kind, title: doc.title, executable: !!doc.action };
+}
+
+async function setProposalStatus(id, status, actor) {
+  if (!["open", "applied", "dismissed"].includes(status)) return { error: "bad status" };
+  const doc = await CoworkerProposal.findByIdAndUpdate(
+    id,
+    { $set: { status } },
+    { new: true },
+  ).lean();
+  if (!doc) return { error: "not found" };
+  await logRun({
+    question: `proposal ${status}: ${doc.title}`,
+    actor: actor || "",
+    tools: [],
+    answer: `Proposal "${doc.title}" marked ${status}.`,
+  }).catch(() => {});
+  return { id: String(doc._id), status: doc.status };
+}
+
+async function getProposal(id) {
+  const p = await CoworkerProposal.findById(id).lean().catch(() => null);
+  if (!p) return null;
+  return { id: String(p._id), kind: p.kind, title: p.title, detail: p.detail, severity: p.severity, status: p.status, action: p.action || null, targets: p.targets };
 }
 
 async function readProposals(status = "open", limit = 20) {
@@ -110,8 +134,9 @@ async function readProposals(status = "open", limit = 20) {
     title: p.title,
     severity: p.severity,
     status: p.status,
-    detail: trunc(p.detail, 500),
+    detail: trunc(p.detail, 1500),
     targets: p.targets,
+    action: p.action || null,
   }));
 }
 
@@ -184,6 +209,8 @@ module.exports = {
   logRun,
   addProposal,
   readProposals,
+  setProposalStatus,
+  getProposal,
   createChat,
   listChats,
   getChatPublic,
