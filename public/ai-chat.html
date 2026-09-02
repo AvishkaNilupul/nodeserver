@@ -48,6 +48,11 @@
     .send:disabled{opacity:.5;cursor:default;}
     .hint{max-width:760px;margin:6px auto 0;padding:0 16px;font-size:11.5px;color:var(--muted);text-align:center;}
     .err{color:#dc2626;}
+    .btn.on{background:var(--accent);color:#fff;border-color:var(--accent);}
+    .trace{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .trace .chip{font-size:11.5px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+    .trace .chip.bad{color:#dc2626;border-color:#dc2626;}
+    .working{color:var(--muted);font-size:13px;font-style:italic;}
   </style>
 </head>
 
@@ -55,6 +60,7 @@
   <header>
     <span class="title">AI Chat</span>
     <span class="model" id="model">…</span>
+    <button class="btn" id="mode" title="Toggle analyst mode (reads your logs &amp; events)">💬 Chat</button>
     <span class="spacer"></span>
     <button class="btn" id="new">New chat</button>
     <button class="btn icon" id="theme" title="Toggle theme">◐</button>
@@ -81,6 +87,16 @@
     const STORE = "aiChatHistory";
     let history = [];          // [{role, content}]
     let busy = false, controller = null;
+    let analyst = false;       // analyst (tool-using) mode vs plain chat
+
+    function applyMode(){
+      const b = $("mode");
+      b.textContent = analyst ? "🔎 Analyst" : "💬 Chat";
+      b.classList.toggle("on", analyst);
+      inputEl.placeholder = analyst
+        ? "Ask about your site…  e.g. \"anything failing today?\" or \"why did farming stop?\""
+        : "Message…  (Enter to send, Shift+Enter for a new line)";
+    }
 
     // ---- tiny, safe Markdown (escape first, then a few constructs) ----
     function esc(s){return s.replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
@@ -144,57 +160,79 @@
       inputEl.value = ""; inputEl.style.height = "auto";
       history.push({ role:"user", content:text }); save(); paint();
 
-      busy = true; sendBtn.disabled = true; sendBtn.textContent = "■";
+      busy = true; sendBtn.disabled = true; sendBtn.textContent = analyst ? "…" : "■";
       const outBubble = bubble("assistant");
+      try{
+        if(analyst) await runAnalyst(outBubble);
+        else await runStreaming(outBubble);
+      }finally{
+        outBubble.classList.remove("cursor");
+        busy = false; sendBtn.disabled = false; sendBtn.textContent = "↑";
+        controller = null; save();
+      }
+    }
+
+    // Plain chat: stream tokens as they arrive.
+    async function runStreaming(outBubble){
       outBubble.classList.add("cursor");
       let acc = "";
       controller = new AbortController();
-
       try{
         const resp = await fetch("/ai-chat/send", {
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({ messages: history }),
-          signal: controller.signal,
+          method:"POST", headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ messages: history }), signal: controller.signal,
         });
         if(!resp.ok || !resp.body){
           let msg = "Request failed (" + resp.status + ")";
           try{ const j = await resp.json(); if(j.message) msg = j.message; }catch(e){}
           throw new Error(msg);
         }
-        const reader = resp.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
+        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = "";
         for(;;){
           const { done, value } = await reader.read();
           if(done) break;
           buf += dec.decode(value, { stream:true });
-          const parts = buf.split("\n");
-          buf = parts.pop();
+          const parts = buf.split("\n"); buf = parts.pop();
           for(const line of parts){
             const t = line.trim();
             if(!t || !t.startsWith("data:")) continue;
             const data = t.slice(5).trim();
             if(data === "[DONE]") continue;
-            try{
-              const json = JSON.parse(data);
-              const delta = json.choices?.[0]?.delta?.content || "";
+            try{ const json = JSON.parse(data); const delta = json.choices?.[0]?.delta?.content || "";
               if(delta){ acc += delta; outBubble.innerHTML = renderMarkdown(acc); scrollDown(); }
-            }catch(e){ /* ignore keep-alive / partial frames */ }
+            }catch(e){}
           }
         }
         if(!acc) acc = "*(no response)*";
         history.push({ role:"assistant", content:acc });
       }catch(err){
-        if(err.name === "AbortError"){
-          if(acc) history.push({ role:"assistant", content:acc });
-        }else{
-          outBubble.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`;
-        }
-      }finally{
-        outBubble.classList.remove("cursor");
-        busy = false; sendBtn.disabled = false; sendBtn.textContent = "↑";
-        controller = null; save();
+        if(err.name === "AbortError"){ if(acc) history.push({ role:"assistant", content:acc }); }
+        else{ outBubble.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`; }
+      }
+    }
+
+    // Analyst: server runs a read-only tool loop, then returns answer + trace.
+    async function runAnalyst(outBubble){
+      outBubble.innerHTML = '<div class="working">Investigating… reading your logs &amp; events</div>';
+      scrollDown();
+      try{
+        const resp = await fetch("/ai-chat/agent", {
+          method:"POST", headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ messages: history }),
+        });
+        const j = await resp.json().catch(()=>({}));
+        if(!resp.ok || j.success === false) throw new Error(j.message || ("Request failed ("+resp.status+")"));
+        const traceHtml = (j.trace && j.trace.length)
+          ? '<div class="trace">' + j.trace.map(t=>`<span class="chip${t.ok?'':' bad'}">🔧 ${esc(t.tool||'?')}</span>`).join("") + '</div>'
+          : "";
+        const answer = j.answer || "*(no answer)*";
+        outBubble.innerHTML = traceHtml + renderMarkdown(answer);
+        // Persist the trace inline so it survives a reload/repaint.
+        const stored = (j.trace && j.trace.length ? "`🔧 " + j.trace.map(t=>t.tool).join(" · ") + "`\n\n" : "") + answer;
+        history.push({ role:"assistant", content: stored });
+        scrollDown();
+      }catch(err){
+        outBubble.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`;
       }
     }
 
@@ -218,8 +256,16 @@
       else { document.documentElement.setAttribute("data-theme","dark"); localStorage.setItem("theme","dark"); }
     });
 
+    $("mode").addEventListener("click", () => {
+      analyst = !analyst;
+      try{ localStorage.setItem("aiChatMode", analyst ? "analyst" : "chat"); }catch(e){}
+      applyMode(); inputEl.focus();
+    });
+
     // --- init ---
     fetch("/ai-chat/config").then(r=>r.json()).then(c=>{ $("model").textContent = c.model || "AI"; }).catch(()=>{ $("model").textContent = "AI"; });
+    try{ analyst = localStorage.getItem("aiChatMode") === "analyst"; }catch(e){}
+    applyMode();
     load(); paint(); inputEl.focus();
   </script>
 </body>

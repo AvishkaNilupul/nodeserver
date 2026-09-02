@@ -10,8 +10,20 @@
 // operator can spend the key's credits.
 const express = require("express");
 const config = require("../config/config");
+const { SCHEMAS, runTool, toolNames } = require("../utils/aiTools");
 
 const router = express.Router();
+
+// Shared headers for every upstream call. AgentRouter fingerprints its clients
+// and 401s anything that doesn't look like the Codex CLI (see config.AI).
+function upstreamHeaders() {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${config.AI.apiKey}`,
+    "User-Agent": config.AI.userAgent,
+    originator: config.AI.originator,
+  };
+}
 
 // Guard against a runaway prompt: cap how much we accept and forward.
 const MAX_MESSAGES = 40;
@@ -77,13 +89,7 @@ router.post("/ai-chat/send", async (req, res) => {
   try {
     upstream = await fetch(`${config.AI.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.AI.apiKey}`,
-        // Required — AgentRouter rejects unrecognized clients (see config.AI).
-        "User-Agent": config.AI.userAgent,
-        originator: config.AI.originator,
-      },
+      headers: upstreamHeaders(),
       body: JSON.stringify({
         model: config.AI.model,
         messages,
@@ -130,5 +136,107 @@ router.post("/ai-chat/send", async (req, res) => {
     res.end();
   }
 });
+
+// ---- Analyst mode: a read-only, tool-using agent loop ----------------------
+//
+// Unlike /ai-chat/send (a pure streaming relay), this runs a function-calling
+// loop server-side: the model may call the read-only tools in utils/aiTools.js
+// to investigate the live system, and we feed the results back until it answers.
+// It CANNOT act on prod — only the read-only tool set is exposed. Non-streaming
+// so the tool round-trips stay simple; the page shows a tool trace then the
+// answer.
+const ANALYST_SYSTEM =
+  "You are the site's ops coworker — an analyst embedded in a Node/Express app " +
+  "that runs a Twitch drop-farming / account-selling operation. Investigate " +
+  "using the provided READ-ONLY tools before answering; never guess when a tool " +
+  "can tell you. Prefer event_summary first to see where problems are, then " +
+  "query_events to drill in, fleet_trend for count changes, pm2_status for " +
+  "process health. Be concise and concrete: cite timestamps, categories, hosts, " +
+  "and counts from the data. Known-routine noise (telegram poll errors, gameflip " +
+  "relist retries, campaignWatcher integrity checks, Mongoose deprecations) is " +
+  "NOT a failure — don't raise it unless asked. If the data is insufficient, say " +
+  "so. You cannot change anything; you observe and explain.";
+
+const MAX_ROUNDS = 6;
+
+async function callModel(messages) {
+  const resp = await fetch(`${config.AI.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: upstreamHeaders(),
+    body: JSON.stringify({
+      model: config.AI.model,
+      messages,
+      tools: SCHEMAS,
+      tool_choice: "auto",
+      stream: false,
+    }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`provider ${resp.status}: ${t.slice(0, 200)}`);
+  }
+  return resp.json();
+}
+
+router.post("/ai-chat/agent", async (req, res) => {
+  if (!config.AI.apiKey) {
+    return res.status(503).json({
+      success: false,
+      message: "AI chat is not configured. Set AGENTROUTER_API_KEY in .env and restart.",
+    });
+  }
+  const incoming = sanitizeMessages(req.body?.messages);
+  if (!incoming) {
+    return res.status(400).json({ success: false, message: "No messages provided." });
+  }
+
+  // Rebuild the message list with our analyst system prompt at the front
+  // (drop any client-sent system message).
+  const messages = [{ role: "system", content: ANALYST_SYSTEM }];
+  for (const m of incoming) if (m.role !== "system") messages.push(m);
+
+  const trace = [];
+  try {
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const data = await callModel(messages);
+      const choice = data.choices?.[0];
+      const msg = choice?.message || {};
+      const calls = msg.tool_calls || [];
+
+      if (choice?.finish_reason === "tool_calls" && calls.length) {
+        // Record the assistant's tool-call turn verbatim (required by the API
+        // before the matching tool results).
+        messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+        for (const call of calls) {
+          let args = {};
+          try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* keep {} */ }
+          const result = await runTool(call.function?.name, args);
+          trace.push({ tool: call.function?.name, args, ok: !result?.error });
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify(result).slice(0, 6000),
+          });
+        }
+        continue; // let the model read the results
+      }
+
+      // No (more) tool calls — this is the final answer.
+      return res.json({ success: true, answer: msg.content || "", trace });
+    }
+    // Ran out of rounds — return whatever the last turn had.
+    return res.json({
+      success: true,
+      answer: "(stopped after several investigation steps — ask me to continue or narrow the question)",
+      trace,
+    });
+  } catch (err) {
+    console.error("ai-chat agent error:", err.message);
+    return res.status(502).json({ success: false, message: err.message, trace });
+  }
+});
+
+// Lets the page list which tools the analyst has (for the UI hint).
+router.get("/ai-chat/tools", (req, res) => res.json({ tools: toolNames }));
 
 module.exports = router;
