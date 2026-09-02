@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent-d:#4338ca;--user:#eef2ff;}
+    html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--user:#232a3a;color-scheme:dark;}
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:"Inter","Segoe UI",Tahoma,sans-serif;color:var(--ink);background:var(--bg);height:100dvh;display:flex;flex-direction:column;}
+    header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:10;}
+    header .title{font-weight:700;font-size:15px;}
+    header .model{font-size:12px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);padding:2px 8px;border-radius:999px;}
+    header .spacer{flex:1;}
+    .btn{cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:10px;padding:7px 12px;font-size:13px;font-weight:600;transition:background .15s;}
+    .btn:hover{background:var(--surface-2);}
+    .btn.icon{width:38px;height:38px;display:flex;align-items:center;justify-content:center;padding:0;font-size:16px;}
+    main{flex:1;overflow-y:auto;padding:20px 0;}
+    .wrap{max-width:760px;margin:0 auto;padding:0 16px;display:flex;flex-direction:column;gap:16px;}
+    .msg{display:flex;gap:12px;align-items:flex-start;}
+    .msg .avatar{flex:0 0 30px;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;}
+    .msg.user .avatar{background:var(--accent);}
+    .msg.assistant .avatar{background:#0ea5e9;}
+    .msg .bubble{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;line-height:1.6;overflow-wrap:anywhere;flex:1;}
+    .msg.user .bubble{background:var(--user);}
+    .bubble p{margin:0 0 8px;}.bubble p:last-child{margin-bottom:0;}
+    .bubble pre{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;overflow-x:auto;margin:8px 0;font-size:13px;}
+    .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;}
+    .bubble :not(pre)>code{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:1px 5px;}
+    .bubble ul,.bubble ol{margin:6px 0 6px 20px;}
+    .bubble a{color:var(--accent);}
+    .empty{color:var(--muted);text-align:center;margin-top:12vh;font-size:15px;line-height:1.7;}
+    .empty b{color:var(--ink);font-size:20px;}
+    .cursor::after{content:"▋";animation:blink 1s steps(2) infinite;color:var(--muted);}
+    @keyframes blink{50%{opacity:0;}}
+    footer{border-top:1px solid var(--line);background:var(--surface);padding:12px 0 max(12px,env(safe-area-inset-bottom));}
+    .composer{max-width:760px;margin:0 auto;padding:0 16px;display:flex;gap:10px;align-items:flex-end;}
+    textarea{flex:1;resize:none;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:14px;padding:12px 14px;font:inherit;font-size:14.5px;line-height:1.5;max-height:180px;outline:none;}
+    textarea:focus{border-color:var(--accent);}
+    .send{flex:0 0 auto;background:var(--accent);color:#fff;border:none;border-radius:14px;width:46px;height:46px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+    .send:hover{background:var(--accent-d);}
+    .send:disabled{opacity:.5;cursor:default;}
+    .hint{max-width:760px;margin:6px auto 0;padding:0 16px;font-size:11.5px;color:var(--muted);text-align:center;}
+    .err{color:#dc2626;}
+  </style>
+</head>
+
+<body>
+  <header>
+    <span class="title">AI Chat</span>
+    <span class="model" id="model">…</span>
+    <span class="spacer"></span>
+    <button class="btn" id="new">New chat</button>
+    <button class="btn icon" id="theme" title="Toggle theme">◐</button>
+    <a class="btn" href="/admin.html">Exit</a>
+  </header>
+
+  <main id="main">
+    <div class="wrap" id="messages">
+      <div class="empty" id="empty"><b>Ask me anything</b><br />Powered by your DeepSeek key, running on your server.</div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="Message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button class="send" id="send" title="Send">↑</button>
+    </div>
+    <div class="hint" id="hint">Conversations are saved only in this browser.</div>
+  </footer>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const messagesEl = $("messages"), inputEl = $("input"), sendBtn = $("send");
+    const STORE = "aiChatHistory";
+    let history = [];          // [{role, content}]
+    let busy = false, controller = null;
+
+    // ---- tiny, safe Markdown (escape first, then a few constructs) ----
+    function esc(s){return s.replace(/[&<>]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+    function mdInline(s){
+      return s
+        .replace(/`([^`]+)`/g,(_,c)=>`<code>${c}</code>`)
+        .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>")
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    }
+    function renderMarkdown(text){
+      const out = []; const lines = esc(text).split("\n");
+      let i = 0, listType = null;
+      const closeList = () => { if(listType){ out.push(`</${listType}>`); listType = null; } };
+      while(i < lines.length){
+        const line = lines[i];
+        const fence = line.match(/^```(.*)$/);
+        if(fence){
+          closeList(); const buf = []; i++;
+          while(i < lines.length && !/^```/.test(lines[i])){ buf.push(lines[i]); i++; }
+          i++; out.push(`<pre><code>${buf.join("\n")}</code></pre>`); continue;
+        }
+        const ul = line.match(/^\s*[-*]\s+(.*)$/);
+        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+        if(ul){ if(listType!=="ul"){closeList();out.push("<ul>");listType="ul";} out.push(`<li>${mdInline(ul[1])}</li>`); i++; continue; }
+        if(ol){ if(listType!=="ol"){closeList();out.push("<ol>");listType="ol";} out.push(`<li>${mdInline(ol[1])}</li>`); i++; continue; }
+        closeList();
+        if(line.trim()==="") { i++; continue; }
+        out.push(`<p>${mdInline(line)}</p>`); i++;
+      }
+      closeList();
+      return out.join("");
+    }
+
+    function bubble(role){
+      const row = document.createElement("div");
+      row.className = "msg " + role;
+      row.innerHTML = `<div class="avatar">${role==="user"?"Y":"AI"}</div><div class="bubble"></div>`;
+      messagesEl.appendChild(row);
+      return row.querySelector(".bubble");
+    }
+    function scrollDown(){ $("main").scrollTop = $("main").scrollHeight; }
+
+    function paint(){
+      messagesEl.innerHTML = "";
+      if(!history.length){
+        const e = document.createElement("div"); e.className="empty";
+        e.innerHTML = "<b>Ask me anything</b><br />Powered by your DeepSeek key, running on your server.";
+        messagesEl.appendChild(e); return;
+      }
+      for(const m of history){ bubble(m.role).innerHTML = renderMarkdown(m.content); }
+      scrollDown();
+    }
+
+    function save(){ try{ localStorage.setItem(STORE, JSON.stringify(history)); }catch(e){} }
+    function load(){ try{ history = JSON.parse(localStorage.getItem(STORE)||"[]"); }catch(e){ history=[]; } }
+
+    async function send(){
+      const text = inputEl.value.trim();
+      if(!text || busy) return;
+      inputEl.value = ""; inputEl.style.height = "auto";
+      history.push({ role:"user", content:text }); save(); paint();
+
+      busy = true; sendBtn.disabled = true; sendBtn.textContent = "■";
+      const outBubble = bubble("assistant");
+      outBubble.classList.add("cursor");
+      let acc = "";
+      controller = new AbortController();
+
+      try{
+        const resp = await fetch("/ai-chat/send", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ messages: history }),
+          signal: controller.signal,
+        });
+        if(!resp.ok || !resp.body){
+          let msg = "Request failed (" + resp.status + ")";
+          try{ const j = await resp.json(); if(j.message) msg = j.message; }catch(e){}
+          throw new Error(msg);
+        }
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for(;;){
+          const { done, value } = await reader.read();
+          if(done) break;
+          buf += dec.decode(value, { stream:true });
+          const parts = buf.split("\n");
+          buf = parts.pop();
+          for(const line of parts){
+            const t = line.trim();
+            if(!t || !t.startsWith("data:")) continue;
+            const data = t.slice(5).trim();
+            if(data === "[DONE]") continue;
+            try{
+              const json = JSON.parse(data);
+              const delta = json.choices?.[0]?.delta?.content || "";
+              if(delta){ acc += delta; outBubble.innerHTML = renderMarkdown(acc); scrollDown(); }
+            }catch(e){ /* ignore keep-alive / partial frames */ }
+          }
+        }
+        if(!acc) acc = "*(no response)*";
+        history.push({ role:"assistant", content:acc });
+      }catch(err){
+        if(err.name === "AbortError"){
+          if(acc) history.push({ role:"assistant", content:acc });
+        }else{
+          outBubble.innerHTML = `<span class="err">⚠ ${esc(err.message)}</span>`;
+        }
+      }finally{
+        outBubble.classList.remove("cursor");
+        busy = false; sendBtn.disabled = false; sendBtn.textContent = "↑";
+        controller = null; save();
+      }
+    }
+
+    // --- events ---
+    sendBtn.addEventListener("click", () => { if(busy && controller){ controller.abort(); } else { send(); } });
+    inputEl.addEventListener("keydown", (e) => {
+      if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+    });
+    inputEl.addEventListener("input", () => {
+      inputEl.style.height = "auto";
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + "px";
+    });
+    $("new").addEventListener("click", () => {
+      if(busy || !history.length || confirm("Start a new chat? This clears the current one.")){
+        history = []; save(); paint();
+      }
+    });
+    $("theme").addEventListener("click", () => {
+      const dark = document.documentElement.getAttribute("data-theme") === "dark";
+      if(dark){ document.documentElement.removeAttribute("data-theme"); localStorage.setItem("theme","light"); }
+      else { document.documentElement.setAttribute("data-theme","dark"); localStorage.setItem("theme","dark"); }
+    });
+
+    // --- init ---
+    fetch("/ai-chat/config").then(r=>r.json()).then(c=>{ $("model").textContent = c.model || "AI"; }).catch(()=>{ $("model").textContent = "AI"; });
+    load(); paint(); inputEl.focus();
+  </script>
+</body>
+
+</html>

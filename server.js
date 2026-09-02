@@ -23,6 +23,7 @@ const adminAuthRoutes = require("./routes/adminAuthRoutes");
 const adminManageRoutes = require("./routes/adminManageRoutes");
 const redeemRoutes = require("./routes/redeemRoutes");
 const chatRoutes = require("./routes/chatRoutes");
+const aiChatRoutes = require("./routes/aiChatRoutes");
 const itemRoutes = require("./routes/itemRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
@@ -577,6 +578,13 @@ app.get("/activity.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "activity.html"));
 });
 
+// AI chatbot page — admin-only, so only the logged-in operator can spend the
+// provider key. Gated before static so an anonymous visitor is redirected to
+// the admin login rather than being served the page.
+app.get("/ai-chat.html", requireAdmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "ai-chat.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -634,6 +642,7 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
+app.use(requireAdmin, enforce2fa, aiChatRoutes);
 
 // =========================
 // Socket.IO
