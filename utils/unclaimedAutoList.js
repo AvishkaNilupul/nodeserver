@@ -276,14 +276,46 @@ function archiveItemKey(drop, game) {
   );
 }
 
+// The two farms an unclaimed account can come from. Anything else is ignored
+// for the per-source split (so a blank/unknown source never inflates a count).
+const ARCHIVE_SOURCES = ["noclaim", "webbot"];
+function archiveSource(row) {
+  const s = String((row && row.source) || "").trim().toLowerCase();
+  return ARCHIVE_SOURCES.includes(s) ? s : "";
+}
+
+// Pick the display label for a group of game strings that normalise to the same
+// game (e.g. "Overwatch" vs "overwatch"). Prefer the most common spelling, then
+// one that actually has an uppercase letter (a real proper-noun casing), then
+// alphabetical — so the merged row reads "Overwatch", not "overwatch".
+function pickGameLabel(labelCounts) {
+  let best = "";
+  let bestScore = -Infinity;
+  for (const [label, count] of labelCounts || []) {
+    const hasUpper = /[A-Z]/.test(label);
+    const hasLower = /[a-z]/.test(label);
+    // Frequency dominates (×4). Ties break to proper Title-case ("Overwatch")
+    // over ALL-CAPS ("OVERWATCH") over all-lowercase ("overwatch").
+    const score =
+      count * 4 + (hasUpper && hasLower ? 2 : 0) + (hasUpper ? 1 : 0);
+    if (score > bestScore || (score === bestScore && label.localeCompare(best) < 0)) {
+      best = label;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 // Group a projected UnclaimedAccount result set by item for the By-item view.
-// rows: [{ _id, game, status, drops:[{ name, game, itemKey }] }].
+// rows: [{ _id, source, game, status, drops:[{ name, game, itemKey }] }].
 // withStatus also rolls up per-status ACCOUNT counts (one per holding account).
+// bySource splits the distinct-account count into no-claim vs web-token farms.
 function groupArchiveByItem(rows, withStatus) {
   const items = new Map();
   for (const row of rows || []) {
     const game = String((row && row.game) || "").trim();
     const status = (row && row.status) || "skipped";
+    const source = archiveSource(row);
     const seen = new Set();
     for (const drop of (row && row.drops) || []) {
       const key = archiveItemKey(drop, game);
@@ -292,8 +324,9 @@ function groupArchiveByItem(rows, withStatus) {
         it = {
           itemKey: key,
           name: String((drop && drop.name) || "").trim(),
-          game,
+          labels: new Map(),
           accounts: new Set(),
+          bySourceAccts: { noclaim: new Set(), webbot: new Set() },
           units: 0,
           byStatus: withStatus ? Object.assign({}, ARCHIVE_STATUS_ZERO) : null,
         };
@@ -301,6 +334,8 @@ function groupArchiveByItem(rows, withStatus) {
       }
       it.units += 1;
       it.accounts.add(String(row._id));
+      if (source) it.bySourceAccts[source].add(String(row._id));
+      if (game) it.labels.set(game, (it.labels.get(game) || 0) + 1);
       if (it.byStatus && !seen.has(key)) {
         it.byStatus[status] += 1;
         seen.add(key);
@@ -311,9 +346,13 @@ function groupArchiveByItem(rows, withStatus) {
     .map((it) => ({
       itemKey: it.itemKey,
       name: it.name,
-      game: it.game,
+      game: pickGameLabel(it.labels),
       accounts: it.accounts.size,
       units: it.units,
+      bySource: {
+        noclaim: it.bySourceAccts.noclaim.size,
+        webbot: it.bySourceAccts.webbot.size,
+      },
       byStatus: it.byStatus,
     }))
     .sort(
@@ -324,24 +363,31 @@ function groupArchiveByItem(rows, withStatus) {
     );
 }
 
-// Group the same result set by game for the By-game view. `items` is the
-// count of DISTINCT item keys seen for the game.
+// Group the same result set by game for the By-game view. Games are folded by
+// their normalized name (so "Overwatch" and "overwatch" are ONE row), keeping
+// the nicest spelling for display. `items` is the count of DISTINCT item keys;
+// bySource splits accounts into no-claim vs web-token.
 function groupArchiveByGame(rows, withStatus) {
   const games = new Map();
   for (const row of rows || []) {
     const game = String((row && row.game) || "").trim();
     const status = (row && row.status) || "skipped";
-    let g = games.get(game);
+    const source = archiveSource(row);
+    const key = String(settings.normGameName(game) || game || "").trim() || "(none)";
+    let g = games.get(key);
     if (!g) {
       g = {
-        game,
+        labels: new Map(),
         accounts: new Set(),
         items: new Set(),
+        bySource: { noclaim: 0, webbot: 0 },
         byStatus: withStatus ? Object.assign({}, ARCHIVE_STATUS_ZERO) : null,
       };
-      games.set(game, g);
+      games.set(key, g);
     }
+    if (game) g.labels.set(game, (g.labels.get(game) || 0) + 1);
     g.accounts.add(String(row._id));
+    if (source) g.bySource[source] += 1;
     for (const drop of (row && row.drops) || []) {
       g.items.add(archiveItemKey(drop, game));
     }
@@ -349,9 +395,10 @@ function groupArchiveByGame(rows, withStatus) {
   }
   return [...games.values()]
     .map((g) => ({
-      game: g.game,
+      game: pickGameLabel(g.labels),
       accounts: g.accounts.size,
       items: g.items.size,
+      bySource: g.bySource,
       byStatus: g.byStatus,
     }))
     .sort(
@@ -894,7 +941,14 @@ async function rowForLedger(ledger) {
 function ownerEmail(row) {
   if (!row) return "";
   const enc = row.credEmail || row.email || "";
-  return enc ? String(decrypt(enc) || "") : "";
+  if (!enc) return "";
+  // A malformed/foreign-key ciphertext must never break the credential fetch —
+  // the password is what matters; an unreadable email just comes back blank.
+  try {
+    return String(decrypt(enc) || "");
+  } catch {
+    return "";
+  }
 }
 
 // Rebuild a credential object for a ledger row (pool row / webbot row).
