@@ -569,13 +569,15 @@ router.post("/api/webbot-farm/bots", requireSuperadmin, async (req, res) => {
     }
     if (busy) return res.status(409).json({ success: false, message: "A build/provision is already running. Try again shortly." });
 
-    // Grab N idle, enabled, non-dead accounts.
-    const picked = await WebBotAccount.find({
-      enabled: true,
-      botId: "",
-      lastStatus: { $ne: "dead" },
-      webToken: { $gt: "" },
-    })
+    // Accounts to assign: an EXPLICIT login list (exact accounts — e.g.
+    // re-pinning a released set to a new game) when given, else N oldest idle.
+    // Behaviour is unchanged when `logins` is absent.
+    const wantLogins = Array.isArray(req.body.logins)
+      ? req.body.logins.map((s) => String(s)).filter(Boolean)
+      : null;
+    const pickQuery = { enabled: true, botId: "", lastStatus: { $ne: "dead" }, webToken: { $gt: "" } };
+    if (wantLogins && wantLogins.length) pickQuery.login = { $in: wantLogins };
+    const picked = await WebBotAccount.find(pickQuery)
       .sort({ createdAt: 1 })
       .limit(count)
       .lean();

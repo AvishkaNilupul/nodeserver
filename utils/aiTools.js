@@ -466,6 +466,26 @@ async function propose_webbot_split(a = {}) {
   });
 }
 
+// EXECUTABLE proposal: RE-PIN the exact accounts currently in some web-farm
+// bot(s) to a different game (collect their logins → release → recreate on the
+// new game with those same accounts). Use this for "put these accounts back on
+// game X" — it does NOT scatter accounts like a plain split can.
+async function propose_webbot_repin(a = {}) {
+  const botIds = Array.isArray(a.botIds) ? a.botIds.map((s) => String(s).trim()).filter((s) => /^[0-9]+$/.test(s)) : [];
+  const game = String(a.game || "").trim();
+  if (!botIds.length || !game) return { error: "botIds (array of digit ids) and game are required" };
+  let parts = Array.isArray(a.parts) ? a.parts.map((n) => parseInt(n, 10)).filter((n) => n > 0) : [];
+  return store.addProposal({
+    kind: "bots",
+    title: `Re-pin web-farm bot(s) ${botIds.join(", ")} → ${game}`,
+    detail: (a.reason ? a.reason + "\n\n" : "") +
+      `Take the EXACT accounts now in web-farm bot(s) ${botIds.join(", ")}, release them, and recreate ${parts.length ? "as " + parts.join(" + ") : "the same number of"} bot(s) pinned to "${game}" using those same accounts. Keeps the accounts together (uses explicit logins on create), unlike a plain split.`,
+    severity: "medium",
+    targets: botIds.map((b) => `webbot-bot-${b}`).concat([game]),
+    action: { type: "webbot_repin", botIds, game, parts },
+  });
+}
+
 // Register the expanded tool set.
 TOOLS.push(
   { schema: { type: "function", function: {
@@ -557,6 +577,16 @@ TOOLS.push(
       reason: { type: "string", description: "one line on why" },
     }, required: ["botId", "game"] },
   } }, impl: propose_webbot_split },
+  { schema: { type: "function", function: {
+    name: "propose_webbot_repin",
+    description: "File an EXECUTABLE proposal to RE-PIN the exact accounts in one or more web-farm bots to a different game (one-tap Approve & run). Use for 'put these accounts back on game X' / 'these bots should farm Y instead' — it keeps the same accounts together (no scatter). First confirm the bots + their game with db_group on webbot_accounts.",
+    parameters: { type: "object", properties: {
+      botIds: { type: "array", items: { type: "string" }, description: "web-farm bot ids to re-pin, digits (e.g. ['3','4'])" },
+      game: { type: "string", description: "the game to pin them to" },
+      parts: { type: "array", items: { type: "number" }, description: "optional account counts per resulting bot (e.g. [50,50]); omit to keep the same number of bots evenly" },
+      reason: { type: "string" },
+    }, required: ["botIds", "game"] },
+  } }, impl: propose_webbot_repin },
 );
 
 const SCHEMAS = TOOLS.map((t) => t.schema);
