@@ -24,10 +24,10 @@ const coworkerChatSchema = new mongoose.Schema({
   title: { type: String, default: "New chat" },
   messages: { type: [messageSchema], default: [] },
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now, index: true },
+  updatedAt: { type: Date, default: Date.now },
 });
 
-// Keep ~400 days (this {updatedAt:1} index doubles as ascending for sorting).
+// Keep ~400 days (this {updatedAt:1} index doubles as the sort index).
 coworkerChatSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 400 * 24 * 60 * 60 });
 
 module.exports = mongoose.model("CoworkerChat", coworkerChatSchema);

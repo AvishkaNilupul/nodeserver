@@ -171,13 +171,15 @@ const ANALYST_BASE = [
   "  marketplace_listings), farming (autofarm_tasks), demand (market_research,",
   "  sale_signals), pool_accounts, bot_accounts, drops, orders. db_group is your",
   "  COMPARE tool (per marketplace / game / host / status).",
-  "- read_code / search_code — inspect the actual source to explain behavior or",
-  "  prepare a fix. Never invent how the code works — read it.",
+  "- read_code / search_code — ONLY for questions about HOW the code works or to",
+  "  prepare a code fix. For status/data questions ('are X farming', 'is Y",
+  "  listed'), use the data tools instead — they're faster; don't spelunk code.",
   "- save_memory — when you learn something durable (a recurring failure, a pricing",
   "  quirk), save it so next time is easier. Use stable short keys.",
   "",
-  "HOW YOU WORK: investigate broadly — cost is not a concern, so use as many tool",
-  "calls as needed to actually compare and verify. Be concrete: cite timestamps,",
+  "HOW YOU WORK: investigate enough to be sure, then STOP and answer — don't keep",
+  "digging once you can answer the question. Use the right tool for the job (data",
+  "tools for data questions). Be concrete: cite timestamps,",
   "counts, marketplaces, prices, hosts. Known-routine noise (telegram poll errors,",
   "gameflip relist retries, campaignWatcher integrity checks, Mongoose deprecations)",
   "is NOT a failure — ignore unless asked.",
@@ -284,7 +286,15 @@ async function runTurn(chatId) {
         finalAnswer = answer || "(no answer)";
         break;
       }
-      if (!finalAnswer) finalAnswer = "(stopped after several investigation steps — ask me to continue or narrow the question)";
+      if (!finalAnswer) {
+        // Hit the round cap without naturally concluding — force a synthesis
+        // from everything gathered, so the user always gets a real answer.
+        try {
+          messages.push({ role: "user", content: "You've gathered enough. Give your best FINAL answer now from what you found, as plain text. Do not call any more tools." });
+          finalAnswer = (await callModel(messages, { noTools: true }))?.choices?.[0]?.message?.content || "";
+        } catch { /* keep empty */ }
+        if (!finalAnswer) finalAnswer = "(couldn't complete — please ask again or narrow the question)";
+      }
     }
   } catch (err) {
     console.error("runTurn error:", err.message);
