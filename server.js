@@ -582,6 +582,9 @@ app.get("/activity.html", requireSuperadmin, enforce2fa, (req, res) => {
 // provider key. Gated before static so an anonymous visitor is redirected to
 // the admin login rather than being served the page.
 app.get("/ai-chat.html", requireAdmin, enforce2fa, (req, res) => {
+  // Never let a browser serve a stale copy of the app shell — it changes often
+  // and a cached page can talk to a newer endpoint contract (and break).
+  res.set("Cache-Control", "no-store");
   res.sendFile(path.join(__dirname, "public", "ai-chat.html"));
 });
 

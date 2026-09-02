@@ -160,15 +160,16 @@ const ANALYST_SYSTEM =
 
 const MAX_ROUNDS = 6;
 
-async function callModel(messages) {
+async function callModel(messages, { noTools = false } = {}) {
   const resp = await fetch(`${config.AI.baseUrl}/chat/completions`, {
     method: "POST",
     headers: upstreamHeaders(),
     body: JSON.stringify({
       model: config.AI.model,
       messages,
-      tools: SCHEMAS,
-      tool_choice: "auto",
+      // noTools forces a plain text answer (used to recover an empty final turn
+      // — DeepSeek is a reasoning model and occasionally returns empty content).
+      ...(noTools ? { tool_choice: "none" } : { tools: SCHEMAS, tool_choice: "auto" }),
       stream: false,
     }),
   });
@@ -243,7 +244,15 @@ router.post("/ai-chat/agent", async (req, res) => {
       }
 
       // No (more) tool calls — this is the final answer.
-      emit("done", { answer: msg.content || "", trace });
+      let answer = msg.content || "";
+      if (!answer && !closed) {
+        // Empty final turn (reasoning model quirk): ask once more for the text,
+        // with tools disabled so it must answer rather than call another tool.
+        messages.push({ role: "user", content: "Give your final answer now, as plain text." });
+        try { answer = (await callModel(messages, { noTools: true }))?.choices?.[0]?.message?.content || ""; }
+        catch { /* keep empty */ }
+      }
+      emit("done", { answer: answer || "(no answer — please ask again)", trace });
       clearInterval(heartbeat);
       return res.end();
     }
