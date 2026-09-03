@@ -116,6 +116,27 @@ router.post("/farm2/lanes/:id/mode", requireSuperadmin, async (req, res) => {
             "promoting a lane to live moves this game off the legacy engine — resend with confirm: true",
         });
       }
+      // Readiness gate: the live-mode steps must exist on this host, and there
+      // must be shadow evidence to promote on. Overridable with force, which is
+      // audited — a guard against promoting by accident, not a lock.
+      const readiness = await farm2.laneReadiness(lane);
+      if (!readiness.ready && req.body.force !== true) {
+        return res.status(409).json({
+          error: "lane is not ready to go live",
+          blockers: readiness.blockers,
+          warnings: readiness.warnings,
+          hint: "resend with force: true to override",
+        });
+      }
+      if (!readiness.ready) {
+        await audit(
+          "lane_promoted_force",
+          lane.game,
+          "readiness overridden: " + readiness.blockers.join("; "),
+          { game: lane.game, blockers: readiness.blockers },
+          actorOf(req),
+        );
+      }
     }
 
     const from = lane.mode;
@@ -156,6 +177,18 @@ router.delete("/farm2/lanes/:id", requireSuperadmin, async (req, res) => {
     farm2.ownership.invalidate();
     await audit("lane_deleted", lane.game, "lane deleted", { game: lane.game }, actorOf(req));
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Readiness for promotion, so the tab can explain WHY a lane can't go live
+// before the operator clicks rather than after.
+router.get("/farm2/lanes/:id/readiness", requireSuperadmin, async (req, res) => {
+  try {
+    const lane = await FarmLane.findById(req.params.id).lean();
+    if (!lane) return res.status(404).json({ error: "lane not found" });
+    res.json(await farm2.laneReadiness(lane));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

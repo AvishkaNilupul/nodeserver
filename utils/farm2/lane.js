@@ -13,6 +13,9 @@ const settings = require("../settings");
 const jobs = require("./jobs");
 const decideStep = require("./steps/decide");
 const verifyStep = require("./steps/verify");
+const executeStep = require("./steps/execute");
+const publishStep = require("./steps/publish");
+const monitorStep = require("./steps/monitor");
 
 // Backoff after consecutive failures, and the point at which a lane is parked
 // for an operator to look at instead of retrying forever.
@@ -50,6 +53,65 @@ async function candidatesFor(lane) {
   });
 }
 
+// Drain this lane's due execute/publish/verify jobs.
+//
+// LIVE LANES ONLY. Every one of these steps has its own internal shadow
+// assertion as well — defence in depth, because "a shadow lane spent accounts"
+// is the single worst bug this engine could have.
+//
+// Each job is individually boundaried: one failing publish must not stop the
+// next job in the queue, in exactly the same way one failing lane must not stop
+// the next lane.
+async function drainJobs(lane, { cycle, af, summary }) {
+  const due = await jobs.claimDueForLane(lane.gameKey, 25, {
+    kind: { $in: ["execute", "publish", "verify"] },
+  });
+
+  for (const job of due) {
+    try {
+      let result;
+      if (job.kind === "execute") {
+        const verdict = (job.payload && job.payload.verdict) || null;
+        if (!verdict) throw new Error("execute job has no verdict payload");
+        result = await executeStep.executeDecision({
+          verdict,
+          lane,
+          cycle,
+          af,
+          shadow: false,
+        });
+        summary.executed.push({ game: lane.game, ...result });
+      } else if (job.kind === "publish" && job.market === "primary") {
+        result = await publishStep.publishPrimary({
+          taskId: job.taskId,
+          af,
+          shadow: false,
+          lane,
+        });
+        if (result && result.listed) summary.listed.push(result.listed);
+      } else if (job.kind === "publish" && job.market === "secondaries") {
+        result = await publishStep.publishSecondaries({
+          taskId: job.taskId,
+          shadow: false,
+          lane,
+        });
+      } else if (job.kind === "verify") {
+        result = await verifyStep.verifyTask(job.taskId);
+      } else {
+        // An unrecognised row (a kind added by a newer version, say) is parked
+        // rather than retried forever against a handler that does not exist.
+        await jobs.finish(job, { unhandled: job.kind, market: job.market }, { status: "skipped" });
+        continue;
+      }
+      await jobs.finish(job, result || {});
+    } catch (e) {
+      summary.errors.push(`${job.kind}${job.market ? "/" + job.market : ""}: ${e.message}`);
+      await jobs.fail(job, e).catch(() => {});
+    }
+  }
+  return due.length;
+}
+
 // Run one lane to completion. Never throws.
 async function runLane(lane, { cycle, af }) {
   const FarmLane = require("../../models/FarmLane");
@@ -60,6 +122,10 @@ async function runLane(lane, { cycle, af }) {
     mode: lane.mode,
     campaigns: 0,
     decisions: [],
+    executed: [],
+    listed: [],
+    jobsDrained: 0,
+    monitor: null,
     audit: null,
     errors: [],
   };
@@ -129,10 +195,27 @@ async function runLane(lane, { cycle, af }) {
       }
     }
 
-    // --- VERIFY (drop checker) --------------------------------------------
-    // Read-only in every mode, so a shadow lane audits the inventory the legacy
-    // engine is managing right now. This is what makes the tab useful on day
-    // one rather than only after a lane goes live.
+    // --- EXECUTE / PUBLISH (live lanes only) -------------------------------
+    // Drained AFTER the decide phase so work queued this cycle can run in the
+    // same cycle rather than waiting for the next one.
+    if (!shadow && lane.mode === "live") {
+      try {
+        summary.jobsDrained = await drainJobs(lane, { cycle, af, summary });
+      } catch (e) {
+        summary.errors.push("drain: " + e.message);
+      }
+    }
+
+    // --- MONITOR + VERIFY (drop checker) -----------------------------------
+    // Read-only with respect to farming in every mode, so a shadow lane audits
+    // the inventory the LEGACY engine is managing right now. That is what makes
+    // the tab useful on day one rather than only after a lane goes live. In a
+    // live lane it also queues the publish work for the next drain.
+    try {
+      summary.monitor = await monitorStep.monitorLane(lane, { jobs, shadow });
+    } catch (e) {
+      summary.errors.push("monitor: " + e.message);
+    }
     try {
       summary.audit = await verifyStep.auditLane(lane);
     } catch (e) {
@@ -163,6 +246,8 @@ async function runLane(lane, { cycle, af }) {
         $inc: {
           "counters.runs": 1,
           "counters.decisions": summary.decisions.length,
+          "counters.executions": summary.executed.length,
+          "counters.listings": summary.listed.length,
           "counters.failures": hadError ? 1 : 0,
         },
       },
@@ -193,4 +278,11 @@ async function runLane(lane, { cycle, af }) {
   }
 }
 
-module.exports = { runLane, candidatesFor, backoffMs, BASE_INTERVAL_MS, PAUSE_AFTER_FAILURES };
+module.exports = {
+  runLane,
+  drainJobs,
+  candidatesFor,
+  backoffMs,
+  BASE_INTERVAL_MS,
+  PAUSE_AFTER_FAILURES,
+};

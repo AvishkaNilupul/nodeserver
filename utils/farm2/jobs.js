@@ -111,10 +111,16 @@ async function claimNext(filter = {}) {
 }
 
 // Claim every due job for one lane, up to a cap. Returns them in queue order.
-async function claimDueForLane(laneKey, limit = 25) {
+//
+// `filter` narrows which kinds are drained. The lane runner uses it to take
+// only execute/publish/verify work: "decide" jobs are created, claimed and
+// finished synchronously in the lane's decide phase, so a drain that also
+// claimed them could pick up a decide job that had been requeued after a
+// failure and then have no handler for it.
+async function claimDueForLane(laneKey, limit = 25, filter = {}) {
   const out = [];
   for (let i = 0; i < limit; i += 1) {
-    const job = await claimNext({ laneKey });
+    const job = await claimNext({ laneKey, ...filter });
     if (!job) break;
     out.push(job);
   }

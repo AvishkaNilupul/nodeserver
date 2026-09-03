@@ -299,10 +299,27 @@ async function setMode(id, mode){
   if(mode === 'live'){
     var lane = state.lanes.filter(function(l){ return String(l._id) === String(id); })[0];
     var name = lane ? lane.game : 'this game';
-    if(!confirm('Promote “' + name + '” to LIVE?\n\nThe legacy auto-farmer will stop making new decisions for this game and the lane engine takes over.\n\nAlready-active tasks are NOT touched — they finish under the legacy engine.\n\nYou can set it back to shadow at any time.')) {
-      loadAll(); return;
+
+    // Check readiness BEFORE the confirm, so the operator sees any blocker or
+    // disagreement warning while deciding rather than after committing.
+    var rd = null;
+    try { rd = await api('/farm2/lanes/' + id + '/readiness'); } catch(e){ /* fall through to the plain confirm */ }
+
+    var msg = 'Promote “' + name + '” to LIVE?\n\n'
+      + 'The legacy auto-farmer will stop making NEW decisions for this game and the lane engine takes over.\n'
+      + 'Already-active tasks are NOT touched — they finish under the legacy engine.\n'
+      + 'You can set it back to shadow at any time.\n';
+    if(rd){
+      msg += '\nShadow decisions recorded: ' + rd.shadowDecisions + '\n';
+      if((rd.warnings||[]).length) msg += '\n⚠ ' + rd.warnings.join('\n⚠ ') + '\n';
+      if(!rd.ready){
+        msg += '\nBLOCKED:\n  • ' + (rd.blockers||[]).join('\n  • ')
+             + '\n\nPress OK to override anyway (this is recorded in the audit log).';
+      }
     }
+    if(!confirm(msg)) { loadAll(); return; }
     body.confirm = true;
+    if(rd && !rd.ready) body.force = true;
   }
   try { await api('/farm2/lanes/' + id + '/mode', { method:'POST', body: JSON.stringify(body) }); }
   catch(e){ alert('Could not change mode: ' + e.message); }

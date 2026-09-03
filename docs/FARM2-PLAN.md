@@ -53,10 +53,48 @@ supervisor.js ("main farm watcher")   — picks due lanes, computes the budget, 
    └── budget.js  (the arbiter)       — sealed per-lane allowances + SSH semaphore
    └── lane.js    (one per game)      — hard error boundary, own clock, own errors
          ├── steps/decide.js          — research + demand + allocation
-         └── steps/verify.js          — the drop checker (holdings gate)
+         ├── steps/execute.js         — drives autoFarmer.executeTask  [LIVE ONLY]
+         ├── steps/verify.js          — the drop checker (holdings gate)
+         ├── steps/publish.js         — listing, split from farming     [LIVE ONLY]
+         └── steps/monitor.js         — per-lane health, queues the next step
    └── jobs.js                        — durable FarmJob rows: retries, backoff, recovery
    └── ownership.js                   — which engine owns which game
 ```
+
+### What the live-mode steps do and don't own
+
+`execute` does **not** reimplement spending. `autoFarmer.executeTask` already
+carries the execution-time reserve re-check, the container-capacity re-check
+(whose absence once produced 31 containers under a `maxAutoBots` of 6),
+reuse-only handling, and the subtle "throw WITHOUT marking failed" cases — a
+`failed` write on a transient pool shortage permanently bricks a plan. So the
+lane prepares the `AutoFarmTask` row, applies its budget ceiling, and hands over.
+
+`monitor` deliberately does **not** run the fleet sweeps (`completeEndedTasks`,
+`backfillActiveTasks`, `reapRetiredBots`, `recycleSoldOutAccounts`,
+`repackAutoBots`). Those are inherently fleet-wide — repacking consolidates
+several games into one container, so a "per-game repack" is a different and more
+dangerous operation, not a smaller one. They also still run against lane-created
+tasks, because the ownership guard only blocks NEW task creation. That is a
+feature: it is what makes a lane's tasks impossible to strand. **The legacy
+engine remains the fleet's janitor, for lane tasks too.** Splitting the sweeps is
+a later phase needing its own design.
+
+### Publishing is two rows, not four
+
+The original intent was one job per marketplace. The real `autoLister` API does
+not support it: `publishPlatiShare`/`publishGgselShare` take a payload assembled
+inside `retryMissingSecondaries` (resolved set, grid image, price, split, and
+**reserved accounts** via `reserveAccountsForPublish`). Driving them directly
+means duplicating the stock-reservation logic — the second source of truth this
+engine exists to avoid. So the boundary is drawn where the API allows one:
+
+- `publish/primary` → `listActivatedTask` (Gameflip, plus a first attempt at the secondaries)
+- `publish/secondaries` → `retryMissingSecondaries`, on its **own** retry clock
+
+A secondary-market outage still cannot block or delay the primary listing, and
+vice versa. It is a genuine failure boundary, just coarser than per-market. True
+per-marketplace splitting needs `autoLister` reworked first.
 
 ### The arbiter is the one genuinely new piece
 
@@ -125,12 +163,18 @@ silent failure mode the legacy engine has no view of.
 2. Turn the master switch on. All three lanes are in shadow; still nothing acts.
 3. **Watch the comparison tab for a few days.** Every disagreement is either a
    lane bug or a legacy bug — investigate before promoting anything.
-4. Promote **one** lane to live (confirm dialog + audit log). Watch it.
-5. Repeat per game. Demote to shadow at any time; the kill switch reverts
-   everything instantly.
+4. Promote **one** lane to live. This is gated: the confirm dialog shows the
+   readiness check, which **blocks** promotion until the lane has at least 3
+   recorded shadow decisions and the live-mode steps are present on that host,
+   and **warns** (without blocking) when recent decisions disagreed with the
+   legacy engine. An override is possible and is written to the audit log.
+5. Watch it. Repeat per game. Demote to shadow at any time; the kill switch
+   reverts everything instantly.
 
-Execute/monitor/publish steps are stubs for live mode and are **not exercised in
-shadow**. They must be filled in and tested before step 4.
+The live-mode steps are implemented. Three independent guards stop a shadow lane
+ever spending or listing: the lane runner only drains jobs when
+`mode === "live"`, and `execute` and `publish` each assert on both the shadow
+flag **and** the lane's own mode. All are covered by tests.
 
 ## Deployment note — prod drift
 
@@ -166,9 +210,9 @@ The three hunks are all additive:
 
 ## Verification done
 
-- 26 new unit tests (budget invariants, ownership fail-safe, lane isolation,
-  job queue) — all pass
-- full suite **613/614**; the single failure (`dropSetsListLight.test.js`) is
+- 37 new unit tests (budget invariants, ownership fail-safe, lane isolation,
+  job queue, the shadow assertions, the readiness gate) — all pass
+- full suite **624/625**; the single failure (`dropSetsListLight.test.js`) is
   pre-existing and unrelated — it needs `utils/archiveExclusions.js`, which lives
   on `perf/drops-archive-rollup` and is absent from this checkout
 - end-to-end against a throwaway in-memory Mongo: inert-by-default, seeding,
@@ -176,11 +220,17 @@ The three hunks are all additive:
 - UI verified against a stubbed API harness — all five panels render, no console
   errors
 
-**Two real bugs were caught by that testing and fixed:**
-`enqueue` relied on the partial unique index being *built*, so on a fresh
-database duplicate jobs were inserted and a second `claimNext` picked up the
-duplicate — one campaign decided twice. Now an atomic `findOneAndUpdate` upsert,
-independent of index-build timing, with the unique index kept as the race backstop.
+**Bugs caught by that testing and fixed:**
+
+1. `enqueue` relied on the partial unique index being *built*, so on a fresh
+   database duplicate jobs were inserted and a second `claimNext` picked up the
+   duplicate — one campaign decided twice. Now an atomic `findOneAndUpdate`
+   upsert, independent of index-build timing, with the unique index kept as the
+   race backstop.
+2. `execute` resolved the farm host *before* the dry-run early return, so a
+   preview failed with "no farm host configured" on exactly the occasions it is
+   most useful — a host outage, or a machine with no farm host configured. The
+   host is now resolved only on the real spending path.
 
 ## Explicitly untouched
 

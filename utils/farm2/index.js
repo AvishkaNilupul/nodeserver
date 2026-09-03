@@ -56,6 +56,75 @@ async function seedTrialLanes({ games = TRIAL_GAMES, mode = "shadow" } = {}) {
   return out;
 }
 
+// Is this lane safe to promote to live?
+//
+// Promotion is the one irreversible-feeling action here: it moves a real game
+// off the engine that has been farming it successfully for months. The rollout
+// plan says "watch the comparison for a few days, then promote", and this is
+// that plan expressed as code rather than as a paragraph someone has to
+// remember at the moment they are clicking a button.
+//
+// It is a guard, not a lock — the caller may override with an explicit force,
+// which is audited. The point is that going live is a decision made against
+// evidence, not by accident.
+const MIN_SHADOW_DECISIONS = 3;
+
+async function laneReadiness(lane) {
+  const FarmJob = require("../../models/FarmJob");
+  const blockers = [];
+  const warnings = [];
+
+  // 1. The live path must actually exist on this host. A lane promoted on a
+  //    box running an older build would own its game with no way to farm it —
+  //    the exact "owned by nobody" outage the ownership guard exists to avoid.
+  try {
+    const execute = require("./steps/execute");
+    const publish = require("./steps/publish");
+    if (typeof execute.executeDecision !== "function") blockers.push("execute step missing");
+    if (typeof publish.publishPrimary !== "function") blockers.push("publish step missing");
+  } catch (e) {
+    blockers.push("live-mode steps unavailable: " + e.message);
+  }
+
+  // 2. There must be shadow evidence to promote ON.
+  const decided = await FarmJob.countDocuments({
+    laneKey: lane.gameKey,
+    kind: "decide",
+    status: "done",
+    shadow: true,
+  });
+  if (decided < MIN_SHADOW_DECISIONS) {
+    blockers.push(
+      `only ${decided} shadow decision(s) recorded — need at least ${MIN_SHADOW_DECISIONS} before promoting`,
+    );
+  }
+
+  // 3. Disagreements with the legacy engine are a warning, not a blocker: some
+  //    are legitimate (the lane's budget arbiter divides the pool differently),
+  //    and judging which is the operator's call. But they must be surfaced at
+  //    the moment of promotion, not buried in a table.
+  const recent = await FarmJob.find({
+    laneKey: lane.gameKey,
+    kind: "decide",
+    status: "done",
+    shadow: true,
+  })
+    .sort({ createdAt: -1 })
+    .limit(25)
+    .select("result")
+    .lean();
+  const diffs = recent
+    .map((r) => r.result && r.result.diff)
+    .filter((d) => d && d.agree === false);
+  if (diffs.length) {
+    warnings.push(
+      `${diffs.length} of the last ${recent.length} decisions disagreed with the legacy engine`,
+    );
+  }
+
+  return { ready: blockers.length === 0, blockers, warnings, shadowDecisions: decided };
+}
+
 function start() {
   supervisor.start();
 }
@@ -74,6 +143,8 @@ module.exports = {
   status,
   runCycle: supervisor.runCycle,
   seedTrialLanes,
+  laneReadiness,
   ownership,
   TRIAL_GAMES,
+  MIN_SHADOW_DECISIONS,
 };

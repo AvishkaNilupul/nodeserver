@@ -34,10 +34,8 @@ const farmJobSchema = new mongoose.Schema(
     //   monitor — progress, backfill and completion for an active task
     //   verify  — the drop checker: confirm the assigned accounts ACTUALLY hold
     //             the campaign's drops before anything is offered for sale
-    //   publish — one marketplace, one job. Gameflip / Plati / GGSel each get
-    //             their own row so one marketplace failing cannot drag the
-    //             others down, which is exactly what happens today when they
-    //             share a single call inside the farm tick.
+    //   publish — publishing, split into independently-retrying rows (see the
+    //             `market` field below for where that boundary actually falls)
     kind: {
       type: String,
       enum: ["decide", "execute", "monitor", "verify", "publish"],
@@ -45,11 +43,31 @@ const farmJobSchema = new mongoose.Schema(
       index: true,
     },
 
-    // For kind: "publish" — which marketplace this row is responsible for.
-    // Empty for every other kind.
+    // For kind: "publish" — which publishing stage this row owns. Empty for
+    // every other kind.
+    //
+    // WHY THIS IS NOT ONE ROW PER MARKETPLACE. The original intent was a job
+    // per marketplace, so a Plati failure could not affect GGSel. The real
+    // autoLister API does not support that split: publishPlatiShare and
+    // publishGgselShare take a fully-prepared payload (resolved DropSet, grid
+    // image, price, computed split, and reserved accounts) that is assembled
+    // inside retryMissingSecondaries — including reserveAccountsForPublish,
+    // the stock-reservation path with the already-fixed double-claim bugs.
+    // Driving them directly would mean reimplementing that assembly, i.e.
+    // exactly the second source of truth this engine exists to avoid.
+    //
+    // So the boundary is drawn where the API actually allows one:
+    //   primary     — the Gameflip listing (autoLister.listActivatedTask),
+    //                 which also makes the first attempt at the secondaries
+    //   secondaries — Plati / GGSel / ZeusX retry as a group
+    //                 (autoLister.retryMissingSecondaries), on their OWN retry
+    //                 clock, so a secondary-market outage can never block or
+    //                 delay the primary listing and vice versa.
+    // That is a genuine failure boundary, just a coarser one than per-market.
+    // A true per-marketplace split needs autoLister reworked first.
     market: {
       type: String,
-      enum: ["", "gameflip", "plati", "ggsel", "zeusx"],
+      enum: ["", "primary", "secondaries"],
       default: "",
     },
 
