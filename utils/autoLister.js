@@ -42,12 +42,18 @@ const fsp = require("fs/promises");
 
 /* --------------------------- campaign details --------------------------- */
 
-// Normalise a label to bare alphanumerics for placeholder comparison
-// ("AC Black Flag Resynced" -> "acblackflagresynced").
+// Normalise a label for placeholder comparison, keeping letters/digits of ANY
+// script ("AC Black Flag Resynced" -> "acblackflagresynced"). Uses the Unicode
+// letter/number classes rather than [a-z0-9]: the old ASCII-only strip reduced
+// a fully non-Latin name to "" (e.g. Tanks Blitz's Cyrillic drop
+// "Аватар «Медаль хочу»" -> ""), which the empty-string check below then
+// misread as a placeholder — so every Cyrillic/CJK-named drop was silently
+// rejected and its campaign never listed. \p{L}\p{N} preserves those letters
+// so a real non-Latin item stays a real item.
 function normLabel(s) {
   return String(s || "")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
+    .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 // A benefit whose name is really just the game or campaign title is NOT a real
@@ -56,12 +62,21 @@ function normLabel(s) {
 // the campaign title itself). Real drops have specific reward names
 // ("Rustborne Swords", "Cheetah Claw Cat"). Refuse to treat a title as an item
 // so we never build a set around a fake itemKey that no account can ever hold.
-function looksLikeTitlePlaceholder(name, { game, campaignName }) {
+//
+// A name matching the GAME title is always an unresolved placeholder. A name
+// matching the CAMPAIGN title usually is too, EXCEPT when the campaign is
+// legitimately named after its single reward (ELDEN RING's "Sorcerer Rogier"
+// campaign hands out a "Sorcerer Rogier" drop). Real drops carry Twitch
+// artwork; unresolved placeholders don't — so a campaign-name match is only
+// treated as a placeholder when the benefit has no artwork (`hasImage`).
+function looksLikeTitlePlaceholder(name, { game, campaignName, hasImage = false }) {
   const n = normLabel(name);
   if (!n) return true;
   const g = normLabel(game);
+  if (g && n === g) return true;
   const c = normLabel(campaignName);
-  return (!!g && n === g) || (!!c && n === c);
+  if (c && n === c && !hasImage) return true;
+  return false;
 }
 
 // Turn a fetched campaign-details object into deduped item rows, dropping any
@@ -79,7 +94,9 @@ function resolveCampaignItems(camp, { game, campaignName }) {
       const b = e && e.benefit;
       if (!b || !b.name) continue;
       rawBenefits++;
-      if (looksLikeTitlePlaceholder(b.name, { game, campaignName })) continue;
+      const hasImage = !!String((b && b.imageAssetURL) || "").trim();
+      if (looksLikeTitlePlaceholder(b.name, { game, campaignName, hasImage }))
+        continue;
       // Build the itemKey game-token EXACTLY as the stock side does
       // (twitchInventory.buildDrops): prefer the game's displayName, then its
       // name, then the campaign's own game, then the task game — and normalise

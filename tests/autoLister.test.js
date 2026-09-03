@@ -348,6 +348,40 @@ test("looksLikeTitlePlaceholder flags the game/campaign title, not real drops", 
   assert.strictEqual(looksLikeTitlePlaceholder("   ", ctx), true);
 });
 
+// A fully non-Latin drop name (Cyrillic/CJK/etc.) is a REAL item, not a
+// placeholder. The old ASCII-only normLabel stripped every Cyrillic letter to
+// "" and the empty-string check then flagged it as a title — so Tanks Blitz's
+// "Аватар «Медаль хочу»" (and any non-Latin-named drop) never listed.
+test("looksLikeTitlePlaceholder keeps non-Latin (Cyrillic) drop names", () => {
+  const ctx = { game: "Tanks Blitz", campaignName: "ЛБП 4 Плей-офф" };
+  assert.notStrictEqual(normLabel("Аватар «Медаль хочу»"), "");
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("Аватар «Медаль хочу»", ctx),
+    false,
+  );
+  // The Cyrillic campaign title itself is still a placeholder (no artwork).
+  assert.strictEqual(looksLikeTitlePlaceholder("ЛБП 4 Плей-офф", ctx), true);
+});
+
+// Some campaigns are legitimately named after their single reward (ELDEN RING's
+// "Sorcerer Rogier"). A benefit that carries real Twitch artwork is a real drop
+// even when its name equals the campaign title — but a name matching the GAME
+// title, or a nameless/artless title match, is still a placeholder.
+test("looksLikeTitlePlaceholder trusts a campaign-named drop that has artwork", () => {
+  const ctx = { game: "ELDEN RING", campaignName: "Sorcerer Rogier" };
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("Sorcerer Rogier", { ...ctx, hasImage: true }),
+    false,
+  );
+  // Same name, no artwork -> still a placeholder (old behaviour preserved).
+  assert.strictEqual(looksLikeTitlePlaceholder("Sorcerer Rogier", ctx), true);
+  // A GAME-title match is never rescued by artwork.
+  assert.strictEqual(
+    looksLikeTitlePlaceholder("ELDEN RING", { ...ctx, hasImage: true }),
+    true,
+  );
+});
+
 test("resolveCampaignItems drops the AC placeholder and keeps real drops", () => {
   const game = "Assassin's Creed Black Flag Resynced";
   const campaignName = "AC Black Flag Resynced";
@@ -381,6 +415,77 @@ test("resolveCampaignItems drops the AC placeholder and keeps real drops", () =>
     "Cheetah Claw Cat",
     "Rustborne Swords",
   ]);
+});
+
+// End-to-end for the two false positives found on prod (Tanks Blitz probe with
+// a Cyrillic drop, ELDEN RING probe whose drop is named after the campaign).
+// Both carried real imageAssetURLs and were wrongly dropped as placeholders.
+test("resolveCampaignItems keeps a real Cyrillic-named drop", () => {
+  const camp = {
+    game: { displayName: "Tanks Blitz" },
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [
+          {
+            benefit: {
+              name: "Аватар «Медаль хочу»",
+              game: { displayName: "Tanks Blitz" },
+              imageAssetURL: "https://x/img.png",
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const { items, rawBenefits } = resolveCampaignItems(camp, {
+    game: "Tanks Blitz",
+    campaignName: "ЛБП 4 Плей-офф",
+  });
+  assert.strictEqual(rawBenefits, 1);
+  assert.strictEqual(items.length, 1);
+  assert.strictEqual(items[0].name, "Аватар «Медаль хочу»");
+});
+
+test("resolveCampaignItems keeps a campaign-named drop with artwork, drops it without", () => {
+  const withArt = {
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [
+          {
+            benefit: {
+              name: "Sorcerer Rogier",
+              game: { displayName: "ELDEN RING" },
+              imageAssetURL: "https://x/rogier.png",
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const r1 = resolveCampaignItems(withArt, {
+    game: "ELDEN RING",
+    campaignName: "Sorcerer Rogier",
+  });
+  assert.strictEqual(r1.items.length, 1);
+  assert.strictEqual(r1.items[0].name, "Sorcerer Rogier");
+
+  // No artwork on an identically-named benefit -> still treated as placeholder.
+  const noArt = {
+    timeBasedDrops: [
+      {
+        requiredMinutesWatched: 60,
+        benefitEdges: [{ benefit: { name: "Sorcerer Rogier" } }],
+      },
+    ],
+  };
+  const r2 = resolveCampaignItems(noArt, {
+    game: "ELDEN RING",
+    campaignName: "Sorcerer Rogier",
+  });
+  assert.strictEqual(r2.items.length, 0);
+  assert.strictEqual(r2.rawBenefits, 1);
 });
 
 // Latent-asymmetry fix: the stock side (twitchInventory.buildDrops) keys drops
