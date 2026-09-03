@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Farm lanes</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .chip.warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .btn.danger:hover{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.4);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+  .nav .me .who b { font-size: 13.5px; display: block; } .nav .me .who span { font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 24px 28px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .banner { margin: 14px 0; padding: 11px 14px; border-radius: 12px; border:1px solid var(--line); background: var(--surface-2); font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+  .banner b { color: var(--ink); }
+
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin: 14px 0; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 9px 15px; }
+  .stat b { font-size: 18px; display:block; } .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 16px; }
+  .panel .hd { padding: 12px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .panel .hd b { font-size: 14.5px; } .panel .bd { padding: 14px 16px; }
+  .panel .hd .note { font-size:11.5px; color:var(--muted); }
+
+  label { display:block; font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing:.03em; }
+  input, select { padding: 9px 11px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; outline:none; font-family:inherit; }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .btn { border:none; border-radius: 10px; padding: 9px 15px; font-size: 13px; font-weight: 600; cursor: pointer; font-family:inherit; }
+  .btn.primary { background: var(--accent); color: #fff; } .btn.primary:hover{filter:brightness(1.06);}
+  .btn.ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); } .btn.ghost:hover{background:var(--surface-2);}
+  .btn.danger { background: var(--surface); color: var(--red); border:1px solid var(--line); } .btn.danger:hover{background:#fef2f2;border-color:#fecaca;}
+  .btn.sm { padding: 6px 10px; font-size: 11.5px; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  .chip { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border:1px solid var(--line); color: var(--muted); background: var(--surface-2); display:inline-block;}
+  .chip.on { color: var(--green); background:#ecfdf5; border-color:transparent; }
+  .chip.off { color: var(--red); background:#fef2f2; border-color:transparent; }
+  .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
+
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align:left; font-size: 11px; text-transform: uppercase; letter-spacing:.04em; color: var(--muted); padding: 8px 10px; border-bottom:1px solid var(--line); font-weight:600; white-space:nowrap; }
+  td { padding: 9px 10px; border-bottom:1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom:none; }
+  .tblwrap { overflow-x:auto; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .dim { color: var(--muted); }
+  .err { color: var(--red); font-size:12px; }
+  .lane-live td { box-shadow: inset 3px 0 0 var(--green); }
+  .lane-shadow td { box-shadow: inset 3px 0 0 var(--accent2); }
+  .lane-off td { box-shadow: inset 3px 0 0 var(--line); }
+  .disagree td { background: rgba(251,191,36,.09); }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout" onclick="toggleTheme()" title="Toggle dark mode"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></button>
+  </div>
+</aside>
+
+<main class="page">
+  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Farm lanes <span class="chip warn" style="vertical-align:middle;">TRIAL</span></h1>
+      <div class="sub">The reorganised farm &amp; list pipeline — one isolated lane per game, a shared budget arbiter, and durable job rows instead of in-memory tick state.</div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+      <button class="btn ghost sm" id="runBtn" title="Run one supervisor cycle now">Run cycle</button>
+      <button class="btn ghost sm" id="refreshBtn">Refresh</button>
+    </div>
+  </div>
+
+  <div class="banner">
+    🧪 <b>Shadow first.</b> A lane in <span class="chip">shadow</span> runs the full decision pipeline and records what it <b>would</b> do — no pool claims, no host writes, no marketplace calls — while the legacy auto-farmer keeps really farming that game. Compare the two below, then promote.
+    <br>🔒 <b>One owner per game.</b> Only a <span class="chip on">live</span> lane takes a game off the legacy engine, and it never touches an already-active task — in-flight campaigns finish under the engine that started them, so nothing can be stranded mid-handoff.
+    <br>🧠 <b>Same brain, new nervous system.</b> Demand tiers, sales boost, probe gates, pricing and the holdings gate all still come from the existing engine's own helpers. This layer replaces scheduling and isolation, not the economics.
+  </div>
+
+  <div class="panel">
+    <div class="hd">
+      <b>Engine</b>
+      <span class="note" id="engineNote">—</span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+        <span id="engineChip" class="chip">—</span>
+        <button class="btn sm ghost" id="toggleBtn">—</button>
+        <button class="btn sm ghost" id="seedBtn" title="Create the three trial lanes in shadow mode">Seed trial lanes</button>
+      </div>
+    </div>
+    <div class="bd">
+      <div class="stats" id="engineStats"></div>
+      <div class="dim mono" id="engineErr"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="hd"><b>Lanes</b><span class="note">one row per owned game — its own clock, its own errors, its own budget</span></div>
+    <div class="bd tblwrap">
+      <table>
+        <thead><tr>
+          <th>Game</th><th>Mode</th><th>State</th><th>Last run</th><th>Budget</th>
+          <th>Runs</th><th>Decisions</th><th>Jobs</th><th>Last error</th><th></th>
+        </tr></thead>
+        <tbody id="laneRows"><tr><td colspan="10" class="dim">Loading…</td></tr></tbody>
+      </table>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div><label>Add a lane</label><input id="newLane" placeholder="Game name, e.g. Warframe" style="min-width:220px" /></div>
+        <button class="btn ghost sm" id="addLaneBtn">Add in shadow mode</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="hd">
+      <b>Shadow comparison</b>
+      <span class="note">what the lane decided vs. what the legacy engine actually did — the evidence for going live</span>
+      <span style="margin-left:auto" id="cmpSummary"></span>
+    </div>
+    <div class="bd tblwrap">
+      <table>
+        <thead><tr>
+          <th>When</th><th>Game</th><th>Campaign</th><th>Lane says</th><th>Legacy did</th><th>Accounts</th><th>Agree</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="cmpRows"><tr><td colspan="8" class="dim">No decisions recorded yet — run a cycle.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="hd">
+      <b>Drop checker</b>
+      <span class="note">do the assigned accounts actually hold what a listing would promise? (read-only — safe on live tasks)</span>
+      <button class="btn sm ghost" id="auditBtn" style="margin-left:auto">Run audit</button>
+    </div>
+    <div class="bd tblwrap">
+      <table>
+        <thead><tr><th>Game</th><th>Campaign</th><th>Verified / assigned</th><th>Listed</th><th>Finding</th></tr></thead>
+        <tbody id="auditRows"><tr><td colspan="5" class="dim">Press “Run audit”.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="hd">
+      <b>Jobs</b>
+      <span class="note">every step is a durable row with its own retries — this is what replaces the in-memory progress log</span>
+      <select id="jobFilter" style="margin-left:auto">
+        <option value="">All statuses</option>
+        <option value="queued">Queued</option>
+        <option value="running">Running</option>
+        <option value="done">Done</option>
+        <option value="failed">Failed</option>
+      </select>
+    </div>
+    <div class="bd tblwrap">
+      <table>
+        <thead><tr><th>When</th><th>Lane</th><th>Kind</th><th>Status</th><th>Att.</th><th>Campaign</th><th>Detail</th></tr></thead>
+        <tbody id="jobRows"><tr><td colspan="7" class="dim">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+function toggleTheme(){
+  try{
+    var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if(dark){ document.documentElement.removeAttribute('data-theme'); localStorage.setItem('theme','light'); }
+    else { document.documentElement.setAttribute('data-theme','dark'); localStorage.setItem('theme','dark'); }
+  }catch(e){}
+}
+var $ = function(id){ return document.getElementById(id); };
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+function ago(d){
+  if(!d) return '—';
+  var ms = Date.now() - new Date(d).getTime();
+  if(ms < 0) return 'in ' + Math.round(-ms/1000) + 's';
+  if(ms < 60000) return Math.round(ms/1000) + 's ago';
+  if(ms < 3600000) return Math.round(ms/60000) + 'm ago';
+  if(ms < 86400000) return Math.round(ms/3600000) + 'h ago';
+  return Math.round(ms/86400000) + 'd ago';
+}
+async function api(url, opts){
+  var r = await fetch(url, Object.assign({ headers: { 'Content-Type':'application/json' } }, opts||{}));
+  var body = await r.json().catch(function(){ return {}; });
+  if(!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+
+var state = { enabled:false, lanes:[] };
+
+function modeChip(m){
+  if(m === 'live')   return '<span class="chip on">live</span>';
+  if(m === 'shadow') return '<span class="chip">shadow</span>';
+  return '<span class="chip off">off</span>';
+}
+function stateChip(s){
+  if(s === 'running') return '<span class="chip warn">running</span>';
+  if(s === 'error')   return '<span class="chip off">error</span>';
+  if(s === 'paused')  return '<span class="chip off">paused</span>';
+  return '<span class="chip">idle</span>';
+}
+
+async function loadStatus(){
+  var d = await api('/farm2/status');
+  state.enabled = d.enabled;
+  state.lanes = d.lanes || [];
+  var e = d.engine || {};
+
+  $('engineChip').outerHTML = '<span id="engineChip" class="chip ' + (d.enabled ? 'on' : 'off') + '">' +
+    (d.enabled ? 'enabled' : 'disabled') + '</span>';
+  $('toggleBtn').textContent = d.enabled ? 'Turn off' : 'Turn on';
+  $('engineNote').textContent = e.started
+    ? ('cycle every ' + Math.round((e.tickMs||0)/60000) + ' min · ' + (e.cycles||0) + ' cycles run')
+    : 'supervisor not started';
+
+  var owned = (e.ownedKeys||[]).length;
+  var s = e.lastSummary || {};
+  $('engineStats').innerHTML = [
+    ['Lanes', state.lanes.length],
+    ['Live (owned)', owned],
+    ['Shadow', state.lanes.filter(function(l){return l.mode==='shadow';}).length],
+    ['Last cycle', e.lastRun ? ago(e.lastRun) : '—'],
+    ['Budget accts', s.budget ? s.budget.totalAccounts : '—'],
+    ['Containers free', s.budget ? s.budget.totalContainers : '—']
+  ].map(function(x){ return '<div class="stat"><b>' + esc(x[1]) + '</b><span>' + esc(x[0]) + '</span></div>'; }).join('');
+
+  var errBits = [];
+  if(e.lastError) errBits.push('engine: ' + e.lastError);
+  if(s.budget && s.budget.reason && s.budget.reason !== 'ok') errBits.push('budget: ' + s.budget.reason);
+  $('engineErr').innerHTML = errBits.length ? '<span class="err">' + esc(errBits.join(' · ')) + '</span>' : '';
+
+  $('laneRows').innerHTML = state.lanes.length ? state.lanes.map(function(l){
+    var jobs = l.jobs || {};
+    var jobStr = ['queued','running','done','failed'].filter(function(k){ return jobs[k]; })
+      .map(function(k){ return k[0].toUpperCase() + ':' + jobs[k]; }).join(' ') || '—';
+    var b = l.lastBudget || {};
+    return '<tr class="lane-' + esc(l.mode) + '">' +
+      '<td><b>' + esc(l.game) + '</b>' + (l.note ? '<br><span class="dim" style="font-size:11px">' + esc(l.note) + '</span>' : '') + '</td>' +
+      '<td>' + modeChip(l.mode) + '</td>' +
+      '<td>' + stateChip(l.state) + '</td>' +
+      '<td class="dim">' + esc(ago(l.lastRunAt)) + '</td>' +
+      '<td class="mono">' + esc((b.accounts||0) + 'a / ' + (b.seats||0) + 's') + '</td>' +
+      '<td>' + esc((l.counters&&l.counters.runs)||0) + '</td>' +
+      '<td>' + esc((l.counters&&l.counters.decisions)||0) + '</td>' +
+      '<td class="mono dim">' + esc(jobStr) + '</td>' +
+      '<td class="err">' + esc((l.lastError||'').slice(0,90)) + '</td>' +
+      '<td style="white-space:nowrap">' +
+        '<select data-lane="' + esc(l._id) + '" class="modeSel" style="padding:5px 8px;font-size:12px">' +
+          ['off','shadow','live'].map(function(m){ return '<option value="' + m + '"' + (l.mode===m?' selected':'') + '>' + m + '</option>'; }).join('') +
+        '</select> ' +
+        (l.mode === 'live' ? '' : '<button class="btn sm danger delLane" data-lane="' + esc(l._id) + '" data-game="' + esc(l.game) + '">Delete</button>') +
+      '</td></tr>';
+  }).join('') : '<tr><td colspan="10" class="dim">No lanes yet — press “Seed trial lanes”.</td></tr>';
+
+  Array.prototype.forEach.call(document.querySelectorAll('.modeSel'), function(sel){
+    sel.addEventListener('change', function(){ setMode(sel.getAttribute('data-lane'), sel.value); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.delLane'), function(btn){
+    btn.addEventListener('click', function(){ delLane(btn.getAttribute('data-lane'), btn.getAttribute('data-game')); });
+  });
+}
+
+async function setMode(id, mode){
+  var body = { mode: mode };
+  if(mode === 'live'){
+    var lane = state.lanes.filter(function(l){ return String(l._id) === String(id); })[0];
+    var name = lane ? lane.game : 'this game';
+    if(!confirm('Promote “' + name + '” to LIVE?\n\nThe legacy auto-farmer will stop making new decisions for this game and the lane engine takes over.\n\nAlready-active tasks are NOT touched — they finish under the legacy engine.\n\nYou can set it back to shadow at any time.')) {
+      loadAll(); return;
+    }
+    body.confirm = true;
+  }
+  try { await api('/farm2/lanes/' + id + '/mode', { method:'POST', body: JSON.stringify(body) }); }
+  catch(e){ alert('Could not change mode: ' + e.message); }
+  loadAll();
+}
+
+async function delLane(id, game){
+  if(!confirm('Delete the lane for “' + game + '”?\n\nThe legacy engine keeps handling this game. Job history is kept.')) return;
+  try { await api('/farm2/lanes/' + id, { method:'DELETE' }); }
+  catch(e){ alert('Could not delete: ' + e.message); }
+  loadAll();
+}
+
+async function loadCompare(){
+  var d = await api('/farm2/compare');
+  var s = d.stats || {};
+  $('cmpSummary').innerHTML =
+    '<span class="chip on">' + (s.agreeing||0) + ' agree</span> ' +
+    '<span class="chip ' + ((s.disagreeing||0) ? 'warn' : '') + '">' + (s.disagreeing||0) + ' differ</span> ' +
+    '<span class="chip">' + (s.pending||0) + ' no legacy row yet</span>';
+
+  $('cmpRows').innerHTML = (d.items||[]).length ? d.items.map(function(i){
+    var agree = i.agree === null ? '<span class="chip">—</span>'
+      : (i.agree ? '<span class="chip on">yes</span>' : '<span class="chip warn">differs</span>');
+    return '<tr' + (i.agree === false ? ' class="disagree"' : '') + '>' +
+      '<td class="dim">' + esc(ago(i.at)) + '</td>' +
+      '<td>' + esc(i.lane) + '</td>' +
+      '<td>' + esc((i.campaignName||i.campaignId||'').slice(0,40)) + '</td>' +
+      '<td><b>' + esc(i.laneDecision) + '</b></td>' +
+      '<td>' + esc(i.legacyDecision || '—') + '</td>' +
+      '<td class="mono">' + esc(i.lanePlanned) + (i.legacyPlanned != null ? ' vs ' + esc(i.legacyPlanned) : '') + '</td>' +
+      '<td>' + agree + '</td>' +
+      '<td class="dim" style="font-size:11.5px">' + esc((i.laneReason||'').slice(0,110)) + '</td>' +
+      '</tr>';
+  }).join('') : '<tr><td colspan="8" class="dim">No decisions recorded yet — run a cycle.</td></tr>';
+}
+
+async function loadAudit(){
+  $('auditRows').innerHTML = '<tr><td colspan="5" class="dim">Checking holdings…</td></tr>';
+  try {
+    var d = await api('/farm2/audit');
+    var rows = [];
+    (d.lanes||[]).forEach(function(l){
+      if(l.error){ rows.push('<tr><td>' + esc(l.game) + '</td><td colspan="4" class="err">' + esc(l.error) + '</td></tr>'); return; }
+      if(!(l.results||[]).length){ rows.push('<tr><td>' + esc(l.game) + '</td><td colspan="4" class="dim">no active tasks</td></tr>'); return; }
+      l.results.forEach(function(r){
+        var flag = r.ok
+          ? (r.listed ? '<span class="chip on">listed</span>' : '<span class="chip warn">ready, not listed</span>')
+          : '<span class="chip off">blocked</span>';
+        rows.push('<tr>' +
+          '<td>' + esc(l.game) + '</td>' +
+          '<td>' + esc((r.campaignName||r.campaignId||'').slice(0,38)) + '</td>' +
+          '<td class="mono">' + esc(r.verified) + ' / ' + esc(r.assigned) + '</td>' +
+          '<td>' + flag + '</td>' +
+          '<td class="dim" style="font-size:11.5px">' + esc((r.reason||'').slice(0,110)) + '</td>' +
+        '</tr>');
+      });
+    });
+    $('auditRows').innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="dim">Nothing to audit.</td></tr>';
+  } catch(e){
+    $('auditRows').innerHTML = '<tr><td colspan="5" class="err">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+async function loadJobs(){
+  var f = $('jobFilter').value;
+  var d = await api('/farm2/jobs?limit=60' + (f ? '&status=' + encodeURIComponent(f) : ''));
+  $('jobRows').innerHTML = (d.jobs||[]).length ? d.jobs.map(function(j){
+    var st = j.status === 'done' ? 'on' : (j.status === 'failed' ? 'off' : (j.status === 'running' ? 'warn' : ''));
+    var detail = j.error ? '<span class="err">' + esc(j.error.slice(0,90)) + '</span>'
+      : (j.result && j.result.verdict ? esc((j.result.verdict.decision||'') + ' · ' + (j.result.verdict.reason||'').slice(0,70)) : '');
+    return '<tr>' +
+      '<td class="dim">' + esc(ago(j.createdAt)) + '</td>' +
+      '<td>' + esc(j.lane) + '</td>' +
+      '<td>' + esc(j.kind) + (j.market ? ' · ' + esc(j.market) : '') + (j.shadow ? ' <span class="chip">shadow</span>' : '') + '</td>' +
+      '<td><span class="chip ' + st + '">' + esc(j.status) + '</span></td>' +
+      '<td class="mono">' + esc(j.attempts) + '/' + esc(j.maxAttempts) + '</td>' +
+      '<td class="mono dim">' + esc((j.campaignId||'').slice(0,14)) + '</td>' +
+      '<td style="font-size:11.5px">' + detail + '</td>' +
+    '</tr>';
+  }).join('') : '<tr><td colspan="7" class="dim">No jobs yet.</td></tr>';
+}
+
+async function loadAll(){
+  try { await loadStatus(); } catch(e){ $('laneRows').innerHTML = '<tr><td colspan="10" class="err">' + esc(e.message) + '</td></tr>'; }
+  try { await loadCompare(); } catch(e){ /* panel keeps its previous content */ }
+  try { await loadJobs(); } catch(e){ /* ditto */ }
+}
+
+$('refreshBtn').addEventListener('click', loadAll);
+$('jobFilter').addEventListener('change', loadJobs);
+$('auditBtn').addEventListener('click', loadAudit);
+
+$('toggleBtn').addEventListener('click', async function(){
+  var turningOn = !state.enabled;
+  if(turningOn && !confirm('Turn the lane engine ON?\n\nLanes in shadow mode only observe and compare — they change nothing.\nOnly a lane set to LIVE takes its game off the legacy auto-farmer.')) return;
+  this.disabled = true;
+  try { await api('/farm2/enable', { method:'POST', body: JSON.stringify({ enabled: turningOn }) }); }
+  catch(e){ alert(e.message); }
+  this.disabled = false;
+  loadAll();
+});
+
+$('seedBtn').addEventListener('click', async function(){
+  this.disabled = true;
+  try {
+    var d = await api('/farm2/seed', { method:'POST' });
+    var made = (d.lanes||[]).filter(function(l){ return l.created; }).length;
+    alert(made ? ('Created ' + made + ' trial lane(s) in shadow mode.') : 'Trial lanes already exist — nothing changed.');
+  } catch(e){ alert(e.message); }
+  this.disabled = false;
+  loadAll();
+});
+
+$('runBtn').addEventListener('click', async function(){
+  this.disabled = true; this.textContent = 'Running…';
+  try { await api('/farm2/run', { method:'POST' }); }
+  catch(e){ alert(e.message); }
+  this.disabled = false; this.textContent = 'Run cycle';
+  loadAll();
+});
+
+loadAll();
+setInterval(loadAll, 30000);
+</script>
+<script src="/admin-nav.js"></script>
+</body>
+
+</html>

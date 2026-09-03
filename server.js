@@ -39,6 +39,8 @@ const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
+const farm2Routes = require("./routes/farm2Routes");
+const farm2 = require("./utils/farm2");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
@@ -644,6 +646,7 @@ app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
 app.use(enforce2fa, spentAccountsRoutes);
 app.use(enforce2fa, autoFarmRoutes);
+app.use(enforce2fa, farm2Routes);
 app.use(enforce2fa, activityRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
@@ -750,6 +753,14 @@ mongoose
     // switch, so starting it here is a no-op until it's enabled.
     autoFarmer.start();
     autoFarmSnapshot.start();
+    // Lane engine (utils/farm2/*): the reorganised farm + list pipeline — one
+    // isolated lane per game, a shared budget arbiter, and durable job rows
+    // instead of in-memory tick state. Doubly inert on a fresh deploy: it runs
+    // no cycles until autoFarm.farm2Enabled is turned on, and even then only
+    // acts on games that have a FarmLane row. A lane in "shadow" mode observes
+    // and compares without side effects; only a "live" lane takes its game off
+    // the legacy auto-farmer above.
+    farm2.start();
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();

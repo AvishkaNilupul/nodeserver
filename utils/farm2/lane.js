@@ -1,0 +1,196 @@
+// One game lane — the unit of isolation.
+//
+// A lane owns everything about a single game: its campaigns, its decisions, its
+// verification, its retry clock and its errors. Nothing in this file may throw
+// past runLane(); a lane that fails records the failure on its OWN row, backs
+// off on its OWN schedule, and leaves every other lane untouched.
+//
+// That single property is the fix for the biggest structural flaw in the legacy
+// engine, where one exception inside a ~900-line runOnce() costs the whole
+// fleet a 10-minute tick.
+
+const settings = require("../settings");
+const jobs = require("./jobs");
+const decideStep = require("./steps/decide");
+const verifyStep = require("./steps/verify");
+
+// Backoff after consecutive failures, and the point at which a lane is parked
+// for an operator to look at instead of retrying forever.
+const BASE_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_BACKOFF_MS = 60 * 60 * 1000;
+const PAUSE_AFTER_FAILURES = 8;
+
+function backoffMs(consecutiveFailures) {
+  if (consecutiveFailures <= 0) return BASE_INTERVAL_MS;
+  return Math.min(MAX_BACKOFF_MS, BASE_INTERVAL_MS * 2 ** Math.min(consecutiveFailures, 6));
+}
+
+// Live campaigns for this lane's game that are worth a decision.
+//
+// Mirrors the legacy engine's candidate query (active + ACTIVE + not ended, and
+// never a no-claim game) but scoped to one game, which is the whole point: a
+// lane never reads the fleet-wide campaign list.
+async function candidatesFor(lane) {
+  const TwitchCampaign = require("../../models/TwitchCampaign");
+  const now = new Date();
+  const rows = await TwitchCampaign.find({
+    active: true,
+    status: "ACTIVE",
+    $or: [{ endAt: null }, { endAt: { $gt: now } }],
+  }).lean();
+
+  const key = settings.normGameName(lane.game);
+  return rows.filter((c) => {
+    if (!c.game) return false;
+    if (settings.normGameName(c.game) !== key) return false;
+    // No-claim games belong to the standalone no-claim system and must never be
+    // touched here, exactly as the legacy engine excludes them.
+    if (settings.isNoClaimGame(c.game)) return false;
+    return true;
+  });
+}
+
+// Run one lane to completion. Never throws.
+async function runLane(lane, { cycle, af }) {
+  const FarmLane = require("../../models/FarmLane");
+  const started = Date.now();
+  const shadow = lane.mode === "shadow";
+  const summary = {
+    game: lane.game,
+    mode: lane.mode,
+    campaigns: 0,
+    decisions: [],
+    audit: null,
+    errors: [],
+  };
+
+  await FarmLane.updateOne(
+    { _id: lane._id },
+    { $set: { state: "running", lastRunAt: new Date() } },
+  ).catch(() => {});
+
+  try {
+    // --- DECIDE ------------------------------------------------------------
+    const campaigns = await candidatesFor(lane);
+    summary.campaigns = campaigns.length;
+
+    for (const c of campaigns) {
+      // Per-campaign error boundary INSIDE the lane: one malformed campaign
+      // must not cost this lane its other campaigns, the same way one lane must
+      // not cost the fleet.
+      let job = null;
+      try {
+        job = await jobs.enqueue({
+          lane: lane.game,
+          laneKey: lane.gameKey,
+          kind: "decide",
+          campaignId: c.campaignId,
+          shadow,
+          payload: { campaignName: c.name || "", endAt: c.endAt || null },
+        });
+        // enqueue returns the EXISTING row when one is already in flight; only
+        // drive a job this pass actually owns.
+        if (!job) continue;
+        const claimed = await jobs.claimNext({ _id: job._id });
+        if (!claimed) continue;
+
+        const verdict = await decideStep.decideCampaign({
+          campaign: c,
+          lane,
+          cycle,
+          af,
+          shadow,
+        });
+
+        // In shadow mode the verdict is compared against what the legacy engine
+        // actually did. That diff is the evidence for flipping this lane live.
+        const diff = shadow ? await decideStep.diffAgainstLegacy(verdict) : null;
+
+        await jobs.finish(claimed, { verdict, diff });
+        summary.decisions.push({ ...verdict, diff });
+
+        if (verdict.wouldFarm && !shadow) {
+          // LIVE mode only: spend the granted budget and queue execution.
+          // Shadow lanes stop here by contract — nothing below this line may
+          // run without the operator having flipped the lane to live.
+          const take = cycle ? cycle.spendAccounts(lane.gameKey, verdict.plannedAccounts) : 0;
+          await jobs.enqueue({
+            lane: lane.game,
+            laneKey: lane.gameKey,
+            kind: "execute",
+            campaignId: c.campaignId,
+            shadow: false,
+            payload: { verdict, granted: take },
+          });
+        }
+      } catch (e) {
+        summary.errors.push(`${c.campaignId}: ${e.message}`);
+        if (job) await jobs.fail(job, e).catch(() => {});
+      }
+    }
+
+    // --- VERIFY (drop checker) --------------------------------------------
+    // Read-only in every mode, so a shadow lane audits the inventory the legacy
+    // engine is managing right now. This is what makes the tab useful on day
+    // one rather than only after a lane goes live.
+    try {
+      summary.audit = await verifyStep.auditLane(lane);
+    } catch (e) {
+      summary.errors.push("audit: " + e.message);
+    }
+
+    // --- Bookkeeping -------------------------------------------------------
+    const hadError = summary.errors.length > 0;
+    const failures = hadError ? (lane.consecutiveFailures || 0) + 1 : 0;
+    const next = new Date(Date.now() + backoffMs(failures));
+
+    await FarmLane.updateOne(
+      { _id: lane._id },
+      {
+        $set: {
+          state: failures >= PAUSE_AFTER_FAILURES ? "paused" : "idle",
+          nextRunAt: next,
+          lastDurationMs: Date.now() - started,
+          consecutiveFailures: failures,
+          lastError: hadError ? summary.errors.join("; ").slice(0, 500) : "",
+          lastErrorAt: hadError ? new Date() : lane.lastErrorAt || null,
+          ...(hadError ? {} : { lastOkAt: new Date() }),
+          "lastBudget.accounts": cycle ? cycle.grantFor(lane.gameKey).accounts : 0,
+          "lastBudget.seats": cycle ? cycle.grantFor(lane.gameKey).seats : 0,
+          "lastBudget.grantedAt": new Date(),
+          "lastBudget.reason": cycle ? cycle.reason : "",
+        },
+        $inc: {
+          "counters.runs": 1,
+          "counters.decisions": summary.decisions.length,
+          "counters.failures": hadError ? 1 : 0,
+        },
+      },
+    ).catch(() => {});
+
+    return summary;
+  } catch (e) {
+    // The outer boundary. Reaching here means a bug in the lane runner itself
+    // rather than in a step; record it and back off, but never propagate — the
+    // supervisor must keep dispatching the other lanes.
+    const failures = (lane.consecutiveFailures || 0) + 1;
+    await FarmLane.updateOne(
+      { _id: lane._id },
+      {
+        $set: {
+          state: failures >= PAUSE_AFTER_FAILURES ? "paused" : "error",
+          lastError: String(e.message || e).slice(0, 500),
+          lastErrorAt: new Date(),
+          consecutiveFailures: failures,
+          nextRunAt: new Date(Date.now() + backoffMs(failures)),
+          lastDurationMs: Date.now() - started,
+        },
+        $inc: { "counters.runs": 1, "counters.failures": 1 },
+      },
+    ).catch(() => {});
+    summary.errors.push("lane: " + e.message);
+    return summary;
+  }
+}
+
+module.exports = { runLane, candidatesFor, backoffMs, BASE_INTERVAL_MS, PAUSE_AFTER_FAILURES };

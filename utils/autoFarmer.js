@@ -28,6 +28,12 @@ const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 const { normGame } = require("./gameLabel");
+// Ownership boundary with the new lane engine (utils/farm2/*). Required
+// directly rather than through utils/farm2/index.js so this stays a leaf
+// dependency: ownership.js pulls in only ./settings, and reads the FarmLane
+// model lazily, so there is no load-order coupling and no require cycle back
+// into this file.
+const farm2Ownership = require("./farm2/ownership");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
@@ -3315,6 +3321,7 @@ async function runOnce() {
       existingRows.map((row) => [row.game + "|" + row.campaignId, row]),
     );
     let noClaimSkipped = 0;
+    let farm2Skipped = 0;
     for (const c of live) {
       if (!c.game) continue;
       // No-claim games (Overwatch, Rainbow Six) are handled by the standalone
@@ -3323,6 +3330,20 @@ async function runOnce() {
       // for such a game is left to its normal lifecycle (leave existing as-is).
       if (settings.isNoClaimGame(c.game)) {
         noClaimSkipped++;
+        continue;
+      }
+      // Games owned by the new lane engine (utils/farm2/*) are farmed there
+      // instead. Same contract as the no-claim skip directly above: no NEW task
+      // is created here, while any already-active task keeps its normal
+      // lifecycle under this engine — so flipping a lane to "live" can never
+      // strand a campaign that is already mid-flight.
+      //
+      // isOwned() is synchronous and answers from a 30s cache, and every
+      // uncertainty (engine stopped, master switch off, lane table unreadable,
+      // cache cold) resolves to NOT owned so this engine keeps covering the
+      // game. See the fail-safe note at the top of utils/farm2/ownership.js.
+      if (farm2Ownership.isOwned(c.game)) {
+        farm2Skipped++;
         continue;
       }
       const existing = existingByKey.get(c.game + "|" + c.campaignId);
@@ -3351,6 +3372,14 @@ async function runOnce() {
           noClaimSkipped +
           " no-claim campaign(s) (Overwatch/Rainbow Six) — handled by the " +
           "standalone no-claim farming system.",
+      );
+    if (farm2Skipped)
+      progress(
+        "Skipped " +
+          farm2Skipped +
+          " campaign(s) owned by the lane engine (" +
+          farm2Ownership.ownedKeys().join(", ") +
+          ").",
       );
     progress(candidates.length + " campaign(s) to decide this tick.");
 
@@ -4434,4 +4463,9 @@ module.exports = {
   researchForGame,
   archiveHoldersByGame,
   ownedAccounts,
+  // Additive export for the lane engine's decide step (utils/farm2/steps/decide.js),
+  // so a LIVE lane makes its decision on the same freshly-rescanned research this
+  // engine would have used. Shadow lanes deliberately call researchForGame instead,
+  // because a re-scan is a real side effect. No behaviour change here.
+  freshResearchForGame,
 };

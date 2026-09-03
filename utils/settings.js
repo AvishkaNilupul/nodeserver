@@ -191,6 +191,15 @@ const AUTO_FARM_DEFAULTS = {
   // itself stopped (an operator Stop stays stopped) — so it never fights manual
   // control. See utils/noclaimWatcher.js.
   noClaimStreamGate: false,
+  // Master switch for the new lane engine (utils/farm2/*), the reorganised
+  // farm + list pipeline that replaces the legacy single-tick autoFarmer for
+  // the games it owns. OFF by default, so a deploy changes nothing: with it
+  // false the engine runs no cycles and utils/farm2/ownership.js reports that
+  // farm2 owns no game, leaving utils/autoFarmer.js in charge of everything
+  // exactly as before. Turning it on only activates the lanes that exist in
+  // the FarmLane collection, and only a lane in mode "live" takes a game away
+  // from the legacy engine — a "shadow" lane just observes and compares.
+  farm2Enabled: false,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

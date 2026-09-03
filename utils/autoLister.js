@@ -2190,6 +2190,12 @@ module.exports = {
   resolveCampaignItems,
   campaignItems,
   filterVerifiedHolders,
+  // Additive export for the lane engine's drop checker
+  // (utils/farm2/steps/verify.js). It reuses THIS holdings gate rather than
+  // running its own aggregation, so "does this account really hold the bundle?"
+  // has exactly one implementation across both engines. Read-only; no
+  // behaviour change to any existing caller.
+  verifiedHoldersForItems,
   // reserve→publish rollback (release stranded reservations on publish failure)
   withReservationRollback,
   // secondary-market publishing (used by ops scripts to rebuild bad products)

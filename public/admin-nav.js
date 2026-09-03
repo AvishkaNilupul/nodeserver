@@ -121,6 +121,16 @@
           superOnly: true,
         },
         {
+          href: "/farm2.html",
+          label: "Farm lanes",
+          icon:
+            '<path d="M3 6h18M3 12h18M3 18h18"></path>' +
+            '<circle cx="7" cy="6" r="1.6"></circle>' +
+            '<circle cx="13" cy="12" r="1.6"></circle>' +
+            '<circle cx="9" cy="18" r="1.6"></circle>',
+          superOnly: true,
+        },
+        {
           href: "/unclaimed-farms.html",
           label: "Unclaimed farms",
           icon:
