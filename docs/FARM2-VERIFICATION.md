@@ -431,17 +431,9 @@ formality.
    times as often (once per cycle, shared across lanes, through the semaphore).
    If that is too much for the Pi, the supervisor cadence or a TTL on the memo
    is the knob — not skipping the sweep, which would change the coverage answer.
-8. **A live lane's skips are not written to `AutoFarmTask`.** Legacy records
-   every skip as a row with status `skipped`, which is what makes the RETRYABLE
-   set re-decide and what the Auto-farm tab shows. `lane.js` only enqueues an
-   execute job for `wouldFarm` verdicts, so a live lane's six new skips exist
-   only as `FarmJob` rows. Harmless in shadow; a real gap in live mode, and
-   pre-existing in shape (the two sellability skips had the same behaviour).
-   Needs its own change in `lane.js`/`execute.js` — not made here, because it
-   writes to a shared collection and deserves separate review. *One exception
-   since commit 8 (§11): when a live reuse finds nothing it can sell,
-   `executeReuse` now writes `skip_reuse_only` / `skip_no_accounts` itself,
-   because the alternative — an empty ACTIVE row — is acted on by the sweeps.*
+8. ~~**A live lane's skips are not written to `AutoFarmTask`.**~~ **Closed by
+   commit 10 — see §12.** A live lane now writes each decide-time skip as the
+   row legacy writes for that decision; shadow lanes still write nothing.
 9. **`recycledPoolCount` depends on a query's shape** (§5.2). It has a test that
    mirrors the `soldGames` term, but nothing ties it to `claimPoolAccounts`
    mechanically.
@@ -679,7 +671,8 @@ predicate `backfillActiveTasks` would have matched.
 | `executeReuse`, `mine = 0` | **now**: `skip_reuse_only` / `skip_no_accounts`, skipped | yes |
 | `executeReuse`, dry-run | `reuse_existing` planned, `plannedAccounts: 0` | yes — dry-run reuse |
 | `executeReuse`, no bot restarted | `reuse_existing` failed | yes |
-| lane skips (decide) | **nothing written** (§7.8) | an absence, not a shape |
+| lane skips (decide) | **was**: nothing written (§7.8) | an absence, not a shape |
+| lane skips (decide) | **now**: the legacy row for that skip (§12) | yes — by construction |
 
 One difference remains by design: the lane writes `targetAccounts: mine.length`
 on reuse rows where legacy leaves the field unwritten. For backfill the two
@@ -711,3 +704,83 @@ two things is true, and only prod can say which:
 
 Writing a second guard here would duplicate existing logic and hide whichever
 of those it is. Declined on those grounds, not on risk.
+
+*Resolved on prod, 2026-09-05: neither. There was no leak. "Fresh" had been
+judged by `AvailableAccount.soldGames` being empty, but `soldGames` is stamped on
+sale, not on recycling; the gate matches `claimedNote`. Checked via
+`PoolUsageEvent`, all 36 accounts were "recycled after World of Tanks" —
+legitimate. The empty-ACTIVE-task bug was real regardless and the fix stands.*
+
+## 12. Lane skips are written as legacy rows (commit 10)
+
+§7.8, closed. A live lane re-decides every campaign every cycle; until this,
+a campaign it decided **not** to farm left no `AutoFarmTask` row at all — the
+decision lived only in `FarmJob`, invisible to the Auto-farm tab, to replay and
+to anyone reading the shared collection. §11's rule is how it is closed: **the
+lane writes only rows legacy already produces.**
+
+**The mapping is the identity on `decision`.** Since commit 2 the lane's skip
+vocabulary is legacy's, so every lane skip has a legacy equivalent — there is no
+lane skip without one. What differs per decision is the **field set** legacy's
+`record()` writes (§5.1), which `execute.legacySkipFields` copies exactly:
+
+| lane skip | legacy decision | fields, as legacy's `record()` writes them |
+|---|---|---|
+| `skip_low_demand` | same | `demandScore` = **effective** demand (`alloc.demand`, not the raw score), `hadResearch`, `internalSales` |
+| `skip_probe_budget` | same | as above |
+| `skip_host_offline` | same | `demandScore` raw, `hadResearch`, `internalSales` |
+| `skip_ends_soon` | same | as above |
+| `skip_already_covered` | same | as above + `coverage` |
+| `skip_no_accounts` | same | as above + `coverage`, `plannedAccounts: 0` |
+| `skip_no_capacity` | same | as above + `coverage`, `plannedAccounts` = the target it could not seat |
+| `skip_reuse_only` | same — **with one edge, below** | the claim-time end state: `plannedAccounts: 0`, `targetAccounts` (the farm record's `wanted`), `coverage`, `executedAt`, `dryRun: false` |
+
+Common to all: `status: "skipped"` (the one status no sweep acts on), `reason`,
+`dryRun: !!af.dryRun` (legacy's `base`), `rescanRequested: false`, `decidedAt`,
+and the `decisionInputs` snapshot like every other row the lane writes. Nothing
+else — no `targetAccounts` where legacy writes none, no `executedAt` except
+where legacy stamps it.
+
+**The one edge: `skip_reuse_only`.** Legacy never *decides* this. It records a
+farm/probe row, calls `executeTask`, and the claim finds none of the game's own
+recycled accounts, so `executeTask` rewrites the row as `skip_reuse_only` — the
+row it leaves therefore carries the farm record's `targetAccounts` and
+`coverage`, plus `executedAt` and `dryRun: false`. The lane decides it up front
+(the six-gates pre-check) and writes that **end state** directly; the transient
+`planned` row is not observable afterwards and is not reproduced. Under
+`af.dryRun`, legacy never reaches the claim — it records a planned farm and
+would only discover the emptiness at approval time — so **no legacy row
+corresponds** to a decide-time `skip_reuse_only` there, and the lane writes
+nothing. That is the single case of "no equivalent", and absence is its answer.
+
+**The guard.** A skip row is written only when the `(game, campaignId)` row is
+**absent or already `skipped`**. Never over `planned`, `active`, `completed`,
+`stopped` or `failed`: those own things — bots, accounts, a history — and a
+`$set` of `status: "skipped"` over one would orphan them (a lane re-decides an
+ACTIVE campaign as `skip_already_covered` routinely, once its own accounts cover
+the demand). The pre-check is deterministic; the write is a conditional upsert
+on `status: "skipped"`, and the unique `(game, campaignId)` index turns a
+concurrent non-skipped insert into a duplicate-key error that is treated as
+*suppressed*, never as a write. Suppressions are counted on the lane summary.
+
+**Shadow lanes write nothing.** The legacy engine is still farming a shadow
+lane's game and writing its `(game, campaignId)` rows; an upsert would overwrite
+legacy's decision with the lane's. `recordSkip` asserts on it, as
+`executeDecision` does, and `lane.js` never calls it off the live path — the
+same three-guard posture as spending.
+
+**What is different from legacy, and stated as such.** Legacy re-decides only
+RETRYABLE skips, stranded rows and rescans; terminal skips (`skip_low_demand`,
+`skip_ends_soon`) are written once and never revisited. The lane decides every
+campaign every cycle — that is its design, not this commit's — so a terminal
+skip row *is* rewritten each cycle here (`decidedAt` moves; the snapshot is
+refreshed). The row shape is identical either way and no sweep reads skipped
+rows, so this is churn, not risk: one upsert per skipped campaign per cycle. If
+that matters on prod, the knob is "write only when the decision or reason
+changed", not a different shape.
+
+**What to check on prod.** After deploy, every live lane's skipped campaigns
+should appear in the Auto-farm tab with the same decision the `FarmJob` row
+shows, and `replay` should score them from their snapshots
+(`inputsBasis: recorded`). `skipsSuppressed` on the lane summary should be
+non-zero only for campaigns with a live task — which is the guard working.

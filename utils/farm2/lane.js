@@ -11,6 +11,7 @@
 
 const settings = require("../settings");
 const jobs = require("./jobs");
+const classes = require("./decisionClasses");
 const decideStep = require("./steps/decide");
 const verifyStep = require("./steps/verify");
 const executeStep = require("./steps/execute");
@@ -124,6 +125,10 @@ async function runLane(lane, { cycle, af, hostCache }) {
     decisions: [],
     executed: [],
     alreadyExecuted: 0,
+    // Decide-time skips written to AutoFarmTask as legacy rows (live lanes
+    // only), and those suppressed because the row already owns something.
+    skipsRecorded: 0,
+    skipsSuppressed: 0,
     listed: [],
     jobsDrained: 0,
     monitor: null,
@@ -176,6 +181,27 @@ async function runLane(lane, { cycle, af, hostCache }) {
 
         await jobs.finish(claimed, { verdict, diff });
         summary.decisions.push({ ...verdict, diff });
+
+        // LIVE lanes write their decide-time skips to AutoFarmTask as the rows
+        // legacy writes (steps/execute.recordSkip), so the Auto-farm tab, replay
+        // and the retry picture are the same whichever engine owns a game.
+        // Shadow lanes write nothing: the legacy engine is still farming their
+        // game and owns its (game, campaignId) rows. A failure to record is
+        // noted on the lane and never fails the decision itself.
+        if (
+          !shadow &&
+          lane.mode === "live" &&
+          !verdict.wouldFarm &&
+          classes.actionClass(verdict.decision) === "skip"
+        ) {
+          try {
+            const rec = await executeStep.recordSkip({ verdict, lane, af, shadow: false });
+            if (rec.written) summary.skipsRecorded += 1;
+            else summary.skipsSuppressed += 1;
+          } catch (e) {
+            summary.errors.push(`${c.campaignId}: record skip: ${e.message}`);
+          }
+        }
 
         if (verdict.wouldFarm && !shadow) {
           // LIVE mode only: spend the granted budget and queue execution.
