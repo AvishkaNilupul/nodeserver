@@ -1663,7 +1663,7 @@ async function processCampaign(c, ctx) {
       status: "skipped",
       reason,
       demandScore: alloc.demand,
-      hadResearch: true,
+      hadResearch: !!research,
       internalSales,
     });
     // A budget hold re-decides every tick, so telegraphing it would spam. Only
