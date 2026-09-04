@@ -178,6 +178,16 @@ function recordsEffectiveDemand(decision) {
 // held 13 sales, the replay trusted the 0, skipped at the sellability gate and
 // called every one a disagreement — while the live shadow lane, reading
 // SaleSignal, agreed with legacy each time.
+//
+// DELIBERATELY NOT UPDATED when those two record() calls were fixed to write
+// internalSales (commit "internalSales written on the two paths that omitted
+// it"). This map gates an integrity CROSS-CHECK against the flat field, and
+// every row written before that fix still carries the old value on these
+// paths — widening the check would turn the 15 Black Desert rows from `agree`
+// back into `sales_count_mismatch`. Whether the field can be trusted is a
+// property of WHEN the row was written, which the harness cannot see; rows
+// written since the decisionInputs snapshot shipped never consult the flat
+// field at all, so nothing is lost by leaving these two here.
 const OMITS_INTERNAL_SALES = Object.freeze(["reuse_existing", "skip_host_offline"]);
 const WRITES_TARGET_ACCOUNTS = Object.freeze(["farm", "probe", "skip_reuse_only"]);
 

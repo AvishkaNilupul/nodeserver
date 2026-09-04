@@ -211,8 +211,8 @@ schema default on a fresh row, **or as whatever an earlier decision on the same
 | Path | `demandScore` | `internalSales` | `targetAccounts` |
 |---|---|---|---|
 | `skip_low_demand`, `skip_probe_budget` | effective (output) | written | — |
-| `skip_host_offline` | raw | **not written** | — |
-| `reuse_existing` (live and dry-run) | raw | **not written** | **not written** |
+| `skip_host_offline` | raw | **not written** *(written since commit 7)* | — |
+| `reuse_existing` (live and dry-run) | raw | **not written** *(written since commit 7)* | **not written** |
 | `skip_ends_soon`, `skip_already_covered`, `skip_no_accounts`, `skip_no_capacity` | raw | written | **not written** |
 | `farm`, `probe` | raw | written | written (`wanted`) |
 | `skip_reuse_only` | (kept from the farm/probe write moments earlier) | kept | kept |
@@ -248,6 +248,14 @@ window did afterwards; and commit 7 writes the flat `internalSales` on those two
 paths too, so the row itself stops lying. Commit 6 makes `hadResearch` truthful
 on the sellability skip. Rows from before those commits keep the behaviour
 described above; `§9.1` is what would recover *them*.
+
+One thing commit 7 deliberately does **not** do: widen the harness's write-map
+(`classes.recordsInternalSales`). That map gates the integrity cross-check
+against the flat field, and every row written before commit 7 still carries the
+old value on those two paths — widening it would turn the 15 Black Desert rows
+from `agree` back into `sales_count_mismatch`. Trustworthiness of the flat field
+is a property of *when* a row was written, which the harness cannot see. Nothing
+is lost: rows written since commit 5 never consult the flat field at all.
 
 ### 5.2 The lane's decision vocabulary WAS a strict subset of the legacy engine's
 

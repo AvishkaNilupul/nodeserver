@@ -1703,6 +1703,7 @@ async function processCampaign(c, ctx) {
         " unreachable — will retry next tick.",
       demandScore,
       hadResearch: !!research,
+      internalSales,
     });
     return { decision: "skip_host_offline" };
   }
@@ -1750,6 +1751,7 @@ async function processCampaign(c, ctx) {
         reason,
         demandScore,
         hadResearch: !!research,
+        internalSales,
         bots: bots.map((b) => ({ ...b, reused: true })),
         plannedAccounts: 0,
       });
@@ -1792,6 +1794,7 @@ async function processCampaign(c, ctx) {
       reason,
       demandScore,
       hadResearch: !!research,
+      internalSales,
       bots: bots.map((b) => ({ ...b, reused: true, shared: true })),
       assignedAccounts: mine,
       plannedAccounts: mine.length,
