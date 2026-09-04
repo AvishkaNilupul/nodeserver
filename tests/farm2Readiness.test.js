@@ -71,9 +71,9 @@ test("rows from the OLD diff logic are not counted as evidence", async () => {
 
 test("rows from the CURRENT diff logic do count", async () => {
   const lane = await laneWith("new evidence", [
-    { agree: true, laneClass: "reuse", legacyClass: "reuse" },
-    { agree: true, laneClass: "reuse", legacyClass: "reuse" },
-    { agree: true, laneClass: "skip", legacyClass: "skip" },
+    { agree: true, laneClass: "reuse", legacyClass: "reuse", stale: false },
+    { agree: true, laneClass: "reuse", legacyClass: "reuse", stale: false },
+    { agree: true, laneClass: "skip", legacyClass: "skip", stale: false },
   ]);
   const r = await farm2.laneReadiness(lane);
   assert.equal(r.compared, 3);
@@ -85,7 +85,7 @@ test("a mix counts only the trustworthy rows", async () => {
   const lane = await laneWith("mixed evidence", [
     { agree: true }, // old
     { agree: true }, // old
-    { agree: true, laneClass: "reuse", legacyClass: "reuse" }, // new
+    { agree: true, laneClass: "reuse", legacyClass: "reuse", stale: false }, // new
   ]);
   const r = await farm2.laneReadiness(lane);
   assert.equal(r.compared, 1, "only the current-logic row counts");
@@ -98,7 +98,7 @@ test("a pending row (no legacy decision yet) is not evidence either", async () =
   const lane = await laneWith("pending evidence", [
     null,
     null,
-    { agree: true, laneClass: "reuse", legacyClass: "reuse" },
+    { agree: true, laneClass: "reuse", legacyClass: "reuse", stale: false },
   ]);
   const r = await farm2.laneReadiness(lane);
   assert.equal(r.compared, 1);

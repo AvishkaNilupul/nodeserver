@@ -135,7 +135,7 @@ test("a lane becomes ready once it has enough shadow decisions", async () => {
       campaignId: "c" + i,
       status: "done",
       shadow: true,
-      result: { verdict: { decision: "farm" }, diff: { agree: true, laneClass: "spend", legacyClass: "spend" } },
+      result: { verdict: { decision: "farm" }, diff: { agree: true, laneClass: "spend", legacyClass: "spend", stale: false } },
     });
   }
   const r = await farm2.laneReadiness(lane.toObject());
@@ -172,6 +172,7 @@ test("a disagreement blocks promotion (force still overrides, and is audited)", 
           // intent grouping this finding disproved.
           laneClass: i === 0 ? "spend" : "reuse",
           legacyClass: "reuse",
+          stale: false,
           laneDecision: "farm",
           legacyDecision: "reuse_existing",
           accountDelta: 12,

@@ -137,6 +137,7 @@ test("a disagreement now BLOCKS promotion instead of only warning", async () => 
           agree: i === 0 ? false : true,
           laneClass: i === 0 ? "spend" : "reuse",
           legacyClass: "reuse",
+          stale: false,
           laneDecision: "farm",
           legacyDecision: "reuse_existing",
           accountDelta: 12,
