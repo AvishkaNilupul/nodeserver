@@ -55,9 +55,17 @@ async function verifyTask(taskDoc) {
   // Resolve what this campaign actually promises. campaignItems is the same
   // resolver the listing path uses, including the non-Latin placeholder fix —
   // a Cyrillic or CJK drop name is a real item, not an unresolved placeholder.
+  //
+  // Its signature is (campaignId, game, campaignName) — three positional
+  // arguments, NOT the task. Passing the task object made campaignId an object,
+  // so the Twitch fetch failed and every single task reported "could not
+  // resolve campaign items", which made the audit read as though all 16
+  // unlisted tasks were broken. In a LIVE lane it would have been worse:
+  // publishPrimary gates on this, so nothing would ever have been listed.
   let items = [];
   try {
-    items = (await L.campaignItems(task)) || [];
+    items =
+      (await L.campaignItems(task.campaignId, task.game, task.campaignName)) || [];
   } catch (e) {
     return {
       ok: false,
