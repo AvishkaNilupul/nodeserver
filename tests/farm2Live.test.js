@@ -118,8 +118,9 @@ test("a lane with no shadow evidence is NOT ready to go live", async () => {
   const lane = await FarmLane.create({ game: "Ready Test", gameKey: "ready test", mode: "shadow" });
   const r = await farm2.laneReadiness(lane.toObject());
   assert.equal(r.ready, false);
-  assert.match(r.blockers.join(" "), /shadow decision/i);
+  assert.match(r.blockers.join(" "), /comparable against the legacy engine/i);
   assert.equal(r.shadowDecisions, 0);
+  assert.equal(r.compared, 0);
 });
 
 test("a lane becomes ready once it has enough shadow decisions", async () => {
@@ -134,7 +135,7 @@ test("a lane becomes ready once it has enough shadow decisions", async () => {
       campaignId: "c" + i,
       status: "done",
       shadow: true,
-      result: { verdict: { decision: "farm" }, diff: { agree: true } },
+      result: { verdict: { decision: "farm" }, diff: { agree: true, laneClass: "spend", legacyClass: "spend" } },
     });
   }
   const r = await farm2.laneReadiness(lane.toObject());
@@ -166,6 +167,11 @@ test("a disagreement blocks promotion (force still overrides, and is audited)", 
         verdict: { decision: "farm" },
         diff: {
           agree: i !== 0,
+          // laneClass is what marks a row as scored by the CURRENT diff logic;
+          // the gate ignores rows without it, since those were scored by the
+          // intent grouping this finding disproved.
+          laneClass: i === 0 ? "spend" : "reuse",
+          legacyClass: "reuse",
           laneDecision: "farm",
           legacyDecision: "reuse_existing",
           accountDelta: 12,

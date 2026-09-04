@@ -86,18 +86,15 @@ async function laneReadiness(lane) {
     blockers.push("live-mode steps unavailable: " + e.message);
   }
 
-  // 2. There must be shadow evidence to promote ON.
+  // 2. There must be shadow evidence to promote ON. Counted for information
+  //    here; the blocking threshold below is applied to COMPARABLE evidence,
+  //    because a decision the legacy engine never weighed in on proves nothing.
   const decided = await FarmJob.countDocuments({
     laneKey: lane.gameKey,
     kind: "decide",
     status: "done",
     shadow: true,
   });
-  if (decided < MIN_SHADOW_DECISIONS) {
-    blockers.push(
-      `only ${decided} shadow decision(s) recorded — need at least ${MIN_SHADOW_DECISIONS} before promoting`,
-    );
-  }
 
   // 3. Disagreement with the legacy engine BLOCKS promotion.
   //
@@ -122,9 +119,28 @@ async function laneReadiness(lane) {
     .limit(25)
     .select("result")
     .lean();
+  // Only trust comparisons produced by the CURRENT diff logic.
+  //
+  // `laneClass` is written by the action-class diff. Rows recorded before it
+  // existed were scored by the old intent-based grouping, which reported
+  // "farm vs reuse_existing" as agreement — the exact mistake that made this
+  // gate necessary. Counting those would let a lane be promoted on evidence
+  // from the logic this gate replaced, so a row without a laneClass is not
+  // evidence at all.
   const compared = recent
     .map((r) => r.result && r.result.diff)
-    .filter((d) => d && d.agree !== null && d.agree !== undefined);
+    .filter(
+      (d) => d && d.agree !== null && d.agree !== undefined && d.laneClass,
+    );
+  if (compared.length < MIN_SHADOW_DECISIONS) {
+    blockers.push(
+      `only ${compared.length} decision(s) comparable against the legacy engine — need at least ${MIN_SHADOW_DECISIONS}` +
+        (decided > compared.length
+          ? ` (${decided} recorded, but ${decided - compared.length} predate the current comparison logic or have no legacy row yet)`
+          : ""),
+    );
+  }
+
   const diffs = compared.filter((d) => d.agree === false);
   if (diffs.length) {
     const detail = diffs

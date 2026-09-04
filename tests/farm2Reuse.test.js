@@ -131,6 +131,8 @@ test("a disagreement now BLOCKS promotion instead of only warning", async () => 
         // The exact shape the trial produced: lane wants to spend, legacy reused.
         diff: {
           agree: i === 0 ? false : true,
+          laneClass: i === 0 ? "spend" : "reuse",
+          legacyClass: "reuse",
           laneDecision: "farm",
           legacyDecision: "reuse_existing",
           accountDelta: 12,
