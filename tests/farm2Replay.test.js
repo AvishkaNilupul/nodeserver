@@ -417,6 +417,174 @@ test("probe decisions are only PARTIAL fidelity when cold-start probing is on", 
   assert.equal(off.fidelity, replay.FIDELITY.EXACT);
 });
 
+// --- The probe gate is only load-bearing on two branches --------------------
+//
+// Prod, 2026-09-04: probeColdStart is ON there, so probeGateFor downgraded every
+// one of 363 rows to partial and the harness scored nothing. The budget half of
+// the gate really is unreconstructable — but demandAllocation only READS
+// probeAllowed on two branches. Everywhere else the unknown value cannot change
+// the output, so the row is exact. Measured on those 363 rows: 53 had no
+// snapshot (unreplayable, correctly), 27 sat on a probe-reachable branch
+// (partial, correctly), 283 did not (78%) — and those must score exact.
+
+const COLD_START = { ...AF, probeColdStart: true, probeMaxSellers: 1 };
+
+test("THE PROD CASE: research, sellers > probeMaxSellers, d below the half tier is EXACT with cold-start ON", async () => {
+  // Below the demand floor WITH real rivals selling: the market has spoken, it
+  // is a plain skip, and probeAllowed is never consulted. The unreconstructable
+  // probe budget cannot touch this row.
+  const game = "Rival Heavy Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 4,
+    sellers: 25, // > probeMaxSellers (1): a proven dud, not an untested market
+  });
+  const task = {
+    game,
+    campaignId: "p1",
+    decision: "skip_low_demand",
+    demandScore: 4,
+    hadResearch: true,
+    internalSales: 0,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: COLD_START });
+  assert.equal(out.fidelity, replay.FIDELITY.EXACT, (out.gaps || []).join(","));
+  assert.equal(out.verdict, "agree", out.detail);
+  assert.equal(out.probeGateMatters, false, "checked, and found irrelevant for these inputs");
+  assert.ok(!(out.gaps || []).includes("probe_budget_unreconstructable"));
+});
+
+test("high demand with cold-start ON is exact too — the tier is settled before probing is considered", async () => {
+  const game = "Proven Cold Start Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 90,
+    sellers: 0, // few sellers, but irrelevant: d is far above the floor
+  });
+  const task = {
+    game,
+    campaignId: "p2",
+    decision: "farm",
+    demandScore: 90,
+    hadResearch: true,
+    internalSales: 0,
+    targetAccounts: 30,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: COLD_START });
+  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
+  assert.equal(out.verdict, "agree", out.detail);
+  assert.equal(out.probeGateMatters, false);
+});
+
+test("a probe-REACHABLE branch stays partial: sub-floor score with an untested market", async () => {
+  // sellers <= probeMaxSellers and d below the floor is exactly where
+  // probeAllowed decides probe-vs-skip, and the budget half of it cannot be
+  // rebuilt. The honest answer is partial — reported, never counted.
+  const game = "Untested Cold Start Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 4,
+    sellers: 0,
+  });
+  const task = {
+    game,
+    campaignId: "p3",
+    decision: "probe",
+    demandScore: 4,
+    hadResearch: true,
+    internalSales: 0,
+    targetAccounts: 5,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: COLD_START });
+  assert.equal(out.fidelity, replay.FIDELITY.PARTIAL);
+  assert.equal(out.probeGateMatters, true);
+  assert.ok(out.gaps.includes("probe_budget_unreconstructable"));
+});
+
+test("no market data and no sales is probe-reachable as well — partial", async () => {
+  // The other branch that reads probeAllowed: an unscanned game with no own
+  // sales is the original unknown-game probe.
+  const game = "Never Scanned Cold Start Game";
+  await reset(game);
+  const task = {
+    game,
+    campaignId: "p4",
+    decision: "probe",
+    demandScore: null,
+    hadResearch: false,
+    internalSales: 0,
+    decidedAt: hoursAgo(30),
+  };
+  const out = await replay.replayDecision(task, { af: COLD_START });
+  assert.equal(out.fidelity, replay.FIDELITY.PARTIAL);
+  assert.equal(out.probeGateMatters, true);
+});
+
+test("probeGateLoadBearing asks the economics rather than restating them", () => {
+  const rivals = { demandScore: 4, sellers: 25, scannedAt: new Date() };
+  const untested = { demandScore: 4, sellers: 0, scannedAt: new Date() };
+  const proven = { demandScore: 90, sellers: 0, scannedAt: new Date() };
+  const none = { count: 0, revenue: 0, avgPrice: 0 };
+  assert.equal(replay.probeGateLoadBearing(rivals, COLD_START, none), false);
+  assert.equal(replay.probeGateLoadBearing(untested, COLD_START, none), true);
+  assert.equal(replay.probeGateLoadBearing(proven, COLD_START, none), false);
+  assert.equal(replay.probeGateLoadBearing(null, COLD_START, none), true, "no market data probes");
+  // With cold-start OFF the sub-floor branch never probes, so probeAllowed is
+  // dead there — but the original no-market-data probe predates the cold-start
+  // switch and reads it regardless. Both are the economics' answer, not ours.
+  assert.equal(replay.probeGateLoadBearing(untested, AF, none), false);
+  assert.equal(replay.probeGateLoadBearing(null, AF, none), true);
+});
+
+test("when the probe gate is irrelevant the row drops the gap and the summary scores it", async () => {
+  const game = "Scored Cold Start Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 3,
+    sellers: 40,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    await AutoFarmTask.create({
+      game,
+      campaignId: "s" + i,
+      decision: "skip_low_demand",
+      status: "skipped",
+      demandScore: 3,
+      hadResearch: true,
+      internalSales: 0,
+      decidedAt,
+    });
+  }
+  const report = await replay.replayHistory({ game, af: COLD_START });
+  assert.equal(report.examined, 3);
+  assert.equal(report.scored, 3, "exact rows are scored");
+  assert.equal(report.agree, 3);
+  assert.equal(
+    report.gapCounts.probe_budget_unreconstructable,
+    undefined,
+    "the gap is gone from the breakdown for rows it cannot affect",
+  );
+});
+
 // --- The summary and the gate ---------------------------------------------
 
 test("only EXACT-fidelity rows count as evidence in the summary", () => {

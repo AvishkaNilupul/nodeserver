@@ -322,6 +322,25 @@ async function probeGateFor(task, { af }) {
   };
 }
 
+// Does `probeAllowed` change what demandAllocation returns for these inputs?
+//
+// It is read on exactly two branches: no market data with a sales boost below
+// the half tier, and a sub-floor score with few enough rival sellers to count
+// as an untested market. On every other branch it cannot alter the output, so
+// not knowing it is provably irrelevant — §3's rule, applied to this input.
+//
+// Answered by asking demandAllocation itself, both ways, rather than by
+// restating those two conditions here. Restating them would need DEMAND_HALF,
+// the boost formula and probeMaxSellers spelled out in a second place — the
+// exact second source of truth this module exists to avoid — and would drift
+// the first time the tiers changed. The economics are the oracle.
+function probeGateLoadBearing(research, af, sales) {
+  const b = brain();
+  const allowed = b.demandAllocation(research, af, sales, { probeAllowed: true });
+  const denied = b.demandAllocation(research, af, sales, { probeAllowed: false });
+  return JSON.stringify(allowed) !== JSON.stringify(denied);
+}
+
 // Combine the three into one input set.
 async function reconstructInputs(task, { af, now = Date.now() } = {}) {
   const af2 = af || settings.getAutoFarm();
@@ -331,7 +350,35 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
     probeGateFor(task, { af: af2 }),
   ]);
 
-  const parts = [salesPart, researchPart, probePart];
+  // The probe budget is never reconstructable (see probeGateFor), and with
+  // probeColdStart ON that downgraded EVERY row: 0 scored of 363 on prod
+  // (2026-09-04). But it only matters where it can change the answer. Measured
+  // on those same 363 rows: 283 had research, more rival sellers than
+  // probeMaxSellers and a sub-floor score — the branch where `probeAllowed` is
+  // dead — and so are exact. The remaining rows (no snapshot, or a genuinely
+  // probe-reachable branch) keep their honest verdicts.
+  let probe = probePart;
+  let probeGateMatters = null; // null: not applicable (gate inert or inputs unreplayable)
+  if (
+    probe.gaps.includes("probe_budget_unreconstructable") &&
+    salesPart.fidelity !== FIDELITY.UNREPLAYABLE &&
+    researchPart.fidelity !== FIDELITY.UNREPLAYABLE
+  ) {
+    probeGateMatters = probeGateLoadBearing(researchPart.research, af2, salesPart.sales);
+    if (!probeGateMatters) {
+      probe = {
+        ...probe,
+        fidelity: FIDELITY.EXACT,
+        gaps: probe.gaps.filter((g) => g !== "probe_budget_unreconstructable"),
+        note:
+          "probe gate is not load-bearing for these inputs — demandAllocation returns the " +
+          "same answer whether or not probing was allowed, so the unreconstructable budget " +
+          "cannot affect this row",
+      };
+    }
+  }
+
+  const parts = [salesPart, researchPart, probe];
   const gaps = parts.flatMap((p) => p.gaps);
   const notes = parts.map((p) => p.note).filter(Boolean);
 
@@ -346,7 +393,11 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
     af: af2,
     research: researchPart.research,
     sales: salesPart.sales,
-    probeAllowed: probePart.probeAllowed,
+    probeAllowed: probe.probeAllowed,
+    // true: probeAllowed decides this row and its budget half is unknown
+    // false: checked and found dead for these inputs (row stays exact)
+    // null: never checked (cold-start off, or an input was unreplayable)
+    probeGateMatters,
     fidelity,
     gaps,
     notes,
@@ -409,7 +460,14 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
     probeBlocked: !!alloc.probeBlocked,
   };
 
-  const out = { ...base, replayed, fidelity: inputs.fidelity, gaps: inputs.gaps, notes: inputs.notes };
+  const out = {
+    ...base,
+    replayed,
+    fidelity: inputs.fidelity,
+    gaps: inputs.gaps,
+    notes: inputs.notes,
+    probeGateMatters: inputs.probeGateMatters,
+  };
 
   // --- Score it ------------------------------------------------------------
   //
@@ -630,6 +688,7 @@ module.exports = {
   salesInputsFor,
   researchInputsFor,
   probeGateFor,
+  probeGateLoadBearing,
   summarise,
   FIDELITY,
   SNAPSHOT_RETENTION_DAYS,

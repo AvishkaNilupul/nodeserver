@@ -62,7 +62,7 @@ utils/farm2/replay.js          the harness
 utils/farm2/decisionClasses.js the shared decision vocabulary
 utils/farm2/steps/decide.js    the six gates (commit 2)
 scripts/farm2-replay.js        operator CLI (read-only)
-tests/farm2Replay.test.js      24 tests
+tests/farm2Replay.test.js      30 tests
 tests/farm2Gates.test.js       21 tests
 ```
 
@@ -134,6 +134,17 @@ sales boost is 0 and the cap is at its base **regardless of price**, so no price
 information is needed and the row is exact despite being unrecoverable in
 principle. Similarly, when `probeColdStart` is off the entire probe gate is
 inert and reconstructs exactly.
+
+The probe gate with `probeColdStart` **on** is the sharpest case. Its budget
+half is never reconstructable (§7.4), and the first version of the harness let
+that downgrade every row — on prod, all 363. But `demandAllocation` reads
+`probeAllowed` on only two branches; everywhere else the value is dead. Rather
+than restate those two conditions here (which would put `DEMAND_HALF` and the
+boost formula in a second place, to drift the first time the tiers move), the
+harness asks the economics directly: `probeGateLoadBearing()` runs
+`demandAllocation` with `probeAllowed` true and again with it false and compares
+the outputs. Identical means the unknown value cannot affect this row and the
+row is exact. Each row records `probeGateMatters` so the split is auditable.
 
 ## 4. How the scoring works
 
@@ -326,12 +337,16 @@ formality.
    configuration and may disagree for a reason that is not the lane's fault. The
    CLI prints the assumed values for this reason. **This is the largest
    unquantified risk in the design.**
-4. **Cold-start probing weakens probe rows.** The concurrent-probe budget counts
-   tasks by *current* status, so probe-vs-`skip_probe_budget` is not
-   reconstructable when `probeColdStart` is on. Those rows come back `partial`
-   and do not count. *(Prod run 2026-09-04: `probeColdStart` is ON, and this
-   downgraded every one of 363 rows. Addressed in the follow-up commit — the
-   downgrade now applies only where `probeAllowed` can change the output.)*
+4. **Cold-start probing weakens probe-reachable rows.** The concurrent-probe
+   budget counts tasks by *current* status, so on the two branches where
+   `demandAllocation` actually reads `probeAllowed` — no market data with a
+   sub-half sales boost, or a sub-floor score with at most `probeMaxSellers`
+   rivals — the row is `partial` and does not count. On every other branch the
+   value is dead and the row is exact (§3). *Prod run 2026-09-04:
+   `probeColdStart` is ON, and the first version of the harness downgraded all
+   363 rows on this alone — 0 scored. Measured on those rows: 53 had no
+   snapshot (unreplayable), 27 sat on a probe-reachable branch (partial), 283
+   did not. This version scores those 283.*
 5. **120-day horizon.** `MarketResearchSnapshot` has a TTL. Older decisions are
    unreplayable, and a row close to the boundary may vanish mid-run.
 6. **Replay shares the lane's blind spots by construction.** It runs the same
@@ -394,9 +409,13 @@ formality.
 
 ## 8. Verification done in the sandbox
 
-- `tests/farm2Replay.test.js` — 24 tests: the vocabulary, every fidelity tier,
+- `tests/farm2Replay.test.js` — 30 tests: the vocabulary, every fidelity tier,
   the exact 171h trial case from the task brief, self-validating demand
-  figures, a genuine disagreement, the readiness integration.
+  figures, a genuine disagreement, the readiness integration, and the
+  probe-gate cases from the prod run — the pinned one being: research present,
+  `sellers > probeMaxSellers`, score below the half tier, `probeColdStart` ON
+  → **exact**; the two probe-reachable branches → partial; and the summary
+  scoring such rows with the gap gone from `gapCounts`.
 - `tests/farm2Gates.test.js` — 21 tests: each of the six gates reached in
   isolation with the legacy row's decision and numbers, the legacy gate order,
   forced-game bypass, reuse-before-time-gate, partial coverage, seat trimming,
