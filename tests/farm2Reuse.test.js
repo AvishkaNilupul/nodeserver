@@ -47,6 +47,7 @@ test("farm vs reuse_existing is a DISAGREEMENT, not agreement", async () => {
     decision: "reuse_existing",
     status: "active",
     plannedAccounts: 18,
+    decidedAt: new Date(),
   });
   const diff = await decideStep.diffAgainstLegacy({
     game: "Diff Game",
@@ -70,6 +71,7 @@ test("reuse vs reuse agrees, and farm vs probe still agrees", async () => {
     campaignId: "c-r",
     decision: "reuse_existing",
     status: "active",
+    decidedAt: new Date(),
   });
   const same = await decideStep.diffAgainstLegacy({
     game: "Diff Game 2",
@@ -85,6 +87,7 @@ test("reuse vs reuse agrees, and farm vs probe still agrees", async () => {
     campaignId: "c-p",
     decision: "probe",
     status: "active",
+    decidedAt: new Date(),
   });
   const spend = await decideStep.diffAgainstLegacy({
     game: "Diff Game 3",
@@ -102,6 +105,7 @@ test("every skip_* reason is one class", async () => {
     campaignId: "c-s",
     decision: "skip_ends_soon",
     status: "skipped",
+    decidedAt: new Date(),
   });
   const d = await decideStep.diffAgainstLegacy({
     game: "Skip Game",

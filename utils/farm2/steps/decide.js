@@ -262,15 +262,55 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) 
 // Returns null when there is nothing to compare against yet (the legacy engine
 // has not decided this campaign), which is a normal transient state, not a
 // mismatch.
+// How recent a legacy decision must be to be worth comparing against.
+//
+// The legacy tick runs every 10 minutes, so anything decided within a few hours
+// was made under substantially the same conditions. Beyond that the two engines
+// are answering different questions.
+const COMPARABLE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 async function diffAgainstLegacy(verdict) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const legacy = await AutoFarmTask.findOne({
     game: verdict.game,
     campaignId: verdict.campaignId,
   })
-    .select("decision plannedAccounts targetAccounts demandScore status reason")
+    .select("decision plannedAccounts targetAccounts demandScore status reason decidedAt")
     .lean();
   if (!legacy) return null;
+
+  // STALENESS GATE.
+  //
+  // Once the legacy engine acts on a campaign it never re-decides it — only
+  // retryable skips come back round. So a lane deciding a campaign today is
+  // routinely compared against a legacy decision made days ago, under
+  // conditions that no longer exist. Every one of the first trial's ten
+  // "disagreements" was this, and all ten were both engines being RIGHT for
+  // their own moment:
+  //
+  //   legacy said `probe` 171h ago when a game was untested; the probe found no
+  //   sales, so the lane now correctly says skip_low_demand
+  //   legacy said `farm` 229h ago when the game had no bots; it created them, so
+  //   the lane now correctly says reuse_existing
+  //
+  // Counting those as disagreement would block promotion forever on a
+  // comparison that was never valid. Counting the stale AGREEMENTS is just as
+  // wrong in the other direction — it inflates confidence. So a stale row is
+  // reported as "not comparable" (agree: null), exactly like having no legacy
+  // row at all, and the readiness gate ignores it.
+  const legacyAt = legacy.decidedAt ? new Date(legacy.decidedAt).getTime() : 0;
+  const ageMs = legacyAt ? Date.now() - legacyAt : Infinity;
+  if (ageMs > COMPARABLE_WINDOW_MS) {
+    return {
+      legacyDecision: legacy.decision,
+      legacyPlanned: Number(legacy.plannedAccounts || 0),
+      laneDecision: verdict.decision,
+      lanePlanned: Number(verdict.plannedAccounts || 0),
+      stale: true,
+      legacyAgeHours: Number.isFinite(ageMs) ? Math.round(ageMs / 3600000) : null,
+      agree: null,
+    };
+  }
 
   // Group decisions by the ACTION they cause, not by their string.
   //
@@ -305,6 +345,8 @@ async function diffAgainstLegacy(verdict) {
     laneClass,
     legacyClass,
     sameClass,
+    stale: false,
+    legacyAgeHours: Math.round(ageMs / 3600000),
     accountDelta: acctDelta,
     // "agree" is the headline the tab shows and what the readiness gate blocks
     // on. Account COUNTS may legitimately differ (the arbiter divides the pool
@@ -314,4 +356,10 @@ async function diffAgainstLegacy(verdict) {
   };
 }
 
-module.exports = { decideCampaign, diffAgainstLegacy, probeGate };
+module.exports = {
+  decideCampaign,
+  diffAgainstLegacy,
+  probeGate,
+  reuseCandidate,
+  COMPARABLE_WINDOW_MS,
+};

@@ -130,13 +130,25 @@ async function laneReadiness(lane) {
   const compared = recent
     .map((r) => r.result && r.result.diff)
     .filter(
-      (d) => d && d.agree !== null && d.agree !== undefined && d.laneClass,
+      (d) =>
+        d &&
+        d.agree !== null &&
+        d.agree !== undefined &&
+        d.laneClass &&
+        // A stale row compares a fresh lane decision against a legacy decision
+        // made hours or days earlier, under conditions that no longer hold. It
+        // is not evidence in EITHER direction — see the staleness gate in
+        // steps/decide.js.
+        !d.stale,
     );
+  const stale = recent
+    .map((r) => r.result && r.result.diff)
+    .filter((d) => d && d.stale).length;
   if (compared.length < MIN_SHADOW_DECISIONS) {
     blockers.push(
       `only ${compared.length} decision(s) comparable against the legacy engine — need at least ${MIN_SHADOW_DECISIONS}` +
         (decided > compared.length
-          ? ` (${decided} recorded, but ${decided - compared.length} predate the current comparison logic or have no legacy row yet)`
+          ? ` (${decided} recorded; ${stale} compared against a legacy decision too old to be evidence, the rest predate the current comparison logic or have no legacy row yet)`
           : ""),
     );
   }
@@ -167,6 +179,7 @@ async function laneReadiness(lane) {
     warnings,
     shadowDecisions: decided,
     compared: compared.length,
+    stale,
     disagreements: diffs.length,
   };
 }
