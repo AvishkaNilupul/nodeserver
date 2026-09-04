@@ -4474,4 +4474,20 @@ module.exports = {
   // real accounts and new containers to do worse than reusing what is running.
   // Caught by the shadow trial before any lane went live. Read-only query.
   reusableTaskForGame,
+  // Additive exports for the lane engine's downstream gates
+  // (utils/farm2/steps/decide.js). The lane previously implemented only the
+  // sellability stage and reuse-first, so on any campaign this engine settles
+  // with the host, time, coverage, pool-floor, capacity or reuse-only gate a
+  // live lane would have carried on and spent. These let the lane run the SAME
+  // gates from the SAME helpers instead of re-deriving them. All are read-only
+  // (probeHost, manualFarmMap and autoSeatCapacity read the host, never write
+  // to it). No behaviour change to this engine.
+  probeHost,
+  isForcedGame,
+  manualFarmMap,
+  activeAutoBotCount,
+  autoSeatCapacity,
+  readyPoolQuery,
+  WILDCARD_CREDIT_CAP,
+  COUNT_MANUAL_AS_COVERAGE,
 };

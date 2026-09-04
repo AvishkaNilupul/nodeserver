@@ -7,6 +7,12 @@ of it is trusted.
 Companion to `docs/FARM2-PLAN.md` (the architecture) and
 `docs/FARM2-TASK-comparison-evidence.md` (the task).
 
+Two commits on this branch:
+
+1. **the replay harness** — the measurement (§1–§4)
+2. **the six downstream gates** — the safety work (§5.2), done second but the
+   prerequisite for the measurement meaning anything
+
 ---
 
 ## 1. Why the current comparison cannot work
@@ -54,8 +60,10 @@ offline, with no engine running.
 ```
 utils/farm2/replay.js          the harness
 utils/farm2/decisionClasses.js the shared decision vocabulary
+utils/farm2/steps/decide.js    the six gates (commit 2)
 scripts/farm2-replay.js        operator CLI (read-only)
 tests/farm2Replay.test.js      24 tests
+tests/farm2Gates.test.js       21 tests
 ```
 
 ### The key enabler
@@ -153,8 +161,8 @@ error in a new place.
 
 ## 5. Two findings the harness surfaced while being built
 
-Both are pre-existing, neither is caused by this change, and the second is the
-more serious.
+Both were pre-existing. The first is documented; the second was serious enough
+that it became the second commit on this branch.
 
 ### 5.1 `AutoFarmTask.demandScore` means two different things
 
@@ -173,46 +181,93 @@ this checkout (`autoFarmer.js` is additive-export-only here).
 
 Captured as `classes.recordsEffectiveDemand()`.
 
-### 5.2 The lane's decision vocabulary is a strict subset of the legacy engine's
+### 5.2 The lane's decision vocabulary WAS a strict subset of the legacy engine's
 
-| Legacy can emit | Lane can emit |
-|---|---|
-| `farm`, `probe`, `reuse_existing` | `farm`, `probe`, `reuse_existing` |
-| `skip_low_demand`, `skip_probe_budget` | `skip_low_demand`, `skip_probe_budget` |
-| `skip_ends_soon` | — |
-| `skip_already_covered` | — |
-| `skip_no_accounts` | — |
-| `skip_no_capacity` | — |
-| `skip_host_offline` | — |
-| `skip_reuse_only` | — |
+At `f7880c9`, `steps/decide.js` implemented the sellability stage and the
+reuse-first check and **nothing downstream of them**:
 
-`steps/decide.js` implements the sellability stage and the reuse-first check,
-and **nothing downstream of them**. It has no time gate, no coverage gate, no
-pool-floor gate, no capacity gate, no host-offline gate and no reuse-only gate.
-It imports `demandAllocation`, `salesOf`, `researchForGame`,
-`internalSalesForGame` and `reusableTaskForGame` from the brain, but not
-`countReadyPool`, `marketStockFloor`, `capForGame`, `fairShare`,
-`archiveHoldersByGame` or `ownedAccounts` — so `FARM2-PLAN.md`'s statement that
-all the economics are imported is currently aspirational rather than true.
+| Legacy can emit | Lane at `f7880c9` | Lane now |
+|---|---|---|
+| `farm`, `probe`, `reuse_existing` | yes | yes |
+| `skip_low_demand`, `skip_probe_budget` | yes | yes |
+| `skip_host_offline` | — | **yes** |
+| `skip_ends_soon` | — | **yes** |
+| `skip_already_covered` | — | **yes** |
+| `skip_no_accounts` | — | **yes** |
+| `skip_no_capacity` | — | **yes** |
+| `skip_reuse_only` | — | **yes** |
 
-The consequence is concrete: **on any campaign the legacy engine settles with
-one of those six gates, a live lane would carry on and spend accounts.** The
-coverage gate is the one that matters most — it is named in `FARM2-PLAN.md` as
-one of the hard-won pieces (the wildcard bug that silently blocked all farming),
-and a lane with no coverage gate would re-buy accounts for demand that is
-already covered.
+The consequence was concrete: **on any campaign the legacy engine settled with
+one of those six gates, a live lane would have carried on and spent accounts.**
+The coverage gate matters most — it is named in `FARM2-PLAN.md` as one of the
+hard-won pieces (the wildcard bug that silently blocked all farming), and a lane
+with no coverage gate would re-buy accounts for demand already covered. There
+was also a phantom disagreement hiding in the pool-floor case: with a zero grant
+the lane returned decision `farm` with `plannedAccounts: 0`, which compared as
+`spend` against a legacy `skip_no_accounts`.
 
-**Nobody has observed this because the comparison is broken.** Zero comparable
-pairs means zero opportunities to notice. That is the strongest argument I have
-that the verification gap is not a reporting nicety: the trial's whole purpose
-is to catch exactly this class of defect, and it caught the reuse-first gap on
-day one precisely because a comparison happened to work that day.
+**Nobody had observed this because the comparison was broken.** Zero comparable
+pairs means zero opportunities to notice. That is the strongest argument that
+the verification gap was never a reporting nicety: the trial's whole purpose is
+to catch exactly this class of defect, and it caught the reuse-first gap on day
+one precisely because a comparison happened to work that day.
 
-This proposal **does not implement the missing gates** — that is a larger change
-with its own risk surface and deserves its own review. What it does is make them
-*visible and named*: `classifyDisagreement()` labels such a difference
-`lane_missing_gate` rather than mixing it into a disagreement count, because the
-response is "implement the gate", not "work out which engine was right".
+#### What the second commit does about it
+
+`decideCampaign` now runs all six gates, **in the legacy order** (the comparison
+is only meaningful if both engines stop at the same gate for the same inputs):
+
+```
+sellability → host → reuse-first → time → coverage → pool floor → capacity → reuse-only → farm/probe
+```
+
+Each gate comes from the legacy engine's own helpers, exposed by **one additive
+hunk** on `autoFarmer.js`'s `module.exports` (`probeHost`, `isForcedGame`,
+`manualFarmMap`, `activeAutoBotCount`, `autoSeatCapacity`, `readyPoolQuery`,
+`WILDCARD_CREDIT_CAP`, `COUNT_MANUAL_AS_COVERAGE`). Nothing else in that file
+changes. Specifics worth knowing at review:
+
+- **Host gate.** `hostOnline = host ? probeHost(host) : false`, exactly as the
+  tick. No configured host is *offline*, not *unknown* — a lane on a box with no
+  farm host records `skip_host_offline` for everything, as legacy does. The
+  probe is memoised per cycle and goes through the SSH semaphore.
+- **Coverage gate.** Uses the exported `archiveHoldersByGame` (one game),
+  `ownedAccounts`, `marketStockFloor` and the two constants. The manual-bot
+  stash comes from `manualFarmMap`, memoised per cycle so every lane in the
+  cycle shares one sweep — see §7 for the cost.
+- **Pool floor.** The arbiter's `remainingAccounts` is the lane's `budgetMap`.
+  A zero grant is now `skip_no_accounts`, not "farm 0".
+- **Capacity gate.** Free containers from the cycle's snapshot; spare seats in
+  running bots (`autoSeatCapacity`, a config read per container) are consulted
+  **only when no container is free**, so the SSH cost is paid only when it can
+  change the answer.
+- **Reuse-only.** Legacy settles this at *claim* time inside `executeTask`. A
+  lane needs it at *decision* time, so `recycledPoolCount()` counts what that
+  claim would find. **This is the one place the lane leans on the shape of a
+  legacy query rather than calling it** — the recycled pass of
+  `claimPoolAccounts` (`readyPoolQuery()` + `^recycled after <game>$` +
+  `soldGames ≠ normGame(game)`), composed from exported primitives. If that
+  filter changes, this must change with it. A claim with `n = 0` was the
+  alternative; it claims nothing and therefore tells us nothing.
+- **`targetAccounts` now includes the market floor**, as the legacy row's
+  `wanted` does (and as replay check (c) rebuilds). Previously the lane
+  recorded the bare tier target.
+- **Every gate is a read.** A test asserts no `AutoFarmTask` or
+  `AvailableAccount` row is written or claimed by a full pass through all nine
+  stages, including the reuse-only pre-check.
+
+The decision context (host state, stash, owned set, coverage) can also be handed
+in as legacy's `ctx` shape, which is how the tests drive each gate without a
+host. `lane.js` is unchanged; the runner passes what it always did and the
+context resolves lazily.
+
+The vocabulary machinery in `decisionClasses.js` — `LANE_DECISIONS`,
+`LEGACY_ONLY_DECISIONS`, the `lane_missing_gate` taxonomy, the readiness caveat —
+is **kept, not removed**. `LANE_DECISIONS` is a separate declaration rather than
+an alias of `LEGACY_DECISIONS` on purpose: the next time a decision is added to
+the legacy engine and not to the lane, the gap reappears there, the comparison
+labels those disagreements `lane_missing_gate` again, and a test fails. It
+should currently have nothing to report, and a test asserts that too.
 
 ## 6. Changes to the existing gate
 
@@ -221,7 +276,8 @@ response is "implement the gate", not "work out which engine was right".
 - **`caveats`** — standing facts about the *engine* that apply to every lane,
   kept out of `warnings` (observations about *this lane's* evidence) so a clean
   lane still reads as clean. Folding them in would make that list never empty
-  and train an operator to ignore it. The vocabulary gap in §5.2 lives here.
+  and train an operator to ignore it. The vocabulary caveat is now inert (§5.2)
+  but the slot stays for the "no replay evidence" caveat.
 - **`disagreementKinds`** — the taxonomy split. A row with no
   `disagreementKind` counts as `unclassified`, never as benign, following the
   discipline already established for `laneClass` and `stale`.
@@ -245,7 +301,7 @@ than falling through to `"skip"`. The old default meant a decision added to the
 `AutoFarmTask` enum without being classified would read as "the lane is doing
 nothing" and agree with any skipping lane — the same
 absence-is-not-a-passing-value trap that has already bitten this comparison
-twice. A test now asserts that every value in the model's enum is classified.
+twice. A test asserts that every value in the model's enum is classified.
 
 ## 7. What this cannot tell you, and what needs checking on prod
 
@@ -255,9 +311,11 @@ formality.
 
 ### Weaknesses of the approach itself
 
-1. **Replay measures the demand stage, not the lane.** A lane could reproduce
-   every historical decision perfectly and still be unsafe, because the gates in
-   §5.2 do not exist. Replay agreement is **necessary, not sufficient**, and
+1. **Replay measures the demand stage, not the lane.** It proves the lane's
+   *use* of `demandAllocation` reproduces recorded decisions. It says nothing
+   about the six gates in §5.2, which are settled by state nobody snapshots.
+   Those are now implemented, but their only evidence is unit tests and the
+   shadow comparison — replay agreement is **necessary, not sufficient**, and
    should never be read as "safe to promote" on its own.
 2. **It proves decision parity, not outcome parity.** Both engines can decide
    `farm 10` and one can execute it badly. Nothing here touches execution,
@@ -271,13 +329,39 @@ formality.
 4. **Cold-start probing weakens probe rows.** The concurrent-probe budget counts
    tasks by *current* status, so probe-vs-`skip_probe_budget` is not
    reconstructable when `probeColdStart` is on. Those rows come back `partial`
-   and do not count.
+   and do not count. *(Prod run 2026-09-04: `probeColdStart` is ON, and this
+   downgraded every one of 363 rows. Addressed in the follow-up commit — the
+   downgrade now applies only where `probeAllowed` can change the output.)*
 5. **120-day horizon.** `MarketResearchSnapshot` has a TTL. Older decisions are
    unreplayable, and a row close to the boundary may vanish mid-run.
 6. **Replay shares the lane's blind spots by construction.** It runs the same
    imported economics, so a bug *inside* `demandAllocation` reproduces
    identically in both and reads as agreement. It validates the lane's *use* of
    the brain, not the brain.
+
+### Weaknesses the gates introduce
+
+7. **The stash sweep runs per lane cycle.** `manualFarmMap` reads every config
+   file on every host. Legacy pays that once per 10-minute tick; the lane
+   supervisor cycles every 3 minutes, so shadow lanes will sweep roughly three
+   times as often (once per cycle, shared across lanes, through the semaphore).
+   If that is too much for the Pi, the supervisor cadence or a TTL on the memo
+   is the knob — not skipping the sweep, which would change the coverage answer.
+8. **A live lane's skips are not written to `AutoFarmTask`.** Legacy records
+   every skip as a row with status `skipped`, which is what makes the RETRYABLE
+   set re-decide and what the Auto-farm tab shows. `lane.js` only enqueues an
+   execute job for `wouldFarm` verdicts, so a live lane's six new skips exist
+   only as `FarmJob` rows. Harmless in shadow; a real gap in live mode, and
+   pre-existing in shape (the two sellability skips had the same behaviour).
+   Needs its own change in `lane.js`/`execute.js` — not made here, because it
+   writes to a shared collection and deserves separate review.
+9. **`recycledPoolCount` depends on a query's shape** (§5.2). It has a test that
+   mirrors the `soldGames` term, but nothing ties it to `claimPoolAccounts`
+   mechanically.
+10. **Two fallbacks exist for an `autoFarmer` that predates the export hunk**
+    (`isForcedGame` → not forced; `probeHost` → single `readdir`). They make the
+    lane *more* conservative, not less, but on such a build it would disagree
+    with legacy on forced games. Deploy the hunk with the lane code.
 
 ### Specific things to confirm on production
 
@@ -287,42 +371,54 @@ formality.
   count collapses and the whole approach needs re-costing. **Check this first —
   everything else depends on it.**
 - **Run `node scripts/farm2-replay.js --days 110` and look at the real ratio.**
-  My claim is that this turns "0 comparable out of 300" into a usable sample. I
-  cannot demonstrate it. If `scored` comes back near zero the design has failed
-  on contact and the `gapCounts` breakdown will say which assumption broke.
-- **Whether the §5.2 gap shows up as real disagreements.** I predict a
-  meaningful number of `lane_missing_gate` rows on any game where the legacy
-  engine uses the coverage gate. If none appear, my reading of `decide.js` is
-  wrong and should be re-checked before anything is built on it.
+  The 2026-09-04 run gave 0 scored of 363 (all `partial`, all
+  `probe_budget_unreconstructable`) — the design failed on first contact, as
+  §7.4 warned, and `gapCounts` named the assumption. Re-run after the exactness
+  fix; the measured expectation is ~283 exact of 363.
+- **Run a shadow cycle with the gates and diff against legacy rows.** The six
+  new decisions should now appear in lane verdicts and, for campaigns the legacy
+  engine re-decides every tick (the RETRYABLE skips), agree with it. Any
+  `class_mismatch` on those is a real finding about one of the two engines.
+- **Whether the §5.2 gap showed up as real disagreements** before this commit.
+  If none appeared on prod, my reading of `decide.js` at `f7880c9` was wrong and
+  the gates work should be re-examined.
 - **Whether `af` settings changed in the replay window.** Worth reconstructing
   from deploy history or operator memory before trusting any run longer than a
   few weeks.
 - **Whether `hadResearch: true` on the skip path has corrupted anything else.**
   I found it while reading; I have not audited what else consumes that field.
+- **The stash sweep's cost on the Pi** at the 3-minute cadence (§7.7).
 - **The five pre-existing test failures** (below) — I assumed they are all the
   same orphan-file class as the documented one, but I have not confirmed that
   against the branches those utils live on.
 
 ## 8. Verification done in the sandbox
 
-- `tests/farm2Replay.test.js` — 24 new tests: the vocabulary, every fidelity
-  tier, the exact 171h trial case from the task brief, self-validating demand
+- `tests/farm2Replay.test.js` — 24 tests: the vocabulary, every fidelity tier,
+  the exact 171h trial case from the task brief, self-validating demand
   figures, a genuine disagreement, the readiness integration.
-- All 63 pre-existing farm2 tests still pass, unmodified. No existing test was
-  edited or deleted.
-- `npx eslint utils/farm2 scripts/farm2-replay.js tests/farm2Replay.test.js` —
-  clean.
-- Full suite: **638 pass, 5 fail**, against a baseline of **614 pass, 5 fail**.
-  The five failures are identical before and after and are all the same class —
-  a test file whose util lives on another branch:
-  `dropSetsListLight` (`utils/archiveExclusions`, documented in the brief),
-  plus `coworkerActs`, `farmDuration`, `operatorFarm` and `webbotFarmWatcher`.
-  The brief expected only the first; the other four are equally pre-existing on
-  this checkout and are **not** caused by this work.
+- `tests/farm2Gates.test.js` — 21 tests: each of the six gates reached in
+  isolation with the legacy row's decision and numbers, the legacy gate order,
+  forced-game bypass, reuse-before-time-gate, partial coverage, seat trimming,
+  the reuse-only `soldGames` term, read-only assertion across all nine stages,
+  per-cycle memoisation, and that `LEGACY_ONLY_DECISIONS` is empty.
+- All 87 pre-existing farm2 tests still pass. Three vocabulary tests in
+  `farm2Replay.test.js` were inverted to assert the gap is closed; no other
+  existing test was edited.
+- `npx eslint utils/farm2 utils/autoFarmer.js tests/farm2Gates.test.js` — clean.
+- Full suite: the same 5 pre-existing failures either side, all one class — a
+  test file whose util lives on another branch: `dropSetsListLight`
+  (`utils/archiveExclusions`, documented in the brief), plus `coworkerActs`,
+  `farmDuration`, `operatorFarm` and `webbotFarmWatcher`. The brief expected
+  only the first; the other four are equally pre-existing on this checkout and
+  are **not** caused by this work.
 
-Nothing in this change touches `utils/autoFarmer.js` or `utils/autoLister.js` —
-not even an added export. Nothing touches the lane runner, the budget arbiter,
-the shadow guards or the live-mode steps.
+`utils/autoLister.js` is untouched. `utils/autoFarmer.js` carries **exactly one
+additive hunk**, on `module.exports`, adding eight existing names. Per
+`FARM2-PLAN.md`'s deployment note, that hunk must be applied onto **prod's**
+copy of the file (4,516 lines, with the catalog integration this checkout does
+not have) — never by copying the local file up. Nothing touches the lane
+runner, the budget arbiter, the shadow guards or the live-mode steps.
 
 ## 9. If you want the stronger version later
 

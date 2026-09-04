@@ -32,29 +32,37 @@ const LEGACY_DECISIONS = Object.freeze([
   "skip_reuse_only",
 ]);
 
-// Everything utils/farm2/steps/decide.js can currently return.
+// Everything utils/farm2/steps/decide.js can return.
 //
-// This is a STRICT SUBSET of the above, and that is a live finding rather than
-// a design choice: the lane implements the sellability stage (demandAllocation)
-// and the reuse-first check, and nothing downstream of them. It has no time
-// gate, no coverage gate, no pool-floor gate, no capacity gate, no host-offline
-// gate and no reuse-only gate.
+// This used to be a STRICT SUBSET of the above — five of the eleven. The lane
+// implemented the sellability stage and reuse-first and nothing downstream, so
+// on any campaign the legacy engine settled with the host, time, coverage,
+// pool-floor, capacity or reuse-only gate, a live lane would have carried on
+// and spent. Nobody had observed it because the shadow comparison was broken
+// (zero comparable pairs, zero chances to notice).
 //
-// The consequence is specific and testable: on any campaign where the legacy
-// engine stops at one of those gates, the lane will carry on and say `farm` or
-// `probe`. That is a real disagreement — the lane would spend accounts the
-// legacy engine correctly declined to spend — and it must be reported as a lane
-// CAPABILITY GAP rather than mixed in with ordinary disagreements, because the
-// fix is "implement the gate", not "investigate which engine was right".
+// decide.js now runs all six gates, in the legacy order, from the legacy
+// engine's own exported helpers. This list is kept as a SEPARATE declaration
+// rather than aliased to LEGACY_DECISIONS on purpose: the moment a decision is
+// added to the legacy engine and not to the lane, the two diverge again, the
+// gap reappears in LEGACY_ONLY_DECISIONS, and the comparison starts labelling
+// those disagreements `lane_missing_gate` instead of burying them. The machinery
+// below is the tripwire for that; it should currently have nothing to report.
 const LANE_DECISIONS = Object.freeze([
   "farm",
   "probe",
   "reuse_existing",
   "skip_low_demand",
   "skip_probe_budget",
+  "skip_ends_soon",
+  "skip_no_accounts",
+  "skip_no_capacity",
+  "skip_host_offline",
+  "skip_already_covered",
+  "skip_reuse_only",
 ]);
 
-// The gates the lane cannot currently express.
+// The gates the lane cannot express. Expected to be EMPTY; a test asserts it.
 const LEGACY_ONLY_DECISIONS = Object.freeze(
   LEGACY_DECISIONS.filter((d) => !LANE_DECISIONS.includes(d)),
 );

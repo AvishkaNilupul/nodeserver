@@ -88,24 +88,33 @@ test("every decision in the AutoFarmTask enum is classified", () => {
   assert.deepEqual(unclassified, [], "unclassified decisions: " + unclassified.join(", "));
 });
 
-test("the lane's vocabulary gap is reported, not hidden", () => {
-  // The lane implements the sellability stage and reuse-first, and nothing
-  // downstream. This is the list of gates it has no equivalent of.
-  assert.ok(classes.LEGACY_ONLY_DECISIONS.includes("skip_already_covered"));
-  assert.ok(classes.LEGACY_ONLY_DECISIONS.includes("skip_ends_soon"));
-  assert.ok(classes.LEGACY_ONLY_DECISIONS.includes("skip_no_accounts"));
-  assert.ok(!classes.LANE_DECISIONS.includes("skip_already_covered"));
+test("the lane's vocabulary covers every legacy decision — the gap is closed", () => {
+  // The lane used to implement only the sellability stage and reuse-first, so
+  // six legacy gates sat outside its vocabulary. decide.js now runs all of
+  // them; this pins that the tripwire has nothing to report.
+  assert.deepEqual(classes.LEGACY_ONLY_DECISIONS, []);
+  for (const d of classes.LEGACY_DECISIONS) {
+    assert.ok(classes.LANE_DECISIONS.includes(d), `lane cannot emit ${d}`);
+  }
 });
 
-test("a disagreement caused by a missing gate is named as such", () => {
+test("with every gate implemented, farm-vs-skip is a genuine mismatch, not a missing gate", () => {
+  // Before the gates existed this pair was `lane_missing_gate` — deterministic,
+  // a feature request. Now both engines can reach skip_already_covered, so a
+  // difference here means one of them is WRONG about a real game and needs a
+  // human. The taxonomy stays as a tripwire for the next time the two
+  // vocabularies drift apart.
   const t = classes.classifyDisagreement("farm", "skip_already_covered");
-  assert.equal(t.kind, "lane_missing_gate");
-  assert.match(t.note, /cannot currently emit/);
+  assert.equal(t.kind, "class_mismatch");
 
-  // Both engines can emit both of these, so a difference is a real mismatch
-  // that needs a human rather than a feature.
   const g = classes.classifyDisagreement("farm", "reuse_existing");
   assert.equal(g.kind, "class_mismatch");
+
+  // An unclassified decision on either side is still not comparable at all.
+  assert.equal(
+    classes.classifyDisagreement("farm", "skip_some_future_thing").kind,
+    "not_comparable",
+  );
 });
 
 test("demandScore means different things on different rows", () => {
@@ -536,7 +545,7 @@ test("requireReplay makes missing replay evidence a blocker, not a caveat", asyn
   assert.match(on.blockers.join(" "), /no replay evidence supplied/);
 });
 
-test("the vocabulary gap is a standing caveat on every lane, clean or not", async () => {
+test("with every gate implemented, the vocabulary caveat no longer fires", async () => {
   await FarmJob.deleteMany({ laneKey: "caveat lane" });
   await FarmLane.deleteMany({ gameKey: "caveat lane" });
   const lane = await FarmLane.create({
@@ -545,8 +554,9 @@ test("the vocabulary gap is a standing caveat on every lane, clean or not", asyn
     mode: "shadow",
   });
   const r = await farm2.laneReadiness(lane.toObject());
-  assert.match(r.caveats.join(" "), /cannot emit/);
-  assert.match(r.caveats.join(" "), /skip_already_covered/);
+  assert.doesNotMatch(r.caveats.join(" "), /cannot emit/, "the gap is closed — no standing caveat");
+  // The OTHER caveat — no replay evidence supplied — is still expected.
+  assert.match(r.caveats.join(" "), /no replay evidence/);
 });
 
 test("a disagreement from a missing gate is reported as a feature gap", async () => {

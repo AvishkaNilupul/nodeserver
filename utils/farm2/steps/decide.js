@@ -138,18 +138,212 @@ async function reuseCandidate(game, { cycle, hostCache }) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Decision context.
+//
+// Legacy processCampaign receives a `ctx` the tick assembled once: the farm
+// host and whether it answered, the manual-bot stash, the auto system's own
+// account set, per-game archive coverage. The lane resolves the same things
+// lazily here and memoises them in the cycle's shared hostCache, so several
+// lanes running in one cycle never repeat a host sweep the legacy tick does
+// once. A caller may also hand in a ready-made `ctx` (tests do; a future
+// supervisor could), in which case nothing is fetched.
+//
+// Every one of these is a READ. Shadow mode's contract is "no writes, no
+// spending"; the probe, the stash sweep and the config reads are exactly the
+// reads the legacy engine performs each tick, routed through the cycle's SSH
+// semaphore. A lane that skipped them would decide differently from the engine
+// it is being measured against, and the comparison would be measuring the
+// skip rather than the lane.
+// ---------------------------------------------------------------------------
+
+// Memoise an async read in the per-cycle cache. The PROMISE is stored, so two
+// lanes asking at the same moment share one in-flight read.
+function memo(hostCache, key, fn) {
+  if (!hostCache) return fn();
+  if (!hostCache.has(key)) hostCache.set(key, Promise.resolve().then(fn));
+  return hostCache.get(key);
+}
+
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const emptyStash = () => ({ map: new Map(), wildcard: new Set(), logins: new Set() });
+
+// Legacy: `hostOnline = host ? await probeHost(host) : false`. No configured
+// farm host is OFFLINE, not unknown — the legacy engine records
+// skip_host_offline for every campaign in that state, and so must the lane.
+async function resolveHostState({ af, cycle, hostCache }) {
+  return memo(hostCache, "__farm2:host", async () => {
+    const b = brain();
+    const host = b.resolveFarmHost(af);
+    if (!host) return { host: null, hostOnline: false };
+    // probeHost carries the flap-tolerant retry the legacy engine learned the
+    // hard way (three attempts, seconds apart, after one false negative rewrote
+    // ~30 campaigns as unreachable). Fall back to a single readdir only if this
+    // checkout's autoFarmer predates the export.
+    const probe = () =>
+      typeof b.probeHost === "function"
+        ? b.probeHost(host)
+        : require("../../botHosts")
+            .readdir(host)
+            .then(() => true);
+    let hostOnline = false;
+    try {
+      hostOnline = !!(cycle ? await cycle.withHost(probe) : await probe());
+    } catch {
+      hostOnline = false;
+    }
+    return { host, hostOnline };
+  });
+}
+
+// The manual-bot stash: every login deployed on a manual bot, and the games it
+// farms. The legacy tick sweeps every config on every host once and uses an
+// EMPTY stash when the farm host is offline. This is the most expensive read in
+// the whole decision, so it is shared by every lane in the cycle.
+async function resolveStash({ hostOnline, cycle, hostCache }) {
+  if (!hostOnline) return emptyStash();
+  return memo(hostCache, "__farm2:stash", async () => {
+    const b = brain();
+    if (typeof b.manualFarmMap !== "function") return emptyStash();
+    // The same registry the legacy sweep excludes: every bot file any auto
+    // task has ever registered, whatever that task's status is now.
+    const AutoFarmTask = require("../../../models/AutoFarmTask");
+    const rows = await AutoFarmTask.find({ "bots.0": { $exists: true } }, { bots: 1 }).lean();
+    const autoKeys = new Set();
+    for (const t of rows) {
+      for (const bot of t.bots || []) autoKeys.add(bot.host + "|" + bot.file);
+    }
+    const sweep = () => b.manualFarmMap(autoKeys);
+    try {
+      return cycle ? await cycle.withHost(sweep) : await sweep();
+    } catch {
+      return emptyStash();
+    }
+  });
+}
+
+// Every account any auto task has ever been given — what the auto-lister can
+// deliver from, and so what counts as the system's OWN stock. null means
+// unknown, which the legacy gate reads conservatively (every non-stashed holder
+// is credited). Passed straight through here for the same reason.
+function resolveOwned({ hostCache }) {
+  return memo(hostCache, "__farm2:owned", () => brain().ownedAccounts());
+}
+
+// The coverage gate's inputs for one game, from the same helpers and the same
+// constants the legacy gate uses. `arch` may be supplied in legacy's
+// ctx.archiveHolders shape ({ holders, stashed, other }); otherwise it comes
+// from the exported one-game aggregation.
+async function coverageFor(game, { stash, owned, arch, hostCache }) {
+  const b = brain();
+  const gameKey = String(game).toLowerCase();
+  const holders =
+    arch ||
+    (await memo(hostCache, "__farm2:arch|" + gameKey, async () => {
+      const m = await b.archiveHoldersByGame([game], stash.logins, owned);
+      return m.get(gameKey) || { holders: 0, stashed: 0, other: 0 };
+    }));
+  const gameSpecificFarmers = stash.map.get(gameKey) ? stash.map.get(gameKey).size : 0;
+  // Both constants are exported by the legacy engine. The fallbacks are their
+  // current values and apply only if this checkout's autoFarmer predates the
+  // export — a wildcard account cannot deliver every campaign at once, and the
+  // manual fleet is the long-term stash, not stock for this campaign.
+  const wildcardCap = Number.isFinite(b.WILDCARD_CREDIT_CAP) ? b.WILDCARD_CREDIT_CAP : 0;
+  const countManual = b.COUNT_MANUAL_AS_COVERAGE === true;
+  const manualFarmers = gameSpecificFarmers + Math.min(stash.wildcard.size, wildcardCap);
+  const archiveHolders = holders.holders || 0;
+  // Fail closed exactly as the legacy gate does: a NaN here would make every
+  // comparison downstream false and read as "nothing is covered".
+  const coveredRaw = countManual ? manualFarmers + archiveHolders : archiveHolders;
+  return {
+    manualFarmers,
+    archiveHolders,
+    stashHolders: holders.stashed || 0,
+    otherHolders: holders.other || 0,
+    covered: Number.isFinite(coveredRaw) ? coveredRaw : 0,
+  };
+}
+
+// Free capacity: container slots first, then — ONLY when no slot is free —
+// spare seats inside running bots, which costs one config read per container
+// and so is paid only when it can change the answer. The legacy gate computes
+// both from a tick-start host snapshot; the cycle's free-container count is
+// the lane's equivalent of that snapshot.
+async function seatCapacityFor({ host, af, cycle, hostCache }) {
+  const b = brain();
+  const perBot = Math.max(1, Number(af.accountsPerBot) || 1);
+  let slotsFree;
+  if (cycle && Number.isFinite(cycle.totalContainers)) {
+    slotsFree = Math.max(0, cycle.totalContainers);
+  } else {
+    const active =
+      typeof b.activeAutoBotCount === "function" ? await b.activeAutoBotCount({}) : 0;
+    slotsFree = Math.max(0, (Number(af.maxAutoBots) || 0) - active);
+  }
+  if (slotsFree >= 1) return { seatCapacity: slotsFree * perBot, slotsFree, freeSeats: null };
+  const freeSeats = await memo(
+    hostCache,
+    "__farm2:freeSeats|" + (host ? host.id : "-"),
+    async () => {
+      if (!host || typeof b.autoSeatCapacity !== "function") return 0;
+      const read = () => b.autoSeatCapacity(host, af, {});
+      try {
+        return Number(cycle ? await cycle.withHost(read) : await read()) || 0;
+      } catch {
+        return 0;
+      }
+    },
+  );
+  return { seatCapacity: slotsFree * perBot + freeSeats, slotsFree, freeSeats };
+}
+
+// Reuse-only games (World of Tanks / UFL) never draw a fresh pool account. The
+// legacy engine settles this at CLAIM time: claimPoolAccounts with recycledOnly
+// finds nothing and executeTask rewrites the row as skip_reuse_only. A lane has
+// to know at DECISION time, so this counts what that claim would find — the
+// recycled pass of claimPoolAccounts, composed from its exported primitives.
+//
+// This is the one place this file leans on the SHAPE of a legacy query rather
+// than calling it: if the recycled filter in claimPoolAccounts changes, this
+// must change with it. The alternative was a claim with n=0, which claims
+// nothing and therefore tells us nothing.
+async function recycledPoolCount(game) {
+  const b = brain();
+  const { normGame } = require("../../gameLabel");
+  const AvailableAccount = require("../../../models/AvailableAccount");
+  const ready =
+    typeof b.readyPoolQuery === "function" ? b.readyPoolQuery() : { status: "available" };
+  return AvailableAccount.countDocuments({
+    ...ready,
+    claimedNote: new RegExp("^recycled after " + escapeRe(game) + "$", "i"),
+    soldGames: { $ne: normGame(game) },
+  });
+}
+
 // Decide one campaign.
 //
 // Returns a plain object describing the verdict. In shadow mode that object is
 // the ENTIRE output — nothing is written to AutoFarmTask, no pool account is
 // claimed, no host is written to — which is what lets a lane run against a live
 // game that the legacy engine is still really farming.
-async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) {
+//
+// GATE ORDER IS THE LEGACY ORDER. The comparison is only meaningful if the two
+// engines stop at the same gate for the same inputs, so the sequence below is
+// processCampaign's, not a tidier one:
+//
+//   sellability -> host -> reuse-first -> time -> coverage -> pool floor ->
+//   capacity -> reuse-only -> farm/probe
+//
+// Until this rewrite the lane implemented only the first and third of those,
+// so on any campaign the legacy engine settled at one of the other six a live
+// lane would have carried on and spent. That gap went unobserved because the
+// shadow comparison it should have surfaced in was itself broken.
+async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ctx }) {
   const game = campaign.game || campaign.name || "?";
   const af2 = af || settings.getAutoFarm();
   const b = brain();
 
-  // --- Sellability ---------------------------------------------------------
+  // --- 1. Sellability ------------------------------------------------------
   // Shadow lanes use the READ-ONLY research lookup. freshResearchForGame can
   // trigger a live marketplace re-scan, which is a real side effect (API spend,
   // rate-limit budget) and must not happen from a mode whose contract is
@@ -165,6 +359,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) 
   const alloc = b.demandAllocation(research, af2, salesRaw, { probeAllowed });
 
   const demandScore = research ? Number(research.demandScore || 0) : null;
+  const hrs = campaign.endAt ? (new Date(campaign.endAt) - Date.now()) / 3600000 : Infinity;
   const common = {
     game,
     campaignId: campaign.campaignId,
@@ -174,38 +369,52 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) 
     hadResearch: !!research,
     internalSales: sales.count,
     effectiveDemand: alloc.effective ?? null,
+    hoursLeft: Number.isFinite(hrs) ? Math.round(hrs * 10) / 10 : null,
   };
+  const skip = (decision, reason, extra = {}) => ({
+    ...common,
+    decision,
+    wouldFarm: false,
+    plannedAccounts: 0,
+    targetAccounts: 0,
+    reason,
+    ...extra,
+  });
 
   if (alloc.skip) {
     const budgetHold = alloc.probeBlocked && probeBudgetBlocked;
-    return {
-      ...common,
-      decision: budgetHold ? "skip_probe_budget" : "skip_low_demand",
-      wouldFarm: false,
-      plannedAccounts: 0,
-      targetAccounts: 0,
-      reason: alloc.probeBlocked
+    return skip(
+      budgetHold ? "skip_probe_budget" : "skip_low_demand",
+      alloc.probeBlocked
         ? budgetHold
           ? `Untested market — ${Number(af2.probeMaxGames) || 0} probes already running (budget full); queued.`
           : "Untested market, but within the post-failure cooldown — no accounts spent."
         : `Effective demand ${alloc.demand} (market research + ${sales.count} own recent sales) — items for this game don't sell.`,
-    };
+    );
   }
 
-  // --- Time window ---------------------------------------------------------
-  // The 12h floor gates the FRESH-account path only: warm bots carry
-  // accumulated watch time and can finish a drop that fresh accounts never
-  // could, so reuse is checked before this bites. Forced games bypass it.
-  const hrs = campaign.endAt
-    ? (new Date(campaign.endAt) - Date.now()) / 3600000
-    : Infinity;
+  // --- 2. Host gate --------------------------------------------------------
+  // Before reuse-first, as in the legacy engine: an unreachable host cannot
+  // restart a warm bot any more than it can take a fresh one.
+  const hostState =
+    ctx && Object.prototype.hasOwnProperty.call(ctx, "hostOnline")
+      ? { host: ctx.host || null, hostOnline: !!ctx.hostOnline }
+      : await resolveHostState({ af: af2, cycle, hostCache });
+  if (!hostState.hostOnline) {
+    return skip(
+      "skip_host_offline",
+      "Farm host " +
+        (hostState.host ? hostState.host.label || hostState.host.id : "?") +
+        " unreachable — will retry next tick.",
+    );
+  }
 
-  // --- Reuse-first ---------------------------------------------------------
-  // Checked BEFORE the budget, because reuse costs no pool accounts and no
-  // container slots: a lane with a zero account budget can still reuse. That
-  // ordering is the whole point — the legacy engine reuses in exactly this
-  // situation, and a lane that fell through to "farm 0 accounts" would simply
-  // stop farming a game that is currently being farmed fine.
+  // --- 3. Reuse-first ------------------------------------------------------
+  // Checked BEFORE the time gate and the budget, because reuse costs no pool
+  // accounts and no container slots, and warm bots carry accumulated watch
+  // time that can finish a drop fresh accounts never could. A lane with a zero
+  // account budget can still reuse; the legacy engine reuses in exactly this
+  // situation.
   const reuse = await reuseCandidate(game, { cycle, hostCache });
   if (reuse) {
     return {
@@ -215,8 +424,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) 
       plannedAccounts: reuse.accounts.length,
       targetAccounts: reuse.accounts.length,
       reuseTaskId: reuse.taskId,
-      reuseBots: reuse.bots.map((b) => b.container),
-      hoursLeft: Number.isFinite(hrs) ? Math.round(hrs * 10) / 10 : null,
+      reuseBots: reuse.bots.map((x) => x.container),
       // Reuse spends nothing from the cycle budget, so it is never "budget
       // limited" and must not be trimmed.
       budgetLimited: false,
@@ -224,14 +432,107 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) 
     };
   }
 
-  // --- Budget --------------------------------------------------------------
-  // The arbiter's sealed allowance is the hard ceiling. alloc.target is what the
-  // economics WANT; the grant is what the fleet can actually afford this cycle
-  // once every other lane has been considered.
-  const want = Math.max(0, Number(alloc.target) || 0);
-  const allowed = cycle ? cycle.remainingAccounts(lane.gameKey) : want;
-  const planned = Math.min(want, allowed);
+  // --- 4. Time gate --------------------------------------------------------
+  // FRESH-account path only, which is why it sits after reuse-first. Forced
+  // games (multi-day events whose per-day campaigns are each shorter than the
+  // floor) bypass it, and only it.
+  const forced = typeof b.isForcedGame === "function" ? b.isForcedGame(game, af2) : false;
+  if (hrs < af2.minHoursLeft && !forced) {
+    return skip(
+      "skip_ends_soon",
+      "Campaign ends in " +
+        Math.max(0, Math.round(hrs)) +
+        "h (< " +
+        af2.minHoursLeft +
+        "h) and no warm bots to reuse — too late to farm with fresh accounts.",
+    );
+  }
 
+  // --- 5. Coverage gate ----------------------------------------------------
+  // How much of the tier target is ALREADY covered by unsold accounts of the
+  // system's own holding this game's items. Only the uncovered remainder is
+  // worth new accounts. This is the gate whose wildcard bug once silently
+  // blocked all farming; it comes from the legacy helpers, not a rewrite.
+  const stash =
+    ctx && ctx.farmMap ? ctx.farmMap : await resolveStash({ hostOnline: true, cycle, hostCache });
+  const owned =
+    ctx && Object.prototype.hasOwnProperty.call(ctx, "owned")
+      ? ctx.owned
+      : await resolveOwned({ hostCache });
+  const archFromCtx =
+    ctx && ctx.archiveHolders && typeof ctx.archiveHolders.get === "function"
+      ? ctx.archiveHolders.get(String(game).toLowerCase()) || { holders: 0, stashed: 0, other: 0 }
+      : null;
+  const cov = await coverageFor(game, { stash, owned, arch: archFromCtx, hostCache });
+  const coverage = {
+    manualFarmers: cov.manualFarmers,
+    archiveHolders: cov.archiveHolders,
+    stashHolders: cov.stashHolders,
+    otherHolders: cov.otherHolders,
+  };
+
+  // Non-probe campaigns must at least fill every enabled market's shelf.
+  const floor = alloc.probe ? 0 : Number(b.marketStockFloor(af2)) || 0;
+  const wanted = Math.min(
+    Math.max(Number(alloc.target) || 0, floor),
+    alloc.cap || Number(af2.maxPerGame) || 0,
+  );
+  const uncovered = Math.max(0, wanted - cov.covered);
+  if (uncovered < 1) {
+    return skip(
+      "skip_already_covered",
+      "Demand target of " +
+        wanted +
+        " accounts is already covered by " +
+        cov.archiveHolders +
+        " unsold account(s) of its OWN holding this game's items. Not counted: " +
+        cov.manualFarmers +
+        " manual farmer(s), " +
+        cov.stashHolders +
+        " stashed holder(s), " +
+        cov.otherHolders +
+        " archive holder(s) it cannot sell.",
+      { targetAccounts: wanted, coverage },
+    );
+  }
+
+  // --- 6. Pool floor -------------------------------------------------------
+  // The arbiter's sealed allowance is the lane's fair share of the spendable
+  // pool, exactly as budgetMap is in the legacy tick. Fail closed alongside the
+  // coverage gate: `target < 1` is false for NaN.
+  const budget = cycle ? cycle.remainingAccounts(lane.gameKey) : uncovered;
+  const target = Math.min(uncovered, budget);
+  if (!Number.isFinite(target) || target < 1) {
+    return skip(
+      "skip_no_accounts",
+      "Pool has no spendable accounts (reserve floor " +
+        af2.poolReserve +
+        " protects manual work) — will retry when the pool refills.",
+      { targetAccounts: wanted, coverage },
+    );
+  }
+
+  // --- 7. Capacity gate ----------------------------------------------------
+  // Free SEATS, not just container slots: a running bot with a spare
+  // TwitchUsers slot can absorb accounts without a new container.
+  const cap = await seatCapacityFor({ host: hostState.host, af: af2, cycle, hostCache });
+  if (cap.seatCapacity < 1) {
+    return skip(
+      "skip_no_capacity",
+      "All " +
+        af2.maxAutoBots +
+        " auto-bot slots on " +
+        (hostState.host ? hostState.host.label || hostState.host.id : "?") +
+        " are busy and no running bot has a free seat — queued; retries when a " +
+        "campaign ends and frees capacity.",
+      // The legacy row keeps the intended plan on a capacity skip.
+      { plannedAccounts: target, targetAccounts: wanted, coverage },
+    );
+  }
+
+  // --- 8. Reuse-only -------------------------------------------------------
+  // Settled by the legacy engine at claim time; the lane settles it here so a
+  // shadow lane records what the legacy row will end up saying.
   const reuseOnly = (() => {
     try {
       return settings.isReuseOnlyGame(game);
@@ -239,22 +540,39 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) 
       return false;
     }
   })();
+  if (reuseOnly && (await recycledPoolCount(game)) < 1) {
+    return skip(
+      "skip_reuse_only",
+      "Reuse-only game (" +
+        game +
+        "): no fresh pool accounts are ever spent here — only accounts already " +
+        "farmed on this game. None of its own recycled accounts are free right " +
+        "now; will retry when one recycles back to the pool.",
+      { targetAccounts: wanted, coverage },
+    );
+  }
 
+  // --- 9. Plan -------------------------------------------------------------
+  // Trim to what free seats can hold, as the legacy plan does. targetAccounts
+  // is the full tier target INCLUDING the market floor — the same `wanted` the
+  // legacy row records, which is what backfill tops the task up toward and
+  // what the replay harness rebuilds to check against.
+  const planned = Math.min(target, cap.seatCapacity);
   return {
     ...common,
     decision: alloc.probe ? "probe" : "farm",
     wouldFarm: planned > 0,
     plannedAccounts: planned,
-    targetAccounts: want,
+    targetAccounts: wanted,
     probe: !!alloc.probe,
     coldStart: !!alloc.coldStart,
     reuseOnly,
-    hoursLeft: Number.isFinite(hrs) ? Math.round(hrs * 10) / 10 : null,
-    budgetLimited: planned < want,
+    coverage,
+    budgetLimited: planned < wanted,
     reason:
       (alloc.tierNote || "") +
-      (planned < want
-        ? ` — trimmed to ${planned} of ${want} by this cycle's account budget`
+      (planned < wanted
+        ? ` — trimmed to ${planned} of ${wanted} by this cycle's account budget and free seats`
         : ""),
   };
 }
