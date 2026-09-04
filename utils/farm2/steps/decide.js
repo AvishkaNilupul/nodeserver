@@ -300,12 +300,26 @@ async function diffAgainstLegacy(verdict) {
   // row at all, and the readiness gate ignores it.
   const legacyAt = legacy.decidedAt ? new Date(legacy.decidedAt).getTime() : 0;
   const ageMs = legacyAt ? Date.now() - legacyAt : Infinity;
+
+  const classOf = (d) => {
+    if (d === "farm" || d === "probe") return "spend";
+    if (d === "reuse_existing") return "reuse";
+    return "skip";
+  };
+
   if (ageMs > COMPARABLE_WINDOW_MS) {
     return {
       legacyDecision: legacy.decision,
       legacyPlanned: Number(legacy.plannedAccounts || 0),
       laneDecision: verdict.decision,
       lanePlanned: Number(verdict.plannedAccounts || 0),
+      // Classes are still recorded on a stale row. They are not used for
+      // agreement (agree stays null), but their PRESENCE marks the row as
+      // scored by the current logic — without them a stale row is
+      // indistinguishable from a pre-gate one and gets counted in both
+      // buckets, making the "recorded vs comparable" explanation wrong.
+      laneClass: classOf(verdict.decision),
+      legacyClass: classOf(legacy.decision),
       stale: true,
       legacyAgeHours: Number.isFinite(ageMs) ? Math.round(ageMs / 3600000) : null,
       agree: null,
