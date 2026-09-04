@@ -88,6 +88,7 @@ async function executeReuse({ verdict, dryRun }) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const hosts = require("../../botHosts");
   const botFactory = require("../../botFactory");
+  const botWaker = require("../../botWaker");
   const b = brain();
 
   const reusable = verdict.reuseTaskId
@@ -125,9 +126,36 @@ async function executeReuse({ verdict, dryRun }) {
     };
   }
 
+  // NEVER restart a container the RAM saver deliberately parked.
+  //
+  // utils/botWaker.js parks idle containers to save memory (~130MB each) and
+  // keeps a registry of what IT stopped, along with the wake logic — campaign
+  // grace windows, Stream Scout liveness, the idle-no-campaign case. Starting a
+  // parked container here would bypass all of that and undo the saving on the
+  // very next cycle, which is precisely the "two engines fighting over the same
+  // containers" failure this engine exists to avoid.
+  //
+  // botWaker owns waking. If a parked bot's game has a live campaign, its own
+  // wake pass will start it — with the liveness checks this step does not have.
+  // So a parked bot is skipped, not fought over.
+  let parked = new Set();
+  try {
+    const reg = await botWaker.readRegistry();
+    parked = new Set(Object.keys(reg || {}));
+  } catch {
+    // Registry unreadable: assume nothing is parked rather than refusing to
+    // start anything. The failure mode of a needless start (a no-op on a
+    // running container) is far milder than never farming.
+  }
+
   const started = [];
   const failed = [];
+  const skippedParked = [];
   for (const bot of bots) {
+    if (parked.has(bot.host + "|" + bot.container)) {
+      skippedParked.push(bot.container);
+      continue;
+    }
     try {
       await botFactory.startContainer(hosts.resolveHost(bot.host), bot.container);
       started.push(bot.container);
@@ -165,7 +193,7 @@ async function executeReuse({ verdict, dryRun }) {
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
 
-  if (!started.length) {
+  if (!started.length && !skippedParked.length) {
     throw new Error("no bot could be restarted: " + (failed.join("; ") || "unknown"));
   }
 
@@ -173,6 +201,9 @@ async function executeReuse({ verdict, dryRun }) {
     reuse: true,
     taskId: task._id,
     restarted: started,
+    // Reported, not treated as an error: botWaker parked these on purpose and
+    // owns waking them when their game's campaign warrants it.
+    skippedParked,
     failed,
     accounts: mine.length,
   };

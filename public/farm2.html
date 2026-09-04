@@ -45,6 +45,15 @@
   .panel .hd { padding: 12px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .panel .hd b { font-size: 14.5px; } .panel .bd { padding: 14px 16px; }
   .panel .hd .note { font-size:11.5px; color:var(--muted); }
+  details.panel > summary { list-style:none; cursor:pointer; user-select:none; }
+  details.panel > summary::-webkit-details-marker { display:none; }
+  details.panel > summary::before { content:"\25B8"; color:var(--muted); margin-right:8px; font-size:11px; transition:transform .15s; display:inline-block; }
+  details.panel[open] > summary::before { transform:rotate(90deg); }
+  details.panel > summary:hover { background:var(--surface-2); }
+  details.banner > summary { list-style:none; }
+  details.banner > summary::-webkit-details-marker { display:none; }
+  details.banner > summary::before { content:"\25B8"; color:var(--muted); margin-right:8px; font-size:11px; transition:transform .15s; display:inline-block; }
+  details.banner[open] > summary::before { transform:rotate(90deg); }
 
   label { display:block; font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing:.03em; }
   input, select { padding: 9px 11px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; outline:none; font-family:inherit; }
@@ -104,11 +113,12 @@
     </div>
   </div>
 
-  <div class="banner">
-    🧪 <b>Shadow first.</b> A lane in <span class="chip">shadow</span> runs the full decision pipeline and records what it <b>would</b> do — no pool claims, no host writes, no marketplace calls — while the legacy auto-farmer keeps really farming that game. Compare the two below, then promote.
+  <details class="banner" id="howPanel">
+    <summary style="cursor:pointer;user-select:none;color:var(--ink);font-weight:600;font-size:12.5px">How this works <span class="dim" style="font-weight:400">— shadow mode, ownership, and what is reused from the old engine</span></summary>
+    <div style="margin-top:10px">🧪 <b>Shadow first.</b> A lane in <span class="chip">shadow</span> runs the full decision pipeline and records what it <b>would</b> do — no pool claims, no host writes, no marketplace calls — while the legacy auto-farmer keeps really farming that game. Compare the two below, then promote.
     <br>🔒 <b>One owner per game.</b> Only a <span class="chip on">live</span> lane takes a game off the legacy engine, and it never touches an already-active task — in-flight campaigns finish under the engine that started them, so nothing can be stranded mid-handoff.
-    <br>🧠 <b>Same brain, new nervous system.</b> Demand tiers, sales boost, probe gates, pricing and the holdings gate all still come from the existing engine's own helpers. This layer replaces scheduling and isolation, not the economics.
-  </div>
+    <br>🧠 <b>Same brain, new nervous system.</b> Demand tiers, sales boost, probe gates, pricing and the holdings gate all still come from the existing engine's own helpers. This layer replaces scheduling and isolation, not the economics.</div>
+  </details>
 
   <div class="panel">
     <div class="hd">
@@ -127,7 +137,11 @@
   </div>
 
   <div class="panel">
-    <div class="hd"><b>Lanes</b><span class="note">one row per owned game — its own clock, its own errors, its own budget</span></div>
+    <div class="hd"><b>Lanes</b><span class="note">one row per owned game — its own clock, its own errors, its own budget</span>
+      <label style="margin-left:auto;display:flex;align-items:center;gap:6px;text-transform:none;font-size:12px;margin-bottom:0">
+        <input type="checkbox" id="showAllLanes" style="width:auto" /> show all <span id="laneCount" class="dim"></span>
+      </label>
+    </div>
     <div class="bd tblwrap">
       <table>
         <thead><tr>
@@ -143,12 +157,12 @@
     </div>
   </div>
 
-  <div class="panel">
-    <div class="hd">
+  <details class="panel" id="cmpPanel">
+    <summary class="hd">
       <b>Shadow comparison</b>
-      <span class="note">what the lane decided vs. what the legacy engine actually did — the evidence for going live</span>
+      <span class="note">lane vs legacy — click to load</span>
       <span style="margin-left:auto" id="cmpSummary"></span>
-    </div>
+    </summary>
     <div class="bd tblwrap">
       <table>
         <thead><tr>
@@ -156,25 +170,26 @@
         </tr></thead>
         <tbody id="cmpRows"><tr><td colspan="8" class="dim">No decisions recorded yet — run a cycle.</td></tr></tbody>
       </table>
+      <div style="margin-top:10px"><button class="btn ghost sm" id="cmpMore">Load 50 more</button></div>
     </div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <div class="hd">
+  <details class="panel" id="auditPanel">
+    <summary class="hd">
       <b>Drop checker</b>
       <span class="note">do the assigned accounts actually hold what a listing would promise? (read-only — safe on live tasks)</span>
       <button class="btn sm ghost" id="auditBtn" style="margin-left:auto">Run audit</button>
-    </div>
+    </summary>
     <div class="bd tblwrap">
       <table>
         <thead><tr><th>Game</th><th>Campaign</th><th>Verified / assigned</th><th>Listed</th><th>Finding</th></tr></thead>
         <tbody id="auditRows"><tr><td colspan="5" class="dim">Press “Run audit”.</td></tr></tbody>
       </table>
     </div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <div class="hd">
+  <details class="panel" id="jobsPanel">
+    <summary class="hd">
       <b>Jobs</b>
       <span class="note">every step is a durable row with its own retries — this is what replaces the in-memory progress log</span>
       <select id="jobFilter" style="margin-left:auto">
@@ -184,14 +199,15 @@
         <option value="done">Done</option>
         <option value="failed">Failed</option>
       </select>
-    </div>
+    </summary>
     <div class="bd tblwrap">
       <table>
         <thead><tr><th>When</th><th>Lane</th><th>Kind</th><th>Status</th><th>Att.</th><th>Campaign</th><th>Detail</th></tr></thead>
-        <tbody id="jobRows"><tr><td colspan="7" class="dim">Loading…</td></tr></tbody>
+        <tbody id="jobRows"><tr><td colspan="7" class="dim">Click to load.</td></tr></tbody>
       </table>
+      <div style="margin-top:10px"><button class="btn ghost sm" id="jobsMore">Load 50 more</button></div>
     </div>
-  </div>
+  </details>
 </main>
 
 <script>
@@ -220,7 +236,11 @@ async function api(url, opts){
   return body;
 }
 
-var state = { enabled:false, lanes:[] };
+var state = { enabled:false, lanes:[], showAllLanes:false, cmpLimit:25, jobsLimit:25 };
+// Panels fetch only when opened, and remember that choice. With 34 lanes the
+// page was pulling every table on load and again every 30s.
+function panelOpen(id){ try { return localStorage.getItem('farm2.'+id)==='1'; } catch(e){ return false; } }
+function rememberPanel(id, open){ try { localStorage.setItem('farm2.'+id, open?'1':'0'); } catch(e){} }
 
 function modeChip(m){
   if(m === 'live')   return '<span class="chip on">live</span>';
@@ -263,7 +283,17 @@ async function loadStatus(){
   if(s.budget && s.budget.reason && s.budget.reason !== 'ok') errBits.push('budget: ' + s.budget.reason);
   $('engineErr').innerHTML = errBits.length ? '<span class="err">' + esc(errBits.join(' · ')) + '</span>' : '';
 
-  $('laneRows').innerHTML = state.lanes.length ? state.lanes.map(function(l){
+  // Default view shows only lanes that need attention — live, erroring, paused
+  // or recently active. 34 idle shadow rows is a wall of text nobody reads.
+  var interesting = state.lanes.filter(function(l){
+    return l.mode === 'live' || l.lastError || l.state === 'paused' ||
+           (l.lastRunAt && (Date.now() - new Date(l.lastRunAt).getTime()) < 15*60*1000);
+  });
+  var shown = state.showAllLanes ? state.lanes : interesting;
+  $('laneCount').textContent = state.showAllLanes
+    ? '(' + state.lanes.length + ')'
+    : '(' + shown.length + ' of ' + state.lanes.length + ')';
+  $('laneRows').innerHTML = shown.length ? shown.map(function(l){
     var jobs = l.jobs || {};
     var jobStr = ['queued','running','done','failed'].filter(function(k){ return jobs[k]; })
       .map(function(k){ return k[0].toUpperCase() + ':' + jobs[k]; }).join(' ') || '—';
@@ -284,7 +314,9 @@ async function loadStatus(){
         '</select> ' +
         (l.mode === 'live' ? '' : '<button class="btn sm danger delLane" data-lane="' + esc(l._id) + '" data-game="' + esc(l.game) + '">Delete</button>') +
       '</td></tr>';
-  }).join('') : '<tr><td colspan="10" class="dim">No lanes yet — press “Seed trial lanes”.</td></tr>';
+  }).join('') : '<tr><td colspan="10" class="dim">' +
+      (state.lanes.length ? 'All ' + state.lanes.length + ' lanes are idle — tick “show all” to list them.'
+                          : 'No lanes yet — press “Seed trial lanes”.') + '</td></tr>';
 
   Array.prototype.forEach.call(document.querySelectorAll('.modeSel'), function(sel){
     sel.addEventListener('change', function(){ setMode(sel.getAttribute('data-lane'), sel.value); });
@@ -334,7 +366,7 @@ async function delLane(id, game){
 }
 
 async function loadCompare(){
-  var d = await api('/farm2/compare');
+  var d = await api('/farm2/compare?limit=' + state.cmpLimit);
   var s = d.stats || {};
   $('cmpSummary').innerHTML =
     '<span class="chip on">' + (s.agreeing||0) + ' agree</span> ' +
@@ -386,7 +418,7 @@ async function loadAudit(){
 
 async function loadJobs(){
   var f = $('jobFilter').value;
-  var d = await api('/farm2/jobs?limit=60' + (f ? '&status=' + encodeURIComponent(f) : ''));
+  var d = await api('/farm2/jobs?limit=' + state.jobsLimit + (f ? '&status=' + encodeURIComponent(f) : ''));
   $('jobRows').innerHTML = (d.jobs||[]).length ? d.jobs.map(function(j){
     var st = j.status === 'done' ? 'on' : (j.status === 'failed' ? 'off' : (j.status === 'running' ? 'warn' : ''));
     var detail = j.error ? '<span class="err">' + esc(j.error.slice(0,90)) + '</span>'
@@ -403,15 +435,33 @@ async function loadJobs(){
   }).join('') : '<tr><td colspan="7" class="dim">No jobs yet.</td></tr>';
 }
 
+// Only the header + lane table load unconditionally. The heavy tables load when
+// their panel is open, so a collapsed page is one small request instead of four.
 async function loadAll(){
   try { await loadStatus(); } catch(e){ $('laneRows').innerHTML = '<tr><td colspan="10" class="err">' + esc(e.message) + '</td></tr>'; }
-  try { await loadCompare(); } catch(e){ /* panel keeps its previous content */ }
-  try { await loadJobs(); } catch(e){ /* ditto */ }
+  if ($('cmpPanel').open)  { try { await loadCompare(); } catch(e){} }
+  if ($('jobsPanel').open) { try { await loadJobs(); } catch(e){} }
 }
 
 $('refreshBtn').addEventListener('click', loadAll);
-$('jobFilter').addEventListener('change', loadJobs);
-$('auditBtn').addEventListener('click', loadAudit);
+$('jobFilter').addEventListener('change', function(){ state.jobsLimit = 25; loadJobs(); });
+$('auditBtn').addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); loadAudit(); });
+
+$('showAllLanes').addEventListener('change', function(){ state.showAllLanes = this.checked; loadStatus(); });
+$('cmpMore').addEventListener('click', function(){ state.cmpLimit += 50; loadCompare(); });
+$('jobsMore').addEventListener('click', function(){ state.jobsLimit += 50; loadJobs(); });
+
+// Restore panel state, and fetch on first open rather than on page load.
+['cmpPanel','jobsPanel','auditPanel','howPanel'].forEach(function(id){
+  var el = $(id);
+  if (panelOpen(id)) el.open = true;
+  el.addEventListener('toggle', function(){
+    rememberPanel(id, el.open);
+    if (!el.open) return;
+    if (id === 'cmpPanel')  loadCompare();
+    if (id === 'jobsPanel') loadJobs();
+  });
+});
 
 $('toggleBtn').addEventListener('click', async function(){
   var turningOn = !state.enabled;
@@ -443,7 +493,11 @@ $('runBtn').addEventListener('click', async function(){
 });
 
 loadAll();
-setInterval(loadAll, 30000);
+if ($('cmpPanel').open)  loadCompare();
+if ($('jobsPanel').open) loadJobs();
+// 60s, and never while the tab is hidden — a background tab was re-querying
+// every table every 30 seconds for nothing.
+setInterval(function(){ if (!document.hidden) loadAll(); }, 60000);
 </script>
 <script src="/admin-nav.js"></script>
 </body>

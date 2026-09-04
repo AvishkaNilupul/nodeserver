@@ -268,3 +268,72 @@ test("execute honours the engine-wide dry-run flag without spending", async () =
     settings.getAutoFarm = orig;
   }
 });
+
+/* --------------------- churn + RAM-saver interaction ---------------------- */
+
+test("a reuse never restarts a container the RAM saver parked", async () => {
+  const botWaker = require("../utils/botWaker");
+  const botFactory = require("../utils/botFactory");
+  const origReg = botWaker.readRegistry;
+  const origStart = botFactory.startContainer;
+  const startedCalls = [];
+  // pi|twitchbotx42 is parked; pi|twitchbotx34 is not.
+  botWaker.readRegistry = async () => ({ "pi|twitchbotx42": { parkedAt: new Date().toISOString() } });
+  botFactory.startContainer = async (host, container) => { startedCalls.push(container); };
+  await AutoFarmTask.deleteMany({ game: "Park Test" });
+  const src = await AutoFarmTask.create({
+    game: "Park Test",
+    campaignId: "c-src",
+    decision: "reuse_existing",
+    status: "active",
+    assignedAccounts: ["p1", "p2"],
+    bots: [
+      { host: "pi", file: "a.json", container: "twitchbotx42" },
+      { host: "pi", file: "b.json", container: "twitchbotx34" },
+    ],
+  });
+  try {
+    const r = await executeStep.executeReuse({
+      verdict: { game: "Park Test", campaignId: "c-new", decision: "reuse_existing", reuseTaskId: src._id },
+      dryRun: false,
+    });
+    // Starting a parked container would undo the RAM saving on the next cycle
+    // and bypass botWaker's liveness/grace logic — the "two engines fighting"
+    // failure this engine exists to avoid.
+    assert.deepEqual(startedCalls, ["twitchbotx34"], "only the un-parked container is started");
+    assert.deepEqual(r.skippedParked, ["twitchbotx42"]);
+  } finally {
+    botWaker.readRegistry = origReg;
+    botFactory.startContainer = origStart;
+  }
+});
+
+test("everything parked is not treated as a failure", async () => {
+  const botWaker = require("../utils/botWaker");
+  const botFactory = require("../utils/botFactory");
+  const origReg = botWaker.readRegistry;
+  const origStart = botFactory.startContainer;
+  botWaker.readRegistry = async () => ({ "pi|onlybot": { parkedAt: new Date().toISOString() } });
+  botFactory.startContainer = async () => { throw new Error("should not be called"); };
+  await AutoFarmTask.deleteMany({ game: "All Parked" });
+  const src = await AutoFarmTask.create({
+    game: "All Parked",
+    campaignId: "c-src",
+    decision: "reuse_existing",
+    status: "active",
+    assignedAccounts: ["x"],
+    bots: [{ host: "pi", file: "a.json", container: "onlybot" }],
+  });
+  try {
+    // botWaker will wake it when the campaign warrants; that is not our error.
+    const r = await executeStep.executeReuse({
+      verdict: { game: "All Parked", campaignId: "c-new", decision: "reuse_existing", reuseTaskId: src._id },
+      dryRun: false,
+    });
+    assert.deepEqual(r.restarted, []);
+    assert.deepEqual(r.skippedParked, ["onlybot"]);
+  } finally {
+    botWaker.readRegistry = origReg;
+    botFactory.startContainer = origStart;
+  }
+});

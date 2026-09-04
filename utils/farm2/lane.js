@@ -123,6 +123,7 @@ async function runLane(lane, { cycle, af, hostCache }) {
     campaigns: 0,
     decisions: [],
     executed: [],
+    alreadyExecuted: 0,
     listed: [],
     jobsDrained: 0,
     monitor: null,
@@ -180,15 +181,37 @@ async function runLane(lane, { cycle, af, hostCache }) {
           // LIVE mode only: spend the granted budget and queue execution.
           // Shadow lanes stop here by contract — nothing below this line may
           // run without the operator having flipped the lane to live.
-          const take = cycle ? cycle.spendAccounts(lane.gameKey, verdict.plannedAccounts) : 0;
-          await jobs.enqueue({
-            lane: lane.game,
-            laneKey: lane.gameKey,
-            kind: "execute",
+          //
+          // But only if this campaign has not ALREADY been executed. The legacy
+          // engine treats a campaign it has acted on as settled and never
+          // revisits it; without this check the lane re-decided and re-executed
+          // the same live campaign every cycle, which meant a `docker start` on
+          // its containers every few minutes — a no-op on a running container,
+          // but pointless SSH churn that would also fight the RAM saver, and
+          // real load once several lanes are live.
+          const AutoFarmTask = require("../../models/AutoFarmTask");
+          const alreadyDone = await AutoFarmTask.findOne({
+            game: lane.game,
             campaignId: c.campaignId,
-            shadow: false,
-            payload: { verdict, granted: take },
-          });
+            status: { $in: ["active", "completed"] },
+            executedAt: { $ne: null },
+          })
+            .select("_id")
+            .lean();
+
+          if (alreadyDone) {
+            summary.alreadyExecuted += 1;
+          } else {
+            const take = cycle ? cycle.spendAccounts(lane.gameKey, verdict.plannedAccounts) : 0;
+            await jobs.enqueue({
+              lane: lane.game,
+              laneKey: lane.gameKey,
+              kind: "execute",
+              campaignId: c.campaignId,
+              shadow: false,
+              payload: { verdict, granted: take },
+            });
+          }
         }
       } catch (e) {
         summary.errors.push(`${c.campaignId}: ${e.message}`);
