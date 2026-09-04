@@ -28,6 +28,7 @@ const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 const { normGame } = require("./gameLabel");
+const { buildDecisionInputs } = require("./decisionInputs");
 // Ownership boundary with the new lane engine (utils/farm2/*). Required
 // directly rather than through utils/farm2/index.js so this stays a leaf
 // dependency: ownership.js pulls in only ./settings, and reads the FarmLane
@@ -1569,11 +1570,23 @@ async function processCampaign(c, ctx) {
     return !prior || prior.decision !== decision;
   }
 
+  // The inputs the sellability gate saw, snapshotted once `alloc` is known
+  // (below) and written by EVERY record() call on every path — including the
+  // ones that never wrote internalSales. The lane engine's replay reads it
+  // instead of reconstructing (utils/decisionInputs.js).
+  let recordedInputs = null;
   async function record(fields) {
     // upsert keeps the unique (game, campaignId) index happy on retries
     return AutoFarmTask.findOneAndUpdate(
       { game, campaignId: c.campaignId },
-      { $set: { ...base, ...fields, decidedAt: new Date() } },
+      {
+        $set: {
+          ...base,
+          ...fields,
+          ...(recordedInputs ? { decisionInputs: recordedInputs } : {}),
+          decidedAt: new Date(),
+        },
+      },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
   }
@@ -1618,6 +1631,14 @@ async function processCampaign(c, ctx) {
     probeBudgetBlocked = !recentlyFailed && !underBudget;
   }
   const alloc = demandAllocation(research, af, sales, { probeAllowed });
+  recordedInputs = buildDecisionInputs({
+    research,
+    sales,
+    af,
+    probeAllowed,
+    probeBudgetBlocked,
+    floor: alloc.probe ? 0 : marketStockFloor(af),
+  });
   if (alloc.skip) {
     // A cold-start candidate held off by the BUDGET is queued, not rejected —
     // record a RETRYABLE decision so it flows into a probe slot the moment one
@@ -4490,4 +4511,8 @@ module.exports = {
   readyPoolQuery,
   WILDCARD_CREDIT_CAP,
   COUNT_MANUAL_AS_COVERAGE,
+  // Additive export so the per-campaign decision can be driven directly by a
+  // test (tests/farm2DecisionInputs.test.js exercises the real record() path on
+  // the two branches that need no host). runOnce is unchanged.
+  processCampaign,
 };

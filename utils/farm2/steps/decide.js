@@ -22,6 +22,9 @@ const settings = require("../../settings");
 // `actionClass` for the live one) with no shared definition — two copies of the
 // rule that gates whether a lane may take over a real game.
 const classes = require("../decisionClasses");
+// The decision-inputs snapshot the legacy engine also writes; one shape for
+// both engines and for replay (utils/decisionInputs.js).
+const { buildDecisionInputs } = require("../../decisionInputs");
 
 // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
 // (and, on prod, the catalog integration) and requires autoLister lazily itself
@@ -358,6 +361,23 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   const { probeAllowed, probeBudgetBlocked } = await probeGate(game, af2);
   const alloc = b.demandAllocation(research, af2, salesRaw, { probeAllowed });
 
+  // Non-probe campaigns must at least fill every enabled market's shelf. Read
+  // here, once, because it is both a coverage-gate input and part of the
+  // recorded snapshot.
+  const floor = alloc.probe ? 0 : Number(b.marketStockFloor(af2)) || 0;
+
+  // What this decision saw, in the same shape the legacy engine records, so a
+  // lane-created row is replayable exactly as a legacy one. Carried on every
+  // verdict via `common`; the execute step persists it.
+  const recordedInputs = buildDecisionInputs({
+    research,
+    sales,
+    af: af2,
+    probeAllowed,
+    probeBudgetBlocked,
+    floor,
+  });
+
   const demandScore = research ? Number(research.demandScore || 0) : null;
   const hrs = campaign.endAt ? (new Date(campaign.endAt) - Date.now()) / 3600000 : Infinity;
   const common = {
@@ -370,6 +390,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
     internalSales: sales.count,
     effectiveDemand: alloc.effective ?? null,
     hoursLeft: Number.isFinite(hrs) ? Math.round(hrs * 10) / 10 : null,
+    decisionInputs: recordedInputs,
   };
   const skip = (decision, reason, extra = {}) => ({
     ...common,
@@ -471,8 +492,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
     otherHolders: cov.otherHolders,
   };
 
-  // Non-probe campaigns must at least fill every enabled market's shelf.
-  const floor = alloc.probe ? 0 : Number(b.marketStockFloor(af2)) || 0;
+  // `floor` was read once, above, alongside the snapshot.
   const wanted = Math.min(
     Math.max(Number(alloc.target) || 0, floor),
     alloc.cap || Number(af2.maxPerGame) || 0,

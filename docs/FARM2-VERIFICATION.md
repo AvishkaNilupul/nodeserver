@@ -7,11 +7,18 @@ of it is trusted.
 Companion to `docs/FARM2-PLAN.md` (the architecture) and
 `docs/FARM2-TASK-comparison-evidence.md` (the task).
 
-Two commits on this branch:
+The series on this branch, in order:
 
 1. **the replay harness** — the measurement (§1–§4)
-2. **the six downstream gates** — the safety work (§5.2), done second but the
-   prerequisite for the measurement meaning anything
+2. **the six downstream gates** — the safety work (§5.2)
+3. **probe-gate exactness** — the first prod run's finding (§7.4)
+4. **row fields are not inputs** — the second prod run's finding (§5.1)
+5. **recorded decision inputs** — replay stops reconstructing (§10)
+6. **`hadResearch` truthful on the sellability skip** — one token, own commit (§5.1)
+7. **`internalSales` written on the two paths that omitted it** — own commit (§5.1)
+
+Commits 6 and 7 change behaviour inside `utils/autoFarmer.js` and are separate so
+each can be deployed or held on its own.
 
 ---
 
@@ -58,12 +65,14 @@ the legacy engine has already made** as a test case, available immediately,
 offline, with no engine running.
 
 ```
-utils/farm2/replay.js          the harness
-utils/farm2/decisionClasses.js the shared decision vocabulary
-utils/farm2/steps/decide.js    the six gates (commit 2)
-scripts/farm2-replay.js        operator CLI (read-only)
-tests/farm2Replay.test.js      37 tests
-tests/farm2Gates.test.js       21 tests
+utils/farm2/replay.js               the harness
+utils/farm2/decisionClasses.js      the shared decision vocabulary
+utils/farm2/steps/decide.js         the six gates (commit 2)
+utils/decisionInputs.js             the recorded snapshot — one shape for both engines and replay (§10)
+scripts/farm2-replay.js             operator CLI (read-only)
+tests/farm2Replay.test.js           37 tests
+tests/farm2Gates.test.js            21 tests
+tests/farm2DecisionInputs.test.js   19 tests
 ```
 
 ### The key enabler
@@ -227,10 +236,18 @@ replayed row carries `salesBasis` (`window_unchanged` | `recorded_zero`) so a
 scored row can be traced to *why* its sales were trusted.
 
 The cost is honest: a `reuse_existing` row whose sales window has moved since
-the decision is now **unreplayable** rather than scored, because on that path
-not even the count at decision time is recorded. For a game that sells steadily
-(Black Desert, ~2 sales/week) that will drop older reuse rows out of the scored
-set. `§9.1` (`internalSalesForGame(game, { asOf })`) is what would recover them.
+the decision is **unreplayable** rather than scored, because on that path not
+even the count at decision time is recorded. For a game that sells steadily
+(Black Desert, ~2 sales/week) that drops older reuse rows out of the scored set.
+On prod the third run showed it: unreplayable rose 11 → 45 while the 15 false
+disagreements became agreements.
+
+**For rows recorded since commit 5 (§10), neither cost applies.** The snapshot
+carries the sales the gate saw, so a reuse row replays exactly whatever the
+window did afterwards; and commit 7 writes the flat `internalSales` on those two
+paths too, so the row itself stops lying. Commit 6 makes `hadResearch` truthful
+on the sellability skip. Rows from before those commits keep the behaviour
+described above; `§9.1` is what would recover *them*.
 
 ### 5.2 The lane's decision vocabulary WAS a strict subset of the legacy engine's
 
@@ -375,8 +392,10 @@ formality.
    `maxPerGame`, `perMarketStock` or the probe settings changed during the
    window, rows either side of the change are replayed under the wrong
    configuration and may disagree for a reason that is not the lane's fault. The
-   CLI prints the assumed values for this reason. **This is the largest
-   unquantified risk in the design.**
+   CLI prints the assumed values for this reason. **This was the largest
+   unquantified risk in the design.** *Closed for rows with a recorded snapshot
+   (§10): they replay under the settings then in force. Still applies to every
+   row from before commit 5 shipped.*
 4. **Cold-start probing weakens probe-reachable rows.** The concurrent-probe
    budget counts tasks by *current* status, so on the two branches where
    `demandAllocation` actually reads `probeAllowed` — no market data with a
@@ -386,9 +405,11 @@ formality.
    `probeColdStart` is ON, and the first version of the harness downgraded all
    363 rows on this alone — 0 scored. Measured on those rows: 53 had no
    snapshot (unreplayable), 27 sat on a probe-reachable branch (partial), 283
-   did not. This version scores those 283.*
+   did not. This version scores those 283. Closed entirely for recorded rows
+   (§10): the snapshot carries `probeAllowed`, so nothing is inferred.*
 5. **120-day horizon.** `MarketResearchSnapshot` has a TTL. Older decisions are
-   unreplayable, and a row close to the boundary may vanish mid-run.
+   unreplayable, and a row close to the boundary may vanish mid-run. *Recorded
+   rows (§10) do not read the snapshot collection at all.*
 6. **Replay shares the lane's blind spots by construction.** It runs the same
    imported economics, so a bug *inside* `demandAllocation` reproduces
    identically in both and reads as agreement. It validates the lane's *use* of
@@ -446,6 +467,18 @@ formality.
   new decisions should now appear in lane verdicts and, for campaigns the legacy
   engine re-decides every tick (the RETRYABLE skips), agree with it. Any
   `class_mismatch` on those is a real finding about one of the two engines.
+- **After commit 5 deploys, confirm the snapshot is being written.** Every new
+  `AutoFarmTask` row — legacy or lane, any decision — should carry
+  `decisionInputs.version: 1` with `research`, `sales`, `af`, `probeAllowed`
+  and `marketStockFloor` populated. A row with `decision` newer than the deploy
+  and no snapshot means the `processCampaign` hunk did not land on prod's copy
+  (its context lines were byte-identical at the last fingerprint, but prod-only
+  lines could sit between them — `git am -3`).
+- **Watch `inputsBasis.recorded` climb on each replay run.** It should track
+  the share of rows decided since the deploy, and `unreplayable` should fall
+  toward zero as pre-deploy rows age out of the 110-day window. If recorded
+  rows ever show a disagreement, that is a real finding: nothing on that row
+  was reconstructed.
 - **Whether the §5.2 gap showed up as real disagreements** before this commit.
   If none appeared on prod, my reading of `decide.js` at `f7880c9` was wrong and
   the gates work should be re-examined.
@@ -483,19 +516,37 @@ formality.
   `farm2Replay.test.js` were inverted to assert the gap is closed; no other
   existing test was edited.
 - `npx eslint utils/farm2 utils/autoFarmer.js tests/farm2Gates.test.js` — clean.
-- Full suite: the same 5 pre-existing failures either side, all one class — a
-  test file whose util lives on another branch: `dropSetsListLight`
-  (`utils/archiveExclusions`, documented in the brief), plus `coworkerActs`,
-  `farmDuration`, `operatorFarm` and `webbotFarmWatcher`. The brief expected
-  only the first; the other four are equally pre-existing on this checkout and
-  are **not** caused by this work.
+- Full suite after commit 5: **691 pass / 1 fail** (692), against a baseline on
+  `de4facd` of 672 / 1 — exactly the 19 new tests. The single failure is
+  `dropSetsListLight.test.js`, which needs `utils/archiveExclusions.js` from
+  another branch; identical before and after. (The four orphaned test files
+  that failed in earlier runs were un-tracked at `f83acb9`.) A clean clone of
+  the target branch reports a higher pass total than this checkout because it
+  carries test files this branch does not; the delta, not the total, is the
+  claim.
 
-`utils/autoLister.js` is untouched. `utils/autoFarmer.js` carries **exactly one
-additive hunk**, on `module.exports`, adding eight existing names. Per
-`FARM2-PLAN.md`'s deployment note, that hunk must be applied onto **prod's**
-copy of the file (4,516 lines, with the catalog integration this checkout does
-not have) — never by copying the local file up. Nothing touches the lane
-runner, the budget arbiter, the shadow guards or the live-mode steps.
+- `tests/farm2DecisionInputs.test.js` — 19 tests: the snapshot shape and its
+  version check; the model keeps the sub-document under strict mode; **the real
+  legacy `record()`**, driven through `processCampaign` on the three branches
+  that need no host (sellability skip, host gate, dry-run reuse) — the last two
+  being the paths that never wrote `internalSales`; a re-decided row gets a
+  fresh snapshot; the lane writes the same shape and `execute` persists it;
+  replay is exact from a snapshot alone, uses the recorded settings over
+  today's (with the reconstruction as a control that *does* disagree), recovers
+  a drifted reuse row and a cold-start probe row, reconstructs an unknown
+  version with a gap, and treats an old row exactly as before.
+
+`utils/autoLister.js` is untouched. `utils/autoFarmer.js` carries, across the
+series: the `module.exports` hunk (commit 2; commit 5 adds `processCampaign`
+so the real write path is testable); one `require` and a ~12-line hunk inside
+`processCampaign` that snapshots the inputs and writes them from every
+`record()` call (commit 5); one token on the sellability skip (commit 6); one
+field on three `record()` calls (commit 7). Commit 5 is the first in the series
+to touch the body of `processCampaign`. Per `FARM2-PLAN.md`'s deployment note,
+every hunk must be applied onto **prod's** copy of the file (4,516 lines, with
+the catalog integration this checkout does not have) with `git am -3` — never by
+copying the local file up. Nothing touches the lane runner, the budget arbiter,
+the shadow guards or the live-mode steps.
 
 ## 9. If you want the stronger version later
 
@@ -508,13 +559,68 @@ Both are out of scope here (this checkout is additive-export-only, and prod runs
    replayable instead of unreplayable, which is currently the single largest
    source of dropped rows. Without it, the only alternative is copying the
    aggregation, which is the second source of truth this engine exists to avoid.
-2. **Snapshot the decision inputs onto `AutoFarmTask`** — a `decisionInputs`
-   sub-document written at `record()` time carrying the research values, the
-   sales figures and the `af` fingerprint. That removes reconstruction entirely
-   for every decision made after it ships, and closes the settings-versioning
-   hole in §7.3.
+2. ~~**Snapshot the decision inputs onto `AutoFarmTask`**~~ — **done, commit 5.
+   See §10.**
 
-The second is the real fix, and it is small. Replay exists because the inputs
-were not recorded; recording them going forward makes replay exact rather than
-best-effort, and would let the readiness gate require full-fidelity evidence
-without the caveats above.
+The first remains the only way to recover rows from *before* commit 5. It is
+not needed for anything recorded since.
+
+## 10. Recorded decision inputs (commit 5)
+
+Replay existed because the inputs a decision saw were not recorded, so they had
+to be rebuilt after the fact — and every rebuild has a hole the prod runs found
+one at a time: research snapshots expire (§7.5), a sale since the decision loses
+the price (§5.1), the probe budget can only be inferred (§7.4), and yesterday's
+decision was replayed under today's settings (§7.3). This commit records the
+inputs instead.
+
+**What.** A `decisionInputs` sub-document on `AutoFarmTask`:
+
+| field | source | why |
+|---|---|---|
+| `version` | `1` | checked for **equality** by the reader; anything else is reconstructed |
+| `at` | write time | — |
+| `research` | `{ demandScore, sellers, scannedAt }`, or `null` | what `demandAllocation` was given; an unscanned document is kept distinct from no document |
+| `sales` | `{ count, revenue, avgPrice }` | exactly what `salesOf()` returned |
+| `af` | `maxPerGame`, `probeColdStart`, `probeSize`, `probeMaxSellers`, `probeMaxGames`, `probeCooldownDays`, `perMarketStock`, `poolReserve`, `minHoursLeft` | every setting the sellability stage, the probe gate and the tier target read |
+| `probeAllowed`, `probeBudgetBlocked` | the probe gate's two outputs | the half that could never be rebuilt |
+| `marketStockFloor` | `alloc.probe ? 0 : marketStockFloor(af)` | the floor as it stood — it also depends on marketplace keys, so it is recorded as a value rather than re-derived |
+
+**Where it is written.** `utils/decisionInputs.js` is the **one** definition of
+the shape; the legacy engine, the lane and replay all import it and none
+describes it themselves.
+
+- Legacy: a `let recordedInputs` in `processCampaign`, populated the moment
+  `alloc` is known, and spread into `record()`'s `$set` — so **every** `record()`
+  call on **every** path writes it, including `reuse_existing` and
+  `skip_host_offline`, with no per-call-site edits. `skip_reuse_only`
+  (executeTask's later `updateOne`) keeps the farm-time snapshot from the same
+  tick. A re-decided RETRYABLE row gets a fresh snapshot each tick.
+- Lane: `decideCampaign` builds the same object and carries it on every verdict
+  via `common`; `execute.js` persists it from `upsertTask` and `executeReuse`.
+  A lane-created row is therefore replayable exactly like a legacy one.
+
+**How replay uses it.** `reconstructInputs` checks the snapshot **first**. A
+recognised version is taken whole — research, sales, the recorded `af`
+fingerprint overriding today's for the fields it covers, `probeAllowed`, the
+floor — with fidelity `exact`, no gaps, no `SaleSignal` query, no snapshot
+lookup, no probe sensitivity check. Every row reports `inputsBasis`
+(`recorded` | `reconstructed`) and `inputsVersion`; the summary and CLI show the
+split; `afAssumed` is now labelled as applying to reconstructed rows only.
+
+**What it deliberately does not do.**
+
+- A snapshot that *exists* but is not recognised — a later version, a malformed
+  write — is **not** trusted and **not** silently ignored: the row is
+  reconstructed and carries `decision_inputs_version_unknown`. A row with no
+  snapshot is reconstructed exactly as before, with no gap. Absence is never a
+  passing value.
+- It records the **sellability-stage** inputs only. Pool depth, container
+  capacity, host state and archive coverage — the inputs to the six downstream
+  gates — are not snapshotted. Replay's scope (§3) is unchanged; widening it is
+  a possible follow-up, not this commit.
+- It does nothing for rows written before it ships. Those keep every caveat in
+  §7 and every reconstruction path in §3–§4.
+
+**Cost.** Roughly 200 bytes per `AutoFarmTask` row, one row per game and
+campaign. Negligible.

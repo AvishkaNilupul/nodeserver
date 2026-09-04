@@ -63,6 +63,12 @@ async function main() {
   const scope = GAME ? `game "${GAME}"` : "all games";
   console.log(`\nFarm2 replay — ${scope}, decisions from the last ${DAYS} days\n`);
   console.log(`  examined      ${report.examined}`);
+  if (report.inputsBasis) {
+    console.log(
+      `    from recorded inputs ${report.inputsBasis.recorded}, reconstructed ${report.inputsBasis.reconstructed}` +
+        "   (recorded = decisionInputs snapshot on the row; these replay under the settings then in force)",
+    );
+  }
   console.log(`  scored        ${report.scored}   (full-fidelity reconstructions — the only evidence)`);
   console.log(`    agree       ${report.agree}   ${pct(report.agree, report.scored)}`);
   console.log(`    disagree    ${report.disagree}`);
@@ -128,10 +134,11 @@ async function main() {
   }
 
   console.log(
-    `\n  Settings assumed: ${JSON.stringify(report.afAssumed)}` +
-      `\n  utils/settings.js is not versioned, so these are TODAY's values applied to` +
-      `\n  past decisions. If any of them changed during the window, rows either side` +
-      `\n  of the change are being replayed under the wrong configuration.\n`,
+    `\n  Settings assumed for RECONSTRUCTED rows: ${JSON.stringify(report.afAssumed)}` +
+      `\n  utils/settings.js is not versioned, so for rows without a decisionInputs snapshot` +
+      `\n  these are TODAY's values applied to past decisions. If any of them changed during` +
+      `\n  the window, those rows are being replayed under the wrong configuration. Rows WITH` +
+      `\n  a snapshot replay under the settings they were decided with.\n`,
   );
 
   await mongoose.disconnect();

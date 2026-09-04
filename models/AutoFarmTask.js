@@ -126,6 +126,53 @@ const autoFarmTaskSchema = new mongoose.Schema(
     // decision timestamp.
     decidedAt: { type: Date, default: null, index: true },
 
+    // What the sellability gate actually saw when it decided — research, own
+    // sales, the settings in force, the probe gate's answer and the market
+    // floor — written by every record() call (utils/decisionInputs.js builds
+    // it). The lane engine's replay harness reads this instead of
+    // reconstructing those inputs after the fact; rows from before it shipped
+    // have none and are reconstructed as before. Versioned, and the reader
+    // checks the version for equality: an unknown shape is reconstructed, not
+    // trusted. Declared here or Mongoose strict mode drops it on $set (see
+    // bots.shared above). `af` is Mixed so a new setting can be added to the
+    // snapshot under the same version without a schema shuffle.
+    decisionInputs: {
+      type: new mongoose.Schema(
+        {
+          version: { type: Number, default: null },
+          at: { type: Date, default: null },
+          research: {
+            type: new mongoose.Schema(
+              {
+                demandScore: { type: Number, default: null },
+                sellers: { type: Number, default: null },
+                scannedAt: { type: Date, default: null },
+              },
+              { _id: false },
+            ),
+            default: null,
+          },
+          sales: {
+            type: new mongoose.Schema(
+              {
+                count: { type: Number, default: 0 },
+                revenue: { type: Number, default: 0 },
+                avgPrice: { type: Number, default: 0 },
+              },
+              { _id: false },
+            ),
+            default: null,
+          },
+          af: { type: mongoose.Schema.Types.Mixed, default: null },
+          probeAllowed: { type: Boolean, default: null },
+          probeBudgetBlocked: { type: Boolean, default: null },
+          marketStockFloor: { type: Number, default: null },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
+
     executedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
 

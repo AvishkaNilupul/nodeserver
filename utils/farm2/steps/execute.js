@@ -62,6 +62,9 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
         // A probe's stop-loss anchor is written once and never moved, so only
         // stamp it when this is a probe that has not started before.
         ...(verdict.probe ? { probeStartedAt: new Date() } : {}),
+        // The inputs this decision saw, in the shape the legacy engine records
+        // (utils/decisionInputs.js), so replay treats a lane row like any other.
+        ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -188,6 +191,7 @@ async function executeReuse({ verdict, dryRun }) {
         decidedAt: new Date(),
         executedAt: new Date(),
         rescanRequested: false,
+        ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },

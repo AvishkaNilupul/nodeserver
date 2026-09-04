@@ -71,6 +71,7 @@
 
 const settings = require("../settings");
 const classes = require("./decisionClasses");
+const inputsMod = require("../decisionInputs");
 
 // Load the legacy engine lazily, for the same reason steps/decide.js does: it
 // pulls a wide dependency graph and, on prod, a catalog integration that does
@@ -374,6 +375,51 @@ function probeGateLoadBearing(research, af, sales) {
 // Combine the three into one input set.
 async function reconstructInputs(task, { af, now = Date.now() } = {}) {
   const af2 = af || settings.getAutoFarm();
+
+  // RECORDED INPUTS FIRST. A snapshot the reader recognises IS what the decision
+  // saw — research, sales, the settings in force, the probe gate's answer, the
+  // market floor — so nothing below is reconstructed and today's settings are
+  // not applied to a past decision. That closes the settings-versioning hole
+  // (FARM2-VERIFICATION §7.3), the sales-window drift, the missing-snapshot and
+  // the probe-budget gaps, for every row written since the snapshot shipped.
+  //
+  // The recorded `af` fingerprint overrides today's values for the fields it
+  // covers; fields it does not cover (marketplace keys, say) keep today's, but
+  // the one thing those feed — the market floor — is recorded as a value.
+  const recorded = inputsMod.isRecordedInputs(task.decisionInputs) ? task.decisionInputs : null;
+  if (recorded) {
+    return {
+      af: { ...af2, ...recorded.af },
+      research: recorded.research || null,
+      sales: {
+        count: Number(recorded.sales.count) || 0,
+        revenue: Number(recorded.sales.revenue) || 0,
+        avgPrice: Number(recorded.sales.avgPrice) || 0,
+      },
+      salesBasis: "recorded",
+      probeAllowed: recorded.probeAllowed,
+      probeGateMatters: null,
+      floor: Number.isFinite(Number(recorded.marketStockFloor))
+        ? Number(recorded.marketStockFloor)
+        : null,
+      inputsBasis: "recorded",
+      inputsVersion: recorded.version,
+      fidelity: FIDELITY.EXACT,
+      gaps: [],
+      notes: [
+        `inputs recorded at decision time (decisionInputs v${recorded.version}) — nothing reconstructed, ` +
+          "replayed under the settings then in force",
+      ],
+      afAssumed: null,
+    };
+  }
+
+  // A snapshot that EXISTS but is not recognised — a later version, a malformed
+  // write — is neither trusted nor silently ignored: the row is reconstructed
+  // below and carries a gap saying why. Absence is never a passing value.
+  const unknownSnapshot =
+    task.decisionInputs != null && !inputsMod.isRecordedInputs(task.decisionInputs);
+
   const [salesPart, researchPart, probePart] = await Promise.all([
     salesInputsFor(task, { now }),
     researchInputsFor(task, { af: af2 }),
@@ -430,12 +476,25 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
     // false: checked and found dead for these inputs (row stays exact)
     // null: never checked (cold-start off, or an input was unreplayable)
     probeGateMatters,
+    // No recorded floor on a reconstructed row; replayDecision reads today's.
+    floor: null,
+    inputsBasis: "reconstructed",
+    inputsVersion: null,
     fidelity,
-    gaps,
-    notes,
-    // Settings are not versioned, so this is an assumption on EVERY row rather
-    // than a per-row gap. Recorded so a reviewer can see which values the
-    // replay ran under and re-run with the ones that were actually live.
+    gaps: unknownSnapshot ? [...gaps, "decision_inputs_version_unknown"] : gaps,
+    notes: unknownSnapshot
+      ? [
+          ...notes,
+          `the row carries a decisionInputs snapshot of version ${
+            task.decisionInputs && task.decisionInputs.version
+          }, which this reader does not recognise — reconstructed instead, not trusted`,
+        ]
+      : notes,
+    // Settings are not versioned, so on a RECONSTRUCTED row this is an
+    // assumption rather than a per-row gap. Recorded so a reviewer can see
+    // which values the replay ran under and re-run with the ones that were
+    // actually live. (Recorded rows carry their own settings and never reach
+    // here.)
     afAssumed: {
       maxPerGame: af2.maxPerGame,
       probeColdStart: !!af2.probeColdStart,
@@ -480,6 +539,8 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
       fidelity: inputs.fidelity,
       gaps: inputs.gaps,
       notes: inputs.notes,
+      inputsBasis: inputs.inputsBasis,
+      inputsVersion: inputs.inputsVersion,
     };
   }
 
@@ -507,6 +568,10 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
     probeGateMatters: inputs.probeGateMatters,
     salesBasis: inputs.salesBasis,
     salesCount: inputs.sales ? inputs.sales.count : null,
+    // recorded | reconstructed — whether this row's inputs came from the
+    // decisionInputs snapshot or were rebuilt after the fact
+    inputsBasis: inputs.inputsBasis,
+    inputsVersion: inputs.inputsVersion,
   };
 
   // --- Score it ------------------------------------------------------------
@@ -577,7 +642,15 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
   if (base.legacyTarget != null && base.legacyTarget > 0) {
     let floor = 0;
     try {
-      floor = replayed.probe ? 0 : Number(b.marketStockFloor(inputs.af)) || 0;
+      // The floor as recorded at decision time when the row has a snapshot
+      // (already 0 for a probe); otherwise as today's marketplace
+      // configuration gives it.
+      floor =
+        inputs.floor != null
+          ? inputs.floor
+          : replayed.probe
+            ? 0
+            : Number(b.marketStockFloor(inputs.af)) || 0;
     } catch {
       // marketStockFloor consults the marketplaces module for key status; if
       // that is unavailable the floor is unknown, not zero.
@@ -634,7 +707,9 @@ async function replayHistory({
   const tasks = await AutoFarmTask.find(q)
     .sort({ decidedAt: -1 })
     .limit(Math.max(1, limit))
-    .select("game campaignId decision demandScore hadResearch internalSales targetAccounts plannedAccounts decidedAt")
+    .select(
+      "game campaignId decision demandScore hadResearch internalSales targetAccounts plannedAccounts decidedAt decisionInputs",
+    )
     .lean();
 
   const af2 = af || settings.getAutoFarm();
@@ -705,6 +780,15 @@ function summarise(rows, { maxAgeDays, af } = {}) {
     gapCounts,
     perGame,
     maxAgeDays,
+    // How many rows replayed from a recorded snapshot versus a reconstruction.
+    // As history rolls past the deploy that started recording, `recorded`
+    // should climb toward `examined` and `unreplayable` toward zero.
+    inputsBasis: {
+      recorded: rows.filter((r) => r.inputsBasis === "recorded").length,
+      reconstructed: rows.filter((r) => r.inputsBasis === "reconstructed").length,
+    },
+    // Applies to RECONSTRUCTED rows only — recorded rows replay under the
+    // settings they were decided with.
     afAssumed: af
       ? {
           maxPerGame: af.maxPerGame,
@@ -728,6 +812,7 @@ function summarise(rows, { maxAgeDays, af } = {}) {
       decidedAt: r.decidedAt,
       legacyDecision: r.legacyDecision,
       kind: r.kind || "unclassified",
+      inputsBasis: r.inputsBasis || null,
       salesBasis: r.salesBasis || null,
       salesCount: r.salesCount == null ? null : r.salesCount,
       detail: r.detail,
