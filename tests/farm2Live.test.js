@@ -142,7 +142,15 @@ test("a lane becomes ready once it has enough shadow decisions", async () => {
   assert.equal(r.warnings.length, 0, "agreeing decisions produce no warning");
 });
 
-test("disagreements warn but do not block", async () => {
+// This test previously asserted the OPPOSITE — that a disagreement only warns,
+// on the reasoning that some disagreements are legitimate and judging them is
+// the operator's call. The live shadow trial on 2026-09-04 proved that wrong:
+// three lanes reported agreement while planning to spend fresh pool accounts on
+// games the legacy engine was serving by reusing warm bots, and a warning would
+// not have stopped a promotion that made the system worse. A disagreement now
+// means one of the two engines is wrong about a real game, which must be
+// understood BEFORE the lane takes it over.
+test("a disagreement blocks promotion (force still overrides, and is audited)", async () => {
   await FarmJob.deleteMany({});
   await FarmLane.deleteMany({ gameKey: "ready test 3" });
   const lane = await FarmLane.create({ game: "Ready Test 3", gameKey: "ready test 3", mode: "shadow" });
@@ -154,12 +162,22 @@ test("disagreements warn but do not block", async () => {
       campaignId: "c" + i,
       status: "done",
       shadow: true,
-      result: { verdict: { decision: "farm" }, diff: { agree: i !== 0 } },
+      result: {
+        verdict: { decision: "farm" },
+        diff: {
+          agree: i !== 0,
+          laneDecision: "farm",
+          legacyDecision: "reuse_existing",
+          accountDelta: 12,
+        },
+      },
     });
   }
   const r = await farm2.laneReadiness(lane.toObject());
-  assert.equal(r.ready, true, "a disagreement is the operator's judgement call, not a lock");
-  assert.match(r.warnings.join(" "), /disagreed/i);
+  assert.equal(r.ready, false, "a disagreement must stop an automatic promotion");
+  assert.match(r.blockers.join(" "), /disagreed with the legacy engine/i);
+  assert.equal(r.disagreements, 1);
+  assert.equal(r.compared, 4);
 });
 
 /* ----------------------------- publish needs ------------------------------ */

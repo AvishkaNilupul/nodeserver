@@ -92,18 +92,40 @@ async function runCycle({ force = false } = {}) {
     // container cap.
     const cycle = await budget.computeCycleBudget(af, {});
 
-    // Weight by how much each lane's game has recently been worth farming.
-    // Live lanes outrank shadow ones: a shadow lane spends nothing, so giving
-    // it budget would strand accounts that a live lane could actually use.
-    const requests = due.map((l) => ({
-      key: l.gameKey,
-      want: l.mode === "live" ? Math.max(0, Number(af.maxPerGame) || 0) : 0,
-      weight: l.mode === "live" ? 2 : 1,
-    }));
-    cycle.allocate(requests);
+    // Live lanes are allocated from the REAL ledger.
+    const liveLanes = due.filter((l) => l.mode === "live");
+    const shadowLanes = due.filter((l) => l.mode !== "live");
+    const perGame = Math.max(0, Number(af.maxPerGame) || 0);
+    cycle.allocate(liveLanes.map((l) => ({ key: l.gameKey, want: perGame, weight: 2 })));
+
+    // Shadow lanes are allocated from a NOTIONAL fork with the same totals.
+    // Granting them from the real ledger would strand accounts a live lane
+    // could use; granting them zero (the original behaviour) made every shadow
+    // decision read "trimmed to 0 of N", so the comparison could never validate
+    // an allocation amount — only intent. The fork gives realistic numbers
+    // while the real budget stays untouched.
+    const shadowCycle = shadowLanes.length
+      ? cycle.fork("notional (shadow lanes)")
+      : null;
+    if (shadowCycle) {
+      shadowCycle.allocate(
+        shadowLanes.map((l) => ({ key: l.gameKey, want: perGame, weight: 1 })),
+      );
+    }
+
+    // One host-read cache per cycle, shared by every lane. The reuse-first
+    // check asks "does this bot's config file still exist?", and several lanes
+    // routinely reuse the SAME containers (twitchbotx42 serves Albion, WoT and
+    // Black Desert at once), so without this each lane would re-ask the Pi for
+    // the same file — over a link measured in seconds of round trip.
+    const hostCache = new Map();
 
     const results = await mapWithConcurrency(due, LANE_CONCURRENCY, (l) =>
-      lane.runLane(l, { cycle, af }),
+      lane.runLane(l, {
+        cycle: l.mode === "live" ? cycle : shadowCycle,
+        af,
+        hostCache,
+      }),
     );
 
     const summary = {

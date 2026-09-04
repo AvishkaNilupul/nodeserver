@@ -163,10 +163,40 @@ class BudgetCycle {
     this._hostSlots += 1;
   }
 
+  // A NOTIONAL copy of this cycle's budget, for shadow lanes.
+  //
+  // Shadow lanes must not be granted from the real ledger — an account promised
+  // to a lane that will never spend it is an account a LIVE lane could have
+  // used. But granting them zero was worse: every shadow decision came out
+  // "trimmed to 0 of 16", so the comparison could only ever validate intent,
+  // never the allocation amount, which is half of what the trial exists to
+  // check.
+  //
+  // A fork has the same totals and its own independent ledger, so shadow lanes
+  // allocate realistically against a copy while the real budget stays untouched.
+  // The SSH semaphore is SHARED, deliberately: host concurrency is a physical
+  // limit on the Pi, and shadow reads consume it exactly as live ones do.
+  fork(reason) {
+    const f = new BudgetCycle({
+      accounts: this.totalAccounts,
+      seats: this.totalSeats,
+      containers: this.totalContainers,
+      perGameCap: this.perGameCap,
+      reason: reason || this.reason,
+    });
+    f._hostSlots = 0;
+    f._hostQueue = [];
+    f._acquireHost = this._acquireHost.bind(this);
+    f._releaseHost = this._releaseHost.bind(this);
+    f.notional = true;
+    return f;
+  }
+
   summary() {
     const out = {};
     for (const [k, g] of this.grants) out[k] = { ...g };
     return {
+      notional: !!this.notional,
       totalAccounts: this.totalAccounts,
       totalSeats: this.totalSeats,
       totalContainers: this.totalContainers,

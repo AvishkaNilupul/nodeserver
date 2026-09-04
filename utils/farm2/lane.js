@@ -113,7 +113,7 @@ async function drainJobs(lane, { cycle, af, summary }) {
 }
 
 // Run one lane to completion. Never throws.
-async function runLane(lane, { cycle, af }) {
+async function runLane(lane, { cycle, af, hostCache }) {
   const FarmLane = require("../../models/FarmLane");
   const started = Date.now();
   const shadow = lane.mode === "shadow";
@@ -166,6 +166,7 @@ async function runLane(lane, { cycle, af }) {
           cycle,
           af,
           shadow,
+          hostCache,
         });
 
         // In shadow mode the verdict is compared against what the legacy engine

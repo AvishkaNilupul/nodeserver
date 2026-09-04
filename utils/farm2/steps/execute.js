@@ -68,6 +68,116 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
   );
 }
 
+// Execute a REUSE decision: restart the game's existing warm bots rather than
+// claiming fresh pool accounts.
+//
+// autoFarmer.executeTask is the FRESH-spend path and must not be used here — it
+// would claim new accounts for a campaign that needs none. The legacy engine
+// runs this restart inline inside processCampaign, so there is no exported
+// helper to borrow; this mirrors that block.
+//
+// The account arithmetic is the subtle part and is deliberately stricter than
+// the decide-time estimate. `assignedAccounts` is what autoLister derives
+// listing quantity from, so copying the reused task's list wholesale would make
+// two campaigns advertise the SAME accounts — stock that cannot be delivered
+// twice, because pickDeliveryAccounts hands out any given login on one listing
+// only. The buyer pays and there is nothing to fulfil. The bots really are
+// shared; the sellable stock is not. So "spoken for" is computed against
+// active AND planned tasks, matching the legacy execution path exactly.
+async function executeReuse({ verdict, dryRun }) {
+  const AutoFarmTask = require("../../../models/AutoFarmTask");
+  const hosts = require("../../botHosts");
+  const botFactory = require("../../botFactory");
+  const b = brain();
+
+  const reusable = verdict.reuseTaskId
+    ? await AutoFarmTask.findById(verdict.reuseTaskId).lean()
+    : await b.reusableTaskForGame(verdict.game);
+  if (!reusable) throw new Error("reuse target task no longer exists");
+
+  const bots = (reusable.bots || []).filter((x) => x.container);
+  if (!bots.length) throw new Error("reuse target has no bots left");
+
+  // Recompute the deliverable account set at EXECUTION time — the decide-time
+  // number can be stale by the time this runs.
+  const others = await AutoFarmTask.find(
+    { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
+    { assignedAccounts: 1 },
+  ).lean();
+  const spokenFor = new Set();
+  for (const o of others) {
+    for (const u of o.assignedAccounts || []) spokenFor.add(String(u).toLowerCase());
+  }
+  const mine = (reusable.assignedAccounts || []).filter(
+    (u) => !spokenFor.has(String(u).toLowerCase()),
+  );
+
+  if (dryRun) {
+    await upsertTask(
+      { ...verdict, plannedAccounts: mine.length, targetAccounts: mine.length },
+      { dryRun: true },
+    );
+    return {
+      dryRun: true,
+      reuse: true,
+      wouldRestart: bots.map((x) => x.container),
+      wouldReuseAccounts: mine.length,
+    };
+  }
+
+  const started = [];
+  const failed = [];
+  for (const bot of bots) {
+    try {
+      await botFactory.startContainer(hosts.resolveHost(bot.host), bot.container);
+      started.push(bot.container);
+    } catch (e) {
+      failed.push(bot.container + ": " + e.message);
+    }
+  }
+
+  const task = await AutoFarmTask.findOneAndUpdate(
+    { game: verdict.game, campaignId: verdict.campaignId },
+    {
+      $set: {
+        game: verdict.game,
+        campaignId: verdict.campaignId,
+        campaignName: verdict.campaignName || "",
+        campaignEndAt: verdict.campaignEndAt || null,
+        decision: "reuse_existing",
+        // A restart that started nothing is a real failure, not a quiet success.
+        status: started.length ? "active" : "failed",
+        reason: verdict.reason || "",
+        demandScore: verdict.demandScore ?? null,
+        hadResearch: !!verdict.hadResearch,
+        internalSales: verdict.internalSales || 0,
+        bots: bots.map((x) => ({ ...x, reused: true, shared: true })),
+        assignedAccounts: mine,
+        plannedAccounts: mine.length,
+        targetAccounts: mine.length,
+        error: failed.join("; "),
+        dryRun: false,
+        decidedAt: new Date(),
+        executedAt: new Date(),
+        rescanRequested: false,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  if (!started.length) {
+    throw new Error("no bot could be restarted: " + (failed.join("; ") || "unknown"));
+  }
+
+  return {
+    reuse: true,
+    taskId: task._id,
+    restarted: started,
+    failed,
+    accounts: mine.length,
+  };
+}
+
 // Execute one decision. Returns a plain summary; throws on real failure so the
 // job queue can retry it on its own backoff.
 async function executeDecision({ verdict, lane, cycle, af, shadow }) {
@@ -90,6 +200,15 @@ async function executeDecision({ verdict, lane, cycle, af, shadow }) {
   // system in dry-run, and a live lane must honour that exactly as the legacy
   // engine does.
   const dryRun = !!af2.dryRun;
+
+  // Reuse takes a completely different execution path from a fresh spend:
+  // restart the warm bots, claim nothing. Dispatched before anything else
+  // because routing a reuse decision into executeTask would claim fresh pool
+  // accounts for a campaign that needs none — the defect the shadow trial found.
+  if (verdict.decision === "reuse_existing") {
+    const run = () => executeReuse({ verdict, dryRun });
+    return cycle ? await cycle.withHost(run) : await run();
+  }
 
   const task = await upsertTask(verdict, { dryRun });
 
@@ -129,4 +248,4 @@ async function executeDecision({ verdict, lane, cycle, af, shadow }) {
   };
 }
 
-module.exports = { executeDecision, upsertTask };
+module.exports = { executeDecision, executeReuse, upsertTask };

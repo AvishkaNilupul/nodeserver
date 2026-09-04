@@ -52,13 +52,94 @@ async function probeGate(game, af) {
   };
 }
 
+// Reuse-first check: can this campaign be served by restarting the game's
+// EXISTING warm bots instead of spending fresh pool accounts?
+//
+// This mirrors step 4 of the legacy processCampaign, and its absence was the
+// first real defect the shadow trial caught. Without it the lane always reached
+// for fresh accounts, so a recurring campaign on a game that already has warm
+// bots (Albion Online, Black Desert and World of Tanks were ALL in exactly that
+// state) would have claimed real pool accounts and burned container slots to do
+// something strictly worse than what was already running.
+//
+// Reuse is close to free — the bots exist, the accounts already hold prior
+// drops, and warm accounts carry accumulated watch time that fresh ones cannot
+// match in a short campaign — so it must be checked BEFORE allocation, not as a
+// fallback.
+//
+// The bot-file existence check is a host READ. Shadow mode's contract is "no
+// writes, no spending"; reads are both allowed and necessary, because a reuse
+// decision that skipped them would not match what a live lane would do and the
+// comparison would be worthless. Reads go through the cycle's SSH semaphore and
+// a per-cycle cache so several lanes cannot storm the Pi.
+async function reuseCandidate(game, { cycle, hostCache }) {
+  const b = brain();
+  const hosts = require("../../botHosts");
+
+  const reusable = await b.reusableTaskForGame(game);
+  if (!reusable || !(reusable.bots || []).length) return null;
+
+  // Retired bots (deleted container, config renamed .done-*) cannot be
+  // restarted. Drop them; if none survive there is nothing to reuse.
+  const live = [];
+  for (const bot of reusable.bots || []) {
+    const h = hosts.resolveHost(bot.host);
+    if (!h) continue;
+    const key = bot.host + "|" + bot.file;
+    let exists = hostCache ? hostCache.get(key) : undefined;
+    if (exists === undefined) {
+      try {
+        const read = () => hosts.exists(h, bot.file);
+        exists = cycle ? await cycle.withHost(read) : await read();
+      } catch {
+        // Host unreachable — treat as not reusable rather than assuming a bot
+        // is there. Claiming reuse against a bot we cannot see would produce a
+        // task that farms nothing.
+        exists = false;
+      }
+      if (hostCache) hostCache.set(key, exists);
+    }
+    if (exists) live.push(bot);
+  }
+  if (!live.length) return null;
+
+  // Which of the reusable task's accounts are still free? An account already
+  // assigned to another ACTIVE task is spoken for and must not be double-counted.
+  const AutoFarmTask = require("../../../models/AutoFarmTask");
+  const others = await AutoFarmTask.find(
+    { status: "active", _id: { $ne: reusable._id } },
+    { assignedAccounts: 1 },
+  ).lean();
+  const spokenFor = new Set();
+  for (const t of others) {
+    for (const u of t.assignedAccounts || []) spokenFor.add(String(u).toLowerCase());
+  }
+  const mine = (reusable.assignedAccounts || []).filter(
+    (u) => !spokenFor.has(String(u).toLowerCase()),
+  );
+
+  return {
+    taskId: reusable._id,
+    bots: live,
+    accounts: mine,
+    reason:
+      "Recurring campaign for a game we already farm — reusing existing bot" +
+      (live.length > 1 ? "s" : "") +
+      " (" +
+      live.map((x) => x.container).join(", ") +
+      ") with their " +
+      mine.length +
+      " accounts instead of spending new pool accounts.",
+  };
+}
+
 // Decide one campaign.
 //
 // Returns a plain object describing the verdict. In shadow mode that object is
 // the ENTIRE output — nothing is written to AutoFarmTask, no pool account is
-// claimed, no host is touched — which is what lets a lane run against a live
+// claimed, no host is written to — which is what lets a lane run against a live
 // game that the legacy engine is still really farming.
-async function decideCampaign({ campaign, lane, cycle, af, shadow }) {
+async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache }) {
   const game = campaign.game || campaign.name || "?";
   const af2 = af || settings.getAutoFarm();
   const b = brain();
@@ -114,6 +195,30 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow }) {
     ? (new Date(campaign.endAt) - Date.now()) / 3600000
     : Infinity;
 
+  // --- Reuse-first ---------------------------------------------------------
+  // Checked BEFORE the budget, because reuse costs no pool accounts and no
+  // container slots: a lane with a zero account budget can still reuse. That
+  // ordering is the whole point — the legacy engine reuses in exactly this
+  // situation, and a lane that fell through to "farm 0 accounts" would simply
+  // stop farming a game that is currently being farmed fine.
+  const reuse = await reuseCandidate(game, { cycle, hostCache });
+  if (reuse) {
+    return {
+      ...common,
+      decision: "reuse_existing",
+      wouldFarm: reuse.accounts.length > 0,
+      plannedAccounts: reuse.accounts.length,
+      targetAccounts: reuse.accounts.length,
+      reuseTaskId: reuse.taskId,
+      reuseBots: reuse.bots.map((b) => b.container),
+      hoursLeft: Number.isFinite(hrs) ? Math.round(hrs * 10) / 10 : null,
+      // Reuse spends nothing from the cycle budget, so it is never "budget
+      // limited" and must not be trimmed.
+      budgetLimited: false,
+      reason: reuse.reason,
+    };
+  }
+
   // --- Budget --------------------------------------------------------------
   // The arbiter's sealed allowance is the hard ceiling. alloc.target is what the
   // economics WANT; the grant is what the fleet can actually afford this cycle
@@ -167,12 +272,26 @@ async function diffAgainstLegacy(verdict) {
     .lean();
   if (!legacy) return null;
 
-  // Group the decisions into farm-vs-skip intent. An exact string match is too
-  // strict to be useful: "farm" and "probe" both mean "spend accounts here",
-  // and the several skip_* reasons all mean "spend nothing". What matters for
-  // trusting the lane is whether it would have taken the same ACTION.
-  const intent = (d) => (d === "farm" || d === "probe" || d === "reuse_existing" ? "act" : "skip");
-  const sameIntent = intent(legacy.decision) === intent(verdict.decision);
+  // Group decisions by the ACTION they cause, not by their string.
+  //
+  // The first version of this lumped "farm", "probe" and "reuse_existing"
+  // together as one "act" class, and that hid the trial's first real finding:
+  // the lane said "farm" (spend fresh pool accounts, burn a container slot)
+  // while the legacy engine said "reuse_existing" (restart warm bots, spend
+  // nothing) — reported as agreement, when in fact promoting that lane would
+  // have made the system actively worse.
+  //
+  // Spending and reusing are different actions with different costs, so they
+  // are different classes. Getting this wrong is not a cosmetic reporting bug:
+  // the readiness gate is built on it.
+  const actionClass = (d) => {
+    if (d === "farm" || d === "probe") return "spend";
+    if (d === "reuse_existing") return "reuse";
+    return "skip";
+  };
+  const laneClass = actionClass(verdict.decision);
+  const legacyClass = actionClass(legacy.decision);
+  const sameClass = laneClass === legacyClass;
   const acctDelta =
     Number(verdict.plannedAccounts || 0) - Number(legacy.plannedAccounts || 0);
 
@@ -183,13 +302,15 @@ async function diffAgainstLegacy(verdict) {
     legacyDemand: legacy.demandScore ?? null,
     laneDecision: verdict.decision,
     lanePlanned: Number(verdict.plannedAccounts || 0),
-    sameIntent,
+    laneClass,
+    legacyClass,
+    sameClass,
     accountDelta: acctDelta,
-    // "agree" is the headline the tab shows. Account counts are allowed to
-    // differ — the lane's budget arbiter divides the pool differently from the
-    // legacy engine's serial pass, and that is by design — so agreement is
-    // judged on intent, with the delta reported alongside for context.
-    agree: sameIntent,
+    // "agree" is the headline the tab shows and what the readiness gate blocks
+    // on. Account COUNTS may legitimately differ (the arbiter divides the pool
+    // differently from a serial pass), so the delta is reported separately —
+    // but the action class must match.
+    agree: sameClass,
   };
 }
 

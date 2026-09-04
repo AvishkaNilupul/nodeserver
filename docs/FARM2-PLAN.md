@@ -1,8 +1,8 @@
 # Farm lanes (farm2) — the reorganised farm + list engine
 
-Status: **built, shipped OFF, not deployed.** Three trial lanes defined, all in
-shadow mode. Nothing about the live system changes until the master switch is
-turned on.
+Status: **deployed to prod and running in shadow.** Master switch ON, three
+trial lanes, all in shadow mode — they decide and audit but change nothing. No
+lane has ever been promoted to live. The legacy engine still farms every game.
 
 ---
 
@@ -140,10 +140,25 @@ A lane in `shadow` runs the **full** decision pipeline and records what it
 marketplace calls, and it uses the read-only `researchForGame` rather than
 triggering a live re-scan. The legacy engine keeps really farming that game.
 
-The tab diffs the two. Agreement is judged on **intent** (act vs. skip), not
-exact strings — `farm`, `probe` and `reuse_existing` all mean "spend accounts
-here". Account counts may legitimately differ, because the arbiter divides the
-pool differently from a serial pass; the delta is shown alongside.
+The tab diffs the two. Agreement is judged on the **action class** the decision
+causes, not on exact strings:
+
+| Class | Decisions | Cost |
+|---|---|---|
+| `spend` | `farm`, `probe` | claims fresh pool accounts, may burn a container slot |
+| `reuse` | `reuse_existing` | restarts warm bots — no accounts, no slots |
+| `skip` | every `skip_*` | nothing |
+
+Account *counts* may legitimately differ (the arbiter divides the pool
+differently from a serial pass), so the delta is reported separately — but the
+class must match, and a mismatch **blocks** promotion. An earlier version lumped
+`spend` and `reuse` together as one "act" class; see the trial finding below for
+why that was dangerous.
+
+Shadow lanes are allocated from a **notional fork** of the cycle budget — same
+totals, independent ledger — so their numbers are realistic without competing
+with live lanes for real accounts. The SSH semaphore is shared, because host
+concurrency is a physical limit that shadow reads consume too.
 
 The drop checker is read-only in every mode, so it audits the inventory the
 legacy engine is managing **right now** — the `ready, not listed` finding is the
@@ -176,6 +191,52 @@ ever spending or listing: the lane runner only drains jobs when
 `mode === "live"`, and `execute` and `publish` each assert on both the shadow
 flag **and** the lane's own mode. All are covered by tests.
 
+## What the shadow trial caught on day one (2026-09-04)
+
+The trial went live and immediately found a defect that would have made the
+system **worse** if a lane had been promoted.
+
+All three trial games were being served by the legacy engine as
+`reuse_existing` — restart the game's existing warm bots, spend nothing:
+
+| Game | Legacy | Lane said |
+|---|---|---|
+| Albion Online | `reuse_existing`, 3 warm bots | `farm` (fresh accounts) |
+| World of Tanks | `reuse_existing`, 2 bots / 18 accounts | `farm` (fresh accounts) |
+| Black Desert | `reuse_existing`, 3 bots / 40 accounts | `farm` (fresh accounts) |
+
+**`decide.js` had no reuse-first path at all.** It always reached for fresh pool
+accounts, so promoting any of those lanes would have claimed real accounts and
+burned container slots to do something strictly worse than what was already
+running. (World of Tanks was accidentally protected — it is reuse-only, so
+`executeTask` would have refused fresh accounts. Luck, not design.)
+
+Worse, **the comparison reported all three as `agree ✓`**, because the original
+diff lumped `farm`, `probe` and `reuse_existing` into one "act" class. The
+readiness gate was built on that metric, so it would have permitted the
+promotion after three "agreeing" decisions.
+
+Three fixes:
+
+1. **Reuse-first in `decide.js`** — checks `reusableTaskForGame` (newly exported)
+   *before* allocation, because reuse costs no accounts and no container slots, so
+   a lane with a zero budget can still reuse. Bot-file existence is a host READ,
+   allowed in shadow, routed through the SSH semaphore with a per-cycle cache
+   (one container commonly serves all three games).
+2. **Reuse execution in `execute.js`** — a reuse decision restarts the warm bots
+   instead of going down `executeTask`'s fresh-spend path. `spokenFor` is
+   computed against active **and** planned tasks, matching the legacy path, since
+   `assignedAccounts` drives listing quantity and double-counting sells stock
+   that cannot be delivered twice.
+3. **Action-class diff + a blocking gate** — `spend` / `reuse` / `skip` are now
+   distinct classes, a mismatch is a **blocker** rather than a warning, and
+   shadow lanes are allocated from a *notional fork* of the budget so their
+   numbers are realistic (they previously got zero, so every shadow decision read
+   "trimmed to 0 of N" and the comparison could never validate an amount).
+
+Cost of finding it this way: **zero accounts spent, nothing broken.** The legacy
+engine farmed all three games normally throughout.
+
 ## Deployment note — prod drift
 
 Fingerprinted 2026-09-03. Prod runs code this checkout does not have:
@@ -205,14 +266,14 @@ integration; that has already happened twice.
 
 The three hunks are all additive:
 - `autoFarmer.js` — require `./farm2/ownership`; the skip guard beside the
-  no-claim skip; export `freshResearchForGame`
+  no-claim skip; export `freshResearchForGame`; export `reusableTaskForGame`
 - `autoLister.js` — export `verifiedHoldersForItems`
 
 ## Verification done
 
-- 37 new unit tests (budget invariants, ownership fail-safe, lane isolation,
-  job queue, the shadow assertions, the readiness gate) — all pass
-- full suite **624/625**; the single failure (`dropSetsListLight.test.js`) is
+- 46 new unit tests (budget invariants, ownership fail-safe, lane isolation,
+  job queue, the shadow assertions, the readiness gate, reuse-first) — all pass
+- full suite **634/635**; the single failure (`dropSetsListLight.test.js`) is
   pre-existing and unrelated — it needs `utils/archiveExclusions.js`, which lives
   on `perf/drops-archive-rollup` and is absent from this checkout
 - end-to-end against a throwaway in-memory Mongo: inert-by-default, seeding,

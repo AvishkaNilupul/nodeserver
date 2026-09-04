@@ -4468,4 +4468,10 @@ module.exports = {
   // engine would have used. Shadow lanes deliberately call researchForGame instead,
   // because a re-scan is a real side effect. No behaviour change here.
   freshResearchForGame,
+  // Additive export for the lane engine's reuse-first check. Without it the lane
+  // engine had no reuse path at all and always reached for FRESH pool accounts,
+  // so a recurring campaign on a game that already has warm bots would have spent
+  // real accounts and new containers to do worse than reusing what is running.
+  // Caught by the shadow trial before any lane went live. Read-only query.
+  reusableTaskForGame,
 };

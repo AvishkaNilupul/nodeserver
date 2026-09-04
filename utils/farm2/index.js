@@ -99,10 +99,19 @@ async function laneReadiness(lane) {
     );
   }
 
-  // 3. Disagreements with the legacy engine are a warning, not a blocker: some
-  //    are legitimate (the lane's budget arbiter divides the pool differently),
-  //    and judging which is the operator's call. But they must be surfaced at
-  //    the moment of promotion, not buried in a table.
+  // 3. Disagreement with the legacy engine BLOCKS promotion.
+  //
+  //    This was originally only a warning, on the reasoning that some
+  //    disagreements are legitimate. The trial immediately proved that wrong:
+  //    all three lanes reported "agree" while actually planning to spend fresh
+  //    pool accounts on games the legacy engine was serving by reusing warm
+  //    bots. Promoting on that evidence would have made the system worse, and
+  //    a warning would not have stopped it.
+  //
+  //    A disagreement now means one of the two engines is wrong about a real
+  //    game, and that must be understood before the lane takes the game over —
+  //    so it is a blocker. `force` still exists for the case where the operator
+  //    has looked and decided the lane is the correct one; that is audited.
   const recent = await FarmJob.find({
     laneKey: lane.gameKey,
     kind: "decide",
@@ -113,16 +122,37 @@ async function laneReadiness(lane) {
     .limit(25)
     .select("result")
     .lean();
-  const diffs = recent
+  const compared = recent
     .map((r) => r.result && r.result.diff)
-    .filter((d) => d && d.agree === false);
+    .filter((d) => d && d.agree !== null && d.agree !== undefined);
+  const diffs = compared.filter((d) => d.agree === false);
   if (diffs.length) {
-    warnings.push(
-      `${diffs.length} of the last ${recent.length} decisions disagreed with the legacy engine`,
+    const detail = diffs
+      .slice(0, 3)
+      .map((d) => `lane ${d.laneDecision} vs legacy ${d.legacyDecision}`)
+      .join("; ");
+    blockers.push(
+      `${diffs.length} of the last ${compared.length} compared decisions disagreed with the legacy engine (${detail})`,
     );
   }
 
-  return { ready: blockers.length === 0, blockers, warnings, shadowDecisions: decided };
+  // A large account-count gap is worth surfacing even when the action matches —
+  // same intent, very different spend, is still worth a look before promoting.
+  const bigGaps = compared.filter((d) => Math.abs(Number(d.accountDelta) || 0) >= 10);
+  if (bigGaps.length) {
+    warnings.push(
+      `${bigGaps.length} decision(s) agreed on the action but differed by 10+ accounts`,
+    );
+  }
+
+  return {
+    ready: blockers.length === 0,
+    blockers,
+    warnings,
+    shadowDecisions: decided,
+    compared: compared.length,
+    disagreements: diffs.length,
+  };
 }
 
 function start() {
