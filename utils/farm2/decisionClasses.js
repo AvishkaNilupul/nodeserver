@@ -157,6 +157,38 @@ function recordsEffectiveDemand(decision) {
   return EFFECTIVE_DEMAND_DECISIONS.includes(decision);
 }
 
+// Which decision-input fields legacy record() actually WRITES, per path.
+//
+// record() is a $set upsert. A field the path does not name is left as the
+// schema default on a fresh row, or as whatever an EARLIER decision on the same
+// (game, campaignId) row wrote — a retryable skip re-decided into a reuse, say.
+// In neither case is it the value at decision time, so anything reading these
+// rows must know which fields the path in question really wrote:
+//
+//   internalSales    written on every path EXCEPT reuse_existing (both the live
+//                    and dry-run record calls) and skip_host_offline.
+//   targetAccounts   written ONLY on farm/probe (the `wanted` tier target).
+//
+// skip_reuse_only is a later updateOne on a row record() had just written as
+// farm/probe in the same tick, touching neither field, so both are still the
+// decision-time values there.
+//
+// Found the expensive way (prod, 2026-09-04): 15 Black Desert reuse_existing
+// rows carried internalSales 0 because that path never writes it, SaleSignal
+// held 13 sales, the replay trusted the 0, skipped at the sellability gate and
+// called every one a disagreement — while the live shadow lane, reading
+// SaleSignal, agreed with legacy each time.
+const OMITS_INTERNAL_SALES = Object.freeze(["reuse_existing", "skip_host_offline"]);
+const WRITES_TARGET_ACCOUNTS = Object.freeze(["farm", "probe", "skip_reuse_only"]);
+
+function recordsInternalSales(decision) {
+  return LEGACY_DECISIONS.includes(decision) && !OMITS_INTERNAL_SALES.includes(decision);
+}
+
+function recordsTargetAccounts(decision) {
+  return WRITES_TARGET_ACCOUNTS.includes(decision);
+}
+
 // Why did these two decisions differ? The taxonomy is the actionable part: an
 // operator staring at "12 disagreements" cannot tell a lane bug from a missing
 // feature from an expected budget effect, and those need three different
@@ -209,9 +241,13 @@ module.exports = {
   DEMAND_STAGE_DECISIONS,
   DOWNSTREAM_DECISIONS,
   EFFECTIVE_DEMAND_DECISIONS,
+  OMITS_INTERNAL_SALES,
+  WRITES_TARGET_ACCOUNTS,
   actionClass,
   laneCanEmit,
   isDemandStageDecision,
   recordsEffectiveDemand,
+  recordsInternalSales,
+  recordsTargetAccounts,
   classifyDisagreement,
 };

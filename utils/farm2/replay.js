@@ -118,28 +118,38 @@ const FIDELITY = Object.freeze({
 // (connected writes one row per drop, listing_sold one per unit) and copying it
 // to shift a date is precisely the drift this engine exists to prevent.
 //
-// When the set HAS changed we cannot recover avgPrice, so we say so instead of
-// substituting 0 — priceFactor(0) returns a neutral 1, which would silently
-// change the sales boost and manufacture a disagreement the lane did not cause.
+// THE ROW'S OWN internalSales IS NOT AN INPUT. Legacy record() writes it on most
+// paths — but not on reuse_existing or skip_host_offline, where the field is the
+// schema default on a fresh row or whatever an earlier decision on the same
+// (game, campaignId) row left there (classes.recordsInternalSales). The first
+// version of this function short-circuited on a recorded 0 without consulting
+// SaleSignal at all, and on prod (2026-09-04) that produced 15 false
+// disagreements: Black Desert reuse_existing rows carried internalSales 0,
+// SaleSignal held 13 sales, the replay skipped at the sellability gate and
+// scored the legacy reuse as a disagreement — while the live shadow lane, which
+// reads SaleSignal, agreed with legacy on every one. A disagreement blocks
+// promotion, so that bug alone would have kept the lane off its game forever.
 //
-// The exception that makes most rows replayable anyway: when the recorded count
-// was 0, salesBoost is 0 and capForGame is at its base regardless of price, so
-// no price information is needed and the reconstruction is exact.
+// The recorded value is now used for exactly one thing, and only on paths that
+// write it: an integrity check that the window really was stable. On paths that
+// do not write it, it is ignored entirely.
+//
+// When the set HAS changed we cannot recover avgPrice, so we say so instead of
+// substituting anything — priceFactor(0) returns a neutral 1, which would
+// silently change the sales boost and manufacture a disagreement the lane did
+// not cause. One exception is safe: a path that writes internalSales recorded
+// 0, so the boost was 0 and the cap at base regardless of price. That row is
+// exact whatever has happened to the window since.
+//
+// `basis` says which of those routes produced the figure, so a scored row can
+// always be traced back to why its sales were trusted.
 async function salesInputsFor(task, { now = Date.now() } = {}) {
   const b = brain();
   const SaleSignal = require("../../models/SaleSignal");
   const gameKey = String(task.game || "").toLowerCase();
-  const recordedCount = Math.max(0, Number(task.internalSales) || 0);
   const decidedAt = task.decidedAt ? new Date(task.decidedAt).getTime() : null;
-
-  if (recordedCount === 0) {
-    return {
-      sales: { count: 0, revenue: 0, avgPrice: 0 },
-      fidelity: FIDELITY.EXACT,
-      gaps: [],
-      note: "no own sales at decision time — price factor cannot apply",
-    };
-  }
+  const rowWritesSales = classes.recordsInternalSales(task.decision);
+  const recordedCount = rowWritesSales ? Math.max(0, Number(task.internalSales) || 0) : null;
 
   if (!decidedAt) {
     return {
@@ -147,6 +157,7 @@ async function salesInputsFor(task, { now = Date.now() } = {}) {
       fidelity: FIDELITY.UNREPLAYABLE,
       gaps: ["no_decided_at"],
       note: "decision has no timestamp, so its sales window is unknown",
+      basis: null,
     };
   }
 
@@ -161,36 +172,55 @@ async function salesInputsFor(task, { now = Date.now() } = {}) {
     }),
   ]);
 
-  if (added > 0 || agedOut > 0) {
+  if (added === 0 && agedOut === 0) {
+    // The row set is unchanged, so the live figure IS the historical figure.
+    const live = b.salesOf(await b.internalSalesForGame(task.game));
+
+    // Integrity check, on paths that wrote the field from this same aggregation
+    // at T. If the set has not moved and the numbers still differ, an assumption
+    // about this collection is wrong (a deleted row, a re-sourced row) and
+    // nothing here is trusted.
+    if (rowWritesSales && live.count !== recordedCount) {
+      return {
+        sales: null,
+        fidelity: FIDELITY.UNREPLAYABLE,
+        gaps: ["sales_count_mismatch"],
+        note:
+          `no rows entered or left the window, but the live count (${live.count}) differs ` +
+          `from the recorded one (${recordedCount}) — the window is not as stable as assumed`,
+        basis: null,
+      };
+    }
+    return { sales: live, fidelity: FIDELITY.EXACT, gaps: [], note: "", basis: "window_unchanged" };
+  }
+
+  if (rowWritesSales && recordedCount === 0) {
     return {
-      sales: null,
-      fidelity: FIDELITY.UNREPLAYABLE,
-      gaps: ["sales_window_drifted"],
+      sales: { count: 0, revenue: 0, avgPrice: 0 },
+      fidelity: FIDELITY.EXACT,
+      gaps: [],
       note:
-        `${added} sale signal(s) landed after the decision and ${agedOut} aged out of ` +
-        "the 45-day window since — the average price at decision time is not recorded " +
-        "anywhere and cannot be recovered without duplicating the aggregation",
+        "no own sales at decision time, recorded on a path that writes the field — the " +
+        "price factor cannot apply, so later sales do not matter",
+      basis: "recorded_zero",
     };
   }
 
-  // The row set is unchanged, so the live figure IS the historical figure.
-  const live = b.salesOf(await b.internalSalesForGame(task.game));
-
-  // Integrity check. If the set really is unchanged the count must match what
-  // was recorded; if it does not, one of our assumptions about this collection
-  // is wrong and the reconstruction must not be trusted.
-  if (live.count !== recordedCount) {
-    return {
-      sales: null,
-      fidelity: FIDELITY.UNREPLAYABLE,
-      gaps: ["sales_count_mismatch"],
-      note:
-        `no rows entered or left the window, but the live count (${live.count}) differs ` +
-        `from the recorded one (${recordedCount}) — the window is not as stable as assumed`,
-    };
-  }
-
-  return { sales: live, fidelity: FIDELITY.EXACT, gaps: [], note: "" };
+  return {
+    sales: null,
+    fidelity: FIDELITY.UNREPLAYABLE,
+    gaps: ["sales_window_drifted"],
+    note:
+      `${added} sale signal(s) landed after the decision and ${agedOut} aged out of the ` +
+      "45-day window since — " +
+      (rowWritesSales
+        ? `the recorded count (${recordedCount}) is trustworthy, but the average price at ` +
+          "decision time is not recorded anywhere"
+        : `and "${task.decision}" is a path where legacy never writes internalSales, so not ` +
+          "even the count at decision time is known") +
+      "; neither can be recovered without duplicating the aggregation",
+    basis: null,
+  };
 }
 
 // Market research as the legacy engine saw it at time T.
@@ -393,6 +423,8 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
     af: af2,
     research: researchPart.research,
     sales: salesPart.sales,
+    // window_unchanged | recorded_zero | null — why the sales figure is trusted
+    salesBasis: salesPart.basis || null,
     probeAllowed: probe.probeAllowed,
     // true: probeAllowed decides this row and its budget half is unknown
     // false: checked and found dead for these inputs (row stays exact)
@@ -430,7 +462,13 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
     campaignId: task.campaignId,
     decidedAt: task.decidedAt || null,
     legacyDecision: task.decision,
-    legacyTarget: Number(task.targetAccounts || 0),
+    // targetAccounts is written by legacy record() ONLY on farm/probe (and kept
+    // on the skip_reuse_only rewrite). On every other path it is the schema
+    // default or a leftover from an earlier decision on the same row, so it is
+    // not evidence there — the same trap as internalSales, see salesInputsFor.
+    legacyTarget: classes.recordsTargetAccounts(task.decision)
+      ? Number(task.targetAccounts || 0)
+      : null,
     legacyDemandScore: task.demandScore == null ? null : Number(task.demandScore),
   };
 
@@ -467,6 +505,8 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
     gaps: inputs.gaps,
     notes: inputs.notes,
     probeGateMatters: inputs.probeGateMatters,
+    salesBasis: inputs.salesBasis,
+    salesCount: inputs.sales ? inputs.sales.count : null,
   };
 
   // --- Score it ------------------------------------------------------------
@@ -484,6 +524,7 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
         return {
           ...out,
           verdict: "disagree",
+          kind: "legacy_skipped_replay_wants",
           detail: `legacy skipped at the sellability gate; replay wants ${replayed.probe ? "probe" : "farm"} ${replayed.target}`,
         };
       }
@@ -509,6 +550,7 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
       return {
         ...out,
         verdict: inputs.gaps.includes("probe_budget_unreconstructable") ? "inconclusive" : "disagree",
+        kind: "probe_not_reproduced",
         detail: `legacy probed; replay says ${replayed.skip ? "skip" : "farm " + replayed.target}`,
       };
     }
@@ -521,6 +563,7 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
     return {
       ...out,
       verdict: "disagree",
+      kind: "legacy_passed_replay_skips",
       detail:
         `legacy passed the sellability gate and settled with "${task.decision}", but the replay ` +
         "skips at that gate — the lane would never have considered this campaign",
@@ -531,7 +574,7 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
   //     targetAccounts is `wanted` from the coverage gate:
   //       min(max(alloc.target, probe ? 0 : marketStockFloor(af)), alloc.cap || af.maxPerGame)
   //     rebuilt here from the same imported helpers rather than re-derived.
-  if (base.legacyTarget > 0) {
+  if (base.legacyTarget != null && base.legacyTarget > 0) {
     let floor = 0;
     try {
       floor = replayed.probe ? 0 : Number(b.marketStockFloor(inputs.af)) || 0;
@@ -551,6 +594,7 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
         ...out,
         replayedWanted: wanted,
         verdict: "disagree",
+        kind: "tier_target",
         detail: `tier target differs — replay wants ${wanted}, legacy recorded ${base.legacyTarget}`,
       };
     }
@@ -670,11 +714,22 @@ function summarise(rows, { maxAgeDays, af } = {}) {
           perMarketStock: af.perMarketStock,
         }
       : null,
+    // Disagreements by cause, so "38 disagree" can be read as e.g. "31 tier
+    // target, 7 legacy passed / replay skips" rather than as one number. The
+    // kinds are set at the scoring sites in replayDecision.
+    disagreementKinds: scoredDisagree.reduce((acc, r) => {
+      const k = r.kind || "unclassified";
+      acc[k] = (acc[k] || 0) + 1;
+      return acc;
+    }, {}),
     disagreements: scoredDisagree.map((r) => ({
       game: r.game,
       campaignId: r.campaignId,
       decidedAt: r.decidedAt,
       legacyDecision: r.legacyDecision,
+      kind: r.kind || "unclassified",
+      salesBasis: r.salesBasis || null,
+      salesCount: r.salesCount == null ? null : r.salesCount,
       detail: r.detail,
     })),
     rows,

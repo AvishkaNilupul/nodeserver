@@ -62,7 +62,7 @@ utils/farm2/replay.js          the harness
 utils/farm2/decisionClasses.js the shared decision vocabulary
 utils/farm2/steps/decide.js    the six gates (commit 2)
 scripts/farm2-replay.js        operator CLI (read-only)
-tests/farm2Replay.test.js      30 tests
+tests/farm2Replay.test.js      37 tests
 tests/farm2Gates.test.js       21 tests
 ```
 
@@ -191,6 +191,46 @@ path is simply incorrect and is worth fixing on its own merits, though not from
 this checkout (`autoFarmer.js` is additive-export-only here).
 
 Captured as `classes.recordsEffectiveDemand()`.
+
+#### …and some are not written at all, depending on the path
+
+`record()` is a `$set` upsert. A field a path does not name is left as the
+schema default on a fresh row, **or as whatever an earlier decision on the same
+`(game, campaignId)` row wrote.** Reading the `record()` calls in
+`processCampaign`/`executeTask`:
+
+| Path | `demandScore` | `internalSales` | `targetAccounts` |
+|---|---|---|---|
+| `skip_low_demand`, `skip_probe_budget` | effective (output) | written | — |
+| `skip_host_offline` | raw | **not written** | — |
+| `reuse_existing` (live and dry-run) | raw | **not written** | **not written** |
+| `skip_ends_soon`, `skip_already_covered`, `skip_no_accounts`, `skip_no_capacity` | raw | written | **not written** |
+| `farm`, `probe` | raw | written | written (`wanted`) |
+| `skip_reuse_only` | (kept from the farm/probe write moments earlier) | kept | kept |
+
+This bit on the second prod run. **15 of 38 disagreements were false** — all
+Black Desert, all `reuse_existing`, all "legacy passed the sellability gate but
+the replay skips". The rows carried `internalSales: 0` because that path never
+writes it; `SaleSignal` held 13 sales at $1.75; `demandAllocation` with 13 sales
+gives demand 37 and passes, with 0 it gives 3.7 and skips. The first version of
+`salesInputsFor()` short-circuited on a recorded 0 without consulting
+`SaleSignal` at all. The live shadow lane, which reads `SaleSignal`, agreed with
+legacy on every one of those decisions. **The replay was wrong and would have
+blocked Black Desert's promotion on a reason that was not real.**
+
+Now: the row's `internalSales` is **never an input**. Sales always come from
+`SaleSignal` through the window-stability check; the recorded value is used only
+as an integrity cross-check, and only on paths that write it. `targetAccounts`
+is checked only on paths that write it. Captured as
+`classes.recordsInternalSales()` / `classes.recordsTargetAccounts()`, and every
+replayed row carries `salesBasis` (`window_unchanged` | `recorded_zero`) so a
+scored row can be traced to *why* its sales were trusted.
+
+The cost is honest: a `reuse_existing` row whose sales window has moved since
+the decision is now **unreplayable** rather than scored, because on that path
+not even the count at decision time is recorded. For a game that sells steadily
+(Black Desert, ~2 sales/week) that will drop older reuse rows out of the scored
+set. `§9.1` (`internalSalesForGame(game, { asOf })`) is what would recover them.
 
 ### 5.2 The lane's decision vocabulary WAS a strict subset of the legacy engine's
 
@@ -390,6 +430,18 @@ formality.
   `probe_budget_unreconstructable`) — the design failed on first contact, as
   §7.4 warned, and `gapCounts` named the assumption. Re-run after the exactness
   fix; the measured expectation is ~283 exact of 363.
+- **Re-run after the row-field fix and read the disagreement breakdown.** The
+  second run scored 315 of 364 with 38 disagreements; 15 were the Black Desert
+  false positives above. Each disagreement now carries a `kind` and a
+  `salesBasis`, and the CLI prints both histograms. The 15 must come back as
+  `agree` (window unchanged) or `unreplayable` (window drifted) — never
+  `disagree`. Of the remaining 23: any `legacy_passed_replay_skips` row with
+  `salesBasis: window_unchanged` is a *real* finding about one of the two
+  engines; `tier_target` rows point at `af` settings drift or the market floor
+  (§7.3), not at sales; `legacy_skipped_replay_wants` rows mean the replay has
+  *more* demand than legacy had — the drift check should already have made those
+  unreplayable, so any that survive are worth a look. Albion Online's 2 of 21
+  will sort themselves into one of those buckets on the re-run.
 - **Run a shadow cycle with the gates and diff against legacy rows.** The six
   new decisions should now appear in lane verdicts and, for campaigns the legacy
   engine re-decides every tick (the RETRYABLE skips), agree with it. Any
@@ -409,13 +461,19 @@ formality.
 
 ## 8. Verification done in the sandbox
 
-- `tests/farm2Replay.test.js` — 30 tests: the vocabulary, every fidelity tier,
+- `tests/farm2Replay.test.js` — 37 tests: the vocabulary, every fidelity tier,
   the exact 171h trial case from the task brief, self-validating demand
-  figures, a genuine disagreement, the readiness integration, and the
-  probe-gate cases from the prod run — the pinned one being: research present,
-  `sellers > probeMaxSellers`, score below the half tier, `probeColdStart` ON
-  → **exact**; the two probe-reachable branches → partial; and the summary
-  scoring such rows with the gap gone from `gapCounts`.
+  figures, a genuine disagreement, the readiness integration, the probe-gate
+  cases from the first prod run (research present, `sellers > probeMaxSellers`,
+  score below the half tier, `probeColdStart` ON → **exact**; the two
+  probe-reachable branches → partial), and the row-field cases from the second
+  prod run — the pinned one being **the Black Desert case**: a `reuse_existing`
+  row with `internalSales: 0` and 13 `SaleSignal` sales at $1.75 → sales taken
+  from `SaleSignal`, `salesBasis: window_unchanged`, `salesCount: 13`, gate
+  passes, **agree**; the same row with one sale landed since → **unreplayable,
+  never disagree**; a contradicting count on a path that writes the field →
+  integrity failure; a stale `targetAccounts` on a reuse row → not checked; and
+  which fields each legacy path writes, pinned.
 - `tests/farm2Gates.test.js` — 21 tests: each of the six gates reached in
   isolation with the legacy row's decision and numbers, the legacy gate order,
   forced-game bypass, reuse-before-time-gate, partial coverage, seat trimming,

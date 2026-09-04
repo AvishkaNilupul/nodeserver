@@ -585,6 +585,234 @@ test("when the probe gate is irrelevant the row drops the gap and the summary sc
   );
 });
 
+// --- The row's own fields are not inputs ----------------------------------
+//
+// Prod, 2026-09-04, second run: 315 scored of 364, 38 disagreements — and 15 of
+// them false. All Black Desert, all reuse_existing, all "legacy passed the
+// sellability gate but the replay skips". The rows recorded internalSales 0;
+// SaleSignal held 13 sales at $1.75; demandAllocation with 13 sales does not
+// skip, with 0 it does. The live shadow lane, reading SaleSignal, agreed with
+// legacy every time. The replay was wrong, because it trusted a field that
+// legacy's record() never writes on the reuse path.
+
+// Thirteen distinct unit sales of one game, all inside the 45-day window and
+// all BEFORE `before`. listing_sold rows carry no account, so
+// internalSalesForGame groups them by dedupeKey — one sale each.
+async function thirteenSales(game, before) {
+  const rows = [];
+  for (let i = 0; i < 13; i += 1) {
+    rows.push({
+      game,
+      gameKey: game.toLowerCase(),
+      source: "listing_sold",
+      dedupeKey: `${game}-unit-${i}`,
+      account: null,
+      priceUsd: 1.75,
+      at: new Date(before.getTime() - (i + 1) * 5 * 3600000), // 5h..65h before the decision
+    });
+  }
+  await SaleSignal.insertMany(rows);
+}
+
+test("THE BLACK DESERT CASE: a reuse_existing row's internalSales 0 is ignored — sales come from SaleSignal", async () => {
+  const game = "Black Desert Case";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 3.7,
+    sellers: 10,
+  });
+  await thirteenSales(game, decidedAt);
+  const task = {
+    game,
+    campaignId: "bd1",
+    decision: "reuse_existing",
+    demandScore: 3.7,
+    hadResearch: true,
+    internalSales: 0, // never written on this path — the schema default
+    targetAccounts: 0,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: AF });
+  assert.equal(out.salesBasis, "window_unchanged", "sales were taken from SaleSignal, not the row");
+  assert.equal(out.salesCount, 13, "the thirteen sales were seen");
+  assert.equal(out.replayed.skip, false, "with the real sales the sellability gate passes");
+  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
+  assert.equal(out.verdict, "agree", out.detail);
+});
+
+test("...and if a sale landed AFTER the decision the row is unreplayable, never a disagreement", async () => {
+  // Same row, but the world moved: one more sale since. On a path that does not
+  // write internalSales we then know neither the count nor the price at T.
+  // The honest answer is "cannot tell", not "the lane is wrong".
+  const game = "Black Desert Drifted";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 3.7,
+    sellers: 10,
+  });
+  await thirteenSales(game, decidedAt);
+  await SaleSignal.create({
+    game,
+    gameKey: game.toLowerCase(),
+    source: "listing_sold",
+    dedupeKey: `${game}-late`,
+    account: null,
+    priceUsd: 1.75,
+    at: hoursAgo(1),
+  });
+  const task = {
+    game,
+    campaignId: "bd2",
+    decision: "reuse_existing",
+    demandScore: 3.7,
+    hadResearch: true,
+    internalSales: 0,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: AF });
+  assert.equal(out.verdict, "unreplayable");
+  assert.ok(out.gaps.includes("sales_window_drifted"));
+  assert.match(out.notes.join(" "), /never writes internalSales/);
+  assert.notEqual(out.verdict, "disagree", "a false disagreement is worse than an unscored row");
+});
+
+test("a recorded internalSales that contradicts SaleSignal, on a path that WRITES it, is an integrity failure", async () => {
+  // skip_ends_soon does write internalSales. The row says 5; SaleSignal has
+  // nothing and the window has not moved. The two were produced by the same
+  // aggregation, so they cannot legitimately differ — an assumption is wrong
+  // and the row must not be scored either way.
+  const game = "Integrity Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 90,
+    sellers: 5,
+  });
+  const task = {
+    game,
+    campaignId: "ig1",
+    decision: "skip_ends_soon",
+    demandScore: 90,
+    hadResearch: true,
+    internalSales: 5,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: AF });
+  assert.equal(out.verdict, "unreplayable");
+  assert.ok(out.gaps.includes("sales_count_mismatch"));
+});
+
+test("a recorded zero on a path that writes it stays exact even after later sales", async () => {
+  // The legitimate half of the old shortcut. farm writes internalSales; it
+  // recorded 0; the boost was 0 and the cap at base regardless of price. A sale
+  // since cannot change what the decision saw.
+  const game = "Recorded Zero Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 90,
+    sellers: 5,
+  });
+  await SaleSignal.create({
+    game,
+    gameKey: game.toLowerCase(),
+    source: "listing_sold",
+    dedupeKey: `${game}-late`,
+    account: null,
+    priceUsd: 9,
+    at: hoursAgo(1),
+  });
+  const task = {
+    game,
+    campaignId: "rz1",
+    decision: "farm",
+    demandScore: 90,
+    hadResearch: true,
+    internalSales: 0,
+    targetAccounts: 30,
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: AF });
+  assert.equal(out.salesBasis, "recorded_zero");
+  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
+  assert.equal(out.verdict, "agree", out.detail);
+});
+
+test("a stale targetAccounts on a reuse_existing row is not checked — legacy never writes it there", async () => {
+  // The sibling bug. This row was once a probe (targetAccounts 3) and was later
+  // re-decided as reuse_existing, which does not touch the field. Comparing the
+  // replayed tier target (30) against that leftover 3 would be a false
+  // "tier target differs".
+  const game = "Stale Target Game";
+  await reset(game);
+  const decidedAt = hoursAgo(30);
+  await MarketResearchSnapshot.create({
+    game,
+    gameKey: game.toLowerCase(),
+    at: new Date(decidedAt.getTime() - 3600000),
+    demandScore: 90,
+    sellers: 5,
+  });
+  const task = {
+    game,
+    campaignId: "st1",
+    decision: "reuse_existing",
+    demandScore: 90,
+    hadResearch: true,
+    internalSales: 0,
+    targetAccounts: 3, // leftover from an earlier probe decision on this row
+    decidedAt,
+  };
+  const out = await replay.replayDecision(task, { af: AF });
+  assert.equal(out.legacyTarget, null, "not evidence on this path");
+  assert.equal(out.verdict, "agree", out.detail);
+  assert.equal(out.downstream, true);
+});
+
+test("which fields each legacy path writes is pinned", () => {
+  // From utils/autoFarmer.js processCampaign/executeTask record() calls.
+  assert.equal(classes.recordsInternalSales("reuse_existing"), false);
+  assert.equal(classes.recordsInternalSales("skip_host_offline"), false);
+  for (const d of ["farm", "probe", "skip_low_demand", "skip_probe_budget", "skip_ends_soon",
+    "skip_already_covered", "skip_no_accounts", "skip_no_capacity", "skip_reuse_only"]) {
+    assert.equal(classes.recordsInternalSales(d), true, `${d} writes internalSales`);
+  }
+  assert.equal(classes.recordsInternalSales("not_a_decision"), false, "unknown paths write nothing");
+
+  for (const d of ["farm", "probe", "skip_reuse_only"]) {
+    assert.equal(classes.recordsTargetAccounts(d), true, `${d} writes targetAccounts`);
+  }
+  for (const d of ["reuse_existing", "skip_host_offline", "skip_ends_soon", "skip_already_covered",
+    "skip_no_accounts", "skip_no_capacity", "skip_low_demand", "skip_probe_budget"]) {
+    assert.equal(classes.recordsTargetAccounts(d), false, `${d} does not write targetAccounts`);
+  }
+});
+
+test("disagreements are broken down by kind in the summary", () => {
+  const s = replay.summarise([
+    { game: "G", verdict: "disagree", fidelity: replay.FIDELITY.EXACT, kind: "tier_target", detail: "a" },
+    { game: "G", verdict: "disagree", fidelity: replay.FIDELITY.EXACT, kind: "tier_target", detail: "b" },
+    { game: "G", verdict: "disagree", fidelity: replay.FIDELITY.EXACT, kind: "legacy_passed_replay_skips", detail: "c" },
+    { game: "G", verdict: "agree", fidelity: replay.FIDELITY.EXACT },
+  ]);
+  assert.deepEqual(s.disagreementKinds, { tier_target: 2, legacy_passed_replay_skips: 1 });
+  assert.equal(s.disagreements[0].kind, "tier_target");
+});
+
 // --- The summary and the gate ---------------------------------------------
 
 test("only EXACT-fidelity rows count as evidence in the summary", () => {

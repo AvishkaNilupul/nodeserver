@@ -99,6 +99,22 @@ async function main() {
     if (report.disagreements.length > 40) {
       console.log(`    ... and ${report.disagreements.length - 40} more (use --json)`);
     }
+    // One number hides several causes. A "legacy passed / replay skips" row
+    // with salesBasis window_unchanged is a real finding about one of the two
+    // engines; the same row with a drifted window can no longer exist (it is
+    // unreplayable), and a tier-target row points at settings or the floor.
+    console.log(`\n  disagreements by kind:`);
+    for (const [kind, n] of Object.entries(report.disagreementKinds || {}).sort((a, b) => b[1] - a[1])) {
+      console.log(`    ${String(n).padStart(5)}  ${kind}`);
+    }
+    const byDecision = {};
+    for (const d of report.disagreements) {
+      byDecision[d.legacyDecision] = (byDecision[d.legacyDecision] || 0) + 1;
+    }
+    console.log(`  disagreements by legacy decision:`);
+    for (const [dec, n] of Object.entries(byDecision).sort((a, b) => b[1] - a[1])) {
+      console.log(`    ${String(n).padStart(5)}  ${dec}`);
+    }
   }
 
   if (VERBOSE) {
