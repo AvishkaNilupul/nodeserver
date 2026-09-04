@@ -16,9 +16,9 @@
 //   * publish jobs are only ever created for stock that is provably real
 //
 // The verification itself is NOT reimplemented here. It calls
-// autoLister.verifiedHoldersForItems, the same gate the real listing path uses
-// (the one added after 55 of 188 auto-listed accounts turned out to hold the
-// wrong content). One implementation, one behaviour.
+// autoLister.pickDeliveryAccounts — the exact function the real listing path
+// uses to choose what it can deliver, so the checker and the lister agree by
+// construction rather than by keeping two implementations in step.
 
 function lister() {
   return require("../../autoLister");
@@ -86,13 +86,13 @@ async function verifyTask(taskDoc) {
     };
   }
 
-  if (typeof L.verifiedHoldersForItems !== "function") {
+  if (typeof L.pickDeliveryAccounts !== "function") {
     // The export is additive and ships with this engine; if a host is running
     // an older autoLister the checker degrades to "unknown" rather than
     // guessing, because a false "verified" would put wrong content on sale.
     return {
       ok: false,
-      reason: "autoLister.verifiedHoldersForItems unavailable on this host",
+      reason: "autoLister.pickDeliveryAccounts unavailable on this host",
       verified: 0,
       assigned: assigned.length,
       items: items.map((i) => i.name || i.itemKey),
@@ -100,7 +100,24 @@ async function verifyTask(taskDoc) {
     };
   }
 
-  const holders = await L.verifiedHoldersForItems(task, items);
+  // pickDeliveryAccounts, NOT verifiedHoldersForItems.
+  //
+  // The two differ by one crucial subtraction: pickDeliveryAccounts also
+  // excludes logins already live on ANOTHER active MarketplaceListing. Holding
+  // the bundle is not the same as being deliverable — an account already
+  // advertised elsewhere cannot be sold twice.
+  //
+  // The first live publish exposed this: this checker reported 7 verified
+  // holders for World of Tanks while the real lister declined with "no assigned
+  // account holds the full bundle yet", because all 7 were already committed to
+  // other listings. No harm followed — the lister's own gate caught it — but
+  // the checker was over-reporting, which also inflated the "sellable but
+  // unlisted" audit and made the monitor re-queue a publish job every cycle
+  // that could never succeed.
+  //
+  // Using the same function the real listing path uses makes the two agree by
+  // construction rather than by keeping a second implementation in step.
+  const holders = await L.pickDeliveryAccounts(task, assigned.length, items);
   const verified = holders.length;
 
   return {
@@ -115,8 +132,8 @@ async function verifyTask(taskDoc) {
     items: items.map((i) => ({ key: i.itemKey, name: i.name, qty: i.qty || 1 })),
     reason:
       verified > 0
-        ? `${verified} of ${assigned.length} assigned account(s) hold the full bundle`
-        : `none of the ${assigned.length} assigned account(s) hold the full bundle yet`,
+        ? `${verified} of ${assigned.length} assigned account(s) are deliverable (hold the full bundle and are not already on another listing)`
+        : `none of the ${assigned.length} assigned account(s) are deliverable yet`,
   };
 }
 

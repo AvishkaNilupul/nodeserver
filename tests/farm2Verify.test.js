@@ -22,13 +22,13 @@ const verify = require("../utils/farm2/steps/verify");
 
 test("verifyTask calls campaignItems with (campaignId, game, campaignName)", async () => {
   const origItems = autoLister.campaignItems;
-  const origHolders = autoLister.verifiedHoldersForItems;
+  const origHolders = autoLister.pickDeliveryAccounts;
   let seen = null;
   autoLister.campaignItems = async (...args) => {
     seen = args;
     return [{ itemKey: "k1", name: "Item One", qty: 1 }];
   };
-  autoLister.verifiedHoldersForItems = async () => [
+  autoLister.pickDeliveryAccounts = async () => [
     { login: "a", password: "p", accountId: "1" },
   ];
   try {
@@ -49,7 +49,7 @@ test("verifyTask calls campaignItems with (campaignId, game, campaignName)", asy
     assert.equal(r.assigned, 2);
   } finally {
     autoLister.campaignItems = origItems;
-    autoLister.verifiedHoldersForItems = origHolders;
+    autoLister.pickDeliveryAccounts = origHolders;
   }
 });
 
@@ -85,9 +85,9 @@ test("a task with no assigned accounts is blocked", async () => {
 
 test("zero verified holders blocks publishing even when items resolve", async () => {
   const origItems = autoLister.campaignItems;
-  const origHolders = autoLister.verifiedHoldersForItems;
+  const origHolders = autoLister.pickDeliveryAccounts;
   autoLister.campaignItems = async () => [{ itemKey: "k1", name: "I", qty: 1 }];
-  autoLister.verifiedHoldersForItems = async () => [];
+  autoLister.pickDeliveryAccounts = async () => [];
   try {
     const r = await verify.verifyTask({
       _id: "t4",
@@ -103,6 +103,6 @@ test("zero verified holders blocks publishing even when items resolve", async ()
     assert.equal(r.shortfall, 3);
   } finally {
     autoLister.campaignItems = origItems;
-    autoLister.verifiedHoldersForItems = origHolders;
+    autoLister.pickDeliveryAccounts = origHolders;
   }
 });
