@@ -17,6 +17,11 @@
 // with its own retry clock, instead of a line in an in-memory progress array.
 
 const settings = require("../../settings");
+// The action-class table and the two engines' decision vocabularies. This used
+// to be written out twice IN THIS FILE (`classOf` for the stale branch,
+// `actionClass` for the live one) with no shared definition — two copies of the
+// rule that gates whether a lane may take over a real game.
+const classes = require("../decisionClasses");
 
 // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
 // (and, on prod, the catalog integration) and requires autoLister lazily itself
@@ -301,11 +306,7 @@ async function diffAgainstLegacy(verdict) {
   const legacyAt = legacy.decidedAt ? new Date(legacy.decidedAt).getTime() : 0;
   const ageMs = legacyAt ? Date.now() - legacyAt : Infinity;
 
-  const classOf = (d) => {
-    if (d === "farm" || d === "probe") return "spend";
-    if (d === "reuse_existing") return "reuse";
-    return "skip";
-  };
+  const classOf = classes.actionClass;
 
   if (ageMs > COMPARABLE_WINDOW_MS) {
     return {
@@ -321,6 +322,10 @@ async function diffAgainstLegacy(verdict) {
       laneClass: classOf(verdict.decision),
       legacyClass: classOf(legacy.decision),
       stale: true,
+      // Explicit reason code rather than leaving the caller to infer "why" from
+      // a combination of flags. Same discipline as the presence checks: a row
+      // states what happened to it, it is not read by elimination.
+      comparability: "stale",
       legacyAgeHours: Number.isFinite(ageMs) ? Math.round(ageMs / 3600000) : null,
       agree: null,
     };
@@ -338,16 +343,37 @@ async function diffAgainstLegacy(verdict) {
   // Spending and reusing are different actions with different costs, so they
   // are different classes. Getting this wrong is not a cosmetic reporting bug:
   // the readiness gate is built on it.
-  const actionClass = (d) => {
-    if (d === "farm" || d === "probe") return "spend";
-    if (d === "reuse_existing") return "reuse";
-    return "skip";
-  };
+  const actionClass = classes.actionClass;
   const laneClass = actionClass(verdict.decision);
   const legacyClass = actionClass(legacy.decision);
   const sameClass = laneClass === legacyClass;
   const acctDelta =
     Number(verdict.plannedAccounts || 0) - Number(legacy.plannedAccounts || 0);
+
+  // An unclassified decision on either side is NOT a disagreement — it is a
+  // comparison we are not equipped to make. Scoring it as `false` would block
+  // promotion on a reporting gap; scoring it as `true` would pass a lane on a
+  // decision nobody classified. Both are wrong, so it is simply not evidence.
+  if (laneClass === "unknown" || legacyClass === "unknown") {
+    return {
+      legacyDecision: legacy.decision,
+      legacyPlanned: Number(legacy.plannedAccounts || 0),
+      laneDecision: verdict.decision,
+      lanePlanned: Number(verdict.plannedAccounts || 0),
+      laneClass,
+      legacyClass,
+      stale: false,
+      comparability: "unknown_class",
+      legacyAgeHours: Math.round(ageMs / 3600000),
+      agree: null,
+    };
+  }
+
+  // Why did they differ? "12 disagreements" is not actionable on its own: a
+  // disagreement caused by a gate the lane does not implement needs a feature,
+  // one caused by the arbiter needs no action at all, and only the remainder
+  // needs a human to work out which engine was right.
+  const taxonomy = classes.classifyDisagreement(verdict.decision, legacy.decision);
 
   return {
     legacyDecision: legacy.decision,
@@ -360,6 +386,17 @@ async function diffAgainstLegacy(verdict) {
     legacyClass,
     sameClass,
     stale: false,
+    comparability: "comparable",
+    // The taxonomy of the difference (agree / lane_missing_gate /
+    // class_mismatch). `lane_missing_gate` is the important one: the lane's
+    // decision vocabulary is a strict subset of the legacy engine's, so on any
+    // campaign the legacy engine settles with a gate the lane does not
+    // implement, the lane will disagree deterministically until that gate is
+    // built. Reporting it as an ordinary disagreement sends an operator looking
+    // for a bug that is really a missing feature.
+    disagreementKind: taxonomy.kind,
+    disagreementNote: taxonomy.note || "",
+    laneCanEmitLegacy: classes.laneCanEmit(legacy.decision),
     legacyAgeHours: Math.round(ageMs / 3600000),
     accountDelta: acctDelta,
     // "agree" is the headline the tab shows and what the readiness gate blocks
@@ -376,4 +413,9 @@ module.exports = {
   probeGate,
   reuseCandidate,
   COMPARABLE_WINDOW_MS,
+  // Re-exported so callers reading a diff do not need a second require to
+  // interpret it, and so there remains exactly one definition of these.
+  actionClass: classes.actionClass,
+  LANE_DECISIONS: classes.LANE_DECISIONS,
+  LEGACY_ONLY_DECISIONS: classes.LEGACY_ONLY_DECISIONS,
 };

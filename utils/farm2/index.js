@@ -69,10 +69,32 @@ async function seedTrialLanes({ games = TRIAL_GAMES, mode = "shadow" } = {}) {
 // evidence, not by accident.
 const MIN_SHADOW_DECISIONS = 3;
 
-async function laneReadiness(lane) {
+// How many EXACT-fidelity replayed decisions constitute evidence, when replay
+// evidence is required. Higher than MIN_SHADOW_DECISIONS because replay rows
+// are cheap — they come from history rather than from waiting — so there is no
+// reason to accept a thin sample.
+const MIN_REPLAY_DECISIONS = 20;
+
+// `opts.replay` is a report from utils/farm2/replay.js (replayHistory), scoped
+// to this lane's game. It is passed IN rather than computed here so that
+// readiness stays a fast, read-only check the promotion dialog can call, while
+// the replay — which walks months of history — is run deliberately.
+//
+// `opts.requireReplay` decides whether missing replay evidence BLOCKS or merely
+// warns. It defaults to false so this change cannot silently raise the bar on
+// the existing gate; the recommendation to flip it is in
+// docs/FARM2-VERIFICATION.md and is a decision for review, not for this module.
+async function laneReadiness(lane, opts = {}) {
   const FarmJob = require("../../models/FarmJob");
+  const classes = require("./decisionClasses");
+  const { replay = null, requireReplay = false } = opts;
   const blockers = [];
   const warnings = [];
+  // Standing facts about the ENGINE that apply to every lane, kept separate
+  // from `warnings` (which are observations about THIS lane's evidence) so that
+  // a clean lane still reads as clean. Folding them into warnings would make
+  // that list never empty and train an operator to ignore it.
+  const caveats = [];
 
   // 1. The live path must actually exist on this host. A lane promoted on a
   //    box running an older build would own its game with no way to farm it —
@@ -176,6 +198,36 @@ async function laneReadiness(lane) {
     );
   }
 
+  // Split the disagreements by cause. A count on its own cannot distinguish a
+  // lane bug from a gate the lane has never had, and those need opposite
+  // responses — investigate vs. implement.
+  //
+  // `disagreementKind` is written only by the current diff. A disagreement
+  // WITHOUT it is counted as unclassified rather than assumed benign: absence
+  // of the field means "not scored by the current logic", never "passed it".
+  const missingGate = diffs.filter((d) => d.disagreementKind === "lane_missing_gate");
+  const genuineMismatch = diffs.filter((d) => d.disagreementKind === "class_mismatch");
+  const unclassified = diffs.filter((d) => !d.disagreementKind);
+  if (missingGate.length) {
+    const gates = [...new Set(missingGate.map((d) => d.legacyDecision))].join(", ");
+    blockers.push(
+      `${missingGate.length} disagreement(s) are the lane having no equivalent of a legacy gate (${gates}) — ` +
+        "the lane engine cannot emit those decisions at all, so it will disagree on every such " +
+        "campaign until the gate is implemented. This is a missing feature, not a mystery",
+    );
+  }
+
+  // The vocabulary gap is worth surfacing even on a lane that currently shows
+  // no disagreements, because whether it has bitten yet is a property of which
+  // campaigns happened to come up, not of the lane being safe.
+  if (classes.LEGACY_ONLY_DECISIONS.length) {
+    caveats.push(
+      `the lane engine cannot emit ${classes.LEGACY_ONLY_DECISIONS.length} of the legacy engine's ` +
+        `decisions (${classes.LEGACY_ONLY_DECISIONS.join(", ")}); on campaigns the legacy engine ` +
+        "settles with one of those, a live lane would carry on and spend instead",
+    );
+  }
+
   // A large account-count gap is worth surfacing even when the action matches —
   // same intent, very different spend, is still worth a look before promoting.
   const bigGaps = compared.filter((d) => Math.abs(Number(d.accountDelta) || 0) >= 10);
@@ -185,15 +237,68 @@ async function laneReadiness(lane) {
     );
   }
 
+  // --- Replay evidence -----------------------------------------------------
+  //
+  // Shadow comparisons answer "did the two engines agree on the campaigns that
+  // happened to come up while both were looking?". Replay answers "does the
+  // lane's economics reproduce what the legacy engine actually decided, given
+  // the inputs it had?" — over months of history rather than days of waiting.
+  // The second is the stronger evidence and the one that scales to 34 lanes.
+  let replaySummary = null;
+  if (replay && typeof replay === "object") {
+    replaySummary = {
+      examined: Number(replay.examined) || 0,
+      scored: Number(replay.scored) || 0,
+      agree: Number(replay.agree) || 0,
+      disagree: Number(replay.disagree) || 0,
+      unreplayable: Number(replay.unreplayable) || 0,
+      inconclusive: Number(replay.inconclusive) || 0,
+    };
+    if (replaySummary.disagree > 0) {
+      const sample = (replay.disagreements || [])
+        .slice(0, 3)
+        .map((d) => `${d.legacyDecision}: ${d.detail}`)
+        .join("; ");
+      blockers.push(
+        `${replaySummary.disagree} of ${replaySummary.scored} replayed decisions did not reproduce ` +
+          `the legacy engine's recorded outcome (${sample})`,
+      );
+    }
+    if (requireReplay && replaySummary.scored < MIN_REPLAY_DECISIONS) {
+      blockers.push(
+        `only ${replaySummary.scored} replayed decision(s) at full fidelity — need at least ` +
+          `${MIN_REPLAY_DECISIONS} (${replaySummary.examined} examined, ${replaySummary.unreplayable} ` +
+          `could not be reconstructed, ${replaySummary.inconclusive} inconclusive)`,
+      );
+    }
+  } else if (requireReplay) {
+    blockers.push(
+      "no replay evidence supplied — run the replay harness for this game before promoting",
+    );
+  } else {
+    caveats.push(
+      "no replay evidence — shadow comparisons alone only cover campaigns decided while both " +
+        "engines were looking; run scripts/farm2-replay.js for this game to check the economics " +
+        "against recorded history",
+    );
+  }
+
   return {
     ready: blockers.length === 0,
     blockers,
     warnings,
+    caveats,
     shadowDecisions: decided,
     compared: compared.length,
     stale,
     preGate,
     disagreements: diffs.length,
+    disagreementKinds: {
+      lane_missing_gate: missingGate.length,
+      class_mismatch: genuineMismatch.length,
+      unclassified: unclassified.length,
+    },
+    replay: replaySummary,
   };
 }
 
@@ -217,6 +322,9 @@ module.exports = {
   seedTrialLanes,
   laneReadiness,
   ownership,
+  replay: require("./replay"),
+  decisionClasses: require("./decisionClasses"),
   TRIAL_GAMES,
   MIN_SHADOW_DECISIONS,
+  MIN_REPLAY_DECISIONS,
 };
