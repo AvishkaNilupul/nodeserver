@@ -438,7 +438,10 @@ formality.
    only as `FarmJob` rows. Harmless in shadow; a real gap in live mode, and
    pre-existing in shape (the two sellability skips had the same behaviour).
    Needs its own change in `lane.js`/`execute.js` — not made here, because it
-   writes to a shared collection and deserves separate review.
+   writes to a shared collection and deserves separate review. *One exception
+   since commit 8 (§11): when a live reuse finds nothing it can sell,
+   `executeReuse` now writes `skip_reuse_only` / `skip_no_accounts` itself,
+   because the alternative — an empty ACTIVE row — is acted on by the sweeps.*
 9. **`recycledPoolCount` depends on a query's shape** (§5.2). It has a test that
    mirrors the `soldGames` term, but nothing ties it to `claimPoolAccounts`
    mechanically.
@@ -632,3 +635,71 @@ split; `afAssumed` is now labelled as applying to reconstructed rows only.
 
 **Cost.** Roughly 200 bytes per `AutoFarmTask` row, one row per game and
 campaign. Negligible.
+
+## 11. Incident: an empty ACTIVE task is not harmless (2026-09-04)
+
+World of Tanks — a live lane, a reuse-only game. Three campaigns arrived within
+two seconds. `executeReuse` served the first by reusing all 18 warm accounts.
+For the other two, `mine` came out 0 (every account spoken for by the first) —
+and the step **still wrote ACTIVE rows** with `plannedAccounts: 0` and
+`targetAccounts: 0`. Legacy's `backfillActiveTasks` read both as "under target"
+(`targetAccounts || plannedAccounts || 0` falls through to the market floor, 18)
+and topped each up with 18 **fresh** pool accounts. 36 fresh accounts on a
+reuse-only game, all deployed, none recoverable. WoT was demoted to shadow.
+
+This was a lane bug, and the lesson generalises:
+
+> **Any row shape the lane writes must be one legacy already produces.** Legacy's
+> fleet sweeps read `status: "active"` and act on it — for lane rows too, by
+> design (`FARM2-PLAN.md`: the legacy engine remains the fleet's janitor). An
+> invented shape is therefore acted on by code that never expected it.
+
+Why the lane and not legacy: legacy's inline reuse writes the same empty row —
+and then immediately tops it up from its own budget through `executeTask`, whose
+reuse-only branch refuses fresh accounts. The lane has no such top-up, so the
+empty row stood until the sweep found it.
+
+**Fix (commit 8).** When `mine` is empty, `executeReuse` touches no host and
+records what legacy records for "nothing to spend": `skip_reuse_only` on a
+reuse-only game — the exact shape `executeTask`'s reuse-only branch writes — and
+`skip_no_accounts` otherwise. Both are RETRYABLE; the lane re-decides every
+cycle and reuses the moment an account frees up. The test drives the real
+non-dry-run `executeReuse` with three campaigns and asserts one active task, two
+skips, one bot restart, and **zero rows that are ACTIVE with no accounts** — the
+predicate `backfillActiveTasks` would have matched.
+
+**Audit of every row shape the lane writes**, applying the rule:
+
+| writer | shape | legacy produces it? |
+|---|---|---|
+| `upsertTask` (before `executeTask`) | `planned`, `plannedAccounts: N` | yes — `record()` then `executeTask` |
+| `executeTask` (legacy, via lane) | active / failed / `skip_reuse_only` | yes — it *is* legacy |
+| `executeReuse`, `mine > 0` | `reuse_existing` active, `assignedAccounts: mine` | yes — inline reuse |
+| `executeReuse`, `mine = 0` | **was**: active, no accounts | **no — fixed** |
+| `executeReuse`, `mine = 0` | **now**: `skip_reuse_only` / `skip_no_accounts`, skipped | yes |
+| `executeReuse`, dry-run | `reuse_existing` planned, `plannedAccounts: 0` | yes — dry-run reuse |
+| `executeReuse`, no bot restarted | `reuse_existing` failed | yes |
+| lane skips (decide) | **nothing written** (§7.8) | an absence, not a shape |
+
+One difference remains by design: the lane writes `targetAccounts: mine.length`
+on reuse rows where legacy leaves the field unwritten. For backfill the two
+read identically (`targetAccounts || plannedAccounts` gives `mine.length`
+either way); noted so it is a known difference rather than a surprise.
+
+**The backfill leak is a separate question, and the answer is not a new fix.**
+`backfillActiveTasks` in this checkout already passes `recycledOnly: true` for
+reuse-only games (lines 4273–4281) — committed **2026-08-21** as `bb0419e`
+("never spend fresh pool accounts on reuse-only games"), in `de4facd`'s history.
+Every leak reported (08-24, 08-30, 09-04) **postdates** it. So on prod one of
+two things is true, and only prod can say which:
+
+1. prod's running `autoFarmer.js` does not contain that hunk — `grep -n
+   "recycledOnly: true" utils/autoFarmer.js` on prod; if it returns only the
+   `executeTask` site, the backfill guard never reached prod's copy. The hunk is
+   packaged standalone alongside this series for hand-application.
+2. it does, and `isReuseOnlyGame(task.game)` is false for those rows —
+   `normGameName(task.game)` on the backfilled WoT rows compared against
+   `settings.reuseOnlyGames`; a label variant would slip through an exact match.
+
+Writing a second guard here would duplicate existing logic and hide whichever
+of those it is. Declined on those grounds, not on risk.

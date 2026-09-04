@@ -129,6 +129,85 @@ async function executeReuse({ verdict, dryRun }) {
     };
   }
 
+  // NOTHING THIS CAMPAIGN COULD SELL: every account on the warm bots is already
+  // advertised by another live task. Restarting the bots anyway and recording
+  // an ACTIVE row with zero accounts is what this step used to do — and it is
+  // not harmless. Legacy's fleet sweeps read status "active" and act on it:
+  // on 2026-09-04 three World of Tanks campaigns arrived within two seconds,
+  // the first reused all 18 warm accounts, the other two found them spoken for
+  // and were written as ACTIVE with none, and backfillActiveTasks then read
+  // both as "under target" and topped each up with 18 FRESH pool accounts — 36
+  // on a reuse-only game, all deployed, none recoverable.
+  //
+  // Legacy's own inline reuse would produce the same empty row here, but it
+  // immediately tops it up from its budget through executeTask, whose
+  // reuse-only branch refuses fresh accounts. The lane has no such top-up, so
+  // the empty row would stand. The rule this fixes into place: any row shape
+  // the lane writes must be one legacy already produces, and an ACTIVE task
+  // with no accounts is not one of them.
+  //
+  // So: touch no host, and record what legacy records for "nothing to spend" —
+  // skip_reuse_only on a reuse-only game (exactly what executeTask's reuse-only
+  // branch writes), skip_no_accounts otherwise. Both are RETRYABLE; the lane
+  // re-decides every cycle and reuses the moment an account frees up.
+  if (!mine.length) {
+    const reuseOnly = (() => {
+      try {
+        return settings.isReuseOnlyGame(verdict.game);
+      } catch {
+        return false;
+      }
+    })();
+    const held = (reusable.assignedAccounts || []).length;
+    const decision = reuseOnly ? "skip_reuse_only" : "skip_no_accounts";
+    const reason = reuseOnly
+      ? `Reuse-only game (${verdict.game}): all ${held} account(s) on its warm bots are already ` +
+        "assigned to another live task, and no fresh pool account is ever spent here — nothing " +
+        "this campaign could sell; will retry when one frees up."
+      : `All ${held} account(s) on the game's warm bots are already assigned to another live task — ` +
+        "nothing this campaign could sell without spending fresh accounts it has no budget for; " +
+        "will retry when one frees up.";
+    const task = await AutoFarmTask.findOneAndUpdate(
+      { game: verdict.game, campaignId: verdict.campaignId },
+      {
+        $set: {
+          game: verdict.game,
+          campaignId: verdict.campaignId,
+          campaignName: verdict.campaignName || "",
+          campaignEndAt: verdict.campaignEndAt || null,
+          decision,
+          status: "skipped",
+          reason,
+          demandScore: verdict.demandScore ?? null,
+          hadResearch: !!verdict.hadResearch,
+          internalSales: verdict.internalSales || 0,
+          bots: [],
+          assignedAccounts: [],
+          plannedAccounts: 0,
+          targetAccounts: 0,
+          error: "",
+          dryRun: false,
+          decidedAt: new Date(),
+          executedAt: new Date(),
+          rescanRequested: false,
+          ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    return {
+      reuse: true,
+      skipped: true,
+      decision,
+      taskId: task._id,
+      restarted: [],
+      skippedParked: [],
+      failed: [],
+      accounts: 0,
+      reason,
+    };
+  }
+
   // NEVER restart a container the RAM saver deliberately parked.
   //
   // utils/botWaker.js parks idle containers to save memory (~130MB each) and
