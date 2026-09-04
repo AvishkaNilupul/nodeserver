@@ -139,16 +139,28 @@ async function laneReadiness(lane) {
         // made hours or days earlier, under conditions that no longer hold. It
         // is not evidence in EITHER direction — see the staleness gate in
         // steps/decide.js.
-        !d.stale,
+        //
+        // `=== false`, NOT `!d.stale`. A row written before the staleness gate
+        // existed has no `stale` field at all, and `!undefined` is true — so the
+        // loose test silently readmitted exactly the rows this filter exists to
+        // exclude. Same trap as the `laneClass` check above: when a comparison
+        // metric changes, absence of the new field means "not scored by the
+        // current logic", never "passed it".
+        d.stale === false,
     );
   const stale = recent
     .map((r) => r.result && r.result.diff)
-    .filter((d) => d && d.stale).length;
+    .filter((d) => d && d.stale === true).length;
+  // Rows that predate either gate — reported separately so the difference
+  // between "recorded" and "comparable" is always explainable.
+  const preGate = recent
+    .map((r) => r.result && r.result.diff)
+    .filter((d) => d && (!d.laneClass || d.stale === undefined)).length;
   if (compared.length < MIN_SHADOW_DECISIONS) {
     blockers.push(
       `only ${compared.length} decision(s) comparable against the legacy engine — need at least ${MIN_SHADOW_DECISIONS}` +
         (decided > compared.length
-          ? ` (${decided} recorded; ${stale} compared against a legacy decision too old to be evidence, the rest predate the current comparison logic or have no legacy row yet)`
+          ? ` (${decided} recorded; ${stale} compared against a legacy decision too old to be evidence, ${preGate} predate the current comparison logic, the rest have no legacy row yet)`
           : ""),
     );
   }
@@ -180,6 +192,7 @@ async function laneReadiness(lane) {
     shadowDecisions: decided,
     compared: compared.length,
     stale,
+    preGate,
     disagreements: diffs.length,
   };
 }

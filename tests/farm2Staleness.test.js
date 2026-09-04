@@ -146,3 +146,32 @@ test("the readiness gate ignores stale rows and says so", async () => {
   assert.equal(r.ready, false);
   assert.match(r.blockers.join(" "), /too old to be evidence/i);
 });
+
+test("a row written BEFORE the staleness gate is not silently readmitted", async () => {
+  // The trap, twice over: `!d.stale` is true for a row that has no `stale`
+  // field, so a loose test readmits exactly the rows the filter exists to
+  // exclude. Absence of the field means "not scored by the current logic",
+  // never "passed it" — the same rule as `laneClass`.
+  await FarmJob.deleteMany({ laneKey: "pre gate" });
+  await FarmLane.deleteMany({ gameKey: "pre gate" });
+  const lane = await FarmLane.create({ game: "Pre Gate", gameKey: "pre gate", mode: "shadow" });
+  for (let i = 0; i < 5; i += 1) {
+    await FarmJob.create({
+      lane: "Pre Gate",
+      laneKey: "pre gate",
+      kind: "decide",
+      campaignId: "c" + i,
+      status: "done",
+      shadow: true,
+      // Has laneClass (so it passed the FIRST gate) but no `stale` field at all.
+      result: {
+        verdict: { decision: "reuse_existing" },
+        diff: { agree: true, laneClass: "reuse", legacyClass: "reuse" },
+      },
+    });
+  }
+  const r = await farm2.laneReadiness(lane.toObject());
+  assert.equal(r.compared, 0, "no stale field means not scored by the current logic");
+  assert.equal(r.preGate, 5, "and they are counted so the gap is explainable");
+  assert.equal(r.ready, false);
+});
