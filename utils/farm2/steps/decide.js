@@ -112,10 +112,16 @@ async function reuseCandidate(game, { cycle, hostCache }) {
   if (!live.length) return null;
 
   // Which of the reusable task's accounts are still free? An account already
-  // assigned to another ACTIVE task is spoken for and must not be double-counted.
+  // assigned to another live task — ACTIVE or PLANNED — is spoken for and must
+  // not be double-counted. `planned` matters: the legacy inline reuse counts
+  // it (autoFarmer.js, the spokenFor query beside the reuse record), the
+  // lane's execute step recomputes with it, and in a live cycle a sibling
+  // campaign for the same game is written as `planned` by upsertTask moments
+  // before its accounts are claimed. Counting only `active` here let a shadow
+  // verdict plan more reuse accounts than legacy would for the same inputs.
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const others = await AutoFarmTask.find(
-    { status: "active", _id: { $ne: reusable._id } },
+    { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
     { assignedAccounts: 1 },
   ).lean();
   const spokenFor = new Set();

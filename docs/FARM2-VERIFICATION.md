@@ -686,6 +686,14 @@ on reuse rows where legacy leaves the field unwritten. For backfill the two
 read identically (`targetAccounts || plannedAccounts` gives `mine.length`
 either way); noted so it is a known difference rather than a surprise.
 
+**A related alignment found during the audit (commit 9).** The decide step's
+spoken-for set counted only `active` sibling tasks; legacy's inline reuse — and
+the lane's own execute step — count `active` **and** `planned`. For the same
+inputs a shadow verdict could therefore plan more reuse accounts than legacy
+would (a false accounts delta in the comparison), and in a live cycle a sibling
+already written as `planned` by `upsertTask` was invisible to it. Aligned;
+decide and execute now agree on the number they plan and spend.
+
 **The backfill leak is a separate question, and the answer is not a new fix.**
 `backfillActiveTasks` in this checkout already passes `recycledOnly: true` for
 reuse-only games (lines 4273–4281) — committed **2026-08-21** as `bb0419e`
