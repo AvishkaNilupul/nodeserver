@@ -42,6 +42,10 @@ const verifyStep = require("./verify");
 // once per POST_EVENT_CHECK_MS (per process; a restart re-checks once).
 const POST_EVENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const POST_EVENT_CHECK_MS = 6 * 60 * 60 * 1000;
+// At most this many completed tasks are verified per lane run, so a lane with
+// weeks of history (Albion: a campaign a day) cannot turn one run into a
+// minute of Twitch fetches; the rest are picked up on the following runs.
+const POST_EVENT_MAX_PER_RUN = 3;
 const postEventChecked = new Map(); // taskId -> ms
 
 // Inspect this lane's active tasks and decide what work to queue.
@@ -164,6 +168,7 @@ async function monitorLane(lane, { jobs, shadow, cache = null }) {
     .select("game campaignId campaignName assignedAccounts campaignEndAt listing status completedAt")
     .lean();
   for (const t of ended) {
+    if (report.postEventChecked >= POST_EVENT_MAX_PER_RUN) break;
     const id = String(t._id);
     const last = postEventChecked.get(id) || 0;
     if (Date.now() - last < POST_EVENT_CHECK_MS) continue;
@@ -199,5 +204,6 @@ module.exports = {
   monitorLane,
   POST_EVENT_WINDOW_MS,
   POST_EVENT_CHECK_MS,
+  POST_EVENT_MAX_PER_RUN,
   _postEventChecked: postEventChecked,
 };
