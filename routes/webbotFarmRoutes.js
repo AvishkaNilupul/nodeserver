@@ -33,6 +33,8 @@ const { encrypt, decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const webbotTwitch = require("../utils/webbotTwitch");
+const webbotFarmWatcher = require("../utils/webbotFarmWatcher");
+const unclaimedAutoList = require("../utils/unclaimedAutoList");
 
 const router = express.Router();
 
@@ -73,6 +75,11 @@ async function sh(script, { timeout = 30000, input } = {}) {
 const containerFor = (id) => CONTAINER_PREFIX + id;
 const botDir = (id) => BOTS_DIR + "/" + id;
 const configPath = (id) => botDir(id) + "/config.json";
+// Markers the auto-power watcher (utils/webbotFarmWatcher.js) reads.
+// `.autostopped` = the watcher parked this bot on a dark game (resume when
+// live); `.operatoroff` = the operator hit Stop (stay off until Start/Create).
+const markerPath = (id) => botDir(id) + "/.autostopped";
+const operatorMarkerPath = (id) => botDir(id) + "/.operatoroff";
 const stagingPath = (id) => BASE + "/staging/" + id + ".json";
 const tail = (t) => (t ? String(t).slice(-6) : "");
 
@@ -96,6 +103,10 @@ function readyPoolQuery() {
     status: "available",
     clientSecret: { $gt: "" },
     lastCheckStatus: { $in: ["", "ok"] },
+    // An account the operator handed to a buyer by hand is NOT supply: it must
+    // never be claimed into a new bot, farmed again and re-listed, or the same
+    // login goes out twice.
+    manualSold: { $ne: true },
   };
 }
 
@@ -137,6 +148,35 @@ function toDTO(a) {
 // State (Mongo only, fast): summary, idle-account count, and bots aggregated
 // from account assignments. Container run-state comes from /bots-status.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Auto power (utils/webbotFarmWatcher.js): the live/dark gate that stops a bot's
+// container when its pinned game has no live campaign and starts it when the
+// game goes live. GET returns the master-switch state + the watcher's last pass;
+// POST flips the switch (OFF by default). Mirrors /api/noclaim-farm/auto.
+// ---------------------------------------------------------------------------
+router.get("/api/webbot-farm/auto", requireSuperadmin, (req, res) => {
+  res.json({
+    success: true,
+    enabled: !!settings.getAutoFarm().webbotStreamGate,
+    watcher: webbotFarmWatcher.status(),
+  });
+});
+
+router.post("/api/webbot-farm/auto", requireSuperadmin, async (req, res) => {
+  try {
+    const enabled = !!req.body.enabled;
+    const saved = await settings.setAutoFarm({ webbotStreamGate: enabled });
+    logEvent({
+      category: "webbot",
+      action: enabled ? "auto_power_on" : "auto_power_off",
+      actor: actorFromReq(req),
+    });
+    res.json({ success: true, enabled: !!saved.webbotStreamGate });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.get("/api/webbot-farm/state", requireSuperadmin, async (req, res) => {
   try {
     const rows = await WebBotAccount.find(
@@ -634,6 +674,9 @@ router.post("/api/webbot-farm/bots", requireSuperadmin, async (req, res) => {
       `if ! docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1; then cd ${hosts.shq(SRC_DIR)} && docker build -t ${hosts.shq(IMAGE)} .; fi`,
       `[ -s ${hosts.shq(stagingPath(id))} ] || { echo "staging config for bot ${id} missing"; exit 1; }`,
       `mkdir -p ${hosts.shq(botDir(id))} && cp ${hosts.shq(stagingPath(id))} ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
+      // Fresh bot / re-pin = operator taking control: clear any stale auto-power
+      // markers so the watcher manages it cleanly from here.
+      `rm -f ${hosts.shq(markerPath(id))} ${hosts.shq(operatorMarkerPath(id))} 2>/dev/null || true`,
       `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
       `docker run -d --name ${hosts.shq(containerFor(id))} --restart unless-stopped ` +
         `-v ${hosts.shq(botDir(id))}:/config:ro ${hosts.shq(IMAGE)}`,
@@ -753,7 +796,13 @@ router.post("/api/webbot-farm/bots/:id/stop", requireSuperadmin, async (req, res
   try {
     const id = String(req.params.id);
     if (!validId(id)) return res.status(400).json({ success: false, message: "bad id" });
-    await sh(`docker stop ${hosts.shq(containerFor(id))} 2>/dev/null || true`, { timeout: 25000 });
+    // Mark it operator-off so the auto-power watcher won't cold-start it back on
+    // the next live event — an explicit Stop stays stopped until Start/Create.
+    await sh(
+      `docker stop ${hosts.shq(containerFor(id))} 2>/dev/null || true; ` +
+        `touch ${hosts.shq(operatorMarkerPath(id))} 2>/dev/null || true`,
+      { timeout: 25000 },
+    );
     logEvent({
       category: "webbot",
       action: "bot_stopped",
@@ -770,7 +819,14 @@ router.post("/api/webbot-farm/bots/:id/start", requireSuperadmin, async (req, re
   try {
     const id = String(req.params.id);
     if (!validId(id)) return res.status(400).json({ success: false, message: "bad id" });
-    await sh(`docker start ${hosts.shq(containerFor(id))} 2>/dev/null || true`, { timeout: 25000 });
+    // Clear both auto-power markers: a manual Start means the operator is taking
+    // control, so the watcher manages this bot fresh from here (neither "parked
+    // by me" nor "operator-off" applies once they start it themselves).
+    await sh(
+      `rm -f ${hosts.shq(markerPath(id))} ${hosts.shq(operatorMarkerPath(id))} 2>/dev/null || true; ` +
+        `docker start ${hosts.shq(containerFor(id))} 2>/dev/null || true`,
+      { timeout: 25000 },
+    );
     logEvent({
       category: "webbot",
       action: "bot_started",
@@ -921,14 +977,45 @@ router.post("/api/webbot-farm/accounts/:id/clear-claimblock", requireSuperadmin,
 });
 
 // Manual "sold" tick — the operator handed this account to a buyer BY HAND.
-// The tick is memory only: the account keeps farming and nothing else changes.
+// The account keeps farming, but an account that went to a buyer must come off
+// every listing that still offers it or the platform can hand the same login
+// to a second buyer. So ticking sold also runs the unclaimed engine's
+// manual-sold removal here (delist from every active row, park the ledger
+// "removed", clear the listed tick) rather than waiting for the periodic
+// auto-list pass to do the same sweep.
 router.post("/api/webbot-farm/accounts/:id/manual-sold", requireSuperadmin, async (req, res) => {
   try {
     const doc = await findAccount(req, res);
     if (!doc) return;
-    doc.manualSold = !!req.body.sold;
+    const sold = !!req.body.sold;
+    doc.manualSold = sold;
     await doc.save();
-    res.json({ success: true, account: toDTO(doc) });
+    let removal = null;
+    if (sold) {
+      removal = await unclaimedAutoList
+        .removeManualSoldOwner({
+          webBotAccountId: String(doc._id),
+          actor: actorFromReq(req) || "operator",
+        })
+        .catch((e) => ({ ledgers: 0, removed: 0, errors: [e.message] }));
+      logEvent({
+        category: "unclaimed",
+        action: "manual_sold",
+        actor: actorFromReq(req),
+        subject: doc.login || String(doc._id),
+        count: removal.removed || 0,
+        detail:
+          "manual-sold tick (web-token) — removed from " +
+          (removal.removed || 0) +
+          " listing ledger(s)",
+      });
+    }
+    res.json({
+      success: true,
+      account: toDTO(doc),
+      delisted: removal ? removal.removed : 0,
+      delistErrors: removal ? removal.errors : [],
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

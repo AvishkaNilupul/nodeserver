@@ -2284,6 +2284,69 @@ async function candForLedger(ledger) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Manual-sold removal (shared by the periodic pass and the reactive ticks)
+// ---------------------------------------------------------------------------
+
+// Park ONE listed ledger whose owner carries the manual-sold tick: pull the
+// login off EVERY active row that still carries it (the gameflip live unit +
+// successor, digiseller content line(s), ggsel offer rebuild(s)), then mark
+// the ledger "removed" — NOT sold, NOT released; the account keeps farming.
+async function removeManualSoldLedger(ledger, opts = {}) {
+  if (!ledger || !ledger._id) return false;
+  await removeLoginFromAllRows(ledger, { removeFromProduct: true, log: false });
+  await UnclaimedAccount.updateOne(
+    { _id: ledger._id, status: "listed" },
+    {
+      $set: {
+        status: "removed",
+        note: "manual sold — kept farming, removed from listings",
+        lastCheckedAt: new Date(),
+      },
+    },
+  ).catch(() => {});
+  await markOwnerUnlisted(ledger);
+  logEvent({
+    category: "unclaimed",
+    action: "manual_sold_removed",
+    actor: opts.actor || "unclaimedAutoList",
+    subject: ledger.login || String(ledger._id) || "",
+    game: ledger.game || "",
+    count: 1,
+    detail:
+      "manual-sold account removed from listing — kept farming (" +
+      (ledger.source || "") +
+      ")",
+  });
+  return true;
+}
+
+// Every listed ledger belonging to ONE owner row that was just ticked
+// manual-sold. Reactive twin of the expiry pass's sweep: the tick calls this
+// so the delist happens NOW instead of up to one pass later, closing the
+// window where the platform could hand the same login to a second buyer.
+// Safe to call for an account that was never auto-listed (returns zeroes).
+async function removeManualSoldOwner(owner = {}) {
+  const out = { ledgers: 0, removed: 0, errors: [] };
+  const or = [];
+  if (owner.poolAccountId) or.push({ poolAccountId: String(owner.poolAccountId) });
+  if (owner.webBotAccountId)
+    or.push({ webBotAccountId: String(owner.webBotAccountId) });
+  if (!or.length) return out;
+  const ledgers = await UnclaimedAccount.find({ status: "listed", $or: or }).lean();
+  out.ledgers = ledgers.length;
+  for (const ledger of ledgers) {
+    try {
+      await removeManualSoldLedger(ledger, { actor: owner.actor || "operator" });
+      out.removed++;
+    } catch (e) {
+      out.errors.push(e.message);
+      console.error("manual-sold removal failed:", e.message);
+    }
+  }
+  return out;
+}
+
 // Expiry + sale pass:
 //   A) quantity-market sales (a stock drop on the item's product)
 //   B) per-ledger: claimed -> spent; all drops gone -> expired + pool return;
@@ -2322,39 +2385,10 @@ async function expirySalePass() {
         .limit(CHECK_LIMIT)
         .lean()
     : [];
-  const removeMarkedLedger = async (ledger) => {
-    // Delist/remove this login from EVERY active row that carries it (the
-    // gameflip live unit + successor, digiseller content line(s), ggsel offer
-    // rebuild(s)), then park the ledger as "removed".
-    await removeLoginFromAllRows(ledger, { removeFromProduct: true, log: false });
-    out.manualSoldRemoved++;
-    await UnclaimedAccount.updateOne(
-      { _id: ledger._id, status: "listed" },
-      {
-        $set: {
-          status: "removed",
-          note: "manual sold — kept farming, removed from listings",
-          lastCheckedAt: new Date(),
-        },
-      },
-    ).catch(() => {});
-    await markOwnerUnlisted(ledger);
-    logEvent({
-      category: "unclaimed",
-      action: "manual_sold_removed",
-      actor: "unclaimedAutoList",
-      subject: ledger.login || ledger._id || "",
-      game: ledger.game || "",
-      count: 1,
-      detail:
-        "manual-sold account removed from listing — kept farming (" +
-        (ledger.source || "") +
-        ")",
-    });
-  };
   await mapLimit(msLedgers, CONCURRENCY, async (ledger) => {
     try {
-      await removeMarkedLedger(ledger);
+      await removeManualSoldLedger(ledger, { actor: "unclaimedAutoList" });
+      out.manualSoldRemoved++;
     } catch (e) {
       console.error("unclaimedAutoList manual-sold removal failed:", e.message);
     }
@@ -2669,6 +2703,8 @@ module.exports = {
   removeUnitFromRow,
   rowsForLogin,
   removeLoginFromAllRows,
+  removeManualSoldLedger,
+  removeManualSoldOwner,
   rebuildGgselOffer,
   spendAccount,
   expireAccount,

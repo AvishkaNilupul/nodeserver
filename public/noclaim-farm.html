@@ -405,10 +405,19 @@ async function loadAccounts(id,c){
         var secret=cb.getAttribute('data-secret');
         cb.disabled=true;
         try{
-          await api('/api/noclaim-farm/accounts/'+encodeURIComponent(secret)+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
+          var r=await api('/api/noclaim-farm/accounts/'+encodeURIComponent(secret)+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
           if(acctCache[id]&&acctCache[id].accounts) acctCache[id].accounts.forEach(function(a){ if(a.clientSecret===secret) a.manualSold=cb.checked; });
           var tr=cb.closest('tr'); if(tr) tr.classList.toggle('soldrow',cb.checked);
-          toast(cb.checked?'Marked sold ✓':'Cleared sold');
+          // Marking sold pulls the account off every listing it still backs, so
+          // the Listed tick can no longer be true — mirror that here instead of
+          // leaving a stale tick until the next reload.
+          if(cb.checked){
+            var lcb=tr?tr.querySelector('input.mlisted'):null;
+            if(lcb){ lcb.checked=false; }
+            if(tr) tr.classList.remove('listedrow');
+            if(acctCache[id]&&acctCache[id].accounts) acctCache[id].accounts.forEach(function(a){ if(a.clientSecret===secret) a.listed=false; });
+          }
+          toast(cb.checked?('Marked sold ✓'+((r&&r.delisted)?' — removed from '+r.delisted+' listing'+(r.delisted===1?'':'s'):'')):'Cleared sold');
         }catch(e){ cb.checked=!cb.checked; toast(e.message); }
         cb.disabled=false;
       };

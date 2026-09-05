@@ -25,6 +25,7 @@ const {
   invalidateExclusions,
 } = require("../utils/archiveExclusions");
 const archiveSnapshot = require("../utils/archiveSnapshot");
+const unclaimedAutoList = require("../utils/unclaimedAutoList");
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -862,18 +863,35 @@ router.post(
 
       // Cross-mark into the Unclaimed farm. Handing this account to a buyer
       // spends the WHOLE account, so any unclaimed-farm listing it still backs
-      // must come down too — not just the sold game. Flagging the matching pool
-      // row manualSold=true lets the unclaimed auto-list engine park those
-      // ledgers "removed" and delist them on its next pass (the same reactive
-      // path the no-claim / web-token consoles' manual-sold tick uses). Matched
-      // by the account's canonical clientSecret; a no-op when it isn't pooled.
+      // must come down too — not just the sold game. Flag the matching pool row
+      // manualSold=true and delist it from every unclaimed row it still backs
+      // right now (the same reactive path the no-claim / web-token consoles'
+      // manual-sold tick uses); the auto-list pass's own sweep stays as the
+      // backstop. Matched by the account's canonical clientSecret; a no-op when
+      // the account isn't pooled.
       let unclaimedFlagged = 0;
+      let unclaimedDelisted = 0;
       if (acc.clientSecret) {
-        const r = await AvailableAccount.updateOne(
-          { clientSecret: acc.clientSecret, manualSold: { $ne: true } },
-          { $set: { manualSold: true } },
-        ).catch(() => null);
-        unclaimedFlagged = (r && r.modifiedCount) || 0;
+        const pooled = await AvailableAccount.findOne(
+          { clientSecret: acc.clientSecret },
+          { _id: 1, manualSold: 1 },
+        ).lean();
+        if (pooled) {
+          if (!pooled.manualSold) {
+            const r = await AvailableAccount.updateOne(
+              { _id: pooled._id },
+              { $set: { manualSold: true } },
+            ).catch(() => null);
+            unclaimedFlagged = (r && r.modifiedCount) || 0;
+          }
+          const removal = await unclaimedAutoList
+            .removeManualSoldOwner({
+              poolAccountId: String(pooled._id),
+              actor: "drops-archive mark-sold",
+            })
+            .catch(() => null);
+          unclaimedDelisted = (removal && removal.removed) || 0;
+        }
       }
 
       bustDropCache();
@@ -886,11 +904,14 @@ router.post(
           gameLabel +
           " drop(s) sold on " +
           (acc.login || String(acc._id)) +
-          (unclaimedFlagged ? " (also removed from the Unclaimed farm)" : ""),
+          (unclaimedFlagged || unclaimedDelisted
+            ? " (also removed from the Unclaimed farm)"
+            : ""),
         reserved: upd.modifiedCount,
         detached,
         warnings,
         unclaimedFlagged,
+        unclaimedDelisted,
       });
     } catch (err) {
       console.error("drops-archive mark-sold error:", err.message);

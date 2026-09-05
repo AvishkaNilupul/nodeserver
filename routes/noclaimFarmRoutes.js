@@ -37,6 +37,7 @@ const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const noclaimWatcher = require("../utils/noclaimWatcher");
+const unclaimedAutoList = require("../utils/unclaimedAutoList");
 
 const router = express.Router();
 
@@ -159,6 +160,10 @@ function readyPoolQuery(game) {
     status: "available",
     clientSecret: { $gt: "" },
     lastCheckStatus: { $in: ["", "ok"] },
+    // An account the operator handed to a buyer by hand is NOT supply: it must
+    // never be claimed into a new bot, farmed again and re-listed, or the same
+    // login goes out twice.
+    manualSold: { $ne: true },
   };
   Object.assign(q, soldGameExclusion(game));
   return q;
@@ -519,7 +524,12 @@ router.get(
 
 // ---------------------------------------------------------------------------
 // Manual "sold" tick — the operator handed this account to a buyer BY HAND.
-// The tick is memory only: the account keeps farming and nothing else changes.
+// The account keeps farming, but the tick is NOT memory-only: an account that
+// went to a buyer must come off every listing that still offers it, or the
+// platform can hand the same login to a second buyer. So ticking sold also
+// runs the unclaimed engine's manual-sold removal right here (delist from
+// every active row, park the ledger "removed", clear the listed tick) instead
+// of waiting up to a full auto-list pass for the same sweep to notice.
 // ---------------------------------------------------------------------------
 router.post(
   "/api/noclaim-farm/accounts/:secret/manual-sold",
@@ -530,15 +540,44 @@ router.post(
       if (!secret)
         return res.status(400).json({ success: false, message: "bad secret" });
       const sold = !!req.body.sold;
-      const r = await AvailableAccount.updateOne(
+      const row = await AvailableAccount.findOne(
         { clientSecret: secret },
-        { $set: { manualSold: sold } },
-      );
-      if (!r.matchedCount)
+        { _id: 1, username: 1 },
+      ).lean();
+      if (!row)
         return res
           .status(404)
           .json({ success: false, message: "No pool account with that secret." });
-      res.json({ success: true, manualSold: sold });
+      await AvailableAccount.updateOne(
+        { _id: row._id },
+        { $set: { manualSold: sold } },
+      );
+      let removal = null;
+      if (sold) {
+        removal = await unclaimedAutoList
+          .removeManualSoldOwner({
+            poolAccountId: String(row._id),
+            actor: actorFromReq(req) || "operator",
+          })
+          .catch((e) => ({ ledgers: 0, removed: 0, errors: [e.message] }));
+        logEvent({
+          category: "unclaimed",
+          action: "manual_sold",
+          actor: actorFromReq(req),
+          subject: row.username || String(row._id),
+          count: removal.removed || 0,
+          detail:
+            "manual-sold tick (no-claim) — removed from " +
+            (removal.removed || 0) +
+            " listing ledger(s)",
+        });
+      }
+      res.json({
+        success: true,
+        manualSold: sold,
+        delisted: removal ? removal.removed : 0,
+        delistErrors: removal ? removal.errors : [],
+      });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }

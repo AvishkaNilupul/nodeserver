@@ -442,9 +442,16 @@ async function loadAccounts(){
 async function toggleManualSold(cb,botId){
   cb.disabled=true;
   try{
-    await api('/api/webbot-farm/accounts/'+encodeURIComponent(cb.getAttribute('data-id'))+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
+    var r=await api('/api/webbot-farm/accounts/'+encodeURIComponent(cb.getAttribute('data-id'))+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
     var tr=cb.closest('tr'); if(tr) tr.classList.toggle('soldrow',cb.checked);
-    toast(cb.checked?'Marked sold ✓':'Cleared sold');
+    // Marking sold pulls the account off every listing it still backs, so the
+    // Listed tick can no longer be true — mirror that immediately.
+    if(cb.checked){
+      var lcb=tr?tr.querySelector('input.mlisted'):null;
+      if(lcb) lcb.checked=false;
+      if(tr) tr.classList.remove('listedrow');
+    }
+    toast(cb.checked?('Marked sold ✓'+((r&&r.delisted)?' — removed from '+r.delisted+' listing'+(r.delisted===1?'':'s'):'')):'Cleared sold');
     if(botId) loadBotTab(botId,'accounts').catch(function(){});
   }catch(e){ cb.checked=!cb.checked; toast(e.message); }
   cb.disabled=false;
