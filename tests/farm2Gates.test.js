@@ -249,12 +249,18 @@ test("a zero account grant is skip_no_accounts, not 'farm 0 accounts'", async ()
   assert.match(v.reason, /reserve floor/);
 });
 
-test("a lane with no grant at all is also skip_no_accounts", async () => {
+test("a lane with no allocation draws on demand — and an EMPTY budget is skip_no_accounts", async () => {
   const game = "Ungranted Game";
   await provenSeller(game);
-  const cycle = new BudgetCycle({ accounts: 30, seats: 30, containers: 3, perGameCap: 30 });
-  // allocate() never called for this lane → remainingAccounts is 0.
-  const v = await decide(game, { ctx: { ...online, ...noCoverage() }, cycle });
+  // allocate() never called: the lane draws from the unallocated remainder,
+  // as the legacy tick fair-shares only among the campaigns that need
+  // accounts this tick (utils/farm2/budget.js).
+  const rich = new BudgetCycle({ accounts: 30, seats: 30, containers: 3, perGameCap: 30 });
+  const ok = await decide(game, { ctx: { ...online, ...noCoverage() }, cycle: rich });
+  assert.equal(ok.decision, "farm");
+  assert.equal(ok.plannedAccounts, 30);
+  const empty = new BudgetCycle({ accounts: 0, seats: 30, containers: 3, perGameCap: 30 });
+  const v = await decide(game, { ctx: { ...online, ...noCoverage() }, cycle: empty });
   assert.equal(v.decision, "skip_no_accounts");
 });
 

@@ -79,11 +79,34 @@ test("spending is capped at the grant and cannot go negative", () => {
   assert.strictEqual(c.spendAccounts("a", 5), 0);
 });
 
-test("an unknown lane can never spend", () => {
-  const c = cycle();
+test("a lane with no allocation draws ON DEMAND from the unallocated remainder — never beyond it", () => {
+  // The legacy tick fair-shares among the campaigns that need accounts THIS
+  // tick, not among every game it knows. Pre-allocating equal shares to every
+  // live lane diluted a real fresh farm to a few accounts once every game had a
+  // lane; so an unallocated remainder is drawn on demand, and the sum of all
+  // draws can still never exceed the budget.
+  const c = cycle({ accounts: 20 });
   c.allocate([{ key: "a", want: 5, weight: 1 }]);
-  assert.strictEqual(c.remainingAccounts("not-a-lane"), 0);
-  assert.strictEqual(c.spendAccounts("not-a-lane", 10), 0);
+  assert.strictEqual(c.unallocated, 15);
+  assert.strictEqual(totalGranted(c) + c.unallocated, 20, "allocations + remainder is the budget");
+  assert.strictEqual(c.remainingAccounts("not-a-lane"), 15);
+  assert.strictEqual(c.spendAccounts("not-a-lane", 10), 10);
+  assert.strictEqual(c.unallocated, 5);
+  assert.strictEqual(c.spendAccounts("other-lane", 10), 5, "only what is left");
+  assert.strictEqual(c.spendAccounts("third", 1), 0);
+  // a's own allocation is untouched by the others' draws
+  assert.strictEqual(c.remainingAccounts("a"), 5);
+  assert.strictEqual(c.spendAccounts("a", 5), 5);
+  const spent = [...c.grants.values()].reduce((s, g) => s + g.spentAccounts, 0);
+  assert.strictEqual(spent, 20, "total spent never exceeds the budget");
+});
+
+test("on-demand draws respect the per-game cap", () => {
+  const c = new BudgetCycle({ accounts: 100, seats: 100, containers: 10, perGameCap: 30 });
+  assert.strictEqual(c.remainingAccounts("x"), 30);
+  assert.strictEqual(c.spendAccounts("x", 50), 30);
+  assert.strictEqual(c.remainingAccounts("x"), 0);
+  assert.strictEqual(c.unallocated, 70);
 });
 
 test("seats are proportional to accounts and a zero-account lane gets none", () => {

@@ -155,8 +155,8 @@ test("cycle 1: decide FARM through all nine gates, spend from the sealed allowan
   assert.equal(s.budget.totalAccounts, 8);
   assert.equal(s.budget.totalContainers, 5);
   const grant = s.budget.grants[settings.normGameName(GAME)];
-  assert.equal(grant.accounts, 8);
-  assert.equal(grant.spentAccounts, 8, "the farm decision drew its plan from the allowance");
+  assert.equal(grant.spentAccounts, 8, "the farm decision drew its plan on demand from the budget");
+  assert.equal(s.budget.unallocated, 0, "nothing left for anyone else this cycle");
 
   const decide = await FarmJob.findOne({ lane: GAME, kind: "decide" }).lean();
   assert.equal(decide.status, "done");
@@ -219,7 +219,7 @@ test("cycle 2: the campaign is settled (no re-decision); the primary listing pub
   assert.equal(r.decisions, 0, "an executed campaign is settled — decided once, not once per cycle");
   assert.equal(await FarmJob.countDocuments({ lane: GAME, kind: "decide" }), 1);
   assert.equal(await FarmJob.countDocuments({ lane: GAME, kind: "execute" }), 1);
-  assert.equal(s.budget.grants[settings.normGameName(GAME)].spentAccounts, 0, "nothing new was spent");
+  assert.equal(s.budget.unallocated, s.budget.totalAccounts, "nothing new was spent");
 
   const pub = await FarmJob.findOne({ lane: GAME, kind: "publish", market: "primary" }).lean();
   assert.equal(pub.status, "done", pub.error);
