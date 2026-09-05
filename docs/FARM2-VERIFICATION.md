@@ -784,3 +784,174 @@ should appear in the Auto-farm tab with the same decision the `FarmJob` row
 shows, and `replay` should score them from their snapshots
 (`inputsBasis: recorded`). `skipsSuppressed` on the lane summary should be
 non-zero only for campaigns with a live task — which is the guard working.
+
+## 13. The reuse account gap: the shadow comparison was measuring itself (commits 11–14)
+
+**The question.** Three lanes (Black Desert, MARVEL Contest of Champions, EVE
+Online) agreed with legacy on 100% of comparable decisions and were held back
+anyway, on the non-blocking "differed by 10+ accounts" warning: negative
+`accountDelta` on `reuse_existing` vs `reuse_existing` rows, worst −40, present
+from the first hour and not growing. Was the lane about to reuse fewer accounts
+than legacy on those games, or was the comparison measuring an artifact of
+shadow mode?
+
+**The answer, verified on prod 2026-09-05: an artifact — and the mechanism is
+one line.** Legacy decides a campaign C only while C has *no* active/planned
+row. It reuses warm task R and writes C's row ACTIVE holding the accounts it
+took from R. The shadow lane decides C later, picks R too, and computes
+"spoken for" over every *other* active/planned task — which now includes **C's
+own legacy row**, holding the very accounts legacy assigned to C. The lane
+subtracts, from C, the accounts legacy gave C.
+
+| game | R held | own row overlapped | lane saw | legacy recorded | delta |
+|---|---|---|---|---|---|
+| EVE Online | 19 | 12 | 7 | 19 | −12 |
+| Black Desert | 40 | 40 | 0 | 40 | −40 |
+
+Excluding the own row restores legacy's number in every measured case. The
+first write-up predicted a second mechanism — that the lane would *pick* C's
+fresh row as its source (`createdAt: -1`) and see R's accounts as spoken for.
+Prod falsified it in 0 of 3 negative rows: an older task kept winning the
+sort, because C's row usually predates R (the campaign was skipped for a while
+before it was farmed, and `record()` upserts onto that row). Where the lane
+*did* pick the own row (2 rows), it agreed with legacy exactly — `$ne:
+reusable._id` already exempts the source. The prediction record is in the
+commit message; only the half that held was implemented.
+
+**The general shape.** The comparison varies the engine *and* the world, and
+legacy's own write is part of the world. §1 said this about the 6h age gate;
+this is the same fact one level down, inside a single decision's inputs. Any
+lane count that reads state legacy's execution changes — spoken-for sets,
+pool depth, archive coverage — is confounded in shadow *by construction*, and
+the fix is never "wait less": it is either to exempt the campaign's own effect
+(when that is exactly identifiable, as here) or to record the inputs at
+decision time and compare against those (§9.2, again).
+
+**Three artifact classes, not one.** Counting every row with `|delta| ≥ 10`,
+not just comparable ones, prod showed 258 rows across 11 games:
+
+1. **Reuse rows with a legitimate zero at T, filled later.** World of Tanks
+   `+18`: legacy's second and third simultaneous campaigns found every warm
+   account spoken for by the first, recorded `plannedAccounts: 0`, and backfill
+   filled them once the first completed. The field is honest but incomplete
+   and undated; `lane − 0` reads as +18.
+2. **The campaign's own row inside the lane's spokenFor** (above). Negative,
+   reuse rows.
+3. **Skip rows carrying a leftover.** The skip paths never write
+   `plannedAccounts` (§5.1), so the row keeps whatever an earlier decision on
+   the same `(game, campaignId)` row wrote. Seven `skip_low_demand` lanes
+   showed −15 where the lane plans 0 by definition. Meaningless in both
+   directions. This is the §2 `record()` trap in a third costume.
+
+**What changed.**
+
+*Commit 11 — the lane's count (`steps/decide.js`, `steps/execute.js`).*
+`reuseCandidate` takes the campaign id and exempts the `(game, campaignId)`
+row of the campaign being decided from spokenFor; one exported matcher, used
+by both steps so decide and execute count the same set (§7.5's principle). A
+*sibling* campaign's row is still spoken for — that is the double-advertising
+guard, and §11 is what its absence costs. **No live action changes**: an
+active own row always carries `executedAt`, so `lane.js`'s `alreadyDone`
+check stops before any execute job whatever the count; a planned own row
+never carries accounts on the reuse path. What changes is what a re-decision
+*reports*: the count the lane would reuse deciding fresh, which is the count
+legacy recorded. Pinned by a `runLane` test (reports 19 instead of 0,
+`alreadyExecuted` 1, no execute job, row untouched).
+
+*Commits 12–13 — the recorded reuse inputs (`utils/decisionInputs.js`,
+`models/AutoFarmTask.js`, the lane's two writers, then legacy's two reuse
+`record()` calls as an additive hunk).* `decisionInputs.reuse = {
+sourceTaskId, sourceHeld, spokenFor, free, competitors, ownRowExcluded,
+dryRun }`. `free` is the count at the moment of the decision (equals the
+`plannedAccounts` the same `record()` writes — but dated, sourced, and immune
+to what the row's later life does to its other fields); `sourceTaskId` says
+which warm task it was counted on; `competitors` are the `_id`s of the live
+tasks that held any of that task's accounts. Optional under version 1 — no
+existing field changes meaning, and absence reads as *not recorded*, never as
+zero and never as a match: the reader is `hasReuseInputs()`, which requires a
+numeric `free`. Legacy's dry-run path computes no spoken-for set and records
+`free: null`; an uncomputed competitor list is stored as `null`, not `[]`
+(`default: undefined` on the array path), so "computed, none" and "not
+computed" stay distinct.
+
+*Commit 14 — the comparison (`utils/farm2/accountGap.js`,
+`diffAgainstLegacy`, `laneReadiness`, the compare route and tab).* A delta is
+**scored only on reuse-vs-reuse rows the comparison can hold still**: same
+source task (or the lane reused the campaign's own row while legacy's source
+had settled — prod's P4 rows), no competitor legacy could not have seen
+(`executedAt` after legacy's `decidedAt`; backfill re-stamps it, so a task
+that gained the accounts since is caught), none of legacy's recorded
+competitors released since (exact when recorded; approximated from
+`completedAt` on pre-record rows — a *stopped* task has no timestamp, the
+residual blind spot, positive direction). Everything else carries the reason
+it was not scored: `different_action_class`, `skip_rows_carry_no_plan`,
+`fresh_spend_budgets_differ_by_design` (farm/probe rows: numbers shown, not
+scored — the arbiter and the serial fair share are different allocators by
+design, and legacy's claim shrinks the pool the lane counts), `legacy_dry_run`,
+`source_mismatch` (the §5.3 signal, kept visible), `competitor_after_legacy`,
+`competitor_released_since`, `competitor_completed_since`,
+`own_row_source_while_legacy_source_live`. `legacyPlanned` is the honest count
+(the recorded `free`, else the live reuse row's field with `sourceVerified:
+false`; `null` on skip rows) and the raw field stays visible as
+`legacyPlannedField`. The readiness warning counts scored rows only and quotes
+the deltas; the unscored rows are a caveat grouped by reason; rows without
+`accountComparable` predate this and are not scored. The report gains
+`accountGaps`.
+
+**Declined: excluding the own row from the reusable pick.** Proposed alongside
+commit 11, then withdrawn. It fixes nothing prod measured, and it is *not*
+inert for the class comparison: in a game whose only task with bots is the
+campaign's own row, excluding it leaves no reusable task, the re-decision
+falls through to the fresh gates and can flip from `reuse_existing` to `farm`
+or `skip_already_covered` — a change to the metric that gates promotion, in a
+configuration nobody measured. The one configuration it would have covered
+(the lane picks the own row while legacy's source is still live — unobserved)
+is recognised by the comparison instead.
+
+**Declined: reconstructing spokenFor at T in replay.** Status has no history
+(a `planned`-at-T row is unrecoverable once executed; `stopped` has no
+timestamp) and `assignedAccounts` mutate afterwards (top-up `$push`,
+backfill). An approximation from `executedAt`/`completedAt` would score rows
+on its blind spots — the `internalSales` failure class (§5.1). Recording at T
+is exact and cheap; that is commits 12–13.
+
+**§5.3 — is `reusableTaskForGame` picking the best target?** Not a lane
+defect: both engines can leave free accounts on an older task while the
+newest's are all spoken for. But prod's `runOnce` builds `reusableMap` from
+the first match in `autoTasks` iteration order, while `reusableTaskForGame`
+sorts `createdAt: -1` explicitly — **two pick rules**, and the lane implements
+the fallback one. If `autoTasks` is not sorted `createdAt: -1` the engines can
+pick different warm tasks for the same game. Not a safety difference (any warm
+task's accounts are valid reuse stock for its game) and not blocking for this
+series — `source_mismatch` now *measures* it, row by row — but the `autoTasks`
+query should be read before more lanes go live, and if the rules differ the
+lane should import the one prod actually runs.
+
+**§5.4 — the compared field.** On a live reuse row `plannedAccounts` *is*
+`mine.length` and is written once: the top-up's `reuseTask.plannedAccounts =
+topUp` is an in-memory mutation `executeTask` never persists (confirmed
+against prod's `$set` list). So the field is immutable but *incomplete*
+(excludes top-ups, unlike `assignedAccounts`) and *unwritten* on the skip
+paths. Neither existing field is the reused count with a date on it; the
+recorded `free` is.
+
+**Sample limits.** Sixteen unique campaigns produced comparable reuse rows on
+prod; the negative set was three campaigns. Every prod check compared current
+task state against a historical decision — P2's arithmetic holds now and
+cannot be proved to have held at decision time. One MCoC row (−18, overlap 0
+now, `mineNow` 18) is unexplained: either R's row was re-decided after the
+lane's decision (check `R.decidedAt` against the FarmJob's `finishedAt`), or a
+sibling task held the 18 and has since completed (`competitor_completed_since`
+would now name it). It is not evidence for the mechanism and is not counted as
+such.
+
+**What to check on prod.** After deploy, on the three held lanes: (1) the
+account-scored reuse rows should sit at delta 0 within a cycle — any residual
+scored delta is now a real signal; (2) `accountGaps.notScored` should be
+dominated by `skip_rows_carry_no_plan` on the skip lanes and by the two
+competitor reasons on multi-campaign games; (3) `source_mismatch` counts
+answer the §5.3 question empirically; (4) legacy reuse rows written after
+deploy carry `decisionInputs.reuse.free === plannedAccounts` and a
+`competitors` list; (5) the World of Tanks `+18` rows should come back as
+`competitor_released_since` or `competitor_completed_since`, not as scored
+gaps.
