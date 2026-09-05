@@ -256,13 +256,21 @@ async function executeReuse({ verdict, dryRun }) {
   if (!bots.length) throw new Error("reuse target has no bots left");
 
   // Recompute the deliverable account set at EXECUTION time — the decide-time
-  // number can be stale by the time this runs.
+  // number can be stale by the time this runs. Same rule as the decide step
+  // (steps/decide.reuseCandidate), including that this campaign's OWN row is
+  // never a competitor for its own reuse: decide and execute must count the
+  // same set, or the lane plans one number and spends another. Reaching here
+  // with an own row that holds accounts does not happen in practice — an
+  // active own row means the campaign was executed and lane.js stops before
+  // enqueueing — so this is symmetry, not a behaviour change.
+  const isOwnRow = require("./decide").ownRowMatcher(verdict.game, verdict.campaignId);
   const others = await AutoFarmTask.find(
     { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
-    { assignedAccounts: 1 },
+    { assignedAccounts: 1, game: 1, campaignId: 1 },
   ).lean();
   const spokenFor = new Set();
   for (const o of others) {
+    if (isOwnRow(o)) continue;
     for (const u of o.assignedAccounts || []) spokenFor.add(String(u).toLowerCase());
   }
   const mine = (reusable.assignedAccounts || []).filter(

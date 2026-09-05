@@ -80,9 +80,26 @@ async function probeGate(game, af) {
 // decision that skipped them would not match what a live lane would do and the
 // comparison would be worthless. Reads go through the cycle's SSH semaphore and
 // a per-cycle cache so several lanes cannot storm the Pi.
-async function reuseCandidate(game, { cycle, hostCache }) {
+//
+// `campaignId` is the campaign being decided. It is needed because of the one
+// thing legacy's inline reuse never has to think about — see the spoken-for
+// computation below.
+
+// Is this AutoFarmTask row the (game, campaignId) row of the campaign being
+// decided? Matched on the normalised game name plus the campaign id, which is
+// exactly the row record() upserts.
+function ownRowMatcher(game, campaignId) {
+  if (campaignId === null || campaignId === undefined) return () => false;
+  const gameKey = settings.normGameName(game);
+  const id = String(campaignId);
+  return (t) =>
+    !!t && String(t.campaignId) === id && settings.normGameName(t.game || "") === gameKey;
+}
+
+async function reuseCandidate(game, { cycle, hostCache, campaignId = null } = {}) {
   const b = brain();
   const hosts = require("../../botHosts");
+  const isOwnRow = ownRowMatcher(game, campaignId);
 
   const reusable = await b.reusableTaskForGame(game);
   if (!reusable || !(reusable.bots || []).length) return null;
@@ -119,13 +136,46 @@ async function reuseCandidate(game, { cycle, hostCache }) {
   // campaign for the same game is written as `planned` by upsertTask moments
   // before its accounts are claimed. Counting only `active` here let a shadow
   // verdict plan more reuse accounts than legacy would for the same inputs.
+  //
+  // THE CAMPAIGN'S OWN ROW IS NOT A COMPETITOR. Legacy's inline reuse decides
+  // a campaign only while it has no active/planned row — so from legacy's
+  // seat, the campaign's own row can never be in this set. The lane has no
+  // such guarantee: it re-decides every campaign every cycle, and in shadow
+  // it decides campaigns the legacy engine has ALREADY acted on. By then the
+  // legacy row for this very campaign is active and holds the accounts legacy
+  // reused for it — the same accounts that sit on the warm task the lane is
+  // about to reuse. Counting that row here subtracts, from this campaign, the
+  // accounts legacy assigned TO this campaign.
+  //
+  // Measured on production (2026-09-05): every negative account delta on a
+  // reuse-vs-reuse shadow row was exactly this. EVE Online: source held 19,
+  // the campaign's own legacy row overlapped 12, the lane saw 7 against
+  // legacy's 19. Black Desert: 40 held, 40 overlapped, the lane saw 0 against
+  // 40. Excluding the own row restores legacy's number in each case. The
+  // sibling-campaign case is unchanged: another campaign's active row still
+  // speaks for its accounts, as it must (the incident in FARM2-VERIFICATION
+  // §11 is what happens when it does not).
+  //
+  // In a live lane this changes no action: an own row that is active always
+  // carries executedAt, so lane.js's alreadyDone check stops execution before
+  // this count is ever spent; a planned own row never carries accounts on the
+  // reuse path. What changes is what a re-decision REPORTS — the count the lane
+  // would reuse if it were deciding fresh, which is the count legacy recorded.
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const others = await AutoFarmTask.find(
     { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
-    { assignedAccounts: 1 },
+    { assignedAccounts: 1, game: 1, campaignId: 1, status: 1 },
   ).lean();
+  const held = new Set((reusable.assignedAccounts || []).map((u) => String(u).toLowerCase()));
   const spokenFor = new Set();
+  let ownRow = null;
   for (const t of others) {
+    if (isOwnRow(t)) {
+      let overlap = 0;
+      for (const u of t.assignedAccounts || []) if (held.has(String(u).toLowerCase())) overlap += 1;
+      ownRow = { taskId: t._id, status: t.status, accounts: (t.assignedAccounts || []).length, overlap };
+      continue;
+    }
     for (const u of t.assignedAccounts || []) spokenFor.add(String(u).toLowerCase());
   }
   const mine = (reusable.assignedAccounts || []).filter(
@@ -136,6 +186,9 @@ async function reuseCandidate(game, { cycle, hostCache }) {
     taskId: reusable._id,
     bots: live,
     accounts: mine,
+    // The campaign's own active/planned row, when one exists — reported so a
+    // verdict says which accounts it did NOT count against itself, and why.
+    ownRow,
     reason:
       "Recurring campaign for a game we already farm — reusing existing bot" +
       (live.length > 1 ? "s" : "") +
@@ -442,7 +495,11 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   // time that can finish a drop fresh accounts never could. A lane with a zero
   // account budget can still reuse; the legacy engine reuses in exactly this
   // situation.
-  const reuse = await reuseCandidate(game, { cycle, hostCache });
+  const reuse = await reuseCandidate(game, {
+    cycle,
+    hostCache,
+    campaignId: campaign.campaignId,
+  });
   if (reuse) {
     return {
       ...common,
@@ -452,6 +509,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
       targetAccounts: reuse.accounts.length,
       reuseTaskId: reuse.taskId,
       reuseBots: reuse.bots.map((x) => x.container),
+      reuseOwnRow: reuse.ownRow,
       // Reuse spends nothing from the cycle budget, so it is never "budget
       // limited" and must not be trimmed.
       budgetLimited: false,
@@ -756,6 +814,9 @@ module.exports = {
   diffAgainstLegacy,
   probeGate,
   reuseCandidate,
+  // One definition of "this campaign's own row", shared with the execute
+  // step's recompute so the two cannot drift.
+  ownRowMatcher,
   COMPARABLE_WINDOW_MS,
   // Re-exported so callers reading a diff do not need a second require to
   // interpret it, and so there remains exactly one definition of these.
