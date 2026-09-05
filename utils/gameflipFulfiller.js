@@ -13,6 +13,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const { loginsOnActiveListings, notListed } = require("./listedLogins");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
@@ -33,23 +34,9 @@ async function claimAccountForSet(set) {
   let candidates = await availableAccountsForSet(set);
   // Skip accounts already attached to another active listing (as its
   // auto-delivery account or a fed Plati/GGSel unit): the buyer gets the whole
-  // account, so its other listing's promised drops would ship with it.
-  const listed = new Set();
-  for (const r of await MarketplaceListing.find(
-    { status: "active" },
-    { accountLogin: 1, units: 1 },
-  ).lean()) {
-    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
-      if (l) listed.add(l.toLowerCase());
-    }
-    for (const u of r.units || []) {
-      const l = String((u && u.login) || "").toLowerCase();
-      if (l) listed.add(l);
-    }
-  }
-  candidates = candidates.filter(
-    (c) => !listed.has(String(c.login || "").toLowerCase()),
-  );
+  // account, so its other listing's promised drops would ship with it. One
+  // implementation for every claimer (utils/listedLogins.js).
+  candidates = notListed(candidates, await loginsOnActiveListings());
   // Hand out an account whose Twitch token still scans before one flagged
   // token_invalid / integrity_failed. A dead token does not always mean the
   // buyer cannot log in — the password is separate, and the guardian's own

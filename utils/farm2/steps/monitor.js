@@ -30,6 +30,20 @@
 const publishStep = require("./publish");
 const verifyStep = require("./verify");
 
+// Post-event listing window and the per-task re-check throttle.
+//
+// A task whose accounts completed the bundle only around the campaign's end
+// is marked completed by completeEndedTasks before any sweep listed it, and
+// the legacy auto-list sweep reads ACTIVE tasks only — so it was never listed
+// at all. The lane's monitor looks back POST_EVENT_WINDOW_MS over its game's
+// completed, unlisted tasks and queues a post-event listing for any with a
+// deliverable full-bundle holder. Verification is a DropLog aggregation plus a
+// Twitch campaign fetch per task, so each completed task is re-checked at most
+// once per POST_EVENT_CHECK_MS (per process; a restart re-checks once).
+const POST_EVENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const POST_EVENT_CHECK_MS = 6 * 60 * 60 * 1000;
+const postEventChecked = new Map(); // taskId -> ms
+
 // Inspect this lane's active tasks and decide what work to queue.
 // Read-only with respect to farming; the only writes are job rows.
 //
@@ -54,6 +68,12 @@ async function monitorLane(lane, { jobs, shadow, cache = null }) {
     queuedPrimary: 0,
     queuedSecondaries: 0,
     endingSoon: 0,
+    // Completed-but-unlisted tasks in the post-event window: how many were
+    // (re-)checked this run, how many hold deliverable stock, how many were
+    // queued for a post-event listing (live lanes only).
+    postEventChecked: 0,
+    postEventListable: 0,
+    postEventQueued: 0,
     tasks: [],
     // Not serialised into the lane summary (lane.js strips it); consumed by
     // verify.auditLane in the same run.
@@ -99,7 +119,7 @@ async function monitorLane(lane, { jobs, shadow, cache = null }) {
           payload: { verified: check.verified, assigned },
         });
         report.queuedPrimary += 1;
-      } else if (needsSecondaries) {
+      } else if (needsSecondaries && !publishStep.secondariesSettledRecently(t._id)) {
         await jobs.enqueue({
           lane: lane.game,
           laneKey: lane.gameKey,
@@ -133,7 +153,51 @@ async function monitorLane(lane, { jobs, shadow, cache = null }) {
     });
   }
 
+  // --- Post-event: completed, never listed, still deliverable ---------------
+  const ended = await AutoFarmTask.find({
+    game: lane.game,
+    status: "completed",
+    completedAt: { $gte: new Date(Date.now() - POST_EVENT_WINDOW_MS) },
+    "assignedAccounts.0": { $exists: true },
+    $or: [{ "listing.externalId": "" }, { "listing.externalId": { $exists: false } }],
+  })
+    .select("game campaignId campaignName assignedAccounts campaignEndAt listing status completedAt")
+    .lean();
+  for (const t of ended) {
+    const id = String(t._id);
+    const last = postEventChecked.get(id) || 0;
+    if (Date.now() - last < POST_EVENT_CHECK_MS) continue;
+    postEventChecked.set(id, Date.now());
+    report.postEventChecked += 1;
+    let check;
+    try {
+      check = await verifyStep.verifyTask(t, { cache });
+    } catch (e) {
+      check = { ok: false, reason: "verify failed: " + e.message, verified: 0 };
+    }
+    if (!check.ok) continue;
+    report.postEventListable += 1;
+    if (!shadow && lane.mode === "live") {
+      await jobs.enqueue({
+        lane: lane.game,
+        laneKey: lane.gameKey,
+        kind: "publish",
+        market: "primary",
+        campaignId: t.campaignId,
+        taskId: t._id,
+        shadow: false,
+        payload: { verified: check.verified, assigned: (t.assignedAccounts || []).length, postEvent: true },
+      });
+      report.postEventQueued += 1;
+    }
+  }
+
   return report;
 }
 
-module.exports = { monitorLane };
+module.exports = {
+  monitorLane,
+  POST_EVENT_WINDOW_MS,
+  POST_EVENT_CHECK_MS,
+  _postEventChecked: postEventChecked,
+};

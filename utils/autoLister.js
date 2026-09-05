@@ -12,6 +12,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const { loginsOnActiveListings } = require("./listedLogins");
 const MarketResearch = require("../models/MarketResearch");
 const { gameflipDeliveryCode, GF_CLAIM_TAG } = require("./gameflipFulfiller");
 const {
@@ -487,19 +488,13 @@ async function verifiedHoldersForItems(task, items) {
 async function pickDeliveryAccounts(task, max, items) {
   const verified = await verifiedHoldersForItems(task, items);
   if (!verified.length) return [];
-  // Exclude any login already live on another active listing (accountLogin can
-  // be a comma/space-separated list on Plati/GGSel rows). Per-drop reservation
-  // covers committed sales; this also guards the window before a concurrent
-  // listing commits its reservation.
-  const used = new Set();
-  for (const r of await MarketplaceListing.find(
-    { status: "active" },
-    { accountLogin: 1 },
-  ).lean()) {
-    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
-      if (l) used.add(l.toLowerCase());
-    }
-  }
+  // Exclude any login already live on another active listing — as its
+  // auto-delivery account OR as a unit fed to a stock product later
+  // (utils/listedLogins.js; this used to read accountLogin only, so every
+  // refilled account was invisible here). Per-drop reservation covers
+  // committed sales; this also guards the window before a concurrent listing
+  // commits its reservation.
+  const used = await loginsOnActiveListings();
   const out = [];
   for (const acc of verified) {
     if (out.length >= max) break;
@@ -1361,6 +1356,12 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       qty: q,
     })),
     price,
+    // The floor the Gameflip relist chain prices against. A relist inherits
+    // its predecessor's price verbatim and nothing else corrects it, so a
+    // chain born without a floor could drift below the researched price
+    // forever (Halo listed at $1.02 beside its $1.50 twin). 1,382 of 1,385
+    // sets on prod had none. The derived price IS the floor.
+    minPriceUsd: price,
     listed: false,
     custom: true,
     coverGame: task.game,
@@ -1730,6 +1731,7 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
       qty: q,
     })),
     price,
+    minPriceUsd: price,
     listed: false,
     custom: true,
     coverGame: task.game,

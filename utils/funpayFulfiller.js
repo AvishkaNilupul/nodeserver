@@ -14,6 +14,7 @@
 // still prevents double-selling across channels.
 const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
+const { loginsOnActiveListings, notListed } = require("./listedLogins");
 const { decrypt } = require("./secretBox");
 const {
   reserveSetOnAccount,
@@ -50,7 +51,16 @@ function funpayPaymentGuide() {
 // password (and releases them) so every returned line is deliverable.
 async function claimAccountsForSet(set, max) {
   const want = Math.max(1, parseInt(max, 10) || 1);
-  const candidates = await availableAccountsForSet(set);
+  // Never an account already attached to another live listing, on ANY
+  // marketplace: the buyer gets the whole account, so a second listing's
+  // promised drops would ship with it (utils/listedLogins.js). The Gameflip
+  // claimer always did this; the stock-product claimers did not, and the
+  // guardian's restocks through them were still creating cross-set
+  // collisions on 2026-09-03.
+  const candidates = notListed(
+    await availableAccountsForSet(set),
+    await loginsOnActiveListings(),
+  );
   const claimed = [];
   for (const c of candidates) {
     if (claimed.length >= want) break;

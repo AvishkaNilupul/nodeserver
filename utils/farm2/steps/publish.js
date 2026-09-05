@@ -24,6 +24,19 @@ const verifyStep = require("./verify");
 const { recordAutoFarmEvent } = require("../../autoFarmEventLog");
 const notify = require("../notify");
 
+// A secondaries job that found every market present (or unmapped) need not be
+// re-queued every cycle: publishNeeds reads the listing's externalIds, but
+// whether ZeusX/Plati/GGSel are even ENABLED for a game is known only inside
+// retryMissingSecondaries. Remember its "nothing to do" verdict for a while.
+// Per process, deliberately — a restart simply re-checks once.
+const SECONDARIES_SETTLED_MS = 6 * 60 * 60 * 1000;
+const secondariesSettled = new Map(); // taskId -> ms
+
+function secondariesSettledRecently(taskId) {
+  const at = secondariesSettled.get(String(taskId));
+  return !!at && Date.now() - at < SECONDARIES_SETTLED_MS;
+}
+
 function lister() {
   return require("../../autoLister");
 }
@@ -66,6 +79,25 @@ async function publishPrimary({ taskId, af, shadow, lane }) {
     }
     throw e;
   }
+  // A campaign that has already ENDED is listed post-event: the same markup,
+  // retitle and stacking pass completeEndedTasks runs for a task that was
+  // listed while live (autoLister.onCampaignEnded). This is what lets a task
+  // whose accounts completed the bundle only around the campaign's end still
+  // reach a marketplace — the legacy sweep lists ACTIVE tasks only, so once
+  // completeEndedTasks had marked such a task completed nothing ever listed
+  // it (128 completed-but-unlisted tasks in 30 days on prod; Halo Infinite
+  // alone had 39 deliverable accounts sitting unsold).
+  let postEvent = null;
+  const ended =
+    task.status === "completed" ||
+    (task.campaignEndAt && new Date(task.campaignEndAt).getTime() < Date.now());
+  if (r && r.listed && ended && !dryRun) {
+    try {
+      postEvent = await lister().onCampaignEnded(task._id);
+    } catch (e) {
+      postEvent = { error: e.message };
+    }
+  }
   if (r && r.listed) {
     // Same event and same alert the legacy sweep records, so the Activity page
     // and the owner's Telegram see a lane listing exactly as a legacy one.
@@ -79,7 +111,9 @@ async function publishPrimary({ taskId, af, shadow, lane }) {
       actor: "farm2/publishPrimary",
     });
     await notify.telegram(
-      "🛍 Auto-listed (lane) — " +
+      "🛍 Auto-listed (lane" +
+        (ended ? ", post-event" : "") +
+        ") — " +
         task.game +
         "\n" +
         r.listed.title +
@@ -97,6 +131,7 @@ async function publishPrimary({ taskId, af, shadow, lane }) {
     skipped: r && r.skipped ? r.skipped : null,
     retried: r && r.retried ? r.retried : null,
     verifiedAtPublish: check.verified,
+    ...(postEvent ? { postEvent } : {}),
   };
 }
 
@@ -116,7 +151,10 @@ async function publishSecondaries({ taskId, shadow, lane }) {
   }
 
   const retried = await lister().retryMissingSecondaries(task);
-  if (!retried) return { skipped: "all secondary markets already present" };
+  if (!retried) {
+    secondariesSettled.set(String(task._id), Date.now());
+    return { skipped: "all secondary markets already present" };
+  }
   await notify.telegram("🛍 Auto-relisted (lane) — " + task.game + "\n" + retried.join(", "));
   return { retried };
 }
@@ -134,4 +172,11 @@ function publishNeeds(task) {
   return { needsPrimary, needsSecondaries };
 }
 
-module.exports = { publishPrimary, publishSecondaries, publishNeeds };
+module.exports = {
+  publishPrimary,
+  publishSecondaries,
+  publishNeeds,
+  secondariesSettledRecently,
+  SECONDARIES_SETTLED_MS,
+  _secondariesSettled: secondariesSettled,
+};
