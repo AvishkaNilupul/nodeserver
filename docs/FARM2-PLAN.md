@@ -177,6 +177,33 @@ silent failure mode the legacy engine has no view of.
 | **World of Tanks** | a **reuse-only** game — never spends fresh pool accounts. Deliberately a genuinely different branch, not a third happy path |
 | **Black Desert** | 12 decisions on the normal fresh-spend path — the control case against WoT |
 
+## Main-engine mode (`autoFarm.farm2Main`)
+
+The end state of the walk. With `farm2Main` on:
+
+- the supervisor creates a **live** lane for every game with a live, claimable
+  campaign, every cycle (`ensureLanesForLiveGames`) — existing lanes keep
+  whatever mode the operator set, no-claim games are never touched, each
+  creation is audited;
+- the legacy tick's per-campaign decision path decides nothing (every
+  candidate is owned) and its stash sweep is skipped when there is nothing to
+  decide; the tick keeps running **only** the fleet maintenance it is the
+  janitor for — completion, backfill, park/wake, reaping, recycling, repack,
+  refill, stacked bundles, catalog sync, the starvation alert;
+- the budget is drawn **on demand** (`BudgetCycle.spendAccounts` from the
+  unallocated remainder, per-game capped) rather than pre-allocated to every
+  live lane — pre-allocation would have diluted a real fresh farm to a few
+  accounts once fifty lanes existed, where the legacy tick fair-shares only
+  among the campaigns that need accounts that tick;
+- a live lane that pauses (8 consecutive failures) **releases its game**:
+  `ownership.js` excludes paused lanes, so the legacy engine covers it instead
+  of nobody, the supervisor drops the ownership cache and alerts on Telegram,
+  and the tab shows a Resume button.
+
+The page is `/farm2.html` ("Auto farm engine"). "Make main engine" flips the
+flag, promotes every shadow lane and creates the missing ones, confirmed and
+audited; "Step back" drops the flag and demotes nothing.
+
 ## Rollout
 
 1. Deploy (engine OFF — a deploy changes nothing).
