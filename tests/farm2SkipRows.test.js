@@ -350,10 +350,12 @@ test("END TO END: a SHADOW lane writes nothing — the legacy engine owns its ro
   assert.equal(await AutoFarmTask.countDocuments({ game }), 0, "no row: shadow changes nothing");
 });
 
-test("END TO END: a live lane does not clobber an ACTIVE task it re-decides as a skip", async () => {
-  // After farming, a game's own accounts cover its demand and the lane decides
-  // skip_already_covered for a campaign whose task is ACTIVE. That skip must be
-  // suppressed, not written over the running task.
+test("END TO END: a live lane leaves an ACTIVE task alone — settled, never re-decided, never clobbered", async () => {
+  // An active task is a campaign the engine has acted on. The legacy tick never
+  // re-decides one; the lane's candidate filter now agrees, so the skip that
+  // used to be decided-then-suppressed is simply never decided. The guard
+  // inside recordSkip is still pinned directly above ("a skip never overwrites
+  // a row that owns something") for the paths that can still reach it.
   const game = "E2E Active Game";
   await AutoFarmTask.deleteMany({ game });
   await research(game, 90);
@@ -369,9 +371,11 @@ test("END TO END: a live lane does not clobber an ACTIVE task it re-decides as a
   });
   const l = await liveLane(game);
   const summary = await laneMod.runLane(l, { cycle: null, af: af({ hostId: "does-not-exist-xyz" }), hostCache: new Map() });
-  assert.equal(summary.decisions[0].decision, "skip_host_offline");
+  assert.equal(summary.campaigns, 1);
+  assert.equal(summary.settled, 1);
+  assert.equal(summary.decisions.length, 0, "an active campaign is not re-decided");
   assert.equal(summary.skipsRecorded, 0);
-  assert.equal(summary.skipsSuppressed, 1);
+  assert.equal(summary.skipsSuppressed, 0);
   const row = await AutoFarmTask.findOne({ game, campaignId: "e2e-active" }).lean();
   assert.equal(row.status, "active", "the running task is untouched");
   assert.deepEqual(row.assignedAccounts, ["x1"]);

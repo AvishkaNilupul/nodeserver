@@ -205,10 +205,12 @@ test("executeReuse's recompute exempts the own row too — decide and execute co
 
 /* ------------------------------- the live lane ---------------------------- */
 
-test("LIVE: re-deciding an already-executed campaign reports the truthful count and still executes nothing", async () => {
-  // The claim this pins: exempting the own row changes what a re-decision
-  // REPORTS, never what a live lane DOES. An active own row always carries
-  // executedAt, so lane.js's alreadyDone check stops before any execute job.
+test("LIVE: an already-executed campaign is SETTLED — not re-decided, nothing executed, the row untouched", async () => {
+  // The claim this pins has moved one step earlier. Exempting the own row
+  // changed what a re-decision REPORTS (pinned above, through decideCampaign);
+  // the lane runner now never re-decides an executed campaign at all — the
+  // candidate filter treats an active row as settled, exactly as the legacy
+  // tick does. No decide job, no execute job, the own row untouched.
   const game = "Live Redecide Gap Game";
   const gameKey = settings.normGameName(game);
   await Promise.all([
@@ -225,7 +227,6 @@ test("LIVE: re-deciding an already-executed campaign reports the truthful count 
   const L = await ownRow(game, "live-c1", R, 19, hoursAgo(1));
   const lane = (await FarmLane.create({ game, gameKey, mode: "live", state: "idle" })).toObject();
 
-  // Host state is a per-cycle memo; seed it so no host is probed here.
   const cache = hostCache();
   cache.set("__farm2:host", Promise.resolve({ host: { id: "local", label: "Local" }, hostOnline: true }));
   const af = { ...settings.getAutoFarm(), probeColdStart: false, dryRun: false, minHoursLeft: 12, maxPerGame: 30, platiCategoryId: "" };
@@ -233,13 +234,17 @@ test("LIVE: re-deciding an already-executed campaign reports the truthful count 
 
   const decideErrors = summary.errors.filter((e) => !/^(monitor|audit):/.test(e));
   assert.deepEqual(decideErrors, [], decideErrors.join("; "));
-  assert.equal(summary.decisions.length, 1);
-  assert.equal(summary.decisions[0].decision, "reuse_existing");
-  assert.equal(summary.decisions[0].plannedAccounts, 19, "before: 0 — its own 19 accounts counted against it");
-  assert.equal(summary.decisions[0].wouldFarm, true);
-  assert.equal(summary.alreadyExecuted, 1, "stopped by alreadyDone, exactly as before");
+  assert.equal(summary.campaigns, 1);
+  assert.equal(summary.settled, 1, "the executed campaign is settled, as legacy treats it");
+  assert.equal(summary.decisions.length, 0, "no re-decision");
   assert.equal(summary.executed.length, 0);
+  assert.equal(await FarmJob.countDocuments({ lane: game, kind: "decide" }), 0, "no decide job was written");
   assert.equal(await FarmJob.countDocuments({ lane: game, kind: "execute" }), 0, "no execute job was queued");
+
+  // Deciding it directly still reports the truthful count — the own row is
+  // not a competitor for its own reuse.
+  const direct = await decideStep.reuseCandidate(game, { cycle: null, hostCache: hostCache(), campaignId: "live-c1" });
+  assert.equal(direct.accounts.length, 19, "before: 0 — its own 19 accounts counted against it");
 
   const row = await AutoFarmTask.findById(L._id).lean();
   assert.equal(row.status, "active");
