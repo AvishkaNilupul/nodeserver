@@ -28,7 +28,11 @@ const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 const { normGame } = require("./gameLabel");
-const { buildDecisionInputs } = require("./decisionInputs");
+const {
+  buildDecisionInputs,
+  buildReuseInputs,
+  withReuseInputs,
+} = require("./decisionInputs");
 // Ownership boundary with the new lane engine (utils/farm2/*). Required
 // directly rather than through utils/farm2/index.js so this stays a leaf
 // dependency: ownership.js pulls in only ./settings, and reads the FarmLane
@@ -1745,6 +1749,21 @@ async function processCampaign(c, ctx) {
       (reusable.assignedAccounts || []).length +
       " accounts instead of spending new pool accounts.";
     if (af.dryRun) {
+      // The reuse inputs, beside the sellability snapshot (utils/
+      // decisionInputs.js). Dry-run computes no spoken-for set, so `free` is
+      // recorded as null — not recorded, rather than 0.
+      if (recordedInputs) {
+        recordedInputs = withReuseInputs(
+          recordedInputs,
+          buildReuseInputs({
+            sourceTaskId: reusable._id,
+            sourceHeld: (reusable.assignedAccounts || []).length,
+            free: null,
+            competitors: null,
+            dryRun: true,
+          }),
+        );
+      }
       await record({
         decision: "reuse_existing",
         status: "planned",
@@ -1777,17 +1796,39 @@ async function processCampaign(c, ctx) {
     // buyer pays and there is nothing to fulfil. The bots really are shared;
     // the sellable stock is not.
     const spokenFor = new Set();
+    // Which live tasks hold any of the reused task's accounts — recorded
+    // beside the count so the lane engine's comparison can tell a rule
+    // difference from a world that moved (utils/decisionInputs.js).
+    const reuseHeld = new Set(
+      (reusable.assignedAccounts || []).map((u) => String(u).toLowerCase()),
+    );
+    const reuseCompetitors = [];
     for (const other of await AutoFarmTask.find(
       { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
       { assignedAccounts: 1 },
     ).lean()) {
+      let overlaps = false;
       for (const u of other.assignedAccounts || []) {
         spokenFor.add(String(u).toLowerCase());
+        if (reuseHeld.has(String(u).toLowerCase())) overlaps = true;
       }
+      if (overlaps) reuseCompetitors.push(other._id);
     }
     const mine = (reusable.assignedAccounts || []).filter(
       (u) => !spokenFor.has(String(u).toLowerCase()),
     );
+    if (recordedInputs) {
+      recordedInputs = withReuseInputs(
+        recordedInputs,
+        buildReuseInputs({
+          sourceTaskId: reusable._id,
+          sourceHeld: (reusable.assignedAccounts || []).length,
+          free: mine.length,
+          competitors: reuseCompetitors,
+          dryRun: false,
+        }),
+      );
+    }
     const reuseTask = await record({
       decision: "reuse_existing",
       status: started.length ? "active" : "failed",

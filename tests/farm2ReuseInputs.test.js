@@ -303,3 +303,108 @@ test("LANE execute (live): the active row records free = what it assigned; the e
   assert.deepEqual(row2.decisionInputs.reuse.competitors.map(String), [String(row1._id)], "the first campaign's task held them");
   assert.equal(inputsMod.hasReuseInputs(row2.decisionInputs), true);
 });
+
+/* --------------------------------- legacy --------------------------------- */
+
+// processCampaign(c, ctx) is the legacy per-campaign decision. Its reuse block
+// is reachable without a host: the reusable task comes from ctx.reusableMap,
+// the bot-file existence check is answered by ctx.hostState.hasFile, and
+// botFactory.startContainer is stubbed above so the LIVE path restarts
+// nothing. Both reuse record() calls are driven for real here.
+const autoFarmer = require("../utils/autoFarmer");
+
+function legacyCtx({ campaignId, research, sales, reusable, afOverrides = {} }) {
+  return {
+    af: af(afOverrides),
+    host: { id: "local", label: "Local" },
+    hostOnline: true,
+    budgetMap: new Map(),
+    infoMap: new Map([[campaignId, { research, sales }]]),
+    priorTasks: new Map(),
+    reusableMap: new Map([[reusable.game, reusable]]),
+    hostState: { hasFile: () => true, activateBot() {} },
+  };
+}
+
+const sellable = () => ({
+  research: { demandScore: 90, sellers: 5, scannedAt: hoursAgo(1) },
+  sales: { count: 7, revenue: 35, avgPrice: 5 },
+});
+
+test("LEGACY record(), live reuse: the row carries source, held, spoken for, free and the competitors — free equals plannedAccounts", async () => {
+  const game = "Legacy Reuse Inputs Game";
+  await AutoFarmTask.deleteMany({ game });
+  const R = (await source(game, 5, hoursAgo(2))).toObject();
+  // A sibling campaign's live task holds two of R's five accounts.
+  const sib = await AutoFarmTask.create({
+    game,
+    campaignId: "sib",
+    decision: "reuse_existing",
+    status: "active",
+    assignedAccounts: R.assignedAccounts.slice(0, 2),
+    executedAt: hoursAgo(1),
+  });
+  const c = { game, campaignId: "lr-live", name: "Weekly", endAt: hoursFromNow(48) };
+  const r = await autoFarmer.processCampaign(c, legacyCtx({ campaignId: "lr-live", ...sellable(), reusable: R }));
+  assert.equal(r.decision, "reuse_existing");
+  assert.equal(r.dryRun, undefined, "the live path");
+
+  const row = await AutoFarmTask.findOne({ game, campaignId: "lr-live" }).lean();
+  assert.equal(row.status, "active");
+  assert.equal(row.plannedAccounts, 3);
+  assert.equal(row.assignedAccounts.length, 3);
+  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true, "the sellability snapshot is still there");
+  assert.equal(inputsMod.hasReuseInputs(row.decisionInputs), true);
+  const ri = row.decisionInputs.reuse;
+  assert.equal(String(ri.sourceTaskId), String(R._id));
+  assert.equal(ri.sourceHeld, 5);
+  assert.equal(ri.spokenFor, 2);
+  assert.equal(ri.free, 3, "the number legacy recorded as plannedAccounts, now dated and sourced");
+  assert.deepEqual(ri.competitors.map(String), [String(sib._id)]);
+  assert.equal(ri.ownRowExcluded, null, "legacy never has an own row to exclude");
+  assert.equal(ri.dryRun, false);
+});
+
+test("LEGACY record(), dry-run reuse: source and held are recorded, free is null — not recorded, not zero", async () => {
+  const game = "Legacy Dry Reuse Inputs Game";
+  await AutoFarmTask.deleteMany({ game });
+  const R = (await source(game, 3, hoursAgo(2))).toObject();
+  const c = { game, campaignId: "lr-dry", name: "Weekly", endAt: hoursFromNow(48) };
+  const r = await autoFarmer.processCampaign(
+    c,
+    legacyCtx({ campaignId: "lr-dry", ...sellable(), reusable: R, afOverrides: { dryRun: true } }),
+  );
+  assert.equal(r.dryRun, true);
+  const row = await AutoFarmTask.findOne({ game, campaignId: "lr-dry" }).lean();
+  assert.equal(row.status, "planned");
+  assert.equal(row.plannedAccounts, 0, "0 by construction on this path — which is why it cannot be compared");
+  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true);
+  assert.equal(inputsMod.hasReuseInputs(row.decisionInputs), false);
+  const ri = row.decisionInputs.reuse;
+  assert.equal(String(ri.sourceTaskId), String(R._id));
+  assert.equal(ri.sourceHeld, 3);
+  assert.equal(ri.free, null);
+  assert.equal(ri.spokenFor, null);
+  assert.equal(ri.competitors, null);
+  assert.equal(ri.dryRun, true);
+});
+
+test("LEGACY record(), a non-reuse path: no reuse inputs at all", async () => {
+  const game = "Legacy Skip Reuse Inputs Game";
+  await AutoFarmTask.deleteMany({ game });
+  const R = (await source(game, 3, hoursAgo(2))).toObject();
+  const c = { game, campaignId: "ls-none", name: "Weekly", endAt: hoursFromNow(48) };
+  const r = await autoFarmer.processCampaign(
+    c,
+    legacyCtx({
+      campaignId: "ls-none",
+      research: { demandScore: 3, sellers: 20, scannedAt: hoursAgo(1) },
+      sales: { count: 0, revenue: 0, avgPrice: 0 },
+      reusable: R,
+    }),
+  );
+  assert.equal(r.decision, "skip_low_demand");
+  const row = await AutoFarmTask.findOne({ game, campaignId: "ls-none" }).lean();
+  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true);
+  assert.equal(row.decisionInputs.reuse, null);
+});
