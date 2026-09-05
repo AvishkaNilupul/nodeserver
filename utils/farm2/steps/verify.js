@@ -28,7 +28,12 @@ function lister() {
 // passwords in memory, writes nothing, contacts no marketplace and no host.
 // Safe to run against live legacy-owned tasks, which is exactly what shadow
 // lanes do.
-async function verifyTask(taskDoc) {
+//
+// `cache` (optional, a Map shared across one supervisor cycle) memoises the
+// campaign-item resolution by campaignId. campaignItems is a Twitch GraphQL
+// fetch through a bot token; without the cache a cycle over 34 lanes paid it
+// once per active task for the monitor pass and AGAIN for the audit pass.
+async function verifyTask(taskDoc, { cache = null } = {}) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const task =
     taskDoc && taskDoc.assignedAccounts
@@ -64,8 +69,21 @@ async function verifyTask(taskDoc) {
   // publishPrimary gates on this, so nothing would ever have been listed.
   let items = [];
   try {
-    items =
-      (await L.campaignItems(task.campaignId, task.game, task.campaignName)) || [];
+    const key = "__farm2:items|" + String(task.campaignId);
+    if (cache && cache.has(key)) {
+      items = await cache.get(key);
+    } else {
+      const p = Promise.resolve().then(
+        async () => (await L.campaignItems(task.campaignId, task.game, task.campaignName)) || [],
+      );
+      // Only a successful resolution is cached: a transient Twitch failure
+      // must not poison every later check of the same campaign this cycle.
+      if (cache) {
+        cache.set(key, p);
+        p.catch(() => cache.delete(key));
+      }
+      items = await p;
+    }
   } catch (e) {
     return {
       ok: false,
@@ -140,7 +158,11 @@ async function verifyTask(taskDoc) {
 // Audit every active task for a lane's game. This is what a shadow lane runs:
 // it reports on the inventory the LEGACY engine is currently managing, which
 // makes the new tab useful before a single game is flipped to live.
-async function auditLane(lane) {
+//
+// `checks` (optional) is a Map taskId -> verifyTask result from the monitor
+// pass of the same lane run; when supplied the audit reuses those instead of
+// verifying every task a second time. `cache` is the per-cycle memo.
+async function auditLane(lane, { checks = null, cache = null } = {}) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const tasks = await AutoFarmTask.find({
     game: lane.game,
@@ -156,7 +178,10 @@ async function auditLane(lane) {
     // Sequential on purpose: each verification runs a DropLog aggregation, and
     // fanning those out per task would put avoidable load on an Atlas shared
     // tier whose binding constraint is bytes returned.
-    const r = await verifyTask(t);
+    const r =
+      checks && checks.has(String(t._id))
+        ? checks.get(String(t._id))
+        : await verifyTask(t, { cache });
     results.push({
       taskId: t._id,
       campaignId: t.campaignId,

@@ -69,6 +69,17 @@ async function seedTrialLanes({ games = TRIAL_GAMES, mode = "shadow" } = {}) {
 // evidence, not by accident.
 const MIN_SHADOW_DECISIONS = 3;
 
+// The evidence window the gate scores: the most recent READINESS_WINDOW_ROWS
+// shadow decisions, no older than READINESS_WINDOW_DAYS. It used to be the
+// last 25 rows, full stop — and at ~180 decisions per lane per day (before the
+// churn fix in lane.js) that window rolled over every few minutes, so a lane
+// read ready:true and ready:false minutes apart. Now that a campaign is
+// decided once rather than every cycle, 200 rows spans days of evidence and a
+// single read is stable; the day bound stops evidence from a previous version
+// of the comparison lingering forever on a quiet game.
+const READINESS_WINDOW_ROWS = 200;
+const READINESS_WINDOW_DAYS = 14;
+
 // How many EXACT-fidelity replayed decisions constitute evidence, when replay
 // evidence is required. Higher than MIN_SHADOW_DECISIONS because replay rows
 // are cheap — they come from history rather than from waiting — so there is no
@@ -136,9 +147,10 @@ async function laneReadiness(lane, opts = {}) {
     kind: "decide",
     status: "done",
     shadow: true,
+    createdAt: { $gte: new Date(Date.now() - READINESS_WINDOW_DAYS * 864e5) },
   })
     .sort({ createdAt: -1 })
-    .limit(25)
+    .limit(READINESS_WINDOW_ROWS)
     .select("result")
     .lean();
   // Only trust comparisons produced by the CURRENT diff logic.
@@ -384,4 +396,6 @@ module.exports = {
   TRIAL_GAMES,
   MIN_SHADOW_DECISIONS,
   MIN_REPLAY_DECISIONS,
+  READINESS_WINDOW_ROWS,
+  READINESS_WINDOW_DAYS,
 };

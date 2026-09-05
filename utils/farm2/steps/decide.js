@@ -449,11 +449,24 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   // trigger a live marketplace re-scan, which is a real side effect (API spend,
   // rate-limit budget) and must not happen from a mode whose contract is
   // "changes nothing". A live lane wants the freshest data and pays for it.
-  const research =
-    shadow || typeof b.freshResearchForGame !== "function"
-      ? await b.researchForGame(game)
-      : await b.freshResearchForGame(game);
-  const salesRaw = await b.internalSalesForGame(game);
+  //
+  // Read ONCE per game per cycle, as the legacy tick's infoMap does: two
+  // campaigns for one game share the exact same market and sales snapshot,
+  // and a live lane's fresh lookup may re-scan a marketplace — that must
+  // happen once per game per cycle, not once per campaign.
+  const info = await memo(
+    hostCache,
+    "__farm2:info|" + (shadow ? "ro" : "fresh") + "|" + settings.normGameName(game),
+    async () => ({
+      research:
+        shadow || typeof b.freshResearchForGame !== "function"
+          ? await b.researchForGame(game)
+          : await b.freshResearchForGame(game),
+      salesRaw: await b.internalSalesForGame(game),
+    }),
+  );
+  const research = info.research;
+  const salesRaw = info.salesRaw;
   const sales = b.salesOf(salesRaw);
 
   const { probeAllowed, probeBudgetBlocked } = await probeGate(game, af2);
@@ -528,6 +541,11 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
     );
   }
 
+  // Forced games (af.forceGames — multi-day events whose per-day campaigns are
+  // each shorter than the floor) bypass the time gate, and only it. Needed by
+  // the reuse top-up below as well as the time gate, so resolved once here.
+  const forced = typeof b.isForcedGame === "function" ? b.isForcedGame(game, af2) : false;
+
   // --- 3. Reuse-first ------------------------------------------------------
   // Checked BEFORE the time gate and the budget, because reuse costs no pool
   // accounts and no container slots, and warm bots carry accumulated watch
@@ -540,12 +558,34 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
     campaignId: campaign.campaignId,
   });
   if (reuse) {
+    // THE TOP-UP. Legacy's inline reuse does not stop at restarting the warm
+    // bots: demand ABOVE what the reused accounts freely cover is worth fresh
+    // pool accounts too (they farm only this event and sell it solo), so it
+    // appends `min(alloc.target − mine, budget)` fresh accounts through
+    // executeTask — best-effort, and only when the campaign is long enough for
+    // fresh accounts to finish a drop (or the game is forced). On prod that
+    // path fired 17 times in 60 days (EVE Online +19 the day before this was
+    // written). The lane had no top-up at all, so a live lane would have
+    // capped every reused game at whatever its warm bots happened to hold.
+    //
+    // The lane records what it WANTS here; the lane runner grants what the
+    // arbiter allows and the execute step spends it. `plannedAccounts` stays
+    // the reused count — that is what legacy's reuse row records — and the
+    // top-up shows up as assignedAccounts growth, exactly as legacy's does.
+    const topUpWanted = Math.max(0, (Number(alloc.target) || 0) - reuse.accounts.length);
+    const topUpAllowed = hrs >= af2.minHoursLeft || forced;
     return {
       ...common,
       decision: "reuse_existing",
-      wouldFarm: reuse.accounts.length > 0,
+      // Worth executing when there is something to reuse OR something to top
+      // up. A campaign whose warm accounts are all spoken for but whose demand
+      // warrants fresh accounts still gets executed, as legacy would.
+      wouldFarm: reuse.accounts.length > 0 || (topUpAllowed && topUpWanted > 0),
       plannedAccounts: reuse.accounts.length,
       targetAccounts: reuse.accounts.length,
+      allocTarget: Number(alloc.target) || 0,
+      topUpWanted,
+      topUpAllowed,
       reuseTaskId: reuse.taskId,
       reuseBots: reuse.bots.map((x) => x.container),
       reuseOwnRow: reuse.ownRow,
@@ -553,18 +593,15 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
       // The sellability snapshot plus the reuse inputs — what this decision
       // counted on, recorded so the comparison can hold the world still.
       decisionInputs: withReuseInputs(recordedInputs, reuse.inputs),
-      // Reuse spends nothing from the cycle budget, so it is never "budget
-      // limited" and must not be trimmed.
+      // Reuse itself spends nothing from the cycle budget; only the top-up
+      // draws on it, and that is granted separately by the runner.
       budgetLimited: false,
       reason: reuse.reason,
     };
   }
 
   // --- 4. Time gate --------------------------------------------------------
-  // FRESH-account path only, which is why it sits after reuse-first. Forced
-  // games (multi-day events whose per-day campaigns are each shorter than the
-  // floor) bypass it, and only it.
-  const forced = typeof b.isForcedGame === "function" ? b.isForcedGame(game, af2) : false;
+  // FRESH-account path only, which is why it sits after reuse-first.
   if (hrs < af2.minHoursLeft && !forced) {
     return skip(
       "skip_ends_soon",

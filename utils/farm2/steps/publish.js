@@ -21,6 +21,8 @@
 // publish job can never run on stale evidence.
 
 const verifyStep = require("./verify");
+const { recordAutoFarmEvent } = require("../../autoFarmEventLog");
+const notify = require("../notify");
 
 function lister() {
   return require("../../autoLister");
@@ -46,11 +48,54 @@ async function publishPrimary({ taskId, af, shadow, lane }) {
     return { skipped: "holdings not verified", detail: check.reason, verified: check.verified };
   }
 
-  const r = await lister().listActivatedTask(taskId, { dryRun: !!(af && af.dryRun) });
+  const dryRun = !!(af && af.dryRun);
+  let r;
+  try {
+    r = await lister().listActivatedTask(taskId, { dryRun });
+  } catch (e) {
+    // The same trace the legacy sweep leaves. The job's own log is not
+    // somewhere an operator looks; the Auto-farm tab reads listing.error, and
+    // without it a task that keeps THROWING (no resolvable items, a Gameflip
+    // 429, an unmapped ZeusX category) looks exactly like a healthy task still
+    // waiting for its first complete account.
+    if (!dryRun) {
+      await AutoFarmTask.updateOne(
+        { _id: task._id },
+        { $set: { "listing.error": ("auto-list failed: " + e.message).slice(0, 400) } },
+      ).catch(() => {});
+    }
+    throw e;
+  }
+  if (r && r.listed) {
+    // Same event and same alert the legacy sweep records, so the Activity page
+    // and the owner's Telegram see a lane listing exactly as a legacy one.
+    await recordAutoFarmEvent({
+      type: "listed",
+      game: task.game,
+      campaignId: task.campaignId,
+      taskId: task._id,
+      count: r.listed.qty || 0,
+      reason: r.listed.title + " ($" + r.listed.price + ")",
+      actor: "farm2/publishPrimary",
+    });
+    await notify.telegram(
+      "🛍 Auto-listed (lane) — " +
+        task.game +
+        "\n" +
+        r.listed.title +
+        "\n$" +
+        r.listed.price +
+        " · qty " +
+        r.listed.qty +
+        "\n" +
+        r.listed.url,
+    );
+  }
   return {
     listed: r && r.listed ? r.listed : null,
     wouldList: r && r.wouldList ? r.wouldList : null,
     skipped: r && r.skipped ? r.skipped : null,
+    retried: r && r.retried ? r.retried : null,
     verifiedAtPublish: check.verified,
   };
 }
@@ -72,6 +117,7 @@ async function publishSecondaries({ taskId, shadow, lane }) {
 
   const retried = await lister().retryMissingSecondaries(task);
   if (!retried) return { skipped: "all secondary markets already present" };
+  await notify.telegram("🛍 Auto-relisted (lane) — " + task.game + "\n" + retried.join(", "));
   return { retried };
 }
 

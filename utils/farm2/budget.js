@@ -224,19 +224,17 @@ async function computeCycleBudget(af, opts = {}) {
     reasons.push("pool count failed: " + e.message);
   }
   const reserve = Math.max(0, Number(af.poolReserve) || 0);
-  let spendable = Math.max(0, ready - reserve);
+  const spendable = Math.max(0, ready - reserve);
   if (spendable === 0) reasons.push(`pool at/below reserve (${ready}/${reserve})`);
 
-  // The market stock floor can hold spending back independently of the pool.
-  try {
-    const floor = autoFarmer.marketStockFloor(af);
-    if (Number.isFinite(floor) && floor >= 0) {
-      spendable = Math.min(spendable, Math.max(0, floor));
-      if (spendable === 0) reasons.push("market stock floor is 0");
-    }
-  } catch {
-    /* floor is advisory; a failure must not zero the budget */
-  }
+  // NOT capped by marketStockFloor. An earlier version did
+  // `spendable = min(spendable, marketStockFloor(af))`, reading the floor as a
+  // fleet-wide ceiling. It is the opposite: the MINIMUM stock a single
+  // campaign must farm to fill every enabled market's shelf (legacy:
+  // `wanted = max(alloc.target, floor)`), and the lane's decide step applies
+  // it there. As a cap it limited every live lane's fresh spend to a share of
+  // 18 accounts per cycle on prod — six live lanes, three accounts each —
+  // where the legacy tick fair-shares the whole spendable pool.
 
   // --- Containers / seats ---------------------------------------------------
   const maxAutoBots = Math.max(0, Number(af.maxAutoBots) || 0);
@@ -265,11 +263,19 @@ async function computeCycleBudget(af, opts = {}) {
   // Seats available for NEW accounts: what free containers could hold. Free
   // seats inside EXISTING containers are deliberately excluded here — counting
   // them needs a per-container host read, which is exactly the SSH fan-out this
-  // cycle is trying to bound. The lane's own execute step consults
-  // autoFarmer.fillExistingBots for consolidation, under the host semaphore.
+  // cycle is trying to bound. The lane's decide step consults
+  // autoFarmer.autoSeatCapacity only when no container is free, and executeTask
+  // packs into free seats (fillExistingBots) under the host semaphore.
   const seats = containersFree * perBot;
 
-  const budget = Math.min(spendable, seats);
+  // The ACCOUNT budget is the spendable pool, exactly as the legacy tick's
+  // `fairShare(requests, spendable)`. It is NOT `min(spendable, seats)`:
+  // capacity is a per-campaign gate (seats in free containers PLUS free seats
+  // in running bots), and with the fleet at its container cap the seats term
+  // here is 0 while running bots may still hold hundreds of free seats. An
+  // earlier version applied that min and would have recorded skip_no_accounts
+  // — "pool has no spendable accounts" — for a pool of 340.
+  const budget = spendable;
 
   return new BudgetCycle({
     accounts: budget,

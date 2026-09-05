@@ -3797,8 +3797,18 @@ async function runOnce() {
         // (there is no product to top up), so without this the market would
         // stay unlisted forever. Retry it here \u2014 once the original cause is
         // cleared it self-heals, binding spare accounts to a fresh product.
+        //
+        // Games owned by a LIVE lane (utils/farm2/*) re-list through the lane's
+        // own publish/secondaries job, which calls this same helper on its own
+        // retry clock. Two callers on one task would race two Plati/GGSel
+        // creates. isOwned() fails safe to false (engine off/stopped, cache
+        // cold), so this engine keeps re-listing every game until a lane is
+        // really live. Refill above is deliberately NOT gated: it tops up stock
+        // on an existing product and the lane has no equivalent.
         try {
-          const retried = await autoListerR.retryMissingSecondaries(t);
+          const retried = farm2Ownership.isOwned(t.game)
+            ? null
+            : await autoListerR.retryMissingSecondaries(t);
           if (retried) {
             progress("Re-listed " + t.game + " on: " + retried.join(", "));
             await tg(
@@ -3835,8 +3845,18 @@ async function runOnce() {
         { "listing.externalId": { $exists: false } },
       ],
     }).lean();
+    let farm2ListSkipped = 0;
     for (const t of unlisted) {
       if (af.dryRun && t.wouldList && t.wouldList.title) continue; // previewed
+      // Games owned by a LIVE lane (utils/farm2/*) are listed by the lane's
+      // own publish/primary job — same listActivatedTask, own retry clock,
+      // gated on a fresh holdings check. Listing here as well would race two
+      // Gameflip creates on one task. Same fail-safe as the decision skip
+      // above: any uncertainty reads as NOT owned and this sweep lists it.
+      if (farm2Ownership.isOwned(t.game)) {
+        farm2ListSkipped++;
+        continue;
+      }
       try {
         progress("Auto-listing " + t.game + " on Gameflip\u2026");
         const r = await autoLister.listActivatedTask(t._id, {
@@ -3907,6 +3927,16 @@ async function runOnce() {
           ).catch(() => {});
         }
       }
+    }
+
+    if (farm2ListSkipped) {
+      progress(
+        "Left " +
+          farm2ListSkipped +
+          " unlisted task(s) to the lane engine (" +
+          farm2Ownership.ownedKeys().join(", ") +
+          ").",
+      );
     }
 
     // Stacked-bundle sweep: tasks whose reused accounts hold earlier
@@ -4559,4 +4589,10 @@ module.exports = {
   // test (tests/farm2DecisionInputs.test.js exercises the real record() path on
   // the two branches that need no host). runOnce is unchanged.
   processCampaign,
+  // Additive export for the lane engine's candidate filter (utils/farm2/lane.js):
+  // which skips are re-decided every tick. The lane used to re-decide EVERY
+  // campaign every cycle (5,400 decide rows a day on prod, one campaign decided
+  // 177 times); it now re-decides on exactly this engine's triggers, from this
+  // engine's own set, so the two cannot drift.
+  RETRYABLE,
 };

@@ -417,13 +417,38 @@ async function loadAudit(){
   }
 }
 
+// One line per job kind, so an execute or publish row says what it DID rather
+// than showing an empty cell. Decide rows keep the verdict + reason.
+function jobDetail(j){
+  var r = j.result || {};
+  if (j.kind === 'decide' && r.verdict) {
+    var t = j.payload && j.payload.trigger ? '[' + j.payload.trigger + '] ' : '';
+    return esc(t + (r.verdict.decision||'') + ' · ' + (r.verdict.reason||'').slice(0,70));
+  }
+  if (j.kind === 'execute') {
+    if (r.dryRun) return esc('dry-run · would spend ' + (r.wouldSpend != null ? r.wouldSpend : r.wouldReuseAccounts || 0));
+    if (r.skipped) return esc((r.decision||'skip') + ' · ' + (r.reason||'').slice(0,70));
+    if (r.reuse) return esc('reuse · restarted ' + (r.restarted||[]).join(', ') + ' · ' + (r.accounts||0) + ' acct'
+      + (r.toppedUp ? ' · topped up +' + r.toppedUp : (r.topUpWanted ? ' · top-up 0 of ' + r.topUpWanted + (r.topUpError ? ' (' + r.topUpError.slice(0,40) + ')' : '') : ''))
+      + ((r.skippedParked||[]).length ? ' · parked: ' + r.skippedParked.join(', ') : ''));
+    return esc((r.decision||'farm') + ' · ' + (r.accounts||0) + ' acct on ' + (r.host||'?') + ' · ' + (r.bots||[]).map(function(b){ return b.container||b; }).join(', '));
+  }
+  if (j.kind === 'publish') {
+    if (r.listed) return esc('LISTED ' + (r.listed.title||'') + ' $' + r.listed.price + ' × ' + r.listed.qty);
+    if (r.retried) return esc('re-listed on ' + [].concat(r.retried).join(', '));
+    if (r.wouldList) return esc('would list ' + (r.wouldList.title||'') + ' [dry-run]');
+    return esc((r.skipped||'') + (r.detail ? ' · ' + String(r.detail).slice(0,60) : ''));
+  }
+  if (j.kind === 'verify') return esc((r.ok ? 'ok' : 'blocked') + ' · ' + (r.verified||0) + '/' + (r.assigned||0));
+  return '';
+}
+
 async function loadJobs(){
   var f = $('jobFilter').value;
   var d = await api('/farm2/jobs?limit=' + state.jobsLimit + (f ? '&status=' + encodeURIComponent(f) : ''));
   $('jobRows').innerHTML = (d.jobs||[]).length ? d.jobs.map(function(j){
     var st = j.status === 'done' ? 'on' : (j.status === 'failed' ? 'off' : (j.status === 'running' ? 'warn' : ''));
-    var detail = j.error ? '<span class="err">' + esc(j.error.slice(0,90)) + '</span>'
-      : (j.result && j.result.verdict ? esc((j.result.verdict.decision||'') + ' · ' + (j.result.verdict.reason||'').slice(0,70)) : '');
+    var detail = j.error ? '<span class="err">' + esc(j.error.slice(0,90)) + '</span>' : jobDetail(j);
     return '<tr>' +
       '<td class="dim">' + esc(ago(j.createdAt)) + '</td>' +
       '<td>' + esc(j.lane) + '</td>' +

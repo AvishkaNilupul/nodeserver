@@ -29,6 +29,11 @@ const settings = require("../../settings");
 // The reuse inputs a reuse row records beside its sellability snapshot
 // (utils/decisionInputs.js) — the same shape legacy's reuse record() writes.
 const { buildReuseInputs, withReuseInputs } = require("../../decisionInputs");
+// The lifecycle history the Activity page and the Auto-farm tab read. Legacy
+// records task_started / task_failed on its inline reuse; a lane must too, or
+// a lane-farmed game leaves no trail there.
+const { recordAutoFarmEvent } = require("../../autoFarmEventLog");
+const notify = require("../notify");
 
 function brain() {
   return require("../../autoFarmer");
@@ -62,9 +67,11 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
         dryRun: !!dryRun,
         decidedAt: new Date(),
         rescanRequested: false,
-        // A probe's stop-loss anchor is written once and never moved, so only
-        // stamp it when this is a probe that has not started before.
-        ...(verdict.probe ? { probeStartedAt: new Date() } : {}),
+        // probeStartedAt is NOT written here. It is the probe stop-loss
+        // anchor, stamped by executeTask the first time a probe goes ACTIVE
+        // and never moved (legacy's record() for a planned probe leaves it
+        // unset too). An earlier version stamped it on every upsert, so a
+        // re-decided probe plan reset its own stop-loss clock each cycle.
         // The inputs this decision saw, in the shape the legacy engine records
         // (utils/decisionInputs.js), so replay treats a lane row like any other.
         ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
@@ -227,6 +234,59 @@ async function recordSkip({ verdict, lane, af, shadow }) {
   return { written: true, decision: verdict.decision, previous: existing ? existing.decision : null };
 }
 
+// The row legacy leaves for "nothing to spend" on a reuse: skip_reuse_only on
+// a reuse-only game (exactly what executeTask's reuse-only branch writes),
+// skip_no_accounts otherwise. Both RETRYABLE. Carries the reuse inputs too —
+// `free: 0` and WHICH live tasks held the accounts is the record of why this
+// campaign got nothing.
+async function writeEmptyReuseSkip({ verdict, reusable, recorded }) {
+  const AutoFarmTask = require("../../../models/AutoFarmTask");
+  const reuseOnly = (() => {
+    try {
+      return settings.isReuseOnlyGame(verdict.game);
+    } catch {
+      return false;
+    }
+  })();
+  const held = (reusable.assignedAccounts || []).length;
+  const decision = reuseOnly ? "skip_reuse_only" : "skip_no_accounts";
+  const reason = reuseOnly
+    ? `Reuse-only game (${verdict.game}): all ${held} account(s) on its warm bots are already ` +
+      "assigned to another live task, and no fresh pool account is ever spent here — nothing " +
+      "this campaign could sell; will retry when one frees up."
+    : `All ${held} account(s) on the game's warm bots are already assigned to another live task — ` +
+      "nothing this campaign could sell without spending fresh accounts it has no budget for; " +
+      "will retry when one frees up.";
+  return AutoFarmTask.findOneAndUpdate(
+    { game: verdict.game, campaignId: verdict.campaignId },
+    {
+      $set: {
+        game: verdict.game,
+        campaignId: verdict.campaignId,
+        campaignName: verdict.campaignName || "",
+        campaignEndAt: verdict.campaignEndAt || null,
+        decision,
+        status: "skipped",
+        reason,
+        demandScore: verdict.demandScore ?? null,
+        hadResearch: !!verdict.hadResearch,
+        internalSales: verdict.internalSales || 0,
+        bots: [],
+        assignedAccounts: [],
+        plannedAccounts: 0,
+        targetAccounts: 0,
+        error: "",
+        dryRun: false,
+        decidedAt: new Date(),
+        executedAt: new Date(),
+        rescanRequested: false,
+        ...recorded(false),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
 // Execute a REUSE decision: restart the game's existing warm bots rather than
 // claiming fresh pool accounts.
 //
@@ -243,12 +303,30 @@ async function recordSkip({ verdict, lane, af, shadow }) {
 // only. The buyer pays and there is nothing to fulfil. The bots really are
 // shared; the sellable stock is not. So "spoken for" is computed against
 // active AND planned tasks, matching the legacy execution path exactly.
-async function executeReuse({ verdict, dryRun }) {
+//
+// THE TOP-UP (the second half of legacy's inline reuse). After the restart,
+// demand above what the reused accounts freely cover is worth FRESH pool
+// accounts too — they farm only this event and sell it solo — so legacy
+// appends `min(alloc.target − mine, budget)` through executeTask in append
+// mode, best-effort, and only when the campaign is long enough for fresh
+// accounts to finish a drop (or the game is forced). `granted` is what the
+// arbiter allowed this campaign this cycle (utils/farm2/lane.js), already
+// clamped to the lane's sealed allowance; the decide step recorded whether the
+// top-up is allowed at all (`verdict.topUpAllowed`). executeTask keeps every
+// guard that matters — reserve re-check, capacity re-check, the reuse-only
+// claim filter, "throw without marking failed" — so a shortage leaves the
+// reuse standing on its restarted bots alone, exactly as legacy's does.
+async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const hosts = require("../../botHosts");
   const botFactory = require("../../botFactory");
   const botWaker = require("../../botWaker");
   const b = brain();
+  const af2 = af || settings.getAutoFarm();
+  const topUp =
+    verdict.topUpAllowed === true && Number.isFinite(Number(granted))
+      ? Math.max(0, Math.floor(Number(granted)))
+      : 0;
 
   const reusable = verdict.reuseTaskId
     ? await AutoFarmTask.findById(verdict.reuseTaskId).lean()
@@ -349,63 +427,25 @@ async function executeReuse({ verdict, dryRun }) {
   // skip_reuse_only on a reuse-only game (exactly what executeTask's reuse-only
   // branch writes), skip_no_accounts otherwise. Both are RETRYABLE; the lane
   // re-decides every cycle and reuses the moment an account frees up.
-  if (!mine.length) {
-    const reuseOnly = (() => {
-      try {
-        return settings.isReuseOnlyGame(verdict.game);
-      } catch {
-        return false;
-      }
-    })();
-    const held = (reusable.assignedAccounts || []).length;
-    const decision = reuseOnly ? "skip_reuse_only" : "skip_no_accounts";
-    const reason = reuseOnly
-      ? `Reuse-only game (${verdict.game}): all ${held} account(s) on its warm bots are already ` +
-        "assigned to another live task, and no fresh pool account is ever spent here — nothing " +
-        "this campaign could sell; will retry when one frees up."
-      : `All ${held} account(s) on the game's warm bots are already assigned to another live task — ` +
-        "nothing this campaign could sell without spending fresh accounts it has no budget for; " +
-        "will retry when one frees up.";
-    const task = await AutoFarmTask.findOneAndUpdate(
-      { game: verdict.game, campaignId: verdict.campaignId },
-      {
-        $set: {
-          game: verdict.game,
-          campaignId: verdict.campaignId,
-          campaignName: verdict.campaignName || "",
-          campaignEndAt: verdict.campaignEndAt || null,
-          decision,
-          status: "skipped",
-          reason,
-          demandScore: verdict.demandScore ?? null,
-          hadResearch: !!verdict.hadResearch,
-          internalSales: verdict.internalSales || 0,
-          bots: [],
-          assignedAccounts: [],
-          plannedAccounts: 0,
-          targetAccounts: 0,
-          error: "",
-          dryRun: false,
-          decidedAt: new Date(),
-          executedAt: new Date(),
-          rescanRequested: false,
-          // Carries the reuse inputs too: `free: 0` and WHICH live tasks held
-          // the accounts is the record of why this campaign got nothing.
-          ...recorded(false),
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
+  //
+  // UNLESS there is a top-up to try. Legacy in this state restarts the bots
+  // and tops up with fresh accounts (its empty reuse row is what the append
+  // then fills). The lane does the same below — but the row is written as the
+  // skip FIRST and only becomes an active reuse row once fresh accounts have
+  // actually landed, so a failed claim can never leave an ACTIVE row with no
+  // accounts behind (the §11 incident shape).
+  if (!mine.length && !(topUp >= 1 && host)) {
+    const task = await writeEmptyReuseSkip({ verdict, reusable, mine, recorded });
     return {
       reuse: true,
       skipped: true,
-      decision,
+      decision: task.decision,
       taskId: task._id,
       restarted: [],
       skippedParked: [],
       failed: [],
       accounts: 0,
-      reason,
+      reason: task.reason,
     };
   }
 
@@ -447,39 +487,148 @@ async function executeReuse({ verdict, dryRun }) {
     }
   }
 
-  const task = await AutoFarmTask.findOneAndUpdate(
-    { game: verdict.game, campaignId: verdict.campaignId },
-    {
-      $set: {
+  const reusedBots = bots.map((x) => ({ ...x, reused: true, shared: true }));
+  const restartedAny = started.length > 0;
+  const restartOk = restartedAny || skippedParked.length > 0;
+
+  // The row. With accounts to reuse it is legacy's active reuse row. With
+  // none — reachable only because a top-up is about to be tried — it is the
+  // retryable skip legacy leaves when the claim finds nothing, and the top-up
+  // below promotes it to an active reuse row only if fresh accounts land.
+  let task;
+  if (mine.length) {
+    task = await AutoFarmTask.findOneAndUpdate(
+      { game: verdict.game, campaignId: verdict.campaignId },
+      {
+        $set: {
+          game: verdict.game,
+          campaignId: verdict.campaignId,
+          campaignName: verdict.campaignName || "",
+          campaignEndAt: verdict.campaignEndAt || null,
+          decision: "reuse_existing",
+          // A restart that started nothing is a real failure, not a quiet
+          // success — unless every bot was parked on purpose (see above).
+          status: restartOk ? "active" : "failed",
+          reason: verdict.reason || "",
+          demandScore: verdict.demandScore ?? null,
+          hadResearch: !!verdict.hadResearch,
+          internalSales: verdict.internalSales || 0,
+          bots: reusedBots,
+          assignedAccounts: mine,
+          plannedAccounts: mine.length,
+          targetAccounts: mine.length,
+          error: failed.join("; "),
+          dryRun: false,
+          decidedAt: new Date(),
+          executedAt: new Date(),
+          rescanRequested: false,
+          ...recorded(false),
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+  } else {
+    task = await writeEmptyReuseSkip({ verdict, reusable, mine, recorded });
+  }
+
+  if (!restartOk) {
+    await recordAutoFarmEvent({
+      type: "task_failed",
+      game: verdict.game,
+      campaignId: verdict.campaignId,
+      taskId: task._id,
+      host: host && host.id,
+      count: failed.length,
+      reason: failed.join("; "),
+      actor: "farm2/executeReuse",
+    });
+    const err = new Error("no bot could be restarted: " + (failed.join("; ") || "unknown"));
+    err.autoFarmEventRecorded = true;
+    throw err;
+  }
+  if (mine.length) {
+    await recordAutoFarmEvent({
+      type: "task_started",
+      game: verdict.game,
+      campaignId: verdict.campaignId,
+      taskId: task._id,
+      host: host && host.id,
+      count: mine.length,
+      reason: verdict.reason || "",
+      actor: "farm2/executeReuse",
+    });
+  }
+
+  // --- The top-up ----------------------------------------------------------
+  // Best-effort, as legacy's is: any shortage (reserve floor, capacity, a
+  // reuse-only game with no recycled account free) throws inside executeTask
+  // WITHOUT touching the row, and the reuse stands as written above. Only
+  // attempted when at least one bot was really restarted — a fully parked
+  // fleet is botWaker's to wake, and packing fresh accounts into parked
+  // containers would farm nothing.
+  let toppedUp = 0;
+  let topUpError = "";
+  if (restartedAny && topUp >= 1 && host) {
+    try {
+      const r = await b.executeTask(
+        {
+          ...(task.toObject ? task.toObject() : task),
+          // What the append may spend. executeTask reads plannedAccounts as
+          // the ceiling; legacy sets it in memory the same way and it is never
+          // persisted (the row's plannedAccounts stays the reused count).
+          plannedAccounts: topUp,
+          decision: "reuse_existing",
+          bots: reusedBots,
+          assignedAccounts: mine,
+        },
+        { af: af2, host },
+        { append: true },
+      );
+      toppedUp = (r && r.accounts) || 0;
+    } catch (e) {
+      topUpError = String((e && e.message) || e);
+    }
+    if (toppedUp > 0 && !mine.length) {
+      // Fresh accounts landed on a campaign that had nothing to reuse: the
+      // skip row executeTask just promoted to ACTIVE now describes a reuse
+      // that farms the event on fresh accounts — legacy's shape for the same
+      // situation (reuse_existing, the warm bots plus the new ones). Legacy's
+      // trail for it is task_started (its empty reuse) then executeTask's
+      // topped_up; the start event is recorded here, the top-up already was.
+      await AutoFarmTask.updateOne(
+        { _id: task._id },
+        {
+          $set: {
+            decision: "reuse_existing",
+            reason: verdict.reason || "",
+            targetAccounts: toppedUp,
+          },
+        },
+      );
+      await recordAutoFarmEvent({
+        type: "task_started",
         game: verdict.game,
         campaignId: verdict.campaignId,
-        campaignName: verdict.campaignName || "",
-        campaignEndAt: verdict.campaignEndAt || null,
-        decision: "reuse_existing",
-        // A restart that started nothing is a real failure, not a quiet success.
-        status: started.length ? "active" : "failed",
-        reason: verdict.reason || "",
-        demandScore: verdict.demandScore ?? null,
-        hadResearch: !!verdict.hadResearch,
-        internalSales: verdict.internalSales || 0,
-        bots: bots.map((x) => ({ ...x, reused: true, shared: true })),
-        assignedAccounts: mine,
-        plannedAccounts: mine.length,
-        targetAccounts: mine.length,
-        error: failed.join("; "),
-        dryRun: false,
-        decidedAt: new Date(),
-        executedAt: new Date(),
-        rescanRequested: false,
-        ...recorded(false),
-      },
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  );
-
-  if (!started.length && !skippedParked.length) {
-    throw new Error("no bot could be restarted: " + (failed.join("; ") || "unknown"));
+        taskId: task._id,
+        host: host && host.id,
+        count: toppedUp,
+        reason: "nothing to reuse — farmed on " + toppedUp + " fresh account(s) instead",
+        actor: "farm2/executeReuse",
+      });
+    }
   }
+
+  await notify.telegram(
+    "🤖 Auto-farm REUSE (lane) — " +
+      verdict.game +
+      "\nRestarted " +
+      started.join(", ") +
+      (skippedParked.length ? "\nLeft parked: " + skippedParked.join(", ") : "") +
+      (failed.length ? "\nFailed: " + failed.join("; ") : "") +
+      (toppedUp ? "\nTopped up with " + toppedUp + " fresh account(s) for solo stock." : "") +
+      "\nCampaign: " +
+      (verdict.campaignName || verdict.campaignId),
+  );
 
   return {
     reuse: true,
@@ -490,12 +639,15 @@ async function executeReuse({ verdict, dryRun }) {
     skippedParked,
     failed,
     accounts: mine.length,
+    toppedUp,
+    topUpWanted: topUp,
+    ...(topUpError ? { topUpError } : {}),
   };
 }
 
 // Execute one decision. Returns a plain summary; throws on real failure so the
 // job queue can retry it on its own backoff.
-async function executeDecision({ verdict, lane, cycle, af, shadow }) {
+async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }) {
   // Rule 1 — the shadow assertion.
   if (shadow) {
     throw new Error(
@@ -521,7 +673,11 @@ async function executeDecision({ verdict, lane, cycle, af, shadow }) {
   // because routing a reuse decision into executeTask would claim fresh pool
   // accounts for a campaign that needs none — the defect the shadow trial found.
   if (verdict.decision === "reuse_existing") {
-    const run = () => executeReuse({ verdict, dryRun });
+    // The farm host is needed only for the top-up (fresh accounts are packed
+    // or created there); the restart itself addresses each bot's own host.
+    // No host configured → no top-up, the reuse still runs.
+    const host = dryRun ? null : b.resolveFarmHost(af2);
+    const run = () => executeReuse({ verdict, dryRun, af: af2, host, granted });
     return cycle ? await cycle.withHost(run) : await run();
   }
 

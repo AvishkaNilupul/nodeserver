@@ -32,7 +32,11 @@ const verifyStep = require("./verify");
 
 // Inspect this lane's active tasks and decide what work to queue.
 // Read-only with respect to farming; the only writes are job rows.
-async function monitorLane(lane, { jobs, shadow }) {
+//
+// Returns `checks` (Map taskId -> verifyTask result) alongside the report so
+// the audit that follows in the same lane run can reuse them; `cache` is the
+// per-cycle memo for campaign-item resolution.
+async function monitorLane(lane, { jobs, shadow, cache = null }) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const tasks = await AutoFarmTask.find({
     game: lane.game,
@@ -51,6 +55,9 @@ async function monitorLane(lane, { jobs, shadow }) {
     queuedSecondaries: 0,
     endingSoon: 0,
     tasks: [],
+    // Not serialised into the lane summary (lane.js strips it); consumed by
+    // verify.auditLane in the same run.
+    checks: new Map(),
   };
 
   for (const t of tasks) {
@@ -68,10 +75,11 @@ async function monitorLane(lane, { jobs, shadow }) {
     // finding without acting on it.
     let check = null;
     try {
-      check = await verifyStep.verifyTask(t);
+      check = await verifyStep.verifyTask(t, { cache });
     } catch (e) {
       check = { ok: false, reason: "verify failed: " + e.message, verified: 0 };
     }
+    report.checks.set(String(t._id), check);
     if (check.ok) report.listable += 1;
     else report.awaitingHoldings += 1;
 
