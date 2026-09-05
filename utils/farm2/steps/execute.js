@@ -26,6 +26,9 @@
 // durable record of what happened.
 
 const settings = require("../../settings");
+// The reuse inputs a reuse row records beside its sellability snapshot
+// (utils/decisionInputs.js) — the same shape legacy's reuse record() writes.
+const { buildReuseInputs, withReuseInputs } = require("../../decisionInputs");
 
 function brain() {
   return require("../../autoFarmer");
@@ -268,18 +271,53 @@ async function executeReuse({ verdict, dryRun }) {
     { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
     { assignedAccounts: 1, game: 1, campaignId: 1 },
   ).lean();
+  const held = new Set((reusable.assignedAccounts || []).map((u) => String(u).toLowerCase()));
   const spokenFor = new Set();
+  const competitors = [];
+  let ownOverlap = null;
   for (const o of others) {
-    if (isOwnRow(o)) continue;
+    let overlap = 0;
+    for (const u of o.assignedAccounts || []) if (held.has(String(u).toLowerCase())) overlap += 1;
+    if (isOwnRow(o)) {
+      ownOverlap = overlap;
+      continue;
+    }
     for (const u of o.assignedAccounts || []) spokenFor.add(String(u).toLowerCase());
+    if (overlap) competitors.push(o._id);
   }
   const mine = (reusable.assignedAccounts || []).filter(
     (u) => !spokenFor.has(String(u).toLowerCase()),
   );
 
+  // What THIS recompute counted on, recorded on whichever row is written
+  // below — the execution-time numbers, since they are what the row's
+  // assignedAccounts reflect. Rides only on a verdict that carries the
+  // sellability snapshot; reuse inputs never travel without it.
+  const recorded = (dry) =>
+    verdict.decisionInputs
+      ? {
+          decisionInputs: withReuseInputs(
+            verdict.decisionInputs,
+            buildReuseInputs({
+              sourceTaskId: reusable._id,
+              sourceHeld: (reusable.assignedAccounts || []).length,
+              free: mine.length,
+              competitors,
+              ownRowExcluded: ownOverlap,
+              dryRun: dry,
+            }),
+          ),
+        }
+      : {};
+
   if (dryRun) {
     await upsertTask(
-      { ...verdict, plannedAccounts: mine.length, targetAccounts: mine.length },
+      {
+        ...verdict,
+        plannedAccounts: mine.length,
+        targetAccounts: mine.length,
+        ...recorded(true),
+      },
       { dryRun: true },
     );
     return {
@@ -351,7 +389,9 @@ async function executeReuse({ verdict, dryRun }) {
           decidedAt: new Date(),
           executedAt: new Date(),
           rescanRequested: false,
-          ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
+          // Carries the reuse inputs too: `free: 0` and WHICH live tasks held
+          // the accounts is the record of why this campaign got nothing.
+          ...recorded(false),
         },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -431,7 +471,7 @@ async function executeReuse({ verdict, dryRun }) {
         decidedAt: new Date(),
         executedAt: new Date(),
         rescanRequested: false,
-        ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
+        ...recorded(false),
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },

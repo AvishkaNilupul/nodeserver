@@ -24,7 +24,11 @@ const settings = require("../../settings");
 const classes = require("../decisionClasses");
 // The decision-inputs snapshot the legacy engine also writes; one shape for
 // both engines and for replay (utils/decisionInputs.js).
-const { buildDecisionInputs } = require("../../decisionInputs");
+const {
+  buildDecisionInputs,
+  buildReuseInputs,
+  withReuseInputs,
+} = require("../../decisionInputs");
 
 // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
 // (and, on prod, the catalog integration) and requires autoLister lazily itself
@@ -164,11 +168,17 @@ async function reuseCandidate(game, { cycle, hostCache, campaignId = null } = {}
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const others = await AutoFarmTask.find(
     { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
-    { assignedAccounts: 1, game: 1, campaignId: 1, status: 1 },
+    { assignedAccounts: 1, game: 1, campaignId: 1, status: 1, executedAt: 1 },
   ).lean();
   const held = new Set((reusable.assignedAccounts || []).map((u) => String(u).toLowerCase()));
   const spokenFor = new Set();
   let ownRow = null;
+  // The live tasks that hold any of the source's accounts — WHO spoke for
+  // them, not just how many. The comparison needs this to tell a rule
+  // difference from a world that moved between the two engines' decisions: a
+  // competitor activated after legacy decided is one legacy could not have
+  // seen (FARM2-VERIFICATION §13).
+  const competitors = [];
   for (const t of others) {
     if (isOwnRow(t)) {
       let overlap = 0;
@@ -176,7 +186,22 @@ async function reuseCandidate(game, { cycle, hostCache, campaignId = null } = {}
       ownRow = { taskId: t._id, status: t.status, accounts: (t.assignedAccounts || []).length, overlap };
       continue;
     }
-    for (const u of t.assignedAccounts || []) spokenFor.add(String(u).toLowerCase());
+    let overlap = 0;
+    for (const u of t.assignedAccounts || []) {
+      const k = String(u).toLowerCase();
+      spokenFor.add(k);
+      if (held.has(k)) overlap += 1;
+    }
+    if (overlap) {
+      competitors.push({
+        taskId: t._id,
+        game: t.game,
+        campaignId: t.campaignId,
+        status: t.status,
+        executedAt: t.executedAt || null,
+        overlap,
+      });
+    }
   }
   const mine = (reusable.assignedAccounts || []).filter(
     (u) => !spokenFor.has(String(u).toLowerCase()),
@@ -189,6 +214,17 @@ async function reuseCandidate(game, { cycle, hostCache, campaignId = null } = {}
     // The campaign's own active/planned row, when one exists — reported so a
     // verdict says which accounts it did NOT count against itself, and why.
     ownRow,
+    competitors,
+    // The same facts in the recorded shape (utils/decisionInputs.js), so a
+    // lane row carries its reuse inputs exactly as a legacy row does.
+    inputs: buildReuseInputs({
+      sourceTaskId: reusable._id,
+      sourceHeld: (reusable.assignedAccounts || []).length,
+      free: mine.length,
+      competitors: competitors.map((c) => c.taskId),
+      ownRowExcluded: ownRow ? ownRow.overlap : null,
+      dryRun: false,
+    }),
     reason:
       "Recurring campaign for a game we already farm — reusing existing bot" +
       (live.length > 1 ? "s" : "") +
@@ -510,6 +546,10 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
       reuseTaskId: reuse.taskId,
       reuseBots: reuse.bots.map((x) => x.container),
       reuseOwnRow: reuse.ownRow,
+      reuseCompetitors: reuse.competitors,
+      // The sellability snapshot plus the reuse inputs — what this decision
+      // counted on, recorded so the comparison can hold the world still.
+      decisionInputs: withReuseInputs(recordedInputs, reuse.inputs),
       // Reuse spends nothing from the cycle budget, so it is never "budget
       // limited" and must not be trimmed.
       budgetLimited: false,

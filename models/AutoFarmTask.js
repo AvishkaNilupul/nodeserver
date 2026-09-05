@@ -167,6 +167,31 @@ const autoFarmTaskSchema = new mongoose.Schema(
           probeAllowed: { type: Boolean, default: null },
           probeBudgetBlocked: { type: Boolean, default: null },
           marketStockFloor: { type: Number, default: null },
+          // The reuse inputs (utils/decisionInputs.js buildReuseInputs):
+          // which warm task a reuse_existing decision counted on, how many
+          // accounts it held, how many another live task spoke for, and so how
+          // many were free — the number recorded as plannedAccounts. Optional
+          // under the same version; present only on reuse decisions, and a
+          // reader requires a numeric `free` (a dry-run records null). Declared
+          // here or strict mode drops it on $set, like everything above.
+          reuse: {
+            type: new mongoose.Schema(
+              {
+                sourceTaskId: { type: mongoose.Schema.Types.ObjectId, default: null },
+                sourceHeld: { type: Number, default: null },
+                spokenFor: { type: Number, default: null },
+                free: { type: Number, default: null },
+                // default undefined: an array path would otherwise be created
+                // as [] on every write, which reads as "computed, none" when
+                // nothing was computed. null is stored as null.
+                competitors: { type: [mongoose.Schema.Types.ObjectId], default: undefined },
+                ownRowExcluded: { type: Number, default: null },
+                dryRun: { type: Boolean, default: false },
+              },
+              { _id: false },
+            ),
+            default: null,
+          },
         },
         { _id: false },
       ),

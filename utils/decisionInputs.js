@@ -105,9 +105,95 @@ function isRecordedInputs(di) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// The REUSE inputs — an optional extension under the same version.
+//
+// A reuse_existing decision has inputs the sellability snapshot above does not
+// cover: which warm task it reused, how many accounts that task held, how many
+// of those another live task already spoke for, and so how many were free —
+// the number legacy records as plannedAccounts and assigns to the campaign.
+//
+// Why record it. The shadow comparison scores a lane's reuse count against the
+// legacy row's plannedAccounts, and production showed that field is not a
+// usable input: never written on the skip paths (so a leftover from an earlier
+// decision on the same row), 0 by construction on a dry-run reuse, and — even
+// when it is the honest mine.length — undated, so nothing says whether the two
+// engines counted the same world. The recorded `free` is the count at the
+// moment of the decision; `sourceTaskId` says which task it was counted on;
+// `competitors` says which live tasks held the rest. With those three the
+// comparison can tell "the lane's rule differs" from "the world moved between
+// the two decisions", which is the whole question.
+//
+// Optional, not a version bump: nothing about the existing fields changes
+// meaning, and absence is read as "not recorded" — never as zero and never as
+// a match. A reader uses hasReuseInputs(), which requires a numeric `free`;
+// the dry-run legacy path records the source and its size but computes no
+// spoken-for set, so it writes free: null and is correctly "not recorded".
+//
+//   sourceTaskId     the task whose accounts were reused (R)
+//   sourceHeld       R.assignedAccounts.length at decision time
+//   spokenFor        of those, how many another active/planned task held
+//   free             sourceHeld - spokenFor: what this campaign got
+//   competitors      the _ids of the active/planned tasks that held any of
+//                    R's accounts (the campaign's own row excluded); [] when
+//                    none, null when not computed (dry-run)
+//   ownRowExcluded   lane only: accounts on the campaign's OWN active/planned
+//                    row that overlapped R and were deliberately not counted
+//                    (steps/decide.js); null when there was no such row
+//   dryRun           the decision was a dry-run plan
+function buildReuseInputs({
+  sourceTaskId,
+  sourceHeld,
+  free,
+  spokenFor,
+  competitors,
+  ownRowExcluded,
+  dryRun,
+}) {
+  const held = Math.max(0, num(sourceHeld) || 0);
+  const freeN = free === null || free === undefined ? null : Math.max(0, num(free) || 0);
+  let spoken = null;
+  if (freeN !== null) {
+    spoken =
+      spokenFor === null || spokenFor === undefined
+        ? Math.max(0, held - freeN)
+        : Math.max(0, num(spokenFor) || 0);
+  }
+  return {
+    sourceTaskId: sourceTaskId || null,
+    sourceHeld: held,
+    spokenFor: spoken,
+    free: freeN,
+    competitors: Array.isArray(competitors) ? competitors.slice() : null,
+    ownRowExcluded:
+      ownRowExcluded === null || ownRowExcluded === undefined
+        ? null
+        : Math.max(0, num(ownRowExcluded) || 0),
+    dryRun: dryRun === true,
+  };
+}
+
+// Attach reuse inputs to a snapshot. A snapshot is required: reuse inputs
+// never travel without the sellability inputs they belong to.
+function withReuseInputs(di, reuse) {
+  if (!di || typeof di !== "object") return di;
+  return { ...di, reuse: reuse || null };
+}
+
+// Were the reuse inputs recorded? Requires a numeric `free`; a dry-run record
+// (free: null), an older row (no `reuse`) or a non-reuse decision all read as
+// "no" — absence is never a passing value.
+function hasReuseInputs(di) {
+  if (!di || typeof di !== "object" || !di.reuse || typeof di.reuse !== "object") return false;
+  return typeof di.reuse.free === "number" && Number.isFinite(di.reuse.free);
+}
+
 module.exports = {
   DECISION_INPUTS_VERSION,
   AF_FIELDS,
   buildDecisionInputs,
   isRecordedInputs,
+  buildReuseInputs,
+  withReuseInputs,
+  hasReuseInputs,
 };
