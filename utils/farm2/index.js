@@ -230,10 +230,60 @@ async function laneReadiness(lane, opts = {}) {
 
   // A large account-count gap is worth surfacing even when the action matches —
   // same intent, very different spend, is still worth a look before promoting.
-  const bigGaps = compared.filter((d) => Math.abs(Number(d.accountDelta) || 0) >= 10);
+  //
+  // SCORED ROWS ONLY. `accountComparable === true` is written by the current
+  // comparison when both sides are reuse decisions that counted the same
+  // source with no competitor moving between the two decisions
+  // (utils/farm2/accountGap.js). Everything else — skip rows whose legacy
+  // plannedAccounts is a leftover, dry-run rows, a lane that saw a competitor
+  // legacy could not, fresh-spend rows whose budgets differ by design — is
+  // reported with its reason and not warned about. On 2026-09-05 this warning
+  // held three lanes back on deltas that were all of those things and not one
+  // rule difference. A row without the field predates the current comparison
+  // and is not scored: absence is never a passing value.
+  const accountGap = require("./accountGap");
+  const accountRows = compared.filter((d) => d.accountComparable === true);
+  const bigGaps = accountRows.filter(
+    (d) => Math.abs(Number(d.accountDelta) || 0) >= accountGap.BIG_GAP,
+  );
   if (bigGaps.length) {
+    const sample = bigGaps
+      .slice(0, 3)
+      .map((d) => (d.accountDelta > 0 ? "+" : "") + d.accountDelta)
+      .join(", ");
     warnings.push(
-      `${bigGaps.length} decision(s) agreed on the action but differed by 10+ accounts`,
+      `${bigGaps.length} of ${accountRows.length} account-scored reuse decision(s) agreed on the ` +
+        `action but reused ${accountGap.BIG_GAP}+ accounts more or fewer than the legacy engine ` +
+        `recorded for the same source (lane − legacy: ${sample})`,
+    );
+  }
+  const notScored = {};
+  for (const d of compared) {
+    if (d.accountComparable === false && d.accountNote) {
+      notScored[d.accountNote] = (notScored[d.accountNote] || 0) + 1;
+    }
+  }
+  const notScoredTotal = Object.values(notScored).reduce((s, n) => s + n, 0);
+  if (notScoredTotal) {
+    caveats.push(
+      `account counts not scored on ${notScoredTotal} of ${compared.length} compared decision(s): ` +
+        Object.entries(notScored)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(", ") +
+        " — the action-class comparison above is unaffected",
+    );
+  }
+  const accountPreGate = compared.filter((d) => d.accountComparable === undefined).length;
+  if (accountPreGate) {
+    caveats.push(
+      `${accountPreGate} compared decision(s) predate the account comparison and are not scored on accounts`,
+    );
+  }
+  const unverifiedSource = accountRows.filter((d) => d.sourceVerified === false).length;
+  if (unverifiedSource) {
+    caveats.push(
+      `${unverifiedSource} account-scored decision(s) compare against a legacy row written before ` +
+        "the reuse inputs were recorded — same-source unverified, counted anyway",
     );
   }
 
@@ -297,6 +347,13 @@ async function laneReadiness(lane, opts = {}) {
       lane_missing_gate: missingGate.length,
       class_mismatch: genuineMismatch.length,
       unclassified: unclassified.length,
+    },
+    accountGaps: {
+      scored: accountRows.length,
+      gaps: bigGaps.length,
+      unverifiedSource,
+      notScored,
+      preGate: accountPreGate,
     },
     replay: replaySummary,
   };

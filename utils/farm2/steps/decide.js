@@ -29,6 +29,9 @@ const {
   buildReuseInputs,
   withReuseInputs,
 } = require("../../decisionInputs");
+// The account-count half of the shadow comparison, scored only when both
+// engines counted the same thing (utils/farm2/accountGap.js).
+const { compareAccounts } = require("../accountGap");
 
 // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
 // (and, on prod, the catalog integration) and requires autoLister lazily itself
@@ -722,7 +725,9 @@ async function diffAgainstLegacy(verdict) {
     game: verdict.game,
     campaignId: verdict.campaignId,
   })
-    .select("decision plannedAccounts targetAccounts demandScore status reason decidedAt")
+    .select(
+      "decision plannedAccounts targetAccounts demandScore status reason decidedAt dryRun decisionInputs",
+    )
     .lean();
   if (!legacy) return null;
 
@@ -770,6 +775,8 @@ async function diffAgainstLegacy(verdict) {
       comparability: "stale",
       legacyAgeHours: Number.isFinite(ageMs) ? Math.round(ageMs / 3600000) : null,
       agree: null,
+      accountComparable: false,
+      accountNote: "stale",
     };
   }
 
@@ -789,8 +796,6 @@ async function diffAgainstLegacy(verdict) {
   const laneClass = actionClass(verdict.decision);
   const legacyClass = actionClass(legacy.decision);
   const sameClass = laneClass === legacyClass;
-  const acctDelta =
-    Number(verdict.plannedAccounts || 0) - Number(legacy.plannedAccounts || 0);
 
   // An unclassified decision on either side is NOT a disagreement — it is a
   // comparison we are not equipped to make. Scoring it as `false` would block
@@ -808,6 +813,8 @@ async function diffAgainstLegacy(verdict) {
       comparability: "unknown_class",
       legacyAgeHours: Math.round(ageMs / 3600000),
       agree: null,
+      accountComparable: false,
+      accountNote: "unknown_class",
     };
   }
 
@@ -817,13 +824,21 @@ async function diffAgainstLegacy(verdict) {
   // needs a human to work out which engine was right.
   const taxonomy = classes.classifyDisagreement(verdict.decision, legacy.decision);
 
+  // The ACCOUNT comparison is scored separately, and only when both sides
+  // counted the same thing (utils/farm2/accountGap.js). The old
+  // `lane.plannedAccounts − legacy.plannedAccounts` compared two numbers that
+  // rarely meant the same quantity: a leftover on skip rows, 0 by construction
+  // on dry-run reuse rows, and on reuse rows a count made against a world
+  // legacy's own write had already changed. The result carries the honest
+  // legacyPlanned (null when the row has none), the raw field beside it, and
+  // either a scorable delta or the reason there is none.
+  const accounts = await compareAccounts({ verdict, legacy, legacyAt });
+
   return {
     legacyDecision: legacy.decision,
-    legacyPlanned: Number(legacy.plannedAccounts || 0),
     legacyTarget: Number(legacy.targetAccounts || 0),
     legacyDemand: legacy.demandScore ?? null,
     laneDecision: verdict.decision,
-    lanePlanned: Number(verdict.plannedAccounts || 0),
     laneClass,
     legacyClass,
     sameClass,
@@ -840,11 +855,14 @@ async function diffAgainstLegacy(verdict) {
     disagreementNote: taxonomy.note || "",
     laneCanEmitLegacy: classes.laneCanEmit(legacy.decision),
     legacyAgeHours: Math.round(ageMs / 3600000),
-    accountDelta: acctDelta,
+    // lanePlanned, legacyPlanned, legacyPlannedField, accountDelta,
+    // accountComparable, accountBasis, accountNote, sourceVerified (and the
+    // competitor counts when a world-moved check fired).
+    ...accounts,
     // "agree" is the headline the tab shows and what the readiness gate blocks
-    // on. Account COUNTS may legitimately differ (the arbiter divides the pool
-    // differently from a serial pass), so the delta is reported separately —
-    // but the action class must match.
+    // on. Account COUNTS are a separate, weaker signal — scored only on reuse
+    // rows the comparison could hold still, and then only warned about — but
+    // the action class must match.
     agree: sameClass,
   };
 }

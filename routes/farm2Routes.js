@@ -276,9 +276,15 @@ router.get("/farm2/compare", requireSuperadmin, async (req, res) => {
           laneReason: v.reason || "",
           demand: v.effectiveDemand ?? v.demandScore ?? null,
           legacyDecision: d ? d.legacyDecision : null,
-          legacyPlanned: d ? d.legacyPlanned : null,
+          // The honest legacy count (null when the row has none — skip rows
+          // never write one); the raw field is legacyPlannedField.
+          legacyPlanned: d ? (d.legacyPlanned ?? null) : null,
           agree: d ? d.agree : null,
-          accountDelta: d ? d.accountDelta : null,
+          accountDelta: d ? (d.accountDelta ?? null) : null,
+          // Whether that delta was scored, and if not, why
+          // (utils/farm2/accountGap.js). undefined on rows that predate it.
+          accountComparable: d ? (d.accountComparable ?? null) : null,
+          accountNote: d ? d.accountNote || "" : "",
         };
       })
       .filter((x) => x.laneDecision);

@@ -382,7 +382,8 @@ async function loadCompare(){
       '<td>' + esc((i.campaignName||i.campaignId||'').slice(0,40)) + '</td>' +
       '<td><b>' + esc(i.laneDecision) + '</b></td>' +
       '<td>' + esc(i.legacyDecision || '—') + '</td>' +
-      '<td class="mono">' + esc(i.lanePlanned) + (i.legacyPlanned != null ? ' vs ' + esc(i.legacyPlanned) : '') + '</td>' +
+      '<td class="mono">' + esc(i.lanePlanned) + (i.legacyPlanned != null ? ' vs ' + esc(i.legacyPlanned) : '') +
+        (i.accountComparable === false && i.accountNote ? ' <span class="dim" title="account counts not scored: ' + esc(i.accountNote) + '">·</span>' : '') + '</td>' +
       '<td>' + agree + '</td>' +
       '<td class="dim" style="font-size:11.5px">' + esc((i.laneReason||'').slice(0,110)) + '</td>' +
       '</tr>';
