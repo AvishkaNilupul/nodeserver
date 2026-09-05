@@ -15,6 +15,7 @@ const budget = require("./budget");
 const lane = require("./lane");
 const jobs = require("./jobs");
 const ownership = require("./ownership");
+const notify = require("./notify");
 
 // How many lanes may run at once. The real constraint is not CPU but SSH
 // concurrency to the Pi, which the budget cycle's semaphore bounds separately;
@@ -47,6 +48,76 @@ async function mapWithConcurrency(items, concurrency, fn) {
   return out;
 }
 
+// MAIN-ENGINE MODE: a live lane for every game that has a live campaign.
+//
+// When autoFarm.farm2Main is on, the lane engine is THE engine: no game may be
+// left for the legacy decision path. So every cycle, any game with a live,
+// claimable campaign and no FarmLane row gets one — in mode "live", because
+// in main mode there is nothing to shadow against. Existing rows are never
+// touched: an operator who set a lane to shadow or off keeps that choice.
+// No-claim games belong to the standalone no-claim system, as everywhere else.
+// Each creation is audited. Returns the games created.
+async function ensureLanesForLiveGames({ audit = true } = {}) {
+  const FarmLane = require("../../models/FarmLane");
+  const TwitchCampaign = require("../../models/TwitchCampaign");
+  const now = new Date();
+  const live = await TwitchCampaign.find({
+    active: true,
+    status: "ACTIVE",
+    $or: [{ endAt: null }, { endAt: { $gt: now } }],
+  })
+    .select("game")
+    .lean();
+  const wanted = new Map();
+  for (const c of live) {
+    if (!c.game || settings.isNoClaimGame(c.game)) continue;
+    const key = settings.normGameName(c.game);
+    if (key && !wanted.has(key)) wanted.set(key, c.game);
+  }
+  if (!wanted.size) return [];
+  const existing = new Set(
+    (await FarmLane.find({ gameKey: { $in: [...wanted.keys()] } }).select("gameKey").lean()).map(
+      (l) => l.gameKey,
+    ),
+  );
+  const created = [];
+  for (const [key, game] of wanted) {
+    if (existing.has(key)) continue;
+    try {
+      await FarmLane.create({
+        game,
+        gameKey: key,
+        mode: "live",
+        state: "idle",
+        nextRunAt: now,
+        note: "auto-created: main engine",
+      });
+      created.push(game);
+    } catch (e) {
+      // A concurrent creation (the route, another cycle) is not a failure.
+      if (!(e && e.code === 11000)) throw e;
+    }
+  }
+  if (created.length) {
+    ownership.invalidate();
+    if (audit) {
+      try {
+        require("../systemLog").logEvent({
+          category: "farm2",
+          action: "lanes_auto_created",
+          actor: "farm2/supervisor",
+          subject: "main engine",
+          detail: created.join(", "),
+          meta: { games: created },
+        });
+      } catch {
+        /* auditing must never block the cycle */
+      }
+    }
+  }
+  return created;
+}
+
 // One supervisor cycle.
 async function runCycle({ force = false } = {}) {
   if (state.running) return { skipped: "already running" };
@@ -70,6 +141,19 @@ async function runCycle({ force = false } = {}) {
     const requeued = await jobs.requeueStale().catch(() => 0);
     if (state.cycles % 50 === 0) await jobs.pruneHistory().catch(() => 0);
 
+    // Main engine: every live game gets a live lane before dispatch, so a
+    // campaign that appeared since the last cycle is decided here, not by the
+    // legacy path. Failure to create is logged on the cycle, never fatal —
+    // the legacy engine covers an unowned game exactly as before.
+    let autoCreated = [];
+    if (af.farm2Main === true) {
+      try {
+        autoCreated = await ensureLanesForLiveGames();
+      } catch (e) {
+        state.lastError = "auto-lanes: " + String(e.message || e);
+      }
+    }
+
     // Which lanes are due? A lane that is paused or off is never dispatched;
     // `force` (the UI's "Run now") ignores only the clock, never the mode.
     const now = new Date();
@@ -80,38 +164,28 @@ async function runCycle({ force = false } = {}) {
     }).lean();
 
     if (!due.length) {
-      state.lastSummary = { enabled: true, lanes: 0, requeued };
+      state.lastSummary = { enabled: true, main: af.farm2Main === true, lanes: 0, requeued, autoCreated };
       state.lastRun = new Date();
       state.cycles += 1;
       return state.lastSummary;
     }
 
-    // Compute the shared budget ONCE, then seal each lane's allowance. This is
-    // the invariant that makes concurrent lanes safe to run: the grants sum to
-    // the budget, so no combination of lanes can overspend the pool or the
-    // container cap.
+    // Compute the shared budget ONCE. Lanes draw from it ON DEMAND
+    // (budget.js spendAccounts): the sum of what they take can never exceed
+    // the budget, so no combination of lanes can overspend the pool — and a
+    // lane that reuses warm bots (most of them, most cycles) takes nothing,
+    // leaving the whole pool for the one that needs fresh accounts. That is
+    // how the legacy tick behaves too: it fair-shares among the campaigns that
+    // need accounts THIS tick, not among every game it knows. Pre-allocating
+    // equal shares to every live lane — the earlier design — would have
+    // trimmed a real fresh farm to a few accounts once every game had a lane.
     const cycle = await budget.computeCycleBudget(af, {});
-
-    // Live lanes are allocated from the REAL ledger.
-    const liveLanes = due.filter((l) => l.mode === "live");
     const shadowLanes = due.filter((l) => l.mode !== "live");
-    const perGame = Math.max(0, Number(af.maxPerGame) || 0);
-    cycle.allocate(liveLanes.map((l) => ({ key: l.gameKey, want: perGame, weight: 2 })));
 
-    // Shadow lanes are allocated from a NOTIONAL fork with the same totals.
-    // Granting them from the real ledger would strand accounts a live lane
-    // could use; granting them zero (the original behaviour) made every shadow
-    // decision read "trimmed to 0 of N", so the comparison could never validate
-    // an allocation amount — only intent. The fork gives realistic numbers
-    // while the real budget stays untouched.
-    const shadowCycle = shadowLanes.length
-      ? cycle.fork("notional (shadow lanes)")
-      : null;
-    if (shadowCycle) {
-      shadowCycle.allocate(
-        shadowLanes.map((l) => ({ key: l.gameKey, want: perGame, weight: 1 })),
-      );
-    }
+    // Shadow lanes draw from a NOTIONAL fork with the same totals, so their
+    // numbers are realistic without competing with live lanes for real
+    // accounts. The SSH semaphore is shared: host concurrency is physical.
+    const shadowCycle = shadowLanes.length ? cycle.fork("notional (shadow lanes)") : null;
 
     // One host-read cache per cycle, shared by every lane. The reuse-first
     // check asks "does this bot's config file still exist?", and several lanes
@@ -128,10 +202,29 @@ async function runCycle({ force = false } = {}) {
       }),
     );
 
+    // A lane that PAUSED this cycle has released its game to the legacy
+    // engine (ownership.js excludes paused lanes). Drop the ownership cache
+    // now rather than in 30s, and tell the operator: a paused lane is the one
+    // state that needs a human.
+    const paused = results.filter((r) => r && r.paused);
+    if (paused.length) {
+      ownership.invalidate();
+      await notify.telegram(
+        "⚠️ Auto-farm lane PAUSED — " +
+          paused.map((r) => r.game).join(", ") +
+          "\n" +
+          paused.map((r) => r.game + ": " + (r.errors || []).slice(-1)[0]).join("\n") +
+          "\nThe legacy engine covers the game until the lane is re-armed from the Auto farm engine page.",
+      );
+    }
+
     const summary = {
       enabled: true,
+      main: af.farm2Main === true,
       lanes: due.length,
       requeued,
+      autoCreated,
+      paused: paused.map((r) => r.game),
       budget: cycle.summary(),
       results: results.map((r) => ({
         game: r.game,
@@ -213,4 +306,13 @@ function status() {
   };
 }
 
-module.exports = { start, stop, status, runCycle, mapWithConcurrency, TICK_MS, _state: state };
+module.exports = {
+  start,
+  stop,
+  status,
+  runCycle,
+  ensureLanesForLiveGames,
+  mapWithConcurrency,
+  TICK_MS,
+  _state: state,
+};

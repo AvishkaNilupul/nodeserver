@@ -5,7 +5,7 @@
 <script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Farm lanes</title>
+<title>Auto farm engine</title>
 <style>
   :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
   html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
@@ -104,8 +104,8 @@
 <main class="page">
   <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
     <div>
-      <h1>Farm lanes <span class="chip warn" style="vertical-align:middle;">TRIAL</span></h1>
-      <div class="sub">The reorganised farm &amp; list pipeline — one isolated lane per game, a shared budget arbiter, and durable job rows instead of in-memory tick state.</div>
+      <h1>Auto farm engine <span id="mainChip" class="chip warn" style="vertical-align:middle;">TRIAL</span></h1>
+      <div class="sub">One isolated lane per game decides, farms and lists it — a shared budget arbiter, durable job rows with their own retries, and the legacy tick reduced to fleet maintenance (completion, backfill, park/wake, reaping, recycling, repack, refill, stacked bundles).</div>
     </div>
     <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
       <button class="btn ghost sm" id="runBtn" title="Run one supervisor cycle now">Run cycle</button>
@@ -127,6 +127,7 @@
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
         <span id="engineChip" class="chip">—</span>
         <button class="btn sm ghost" id="toggleBtn">—</button>
+        <button class="btn sm primary" id="mainBtn" title="Every game with a live campaign gets a live lane; the legacy decision path retires">—</button>
         <button class="btn sm ghost" id="seedBtn" title="Create the three trial lanes in shadow mode">Seed trial lanes</button>
       </div>
     </div>
@@ -236,7 +237,7 @@ async function api(url, opts){
   return body;
 }
 
-var state = { enabled:false, lanes:[], showAllLanes:false, cmpLimit:25, jobsLimit:25 };
+var state = { enabled:false, main:false, lanes:[], showAllLanes:false, cmpLimit:25, jobsLimit:25 };
 // Panels fetch only when opened, and remember that choice. With 34 lanes the
 // page was pulling every table on load and again every 30s.
 function panelOpen(id){ try { return localStorage.getItem('farm2.'+id)==='1'; } catch(e){ return false; } }
@@ -257,8 +258,14 @@ function stateChip(s){
 async function loadStatus(){
   var d = await api('/farm2/status');
   state.enabled = d.enabled;
+  state.main = !!d.main;
   state.lanes = d.lanes || [];
   var e = d.engine || {};
+
+  $('mainChip').outerHTML = '<span id="mainChip" class="chip ' + (d.main ? 'on' : 'warn') + '" style="vertical-align:middle;">' + (d.main ? 'MAIN ENGINE' : 'TRIAL') + '</span>';
+  $('mainBtn').textContent = d.main ? 'Step back from main' : 'Make main engine';
+  $('mainBtn').className = 'btn sm ' + (d.main ? 'ghost' : 'primary');
+  $('seedBtn').style.display = d.main ? 'none' : '';
 
   $('engineChip').outerHTML = '<span id="engineChip" class="chip ' + (d.enabled ? 'on' : 'off') + '">' +
     (d.enabled ? 'enabled' : 'disabled') + '</span>';
@@ -272,6 +279,7 @@ async function loadStatus(){
   $('engineStats').innerHTML = [
     ['Lanes', state.lanes.length],
     ['Live (owned)', owned],
+    ['Paused', state.lanes.filter(function(l){return l.state==='paused';}).length],
     ['Shadow', state.lanes.filter(function(l){return l.mode==='shadow';}).length],
     ['Last cycle', e.lastRun ? ago(e.lastRun) : '—'],
     ['Budget accts', s.budget ? s.budget.totalAccounts : '—'],
@@ -312,6 +320,7 @@ async function loadStatus(){
         '<select data-lane="' + esc(l._id) + '" class="modeSel" style="padding:5px 8px;font-size:12px">' +
           ['off','shadow','live'].map(function(m){ return '<option value="' + m + '"' + (l.mode===m?' selected':'') + '>' + m + '</option>'; }).join('') +
         '</select> ' +
+        (l.state === 'paused' ? '<button class="btn sm primary resumeLane" data-lane="' + esc(l._id) + '" data-game="' + esc(l.game) + '">Resume</button> ' : '') +
         (l.mode === 'live' ? '' : '<button class="btn sm danger delLane" data-lane="' + esc(l._id) + '" data-game="' + esc(l.game) + '">Delete</button>') +
       '</td></tr>';
   }).join('') : '<tr><td colspan="10" class="dim">' +
@@ -323,6 +332,14 @@ async function loadStatus(){
   });
   Array.prototype.forEach.call(document.querySelectorAll('.delLane'), function(btn){
     btn.addEventListener('click', function(){ delLane(btn.getAttribute('data-lane'), btn.getAttribute('data-game')); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.resumeLane'), function(btn){
+    btn.addEventListener('click', async function(){
+      btn.disabled = true;
+      try { await api('/farm2/lanes/' + btn.getAttribute('data-lane') + '/resume', { method:'POST' }); }
+      catch(e){ alert('Could not resume: ' + e.message); }
+      loadAll();
+    });
   });
 }
 
@@ -495,6 +512,27 @@ $('toggleBtn').addEventListener('click', async function(){
   this.disabled = true;
   try { await api('/farm2/enable', { method:'POST', body: JSON.stringify({ enabled: turningOn }) }); }
   catch(e){ alert(e.message); }
+  this.disabled = false;
+  loadAll();
+});
+
+$('mainBtn').addEventListener('click', async function(){
+  var turningOn = !state.main;
+  var shadows = state.lanes.filter(function(l){ return l.mode === 'shadow'; }).length;
+  var msg = turningOn
+    ? 'Make the lane engine the MAIN auto-farm engine?\n\n'
+      + '• Every game with a live campaign gets a LIVE lane, now and automatically from here on.\n'
+      + '• The ' + shadows + ' shadow lane(s) are promoted to live.\n'
+      + '• The legacy auto-farmer stops deciding campaigns; its tick keeps running only the fleet maintenance sweeps.\n'
+      + '• A lane that fails 8 cycles in a row pauses, hands its game back to the legacy engine and alerts you on Telegram.\n\n'
+      + 'You can step back at any time; lanes keep their modes.'
+    : 'Step back from main engine?\n\nLanes keep their current modes (nothing is demoted); the engine simply stops creating lanes for new games.';
+  if(!confirm(msg)) return;
+  this.disabled = true;
+  try {
+    var r = await api('/farm2/main', { method:'POST', body: JSON.stringify({ enabled: turningOn, confirm: true, promoteAll: turningOn }) });
+    if (turningOn) alert('Main engine ON. Promoted ' + (r.promoted||[]).length + ' lane(s), created ' + (r.created||[]).length + ' new lane(s).');
+  } catch(e){ alert(e.message); }
   this.disabled = false;
   loadAll();
 });

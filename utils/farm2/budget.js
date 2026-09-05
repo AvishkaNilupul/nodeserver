@@ -41,7 +41,14 @@ class BudgetCycle {
     this.totalContainers = Math.max(0, Number(containers) || 0);
     this.perGameCap = Math.max(0, Number(perGameCap) || 0);
     this.reason = reason || "";
-    this.grants = new Map(); // laneKey -> { accounts, seats, spentAccounts, spentSeats }
+    this.grants = new Map(); // laneKey -> { accounts, seats, spentAccounts, spentSeats, onDemand }
+    // The part of the budget no lane has been allocated. Lanes draw from it ON
+    // DEMAND (spendAccounts), which is how the engine behaves like the legacy
+    // tick once every game has a lane: legacy fair-shares the pool among the
+    // handful of campaigns that need fresh accounts THIS tick, not among every
+    // game it knows. Pre-allocating to 50 lanes — most of which reuse warm
+    // bots and spend nothing — diluted a real fresh farm to six accounts.
+    this.unallocated = this.totalAccounts;
     // SSH fan-out limiter. The Pi's link is seconds of RTT and an offline host
     // costs ~63s per read, so lanes must not all reach for it at once. This is
     // a semaphore, not an allowance: it bounds concurrency, not total work.
@@ -83,8 +90,10 @@ class BudgetCycle {
 
     // Seats are divided in proportion to the accounts actually granted: a lane
     // that got no accounts needs no containers.
+    let allocated = 0;
     for (const w of wants) {
       const acc = Math.max(0, split.get(w.key) || 0);
+      allocated += acc;
       const seatShare =
         this.totalAccounts > 0
           ? Math.floor((this.totalSeats * acc) / this.totalAccounts)
@@ -94,8 +103,10 @@ class BudgetCycle {
         seats: seatShare,
         spentAccounts: 0,
         spentSeats: 0,
+        onDemand: 0,
       });
     }
+    this.unallocated = Math.max(0, this.totalAccounts - allocated);
     return this.grants;
   }
 
@@ -106,22 +117,45 @@ class BudgetCycle {
         seats: 0,
         spentAccounts: 0,
         spentSeats: 0,
+        onDemand: 0,
       }
     );
   }
 
-  // How many accounts this lane may still claim. Lanes MUST call this
-  // immediately before claiming and claim no more than it returns.
-  remainingAccounts(laneKey) {
-    const g = this.grantFor(laneKey);
-    return Math.max(0, g.accounts - g.spentAccounts);
+  _grantRemaining(g) {
+    return Math.max(0, g.accounts - (g.spentAccounts - g.onDemand));
   }
 
+  // How many accounts this lane may still claim: what is left of its own
+  // allocation plus what nobody has been allocated, capped per game. Lanes
+  // MUST call this immediately before claiming and claim no more than it
+  // returns.
+  remainingAccounts(laneKey) {
+    const g = this.grantFor(laneKey);
+    const own = this._grantRemaining(g);
+    const capRoom =
+      this.perGameCap > 0 ? Math.max(0, this.perGameCap - g.spentAccounts - own) : Infinity;
+    return own + Math.max(0, Math.min(this.unallocated, capRoom));
+  }
+
+  // Spend: the lane's own allocation first, then the unallocated remainder.
+  // The sum over all lanes can never exceed totalAccounts — the invariant the
+  // arbiter exists for — because on-demand draws come out of one shared
+  // counter that only ever goes down.
   spendAccounts(laneKey, n) {
-    const g = this.grants.get(laneKey);
-    if (!g) return 0;
-    const take = Math.max(0, Math.min(Number(n) || 0, g.accounts - g.spentAccounts));
+    const room = this.remainingAccounts(laneKey);
+    const take = Math.max(0, Math.min(Number(n) || 0, room));
+    if (!take) return 0;
+    let g = this.grants.get(laneKey);
+    if (!g) {
+      g = { accounts: 0, seats: 0, spentAccounts: 0, spentSeats: 0, onDemand: 0 };
+      this.grants.set(laneKey, g);
+    }
+    const fromGrant = Math.min(take, this._grantRemaining(g));
+    const fromPool = take - fromGrant;
+    this.unallocated = Math.max(0, this.unallocated - fromPool);
     g.spentAccounts += take;
+    g.onDemand += fromPool;
     return take;
   }
 
@@ -198,6 +232,7 @@ class BudgetCycle {
     return {
       notional: !!this.notional,
       totalAccounts: this.totalAccounts,
+      unallocated: this.unallocated,
       totalSeats: this.totalSeats,
       totalContainers: this.totalContainers,
       perGameCap: this.perGameCap,

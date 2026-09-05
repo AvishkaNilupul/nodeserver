@@ -56,6 +56,19 @@ function killSwitchOn() {
   }
 }
 
+// Is the lane engine the MAIN engine? When true the supervisor creates a live
+// lane for every game with a live campaign, so the legacy engine decides
+// nothing and runs only its fleet-wide maintenance sweeps. Read fresh each
+// time, like the kill switch, so it can be flipped from the tab.
+function isMain() {
+  try {
+    const af = settings.getAutoFarm();
+    return af.farm2Enabled === true && af.farm2Main === true;
+  } catch {
+    return false;
+  }
+}
+
 function normKey(game) {
   try {
     return settings.normGameName(game);
@@ -76,7 +89,12 @@ async function refresh() {
   cache.loading = (async () => {
     try {
       const FarmLane = require("../../models/FarmLane");
-      const rows = await FarmLane.find({ mode: "live" })
+      // A PAUSED live lane owns nothing. Pausing means the lane failed
+      // PAUSE_AFTER_FAILURES cycles in a row and stopped retrying; if it kept
+      // ownership, its game would be farmed by nobody — the exact "owned by
+      // nobody" outage this module exists to prevent. Releasing it lets the
+      // legacy engine cover the game until an operator re-arms the lane.
+      const rows = await FarmLane.find({ mode: "live", state: { $ne: "paused" } })
         .select("gameKey")
         .lean();
       cache.keys = new Set(rows.map((r) => r.gameKey).filter(Boolean));
@@ -144,5 +162,6 @@ module.exports = {
   refresh,
   setEngineRunning,
   killSwitchOn,
+  isMain,
   normKey,
 };

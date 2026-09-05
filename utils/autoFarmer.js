@@ -3544,10 +3544,17 @@ async function runOnce() {
     for (const t of autoTasks) {
       for (const b of t.bots || []) autoKeys.add(b.host + "|" + b.file);
     }
-    progress("Sweeping manual bot configs to identify the stash\u2026");
-    const farmMap = hostOnline
-      ? await manualFarmMap(autoKeys)
-      : { map: new Map(), wildcard: new Set(), logins: new Set() };
+    // The stash sweep reads every config on every host — the most expensive
+    // read in the tick — and feeds only the coverage gate of the campaigns
+    // decided below. With nothing to decide (every game owned by the lane
+    // engine, or simply a quiet calendar) it is skipped.
+    if (candidates.length) {
+      progress("Sweeping manual bot configs to identify the stash\u2026");
+    }
+    const farmMap =
+      hostOnline && candidates.length
+        ? await manualFarmMap(autoKeys)
+        : { map: new Map(), wildcard: new Set(), logins: new Set() };
     progress(
       "Stash sweep done: " +
         farmMap.logins.size +

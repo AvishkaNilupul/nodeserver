@@ -122,7 +122,7 @@
         },
         {
           href: "/farm2.html",
-          label: "Farm lanes",
+          label: "Auto farm engine",
           icon:
             '<path d="M3 6h18M3 12h18M3 18h18"></path>' +
             '<circle cx="7" cy="6" r="1.6"></circle>' +

@@ -54,9 +54,11 @@ router.get("/farm2/status", requireSuperadmin, async (req, res) => {
       byLane.get(k)[c._id.status] = c.n;
     }
 
+    const afNow = settings.getAutoFarm();
     res.json({
       engine: farm2.status(),
-      enabled: settings.getAutoFarm().farm2Enabled === true,
+      enabled: afNow.farm2Enabled === true,
+      main: afNow.farm2Enabled === true && afNow.farm2Main === true,
       lanes: lanes.map((l) => ({
         ...l,
         jobs: byLane.get(l.gameKey) || {},
@@ -219,6 +221,75 @@ router.post("/farm2/enable", requireSuperadmin, async (req, res) => {
       actorOf(req),
     );
     res.json({ ok: true, enabled: on });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Make the lane engine THE engine (or step back from it).
+//
+// On: farm2Enabled + farm2Main are set, every game with a live campaign gets a
+// live lane (created here and, from now on, by every supervisor cycle), and —
+// with promoteAll — every existing shadow lane is promoted. The readiness
+// gate is deliberately bypassed for this: main mode is the operator's
+// decision that the engine is trusted, and it is audited as such. Off: only
+// the flag drops; lanes keep their modes, so the engine keeps owning what it
+// owns and simply stops auto-creating.
+router.post("/farm2/main", requireSuperadmin, async (req, res) => {
+  try {
+    const on = !!(req.body && req.body.enabled);
+    if (on && req.body.confirm !== true) {
+      return res.status(400).json({
+        error: "making the lane engine the main engine retires the legacy decision path — resend with confirm: true",
+      });
+    }
+    const actor = actorOf(req);
+    await settings.setAutoFarm(on ? { farm2Enabled: true, farm2Main: true } : { farm2Main: false }, { actor });
+    let promoted = [];
+    let created = [];
+    if (on) {
+      if (req.body.promoteAll === true) {
+        const shadows = await FarmLane.find({ mode: "shadow" });
+        for (const lane of shadows) {
+          lane.mode = "live";
+          lane.state = "idle";
+          lane.consecutiveFailures = 0;
+          lane.nextRunAt = new Date();
+          await lane.save();
+          promoted.push(lane.game);
+        }
+      }
+      created = await farm2.ensureLanesForLiveGames();
+    }
+    farm2.ownership.invalidate();
+    await audit(
+      on ? "engine_main_on" : "engine_main_off",
+      "farm2",
+      on
+        ? `main engine ON; promoted ${promoted.length} shadow lane(s); created ${created.length} lane(s)`
+        : "main engine OFF (lanes keep their modes)",
+      { enabled: on, promoted, created },
+      actor,
+    );
+    res.json({ ok: true, main: on, promoted, created });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Re-arm a paused lane (a paused live lane has released its game to the
+// legacy engine; this hands it back).
+router.post("/farm2/lanes/:id/resume", requireSuperadmin, async (req, res) => {
+  try {
+    const lane = await FarmLane.findById(req.params.id);
+    if (!lane) return res.status(404).json({ error: "lane not found" });
+    lane.state = "idle";
+    lane.consecutiveFailures = 0;
+    lane.nextRunAt = new Date();
+    await lane.save();
+    farm2.ownership.invalidate();
+    await audit("lane_resumed", lane.game, "lane re-armed after pause", { game: lane.game }, actorOf(req));
+    res.json({ ok: true, lane });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -297,6 +297,9 @@ async function runLane(lane, { cycle, af, hostCache }) {
   const summary = {
     game: lane.game,
     mode: lane.mode,
+    // True when THIS run tripped the lane into "paused" (the supervisor
+    // releases ownership and alerts the operator).
+    paused: false,
     campaigns: 0,
     // Campaigns the candidate filter left alone this cycle (settled).
     settled: 0,
@@ -496,6 +499,7 @@ async function runLane(lane, { cycle, af, hostCache }) {
     const hadError = summary.errors.length > 0;
     const failures = hadError ? (lane.consecutiveFailures || 0) + 1 : 0;
     const next = new Date(Date.now() + backoffMs(failures));
+    summary.paused = failures >= PAUSE_AFTER_FAILURES && lane.state !== "paused";
 
     await FarmLane.updateOne(
       { _id: lane._id },
@@ -508,7 +512,7 @@ async function runLane(lane, { cycle, af, hostCache }) {
           lastError: hadError ? summary.errors.join("; ").slice(0, 500) : "",
           lastErrorAt: hadError ? new Date() : lane.lastErrorAt || null,
           ...(hadError ? {} : { lastOkAt: new Date() }),
-          "lastBudget.accounts": cycle ? cycle.grantFor(lane.gameKey).accounts : 0,
+          "lastBudget.accounts": cycle ? cycle.grantFor(lane.gameKey).spentAccounts : 0,
           "lastBudget.seats": cycle ? cycle.grantFor(lane.gameKey).seats : 0,
           "lastBudget.grantedAt": new Date(),
           "lastBudget.reason": cycle ? cycle.reason : "",
@@ -529,6 +533,7 @@ async function runLane(lane, { cycle, af, hostCache }) {
     // rather than in a step; record it and back off, but never propagate — the
     // supervisor must keep dispatching the other lanes.
     const failures = (lane.consecutiveFailures || 0) + 1;
+    summary.paused = failures >= PAUSE_AFTER_FAILURES && lane.state !== "paused";
     await FarmLane.updateOne(
       { _id: lane._id },
       {

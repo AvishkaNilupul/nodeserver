@@ -200,6 +200,13 @@ const AUTO_FARM_DEFAULTS = {
   // the FarmLane collection, and only a lane in mode "live" takes a game away
   // from the legacy engine — a "shadow" lane just observes and compares.
   farm2Enabled: false,
+  // The lane engine is the MAIN engine: the supervisor creates a live lane for
+  // every game with a live campaign, so the legacy engine's per-campaign
+  // decision path decides nothing and its tick runs only the fleet-wide
+  // maintenance sweeps (completion, backfill, park/wake, reaping, recycling,
+  // repack, refill, stacked bundles). Requires farm2Enabled. OFF by default;
+  // flipped from the Auto farm engine page once the lanes have been trusted.
+  farm2Main: false,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };

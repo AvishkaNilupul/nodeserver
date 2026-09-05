@@ -388,6 +388,7 @@ module.exports = {
   stop,
   status,
   runCycle: supervisor.runCycle,
+  ensureLanesForLiveGames: supervisor.ensureLanesForLiveGames,
   seedTrialLanes,
   laneReadiness,
   ownership,
