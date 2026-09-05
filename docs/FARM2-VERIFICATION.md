@@ -1075,3 +1075,50 @@ lane is quiet: one decide, one execute, two publish rows, one task.
 
 Everything fleet-wide (§ "What the live-mode steps do and don't own"). Retiring
 the legacy tick is a separate project: even at 34/34 live it runs 15 phases.
+
+## 15. Main-engine switch and the whole-pipeline audit (2026-09-06)
+
+**Switched.** `farm2Main` on at 16:20 UTC: 28 shadow lanes promoted, 65 lanes
+auto-created, 99 live (100 within the hour — a new game's lane appeared by
+itself). First cycle: 99/99 clean, the lanes re-decided the four retryable
+campaigns exactly as legacy had, the legacy tick logged "Left 17 unlisted
+task(s) to the lane engine" and decided nothing new after its ownership cache
+turned over.
+
+**Audited** (read-only, against prod): park/wake, every active task's listing
+state and deliverable stock, every completed task of the last 30 days, all 684
+active auto listings' prices against `derivePrice`, allocation blockers, the
+24h error log. Four findings, all fixed in this commit:
+
+1. **Completed-but-unlisted tasks with deliverable stock.** 128 completed tasks
+   in 30 days had no listing; several held deliverable full-bundle stock (Halo
+   Infinite 39 accounts, Epic Seven 15, Albion 12, Black Desert 7). Cause: the
+   legacy auto-list sweep reads ACTIVE tasks only, so a task whose accounts
+   completed the bundle around the campaign's end was marked completed first
+   and never listed. The lane monitor now looks back 14 days over its game's
+   completed, unlisted tasks, verifies holdings (throttled to once per 6h per
+   task), and queues a post-event listing; `publishPrimary` runs
+   `onCampaignEnded` after listing an ended campaign so the markup, retitle
+   and stacking pass apply as they would have at completion.
+2. **Cross-listing collisions still being created.** 113 logins sat on two or
+   more active listings; four new ones on 2026-09-03 came from the guardian's
+   restock through the GGSel/Digiseller claimers, which never excluded
+   accounts already on another listing (only the Gameflip claimer did), and
+   the auto-lister's picker read `accountLogin` only, so every account fed
+   later as a stock unit was invisible to it. `utils/listedLogins.js` is now
+   the one implementation (accountLogin csv + `units[].login`, active rows),
+   used by all four claimers and the picker.
+3. **No price floor on 1,382 of 1,385 sets.** The Gameflip relist chain
+   inherits its predecessor's price and only `DropSet.minPriceUsd` corrects
+   it. Both `DropSet.create` sites in the auto-lister now set the floor to the
+   derived price.
+4. **Secondaries churn.** `publishNeeds` reads externalIds but only
+   `retryMissingSecondaries` knows whether ZeusX/Plati are enabled for a game,
+   so a "nothing to do" result was re-queued every cycle. Remembered for 6h.
+
+**Observed, not changed:** `pi|twitchbotx38` (Predecessor, active task, 30
+accounts) has no container and its accounts are in no config — the campaign
+ends in 55h and its stock is listed and delivering, so the row completes on
+its own; 153 of 684 listings sit at Gameflip's $0.75 floor (derivePrice's
+honest answer for those games' research); the 109 historical collisions are
+data, not code — worth a supervised delist pass.
