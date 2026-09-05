@@ -955,3 +955,123 @@ deploy carry `decisionInputs.reuse.free === plannedAccounts` and a
 `competitors` list; (5) the World of Tanks `+18` rows should come back as
 `competitor_released_since` or `competitor_completed_since`, not as scored
 gaps.
+
+## 14. The parity audit: what the lane's per-campaign path still lacked (2026-09-06)
+
+The question this round answered: **read against `processCampaign`,
+`executeTask` and `runOnce`, does the lane do everything legacy does for a
+campaign it owns?** It did not. Six things were missing, two were bugs of the
+lane's own, and the fresh-spend path had never run anywhere. All are closed;
+`tests/farm2Parity.test.js` (21) and `tests/farm2FreshPath.test.js` (4) pin
+them.
+
+### 14.1 Churn — the lane re-decided everything, every cycle
+
+5,400 decide rows a day on prod (one WoT campaign decided 177 times) because the
+`alreadyExecuted` guard sat at the execute step, so every settled campaign was
+re-decided and thrown away. Those rows were also the ones the staleness gate
+discarded, so the churn *was* the thin evidence.
+
+`lane.decisionDue()` now re-decides on exactly legacy's triggers — no row,
+`skipped` + `RETRYABLE` (imported from `autoFarmer`, additive export), `rescanRequested`,
+stranded in live mode — plus one shadow-only trigger: **legacy decided this
+campaign inside the comparison window and the lane has not yet decided against
+that decision**. That keeps every fresh pair the comparison lives on and drops
+the rest. Terminal skips (`skip_low_demand`, `skip_ends_soon`) are decided once,
+as legacy decides them; the "rewrite the skip row every cycle" behaviour from
+§12 is gone with the churn. Two tests from that era that pinned re-deciding an
+active campaign now pin the opposite.
+
+The readiness gate's window moved from "last 25 rows" to the last 200 within
+14 days — with the churn gone, 25 rows was days of evidence on a quiet lane and
+minutes on a busy one.
+
+### 14.2 The reuse top-up — a whole half of legacy's reuse
+
+Legacy's inline reuse does not stop at restarting the warm bots: demand above
+what the reused accounts freely cover is worth fresh pool accounts too, so it
+appends `min(alloc.target − mine, budget)` through `executeTask(…, {append:
+true})`, best-effort, and only when `hours ≥ minHoursLeft` or the game is
+forced. **On prod that fired 17 times in 60 days** (`topped_up` by
+`executeTask`; EVE Online +19 the day before this was written). The lane had no
+top-up, so a live lane capped every reused game at whatever its warm bots held —
+and the shadow comparison could never see it, because a top-up shows up as
+`assignedAccounts` growth, which the account comparison deliberately does not
+score.
+
+Now: `decide` records `allocTarget`, `topUpWanted` and `topUpAllowed` on a
+reuse verdict; the runner draws **only the top-up** from the lane's sealed
+allowance (a reuse used to be charged for the accounts it reused, which starved
+siblings that needed fresh ones); `executeReuse` restarts, writes the row, then
+hands the grant to the real `executeTask` in append mode. A shortage is
+swallowed as legacy swallows it. A campaign with **nothing** to reuse but a
+top-up to try writes its retryable skip row *first* and is promoted to an
+active `reuse_existing` row only once fresh accounts have actually landed — the
+§11 predicate (an ACTIVE row with no accounts) is asserted never to appear.
+
+### 14.3 The trails — Telegram and AutoFarmEvent
+
+Legacy alerts the owner on every consequential decision and records the
+lifecycle in `AutoFarmEvent` (the Activity page). The lane did neither, so a
+game moved to a lane went silent. Now, live lanes only, through
+`utils/farm2/notify.js`: reuse (restart + top-up line), terminal skips on the
+legacy triggers (`skip_low_demand` once, `skip_already_covered` on the
+transition, the rest silent as in legacy), listings and re-listings; events
+`task_started`/`task_failed` on reuse, `listed` on publish, `task_failed` on an
+execute job failure. The fresh path already had both through `executeTask`.
+
+### 14.4 The listing race — who lists a lane's task?
+
+Legacy's auto-list sweep listed every unlisted active task, lane tasks
+included, while the lane's publish job listed the same task on its own clock:
+two `listActivatedTask` calls in one process on one task, racing two Gameflip
+creates; the same for `retryMissingSecondaries` in the refill loop. Two
+additive hunks on `runOnce` skip both for `farm2Ownership.isOwned(t.game)` —
+the same fail-safe as the decision skip, so an engine that is off or stopped
+leaves everything to legacy. `refillMarkets` (stock top-up on an existing
+product) and the stacked-bundle sweep stay legacy for every game: the lane has
+no equivalent, and neither creates a listing that could race.
+
+A throwing publish now writes `listing.error` on the task, as the sweep does —
+the trace the Auto-farm tab reads.
+
+### 14.5 Two bugs of the lane's own
+
+- **The budget was capped at `marketStockFloor`** — a per-campaign *minimum*
+  (legacy: `wanted = max(target, floor)`) read as a fleet ceiling — and at
+  seats in *free* containers. On prod that was 18 accounts shared by six live
+  lanes, three each, against legacy's fair share of a 320-account spendable
+  pool; and with the fleet at its container cap the seats term is 0 while
+  running bots hold hundreds of free seats, so the lane would have recorded
+  `skip_no_accounts` — "pool has no spendable accounts" — for a pool of 340.
+  The budget is now the spendable pool; capacity is the per-campaign gate it
+  always was.
+- **`upsertTask` re-stamped `probeStartedAt`** on every upsert, resetting a
+  probe's stop-loss clock each re-decision. It is `executeTask`'s to stamp, on
+  activation, once.
+
+### 14.6 Cost
+
+Research and sales are read once per game per cycle (legacy's `infoMap`), not
+once per campaign; the monitor and the audit share one verification per task
+(they each ran a DropLog aggregation *and* a Twitch campaign fetch per active
+task per cycle); campaign items are memoised per cycle, and only a successful
+resolution is cached.
+
+### 14.7 The fresh-spend path, run
+
+`tests/farm2FreshPath.test.js` drives the real supervisor cycle, lane runner,
+all nine gates, the real `executeTask` (atomic pool claim, reserve and capacity
+re-checks, the row it writes, the event it records), then monitor → verify →
+publish over three cycles against an in-memory Mongo and a temp-directory farm
+host. Stubs: the container factory, the manual-stash sweep, the lister's
+Twitch/Gameflip calls, Telegram. It asserts the allowance was spent (8 of 8),
+the 8 accounts claimed with legacy's note and where-used events, the active row
+with its bot, `task_started` from legacy's executor, the primary listing with
+`listed` + alert, the secondaries on their own clock, and that afterwards the
+lane is quiet: one decide, one execute, two publish rows, one task.
+
+### 14.8 Still legacy, by design
+
+Everything fleet-wide (§ "What the live-mode steps do and don't own"). Retiring
+the legacy tick is a separate project: even at 34/34 live it runs 15 phases.

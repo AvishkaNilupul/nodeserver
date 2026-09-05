@@ -1,8 +1,13 @@
 # Farm lanes (farm2) — the reorganised farm + list engine
 
-Status: **deployed to prod and running in shadow.** Master switch ON, three
-trial lanes, all in shadow mode — they decide and audit but change nothing. No
-lane has ever been promoted to live. The legacy engine still farms every game.
+Status: **deployed to prod; 6 lanes LIVE, 28 in shadow (2026-09-06).** The
+lane engine owns decide → execute → list for its live games; the legacy engine
+still runs every fleet-wide sweep (completion, backfill, reap, recycle, repack,
+wake/park, reprice, refill, stacked bundles) for every game, lane games
+included — by design (see "What the live-mode steps do and don't own"). The
+parity audit in `docs/FARM2-VERIFICATION.md` §14 closed the last known gaps
+between the two engines' per-campaign paths and pinned the fresh-spend path
+end to end.
 
 ---
 
