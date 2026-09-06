@@ -121,7 +121,13 @@ async function main() {
     const results = (r && r.results) || [];
     for (const x of results) {
       const o = x.offer || x;
-      if (o && o.offerTitle) existing.add(o.offerTitle.trim().toLowerCase());
+      // Only a LIVE offer blocks a re-publish. Offers auto-expire after ~3 weeks
+      // and cannot be renewed (Eldorado ignores expireDate on edit), so a
+      // closed/expired one must read as absent — that is what lets a re-run
+      // rebuild the catalogue after the expiry date passes.
+      if (!o || !o.offerTitle) continue;
+      if (o.offerState !== "Active" && o.offerState !== "Paused") continue;
+      existing.add(o.offerTitle.trim().toLowerCase());
     }
     if (!results.length || page >= (r.totalPages || 1)) break;
   }

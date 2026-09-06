@@ -72,7 +72,10 @@ async function main() {
   // a second "Reload Championship Spray" through in testing). Exclude by item
   // signature too.
   const already = await MarketplaceListing.find(
-    { marketplace: "eldorado" },
+    // Only rows still on sale block a re-publish: offers auto-expire after ~3
+    // weeks and cannot be renewed, so an expired row must read as absent to let
+    // a re-run rebuild the catalogue.
+    { marketplace: "eldorado", status: { $in: ["active"] } },
     { set: 1 },
   ).lean();
   const liveSets = new Set(already.map((r) => String(r.set)));

@@ -4179,6 +4179,12 @@ async function eldoradoUpdateOffer(offerId, patch = {}) {
     mainOfferImage: patch.mainOfferImage || cur.mainOfferImage,
     offerImages: patch.offerImages || cur.offerImages || [],
   };
+  // NOTE: expireDate is deliberately NOT settable here. Offers auto-expire ~3
+  // weeks after creation, Eldorado exposes no renew endpoint, and sending
+  // expireDate through this DTO is silently IGNORED (verified live 2026-09-07 —
+  // the value comes back unchanged). Keeping a listing alive past its date means
+  // re-creating it, which is what the publisher scripts do when they treat a
+  // closed/expired offer as absent.
   try {
     await eldRequest(
       "PUT",
