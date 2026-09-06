@@ -91,6 +91,22 @@
   code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
   .tbl { overflow-x:auto; -webkit-overflow-scrolling:touch; }
 
+  /* ---- ?embed=1 (iframe inside unclaimed-farms.html): the parent page already has the
+     nav, so hide this page's sidebar AND the mobile top bar / drawer backdrop that
+     admin-nav.js injects at <=768px, at every width. admin-nav's <style> lands after
+     this one and sets body{padding-top:54px} inside its media query — hence !important. */
+  html.embed .nav, html.embed .mobile-topbar, html.embed .nav-backdrop { display:none !important; }
+  html.embed body { padding-top:0 !important; }
+
+  /* ---- Credential copy: hidden Password column (eye toggle) + manual-copy fallback ---- */
+  .pwcol { display:none; }
+  .pwshow .pwcol { display:table-cell; }
+  .credbar { margin-bottom:8px; }
+  .credbar .btn svg { vertical-align:-3px; margin-right:4px; }
+  #copyFallback { position:fixed; left:12px; right:12px; bottom:12px; z-index:300; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:10px; box-shadow:0 10px 30px rgba(15,23,42,.25); display:none; }
+  #copyFallback.show { display:block; }
+  #copyFallback textarea { margin-top:8px; -webkit-user-select:text; user-select:text; }
+
   /* ---- Mobile (also the ?embed=1 iframe inside unclaimed-farms.html on a phone) ---- */
   @media (max-width: 720px) {
     body { flex-direction:column; height:100vh; height:100dvh; }
@@ -295,10 +311,16 @@
           <input id="acctSearch" type="search" placeholder="Search account name or token…" style="flex:1;min-width:220px;" />
           <span class="muted" id="acctTotal"></span>
         </div>
-        <div class="tbl" style="margin-top:10px;">
+        <div class="tagrow credbar" style="margin-top:10px;">
+          <button class="btn ghost sm" id="acctPwEye" title="Show / hide the Password column">Show passwords</button>
+          <button class="btn ghost sm" id="acctCopySelBtn" title="Copy login:password lines for the ticked rows">Copy selected</button>
+          <button class="btn ghost sm" id="acctCopyAllBtn" title="Copy login:password lines for every row on this page">Copy all</button>
+          <span class="muted" id="acctCredsNote"></span>
+        </div>
+        <div class="tbl" id="acctTbl">
           <table>
-            <thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Account</th><th>Password</th><th>Client secret</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
-            <tbody id="rows"><tr><td colspan="8" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+            <thead><tr><th style="width:26px;"><input type="checkbox" id="acctPickAll" title="Select all rows on this page"></th><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Account</th><th class="pwcol">Password</th><th>Client secret</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="10" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
           </table>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;">
@@ -317,6 +339,11 @@
 </main>
 
 <div class="toast" id="toast"></div>
+<!-- Manual-copy fallback: shown only when both clipboard paths are refused (e.g. an iframe without clipboard-write). -->
+<div id="copyFallback">
+  <div class="tagrow"><b style="font-size:13px;">Copy blocked</b><span class="muted">long-press the text to select and copy</span><button class="btn ghost sm" id="copyFallbackClose" style="margin-left:auto;">Close</button></div>
+  <textarea id="copyFallbackText" rows="4" readonly spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+</div>
 
 <script>
 function toggleTheme(){var d=document.documentElement,dark=d.getAttribute('data-theme')==='dark';if(dark){d.removeAttribute('data-theme');try{localStorage.setItem('theme','light')}catch(e){}}else{d.setAttribute('data-theme','dark');try{localStorage.setItem('theme','dark')}catch(e){}}ti();}
@@ -332,6 +359,14 @@ var openBots={}; // id -> active tab
 var pollT=null;
 var botIndex={}; // id -> {game,count,dead}
 var acctPage=1, acctPages=1, acctQuery='', acctSearchT=null;
+// Credential copy. iOS Safari only honours clipboard writes made synchronously
+// inside the tap handler — never after an await — so the login:password lines
+// are fetched when a table renders and kept in memory, and every Copy button
+// reads from these maps synchronously. Keyed by the id set so a re-render of
+// the same rows never re-hits the (audited) export route.
+var botCreds={};     // botId -> {key, map: Map(login -> "login:password"), loaded}
+var acctCreds=null;  // same shape for the Accounts management table
+var pwShown={};      // 'acct' | 'bot<id>' -> Password column visible?
 
 function contChip(c){
   if(!c) return '<span class="chip warn">starting…</span>';
@@ -417,14 +452,22 @@ async function loadBotTab(id,tab){
     if(tab==='accounts'){
       var j=await api('/api/webbot-farm/bots/'+id+'/accounts');
       if(!j.accounts.length){ box.innerHTML='<div class="muted">No accounts.</div>'; return; }
-      box.innerHTML='<div class="tbl"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
-        j.accounts.map(a=>'<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table></div>';
+      var pwKey='bot'+id, show=!!pwShown[pwKey];
+      box.innerHTML='<div class="tagrow credbar">'+
+          '<button class="btn ghost sm" data-pweye="'+pwKey+'" data-tbl="btbl-'+id+'" title="Show / hide the Password column">'+eyeLabel(show)+'</button>'+
+          '<button class="btn ghost sm" data-copy="unsold" data-bid="'+id+'" title="Copy login:password for rows that are neither manual-sold nor listed">Copy unsold</button>'+
+          '<button class="btn ghost sm" data-copy="all" data-bid="'+id+'" title="Copy login:password for every account in this bot">Copy all</button>'+
+          '<span class="muted" id="bcreds-'+id+'"></span></div>'+
+        '<div class="tbl'+(show?' pwshow':'')+'" id="btbl-'+id+'"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th class="pwcol">Password</th><th>Token</th><th>Last check</th><th></th></tr></thead><tbody>'+
+        j.accounts.map(a=>'<tr data-login="'+esc(a.login||'')+'" class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono pwcol" data-pw></td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td><td style="text-align:right;">'+(a.login?'<button class="btn ghost sm" data-copy="row" data-bid="'+id+'" data-login="'+esc(a.login)+'" title="Copy login:password">Copy</button>':'')+'</td></tr>').join('')+'</tbody></table></div>';
       box.querySelectorAll('input.msold').forEach(function(cb){
         cb.onchange=function(){ toggleManualSold(cb,id); };
       });
       box.querySelectorAll('input.mlisted').forEach(function(cb){
         cb.onchange=function(){ toggleListed(cb,id); };
       });
+      // Every id: the route itself skips rows with no stored password.
+      loadCreds('bot',id,j.accounts.map(function(a){ return a.id; }),j.accounts,'btbl-'+id,'bcreds-'+id);
     } else if(tab==='drops'){
       var j=await api('/api/webbot-farm/bots/'+id+'/drops');
       var rows=[];
@@ -513,25 +556,31 @@ async function loadAccounts(){
     $('acctPrev').disabled=acctPage<=1;
     $('acctNext').disabled=acctPage>=pages;
     var rows=$('rows');
-    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="8" class="muted" style="padding:14px;">'+(acctQuery?'No accounts match “'+esc(acctQuery)+'”.':'No accounts — seed or pull below.')+'</td></tr>'; return; }
+    $('acctPickAll').checked=false;
+    $('acctTbl').classList.toggle('pwshow',!!pwShown.acct);
+    if(!j.accounts.length){ rows.innerHTML='<tr><td colspan="10" class="muted" style="padding:14px;">'+(acctQuery?'No accounts match “'+esc(acctQuery)+'”.':'No accounts — seed or pull below.')+'</td></tr>'; $('acctCredsNote').textContent=''; return; }
     rows.innerHTML=j.accounts.map(function(a){
-      return '<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'">'+
+      return '<tr data-login="'+esc(a.login||'')+'" class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'">'+
+        '<td><input type="checkbox" class="pickck" data-id="'+a.id+'" title="Select for Copy selected"></td>'+
         '<td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td>'+
         '<td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td>'+
         '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b>'+(a.fromPool?' <span class="chip">pool</span>':'')+(a.enabled?'':' <span class="chip off">disabled</span>')+'</td>'+
-        '<td class="mono">'+(a.password?esc(a.password):'<span class="muted">–</span>')+'</td>'+
+        '<td class="mono pwcol" data-pw></td>'+
         '<td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(a.webToken)+'">'+esc(a.webToken)+'</td>'+
         '<td>'+statusChip(a)+'</td>'+
         '<td>'+(a.botId?'<span class="chip">bot '+esc(a.botId)+'</span>':'<span class="muted">idle</span>')+'</td>'+
         '<td>'+claimCell(a)+'</td>'+
         '<td><div class="acts">'+
+          (a.login&&a.hasPassword?'<button class="btn ghost sm" data-copy="row" data-login="'+esc(a.login)+'" title="Copy login:password">Copy</button>':'')+
           '<button class="btn ghost sm" data-aact="validate" data-id="'+a.id+'">Validate</button>'+
           '<button class="btn ghost sm" data-aact="toggle" data-id="'+a.id+'">'+(a.enabled?'Disable':'Enable')+'</button>'+
           (a.claimBlocked?'<button class="btn ghost sm" data-aact="clearblock" data-id="'+a.id+'">Clear</button>':'')+
           (a.botId?'':'<button class="btn danger sm" data-aact="delete" data-id="'+a.id+'">Delete</button>')+
         '</div></td></tr>';
     }).join('');
-  }catch(e){ $('rows').innerHTML='<tr><td colspan="8"><span class="chip off">'+esc(e.message)+'</span></td></tr>'; }
+    // Only enabled rows with a stored password are worth exporting.
+    loadCreds('acct',null,j.accounts.filter(function(a){ return a.enabled&&a.hasPassword; }).map(function(a){ return a.id; }),j.accounts,'acctTbl','acctCredsNote');
+  }catch(e){ $('rows').innerHTML='<tr><td colspan="10"><span class="chip off">'+esc(e.message)+'</span></td></tr>'; }
 }
 async function toggleManualSold(cb,botId){
   cb.disabled=true;
@@ -604,6 +653,107 @@ async function pull(){
   }catch(e){ toast('Pull failed: '+e.message); } finally{ btn.disabled=false; btn.textContent='Pull'; }
 }
 async function loadPool(){ try{ var j=await api('/api/webbot-farm/pool'); $('poolNote').textContent='('+j.spendable+' spendable · reserve '+j.reserve+')'; }catch(e){ $('poolNote').textContent=''; } }
+
+// ---- Credential copy (bot Accounts tabs + Accounts management table) ----
+// Passwords never reach console.log; they live only in the in-memory maps,
+// the (eye-toggled) Password cells and the manual-copy fallback textarea.
+async function fetchCreds(ids){
+  // text/plain response — bypass the JSON helper, but surface its error shape when the route refuses.
+  var r=await fetch('/api/webbot-farm/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accounts:ids})});
+  if(!r.ok){ var msg='HTTP '+r.status; try{ var ej=await r.json(); if(ej&&ej.message) msg=ej.message; }catch(e){} throw new Error(msg); }
+  var text=await r.text(), map=new Map();
+  text.split(/\r?\n/).forEach(function(line){ if(!line) return; var i=line.indexOf(':'); if(i<1) return; map.set(line.slice(0,i),line); });
+  var n=parseInt(r.headers.get('X-Exported-Count'),10);
+  return {map:map,count:isNaN(n)?map.size:n};
+}
+// kind: 'acct' | 'bot'. Seeds the map synchronously from the DTO (which already
+// carries the decrypted password) so Copy works before — or without — the export
+// round trip, then refreshes it from export-creds once per distinct id set.
+async function loadCreds(kind,botId,ids,accounts,tblId,noteId){
+  var key=ids.slice().sort().join(',');
+  var st=kind==='acct'?acctCreds:botCreds[botId];
+  if(!st||st.key!==key){
+    st={key:key,map:new Map(),loaded:false,count:0,error:'',pending:null};
+    accounts.forEach(function(a){ if(a.login&&a.password) st.map.set(a.login,a.login+':'+a.password); });
+    if(kind==='acct') acctCreds=st; else botCreds[botId]=st;
+  }
+  fillPw(tblId,st.map);
+  var note=$(noteId);
+  if(!st.loaded&&ids.length){
+    if(note) note.textContent='loading passwords…';
+    if(!st.pending){
+      st.pending=fetchCreds(ids).then(function(got){ got.map.forEach(function(v,k){ st.map.set(k,v); }); st.loaded=true; st.count=got.count; st.error=''; },function(e){ st.error=e.message||'failed'; }).then(function(){ st.pending=null; });
+    }
+    await st.pending;
+    fillPw(tblId,st.map);
+  }
+  if(note) note.textContent=st.error?('passwords: '+st.error):(st.map.size+' with password');
+}
+function fillPw(tblId,map){
+  var t=$(tblId); if(!t) return;
+  t.querySelectorAll('tr[data-login]').forEach(function(tr){
+    var td=tr.querySelector('td[data-pw]'); if(!td) return;
+    var line=map.get(tr.getAttribute('data-login')||'');
+    if(line){ td.textContent=line.slice(line.indexOf(':')+1); td.classList.remove('muted'); }
+    else { td.textContent='–'; td.classList.add('muted'); }
+  });
+}
+function eyeLabel(show){
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle>'+(show?'<path d="M3 3l18 18"></path>':'')+'</svg>'+(show?'Hide passwords':'Show passwords');
+}
+function togglePw(key,tblId,btn){
+  pwShown[key]=!pwShown[key];
+  var t=$(tblId); if(t) t.classList.toggle('pwshow',!!pwShown[key]);
+  if(btn) btn.innerHTML=eyeLabel(!!pwShown[key]);
+}
+// mode: 'all' | 'unsold' (neither manual-sold nor listed, read live from the ticks) | 'selected' (pick ticks)
+function tableLines(tblId,map,mode){
+  var out=[], missing=0, t=$(tblId); if(!t) return {lines:out,missing:0};
+  t.querySelectorAll('tr[data-login]').forEach(function(tr){
+    var login=tr.getAttribute('data-login'); if(!login) return;
+    if(mode==='unsold'){ var s=tr.querySelector('input.msold'), l=tr.querySelector('input.mlisted'); if((s&&s.checked)||(l&&l.checked)) return; }
+    if(mode==='selected'){ var p=tr.querySelector('input.pickck'); if(!p||!p.checked) return; }
+    var line=map.get(login); if(line) out.push(line); else missing++;
+  });
+  return {lines:out,missing:missing};
+}
+function copyFromStore(st,login){
+  var line=st&&st.map.get(login);
+  if(!line){ toast('No password stored for '+login+'.'); return; }
+  copyText(line,'Copied '+login+'.');
+}
+function copyTable(st,tblId,mode,label){
+  var r=tableLines(tblId,st?st.map:new Map(),mode);
+  if(!r.lines.length){ toast('Nothing to copy — '+(r.missing?r.missing+' row'+(r.missing===1?'':'s')+' without a password':(mode==='selected'?'tick some rows first':'no matching rows'))+'.'); return; }
+  copyText(r.lines.join('\n')+'\n','Copied '+r.lines.length+' line'+(r.lines.length===1?'':'s')+' ('+label+')'+(r.missing?' · '+r.missing+' skipped, no password':'')+'.');
+}
+// Must be called synchronously from the tap handler (iOS). Order: async
+// Clipboard API (issued inside the gesture) → execCommand on a temp textarea
+// → readonly textarea the owner can long-press-select.
+function copyText(text,okMsg){
+  var done=function(){ toast(okMsg); };
+  var viaExec=function(){
+    var ok=false;
+    try{
+      var ta=document.createElement('textarea'); ta.value=text; ta.setAttribute('readonly','');
+      ta.style.cssText='position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;';
+      document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0,text.length);
+      ok=document.execCommand('copy'); document.body.removeChild(ta);
+    }catch(e){ ok=false; }
+    return ok;
+  };
+  var manual=function(){ showCopyFallback(text); };
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    var p; try{ p=navigator.clipboard.writeText(text); }catch(e){ p=Promise.reject(e); }
+    p.then(done,function(){ if(viaExec()) done(); else manual(); });
+  } else if(viaExec()) done(); else manual();
+}
+function showCopyFallback(text){
+  var b=$('copyFallback'), ta=$('copyFallbackText');
+  ta.value=text; ta.rows=Math.min(10,Math.max(2,text.split('\n').length));
+  b.classList.add('show'); ta.focus(); ta.select();
+  toast('Copy blocked — long-press the text below to select and copy.');
+}
 
 // ---- Sellable stock + spent (bot-scoped live scans) ----
 // Both panels scan LIVE Twitch inventories, so they run on demand only; the
@@ -825,11 +975,24 @@ async function removeSpent(){
 
 // ---- Event wiring ----
 $('bots').addEventListener('click',function(e){
+  // Copy / eye first: they must run synchronously inside this tap (iOS clipboard).
+  var cp=e.target.closest('button[data-copy]');
+  if(cp){ var bid=cp.getAttribute('data-bid'), m=cp.getAttribute('data-copy'); if(m==='row') copyFromStore(botCreds[bid],cp.getAttribute('data-login')); else copyTable(botCreds[bid],'btbl-'+bid,m,m==='unsold'?'unsold':'all'); return; }
+  var ey=e.target.closest('button[data-pweye]'); if(ey){ togglePw(ey.getAttribute('data-pweye'),ey.getAttribute('data-tbl'),ey); return; }
   var ba=e.target.closest('button[data-bact]'); if(ba){ botAct(ba); return; }
   var tb=e.target.closest('.tab[data-tab]'); if(tb){ openBots[tb.getAttribute('data-bid')]=tb.getAttribute('data-tab'); renderBots(); return; }
   var row=e.target.closest('.row[data-bid]'); if(row){ var id=row.getAttribute('data-bid'); if(openBots[id]) delete openBots[id]; else openBots[id]='drops'; renderBots(); }
 });
-$('rows').addEventListener('click',function(e){ var b=e.target.closest('button[data-aact]'); if(b) acctAct(b); });
+$('rows').addEventListener('click',function(e){
+  var cp=e.target.closest('button[data-copy]'); if(cp){ copyFromStore(acctCreds,cp.getAttribute('data-login')); return; }
+  var b=e.target.closest('button[data-aact]'); if(b) acctAct(b);
+});
+$('acctPwEye').innerHTML=eyeLabel(false);
+$('acctPwEye').onclick=function(){ togglePw('acct','acctTbl',this); };
+$('acctCopySelBtn').onclick=function(){ copyTable(acctCreds,'acctTbl','selected','selected'); };
+$('acctCopyAllBtn').onclick=function(){ copyTable(acctCreds,'acctTbl','all','all on page'); };
+$('acctPickAll').onchange=function(){ var on=this.checked; document.querySelectorAll('#rows .pickck').forEach(function(x){ x.checked=on; }); };
+$('copyFallbackClose').onclick=function(){ $('copyFallback').classList.remove('show'); $('copyFallbackText').value=''; };
 $('rows').addEventListener('change',function(e){ var cb=e.target.closest('input.msold'); if(cb){ toggleManualSold(cb); return; } var lc=e.target.closest('input.mlisted'); if(lc) toggleListed(lc); });
 $('createBtn').onclick=createBot;
 $('rebuildBtn').onclick=rebuild;

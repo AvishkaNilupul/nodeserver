@@ -154,14 +154,24 @@
   }
 
   /* Embedded in the Unclaimed farms iframe (?embed=1): admin-nav.js injects
-     its own 54px "RedeemHub" top bar + off-canvas drawer at ≤768px, which
-     would duplicate the parent page's chrome inside the frame. Suppress it
-     there; the standalone page keeps the drawer. Breakpoint matches the
-     script's own (768px), not 720px, so no width gets the bar. */
-  @media (max-width: 768px) {
-    html.embed body { padding-top: 0; }
-    html.embed .nav, html.embed .mobile-topbar, html.embed .nav-backdrop { display: none; }
-  }
+     its own 54px "RedeemHub ☰" top bar + off-canvas drawer + backdrop at
+     ≤768px and pads the body for it, which duplicated the parent page's
+     chrome inside the frame. Deliberately OUTSIDE any media query and
+     !important: the script's own styles are injected later (and its media
+     rule has the same specificity), so an unqualified rule here lost to it
+     at phone widths. The parent page already has the nav at every width;
+     the standalone page (no ?embed=1) keeps the drawer. */
+  html.embed .nav, html.embed .mobile-topbar, html.embed .nav-backdrop { display: none !important; }
+  html.embed body { padding-top: 0 !important; }
+
+  /* Copy fallback: when neither clipboard path works (iOS Safari refuses
+     writes outside a live tap, plain-http has no clipboard API) the text is
+     shown in a readonly textarea the owner can long-press-select. */
+  .copybox { position: fixed; inset: 0; z-index: 60; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .copybox[hidden] { display: none; }
+  .copybox .card { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 12px; width: 100%; max-width: 420px; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+  .copybox .card .hd { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; font-size: 13px; }
+  .copybox textarea { width: 100%; min-height: 120px; max-height: 45vh; font-family: ui-monospace, Menlo, monospace; font-size: 13px; resize: vertical; -webkit-user-select: text; user-select: text; }
 </style>
 </head>
 
@@ -272,6 +282,13 @@
 </main>
 
 <div class="toast" id="toast"></div>
+<!-- Copy fallback (see copyToClipboard): shown only when the clipboard refused. -->
+<div class="copybox" id="copyReveal" hidden>
+  <div class="card">
+    <div class="hd"><b>Copy failed — long-press to select</b><button class="btn ghost sm" id="copyRevealClose" type="button" style="margin-left:auto;">Close</button></div>
+    <textarea id="copyRevealTa" readonly spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+  </div>
+</div>
 
 <script>
 function toggleTheme(){var d=document.documentElement,dark=d.getAttribute('data-theme')==='dark';if(dark){d.removeAttribute('data-theme');try{localStorage.setItem('theme','light')}catch(e){}}else{d.setAttribute('data-theme','dark');try{localStorage.setItem('theme','dark')}catch(e){}}ti();}
@@ -445,8 +462,16 @@ function exportAccounts(id,fmt){
     dlFile(base+'.csv','text/csv',rows.map(function(r){ return r.map(csvCell).join(','); }).join('\r\n'));
     toast('Exported '+d.accounts.length+' account(s) as CSV.'); return;
   }
-  var txt=d.accounts.map(function(a){ return a.login+':'+(a.password||''); }).join('\n');
-  if(fmt==='copy'){ copyToClipboard(txt); return; }
+  function line(a){ return a.login+':'+(a.password||''); }
+  if(fmt==='copyunsold'){
+    // Only what can still go to a buyer: not ticked Sold, not on a listing.
+    var free=d.accounts.filter(function(a){ return !a.manualSold&&!a.listed; });
+    if(!free.length){ toast('No unsold, unlisted accounts on this bot.'); return; }
+    copyToClipboard(free.map(line).join('\n'),free.length+' unsold account'+(free.length===1?'':'s')+' of '+d.accounts.length+' (login:pass)');
+    return;
+  }
+  var txt=d.accounts.map(line).join('\n');
+  if(fmt==='copy'){ copyToClipboard(txt,d.accounts.length+' account'+(d.accounts.length===1?'':'s')+' (login:pass)'); return; }
   dlFile(base+'.txt','text/plain',txt);
   toast('Exported '+d.accounts.length+' account(s) as TXT.');
 }
@@ -461,12 +486,14 @@ async function loadAccounts(id,c){
             '<button class="btn ghost sm" data-exp="txt">Export TXT</button>'+
             '<button class="btn ghost sm" data-exp="json">Export JSON</button>'+
             '<button class="btn ghost sm" data-exp="copy">Copy user:pass</button>'+
+            '<button class="btn ghost sm" data-exp="copyunsold" title="Only rows that are neither ticked Sold nor Listed">Copy unsold</button>'+
           '</div>';
-    h+='<div class="tw wide"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
-    j.accounts.forEach(function(a){
+    h+='<div class="tw wide"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th style="width:52px;"></th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
+    j.accounts.forEach(function(a,idx){
       h+='<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'">'+
          '<td><input type="checkbox" class="msold" data-secret="'+esc(a.clientSecret)+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td>'+
          '<td><input type="checkbox" class="mlisted" data-secret="'+esc(a.clientSecret)+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td>'+
+         '<td><button class="btn ghost sm rowcopy" data-row="'+idx+'" type="button" title="Copy this row as login:password">Copy</button></td>'+
          '<td>'+esc(a.login)+'</td><td class="mono">'+(a.password?esc(a.password):'<span class="muted">—</span>')+'</td>'+
          '<td class="mono">'+esc(a.twitchId)+'</td>'+
          '<td class="mono">'+esc(a.clientSecret)+'</td></tr>';
@@ -475,6 +502,15 @@ async function loadAccounts(id,c){
     c.innerHTML=h;
     c.querySelectorAll('button[data-exp]').forEach(function(btn){
       btn.onclick=function(){ exportAccounts(id,btn.getAttribute('data-exp')); };
+    });
+    // Per-row copy. Reads the row straight out of acctCache and writes the
+    // clipboard synchronously in the tap — no await in between (iOS rule).
+    c.querySelectorAll('button.rowcopy').forEach(function(btn){
+      btn.onclick=function(){
+        var d=acctCache[id], a=d&&d.accounts[+btn.getAttribute('data-row')];
+        if(!a){ toast('Row not found — reload the tab.'); return; }
+        copyToClipboard(a.login+':'+(a.password||''),a.login+(a.password?'':' (no password stored)'));
+      };
     });
     c.querySelectorAll('input.msold').forEach(function(cb){
       cb.onchange=async function(){
@@ -537,21 +573,58 @@ async function loadDrops(id,c){
   }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
 }
 
-// Copy helper: navigator.clipboard where available (https / localhost), with a
-// throwaway-textarea + execCommand fallback so the button still works on plain
-// http. Generation tool only — this just fills the OS clipboard for the human.
-function copyToClipboard(txt){
-  function fallback(){
-    var ta=document.createElement('textarea'); ta.value=txt;
-    ta.style.position='fixed'; ta.style.left='-9999px'; document.body.appendChild(ta); ta.select();
-    try{ document.execCommand('copy'); toast('Copied to clipboard.'); }
-    catch(e){ toast('Copy failed — select the text manually.'); }
-    document.body.removeChild(ta);
+// Copy helper. MUST be called synchronously from inside the tap/click handler:
+// iOS Safari only honours clipboard writes while the user gesture is live, and
+// an await before the write (a fetch, a resolved promise) ends the gesture.
+//   1. navigator.clipboard.writeText, invoked synchronously (https / localhost).
+//   2. If that's missing (plain http) or rejects: a throwaway textarea +
+//      execCommand('copy'). iOS ignores textarea.select(); it needs
+//      contentEditable + readOnly + setSelectionRange to actually select.
+//   3. If both fail: reveal the text in a readonly textarea (#copyReveal) the
+//      owner can long-press-select — never silently lose the credentials.
+// `what` is the toast label, e.g. "12 unsold account(s)"; defaults to generic.
+function copyToClipboard(txt,what){
+  txt=String(txt==null?'':txt);
+  var label='Copied '+(what||'to clipboard')+'.';
+  function legacy(){
+    var ok=false, ta=document.createElement('textarea');
+    ta.value=txt; ta.setAttribute('readonly','');
+    ta.style.position='fixed'; ta.style.top='0'; ta.style.left='0'; ta.style.opacity='0'; ta.style.fontSize='16px';
+    document.body.appendChild(ta);
+    try{
+      ta.contentEditable=true; ta.readOnly=true;
+      var range=document.createRange(); range.selectNodeContents(ta);
+      var sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      ta.setSelectionRange(0,txt.length);
+      ok=document.execCommand('copy');
+    }catch(e){ ok=false; }
+    try{ document.body.removeChild(ta); }catch(e){}
+    return ok;
   }
-  if(navigator.clipboard&&navigator.clipboard.writeText)
-    navigator.clipboard.writeText(txt).then(function(){toast('Copied to clipboard.');},fallback);
-  else fallback();
+  function reveal(){
+    var box=$('copyReveal'), ta=$('copyRevealTa');
+    if(!box||!ta){ toast('Copy failed — select the text manually.'); return; }
+    ta.value=txt; box.hidden=false;
+    toast('Clipboard refused — long-press the text to select it.');
+    try{ ta.focus(); ta.setSelectionRange(0,txt.length); }catch(e){}
+  }
+  if(navigator.clipboard&&navigator.clipboard.writeText&&window.isSecureContext){
+    var p;
+    try{ p=navigator.clipboard.writeText(txt); }catch(e){ p=Promise.reject(e); }
+    // The legacy path runs from inside the rejection callback, which on
+    // desktop is still within the transient-activation window; on iOS it
+    // usually is not, which is exactly what the reveal box is for.
+    p.then(function(){ toast(label); },function(){ if(legacy()) toast(label); else reveal(); });
+  }else if(legacy()) toast(label);
+  else reveal();
 }
+(function(){
+  var btn=$('copyRevealClose'), box=$('copyReveal');
+  if(btn&&box){
+    btn.onclick=function(){ box.hidden=true; };
+    box.onclick=function(e){ if(e.target===box) box.hidden=true; };
+  }
+})();
 
 async function loadSocial(id,c){
   c.innerHTML='<div class="muted">Generating post copy + cover for each account… (this can take a moment)</div>';
