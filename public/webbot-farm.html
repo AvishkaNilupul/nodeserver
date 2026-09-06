@@ -85,6 +85,7 @@
   pre.log { margin:0; background:#0b0e14; color:#c8d3e6; border-radius:9px; padding:11px; font-size:11.5px; line-height:1.5; max-height:300px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; }
   .acts { display:flex; gap:5px; flex-wrap:wrap; justify-content:flex-end; }
   .muted { color:var(--muted); font-size:12.5px; }
+  .tagrow { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width:380px;}
   .toast.show { opacity:1; transform:none; }
   code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
@@ -177,6 +178,47 @@
   <div class="panel">
     <div class="hd"><b>Bots</b> <span class="muted" id="botsCount" style="margin-left:auto;"></span></div>
     <div class="bd"><div id="bots"><div class="muted">Loading…</div></div></div>
+  </div>
+
+  <!-- Sellable stock (live scan) -->
+  <div class="panel">
+    <div class="hd"><b>Sellable stock</b> <span class="chip warn" style="margin-left:6px;">live scan</span> <span class="muted" id="sellScanStatus" style="margin-left:auto;"></span></div>
+    <div class="bd">
+      <div class="muted" style="margin-bottom:11px;">
+        Reads live Twitch inventories for what is <b>ready to sell</b>: the farmed (unclaimed — the buyer claims) drops, the event bundle they add up to, whether the account is already <b>connected</b> to a game account, and what the auto-lister's ledger says. Tick rows for the bulk actions. Scans are live reads and take a while; use <b>Load more</b> to walk the next page.
+      </div>
+      <div class="tagrow" style="margin-bottom:12px;">
+        <select id="sellBot" title="Which accounts to scan"><option value="all">All accounts</option><option value="idle">Idle (no bot)</option></select>
+        <button class="btn primary sm" id="sellScanBtn">Scan</button>
+        <span style="flex:1;"></span>
+        <button class="btn ghost sm" id="sellExportBtn" disabled title="Download login:password lines for the ticked accounts (audited)">Export creds</button>
+        <button class="btn ghost sm" id="sellSoldBtn" disabled title="Tick manual-sold on every ticked account — pulls each off the listings it still backs">Mark manual sold</button>
+        <button class="btn ghost sm" id="sellUnsoldBtn" disabled title="Clear manual-sold on every ticked account">Unmark</button>
+      </div>
+      <div id="sellCreds" style="display:none;margin-bottom:12px;"></div>
+      <div id="sellTable"><div class="muted">Not scanned yet — pick a scope and press Scan.</div></div>
+      <div class="tagrow" style="margin-top:10px;">
+        <span class="muted" id="sellStats"></span>
+        <button class="btn ghost sm" id="sellMoreBtn" style="margin-left:auto;display:none;">Load more</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spent (sold / connected) -->
+  <div class="panel">
+    <div class="hd"><b>Spent accounts</b> <span class="muted" style="margin-left:auto;">sold or connected — not worth farming</span></div>
+    <div class="bd">
+      <div class="muted" style="margin-bottom:11px;">
+        Finds accounts that are <b>sold</b> (ledger, manual tick, or a live/sold listing still holds the login) or <b>connected</b> to a game account (the drop is already on the buyer's account). Removing them disables the account and takes it off its bot <b>in the registry only</b> — the Pi container keeps the account until that bot is released and re-created.
+      </div>
+      <div class="tagrow" style="margin-bottom:12px;">
+        <select id="spentBot" title="Which accounts to scan"><option value="all">All accounts</option><option value="idle">Idle (no bot)</option></select>
+        <button class="btn primary sm" id="scanSpentBtn">Scan spent</button>
+        <span class="muted" id="scanSpentStatus"></span>
+      </div>
+      <div id="spentCandidates"><div class="muted">No spent accounts found yet — scan above.</div></div>
+      <div class="muted" id="spentNote" style="margin-top:10px;display:none;"></div>
+    </div>
   </div>
 
   <!-- Accounts (management) -->
@@ -298,6 +340,7 @@ async function load(){
     var keep={}; j.bots.forEach(function(b){ keep[b.id]=Object.assign(botIndex[b.id]||{},{game:b.game,count:b.count,dead:b.dead}); });
     botIndex=keep;
     renderBots();
+    fillBotSelects();
     botsStatus();
     loadAccounts();
   }catch(e){ $('bots').innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
@@ -511,6 +554,224 @@ async function pull(){
 }
 async function loadPool(){ try{ var j=await api('/api/webbot-farm/pool'); $('poolNote').textContent='('+j.spendable+' spendable · reserve '+j.reserve+')'; }catch(e){ $('poolNote').textContent=''; } }
 
+// ---- Sellable stock + spent (bot-scoped live scans) ----
+// Both panels scan LIVE Twitch inventories, so they run on demand only; the
+// refresh cycle (load) just keeps their bot selectors in step with botIndex.
+// Scope vocabulary for both routes: <bot id> | "idle" | "all".
+var sellRows=[], sellCursor=null, sellScanned=0, sellScope='all';
+var spentRows=[]; // {id, login, botId?, sold, soldWhy, connected, tokenStatus}
+
+function scopeLabel(v){ return v==='all'?'all accounts':(v==='idle'?'idle accounts':'bot #'+v); }
+
+function fillBotSelects(){
+  var ids=Object.keys(botIndex).sort((a,b)=>(parseInt(a,10)||0)-(parseInt(b,10)||0));
+  ['sellBot','spentBot'].forEach(function(sid){
+    var sel=$(sid); if(!sel) return; var cur=sel.value||'all';
+    var h='<option value="all">All accounts</option><option value="idle">Idle (no bot)</option>';
+    ids.forEach(function(id){ var b=botIndex[id]; h+='<option value="'+esc(id)+'">bot #'+esc(id)+' · '+esc(b.game||'(any)')+' · '+b.count+' acct'+(b.count===1?'':'s')+'</option>'; });
+    sel.innerHTML=h;
+    sel.value=cur; if(sel.value!==cur) sel.value='all'; // selected bot got released
+  });
+}
+
+// --- sellable ---
+async function scanSellable(more){
+  var btn=$('sellScanBtn'), stt=$('sellScanStatus'), moreBtn=$('sellMoreBtn');
+  if(!more){ sellRows=[]; sellCursor=null; sellScanned=0; sellScope=$('sellBot').value||'all'; renderSellable(); }
+  btn.disabled=true; moreBtn.disabled=true;
+  stt.textContent=(more?'Scanning next page':'Scanning')+' — '+scopeLabel(sellScope)+'… live inventory reads';
+  try{
+    var p=new URLSearchParams(); p.set('botId',sellScope); p.set('limit','60'); if(more&&sellCursor) p.set('cursor',sellCursor);
+    var j=await api('/api/webbot-farm/sellable?'+p.toString());
+    var got=j.accounts||[];
+    got.forEach(function(a){ sellRows.push(a); });
+    sellScanned+=(typeof j.scanned==='number'?j.scanned:got.length);
+    sellCursor=j.nextCursor||null;
+    stt.textContent=sellRows.length+' account'+(sellRows.length===1?'':'s')+' · '+scopeLabel(sellScope)+(sellCursor?' · more available':' · complete');
+  }catch(e){
+    stt.textContent='';
+    toast('Scan failed: '+e.message);
+    if(!sellRows.length){ $('sellTable').innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; btn.disabled=false; moreBtn.disabled=false; return; }
+  }
+  btn.disabled=false; moreBtn.disabled=false;
+  renderSellable();
+}
+
+function gameOf(a){
+  if(a.pinnedGame) return a.pinnedGame;
+  var g=(a.ready||[]).map(function(d){ return d.game; }).filter(Boolean);
+  return g.length?g[0]:'';
+}
+function readyCell(a){
+  var by={}, order=[];
+  (a.ready||[]).forEach(function(d){ var k=d.name||d.itemKey||'?'; if(!(k in by)){ by[k]=0; order.push(k); } by[k]++; });
+  if(!order.length) return '<span class="muted">–</span>';
+  var parts=order.map(function(k){ return (by[k]>1?by[k]+'× ':'')+k; });
+  var n=(typeof a.readyCount==='number')?a.readyCount:(a.ready||[]).length;
+  return '<span class="mono">'+n+'</span> <span title="'+esc(parts.join('\n'))+'">'+parts.slice(0,3).map(esc).join(', ')+
+    (parts.length>3?' <span class="muted">+'+(parts.length-3)+' more</span>':'')+'</span>';
+}
+function ledgerCell(a){
+  var h='';
+  if(a.manualSold) h+='<span class="chip off">manual sold</span> ';
+  var s=a.ledgerStatus||'';
+  if(s==='listed') h+='<span class="chip on">listed'+(a.market?' · '+esc(a.market):'')+'</span>';
+  else if(s==='sold') h+='<span class="chip off">sold'+(a.market?' · '+esc(a.market):'')+'</span>';
+  else if(s) h+='<span class="chip">'+esc(s)+'</span>';
+  if(a.tokenStatus&&a.tokenStatus!=='ok') h+=' <span class="chip warn">token '+esc(a.tokenStatus)+'</span>';
+  return h||'<span class="muted">–</span>';
+}
+function renderSellable(){
+  var c=$('sellTable'), st=$('sellStats'), moreBtn=$('sellMoreBtn');
+  var ready=0, listed=0, full=0;
+  sellRows.forEach(function(a){ if((a.readyCount||0)>0||(a.ready||[]).length) ready++; if(a.ledgerStatus==='listed') listed++; if(a.full) full++; });
+  st.textContent=sellRows.length?('scanned '+sellScanned+' · ready '+ready+' · listed '+listed+' · full bundles '+full):'';
+  moreBtn.style.display=sellCursor?'':'none';
+  if(!sellRows.length){ c.innerHTML='<div class="muted">'+(sellScanned?'No sellable accounts in this scope.':'Not scanned yet — pick a scope and press Scan.')+'</div>'; sellBulkState(); return; }
+  var h='<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Bot</th><th>Game</th><th>Ready drops</th><th>Bundle</th><th>Connected</th><th>Ledger</th>'+
+        '<th style="width:26px;text-align:right;"><input type="checkbox" id="sellAll" title="Select all"></th></tr></thead><tbody>';
+  sellRows.forEach(function(a,i){
+    var cls=a.manualSold?'soldrow':(a.ledgerStatus==='listed'?'listedrow':'');
+    h+='<tr class="'+cls+'">'+
+      '<td><b>'+(a.login?esc(a.login):'<span class="muted">(unvalidated)</span>')+'</b></td>'+
+      '<td>'+(a.botId?'<span class="chip">bot '+esc(a.botId)+'</span>':'<span class="muted">idle</span>')+'</td>'+
+      '<td>'+esc(gameOf(a))+'</td>'+
+      '<td>'+readyCell(a)+'</td>'+
+      '<td>'+(a.bundleLabel?esc(a.bundleLabel)+' '+(a.full?'<span class="chip on">full</span>':'<span class="chip">partial</span>'):'<span class="muted">–</span>')+'</td>'+
+      '<td>'+(a.connected?'<span class="chip warn">connected</span>':'<span class="muted">–</span>')+'</td>'+
+      '<td>'+ledgerCell(a)+'</td>'+
+      '<td style="text-align:right;"><input type="checkbox" class="sellck" data-i="'+i+'"></td></tr>';
+  });
+  h+='</tbody></table></div>'; c.innerHTML=h;
+  $('sellAll').onchange=function(){ var on=this.checked; c.querySelectorAll('.sellck').forEach(function(x){ x.checked=on; }); sellBulkState(); };
+  sellBulkState();
+}
+function sellPicked(){ var out=[]; document.querySelectorAll('#sellTable .sellck').forEach(function(x){ if(x.checked) out.push(sellRows[+x.getAttribute('data-i')]); }); return out; }
+function sellBulkState(){ var n=sellPicked().length; ['sellExportBtn','sellSoldBtn','sellUnsoldBtn'].forEach(function(id){ $(id).disabled=!n; }); }
+
+async function sellBulkSold(value){
+  var picked=sellPicked(); if(!picked.length){ toast('Select at least one account.'); return; }
+  var ids=picked.map(function(a){ return a.id; });
+  if(value&&!confirm('Mark '+ids.length+' account(s) as manually sold? Each is pulled off every listing it still backs.')) return;
+  var btn=$(value?'sellSoldBtn':'sellUnsoldBtn'); btn.disabled=true;
+  try{
+    var j=await api('/api/webbot-farm/manual-sold-bulk',{method:'POST',body:JSON.stringify({accounts:ids,value:!!value})});
+    var n=(typeof j.updated==='number')?j.updated:ids.length;
+    // Mirror the single-tick behaviour: marking sold pulls the account off its
+    // listings, so a "listed" ledger can no longer be true. A rescan re-reads truth.
+    picked.forEach(function(a){ a.manualSold=!!value; if(value&&a.ledgerStatus==='listed') a.ledgerStatus=''; });
+    renderSellable();
+    toast((value?'Marked sold ':'Unmarked ')+n+' account'+(n===1?'':'s')+((value&&j.delisted)?' — removed from '+j.delisted+' listing'+(j.delisted===1?'':'s'):'')+'.');
+    loadAccounts();
+  }catch(e){ toast('Failed: '+e.message); }
+  btn.disabled=false; sellBulkState();
+}
+
+async function sellExport(){
+  var picked=sellPicked(); if(!picked.length){ toast('Select at least one account.'); return; }
+  var ids=picked.map(function(a){ return a.id; });
+  var btn=$('sellExportBtn'); btn.disabled=true;
+  try{
+    // text/plain response — bypass the JSON helper, but surface its error shape when the route refuses.
+    var r=await fetch('/api/webbot-farm/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accounts:ids})});
+    if(!r.ok){ var msg='HTTP '+r.status; try{ var ej=await r.json(); if(ej&&ej.message) msg=ej.message; }catch(e){} throw new Error(msg); }
+    showCreds(await r.text());
+  }catch(e){ toast('Export failed: '+e.message); }
+  btn.disabled=false; sellBulkState();
+}
+function showCreds(text){
+  var box=$('sellCreds'); box.style.display='';
+  var lines=text.split(/\r?\n/).filter(Boolean).length;
+  box.innerHTML='<div class="tagrow" style="margin-bottom:6px;"><b style="font-size:13px;">Exported credentials</b>'+
+    '<span class="muted">'+lines+' line'+(lines===1?'':'s')+' · login:password · this export is audited</span>'+
+    '<button class="btn ghost sm" id="credsCopyBtn" style="margin-left:auto;">Copy</button>'+
+    '<button class="btn ghost sm" id="credsDlBtn">Download .txt</button>'+
+    '<button class="btn ghost sm" id="credsCloseBtn">Close</button></div>'+
+    '<textarea id="credsText" rows="'+Math.min(12,Math.max(3,lines))+'" readonly spellcheck="false"></textarea>';
+  $('credsText').value=text;
+  $('credsCopyBtn').onclick=function(){
+    var done=function(){ toast('Copied '+lines+' line'+(lines===1?'':'s')+'.'); };
+    var fail=function(){ var ta=$('credsText'); ta.focus(); ta.select(); toast('Copy blocked — text selected, press Ctrl/Cmd+C.'); };
+    if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done,fail); else fail();
+  };
+  $('credsDlBtn').onclick=function(){
+    var u=URL.createObjectURL(new Blob([text],{type:'text/plain'}));
+    var a=document.createElement('a'); a.href=u; a.download='webbot-creds-'+new Date().toISOString().slice(0,10)+'.txt';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ URL.revokeObjectURL(u); },1000);
+  };
+  $('credsCloseBtn').onclick=function(){ box.style.display='none'; box.innerHTML=''; };
+}
+
+// --- spent (sold / connected) ---
+async function scanSpent(){
+  var btn=$('scanSpentBtn'), stt=$('scanSpentStatus'); var scope=$('spentBot').value||'all';
+  btn.disabled=true; spentRows=[]; renderSpentCandidates(); $('spentNote').style.display='none';
+  stt.textContent='Scanning '+scopeLabel(scope)+'… live inventory reads';
+  try{
+    var j=await api('/api/webbot-farm/spent/scan?botId='+encodeURIComponent(scope));
+    (j.spent||[]).forEach(function(a){ if(!a.botId&&scope!=='all'&&scope!=='idle') a.botId=scope; spentRows.push(a); });
+    stt.textContent=spentRows.length+' spent account'+(spentRows.length===1?'':'s')+' · '+scopeLabel(scope);
+  }catch(e){
+    stt.textContent=''; toast('Scan failed: '+e.message);
+    $('spentCandidates').innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>';
+    btn.disabled=false; return;
+  }
+  btn.disabled=false; renderSpentCandidates();
+}
+
+function reasonChips(a){
+  var h='';
+  if(a.sold) h+='<span class="chip off">sold'+(a.soldWhy?' · '+esc(a.soldWhy):'')+'</span> ';
+  if(a.connected) h+='<span class="chip warn">connected</span> ';
+  if(a.tokenStatus&&a.tokenStatus!=='ok') h+='<span class="chip">token '+esc(a.tokenStatus)+'</span>';
+  return h||'<span class="muted">—</span>';
+}
+
+function renderSpentCandidates(){
+  var c=$('spentCandidates');
+  if(!spentRows.length){ c.innerHTML='<div class="muted">No spent accounts found yet — scan above.</div>'; return; }
+  var h='<div class="tagrow" style="margin-bottom:8px;">'+
+        '<span class="muted">'+spentRows.length+' candidate'+(spentRows.length===1?'':'s')+' — review, then remove</span>'+
+        '<button class="btn danger sm" id="removeSpentBtn" style="margin-left:auto;">Remove selected</button>'+
+        '</div>'+
+        '<div style="overflow-x:auto;"><table><thead><tr><th style="width:26px;"><input type="checkbox" id="spentAll" checked></th>'+
+        '<th>Login</th><th>Bot</th><th>Reason</th></tr></thead><tbody>';
+  spentRows.forEach(function(a,i){
+    h+='<tr><td><input type="checkbox" class="spentck" data-i="'+i+'" checked></td>'+
+       '<td><b>'+esc(a.login||'(unvalidated)')+'</b></td>'+
+       '<td>'+(a.botId?'<span class="chip">bot '+esc(a.botId)+'</span>':'<span class="muted">'+(a.botId===''?'idle':'–')+'</span>')+'</td>'+
+       '<td class="tagrow">'+reasonChips(a)+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  c.innerHTML=h;
+  $('spentAll').onchange=function(){ var on=this.checked; c.querySelectorAll('.spentck').forEach(function(x){ x.checked=on; }); };
+  $('removeSpentBtn').onclick=removeSpent;
+}
+
+async function removeSpent(){
+  var c=$('spentCandidates'), picked=[];
+  c.querySelectorAll('.spentck').forEach(function(x){ if(x.checked) picked.push(spentRows[+x.getAttribute('data-i')]); });
+  if(!picked.length){ toast('Select at least one account.'); return; }
+  if(!confirm('Remove '+picked.length+' account(s)? Each is disabled and unassigned from its bot in the registry. The Pi container keeps them until that bot is released and re-created.')) return;
+  var btn=$('removeSpentBtn'); btn.disabled=true;
+  var ids=picked.map(function(a){ return a.id; });
+  try{
+    var j=await api('/api/webbot-farm/spent/remove',{method:'POST',body:JSON.stringify({accounts:ids})});
+    var removed=(typeof j.removed==='number')?j.removed:ids.length;
+    var gone=new Set(ids);
+    spentRows=spentRows.filter(function(a){ return !gone.has(a.id); });
+    renderSpentCandidates();
+    toast('Removed '+removed+' account'+(removed===1?'':'s')+'.');
+    var note=$('spentNote');
+    if(j.needsRecreate){
+      var bots={}; picked.forEach(function(a){ if(a.botId) bots[a.botId]=1; }); var bl=Object.keys(bots);
+      note.innerHTML='⚠️ <b>Bot config not rewritten.</b> The farmer reads its own bot config, so '+(bl.length?'bot'+(bl.length===1?'':'s')+' <b>#'+bl.map(esc).join(', #')+'</b> keep':'the affected bots keep')+' farming these accounts until you <b>Release</b> and create the bot again from the Bots panel.'+((j.note||j.message)?' <span class="muted">'+esc(j.note||j.message)+'</span>':'');
+      note.style.display='';
+    } else note.style.display='none';
+  }catch(e){ toast('Remove failed: '+e.message); btn.disabled=false; return; }
+  await loadAccounts(); await load();
+}
+
 // ---- Event wiring ----
 $('bots').addEventListener('click',function(e){
   var ba=e.target.closest('button[data-bact]'); if(ba){ botAct(ba); return; }
@@ -525,6 +786,13 @@ $('feedBtn').onclick=feed;
 $('valIdleBtn').onclick=validateIdle;
 $('pullBtn').onclick=pull;
 $('refreshBtn').onclick=function(){load();loadPool();};
+$('sellScanBtn').onclick=function(){ scanSellable(false); };
+$('sellMoreBtn').onclick=function(){ scanSellable(true); };
+$('sellExportBtn').onclick=sellExport;
+$('sellSoldBtn').onclick=function(){ sellBulkSold(true); };
+$('sellUnsoldBtn').onclick=function(){ sellBulkSold(false); };
+$('sellTable').addEventListener('change',function(e){ if(e.target.closest('input.sellck')) sellBulkState(); });
+$('scanSpentBtn').onclick=scanSpent;
 $('acctSearch').addEventListener('input',function(){
   var v=this.value.trim();
   clearTimeout(acctSearchT);

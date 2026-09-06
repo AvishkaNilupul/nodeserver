@@ -30,8 +30,17 @@
 //   listed (one unit of an item on one market) ->
 //     sold   (its unit sold / buyer claimed) -> spent path (never pool-return)
 //     expired (all drops gone) -> unit removed -> released back to pool
-// Rules: never claim, never reprice, never touch origin "auto"/"manual" rows,
-// and only return an account to the pool after ALL of its drops expired.
+// Rules: never claim, never touch origin "auto"/"manual" rows, and only return
+// an account to the pool after ALL of its drops expired (confirmed by repeated
+// empty reads — see shouldExpire).
+//
+// v3 (docs/UNCLAIMED-BUNDLES-CONTRACT.md): an item's identity counts COPIES
+// ("4× Alpha Pack" ≠ "Alpha Pack"); listings are event-bundle aware (title,
+// description, DropSet.source*) via utils/unclaimedBundles.js; new listings are
+// priced from market analytics (bundlePrice) with per-game floors; live rows
+// can be repriced (repriceUnclaimedRows, flag unclaimedRepriceExisting, default
+// OFF); Gameflip lots of N accounts (utils/unclaimedLots.js, flag
+// unclaimedGameflipLots, default OFF); webbot expiry keeps the account on its bot.
 // ---------------------------------------------------------------------------
 const fsp = require("fs/promises");
 const mongoose = require("mongoose");
@@ -42,7 +51,7 @@ const webbotTwitch = require("./webbotTwitch");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
-const { derivePrice, buildTitle, buildDescription } = require("./autoLister");
+const { derivePrice, buildDescription } = require("./autoLister");
 const { digisellerDeliveryCode } = require("./digisellerFulfiller");
 const { ggselDeliveryCode } = require("./ggselFulfiller");
 const { gameflipDeliveryCode } = require("./gameflipFulfiller");
@@ -58,6 +67,35 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const MarketResearch = require("../models/MarketResearch");
 const NoclaimSpentAccount = require("../models/NoclaimSpentAccount");
+const TwitchCampaign = require("../models/TwitchCampaign");
+
+// v3 siblings (docs/UNCLAIMED-BUNDLES-CONTRACT.md): the bundle classifier /
+// analytics pricer and the Gameflip lot publisher. Required lazily and guarded
+// so the engine still loads (and every pure helper still works) when a sibling
+// is missing or broken — a bundle/lot failure must degrade to the v2 behaviour
+// (plain qty-aware titles, floor pricing, no lots), never take the tick down.
+let _bundlesMod;
+function bundlesMod() {
+  if (_bundlesMod !== undefined) return _bundlesMod;
+  try {
+    _bundlesMod = require("./unclaimedBundles");
+  } catch (e) {
+    _bundlesMod = null;
+    console.error("unclaimedAutoList: unclaimedBundles unavailable:", e.message);
+  }
+  return _bundlesMod;
+}
+let _lotsMod;
+function lotsMod() {
+  if (_lotsMod !== undefined) return _lotsMod;
+  try {
+    _lotsMod = require("./unclaimedLots");
+  } catch (e) {
+    _lotsMod = null;
+    console.error("unclaimedAutoList: unclaimedLots unavailable:", e.message);
+  }
+  return _lotsMod;
+}
 
 const ORIGIN = "unclaimed";
 const SET_NOTE = "Unclaimed auto-list";
@@ -437,31 +475,59 @@ function padBot(id) {
   return "zz" + String(id || "");
 }
 
-// "The same item" = one game + the exact same set of drop itemKeys.
-function signatureFor(game, drops) {
-  const g = String(game || "").trim().toLowerCase();
-  const keys = [
-    ...new Set(
-      (drops || [])
-        .map((d) => String(d.itemKey || d.name || "").trim().toLowerCase())
-        .filter(Boolean),
-    ),
-  ].sort();
-  return { game: g, keys, key: g + "|" + keys.join(",") };
+// Normalised identity key of one drop (stored itemKey, else its name).
+function dropKey(d) {
+  return String((d && (d.itemKey || d.name)) || "").trim().toLowerCase();
 }
 
-// A set's items are ONE row per unique drop (an account can hold several
-// copies of the same drop — e.g. "Alpha Pack" from different campaigns — and
-// the signature dedupes them, so the items must too, or findUnclaimedSet's
-// size check never matches and every account gets its own set/listing).
+// How many copies one drop entry stands for. Raw inventory drops are one copy
+// each (duplicates in the list ARE copies); drops rebuilt from a set's items
+// carry the set's qty so a successor/rebuild keeps the "4× Alpha Pack" identity.
+function dropQty(d) {
+  const q = Math.floor(Number(d && d.qty));
+  return Number.isFinite(q) && q > 1 ? q : 1;
+}
+
+// Count copies per itemKey, in first-seen order. Returns Map key -> qty.
+function qtyByKey(drops) {
+  const counts = new Map();
+  for (const d of drops || []) {
+    const key = dropKey(d);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + dropQty(d));
+  }
+  return counts;
+}
+
+// "The same item" = one game + the exact same set of drop itemKeys AND copies
+// (v3: "4× Alpha Pack" and "1× Alpha Pack" are different items). A key is
+// written `itemKey×qty` when qty>1 so a qty-1 signature is unchanged from v2.
+//   keys     — decorated, sorted (the identity)
+//   itemKeys — plain, sorted (the $all prefilter for findUnclaimedSet)
+//   pairs    — [[itemKey, qty]] sorted by itemKey (the exact JS match)
+function signatureFor(game, drops) {
+  const g = String(game || "").trim().toLowerCase();
+  const counts = qtyByKey(drops);
+  const itemKeys = [...counts.keys()].sort();
+  const pairs = itemKeys.map((k) => [k, counts.get(k)]);
+  const keys = pairs.map(([k, q]) => (q > 1 ? k + "×" + q : k));
+  return { game: g, keys, itemKeys, pairs, key: g + "|" + keys.join(",") };
+}
+
+// A set's items are ONE row per unique drop with `qty` = the number of copies
+// (an account can hold several copies of the same drop — e.g. "Alpha Pack"
+// from four campaigns — and the signature folds them into one qty-4 item, so
+// the items must too, or findUnclaimedSet's size check never matches and every
+// account gets its own set/listing).
 function dedupeSetItems(drops, game) {
+  const counts = qtyByKey(drops);
   const seen = new Set();
   const items = [];
   for (const d of drops || []) {
     // Lowercased exactly like signatureFor: the signature is the set's
     // identity, and findUnclaimedSet matches items.itemKey with $all — a
     // case mismatch would silently create a duplicate set per account again.
-    const key = String(d.itemKey || d.name || "").trim().toLowerCase();
+    const key = dropKey(d);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     items.push({
@@ -469,10 +535,36 @@ function dedupeSetItems(drops, game) {
       name: d.name || "Reward",
       game: d.game || game,
       image: d.imageURL || "",
-      qty: 1,
+      qty: counts.get(key) || 1,
     });
   }
   return items;
+}
+
+// The drops a set stands for, in the shape the publish/title helpers expect
+// (like scan `sellable`), carrying each item's qty so titles and signatures
+// rebuilt from the set stay qty-aware.
+function dropsFromSet(set) {
+  return ((set && set.items) || []).map((i) => ({
+    name: i.name,
+    game: i.game,
+    campaign: "",
+    imageURL: i.image || "",
+    itemKey: i.itemKey,
+    qty: dropQty(i),
+  }));
+}
+
+// Expand a set's items back into one drop entry PER COPY — the shape
+// classifyHoldings takes (duplicates are copies). Used when a classification
+// has to be rebuilt from a stored set (successor publish, rebuild, reprice).
+function expandSetDrops(set) {
+  const out = [];
+  for (const d of dropsFromSet(set)) {
+    const n = dropQty(d);
+    for (let i = 0; i < n; i++) out.push({ ...d, qty: 1 });
+  }
+  return out;
 }
 
 // ONE listing = ONE game. An account can farm drops for several games at once
@@ -512,19 +604,21 @@ function pickListingGroup(preferredGame, drops) {
 }
 
 // The drops a listing TITLE/DESCRIPTION should show: one entry per unique
-// itemKey (same dedupe rule as signatureFor / dedupeSetItems), preserving the
-// first-seen drop so buildTitle sees exactly the set's items. Without this an
-// account holding "Alpha Pack" from four campaigns lists as
-// "Alpha Pack + Alpha Pack +2 more" — the set is one item, so is the title.
+// itemKey (same dedupe rule as signatureFor / dedupeSetItems) carrying `qty` =
+// the number of copies, preserving the first-seen drop so the title builders
+// see exactly the set's items. An account holding "Alpha Pack" from four
+// campaigns is ONE item with qty 4 — "4× Alpha Pack", never
+// "Alpha Pack + Alpha Pack +2 more". Never mutates the input drops.
 function uniqueDrops(drops) {
+  const counts = qtyByKey(drops);
   const seen = new Set();
   const out = [];
   for (const d of drops || []) {
     if (!d || !String(d.name || "").trim()) continue;
-    const key = String(d.itemKey || d.name || "").trim().toLowerCase();
+    const key = dropKey(d);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push(d);
+    out.push({ ...d, itemKey: key, qty: counts.get(key) || 1 });
   }
   return out;
 }
@@ -584,16 +678,47 @@ async function manualSoldOwnerKeys(ledgers) {
 // House title style, exactly like the auto-lister:
 //   "{Game} Twitch Drops ({N} Items) — {Item A} + {Item B} +{N-2} more"
 // so a buyer sees the item and its drops, not a vague "drop account".
-function listingTitle(game, drops) {
-  const items = uniqueDrops(drops);
-  if (items.length) {
-    return buildTitle({
-      game: String(game || "Twitch").trim(),
-      items,
-      campaignName: "",
-    });
+//
+// v3: qty-aware and event-aware. `cls` is the unclaimedBundles.classifyHoldings
+// result for these drops (null/undefined when unknown); the title comes from
+// unclaimedBundles.bundleTitle. When that module is unavailable (or throws)
+// the local fallback below produces the contract's "no event" form itself:
+//   "{Game} Twitch Drops (5 Items) — 4× Alpha Pack + SMELLS LIKE BURNING"
+// where the item count is the SUM of copies.
+function qtyTitleFallback(game, items) {
+  const g = String(game || "Twitch").trim();
+  const total = items.reduce((m, i) => m + dropQty(i), 0);
+  const names = items.map((i) => (dropQty(i) > 1 ? dropQty(i) + "× " : "") + i.name);
+  const prefix = g + " Twitch Drops";
+  const countBit = " (" + total + " Item" + (total === 1 ? "" : "s") + ")";
+  const more = names.length > 2 ? " +" + (names.length - 2) + " more" : "";
+  let title = prefix + countBit + " — " + names.slice(0, 2).join(" + ") + more;
+  if (title.length > 120) {
+    const one = names[0] ? " — " + names[0] + (names.length > 1 ? " +" + (names.length - 1) + " more" : "") : "";
+    title = prefix + countBit + one;
   }
-  return (game ? String(game).trim() : "Twitch") + " drop account — unclaimed";
+  if (title.length > 120) title = (prefix + countBit).slice(0, 120);
+  return title;
+}
+
+function listingTitle(game, drops, cls) {
+  const items = uniqueDrops(drops);
+  if (!items.length) {
+    return (game ? String(game).trim() : "Twitch") + " drop account — unclaimed";
+  }
+  const g = String(game || "Twitch").trim();
+  const ub = bundlesMod();
+  if (ub && typeof ub.bundleTitle === "function") {
+    try {
+      const t = String(
+        ub.bundleTitle({ game: g, items, classification: cls || null }) || "",
+      ).trim();
+      if (t) return t.slice(0, 120);
+    } catch (e) {
+      console.error("unclaimedAutoList bundleTitle failed:", e.message);
+    }
+  }
+  return qtyTitleFallback(g, items);
 }
 
 // Reuse the auto-lister's house description so an unclaimed listing reads
@@ -609,7 +734,14 @@ function listingTitle(game, drops) {
 // are attached as the platform's auto-delivery code and handed to the buyer
 // ONLY after the order completes (same model as the auto-farm). It takes no
 // login at all.
-function listingDescription(game, drops, marketplace) {
+//
+// v3: `cls` (classifyHoldings result) adds unclaimedBundles.bundleDescriptionLines
+// — the event line, the copies line, the bulk line — inserted BEFORE the house
+// "Includes:" list (the contract's "after the first line" for a description
+// whose first line IS the item list: the bundle lines lead, the house template
+// follows unchanged). `opts.lotsEnabled`/`opts.lotSize` feed the Gameflip bulk
+// line. Items carry qty, so the house list already reads "- 4× Alpha Pack".
+function listingDescription(game, drops, marketplace, cls, opts = {}) {
   const items = uniqueDrops(drops);
   const g = String(game || "Twitch").trim();
   if (!items.length) {
@@ -619,13 +751,113 @@ function listingDescription(game, drops, marketplace) {
       "game account and claim them yourself."
     );
   }
-  return buildDescription({
+  const base = buildDescription({
     game: g,
     items,
     campaignName: "",
     postEvent: false,
     marketplace,
   });
+  let extra = [];
+  const ub = bundlesMod();
+  if (ub && typeof ub.bundleDescriptionLines === "function") {
+    try {
+      extra = (
+        ub.bundleDescriptionLines({
+          game: g,
+          items,
+          classification: cls || null,
+          marketplace,
+          lotsEnabled: !!opts.lotsEnabled,
+          lotSize: Number(opts.lotSize) || 0,
+        }) || []
+      )
+        .map((l) => String(l == null ? "" : l))
+        .filter((l) => l.trim());
+    } catch (e) {
+      console.error("unclaimedAutoList bundleDescriptionLines failed:", e.message);
+      extra = [];
+    }
+  }
+  if (!extra.length) return base;
+  const lines = base.split("\n");
+  let at = lines.findIndex((l) => l.trim() === "Includes:");
+  if (at < 0) at = 0;
+  lines.splice(at, 0, ...extra, "");
+  return lines.join("\n").slice(0, 5000);
+}
+
+// EXPIRY STRIKES (v3). One empty inventory read is not proof the drops are
+// gone — Twitch returns an empty inventory transiently, and v2 delisted on the
+// spot, then re-listed the same account ten minutes later (the Marvel Rivals
+// flap). Pure decision for the check pass:
+//   ledger        — { emptyReads, firstEmptyAt } (the stored strikes)
+//   now           — ms epoch
+//   confirmPasses — consecutive empty reads required (settings, default 2)
+//   campaignEnded — every campaign the ledger's drops came from ended >1h ago
+//   empty         — whether THIS read was empty (default true; a non-empty
+//                   read resets the strikes and never expires)
+// Returns { expire, emptyReads, firstEmptyAt, reason } — the caller persists
+// emptyReads/firstEmptyAt. Expire when emptyReads >= confirmPasses AND the
+// first empty read was >= 20 min ago, OR the campaign(s) ended and this is at
+// least the first empty read (an ended campaign's drops cannot come back).
+const EXPIRY_MIN_GAP_MS = 20 * 60 * 1000;
+function shouldExpire(ledger, now, opts = {}) {
+  const t = Number(now);
+  const nowMs = Number.isFinite(t) ? t : Date.now();
+  const empty = opts.empty !== false;
+  if (!empty) {
+    return { expire: false, emptyReads: 0, firstEmptyAt: null, reason: "non-empty read" };
+  }
+  const passes = Math.max(1, Math.floor(Number(opts.confirmPasses) || 0) || 2);
+  const prevRaw = Number(ledger && ledger.emptyReads);
+  const prev = Number.isFinite(prevRaw) && prevRaw > 0 ? Math.floor(prevRaw) : 0;
+  const emptyReads = prev + 1;
+  let first = ledger && ledger.firstEmptyAt ? new Date(ledger.firstEmptyAt) : null;
+  if (!first || Number.isNaN(first.getTime())) first = new Date(nowMs);
+  const gapOk = nowMs - first.getTime() >= EXPIRY_MIN_GAP_MS;
+  // NOTE: `opts.campaignEnded` deliberately does NOT shortcut the strikes.
+  // The stock this engine sells is post-event by design (Week 1 + Finals,
+  // EWC DAY 1..10), so "campaign ended" is true for most listed accounts while
+  // their drops are still sitting in the inventory — an empty read on such an
+  // account is far more likely a transient GQL failure than a real expiry.
+  // Confirmation always needs `passes` consecutive empty reads spanning the
+  // minimum gap; the flag only annotates the reason.
+  if (emptyReads >= passes && gapOk) {
+    return {
+      expire: true,
+      emptyReads,
+      firstEmptyAt: first,
+      reason:
+        emptyReads + " consecutive empty reads" + (opts.campaignEnded ? " (campaign ended)" : ""),
+    };
+  }
+  return {
+    expire: false,
+    emptyReads,
+    firstEmptyAt: first,
+    reason:
+      emptyReads < passes
+        ? "empty read " + emptyReads + "/" + passes
+        : "awaiting 20-minute confirmation gap",
+  };
+}
+
+// campaignEnded input for shouldExpire: every campaign named in the ledger's
+// drops has ended more than an hour ago per TwitchCampaign. `ended` is a Set of
+// "normGame|campaign name lowercased" keys (see endedCampaignKeys); unknown
+// campaigns / drops with no campaign name count as NOT ended (conservative).
+function ledgerCampaignsEnded(ledger, ended) {
+  const names = [
+    ...new Set(
+      ((ledger && ledger.drops) || [])
+        .map((d) => String((d && d.campaign) || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  if (!names.length || !ended || !ended.size) return false;
+  const g = settings.normGameName((ledger && ledger.game) || "");
+  return names.every((n) => ended.has(g + "|" + n));
 }
 
 // Which active-listing logins would block a fresh listing (one account, one
@@ -859,33 +1091,110 @@ async function enabledMarketsForGame(game) {
   return { markets, ggselCategoryId };
 }
 
-async function findUnclaimedSet(signature) {
-  if (!signature || !signature.keys || !signature.keys.length) return null;
-  return DropSet.findOne({
-    note: SET_NOTE,
-    "items.itemKey": { $all: signature.keys },
-    items: { $size: signature.keys.length },
-  }).lean();
+// Sorted [itemKey, qty] pairs of a stored set (missing qty = 1, like the
+// pre-v3 rows), for the exact match against a signature's pairs.
+function setPairs(set) {
+  return ((set && set.items) || [])
+    .map((i) => [String((i && i.itemKey) || "").trim().toLowerCase(), dropQty(i)])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
-async function createUnclaimedSet(signature, game, drops, price) {
+function pairsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i][0] !== b[i][0] || a[i][1] !== b[i][1]) return false;
+  }
+  return true;
+}
+
+// Items AND copies must match (v3): the $all/$size prefilter narrows to sets
+// holding exactly these itemKeys, then the full sorted [itemKey, qty] signature
+// is compared in JS, so a "4× Alpha Pack" set never absorbs a 1× account and
+// every pre-v3 qty-1 set keeps matching qty-1 accounts.
+async function findUnclaimedSet(signature) {
+  const plain = (signature && (signature.itemKeys || signature.keys)) || [];
+  if (!plain.length) return null;
+  const want = (signature.pairs || plain.map((k) => [k, 1])).slice().sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+  );
+  const cands = await DropSet.find({
+    note: SET_NOTE,
+    "items.itemKey": { $all: plain },
+    items: { $size: plain.length },
+  })
+    .sort({ _id: 1 })
+    .lean();
+  return cands.find((s) => pairsEqual(setPairs(s), want)) || null;
+}
+
+// `meta` (v3, optional): { cls, floor } — the classifyHoldings result and the
+// price floor. The set records where its bundle came from
+// (sourceType/sourceEventKey/sourceEventName/sourceCampaignIds) and is named
+// by the bundle title, so the Bundles panel and the repricer can rebuild the
+// classification from the set alone.
+function setSourceFields(cls, game, drops) {
+  const ev = cls && cls.event ? cls.event : null;
+  const campaignIds = [];
+  for (const w of (cls && cls.waves) || []) {
+    if (w && w.campaignId && (w.held || []).length) campaignIds.push(String(w.campaignId));
+  }
+  return {
+    sourceType: "unclaimed-bundle",
+    sourceEventKey: (ev && ev.key) || "",
+    sourceEventName: (ev && ev.name) || "",
+    sourceCampaignIds: [...new Set(campaignIds)],
+    name: listingTitle(game, drops, cls),
+  };
+}
+
+async function createUnclaimedSet(signature, game, drops, price, meta = {}) {
+  const src = setSourceFields(meta.cls, game, drops);
   return DropSet.create({
-    name: (game || "Twitch") + " drops — unclaimed",
+    name: src.name || (game || "Twitch") + " drops — unclaimed",
     note: SET_NOTE,
     items: dedupeSetItems(drops, game),
     price,
+    minPriceUsd: Math.max(0, Number(meta.floor) || 0),
     listed: false,
     custom: true,
     coverGame: game,
+    sourceType: src.sourceType,
+    sourceEventKey: src.sourceEventKey,
+    sourceEventName: src.sourceEventName,
+    sourceCampaignIds: src.sourceCampaignIds,
   });
 }
 
 // Find or create the item's set. Two concurrent workers for the same signature
-// could race a duplicate create; the winner check below collapses them.
-async function ensureUnclaimedSet(signature, game, drops, price) {
+// could race a duplicate create; the winner check below collapses them. An
+// existing set that predates v3 (no source fields) is back-filled once so the
+// repricer can classify it; its price is NOT touched here (see scan pass).
+async function ensureUnclaimedSet(signature, game, drops, price, meta = {}) {
   const existing = await findUnclaimedSet(signature);
-  if (existing) return existing;
-  const created = await createUnclaimedSet(signature, game, drops, price);
+  if (existing) {
+    if (meta.cls && !existing.sourceEventKey && meta.cls.event && meta.cls.event.key) {
+      const src = setSourceFields(meta.cls, game, drops);
+      await DropSet.updateOne(
+        { _id: existing._id },
+        {
+          $set: {
+            sourceType: src.sourceType,
+            sourceEventKey: src.sourceEventKey,
+            sourceEventName: src.sourceEventName,
+            sourceCampaignIds: src.sourceCampaignIds,
+          },
+        },
+      ).catch(() => {});
+      Object.assign(existing, {
+        sourceType: src.sourceType,
+        sourceEventKey: src.sourceEventKey,
+        sourceEventName: src.sourceEventName,
+        sourceCampaignIds: src.sourceCampaignIds,
+      });
+    }
+    return existing;
+  }
+  const created = await createUnclaimedSet(signature, game, drops, price, meta);
   const winner = await findUnclaimedSet(signature);
   if (winner && String(winner._id) !== String(created._id)) {
     await DropSet.deleteOne({ _id: created._id }).catch(() => {});
@@ -898,6 +1207,12 @@ async function ensureUnclaimedSet(signature, game, drops, price) {
 // Row + ledger queries
 // ---------------------------------------------------------------------------
 
+// Lot rows (lotSize > 0, utils/unclaimedLots.js) are Gameflip listings that
+// deliver N accounts at once. They live beside the single-unit chain and must
+// never be mistaken for it: this filter keeps every "is there a live single
+// unit?" query (chain publish, market pick, repair, consistency) lot-blind.
+const NOT_LOT = { lotSize: { $in: [0, null] } };
+
 async function activeRowForSetMarket(setId, marketplace) {
   if (!setId || !marketplace) return null;
   return MarketplaceListing.findOne({
@@ -905,6 +1220,7 @@ async function activeRowForSetMarket(setId, marketplace) {
     set: setId,
     marketplace,
     status: "active",
+    ...NOT_LOT,
   }).lean();
 }
 
@@ -916,23 +1232,53 @@ async function listedLedgersForSetMarket(setId, market) {
 }
 
 // The marketplace row this ledger is (or was) a unit of.
+// The marketplace row a ledger's unit lives on. Gameflip needs care: a set
+// can hold an older SOLD single row, the current live single row and (lots on)
+// a lot row all at once, and removeUnitFromRow's gameflip branch only acts when
+// the row's accountLogin IS this ledger's login — an unsorted findOne used to
+// hand back a sold predecessor or a lot row, silently skipping the delist while
+// the account was released to the pool. So for gameflip: this login's own
+// single row first (active before sold), then the live single-unit head; lot
+// rows never (they are unclaimedLots' business).
 async function rowForLedger(ledger) {
   if (!ledger || !ledger.set) return null;
-  if (ledger.market) {
+  const login = String(ledger.login || "").trim();
+  const loginEsc = login.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const gameflipRow = async () => {
+    if (login) {
+      const own = await MarketplaceListing.find({
+        origin: ORIGIN,
+        set: ledger.set,
+        marketplace: "gameflip",
+        status: { $in: ["active", "sold"] },
+        accountLogin: new RegExp("^" + loginEsc + "$", "i"),
+        ...NOT_LOT,
+      })
+        .sort({ status: 1, updatedAt: -1 }) // "active" sorts before "sold"
+        .limit(1)
+        .lean();
+      if (own[0]) return own[0];
+    }
+    return MarketplaceListing.findOne({
+      origin: ORIGIN,
+      set: ledger.set,
+      marketplace: "gameflip",
+      status: "active",
+      ...NOT_LOT,
+    }).lean();
+  };
+  if (ledger.market && ledger.market !== "gameflip") {
     const row = await MarketplaceListing.findOne({
       origin: ORIGIN,
       set: ledger.set,
       marketplace: ledger.market,
       status: { $in: ["active", "sold"] },
-    }).lean();
+    })
+      .sort({ status: 1, updatedAt: -1 })
+      .lean();
     if (row) return row;
   }
-  return MarketplaceListing.findOne({
-    origin: ORIGIN,
-    set: ledger.set,
-    marketplace: "gameflip",
-    status: { $in: ["active", "sold"] },
-  }).lean();
+  return gameflipRow();
 }
 
 // The owner row's email, secretBox-encrypted where present. Pool rows carry
@@ -979,14 +1325,444 @@ async function credentialForLedger(ledger) {
 }
 
 // ---------------------------------------------------------------------------
+// v3: event catalog, bundle classification, analytics pricing, lots, reprice
+// (docs/UNCLAIMED-BUNDLES-CONTRACT.md — engine hunks 2, 3, 7, 8)
+// ---------------------------------------------------------------------------
+
+// Thin wrapper over unclaimedBundles.loadCatalog: the event catalog (Map) for
+// these games, or an EMPTY Map when the module is missing or the load fails —
+// an empty catalog classifies every account as "no event", i.e. v2 behaviour.
+async function catalogForGames(games) {
+  const list = [...new Set((games || []).map((g) => String(g || "").trim()).filter(Boolean))];
+  const ub = bundlesMod();
+  if (!ub || typeof ub.loadCatalog !== "function") return new Map();
+  try {
+    const cat = await ub.loadCatalog({ games: list });
+    return cat instanceof Map ? cat : new Map(Object.entries(cat || {}));
+  } catch (e) {
+    console.error("unclaimedAutoList loadCatalog failed:", e.message);
+    return new Map();
+  }
+}
+
+// Per-pass catalog cache. The batch's candidate games are loaded up front; a
+// listing whose REAL game (pickListingGroup) was not among them is loaded on
+// demand and merged, so a mis-configured bot still gets its event resolved.
+function makeCatalogLoader(initialGames) {
+  const catalog = new Map();
+  const loaded = new Set();
+  const keyOf = (g) => settings.normGameName(g) || String(g || "").trim().toLowerCase();
+  let ready = null;
+  const merge = (cat) => {
+    for (const [k, v] of cat || []) catalog.set(k, v);
+  };
+  const loadFor = async (games) => {
+    const fresh = (games || []).filter((g) => g && !loaded.has(keyOf(g)));
+    if (!fresh.length) return catalog;
+    for (const g of fresh) loaded.add(keyOf(g));
+    merge(await catalogForGames(fresh));
+    return catalog;
+  };
+  return {
+    // Map for `game` (loads the batch games once, then this game if new).
+    async forGame(game) {
+      if (!ready) ready = loadFor(initialGames || []);
+      await ready.catch(() => {});
+      if (game && !loaded.has(keyOf(game))) await loadFor([game]).catch(() => {});
+      return catalog;
+    },
+    catalog,
+  };
+}
+
+// classifyHoldings, guarded. Returns null when the module is missing, the
+// catalog is empty, or the classifier throws (→ plain qty-aware listing).
+function classifyDrops(game, drops, catalog, now) {
+  const ub = bundlesMod();
+  if (!ub || typeof ub.classifyHoldings !== "function") return null;
+  if (!catalog || (catalog instanceof Map && !catalog.size)) return null;
+  try {
+    return ub.classifyHoldings(game, drops || [], catalog, now || Date.now()) || null;
+  } catch (e) {
+    console.error("unclaimedAutoList classifyHoldings failed:", e.message);
+    return null;
+  }
+}
+
+// Narrow a catalog to the set's recorded event when it knows one, so a set
+// rebuilt from storage is classified against ITS event, not a same-item event
+// from another wave (the "via sourceEventKey" rule).
+function catalogForSet(set, catalog) {
+  const key = String((set && set.sourceEventKey) || "");
+  if (key && catalog && catalog.has(key)) return new Map([[key, catalog.get(key)]]);
+  return catalog;
+}
+
+// Rebuild the classification of a stored set (successor publish, GGSel
+// rebuild, reprice). `catalog` may be passed by a pass that already loaded one;
+// otherwise it is loaded for the set's game. Never throws.
+async function classificationForSet(set, catalog) {
+  if (!set) return null;
+  const game = set.coverGame || (set.items && set.items[0] && set.items[0].game) || "";
+  try {
+    const cat = catalog || (await catalogForGames([game]));
+    return classifyDrops(game, expandSetDrops(set), catalogForSet(set, cat));
+  } catch (e) {
+    console.error("unclaimedAutoList classificationForSet failed:", e.message);
+    return null;
+  }
+}
+
+// Analytics price for a set's items (hunk 3): unclaimedBundles.bundlePrice,
+// falling back to the auto-lister's derivePrice floored at the unclaimed
+// floors when the module is unavailable. Always returns { price, floor, … }.
+// `soldFloorUsd` (optional, EXISTING sets only — see soldFloorForSet) is the
+// best price this set actually sold at recently: the analytics price is never
+// allowed to drop below it, so a set that just sold at $3 is not relisted at
+// $1.50 because the anchor moved. Passed through to bundlePrice and clamped
+// here too, so the floor holds even on the derivePrice fallback path.
+function priceForItems({ research, game, items, cls, pricing, soldFloorUsd = 0 }) {
+  const p = pricing || settings.getUnclaimedPricing();
+  let gameFloor = 0;
+  try {
+    gameFloor = Number(settings.gameFloorFor(game)) || 0;
+  } catch {
+    gameFloor = 0;
+  }
+  const floor = Math.max(Number(p.floorUsd) || 0, gameFloor, 0);
+  const soldFloor = Math.max(Number(soldFloorUsd) || 0, 0);
+  const ub = bundlesMod();
+  if (ub && typeof ub.bundlePrice === "function") {
+    try {
+      const r = ub.bundlePrice({
+        research: research || null,
+        game,
+        items: items || [],
+        classification: cls || null,
+        pricing: p,
+        soldFloorUsd: soldFloor,
+      });
+      const price = Number(r && r.price);
+      if (Number.isFinite(price) && price > 0) {
+        return {
+          price: Math.max(price, floor, soldFloor),
+          floor: Math.max(Number(r.floor) || 0, floor),
+          soldFloor: Math.max(Number(r.soldFloor) || 0, soldFloor),
+          anchor: r.anchor,
+          anchorSource: r.anchorSource || "",
+          totalQty: r.totalQty,
+          full: !!r.full,
+        };
+      }
+    } catch (e) {
+      console.error("unclaimedAutoList bundlePrice failed:", e.message);
+    }
+  }
+  const base = Number(derivePrice(research)) || 0;
+  const price = Math.max(Math.round(Math.max(base, floor) * 4) / 4, floor, soldFloor);
+  return {
+    price,
+    floor,
+    soldFloor,
+    anchor: base,
+    anchorSource: "derivePrice-fallback",
+    totalQty: (items || []).reduce((m, i) => m + dropQty(i), 0),
+    full: false,
+  };
+}
+
+// The highest price an EXISTING set's unclaimed rows actually sold at in the
+// last `days` days (MarketplaceListing status "sold", origin unclaimed, by the
+// row's updatedAt — the sold flip). 0 when the set never sold in the window,
+// on a missing setId, or on a DB error, so callers can always pass the result
+// straight into priceForItems as `soldFloorUsd`. Lot rows are excluded: a lot
+// price covers N accounts and is not a per-unit signal.
+async function soldFloorForSet(setId, days = 30) {
+  if (!setId) return 0;
+  const span = Math.max(Number(days) || 0, 0) * 24 * 60 * 60 * 1000;
+  if (!span) return 0;
+  try {
+    const rows = await MarketplaceListing.find(
+      {
+        set: setId,
+        origin: ORIGIN,
+        status: "sold",
+        updatedAt: { $gte: new Date(Date.now() - span) },
+        ...NOT_LOT,
+      },
+      { price: 1 },
+    ).lean();
+    let max = 0;
+    for (const r of rows || []) {
+      const v = Number(r && r.price) || 0;
+      if (v > max) max = v;
+    }
+    return max;
+  } catch (e) {
+    console.error("unclaimedAutoList soldFloorForSet failed:", e.message);
+    return 0;
+  }
+}
+
+// MarketResearch rows for these games, keyed by lowercased game label.
+async function researchByGame(games) {
+  const list = [...new Set((games || []).map((g) => String(g || "").trim()).filter(Boolean))];
+  const map = new Map();
+  if (!list.length) return map;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rows = await MarketResearch.find({
+    game: { $in: list.map((g) => new RegExp("^" + esc(g) + "$", "i")) },
+  })
+    .lean()
+    .catch(() => []);
+  for (const r of rows) map.set(String(r.game || "").toLowerCase(), r);
+  return map;
+}
+
+// The set's Gameflip ledgers that are WAITING for the chain (listed, market
+// gameflip, not the live single unit, not already inside a lot, owner not
+// manual-sold), oldest listedAt first — the pool a lot is formed from.
+async function waitingGameflipLedgers(setId) {
+  if (!setId) return [];
+  const ledgers = await UnclaimedAccount.find({
+    set: setId,
+    market: "gameflip",
+    status: "listed",
+    lotId: { $in: ["", null] },
+  })
+    .sort({ listedAt: 1, _id: 1 })
+    .lean();
+  if (!ledgers.length) return [];
+  const live = await activeRowForSetMarket(setId, "gameflip");
+  const liveLogin = String((live && live.accountLogin) || "").trim().toLowerCase();
+  const marked = await manualSoldOwnerKeys(ledgers);
+  return filterManualSoldLedgers(ledgers, marked).filter(
+    (l) => !liveLogin || String(l.loginLower || "").toLowerCase() !== liveLogin,
+  );
+}
+
+// Hunk 7: publish ONE Gameflip lot for a set when the flag is on and enough
+// units are waiting. Never throws.
+async function maybePublishLot(set, pricing) {
+  const p = pricing || settings.getUnclaimedPricing();
+  if (!p.lots || !set) return null;
+  const lots = lotsMod();
+  if (!lots || typeof lots.publishLotIfReady !== "function") return null;
+  try {
+    const waiting = await waitingGameflipLedgers(set._id);
+    if (waiting.length < Math.max(2, Number(p.lotSize) || 0)) return null;
+    return await lots.publishLotIfReady(set, { pricing: p });
+  } catch (e) {
+    console.error("unclaimedAutoList publishLotIfReady failed:", e.message);
+    return null;
+  }
+}
+
+// "campaign ended" keys for shouldExpire: every TwitchCampaign whose name is
+// in `names` and whose endAt is more than an hour in the past, keyed
+// "normGame|name-lowercased" (plus "|name" when the campaign row has no game).
+async function endedCampaignKeys(names, now) {
+  const list = [...new Set((names || []).map((n) => String(n || "").trim()).filter(Boolean))];
+  const ended = new Set();
+  if (!list.length) return ended;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const cutoff = new Date((Number(now) || Date.now()) - 60 * 60 * 1000);
+  const rows = await TwitchCampaign.find(
+    {
+      name: { $in: list.map((n) => new RegExp("^" + esc(n) + "$", "i")) },
+      endAt: { $ne: null, $lt: cutoff },
+    },
+    { name: 1, game: 1, endAt: 1 },
+  )
+    .lean()
+    .catch(() => []);
+  // A campaign name can exist for several games (or be re-run); only the rows
+  // that ended count, and a still-running same-name row for the same game wins.
+  const liveRows = await TwitchCampaign.find(
+    {
+      name: { $in: list.map((n) => new RegExp("^" + esc(n) + "$", "i")) },
+      $or: [{ endAt: null }, { endAt: { $gte: cutoff } }],
+    },
+    { name: 1, game: 1 },
+  )
+    .lean()
+    .catch(() => []);
+  const live = new Set(
+    liveRows.map(
+      (r) => settings.normGameName(r.game || "") + "|" + String(r.name || "").trim().toLowerCase(),
+    ),
+  );
+  for (const r of rows) {
+    const key = settings.normGameName(r.game || "") + "|" + String(r.name || "").trim().toLowerCase();
+    if (!live.has(key)) ended.add(key);
+  }
+  return ended;
+}
+
+// Hunk 8: reprice every active single-unit unclaimed row to its analytics
+// price. Dry-run by default — returns the plan; `apply:true` patches the rows
+// whose |drift| >= pricing.repriceDriftPct. Manual/auto rows and lot rows are
+// never touched (lots are priced from their set by unclaimedLots).
+async function repriceUnclaimedRows({ apply = false } = {}) {
+  const pricing = settings.getUnclaimedPricing();
+  const out = { apply: !!apply, driftPct: pricing.repriceDriftPct, rows: 0, changed: 0, plan: [], notes: [] };
+  const rows = await MarketplaceListing.find(
+    { origin: ORIGIN, status: "active", ...NOT_LOT },
+    { set: 1, marketplace: 1, externalId: 1, title: 1, price: 1 },
+  ).lean();
+  out.rows = rows.length;
+  if (!rows.length) return out;
+  const setIds = [...new Set(rows.map((r) => String(r.set || "")).filter(Boolean))];
+  const sets = await DropSet.find({ _id: { $in: setIds } }).lean();
+  const setById = new Map(sets.map((s) => [String(s._id), s]));
+  const gameOf = (s) => (s && (s.coverGame || (s.items && s.items[0] && s.items[0].game))) || "";
+  const games = [...new Set(sets.map(gameOf).filter(Boolean))];
+  const [catalog, research] = await Promise.all([catalogForGames(games), researchByGame(games)]);
+  // Recent sold floor per set — one lookup per set for the whole run. Every
+  // row of a set shares it, so a set that sold at $3 last week is never
+  // repriced below $3 no matter where the analytics anchor drifted.
+  const soldFloors = new Map(); // setId -> max sold price (0 when none)
+  await Promise.all(
+    sets.map(async (s) => {
+      soldFloors.set(String(s._id), await soldFloorForSet(s._id));
+    }),
+  );
+  const priced = new Map(); // setId -> { price, floor, soldFloor, ... }
+  for (const s of sets) {
+    const game = gameOf(s);
+    const cls = classifyDrops(game, expandSetDrops(s), catalogForSet(s, catalog));
+    priced.set(
+      String(s._id),
+      priceForItems({
+        research: research.get(String(game).toLowerCase()) || null,
+        game,
+        items: s.items || [],
+        cls,
+        pricing,
+        soldFloorUsd: soldFloors.get(String(s._id)) || 0,
+      }),
+    );
+  }
+  let rubRate = 0;
+  const needRub = rows.some((r) => r.marketplace === "ggsel");
+  if (apply && needRub) {
+    if (typeof mp.usdToRub === "function") {
+      try {
+        rubRate = Number(await mp.usdToRub()) || 0;
+      } catch {
+        rubRate = 0;
+      }
+    }
+    if (!rubRate) out.notes.push("ggsel rows skipped: USD→RUB rate unavailable");
+  }
+  const touchedSets = new Map();
+  for (const row of rows) {
+    const s = setById.get(String(row.set || ""));
+    const p = priced.get(String(row.set || ""));
+    if (!s || !p) {
+      out.notes.push("row " + String(row._id) + " has no set — skipped");
+      continue;
+    }
+    const current = Number(row.price) || 0;
+    const target = Number(p.price) || 0;
+    const driftPct = current > 0 ? ((target - current) / current) * 100 : target > 0 ? 100 : 0;
+    const entry = {
+      rowId: String(row._id),
+      setId: String(s._id),
+      marketplace: row.marketplace,
+      externalId: row.externalId,
+      title: row.title || s.name || "",
+      game: gameOf(s),
+      current,
+      target,
+      floor: p.floor,
+      soldFloor: Number(p.soldFloor) || 0,
+      anchorSource: p.anchorSource || "",
+      driftPct: Math.round(driftPct * 10) / 10,
+      apply: false,
+      applied: false,
+      error: "",
+    };
+    entry.apply = Math.abs(driftPct) >= (Number(pricing.repriceDriftPct) || 20) && target > 0 && Math.abs(target - current) >= 0.01;
+    if (apply && entry.apply) {
+      try {
+        if (row.marketplace === "gameflip") {
+          await mp.gameflipReprice(row.externalId, { priceUsd: target });
+        } else if (row.marketplace === "digiseller") {
+          const r = await mp.digisellerRepriceProducts([{ productId: row.externalId, priceUsd: target }]);
+          if (r && r.failed) throw new Error((r.errors && r.errors[0]) || "digiseller reprice failed");
+        } else if (row.marketplace === "ggsel") {
+          if (!rubRate) {
+            entry.error = "skipped: no RUB rate";
+            out.plan.push(entry);
+            continue;
+          }
+          await mp.ggselUpdateOffer(row.externalId, { priceRub: Math.ceil(target * rubRate) });
+        } else {
+          entry.error = "skipped: unsupported marketplace";
+          out.plan.push(entry);
+          continue;
+        }
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          { $set: { price: target, lastError: "" } },
+        ).catch(() => {});
+        touchedSets.set(String(s._id), p);
+        entry.applied = true;
+        out.changed++;
+        logEvent({
+          category: "unclaimed",
+          action: "repriced",
+          actor: "unclaimedAutoList",
+          subject: String(row.externalId || row._id),
+          game: entry.game,
+          detail:
+            row.marketplace + " $" + current.toFixed(2) + " → $" + target.toFixed(2) +
+            " (" + (driftPct >= 0 ? "+" : "") + entry.driftPct + "%, anchor " + (p.anchorSource || "?") + ")",
+        });
+      } catch (e) {
+        entry.error = e.message;
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          { $set: { lastError: "reprice: " + e.message } },
+        ).catch(() => {});
+      }
+    }
+    out.plan.push(entry);
+  }
+  for (const [setId, p] of touchedSets) {
+    await DropSet.updateOne(
+      { _id: setId },
+      { $set: { price: p.price, minPriceUsd: p.floor } },
+    ).catch(() => {});
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Publishing (ONE listing per item per marketplace)
 // ---------------------------------------------------------------------------
 
-async function publishGameflipUnit(set, cand, drops, price, img) {
+// The lots flags the Gameflip bulk line in a description depends on.
+function descOpts() {
+  let p = null;
+  try {
+    p = settings.getUnclaimedPricing();
+  } catch {
+    p = null;
+  }
+  return { lotsEnabled: !!(p && p.lots), lotSize: (p && p.lotSize) || 0 };
+}
+
+// `cls` (v3, optional trailing arg on every publisher): the classifyHoldings
+// result for this set's drops — drives the bundle title/description lines.
+async function publishGameflipUnit(set, cand, drops, price, img, cls) {
   const game = cand.game || (drops[0] && drops[0].game) || set.coverGame || "";
+  const title = listingTitle(game, drops, cls);
+  const description = listingDescription(game, drops, "gameflip", cls, descOpts());
   const r = await mp.gameflipPublish({
-    title: listingTitle(game, drops),
-    description: listingDescription(game, drops, "gameflip"),
+    title,
+    description,
     priceUsd: price,
     imagePath: img || undefined,
     autoDeliverCode: gameflipDeliveryCode(cand.login, cand.password),
@@ -996,8 +1772,8 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
     marketplace: "gameflip",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(game, drops),
-    description: listingDescription(game, drops, "gameflip"),
+    title,
+    description,
     price,
     status: "active",
     origin: ORIGIN,
@@ -1010,10 +1786,12 @@ async function publishGameflipUnit(set, cand, drops, price, img) {
   });
 }
 
-async function publishDigisellerProduct(set, units, game, drops, price, img, categoryId) {
+async function publishDigisellerProduct(set, units, game, drops, price, img, categoryId, cls) {
+  const title = listingTitle(game, drops, cls);
+  const description = listingDescription(game, drops, "digiseller", cls);
   const r = await mp.digisellerPublish({
-    title: listingTitle(game, drops),
-    description: listingDescription(game, drops, "digiseller"),
+    title,
+    description,
     priceUsd: price,
     categories: [
       {
@@ -1060,8 +1838,8 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
     marketplace: "digiseller",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(game, drops),
-    description: listingDescription(game, drops, "digiseller"),
+    title,
+    description,
     price,
     status: "active",
     origin: ORIGIN,
@@ -1087,10 +1865,12 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
   return row;
 }
 
-async function publishGgselOffer(set, units, game, drops, price, img, categoryId) {
+async function publishGgselOffer(set, units, game, drops, price, img, categoryId, cls) {
+  const title = listingTitle(game, drops, cls);
+  const description = listingDescription(game, drops, "ggsel", cls);
   const r = await mp.ggselPublish({
-    title: listingTitle(game, drops),
-    description: listingDescription(game, drops, "ggsel"),
+    title,
+    description,
     priceUsd: price,
     categoryId,
     delivery: "auto",
@@ -1104,8 +1884,8 @@ async function publishGgselOffer(set, units, game, drops, price, img, categoryId
     marketplace: "ggsel",
     externalId: r.externalId,
     url: r.url || "",
-    title: listingTitle(game, drops),
-    description: listingDescription(game, drops, "ggsel"),
+    title,
+    description,
     price,
     status: "active",
     origin: ORIGIN,
@@ -1131,7 +1911,7 @@ async function publishGgselOffer(set, units, game, drops, price, img, categoryId
   return row;
 }
 
-async function publishProduct(set, market, units, game, drops, price, img, ggselCategoryId) {
+async function publishProduct(set, market, units, game, drops, price, img, ggselCategoryId, cls) {
   if (market === "digiseller") {
     return publishDigisellerProduct(
       set,
@@ -1141,9 +1921,10 @@ async function publishProduct(set, market, units, game, drops, price, img, ggsel
       price,
       img,
       settings.getAutoFarm().platiCategoryId,
+      cls,
     );
   }
-  return publishGgselOffer(set, units, game, drops, price, img, ggselCategoryId);
+  return publishGgselOffer(set, units, game, drops, price, img, ggselCategoryId, cls);
 }
 
 // Attach one more stock unit to an existing quantity product.
@@ -1198,6 +1979,9 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
     market: "gameflip",
     status: "listed",
     loginLower: { $ne: String(excludeLogin || "").toLowerCase() },
+    // A member of a Gameflip lot is already on sale inside that lot listing —
+    // it can never double as the chain's single live unit.
+    lotId: { $in: ["", null] },
   })
     .sort({ listedAt: 1, _id: 1 })
     .lean();
@@ -1206,14 +1990,9 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
   const marked = await manualSoldOwnerKeys(waitingList);
   const list = filterManualSoldLedgers(waitingList, marked);
   if (!list.length) return { published: false, reason: "no waiting unit" };
-  const drops = (set.items || []).map((i) => ({
-    name: i.name,
-    game: i.game,
-    campaign: "",
-    imageURL: i.image || "",
-    itemKey: i.itemKey,
-  }));
+  const drops = dropsFromSet(set);
   const game = set.coverGame || (drops[0] && drops[0].game) || "";
+  const cls = await classificationForSet(set);
   for (const waiting of list) {
     const cred = await credentialForLedger(waiting);
     if (!cred.password) continue;
@@ -1238,6 +2017,7 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
         drops,
         Number(set.price) || 0,
         img,
+        cls,
       );
       if (img) await fsp.unlink(img).catch(() => {});
       await UnclaimedAccount.updateOne(
@@ -1401,13 +2181,8 @@ async function rebuildGgselOffer(oldRow, remainingUnits) {
   const set = await DropSet.findById(oldRow.set).lean();
   if (!set) return;
   const game = (set.items && set.items[0] && set.items[0].game) || set.coverGame || "";
-  const drops = (set.items || []).map((i) => ({
-    name: i.name,
-    game: i.game,
-    campaign: "",
-    imageURL: i.image || "",
-    itemKey: i.itemKey,
-  }));
+  const drops = dropsFromSet(set);
+  const cls = await classificationForSet(set);
   const units = [];
   for (const u of remainingUnits) {
     const ledger = await UnclaimedAccount.findOne({
@@ -1441,6 +2216,7 @@ async function rebuildGgselOffer(oldRow, remainingUnits) {
     Number(set.price) || 0,
     img,
     ggselCategoryId,
+    cls,
   );
   if (img) await fsp.unlink(img).catch(() => {});
   await UnclaimedAccount.updateMany(
@@ -1687,9 +2463,13 @@ async function releaseToPool(ledger) {
     return false;
   }
   if (ledger.source === "webbot" && ledger.webBotAccountId) {
+    // v3 (owner decision after the expiry flap): expiry does NOT scatter the
+    // bot. The account stays on its bot (botId / pinnedGame / lastStatus
+    // untouched) and keeps farming that game for the next wave; only the
+    // ledger's "listed" tick is cleared.
     await WebBotAccount.updateOne(
       { _id: ledger.webBotAccountId },
-      { $set: { botId: "", pinnedGame: "", lastStatus: "idle" } },
+      { $set: { listed: false } },
     );
     return true;
   }
@@ -1799,7 +2579,9 @@ async function markOwnerUnlisted(ledger) {
   }
 }
 
-async function ledgerAccount(cand, set, market, row, sellable, game, price, note) {
+// `cls` (v3, optional): classifyHoldings result — stamps bundleKey/bundleLabel
+// on the ledger so the archive views can group accounts by event bundle.
+async function ledgerAccount(cand, set, market, row, sellable, game, price, note, cls) {
   const login = cand.login || "";
   const loginLower = String(login).toLowerCase();
   const existing = await UnclaimedAccount.findOne({ loginLower, source: cand.source }).lean();
@@ -1842,6 +2624,12 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
         listingExternalIds: row && row.externalId ? [String(row.externalId)] : [],
         listedAt: new Date(),
         lastCheckedAt: new Date(),
+        bundleKey: String((cls && cls.bundleKey) || ""),
+        bundleLabel: String((cls && cls.bundleLabel) || ""),
+        // A fresh listing starts with a clean expiry-strike record.
+        emptyReads: 0,
+        firstEmptyAt: null,
+        lotId: "",
       },
       $setOnInsert: { market },
     },
@@ -1857,8 +2645,10 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
 // Returns { ok, issues: [...] } so the panel can surface drift immediately.
 async function consistencyIssues() {
   const issues = [];
+  // Lot rows (N accounts in one Gameflip listing) are checked by
+  // unclaimedLots.checkLots; here they would only masquerade as a bad live unit.
   const rows = await MarketplaceListing.find(
-    { origin: ORIGIN, status: "active" },
+    { origin: ORIGIN, status: "active", ...NOT_LOT },
     { marketplace: 1, set: 1, accountLogin: 1, units: 1 },
   ).lean();
   // Keyed by set+marketplace: several items (game + drop set) share the same
@@ -1897,7 +2687,8 @@ async function consistencyIssues() {
   for (const l of ledgers) {
     if (!l.market) continue;
     if (l.market === "gameflip") {
-      // The relist chain keeps waiting units unpublished — off-row is normal.
+      // The relist chain keeps waiting units unpublished — off-row is normal
+      // (and lot members sit on their lot row, which is not read here).
       continue;
     }
     const mine = rowBySetMarket.get(String(l.set) + ":" + l.market);
@@ -2023,6 +2814,13 @@ async function scanAndListPass() {
   const setLocks = new Map(); // signature key -> promise chain (serialize per set)
   const gameLocks = new Map(); // game key -> promise chain (serialize cap slots)
 
+  // v3: pricing knobs + the event catalog, loaded ONCE per pass for the
+  // batch's distinct games (a listing's real game not in the batch is merged
+  // on demand). Sets touched this pass are remembered for the lot hook.
+  const pricing = settings.getUnclaimedPricing();
+  const catalogs = makeCatalogLoader(batch.map((c) => c.game));
+  const touchedSets = new Map(); // setId -> set
+
   // Reserve one of the game's GAME_CAP slots (serialized per game so parallel
   // workers of the same game can't both take the last slot). Returns false when
   // the game is at cap — the account stays unlisted for manual sale.
@@ -2090,8 +2888,47 @@ async function scanAndListPass() {
       const prev = setLocks.get(signature.key) || Promise.resolve();
       const run = prev.then(async () => {
         const research = await MarketResearch.findOne({ game }).lean().catch(() => null);
-        const price = derivePrice(research);
-        const set = await ensureUnclaimedSet(signature, game, drops, price);
+        // Bundle classification (event / waves / copies) against the pass's
+        // catalog, then the analytics price for exactly these items.
+        const catalog = await catalogs.forGame(game);
+        const cls = classifyDrops(game, drops, catalog);
+        const items = dedupeSetItems(drops, game);
+        // A brand-new set has no sales history, so it is priced with
+        // soldFloorUsd 0 (the default); an existing set is re-priced below
+        // against what it recently sold for.
+        let priced = priceForItems({ research, game, items, cls, pricing });
+        const set = await ensureUnclaimedSet(signature, game, drops, priced.price, {
+          cls,
+          floor: priced.floor,
+        });
+        // The set's price is the item's price on every market. A brand-new set
+        // carries the analytics price; an existing set keeps its price while it
+        // has a live row (repricing live rows is the reprice job's business),
+        // but a DORMANT set (no active row anywhere) is refreshed so its next
+        // listing is not published at a stale flat price — and never below
+        // the best price this set actually sold at in the last 30 days.
+        let price = Number(set.price) || 0;
+        const dormant = !(await MarketplaceListing.exists({
+          origin: ORIGIN,
+          set: set._id,
+          status: "active",
+        }));
+        if (dormant) {
+          const soldFloor = await soldFloorForSet(set._id);
+          if (soldFloor > 0) {
+            priced = priceForItems({ research, game, items, cls, pricing, soldFloorUsd: soldFloor });
+          }
+        }
+        if (dormant && Math.abs(price - priced.price) >= 0.01) {
+          price = priced.price;
+          await DropSet.updateOne(
+            { _id: set._id },
+            { $set: { price, minPriceUsd: priced.floor } },
+          ).catch(() => {});
+          set.price = price;
+        }
+        if (!price) price = priced.price;
+        touchedSets.set(String(set._id), set);
         const { markets, ggselCategoryId } = await enabledMarketsForGame(game);
         const market = await pickMarketForSet(set._id, markets);
         if (!market) {
@@ -2140,7 +2977,7 @@ async function scanAndListPass() {
               } catch {
                 img = "";
               }
-              row = await publishGameflipUnit(set, withLogin, drops, price, img);
+              row = await publishGameflipUnit(set, withLogin, drops, price, img, cls);
               if (img) await fsp.unlink(img).catch(() => {});
               await ledgerAccount(
                 withLogin,
@@ -2151,6 +2988,7 @@ async function scanAndListPass() {
                 game,
                 price,
                 "unclaimed auto-list — live unit",
+                cls,
               );
             } else {
               await ledgerAccount(
@@ -2162,6 +3000,7 @@ async function scanAndListPass() {
                 game,
                 price,
                 "unclaimed auto-list — waiting unit",
+                cls,
               );
             }
           } else {
@@ -2181,6 +3020,7 @@ async function scanAndListPass() {
                 price,
                 img,
                 ggselCategoryId,
+                cls,
               );
               if (img) await fsp.unlink(img).catch(() => {});
             } else {
@@ -2195,6 +3035,7 @@ async function scanAndListPass() {
               game,
               price,
               "unclaimed auto-list — stock unit",
+              cls,
             );
           }
           slotUsed = true;
@@ -2229,7 +3070,35 @@ async function scanAndListPass() {
   });
 
   const repaired = await repairGameflipChains();
-  return { candidates: work.length, scanned: batch.length, listed, repaired, skipped };
+
+  // Hunk 7: Gameflip lots (flag unclaimedGameflipLots, default OFF). After
+  // every set's single-unit chain is settled, any set with >= lotSize WAITING
+  // gameflip units gets at most ONE lot published per pass. Sets touched this
+  // pass are checked first, then every other set that still has gameflip
+  // ledgers waiting (units accumulate across passes).
+  let lots = 0;
+  if (pricing.lots && lotsMod()) {
+    try {
+      const setIds = await UnclaimedAccount.distinct("set", {
+        market: "gameflip",
+        status: "listed",
+        lotId: { $in: ["", null] },
+      });
+      const order = [
+        ...touchedSets.keys(),
+        ...setIds.map(String).filter((id) => id && !touchedSets.has(id)),
+      ];
+      for (const id of order) {
+        const set = touchedSets.get(id) || (await DropSet.findById(id).lean().catch(() => null));
+        if (!set) continue;
+        const r = await maybePublishLot(set, pricing);
+        if (r && (r.published || r.row || r.lotId)) lots++;
+      }
+    } catch (e) {
+      console.error("unclaimedAutoList lot hook failed:", e.message);
+    }
+  }
+  return { candidates: work.length, scanned: batch.length, listed, repaired, lots, skipped };
 }
 
 // Sets with gameflip ledgers but no live row get a live unit published again
@@ -2238,6 +3107,7 @@ async function repairGameflipChains() {
   const setIds = await UnclaimedAccount.distinct("set", {
     market: "gameflip",
     status: "listed",
+    lotId: { $in: ["", null] }, // lot members are on sale inside their lot
   });
   let repaired = 0;
   for (const setId of setIds) {
@@ -2247,6 +3117,7 @@ async function repairGameflipChains() {
       set: setId,
       marketplace: "gameflip",
       status: "active",
+      ...NOT_LOT,
     }).lean();
     if (active) continue;
     const r = await publishGameflipSuccessor(setId, "", { log: false }).catch(
@@ -2353,7 +3224,17 @@ async function removeManualSoldOwner(owner = {}) {
 //      Gameflip live row sold -> spent + successor
 //   C) Gameflip chain repair
 async function expirySalePass() {
-  const out = { checked: 0, sold: 0, expired: 0, released: 0, repaired: 0, manualSoldRemoved: 0 };
+  const out = {
+    checked: 0,
+    sold: 0,
+    expired: 0,
+    released: 0,
+    repaired: 0,
+    manualSoldRemoved: 0,
+    emptyStrikes: 0,
+    lots: null,
+  };
+  const pricing = settings.getUnclaimedPricing();
 
   // Manual-sold accounts (sold by the operator by hand) keep farming but must
   // NEVER be auto-sold. Remove them from their listings FIRST — before any
@@ -2455,6 +3336,22 @@ async function expirySalePass() {
     .limit(Math.max(0, CHECK_LIMIT - msLedgers.length))
     .lean();
   const ledgers = rest;
+
+  // Hunk 4: which of these ledgers' campaigns have ended (>1h ago) — loaded
+  // ONCE per pass by campaign name; an ended campaign lets a single empty read
+  // expire the account (its drops cannot come back), otherwise the strikes
+  // (unclaimedExpiryConfirmPasses, min 20 min apart) must confirm.
+  const passNow = Date.now();
+  let endedKeys = new Set();
+  try {
+    const names = [];
+    for (const l of ledgers) for (const d of l.drops || []) if (d && d.campaign) names.push(d.campaign);
+    endedKeys = await endedCampaignKeys(names, passNow);
+  } catch (e) {
+    console.error("unclaimedAutoList ended-campaign load failed:", e.message);
+    endedKeys = new Set();
+  }
+
   await mapLimit(ledgers, CONCURRENCY, async (ledger) => {
     try {
       // Manual-sold guard (see top of pass): never sell a marked ledger — if
@@ -2485,12 +3382,15 @@ async function expirySalePass() {
       // the code. Spend the live unit; removeUnitFromRow publishes the
       // successor (it sees the row is already sold and skips the delist).
       if (ledger.market === "gameflip") {
+        // Hunk 6: a single live unit names the login in accountLogin; a sold
+        // LOT names every member in units[].login (accountLogin is the joined
+        // list) — either way this account went to a buyer.
         const soldRow = await MarketplaceListing.findOne({
           origin: ORIGIN,
           set: ledger.set,
           marketplace: "gameflip",
           status: "sold",
-          accountLogin: ledger.login,
+          $or: [{ accountLogin: ledger.login }, { "units.login": ledger.login }],
         }).lean();
         if (soldRow) {
           out.sold++;
@@ -2518,11 +3418,33 @@ async function expirySalePass() {
         return;
       }
 
-      // Everything expired -> remove unit + release to pool.
+      // Everything gone -> an expiry STRIKE (hunk 4). Only a confirmed run of
+      // empty reads (or an ended campaign) removes the unit + releases the
+      // account; one transient empty inventory read no longer delists.
       if (!sellable.length) {
-        out.expired++;
-        const ok = await expireAccount(ledger);
-        if (ok) out.released++;
+        const decision = shouldExpire(ledger, Date.now(), {
+          confirmPasses: pricing.expiryConfirmPasses,
+          campaignEnded: ledgerCampaignsEnded(ledger, endedKeys),
+          empty: true,
+        });
+        if (decision.expire) {
+          out.expired++;
+          const ok = await expireAccount(ledger);
+          if (ok) out.released++;
+          return;
+        }
+        out.emptyStrikes++;
+        await UnclaimedAccount.updateOne(
+          { _id: ledger._id, status: "listed" },
+          {
+            $set: {
+              emptyReads: decision.emptyReads,
+              firstEmptyAt: decision.firstEmptyAt,
+              lastCheckedAt: new Date(),
+              note: "inventory empty — " + decision.reason + ", awaiting confirmation",
+            },
+          },
+        ).catch(() => {});
         return;
       }
 
@@ -2532,6 +3454,9 @@ async function expirySalePass() {
         {
           $set: {
             lastCheckedAt: new Date(),
+            // A non-empty read resets the expiry strikes (hunk 4).
+            emptyReads: 0,
+            firstEmptyAt: null,
             // Refresh the panel snapshot with the LISTED game's drops only
             // (same rule as the scan pass), so a Rainbow Six listing never
             // shows the account's Call of Duty drops.
@@ -2549,6 +3474,19 @@ async function expirySalePass() {
       console.error("unclaimedAutoList expiry pass error:", e.message);
     }
   });
+
+  // Lots lifecycle (hunk 7): sold lot rows spend their members; a lot whose
+  // member left "listed" is broken up. Runs regardless of the publish flag so
+  // lots created while it was on are still looked after once it is off.
+  const lots = lotsMod();
+  if (lots && typeof lots.checkLots === "function") {
+    try {
+      out.lots = (await lots.checkLots({ pricing })) || null;
+    } catch (e) {
+      console.error("unclaimedAutoList checkLots failed:", e.message);
+      out.lots = { error: e.message };
+    }
+  }
 
   // C) Heal Gameflip chains whose live row sold/expired without a successor.
   out.repaired = await repairGameflipChains();
@@ -2626,7 +3564,22 @@ async function runOnce(opts = {}) {
   try {
     const scan = opts.scan !== false ? await scanAndListPass() : null;
     const check = opts.check !== false ? await expirySalePass() : null;
-    lastRun = { at: startedAt, scan, check, tookMs: Date.now() - startedAt.getTime() };
+    // Hunk 8: periodic reprice of live rows, only when the owner turned
+    // unclaimedRepriceExisting on (default OFF — the "Reprice now" button with
+    // dry-run is the manual path).
+    let reprice = null;
+    if (opts.check !== false) {
+      try {
+        if (settings.getUnclaimedPricing().repriceExisting) {
+          const r = await repriceUnclaimedRows({ apply: true });
+          reprice = { rows: r.rows, changed: r.changed, notes: r.notes };
+        }
+      } catch (e) {
+        console.error("unclaimedAutoList reprice failed:", e.message);
+        reprice = { error: e.message };
+      }
+    }
+    lastRun = { at: startedAt, scan, check, reprice, tookMs: Date.now() - startedAt.getTime() };
     return lastRun;
   } finally {
     running = false;
@@ -2692,9 +3645,20 @@ module.exports = {
   groupArchiveByGame,
   listingTitle,
   listingDescription,
+  uniqueDrops,
+  dropsFromSet,
+  shouldExpire,
+  ledgerCampaignsEnded,
   credentialForLedger,
   activeListingsForLogin,
   soldMapForSecrets,
+  // v3 bundles / pricing / lots / reprice
+  catalogForGames,
+  classificationForSet,
+  priceForItems,
+  soldFloorForSet,
+  waitingGameflipLedgers,
+  repriceUnclaimedRows,
   // engine
   ensureUnclaimedSet,
   publishGameflipUnit,

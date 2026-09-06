@@ -44,6 +44,26 @@ const AUTO_FARM_DEFAULTS = {
   // marketplaces the auto-farmer uses. Ships ON per the owner's build request;
   // pause from the Unclaimed farms tab (writes unclaimedAutoListPaused).
   unclaimedAutoList: true,
+  // Unclaimed-farms v3 pricing / bundles / bulk knobs (docs/UNCLAIMED-BUNDLES-
+  // CONTRACT.md). Read through getUnclaimedPricing(); all live-editable.
+  unclaimedPriceFloorUsd: 0.75,
+  // Per-game floors keyed like noClaimGames (substring of the normalised
+  // label): { "overwatch": 1.5 }. Empty = only the absolute floor applies.
+  unclaimedGameFloors: {},
+  unclaimedItemStepPct: 15,
+  unclaimedItemCapMult: 2.5,
+  unclaimedFullEventBonusPct: 25,
+  // Periodic repricing of EXISTING live unclaimed rows. Ships OFF; the
+  // Bundles panel has a dry-run "Reprice" button either way.
+  unclaimedRepriceExisting: false,
+  unclaimedRepriceDriftPct: 20,
+  // Gameflip "lot of N accounts" listings (utils/unclaimedLots.js). Ships OFF.
+  unclaimedGameflipLots: false,
+  unclaimedLotSize: 5,
+  unclaimedLotDiscountPct: 10,
+  // Consecutive empty inventory reads (>= 20 min apart) before a listed
+  // account counts as expired — one empty read used to delist + release.
+  unclaimedExpiryConfirmPasses: 2,
   // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
   // account on — World of Tanks and UFL sell too thin to be worth burning new
   // accounts. For these, the brain only ever REUSES accounts it has already
@@ -191,6 +211,18 @@ const AUTO_FARM_DEFAULTS = {
   // itself stopped (an operator Stop stays stopped) — so it never fights manual
   // control. See utils/noclaimWatcher.js.
   noClaimStreamGate: false,
+  // Web-farm auto-power master switch (utils/webbotFarmWatcher.js). Same
+  // contract as noClaimStreamGate but for the standalone webbot-bot-* fleet, and
+  // OFF by default so it never surprise-kills a manually pre-positioned bot until
+  // the operator turns it on. The games it manages are derived dynamically from
+  // the pinned games of the live bots — no separate list.
+  webbotStreamGate: false,
+  // Master switch for the AI coworker's AUTONOMOUS actions (utils/coworkerActs.js).
+  // OFF by default: while false the coworker executes nothing itself and can only
+  // investigate and propose, exactly as before. Turning it on lets it perform the
+  // "auto"-tier capabilities (reversible, blast-radius-capped, fully audited);
+  // "confirm"-tier work always still goes through operator approval.
+  coworkerAutonomy: false,
   // Master switch for the new lane engine (utils/farm2/*), the reorganised
   // farm + list pipeline that replaces the legacy single-tick autoFarmer for
   // the games it owns. OFF by default, so a deploy changes nothing: with it
@@ -363,6 +395,73 @@ function getNoClaimGate() {
   return { enabled: !!getAutoFarm().noClaimStreamGate };
 }
 
+// Web-farm auto-power master switch, read fresh each call (live-editable).
+// The games it manages are the pinned games of the live webbot bots.
+function getWebbotGate() {
+  return { enabled: !!getAutoFarm().webbotStreamGate };
+}
+
+// AI coworker autonomy master switch, read fresh each call (live-editable), so
+// it can be revoked instantly without a restart if the coworker misbehaves.
+// Unclaimed-farms v3 pricing/bundle/bulk knobs, read fresh each call with the
+// seed defaults merged under the live values (a settings.json written before
+// v3 has none of these keys). Frozen shape: docs/UNCLAIMED-BUNDLES-CONTRACT.md.
+const UNCLAIMED_PRICING_DEFAULTS = {
+  floorUsd: 0.75,
+  gameFloors: {},
+  itemStepPct: 15,
+  itemCapMult: 2.5,
+  fullEventBonusPct: 25,
+  repriceExisting: false,
+  repriceDriftPct: 20,
+  lots: false,
+  lotSize: 5,
+  lotDiscountPct: 10,
+  expiryConfirmPasses: 2,
+};
+function num(v, d) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+function getUnclaimedPricing() {
+  const af = getAutoFarm() || {};
+  const D = UNCLAIMED_PRICING_DEFAULTS;
+  return {
+    floorUsd: Math.max(0, num(af.unclaimedPriceFloorUsd, D.floorUsd)),
+    gameFloors:
+      af.unclaimedGameFloors && typeof af.unclaimedGameFloors === "object"
+        ? af.unclaimedGameFloors
+        : {},
+    itemStepPct: Math.max(0, num(af.unclaimedItemStepPct, D.itemStepPct)),
+    itemCapMult: Math.max(1, num(af.unclaimedItemCapMult, D.itemCapMult)),
+    fullEventBonusPct: Math.max(0, num(af.unclaimedFullEventBonusPct, D.fullEventBonusPct)),
+    repriceExisting: af.unclaimedRepriceExisting == null ? D.repriceExisting : !!af.unclaimedRepriceExisting,
+    repriceDriftPct: Math.max(1, num(af.unclaimedRepriceDriftPct, D.repriceDriftPct)),
+    lots: af.unclaimedGameflipLots == null ? D.lots : !!af.unclaimedGameflipLots,
+    lotSize: Math.max(2, Math.floor(num(af.unclaimedLotSize, D.lotSize))),
+    lotDiscountPct: Math.min(90, Math.max(0, num(af.unclaimedLotDiscountPct, D.lotDiscountPct))),
+    expiryConfirmPasses: Math.max(1, Math.floor(num(af.unclaimedExpiryConfirmPasses, D.expiryConfirmPasses))),
+  };
+}
+
+// Per-game unclaimed price floor: the first unclaimedGameFloors key that is a
+// SUBSTRING of the normalised game label (same matching rule as noClaimGames).
+// 0 when no key matches.
+function gameFloorFor(game) {
+  const floors = getUnclaimedPricing().gameFloors || {};
+  const g = normGameName(game);
+  if (!g) return 0;
+  for (const k of Object.keys(floors)) {
+    const key = normGameName(k);
+    if (key && g.includes(key)) return Math.max(0, num(floors[k], 0));
+  }
+  return 0;
+}
+
+function getCoworkerAutonomy() {
+  return { enabled: !!getAutoFarm().coworkerAutonomy };
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -377,4 +476,9 @@ module.exports = {
   streamGatedGameEntry,
   isStreamGatedGame,
   getNoClaimGate,
+  getWebbotGate,
+  getCoworkerAutonomy,
+  getUnclaimedPricing,
+  gameFloorFor,
+  UNCLAIMED_PRICING_DEFAULTS,
 };

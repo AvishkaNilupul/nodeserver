@@ -42,6 +42,7 @@ const INVENTORY_QUERY = `query Inventory {
       dropCampaignsInProgress {
         id name status endAt
         game { id displayName }
+        self { isAccountConnected }
         timeBasedDrops {
           id name requiredMinutesWatched
           benefitEdges {
@@ -57,9 +58,17 @@ const INVENTORY_QUERY = `query Inventory {
 // POST gql.twitch.tv — returns the account's in-progress drop campaigns,
 // flattened to one row per time-based drop with percent + claim state.
 // `farmedUnclaimed` marks a drop the web farmer completed but can't claim.
+// `connected` is the CAMPAIGN-level `self.isAccountConnected` copied onto each
+// of its drops — the same meaning as twitchInventory's `inProgress[].connected`
+// (the Twitch account is linked to the game publisher, so a buyer could no
+// longer connect their own account = the drop is spent for resale).
+const INVENTORY_TIMEOUT_MS = Number(process.env.WEBBOT_INVENTORY_TIMEOUT_MS) || 25000;
 async function fetchInventory(webToken) {
+  // Bounded: the sell-side scans fan this out over hundreds of accounts with
+  // Promise.all, so one stalled GQL socket must not hang a whole request.
   const r = await fetch("https://gql.twitch.tv/gql", {
     method: "POST",
+    signal: AbortSignal.timeout(INVENTORY_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
       "Client-Id": WEB_CLIENT_ID,
@@ -87,6 +96,7 @@ async function fetchInventory(webToken) {
   const campaigns = one?.data?.currentUser?.inventory?.dropCampaignsInProgress || [];
   const drops = [];
   for (const c of campaigns) {
+    const connected = !!(c.self && c.self.isAccountConnected);
     for (const d of c.timeBasedDrops || []) {
       const s = d.self || {};
       const b = (d.benefitEdges && d.benefitEdges[0] && d.benefitEdges[0].benefit) || {};
@@ -105,6 +115,7 @@ async function fetchInventory(webToken) {
         claimed: !!s.isClaimed,
         ready, // complete + has an instance id, awaiting claim
         farmedUnclaimed: percent >= 100 && !s.isClaimed,
+        connected, // campaign-level isAccountConnected
       });
     }
   }

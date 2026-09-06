@@ -330,6 +330,21 @@
           transform: rotate(360deg);
         }
       }
+      /* Small inline tag next to a game name (e.g. "no-claim" for games farmed
+         by the unclaimed systems, whose stock never reaches DropLog). */
+      .chip {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        vertical-align: middle;
+        white-space: nowrap;
+      }
     </style>
   </head>
   <body>
@@ -504,6 +519,7 @@
             <option value="soldRecent">Sort: recent Gameflip sales</option>
             <option value="observedRevenue">Sort: revenue observed</option>
             <option value="ownRevenue">Sort: our own revenue</option>
+            <option value="unclaimedStock">Sort: unclaimed stock</option>
             <option value="salesPerWeek">Sort: RU sales per week</option>
             <option value="demandTrend">Sort: rising fastest</option>
             <option value="avgSoldPrice">Sort: avg sold price</option>
@@ -719,7 +735,7 @@
           });
         if (!marketLines.length) marketLines = ["no recorded sales yet"];
         return (
-          '<td colspan="9"><div class="row" style="align-items:flex-start;padding:4px 0 8px;flex-wrap:wrap">' +
+          '<td colspan="11"><div class="row" style="align-items:flex-start;padding:4px 0 8px;flex-wrap:wrap">' +
           block("Gameflip", [
             "sold last 30d: " + (gf.soldRecent || 0),
             "avg sold price: " + money(gf.avgSoldPrice),
@@ -727,6 +743,14 @@
               ? "last sale: " + new Date(gf.lastSoldAt).toLocaleDateString()
               : "last sale: —",
             rivals(gf),
+            // The lowest live price that is not our own row — what an
+            // unclaimed listing should be priced against.
+            "lowest rival price: " +
+              (gf.lowestOther > 0
+                ? money(gf.lowestOther)
+                : gf.lowestOther != null && gf.active > 0
+                  ? "only our rows"
+                  : "—"),
           ]) +
           block("GGSel", [
             "lifetime sales: " + (gg.totalSold || 0),
@@ -756,6 +780,8 @@
               (r.ownSales || 0) +
               " · " +
               money(r.ownRevenue),
+            "unclaimed stock listed: " + (r.unclaimedStock || 0),
+            "unclaimed sold: " + (r.unclaimedSold || 0),
           ]) +
           block("Your sales by market", marketLines) +
           '<div style="min-width:160px"><b>Search</b><div class="muted">"' +
@@ -814,6 +840,7 @@
         var html =
           "<table><thead><tr>" +
           "<th>Game</th><th>Campaign</th><th>Sold 30d (GF)</th>" +
+          "<th>Unclaimed stock</th><th>Own price floor</th>" +
           "<th>Revenue 30d</th><th>RU sales/wk</th><th>Sellers</th>" +
           "<th>Demand</th><th>Opportunity</th><th>Recommendation</th>" +
           "</tr></thead><tbody>";
@@ -850,6 +877,9 @@
             "<td><b>" +
             esc(r.game) +
             "</b>" +
+            (r.noClaim
+              ? '<span class="chip" title="Farmed by the no-claim / web-token systems; stock counted in Unclaimed stock, not in farmed accounts">no-claim</span>'
+              : "") +
             (r.farmedAccounts > 0
               ? '<div class="muted">farming · ' +
                 r.farmedAccounts +
@@ -861,6 +891,27 @@
             "</td>" +
             "<td>" +
             (gf.soldRecent || 0) +
+            "</td>" +
+            // Accounts on the unclaimed shelf right now (+ units sold that
+            // way). These never reach DropLog, so "farming · N acc" cannot
+            // show them.
+            "<td>" +
+            (r.unclaimedStock > 0 || r.unclaimedSold > 0
+              ? (r.unclaimedStock || 0) +
+                (r.unclaimedSold > 0
+                  ? '<div class="muted">' + r.unclaimedSold + " sold</div>"
+                  : "")
+              : '<span class="muted">—</span>') +
+            "</td>" +
+            // Lowest live Gameflip price from a seller other than us: the
+            // number an unclaimed listing may safely undercut. "only ours"
+            // means every live row for the game is our own.
+            "<td>" +
+            (gf.lowestOther > 0
+              ? money(gf.lowestOther)
+              : gf.lowestOther != null && gf.active > 0
+                ? '<span class="muted" title="Every live Gameflip row for this game is ours">only ours</span>'
+                : '<span class="muted">—</span>') +
             "</td>" +
             "<td>" +
             money(r.observedRevenue) +

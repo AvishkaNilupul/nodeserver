@@ -110,6 +110,11 @@ const marketplaceListingSchema = new mongoose.Schema(
     // negative sales, and without persisting it at all a failed feed would
     // make the same shortfall count as a new sale on every single pass.
     lastStock: { type: Number, default: null },
+    // Unclaimed Gameflip LOT rows (utils/unclaimedLots.js): one listing that
+    // delivers lotSize separate accounts (units[] holds their logins). 0 = a
+    // normal single-unit / quantity row.
+    lotSize: { type: Number, default: 0 },
+    lotId: { type: String, default: "", index: true },
   },
   { timestamps: true },
 );

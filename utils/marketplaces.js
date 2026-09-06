@@ -147,6 +147,44 @@ async function gameflipTest() {
   }
 }
 
+// Our own Gameflip owner id — the same string a listing row carries as
+// `owner` (priceScout maps it to `seller`). Market research uses it to drop
+// our own rows from "lowest competitor price": every unclaimed row sat at the
+// $0.75 floor because the lowest live listing for the game was OUR OWN row
+// and the pricer kept undercutting itself. Cached for an hour; returns "" on
+// any failure (no keys, network, unexpected shape) so callers can fall back
+// to the unfiltered lowest rather than fail a scan.
+let gfOwnerCache = { id: "", until: 0 };
+async function gameflipOwnerId() {
+  const now = Date.now();
+  if (gfOwnerCache.id && gfOwnerCache.until > now) return gfOwnerCache.id;
+  try {
+    const keys = requireKeys("gameflip");
+    const pick = (r) => String((((r || {}).data || {}).data || {}).owner || "");
+    let owner = pick(
+      await axios.get(GF_API + "/account/me", {
+        headers: gfHeaders(keys),
+        timeout: 20000,
+      }),
+    );
+    // /account/me/profile is the endpoint the rest of this file already reads
+    // `owner` from (gameflipTest, gameflipListingIdsByStatus); use it when the
+    // account document does not carry the id.
+    if (!owner) {
+      owner = pick(
+        await axios.get(GF_API + "/account/me/profile", {
+          headers: gfHeaders(keys),
+          timeout: 20000,
+        }),
+      );
+    }
+    if (owner) gfOwnerCache = { id: owner, until: now + 60 * 60 * 1000 };
+    return owner;
+  } catch {
+    return "";
+  }
+}
+
 async function gfUploadPhoto(keys, listingId, imagePath) {
   const init = await axios.post(
     GF_API + "/listing/" + listingId + "/photo",
@@ -3640,6 +3678,7 @@ module.exports = {
   // bring FunPay's EUR-quoted pages back to USD.
   usdRate,
   gameflipTest,
+  gameflipOwnerId,
   gameflipPublish,
   gameflipListingStatus,
   gameflipDelist,

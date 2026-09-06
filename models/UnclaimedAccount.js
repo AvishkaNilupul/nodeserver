@@ -88,6 +88,19 @@ const unclaimedAccountSchema = new mongoose.Schema(
     expiredAt: { type: Date, default: null },
     releasedAt: { type: Date, default: null },
     lastCheckedAt: { type: Date, default: null, index: true },
+
+    // v3 (docs/UNCLAIMED-BUNDLES-CONTRACT.md). Expiry confirmation: how many
+    // consecutive check passes read an EMPTY sellable inventory, and when the
+    // first of them happened. One empty read used to delist + release the
+    // account, which flapped on transient reads. Reset on any non-empty read.
+    emptyReads: { type: Number, default: 0 },
+    firstEmptyAt: { type: Date, default: null },
+    // Event bundle this account's listed drops resolve to (utils/
+    // unclaimedBundles.js classifyHoldings) — "" when no event resolves.
+    bundleKey: { type: String, default: "", index: true },
+    bundleLabel: { type: String, default: "" },
+    // Gameflip lot this waiting unit is a member of ("" = not in a lot).
+    lotId: { type: String, default: "", index: true },
   },
   { timestamps: true },
 );

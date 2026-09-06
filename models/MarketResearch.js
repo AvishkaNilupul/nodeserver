@@ -77,6 +77,13 @@ const marketResearchSchema = new mongoose.Schema(
     competitionScore: { type: Number, default: 0 },
     opportunityScore: { type: Number, default: 0, index: true },
     recommendation: { type: String, default: "" },
+    // Unclaimed farms (no-claim + web-token) stock for this game: accounts
+    // currently attached to an unclaimed auto-listing, and units sold that way.
+    // DropLog never sees those accounts, so farmedAccounts cannot count them.
+    unclaimedStock: { type: Number, default: 0 },
+    unclaimedSold: { type: Number, default: 0 },
+    // True when the game is on settings.noClaimGames (farmed unclaimed).
+    noClaim: { type: Boolean, default: false },
     scannedAt: { type: Date, default: null },
   },
   { timestamps: true },

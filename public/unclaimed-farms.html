@@ -91,6 +91,20 @@
   .modal > header b { font-size:16px; }
   .modal > header .x { margin-left:auto; width:30px; height:30px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
   .mbody { padding:18px 20px; display:flex; flex-direction:column; gap:14px; }
+
+  /* Bundles panel + reprice / pricing modals */
+  tr.bt-game td { background: var(--surface-2); font-weight:700; }
+  tr.bt-game .chip { margin-left:6px; font-weight:600; }
+  .drift-up { color: var(--green); font-weight:600; } .drift-down { color: var(--red); font-weight:600; }
+  tr.dim td { opacity:.55; }
+  .frm { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .frm label { display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--muted); font-weight:600; }
+  .frm label.wide { grid-column: 1 / -1; }
+  .frm label small { font-weight:500; font-size:11px; }
+  .frm input[type="number"], .frm textarea { padding:8px 11px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font-size:13px; outline:none; font-family:inherit; width:100%; }
+  .frm textarea { min-height:84px; font-family: ui-monospace, Menlo, monospace; font-size:12px; resize:vertical; }
+  .frm label.tog { flex-direction:row; align-items:center; gap:8px; color:var(--ink); font-weight:500; padding-top:22px; }
+  .frm label.tog input { width:16px; height:16px; }
 </style>
 </head>
 
@@ -137,6 +151,38 @@
       <div class="stat"><b id="stReleased">–</b><span>Back to pool</span></div>
       <div class="stat"><b id="stSkipped">–</b><span>Skipped</span></div>
       <div class="stat"><b id="stRemoved">–</b><span>Manual sold</span></div>
+    </div>
+
+    <div class="panel" id="bundlesPanel">
+      <div class="hd">
+        <b>Bundles</b>
+        <span class="chip" id="bdLotsFlag" title="unclaimedGameflipLots">lots –</span>
+        <span class="chip" id="bdRepriceFlag" title="unclaimedRepriceExisting">auto-reprice –</span>
+        <span class="muted" id="bdTotal"></span>
+        <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <span class="muted" id="bdMsg"></span>
+          <button class="btn ghost sm" id="bdRefreshBtn">Refresh</button>
+          <button class="btn ghost sm" id="repriceBtn">Reprice (dry-run)</button>
+          <button class="btn primary sm" id="pricingBtn">Pricing settings</button>
+        </span>
+      </div>
+      <div class="bd">
+        <div style="overflow-x:auto;">
+          <table id="bundleTable">
+            <thead><tr><th>Game</th><th>Event / bundle</th><th>Waves</th><th>Items</th><th>Listed <span style="text-transform:none;font-weight:500;">(GF live/wait · DG · GG)</span></th><th>Lots</th><th>Sold</th><th>Price → Suggested</th></tr></thead>
+            <tbody id="bundleRows"><tr><td colspan="8" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div id="lotsWrap" style="display:none;margin-top:12px;">
+          <div class="muted" style="margin-bottom:6px;"><b style="color:var(--ink);">Gameflip lots</b> <span id="lotsTotal"></span></div>
+          <div style="overflow-x:auto;">
+            <table>
+              <thead><tr><th>Set</th><th>Lot size</th><th>Price</th><th>Listing</th><th>Status</th></tr></thead>
+              <tbody id="lotRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="panel">
@@ -278,6 +324,70 @@
   </div>
 </div>
 
+<!-- Reprice plan modal (dry-run first; Apply patches rows whose drift >= unclaimedRepriceDriftPct) -->
+<div class="modal-bg" id="repriceBg">
+  <div class="modal" style="max-width:980px;">
+    <header>
+      <b>Reprice plan</b>
+      <span class="chip" id="repriceMode">dry-run</span>
+      <span class="muted" id="repriceSummary"></span>
+      <button class="x" id="repriceClose">&times;</button>
+    </header>
+    <div class="mbody">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Market</th><th>Title</th><th>Listing</th><th>Current</th><th>Target</th><th>Drift</th><th>Result</th></tr></thead>
+          <tbody id="repriceRows"><tr><td colspan="7" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <span class="muted" id="repriceNote"></span>
+        <button class="btn ghost sm" id="repriceRerun" style="margin-left:auto;">Re-run dry-run</button>
+        <button class="btn primary sm" id="repriceApply" disabled>Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Pricing settings modal (unclaimed* keys only) -->
+<div class="modal-bg" id="pricingBg">
+  <div class="modal" style="max-width:680px;">
+    <header>
+      <b>Unclaimed pricing settings</b>
+      <span class="muted" id="pricingMsg" style="margin-left:auto;"></span>
+      <button class="x" id="pricingClose">&times;</button>
+    </header>
+    <div class="mbody">
+      <form id="pricingForm" class="frm" autocomplete="off">
+        <label>Price floor (USD)<small>unclaimedPriceFloorUsd — absolute floor for any unclaimed row</small>
+          <input type="number" id="prFloor" min="0" step="0.25" required /></label>
+        <label>Item step %<small>unclaimedItemStepPct — +% per extra item (qty counts)</small>
+          <input type="number" id="prStep" min="0" step="1" required /></label>
+        <label>Item cap ×<small>unclaimedItemCapMult — per-item scaling never exceeds this × anchor</small>
+          <input type="number" id="prCap" min="1" step="0.1" required /></label>
+        <label>Full-event bonus %<small>unclaimedFullEventBonusPct — complete-event bundle bonus</small>
+          <input type="number" id="prBonus" min="0" step="1" required /></label>
+        <label class="wide">Per-game floors<small>unclaimedGameFloors — one <code>game=price</code> per line, e.g. <code>overwatch=1.5</code> (substring match like noClaimGames)</small>
+          <textarea id="prGameFloors" placeholder="overwatch=1.5&#10;rainbow six=2"></textarea></label>
+        <label class="tog"><input type="checkbox" id="prRepriceExisting" /> Reprice existing rows periodically <small class="muted">(unclaimedRepriceExisting)</small></label>
+        <label>Reprice drift %<small>unclaimedRepriceDriftPct — only rows drifting at least this much are patched</small>
+          <input type="number" id="prDriftPct" min="1" step="1" required /></label>
+        <label class="tog"><input type="checkbox" id="prLots" /> Publish Gameflip lots <small class="muted">(unclaimedGameflipLots)</small></label>
+        <label>Lot size<small>unclaimedLotSize — accounts per Gameflip lot</small>
+          <input type="number" id="prLotSize" min="2" step="1" required /></label>
+        <label>Lot discount %<small>unclaimedLotDiscountPct</small>
+          <input type="number" id="prLotDiscount" min="0" max="90" step="1" required /></label>
+        <label>Expiry confirm passes<small>unclaimedExpiryConfirmPasses — consecutive empty reads before expiry</small>
+          <input type="number" id="prExpiryPasses" min="1" step="1" required /></label>
+        <div class="wide" style="grid-column:1 / -1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <span class="muted">Manual listings (origin manual/auto) are never repriced; lots and repricing stay OFF until you turn them on here.</span>
+          <button type="submit" class="btn primary sm" id="pricingSave" style="margin-left:auto;">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <script src="/theme.js"></script>
 <script src="/admin-nav.js"></script>
 <script>
@@ -302,7 +412,7 @@ function switchSec(sec){
     var el=$('sec-'+s); if(!el) return;
     el.classList.toggle('hidden', s!==sec);
   });
-  if(sec==='autolist'){ loadState(); loadAccounts(); loadListings(); }
+  if(sec==='autolist'){ loadState(); loadBundles(); loadAccounts(); loadListings(); }
   if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
   if(sec==='webbot' && !secLoaded.webbot){ secLoaded.webbot=true; $('sec-webbot').innerHTML='<iframe src="/webbot-farm.html?embed=1" title="Web-token farm"></iframe>'; }
   if(sec==='archive'){ secLoaded.archive=true; switchArcSub(arcSub); }
@@ -390,6 +500,302 @@ async function loadListings(){
       '</tr>';
     }).join('');
   }catch(e){ $('listRows').innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+// ---------------------------------------------------------------------------
+// Bundles — per-game event bundles held by unclaimed accounts, what is listed
+// where, and the analytics price vs the live price. Reprice runs as a dry-run
+// first; Apply patches only rows whose |drift| >= unclaimedRepriceDriftPct.
+// Pricing settings post the unclaimed* keys only.
+// ---------------------------------------------------------------------------
+
+var pricingCache=null, bundlesCache=[], repriceLast=null;
+
+function bundleToast(msg){ var el=$('bdMsg'); if(el) el.textContent=msg||''; }
+function money(n){ n=Number(n); return isFinite(n)?'$'+n.toFixed(2):'–'; }
+function pctTxt(n){ n=Number(n); if(!isFinite(n)) return ''; return (n>0?'+':'')+Math.round(n)+'%'; }
+function driftCell(n){
+  n=Number(n);
+  if(!isFinite(n)||Math.abs(n)<0.5) return '<span class="muted">0%</span>';
+  return '<span class="'+(n>0?'drift-up':'drift-down')+'">'+pctTxt(n)+'</span>';
+}
+function driftThreshold(){
+  var p=pricingCache||{};
+  var t=Number(p.repriceDriftPct);
+  return isFinite(t)&&t>=0?t:20;
+}
+
+// GET /pricing returns getUnclaimedPricing(); accept either the bare object
+// or a {success, pricing} envelope.
+async function loadPricing(force){
+  if(pricingCache && !force) return pricingCache;
+  var j=await api('/api/unclaimed-auto/pricing');
+  pricingCache=(j&&j.pricing)?j.pricing:j;
+  renderPricingFlags();
+  return pricingCache;
+}
+function renderPricingFlags(){
+  var p=pricingCache||{};
+  var lf=$('bdLotsFlag'); if(lf){ lf.textContent='lots '+(p.lots?'on':'off'); lf.className='chip '+(p.lots?'on':''); }
+  var rf=$('bdRepriceFlag'); if(rf){ rf.textContent='auto-reprice '+(p.repriceExisting?'on':'off'); rf.className='chip '+(p.repriceExisting?'on':''); }
+}
+
+function itemsCell(items){
+  items=items||[];
+  var qty=items.reduce(function(s,it){ return s+(Number(it.qty)||1); },0);
+  var names=items.map(function(it){ return ((Number(it.qty)||1)>1?(it.qty+'× '):'')+(it.name||''); });
+  return '<span title="'+esc(names.join(', '))+'">'+qty+' item'+(qty===1?'':'s')+'</span>'+
+    (items.length&&items.length!==qty?'<div class="muted" style="font-size:11px;">'+items.length+' distinct</div>':'');
+}
+function wavesCell(ev){
+  if(!ev||!ev.waves||!ev.waves.length) return '<span class="muted">–</span>';
+  var ended=ev.waves.filter(function(w){ return w.ended; }).length;
+  var labels=ev.waves.map(function(w){ return (w.waveLabel||'single')+(w.ended?' (ended)':''); });
+  return '<span title="'+esc(labels.join(' · '))+'">'+ev.waves.length+' wave'+(ev.waves.length===1?'':'s')+'</span>'+
+    (ended?'<div class="muted" style="font-size:11px;">'+ended+' ended</div>':'');
+}
+function listedCell(l){
+  l=l||{}; var gf=l.gameflip||{};
+  return '<span class="mono">GF '+(gf.live||0)+'/'+(gf.waiting||0)+' · DG '+(l.digiseller||0)+' · GG '+(l.ggsel||0)+'</span>';
+}
+function bundleChip(s){
+  if(s.full) return '<span class="chip on">full</span>';
+  if(s.eventKey||s.bundleLabel) return '<span class="chip warn">partial</span>';
+  return '<span class="chip">no event</span>';
+}
+function researchChips(r, noClaim){
+  r=r||{};
+  var out=[];
+  if(noClaim) out.push('<span class="chip">no-claim</span>');
+  if(r.demandScore!=null) out.push('<span class="chip" title="demand score">demand '+esc(Math.round(Number(r.demandScore)||0))+'</span>');
+  if(r.avgSoldPrice) out.push('<span class="chip" title="Gameflip avg sold price">avg sold '+money(r.avgSoldPrice)+'</span>');
+  if(r.lowestOther) out.push('<span class="chip" title="lowest live Gameflip price that is not ours">others from '+money(r.lowestOther)+'</span>');
+  if(r.ownSales!=null) out.push('<span class="chip" title="own sales recorded">own sales '+esc(r.ownSales)+'</span>');
+  return out.join('');
+}
+
+function renderGameRows(g){
+  var sets=g.sets||[], events=g.events||[];
+  var byKey={}; events.forEach(function(ev){ if(ev&&ev.key) byKey[ev.key]=ev; });
+  var head='<tr class="bt-game"><td colspan="8">'+esc(g.game||'(no game)')+researchChips(g.research, g.noClaim)+
+    '<span class="muted" style="margin-left:8px;font-weight:500;">'+events.length+' event'+(events.length===1?'':'s')+' · '+sets.length+' bundle'+(sets.length===1?'':'s')+'</span></td></tr>';
+  if(!sets.length) return head+'<tr><td></td><td colspan="7" class="muted">No bundles listed for this game yet.</td></tr>';
+  return head+sets.map(function(s){
+    var ev=s.eventKey?byKey[s.eventKey]:null;
+    var sug=s.suggested||{};
+    var label=s.bundleLabel||s.title||'–';
+    var sub=s.bundleLabel&&s.title&&s.bundleLabel!==s.title?'<div class="muted" style="font-size:11px;">'+esc(s.title)+'</div>':'';
+    var drift=s.driftPct!=null?s.driftPct:(Number(s.price)>0&&sug.price!=null?((Number(sug.price)-Number(s.price))/Number(s.price))*100:null);
+    var priceCell=money(s.price)+' <span class="muted">→</span> '+money(sug.price)+
+      (drift!=null?' '+driftCell(drift):'')+
+      '<div class="muted" style="font-size:11px;">'+(sug.anchorSource?'anchor '+esc(sug.anchorSource):'')+(sug.floor!=null?(sug.anchorSource?' · ':'')+'floor '+money(sug.floor):'')+'</div>';
+    return '<tr data-setid="'+esc(s.setId||'')+'">'+
+      '<td class="muted">'+esc(g.game||'')+'</td>'+
+      '<td><b>'+esc(label)+'</b> '+bundleChip(s)+sub+'</td>'+
+      '<td>'+wavesCell(ev)+'</td>'+
+      '<td>'+itemsCell(s.items)+'</td>'+
+      '<td>'+listedCell(s.listed)+'</td>'+
+      '<td>'+(s.lots||0)+'</td>'+
+      '<td>'+(s.sold||0)+'</td>'+
+      '<td style="white-space:nowrap;">'+priceCell+'</td>'+
+    '</tr>';
+  }).join('');
+}
+
+async function loadBundles(force){
+  var pr=loadPricing(!!force).catch(function(){ return null; });
+  try{
+    var j=await api('/api/unclaimed-auto/bundles');
+    var games=j.games||[];
+    bundlesCache=games;
+    var nSets=games.reduce(function(s,g){ return s+((g.sets||[]).length); },0);
+    $('bdTotal').textContent=nSets+' bundle'+(nSets===1?'':'s')+' · '+games.length+' game'+(games.length===1?'':'s');
+    var rows=$('bundleRows');
+    if(!games.length){ rows.innerHTML='<tr><td colspan="8" class="muted" style="padding:14px;">No unclaimed bundles yet — run “Scan &amp; list now”.</td></tr>'; }
+    else rows.innerHTML=games.map(renderGameRows).join('');
+  }catch(e){ $('bundleRows').innerHTML='<tr><td colspan="8" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+  await pr;
+  loadLots();
+}
+
+// GET /lots → lotsSummary() + flag state. Key names for the flag are not
+// frozen, so accept enabled / lotsEnabled / flag / pricing.lots and fall back
+// to the cached pricing.
+async function loadLots(){
+  var wrap=$('lotsWrap'); if(!wrap) return;
+  try{
+    var j=await api('/api/unclaimed-auto/lots');
+    var lots=j.lots||j.rows||j.summary||[];
+    var enabled=j.enabled!=null?j.enabled:(j.lotsEnabled!=null?j.lotsEnabled:(j.flag!=null?j.flag:(j.pricing&&j.pricing.lots!=null?j.pricing.lots:(pricingCache&&pricingCache.lots))));
+    if(!lots.length && !enabled){ wrap.style.display='none'; return; }
+    wrap.style.display='';
+    $('lotsTotal').textContent=lots.length+' lot'+(lots.length===1?'':'s')+(enabled?'':' · publishing off');
+    $('lotRows').innerHTML=lots.length?lots.map(function(l){
+      var st=l.status||'–';
+      var chip=st==='active'?'<span class="chip on">active</span>':(st==='sold'?'<span class="chip off">sold</span>':'<span class="chip warn">'+esc(st)+'</span>');
+      return '<tr>'+
+        '<td>'+esc(l.title||l.setId||'–')+'</td>'+
+        '<td>'+esc(l.lotSize||'–')+'</td>'+
+        '<td>'+money(l.price)+'</td>'+
+        '<td><span class="chip">gameflip</span> <span class="mono">'+esc(l.externalId||'–')+'</span></td>'+
+        '<td>'+chip+'</td>'+
+      '</tr>';
+    }).join(''):'<tr><td colspan="5" class="muted" style="padding:10px;">Lots are on but none published yet — a lot needs '+esc((pricingCache&&pricingCache.lotSize)||'N')+' waiting Gameflip accounts on one set.</td></tr>';
+  }catch(e){
+    // Lots are flagged OFF by default; a missing/failed endpoint should not
+    // break the bundles panel.
+    wrap.style.display='none';
+  }
+}
+
+// ---- Reprice (dry-run → Apply) --------------------------------------------
+
+// POST /reprice returns engine.repriceUnclaimedRows output. The envelope is
+// not frozen (plan may be top-level, under .plan, or under .result), so
+// normalise before rendering.
+function normalizePlan(r){
+  var res=(r&&r.result!=null)?r.result:r;
+  var plan=Array.isArray(res)?res:((res&&(res.plan||res.rows||res.items))||[]);
+  var applied=null;
+  if(res&&!Array.isArray(res)){
+    if(res.applied!=null) applied=res.applied;
+    else if(res.patched!=null) applied=res.patched;
+    else if(res.updated!=null) applied=res.updated;
+  }
+  return { plan:plan, applied:applied, raw:res };
+}
+
+function renderReprice(out, applied){
+  var plan=out.plan||[], thr=driftThreshold();
+  var eligible=plan.filter(function(p){ return Math.abs(Number(p.driftPct)||0)>=thr; });
+  $('repriceMode').textContent=applied?'applied':'dry-run';
+  $('repriceMode').className='chip '+(applied?'on':'warn');
+  $('repriceSummary').textContent=plan.length+' row'+(plan.length===1?'':'s')+' · '+eligible.length+' at ≥'+thr+'% drift'+
+    (applied&&typeof out.applied==='number'?' · '+out.applied+' patched':'');
+  var rows=$('repriceRows');
+  if(!plan.length){ rows.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">No active unclaimed rows to reprice.</td></tr>'; }
+  else rows.innerHTML=plan.map(function(p){
+    var d=Number(p.driftPct)||0, hit=Math.abs(d)>=thr;
+    var result='';
+    if(p.error) result='<span class="chip off">'+esc(p.error)+'</span>';
+    else if(p.note) result='<span class="muted">'+esc(p.note)+'</span>';
+    else if(applied) result=hit?'<span class="chip on">'+(p.applied===false?'skipped':'patched')+'</span>':'<span class="muted">below threshold</span>';
+    else result=hit?'<span class="chip warn">will patch</span>':'<span class="muted">below threshold</span>';
+    return '<tr class="'+(hit?'':'dim')+'">'+
+      '<td><span class="chip">'+esc(p.marketplace||'–')+'</span></td>'+
+      '<td>'+esc(p.title||'')+'</td>'+
+      '<td class="mono">'+esc(p.externalId||p.rowId||'–')+'</td>'+
+      '<td>'+money(p.current)+'</td>'+
+      '<td>'+money(p.target)+'</td>'+
+      '<td>'+driftCell(d)+'</td>'+
+      '<td>'+result+'</td>'+
+    '</tr>';
+  }).join('');
+  $('repriceNote').textContent=applied
+    ? 'Rows patched on the marketplaces; DropSet prices updated. Manual listings untouched.'
+    : (eligible.length?'Apply patches the '+eligible.length+' highlighted row'+(eligible.length===1?'':'s')+' (Gameflip / Digiseller / GGSel). Nothing is changed until you click Apply.':'Nothing to apply — every row is within the drift threshold.');
+  $('repriceApply').disabled=applied||!eligible.length;
+}
+
+async function runReprice(apply){
+  $('repriceRows').innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+(apply?'Applying…':'Computing plan…')+'</td></tr>';
+  $('repriceSummary').textContent='';
+  $('repriceNote').textContent='';
+  $('repriceApply').disabled=true;
+  $('repriceRerun').disabled=true;
+  try{
+    await loadPricing(false).catch(function(){ return null; });
+    var r=await api('/api/unclaimed-auto/reprice',{method:'POST',body:JSON.stringify({apply:!!apply})});
+    repriceLast=normalizePlan(r);
+    renderReprice(repriceLast, !!apply);
+    if(apply){ bundleToast('reprice applied'); loadBundles(); loadListings(); loadState(); }
+  }catch(e){
+    $('repriceRows').innerHTML='<tr><td colspan="7" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>';
+    $('repriceApply').disabled=true;
+  }finally{ $('repriceRerun').disabled=false; }
+}
+
+function openReprice(){
+  $('repriceBg').classList.add('show');
+  runReprice(false);
+}
+
+// ---- Pricing settings form --------------------------------------------------
+
+function gameFloorsToLines(o){
+  o=o||{};
+  return Object.keys(o).map(function(k){ return k+'='+o[k]; }).join('\n');
+}
+// "game=price" lines → { game: price }. Keys are lowercased substrings, like
+// noClaimGames; blank lines ignored; anything else is a validation error.
+function parseGameFloors(txt){
+  var out={};
+  String(txt||'').split(/\r?\n/).forEach(function(line,i){
+    var s=line.trim(); if(!s) return;
+    var m=s.match(/^(.+?)\s*[=:]\s*\$?(\d+(?:\.\d+)?)\s*$/);
+    if(!m) throw new Error('Per-game floors line '+(i+1)+' must be game=price (got "'+s+'")');
+    var k=m[1].trim().toLowerCase(), v=Number(m[2]);
+    if(!k||!isFinite(v)||v<0) throw new Error('Per-game floors line '+(i+1)+': bad price');
+    out[k]=v;
+  });
+  return out;
+}
+function numField(id, label, opts){
+  opts=opts||{};
+  var v=Number($(id).value);
+  if(!isFinite(v)) throw new Error(label+' must be a number');
+  if(opts.min!=null&&v<opts.min) throw new Error(label+' must be ≥ '+opts.min);
+  if(opts.max!=null&&v>opts.max) throw new Error(label+' must be ≤ '+opts.max);
+  if(opts.int&&Math.floor(v)!==v) throw new Error(label+' must be a whole number');
+  return v;
+}
+
+async function openPricing(){
+  $('pricingMsg').textContent='Loading…';
+  $('pricingBg').classList.add('show');
+  try{
+    var p=await loadPricing(true);
+    $('prFloor').value=p.floorUsd!=null?p.floorUsd:0.75;
+    $('prStep').value=p.itemStepPct!=null?p.itemStepPct:15;
+    $('prCap').value=p.itemCapMult!=null?p.itemCapMult:2.5;
+    $('prBonus').value=p.fullEventBonusPct!=null?p.fullEventBonusPct:25;
+    $('prGameFloors').value=gameFloorsToLines(p.gameFloors);
+    $('prRepriceExisting').checked=!!p.repriceExisting;
+    $('prDriftPct').value=p.repriceDriftPct!=null?p.repriceDriftPct:20;
+    $('prLots').checked=!!p.lots;
+    $('prLotSize').value=p.lotSize!=null?p.lotSize:5;
+    $('prLotDiscount').value=p.lotDiscountPct!=null?p.lotDiscountPct:10;
+    $('prExpiryPasses').value=p.expiryConfirmPasses!=null?p.expiryConfirmPasses:2;
+    $('pricingMsg').textContent='';
+  }catch(e){ $('pricingMsg').textContent='Error: '+e.message; }
+}
+
+async function savePricing(){
+  var btn=$('pricingSave');
+  btn.disabled=true;
+  $('pricingMsg').textContent='';
+  try{
+    var body={
+      unclaimedPriceFloorUsd: numField('prFloor','Price floor',{min:0}),
+      unclaimedGameFloors: parseGameFloors($('prGameFloors').value),
+      unclaimedItemStepPct: numField('prStep','Item step %',{min:0}),
+      unclaimedItemCapMult: numField('prCap','Item cap ×',{min:1}),
+      unclaimedFullEventBonusPct: numField('prBonus','Full-event bonus %',{min:0}),
+      unclaimedRepriceExisting: !!$('prRepriceExisting').checked,
+      unclaimedRepriceDriftPct: numField('prDriftPct','Reprice drift %',{min:1}),
+      unclaimedGameflipLots: !!$('prLots').checked,
+      unclaimedLotSize: numField('prLotSize','Lot size',{min:2,int:true}),
+      unclaimedLotDiscountPct: numField('prLotDiscount','Lot discount %',{min:0,max:90}),
+      unclaimedExpiryConfirmPasses: numField('prExpiryPasses','Expiry confirm passes',{min:1,int:true})
+    };
+    await api('/api/unclaimed-auto/pricing',{method:'POST',body:JSON.stringify(body)});
+    pricingCache=null;
+    await loadPricing(true).catch(function(){ return null; });
+    $('pricingBg').classList.remove('show');
+    bundleToast('pricing saved');
+    loadBundles();
+  }catch(e){ $('pricingMsg').textContent='Error: '+e.message; }
+  finally{ btn.disabled=false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -622,14 +1028,14 @@ document.querySelectorAll('.tab').forEach(function(b){
 $('scanBtn').addEventListener('click',function(){
   busy(this, async function(){
     var r=await api('/api/unclaimed-auto/scan',{method:'POST',body:'{}'});
-    loadState(); loadAccounts(); loadListings();
+    loadState(); loadBundles(); loadAccounts(); loadListings();
     return 'scan done — listed '+(r.result&&r.result.scan&&r.result.scan.listed||0)+' new';
   });
 });
 $('refreshBtn').addEventListener('click',function(){
   busy(this, async function(){
     var r=await api('/api/unclaimed-auto/refresh',{method:'POST',body:'{}'});
-    loadState(); loadAccounts(); loadListings();
+    loadState(); loadBundles(); loadAccounts(); loadListings();
     var c=r.result&&r.result.check||{};
     return 'check done — sold '+((c.sold)||0)+', expired '+((c.expired)||0)+', released '+((c.released)||0)+', removed '+((c.manualSoldRemoved)||0);
   });
@@ -660,6 +1066,22 @@ $('arcAcctPrev').addEventListener('click',function(){ if(arcPage>1){arcPage--;lo
 $('arcAcctNext').addEventListener('click',function(){ if(arcPage<arcPages){arcPage++;loadArcAccounts();} });
 $('arcItemClose').addEventListener('click',function(){ $('arcItemBg').classList.remove('show'); });
 $('arcItemBg').addEventListener('click',function(e){ if(e.target===this) this.classList.remove('show'); });
+
+// Bundles panel: refresh, reprice modal, pricing form.
+$('bdRefreshBtn').addEventListener('click',function(){ bundleToast(''); loadBundles(true); });
+$('repriceBtn').addEventListener('click',openReprice);
+$('repriceClose').addEventListener('click',function(){ $('repriceBg').classList.remove('show'); });
+$('repriceBg').addEventListener('click',function(e){ if(e.target===this) this.classList.remove('show'); });
+$('repriceRerun').addEventListener('click',function(){ runReprice(false); });
+$('repriceApply').addEventListener('click',function(){
+  var n=repriceLast?repriceLast.plan.filter(function(p){ return Math.abs(Number(p.driftPct)||0)>=driftThreshold(); }).length:0;
+  if(!confirm('Apply the reprice plan? '+n+' live unclaimed row'+(n===1?'':'s')+' will be repriced on Gameflip / Digiseller / GGSel. Manual listings are untouched.')) return;
+  runReprice(true);
+});
+$('pricingBtn').addEventListener('click',openPricing);
+$('pricingClose').addEventListener('click',function(){ $('pricingBg').classList.remove('show'); });
+$('pricingBg').addEventListener('click',function(e){ if(e.target===this) this.classList.remove('show'); });
+$('pricingForm').addEventListener('submit',function(e){ e.preventDefault(); savePricing(); });
 
 document.addEventListener('click',function(e){
   var t=e.target;

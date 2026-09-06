@@ -21,6 +21,10 @@ const {
   allocateCapKeep,
   manualSoldKey,
   filterManualSoldLedgers,
+  uniqueDrops,
+  dropsFromSet,
+  shouldExpire,
+  ledgerCampaignsEnded,
 } = require("../utils/unclaimedAutoList");
 
 test("no-claim inventory: only 100%-unclaimed drops are sellable", () => {
@@ -116,21 +120,80 @@ test("listing copy: title is auto-lister style and description is the house temp
   assert.ok(!/(^|\s)acct_[0-9a-z]+/i.test(desc));
 });
 
-test("listing copy: duplicate-name drops collapse to one item in the title", () => {
+test("listing copy: duplicate drops are COPIES — one qty-aware item in title and description (v3)", () => {
   const drops = [
     { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
     { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
     { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
     { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
   ];
+  // Item count = sum of copies; the item is prefixed with its copy count.
   const title = listingTitle("Rainbow Six Siege", drops);
   assert.strictEqual(
     title,
-    "Rainbow Six Siege Twitch Drops (1 Item) — Alpha Pack",
+    "Rainbow Six Siege Twitch Drops (4 Items) — 4× Alpha Pack",
   );
+  assert.ok(title.length <= 120);
   const desc = listingDescription("Rainbow Six Siege", drops, "gameflip");
-  assert.ok(desc.includes("Includes:\n- Alpha Pack"));
-  assert.strictEqual(desc.match(/Alpha Pack/g).length, 1);
+  assert.ok(desc.includes("Includes:\n- 4× Alpha Pack"));
+  // ONE item line for the four copies (the bundle "Copies:" lead-in, when the
+  // bundles module is present, may name the item once more above the list).
+  const itemLines = desc.split("\n").filter((l) => l.startsWith("- "));
+  assert.deepStrictEqual(itemLines, ["- 4× Alpha Pack"]);
+  const includesAt = desc.indexOf("Includes:");
+  assert.ok(includesAt >= 0);
+  assert.ok(/press Connect/i.test(desc));
+  assert.ok(desc.includes("message me here on Gameflip"));
+});
+
+test("listing copy: no-event qty title matches the contract form", () => {
+  // Contract: "(5 Items) — 4× Alpha Pack + SMELLS LIKE BURNING"
+  const drops = [
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "SMELLS LIKE BURNING", itemKey: "smells like burning|rainbow six siege" },
+  ];
+  const title = listingTitle("Rainbow Six Siege", drops);
+  assert.strictEqual(
+    title,
+    "Rainbow Six Siege Twitch Drops (5 Items) — 4× Alpha Pack + SMELLS LIKE BURNING",
+  );
+  // A classification with no event must not change the no-event form.
+  assert.strictEqual(listingTitle("Rainbow Six Siege", drops, null), title);
+  assert.strictEqual(
+    listingTitle("Rainbow Six Siege", drops, { event: null, waves: [], full: false, bundleKey: "", bundleLabel: "" }),
+    title,
+  );
+  // Drops rebuilt from a stored set carry qty and produce the same title as
+  // the raw copies did — a successor publish never loses the "4×".
+  const set = {
+    coverGame: "Rainbow Six Siege",
+    items: [
+      { itemKey: "alpha pack|rainbow six siege", name: "Alpha Pack", game: "Rainbow Six Siege", qty: 4 },
+      { itemKey: "smells like burning|rainbow six siege", name: "SMELLS LIKE BURNING", game: "Rainbow Six Siege", qty: 1 },
+    ],
+  };
+  assert.strictEqual(listingTitle("Rainbow Six Siege", dropsFromSet(set)), title);
+  assert.strictEqual(signatureFor("Rainbow Six Siege", dropsFromSet(set)).key, signatureFor("Rainbow Six Siege", drops).key);
+});
+
+test("uniqueDrops: one entry per key with qty, input untouched", () => {
+  const drops = [
+    { name: "Alpha Pack", itemKey: "alpha pack|r6" },
+    { name: "Alpha Pack", itemKey: "Alpha Pack|R6" },
+    { name: "Charm", itemKey: "charm|r6" },
+    { name: "", itemKey: "" },
+  ];
+  const out = uniqueDrops(drops);
+  assert.deepStrictEqual(
+    out.map((d) => [d.itemKey, d.qty]),
+    [["alpha pack|r6", 2], ["charm|r6", 1]],
+  );
+  assert.strictEqual(drops[0].qty, undefined);
+  assert.deepStrictEqual(uniqueDrops(null), []);
+  assert.deepStrictEqual(uniqueDrops("acct_1"), []);
 });
 
 test("cap key normalises game labels: Overwatch and overwatch are one game", () => {
@@ -253,7 +316,143 @@ test("signatureFor: a different drop makes it a different item", () => {
   assert.strictEqual(signatureFor("", []).key, "|");
 });
 
-test("dedupeSetItems: duplicate drops collapse to one item per key", () => {
+test("signatureFor: copies count — 4× Alpha Pack and 1× Alpha Pack are different items (v3)", () => {
+  const one = signatureFor("Rainbow Six Siege", [
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+  ]);
+  const four = signatureFor("Rainbow Six Siege", [
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+    { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
+  ]);
+  assert.notStrictEqual(one.key, four.key);
+  // qty-1 keys are undecorated (a pre-v3 signature is unchanged); qty>1 keys
+  // are written itemKey×qty.
+  assert.deepStrictEqual(one.keys, ["alpha pack|rainbow six siege"]);
+  assert.strictEqual(one.key, "rainbow six siege|alpha pack|rainbow six siege");
+  assert.deepStrictEqual(four.keys, ["alpha pack|rainbow six siege×4"]);
+  assert.strictEqual(four.key, "rainbow six siege|alpha pack|rainbow six siege×4");
+  // The $all prefilter still sees plain keys; the exact match sees pairs.
+  assert.deepStrictEqual(four.itemKeys, ["alpha pack|rainbow six siege"]);
+  assert.deepStrictEqual(four.pairs, [["alpha pack|rainbow six siege", 4]]);
+  // Order-agnostic across mixed copies, and a drop carrying qty counts as that
+  // many copies (set-derived drops).
+  const mixed = signatureFor("R6", [
+    { name: "Charm", itemKey: "charm|r6" },
+    { name: "Alpha Pack", itemKey: "alpha pack|r6" },
+    { name: "Alpha Pack", itemKey: "alpha pack|r6" },
+  ]);
+  const viaQty = signatureFor("r6", [
+    { name: "Alpha Pack", itemKey: "alpha pack|r6", qty: 2 },
+    { name: "Charm", itemKey: "charm|r6", qty: 1 },
+  ]);
+  assert.strictEqual(mixed.key, viaQty.key);
+  assert.strictEqual(mixed.key, "r6|alpha pack|r6×2,charm|r6");
+});
+
+test("shouldExpire: strikes — one empty read never expires, the confirming read must be 20 min later", () => {
+  const T0 = Date.UTC(2026, 8, 5, 18, 29);
+  const MIN = 60 * 1000;
+  // First empty read: strike 1, firstEmptyAt stamped, no expiry.
+  const s1 = shouldExpire({ emptyReads: 0, firstEmptyAt: null }, T0, { confirmPasses: 2 });
+  assert.strictEqual(s1.expire, false);
+  assert.strictEqual(s1.emptyReads, 1);
+  assert.strictEqual(new Date(s1.firstEmptyAt).getTime(), T0);
+  // Second empty read only 10 min later: passes reached but the gap is not.
+  const s2 = shouldExpire(
+    { emptyReads: s1.emptyReads, firstEmptyAt: s1.firstEmptyAt },
+    T0 + 10 * MIN,
+    { confirmPasses: 2 },
+  );
+  assert.strictEqual(s2.expire, false);
+  assert.strictEqual(s2.emptyReads, 2);
+  assert.strictEqual(new Date(s2.firstEmptyAt).getTime(), T0, "firstEmptyAt is kept, not re-stamped");
+  // Third empty read at +20 min: confirmed.
+  const s3 = shouldExpire(
+    { emptyReads: s2.emptyReads, firstEmptyAt: s2.firstEmptyAt },
+    T0 + 20 * MIN,
+    { confirmPasses: 2 },
+  );
+  assert.strictEqual(s3.expire, true);
+  assert.strictEqual(s3.emptyReads, 3);
+  // Two reads 20+ min apart is enough with confirmPasses 2.
+  const direct = shouldExpire({ emptyReads: 1, firstEmptyAt: new Date(T0) }, T0 + 25 * MIN, { confirmPasses: 2 });
+  assert.strictEqual(direct.expire, true);
+  // Higher confirmPasses needs more strikes even after the gap.
+  const strict = shouldExpire({ emptyReads: 1, firstEmptyAt: new Date(T0) }, T0 + 60 * MIN, { confirmPasses: 3 });
+  assert.strictEqual(strict.expire, false);
+  assert.strictEqual(strict.emptyReads, 2);
+  // Default confirmPasses is 2 when the option is missing/invalid.
+  assert.strictEqual(shouldExpire({ emptyReads: 1, firstEmptyAt: new Date(T0) }, T0 + 25 * MIN, {}).expire, true);
+  assert.strictEqual(shouldExpire({ emptyReads: 0 }, T0).expire, false);
+});
+
+test("shouldExpire: campaignEnded never shortcuts the strikes (post-event stock is the norm)", () => {
+  const T0 = Date.UTC(2026, 8, 5, 18, 29);
+  const r = shouldExpire({ emptyReads: 0, firstEmptyAt: null }, T0, { confirmPasses: 2, campaignEnded: true });
+  assert.strictEqual(r.expire, false);
+  assert.strictEqual(r.emptyReads, 1);
+  // Confirmed strikes + gap still expire, and the reason notes the ended campaign.
+  const done = shouldExpire({ emptyReads: 1, firstEmptyAt: new Date(T0) }, T0 + 25 * 60 * 1000, {
+    confirmPasses: 2,
+    campaignEnded: true,
+  });
+  assert.strictEqual(done.expire, true);
+  assert.match(done.reason, /campaign ended/);
+  // campaignEnded alone (no empty read) never expires — the non-empty read
+  // path wins and resets.
+  const live = shouldExpire({ emptyReads: 3, firstEmptyAt: new Date(T0) }, T0, {
+    confirmPasses: 2,
+    campaignEnded: true,
+    empty: false,
+  });
+  assert.strictEqual(live.expire, false);
+  assert.strictEqual(live.emptyReads, 0);
+  assert.strictEqual(live.firstEmptyAt, null);
+});
+
+test("shouldExpire: a non-empty read resets both strike fields", () => {
+  const T0 = Date.UTC(2026, 8, 5, 18, 29);
+  const r = shouldExpire({ emptyReads: 2, firstEmptyAt: new Date(T0) }, T0 + 30 * 60 * 1000, {
+    confirmPasses: 2,
+    empty: false,
+  });
+  assert.deepStrictEqual(
+    { expire: r.expire, emptyReads: r.emptyReads, firstEmptyAt: r.firstEmptyAt },
+    { expire: false, emptyReads: 0, firstEmptyAt: null },
+  );
+  // Garbage stored values are tolerated (NaN emptyReads, invalid date).
+  const g = shouldExpire({ emptyReads: "x", firstEmptyAt: "not a date" }, T0, { confirmPasses: 2 });
+  assert.strictEqual(g.expire, false);
+  assert.strictEqual(g.emptyReads, 1);
+  assert.strictEqual(new Date(g.firstEmptyAt).getTime(), T0);
+});
+
+test("ledgerCampaignsEnded: every named campaign must be in the ended set", () => {
+  const ledger = {
+    game: "Overwatch",
+    drops: [
+      { name: "A", campaign: "CAH Championship Week 1" },
+      { name: "B", campaign: "CAH Championship Finals" },
+    ],
+  };
+  const g = "overwatch";
+  assert.strictEqual(ledgerCampaignsEnded(ledger, new Set([g + "|cah championship week 1"])), false);
+  assert.strictEqual(
+    ledgerCampaignsEnded(
+      ledger,
+      new Set([g + "|cah championship week 1", g + "|cah championship finals"]),
+    ),
+    true,
+  );
+  // No campaign names on the drops → never "ended" (conservative).
+  assert.strictEqual(ledgerCampaignsEnded({ game: "Overwatch", drops: [{ name: "A" }] }, new Set(["overwatch|x"])), false);
+  assert.strictEqual(ledgerCampaignsEnded(ledger, new Set()), false);
+  assert.strictEqual(ledgerCampaignsEnded(null, new Set(["overwatch|x"])), false);
+});
+
+test("dedupeSetItems: duplicate drops collapse to one item per key WITH qty", () => {
   const drops = [
     { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
     { name: "Alpha Pack", itemKey: "alpha pack|rainbow six siege" },
@@ -265,6 +464,7 @@ test("dedupeSetItems: duplicate drops collapse to one item per key", () => {
   assert.strictEqual(items[0].itemKey, "alpha pack|rainbow six siege");
   assert.strictEqual(items[0].name, "Alpha Pack");
   assert.strictEqual(items[0].game, "Rainbow Six Siege");
+  assert.strictEqual(items[0].qty, 4);
   // Keeps distinct items; a drop without an itemKey is keyed by name (same
   // fallback as signatureFor), and a drop with neither is dropped.
   const mixed = dedupeSetItems(
