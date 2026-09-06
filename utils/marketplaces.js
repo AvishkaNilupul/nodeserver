@@ -1383,6 +1383,51 @@ async function digisellerProductStock(productId) {
   return (await digisellerProductStockDetailed(productId)).stock;
 }
 
+// Is this product still offered for sale? `/products/{id}/data` answers for a
+// DISABLED product exactly as it does for a live one (verified live 2026-09-06
+// on product 6078723: delisted, still reports num_in_stock 3), so the only
+// read that tells enabled from disabled is the seller's own goods list, whose
+// `visible` field is 1 for a live product and negative for a disabled one.
+// Returns true/false, or null when the state could not be read — callers must
+// treat null as "unknown", never as "it is down".
+async function digisellerProductVisible(productId, { maxPages = 15 } = {}) {
+  const want = String(productId);
+  try {
+    const keys = requireKeys("digiseller");
+    const token = await digisellerToken();
+    for (let page = 1; page <= maxPages; page++) {
+      const r = await axios.post(
+        DS_API + "/seller-goods?token=" + encodeURIComponent(token),
+        {
+          id_seller: Number(keys.sellerId),
+          order_col: "cntsell",
+          order_dir: "desc",
+          rows: 100,
+          page,
+          currency: "USD",
+          lang: "en-US",
+          show_hidden: 1,
+        },
+        { headers: { "Content-Type": "application/json" }, timeout: 30000 },
+      );
+      const d = r.data || {};
+      if (d.retval !== undefined && String(d.retval) !== "0") return null;
+      const rows = Array.isArray(d.rows) ? d.rows : [];
+      const hit = rows.find((p) => String(p && p.id_goods) === want);
+      if (hit) return Number(hit.visible) > 0;
+      if (!rows.length || page >= Number(d.pages || 1)) break;
+    }
+    // Not in the seller's own list at all — it cannot be on sale.
+    return false;
+  } catch (e) {
+    console.error(
+      "digiseller visibility unreadable for product " + productId + ": " +
+        (e.response ? "HTTP " + e.response.status : e.message),
+    );
+    return null;
+  }
+}
+
 // Disable sales for a product (soft delist).
 async function digisellerDelist(productId) {
   const token = await digisellerToken();
@@ -2046,6 +2091,31 @@ async function ggselOfferStockDetailed(offerId) {
 
 async function ggselOfferStock(offerId) {
   return (await ggselOfferStockDetailed(offerId)).stock;
+}
+
+// The offer's own on-sale state ("active" / "paused" / …). ggselDelist pauses
+// an offer, so this is how a caller proves the delist actually took. Stock is
+// NOT that proof: a paused offer keeps reporting the products still attached
+// to it. Returns "" / null when unreadable — never assume "down" from that.
+async function ggselOfferStatus(offerId) {
+  const keys = requireKeys("ggsel");
+  try {
+    const o = await ggselReadOffer(keys, offerId);
+    return String((o && o.status) || "");
+  } catch (e) {
+    try {
+      const row = await ggselFindOfferInList(keys, offerId);
+      // Absent from the seller's offer list entirely — it is not on sale.
+      if (!row) return "gone";
+      return String(row.status || "");
+    } catch {
+      console.error(
+        "ggsel status unreadable for offer " + offerId + ": " +
+          (e.response ? "HTTP " + e.response.status : e.message),
+      );
+      return null;
+    }
+  }
 }
 
 // Products can only be attached to an autoselling offer — GGSel rejects
@@ -3698,6 +3768,7 @@ module.exports = {
   digisellerRemoveContent,
   digisellerProductStock,
   digisellerProductStockDetailed,
+  digisellerProductVisible,
   digisellerDelist,
   g2gTest,
   g2gServices,
@@ -3716,6 +3787,7 @@ module.exports = {
   ggselAddProducts,
   ggselOfferStock,
   ggselOfferStockDetailed,
+  ggselOfferStatus,
   ggselStockField,
   ggselResolveCategoryId,
   ggselTitle,

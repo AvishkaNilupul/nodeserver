@@ -1942,6 +1942,17 @@ async function publishProduct(set, market, units, game, drops, price, img, ggsel
 
 // Attach one more stock unit to an existing quantity product.
 async function addUnitToRow(row, cand) {
+  return withSetMarketLock(row && row.set, row && row.marketplace, () =>
+    addUnitToRowLocked(row, cand),
+  );
+}
+
+async function addUnitToRowLocked(row, cand) {
+  // Adding to a row another worker just took off sale would attach a code to a
+  // dead product; re-read under the lock and let the scan pass republish.
+  const fresh = await MarketplaceListing.findById(row._id).lean().catch(() => null);
+  if (!fresh || fresh.status !== "active") return;
+  row = fresh;
   if (row.marketplace === "digiseller") {
     const added = await mp.digisellerAddContent(row.externalId, [
       digisellerDeliveryCode(cand.login, cand.password),
@@ -1985,6 +1996,15 @@ async function addUnitToRow(row, cand) {
 // `excludeLogin` is the unit that just left (sold/expired) — never it.
 async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
   if (!setId) return { published: false, reason: "no set" };
+  if (!opts.locked) {
+    return withSetMarketLock(setId, "gameflip", () =>
+      publishGameflipSuccessor(setId, excludeLogin, { ...opts, locked: true }),
+    );
+  }
+  // Never add a second live head to a chain that already has one — a parallel
+  // removal may have published the successor while we were waiting.
+  const liveHead = await activeRowForSetMarket(setId, "gameflip");
+  if (liveHead) return { published: false, reason: "chain already live" };
   const set = await DropSet.findById(setId).lean();
   if (!set) return { published: false, reason: "no set" };
   const waitingList = await UnclaimedAccount.find({
@@ -2007,6 +2027,19 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
   const game = set.coverGame || (drops[0] && drops[0].game) || "";
   const cls = await classificationForSet(set);
   for (const waiting of list) {
+    // The list was read before the lock was taken; re-read this unit so a
+    // ledger another worker just sold/removed can never become the new head.
+    const still = await UnclaimedAccount.findOne({
+      _id: waiting._id,
+      status: "listed",
+    })
+      .select("_id")
+      .lean()
+      .catch(() => null);
+    if (!still) continue;
+    if (filterManualSoldLedgers([waiting], await manualSoldOwnerKeys([waiting])).length === 0) {
+      continue;
+    }
     const cred = await credentialForLedger(waiting);
     if (!cred.password) continue;
     let img = "";
@@ -2072,6 +2105,117 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
 // Unit removal + marketplace repair
 // ---------------------------------------------------------------------------
 
+// One item's rows on one marketplace are edited by several passes at once:
+// the manual-sold sweep alone runs CONCURRENCY removals in parallel, and the
+// Gameflip chain and the GGSel offer are both "delist the row, publish its
+// replacement" sequences. Run those in parallel over the same set+market and
+// each worker reads the row BEFORE its sibling replaces it, so each publishes
+// a replacement of its own: on 2026-09-06 three manual-sold R6 accounts
+// removed together left THREE live GGSel offers (102872251/53/55) and a
+// Gameflip successor for an account that was itself sold in the same sweep.
+// This is an in-process mutex keyed by set+market; the cross-process run lock
+// (acquireRunLock) already guarantees only one process is in a pass at a time,
+// so serialising here is enough. Re-entrant callers pass { locked: true }.
+const setMarketLocks = new Map();
+async function withSetMarketLock(setId, market, fn) {
+  const key = String(setId || "") + ":" + String(market || "");
+  const prev = setMarketLocks.get(key) || Promise.resolve();
+  let release;
+  const mine = prev.then(() => new Promise((r) => (release = r)));
+  setMarketLocks.set(key, mine);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Drop the key once nothing is queued behind us, so the map cannot grow
+    // one entry per set+market for the life of the process.
+    if (setMarketLocks.get(key) === mine) setMarketLocks.delete(key);
+  }
+}
+
+// Take a row off sale and only mark it delisted once the PLATFORM agrees.
+// The old code was `mp.<x>Delist(id).catch(() => {})` followed by an
+// unconditional status:"delisted" write, so a delist that failed left the
+// listing live for buyers while the DB called it gone — that is how gameflip
+// 97b49ffd stayed on sale for a sold R6 account. A failure now leaves the row
+// ACTIVE with lastError set, so the next pass (and the reconcile pass) retries
+// it instead of forgetting it.
+// Pure verdict for the above, so the rule is testable without a platform:
+//   callError ""            -> the platform accepted the delist            (down)
+//   outcome "sold" / "gone" -> not on sale anyway                          (down)
+//   otherwise the platform's own state decides: "down" / "live" / unknown,
+//   and unknown must stay retryable — never assume a failed call worked.
+function delistVerdict({ callError = "", outcome = "", platformState = null } = {}) {
+  if (!callError) return "down";
+  if (outcome === "sold" || outcome === "gone") return "down";
+  if (platformState === "down") return "down";
+  if (platformState === "live") return "live";
+  return "unknown";
+}
+
+async function delistRowVerified(row, reason = "", opts = {}) {
+  if (!row || !row._id) return { ok: true, changed: false };
+  // `force` is for a row we already believe is down but the platform says is
+  // still on sale — there is nothing to claim, it just has to come off.
+  if (row.status !== "active" && !opts.force) return { ok: true, changed: false };
+  const id = row.externalId;
+  let callError = "";
+  try {
+    if (row.marketplace === "gameflip") await mp.gameflipDelist(id);
+    else if (row.marketplace === "digiseller") await mp.digisellerDelist(id);
+    else if (row.marketplace === "ggsel") await mp.ggselDelist(id);
+    else return { ok: true, changed: false };
+  } catch (e) {
+    callError = e.message || String(e);
+  }
+  const outcome = callError ? mp.delistOutcome(callError) : "";
+  let platformState = null;
+  if (callError && !outcome) {
+    // The call failed for some other reason — ask the platform directly
+    // before deciding, because a transport blip on an already-processed
+    // delist must not strand the row as active forever.
+    try {
+      if (row.marketplace === "gameflip") {
+        const st = await mp.gameflipListingStatus(id);
+        platformState = st === "onsale" ? "live" : "down";
+      } else if (row.marketplace === "ggsel") {
+        const st = await mp.ggselOfferStatus(id);
+        if (st !== null && st !== "") platformState = st === "active" ? "live" : "down";
+      } else if (row.marketplace === "digiseller") {
+        const vis = await mp.digisellerProductVisible(id);
+        if (vis !== null) platformState = vis ? "live" : "down";
+      }
+    } catch {
+      /* unreadable — stays unknown and retries next pass */
+    }
+  }
+  const down = delistVerdict({ callError, outcome, platformState }) === "down";
+  const claim = opts.force ? { _id: row._id } : { _id: row._id, status: "active" };
+  if (!down) {
+    await MarketplaceListing.updateOne(
+      claim,
+      { $set: { lastError: "delist failed: " + (callError || "still on sale") } },
+    ).catch(() => {});
+    logEvent({
+      category: "unclaimed",
+      action: "delist_failed",
+      actor: "unclaimedAutoList",
+      subject: String(id),
+      detail:
+        row.marketplace + " listing " + id + " is still on sale after a delist" +
+        (reason ? " (" + reason + ")" : "") +
+        (callError ? ": " + callError.slice(0, 200) : ""),
+    });
+    return { ok: false, changed: false, error: callError || "still on sale" };
+  }
+  const r = await MarketplaceListing.updateOne(
+    claim,
+    { $set: { status: "delisted", lastError: reason || "" } },
+  ).catch(() => null);
+  return { ok: true, changed: !!(r && r.modifiedCount) };
+}
+
 // Remove this ledger's unit from its marketplace listing.
 //  - gameflip: delist the live row (if this unit was the live one) and publish
 //    the next waiting unit as the successor.
@@ -2081,25 +2225,35 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
 //    when healthy units remain, else take the whole offer down.
 async function removeUnitFromRow(row, ledger, opts = {}) {
   if (!row || !ledger) return { ok: true, removed: false };
+  if (opts.locked) return removeUnitFromRowLocked(row, ledger, opts);
+  return withSetMarketLock(row.set, row.marketplace, () =>
+    removeUnitFromRowLocked(row, ledger, opts),
+  );
+}
+
+async function removeUnitFromRowLocked(row, ledger, opts = {}) {
   const login = String(ledger.login || "").toLowerCase();
+  // Re-read the row inside the lock: the caller's copy may have been fetched
+  // before a sibling removal replaced or delisted it, and acting on a stale
+  // snapshot is exactly what published the duplicate offers.
+  const fresh = await MarketplaceListing.findById(row._id).lean().catch(() => null);
+  if (!fresh) return { ok: true, removed: false };
+  row = fresh;
   if (row.marketplace === "gameflip") {
     if (String(row.accountLogin || "").toLowerCase() !== login) {
       return { ok: true, removed: false }; // not the live unit — never exposed
     }
     if (row.status === "active") {
-      await mp.gameflipDelist(row.externalId).catch(() => {});
-      await MarketplaceListing.updateOne(
-        { _id: row._id, status: "active" },
-        { $set: { status: "delisted", lastError: "" } },
-      ).catch(() => {});
+      // A row we could not take off sale must NOT be replaced by a successor:
+      // that would leave two live listings for one item, one of them selling
+      // an account that is already gone.
+      const d = await delistRowVerified(row, "");
+      if (!d.ok) return { ok: false, removed: false, error: d.error };
     }
-    await publishGameflipSuccessor(row.set, ledger.login, { log: opts.log !== false });
-    return { ok: true, removed: true };
-  }
-  // A platform sale: the buyer already got this unit from the platform, so
-  // its code is gone from the product and the stock read is the truth. Only
-  // the ledger changes (to sold) — leave the row's bookkeeping untouched.
-  if (opts.removeFromProduct === false) {
+    await publishGameflipSuccessor(row.set, ledger.login, {
+      log: opts.log !== false,
+      locked: true,
+    });
     return { ok: true, removed: true };
   }
   const was = (row.units || []).length;
@@ -2107,9 +2261,15 @@ async function removeUnitFromRow(row, ledger, opts = {}) {
     (u) => String(u.login || "").toLowerCase() !== login,
   );
   const removed = units.length < was;
-  if (!removed) return { ok: true, removed: false };
+  // A platform sale: the buyer already got this unit from the platform, so its
+  // code is gone from the product — never delete a content line or rebuild the
+  // offer for it. The row's own bookkeeping still has to drop the unit, or the
+  // row keeps advertising accounts that are spent (digiseller 6090106 sat live
+  // holding three sold R6 logins that way).
+  const platformConsumed = opts.removeFromProduct === false;
+  if (!removed) return { ok: true, removed: platformConsumed };
   if (row.marketplace === "digiseller") {
-    if (opts.removeFromProduct !== false) {
+    if (!platformConsumed) {
       const unit = (row.units || []).find(
         (u) => String(u.login || "").toLowerCase() === login,
       );
@@ -2124,11 +2284,7 @@ async function removeUnitFromRow(row, ledger, opts = {}) {
       { $set: { units, accountLogin: units.map((u) => u.login).join(", ") } },
     ).catch(() => {});
     if (!units.length) {
-      await mp.digisellerDelist(row.externalId).catch(() => {});
-      await MarketplaceListing.updateOne(
-        { _id: row._id, status: "active" },
-        { $set: { status: "delisted", lastError: "" } },
-      ).catch(() => {});
+      await delistRowVerified({ ...row, units }, "");
     } else {
       const stock = await mp.digisellerProductStock(row.externalId).catch(() => null);
       if (stock != null) {
@@ -2140,16 +2296,18 @@ async function removeUnitFromRow(row, ledger, opts = {}) {
     }
   }
   if (row.marketplace === "ggsel") {
-    if (units.length) {
-      await rebuildGgselOffer(row, units).catch((e) =>
-        console.error("unclaimedAutoList ggsel rebuild failed:", e.message),
-      );
-    } else {
-      await mp.ggselDelist(row.externalId).catch(() => {});
+    if (!units.length) {
+      await delistRowVerified({ ...row, units }, "");
+    } else if (platformConsumed) {
+      // GGSel took the code itself; keep the offer and just drop our unit.
       await MarketplaceListing.updateOne(
         { _id: row._id, status: "active" },
-        { $set: { status: "delisted", lastError: "" } },
+        { $set: { units, accountLogin: units.map((u) => u.login).join(", ") } },
       ).catch(() => {});
+    } else {
+      await rebuildGgselOffer(row, units, { locked: true }).catch((e) =>
+        console.error("unclaimedAutoList ggsel rebuild failed:", e.message),
+      );
     }
   }
   return { ok: true, removed };
@@ -2190,7 +2348,12 @@ async function removeLoginFromAllRows(ledger, opts = {}) {
 
 // GGSel cannot delete a single unit, so a unit that must come off (expired /
 // claimed) forces a clean rebuild of the offer with only the healthy units.
-async function rebuildGgselOffer(oldRow, remainingUnits) {
+async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
+  if (!opts.locked) {
+    return withSetMarketLock(oldRow && oldRow.set, "ggsel", () =>
+      rebuildGgselOffer(oldRow, remainingUnits, { locked: true }),
+    );
+  }
   const set = await DropSet.findById(oldRow.set).lean();
   if (!set) return;
   const game = (set.items && set.items[0] && set.items[0].game) || set.coverGame || "";
@@ -2208,11 +2371,14 @@ async function rebuildGgselOffer(oldRow, remainingUnits) {
       units.push({ login: cred.login, password: cred.password, id: ledger.poolAccountId || ledger.webBotAccountId || "" });
     }
   }
-  await mp.ggselDelist(oldRow.externalId).catch(() => {});
-  await MarketplaceListing.updateOne(
-    { _id: oldRow._id, status: "active" },
-    { $set: { status: "delisted", lastError: "rebuilt after unit removal" } },
-  ).catch(() => {});
+  // Claim the rebuild: only the caller that actually flips this offer from
+  // active to delisted may publish its replacement. Without the claim two
+  // callers holding the same snapshot each publish one, and the item ends up
+  // with several live offers selling the same (or already sold) accounts.
+  const current = await MarketplaceListing.findById(oldRow._id).lean().catch(() => null);
+  if (!current || current.status !== "active") return;
+  const down = await delistRowVerified(current, "rebuilt after unit removal");
+  if (!down.ok || !down.changed) return;
   if (!units.length) return;
   let img = "";
   try {
@@ -2498,25 +2664,8 @@ async function delistRowsForAccount(rows) {
       results.push({ row, ok: true });
       continue;
     }
-    let ok = true;
-    try {
-      if (row.marketplace === "gameflip") await mp.gameflipDelist(row.externalId);
-      else if (row.marketplace === "digiseller") await mp.digisellerDelist(row.externalId);
-      else if (row.marketplace === "ggsel") await mp.ggselDelist(row.externalId);
-    } catch (e) {
-      ok = false;
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        { $set: { lastError: "auto-delist: " + e.message } },
-      ).catch(() => {});
-    }
-    if (ok) {
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        { $set: { status: "delisted" } },
-      ).catch(() => {});
-    }
-    results.push({ row, ok });
+    const d = await delistRowVerified(row, "");
+    results.push({ row, ok: d.ok });
   }
   return results;
 }
@@ -2741,6 +2890,287 @@ async function consistencyIssues() {
     }
   }
   return { ok: issues.length === 0, count: issues.length, issues: issues.slice(0, 50) };
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile pass — the self-healing net under every other path
+// ---------------------------------------------------------------------------
+
+// consistencyIssues() only REPORTS, and its set+market map even collapses
+// duplicate rows so it cannot see them. This pass fixes what it finds:
+//
+//   1. more than one active row for the same set+market (never legitimate off
+//      a lot) -> keep the newest, take the rest off sale;
+//   2. a row whose deliverable logins are no longer sellable ledgers (sold,
+//      manual-sold, expired, released) -> drop those units, and take the whole
+//      row off sale when nothing sellable is left.
+//
+// Every zombie found on 2026-09-06 (a Gameflip head and a Digiseller product
+// for accounts already hand-sold, plus three duplicate GGSel offers) would
+// have been cleared by this on the next tick, whatever race produced it.
+const RECONCILE_GRACE_MS = 10 * 60 * 1000; // let a fresh publish attach its ledgers
+// The Gameflip "everything on sale" sweep shares a rate limit with the auto-farm
+// watcher's own per-tick sale detection (a 429 there looks exactly like "not
+// sold"), so the leak check runs on this slower clock. opts.force runs it now,
+// which is what a manual reconcile wants.
+const ONSALE_SWEEP_MS = 30 * 60 * 1000;
+let lastOnsaleSweepAt = 0;
+
+// Which active rows are duplicates of another row for the same set+market?
+// Pure: `rows` oldest-first, the NEWEST row of a group is the survivor (it is
+// the one the last publish/rebuild produced and the one carrying the current
+// units). Returns the ids of every other row in a group of two or more.
+function supersededRowIds(rows) {
+  const groups = new Map();
+  for (const r of rows || []) {
+    const k = String(r.set) + ":" + r.marketplace;
+    groups.set(k, (groups.get(k) || []).concat(r));
+  }
+  const out = new Map(); // superseded id -> the row that supersedes it
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const keep = list[list.length - 1];
+    for (const r of list) {
+      if (String(r._id) !== String(keep._id)) out.set(String(r._id), keep);
+    }
+  }
+  return out;
+}
+
+// What should happen to ONE live row, given whether each login it can deliver
+// is still a sellable unit of that item? Pure so the rule is testable without
+// Mongo or a marketplace. `isSellable(login)` answers for this row's item.
+//   { action: "none" }                       nothing to do
+//   { action: "delist", bad }                nothing sellable is left
+//   { action: "repair", bad, good }          some units must come off
+function reconcileRowPlan(row, isSellable) {
+  if (!row) return { action: "none" };
+  if (row.marketplace === "gameflip") {
+    // A Gameflip row sells exactly one account: its live unit.
+    const live = String(row.accountLogin || "").trim();
+    if (!live) return { action: "none" };
+    if (isSellable(live)) return { action: "none" };
+    return { action: "delist", bad: [{ login: live }] };
+  }
+  const units = row.units || [];
+  if (!units.length) return { action: "none" };
+  const good = units.filter((u) => isSellable(u.login));
+  if (good.length === units.length) return { action: "none" };
+  const bad = units.filter((u) => !isSellable(u.login));
+  return good.length ? { action: "repair", bad, good } : { action: "delist", bad, good: [] };
+}
+
+async function reconcileRowsPass(opts = {}) {
+  const apply = opts.apply !== false;
+  const out = { rows: 0, duplicates: 0, delisted: 0, repaired: 0, stranded: 0, failed: 0, actions: [] };
+  const rows = await MarketplaceListing.find({
+    origin: ORIGIN,
+    status: "active",
+    ...NOT_LOT,
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+  if (!rows.length) return out;
+  out.rows = rows.length;
+
+  const cutoff = Date.now() - RECONCILE_GRACE_MS;
+  // Every listed unit, not just those of the sets that still have a live row —
+  // a set whose only row was taken down is exactly where a stranded unit hides.
+  const ledgers = await UnclaimedAccount.find({ status: "listed" })
+    .select("loginLower login set market lotId listedAt poolAccountId webBotAccountId source")
+    .lean();
+  const marked = await manualSoldOwnerKeys(ledgers);
+  const sellable = new Set();
+  for (const l of ledgers) {
+    if (marked.has(manualSoldKey(l))) continue;
+    sellable.add(String(l.set) + ":" + l.market + ":" + String(l.loginLower || "").toLowerCase());
+  }
+  const sellableFor = (row) => (login) =>
+    sellable.has(
+      String(row.set) + ":" + row.marketplace + ":" + String(login || "").toLowerCase(),
+    );
+
+  // 1. Duplicate active rows for one set+market — keep the newest.
+  const superseded = supersededRowIds(rows);
+  for (const row of rows) {
+    const keep = superseded.get(String(row._id));
+    if (!keep) continue;
+    out.duplicates++;
+    out.actions.push({
+      action: "duplicate",
+      marketplace: row.marketplace,
+      externalId: row.externalId,
+      detail: "superseded by " + keep.externalId,
+    });
+    if (!apply) continue;
+    const d = await withSetMarketLock(row.set, row.marketplace, () =>
+      delistRowVerified(row, "duplicate row — superseded by " + keep.externalId),
+    );
+    if (d.ok) out.delisted++;
+    else out.failed++;
+  }
+
+  // 2. Rows that can still deliver an account nobody may buy any more.
+  for (const row of rows) {
+    if (superseded.has(String(row._id))) continue;
+    if (new Date(row.createdAt || 0).getTime() > cutoff) continue;
+    try {
+      const plan = reconcileRowPlan(row, sellableFor(row));
+      if (plan.action === "none") continue;
+      const badLogins = (plan.bad || []).map((u) => u.login).join(", ");
+      out.actions.push({
+        action: plan.action === "delist" ? "no-stock" : "dead-units",
+        marketplace: row.marketplace,
+        externalId: row.externalId,
+        detail: badLogins + " no longer sellable",
+      });
+      if (!apply) continue;
+      const ok = await withSetMarketLock(row.set, row.marketplace, async () => {
+        const fresh = await MarketplaceListing.findById(row._id).lean().catch(() => null);
+        if (!fresh || fresh.status !== "active") return true;
+        if (plan.action === "delist") {
+          const d = await delistRowVerified(fresh, "no sellable stock behind it");
+          if (!d.ok) return false;
+          out.delisted++;
+          // A Gameflip chain whose head just came down gets its next waiting
+          // unit straight away — the item stays on sale, honestly stocked.
+          if (fresh.marketplace === "gameflip") {
+            await publishGameflipSuccessor(fresh.set, fresh.accountLogin, {
+              log: false,
+              locked: true,
+            });
+          }
+          return true;
+        }
+        if (fresh.marketplace === "digiseller") {
+          for (const u of plan.bad) {
+            if (u.contentId) {
+              await mp
+                .digisellerRemoveContent(fresh.externalId, u.contentId)
+                .catch(() => {});
+            }
+          }
+          await MarketplaceListing.updateOne(
+            { _id: fresh._id, status: "active" },
+            {
+              $set: {
+                units: plan.good,
+                accountLogin: plan.good.map((u) => u.login).join(", "),
+              },
+            },
+          ).catch(() => {});
+          out.repaired++;
+          return true;
+        }
+        if (fresh.marketplace === "ggsel") {
+          await rebuildGgselOffer(fresh, plan.good, { locked: true });
+          out.repaired++;
+          return true;
+        }
+        return true;
+      });
+      if (!ok) out.failed++;
+    } catch (e) {
+      out.failed++;
+      console.error(
+        "unclaimedAutoList reconcile failed for " + row.marketplace + " " + row.externalId + ":",
+        e.message,
+      );
+    }
+  }
+  // 3. The mirror of (2): a ledger that says "listed" but sits on no live row.
+  // The scan pass skips every listed/sold/removed ledger, so such an account is
+  // stranded forever — farming, held out of the sellable pool, on sale nowhere.
+  // Park it as "skipped" (the engine's held state) so the next scan re-lists it
+  // on whichever market its game allows. Gameflip units waiting in a relist
+  // chain are OFF-row by design, and lot members sit on their lot row, so
+  // neither counts as stranded.
+  const carried = new Set();
+  for (const r of rows) {
+    if (superseded.has(String(r._id))) continue;
+    for (const u of r.units || []) {
+      carried.add(String(r.set) + ":" + r.marketplace + ":" + String(u.login || "").toLowerCase());
+    }
+  }
+  for (const l of ledgers) {
+    if (!l.market || l.market === "gameflip") continue;
+    if (l.lotId) continue;
+    if (new Date(l.listedAt || 0).getTime() > cutoff) continue;
+    const key = String(l.set) + ":" + l.market + ":" + String(l.loginLower || "").toLowerCase();
+    if (carried.has(key)) continue;
+    out.actions.push({
+      action: "stranded",
+      marketplace: l.market,
+      externalId: l.login || String(l._id),
+      detail: "listed on " + l.market + " but on no live row — released for re-listing",
+    });
+    if (!apply) continue;
+    const r = await UnclaimedAccount.updateOne(
+      { _id: l._id, status: "listed" },
+      {
+        $set: {
+          status: "skipped",
+          note: "stranded — was listed on " + l.market + " with no live listing; re-listing on the next scan",
+          lastCheckedAt: new Date(),
+        },
+      },
+    ).catch(() => null);
+    if (r && r.modifiedCount) out.stranded++;
+  }
+
+  // 4. Rows we believe are DOWN that Gameflip still has on sale. A delist that
+  // failed used to be swallowed and the row marked delisted anyway, so nothing
+  // ever looked at it again — gameflip 97b49ffd sold a hand-sold R6 account
+  // that way. Gameflip is the one platform that will list everything on sale in
+  // one paged call, but it is rate-limited and shared with the watcher, so the
+  // check runs on ONSALE_SWEEP_MS rather than every pass.
+  if (opts.force || Date.now() - lastOnsaleSweepAt >= ONSALE_SWEEP_MS) {
+    try {
+      lastOnsaleSweepAt = Date.now();
+      const onsale = await mp.gameflipListingIdsByStatus("onsale");
+      const liveIds = [...(onsale || [])].map(String);
+      if (liveIds.length) {
+        const leaked = await MarketplaceListing.find({
+          origin: ORIGIN,
+          marketplace: "gameflip",
+          status: { $ne: "active" },
+          externalId: { $in: liveIds },
+        }).lean();
+        for (const row of leaked) {
+          out.actions.push({
+            action: "leaked",
+            marketplace: "gameflip",
+            externalId: row.externalId,
+            detail: "row is " + row.status + " here but still on sale on Gameflip",
+          });
+          if (!apply) continue;
+          const d = await withSetMarketLock(row.set, "gameflip", () =>
+            delistRowVerified(row, "was still on sale after a failed delist", {
+              force: true,
+            }),
+          );
+          if (d.ok) out.delisted++;
+          else out.failed++;
+        }
+      }
+    } catch (e) {
+      console.error("unclaimedAutoList onsale cross-check failed:", e.message);
+    }
+  }
+
+  if (apply && (out.delisted || out.repaired || out.duplicates || out.stranded)) {
+    logEvent({
+      category: "unclaimed",
+      action: "reconciled",
+      actor: "unclaimedAutoList",
+      count: out.delisted + out.repaired + out.stranded,
+      detail:
+        "reconcile: " + out.delisted + " row(s) taken off sale, " + out.repaired +
+        " repaired, " + out.duplicates + " duplicate(s), " + out.stranded +
+        " stranded unit(s) released, " + out.failed + " failed",
+    });
+  }
+  return out;
 }
 
 // Scan candidates + list new sellable accounts into their item's ONE listing.
@@ -3180,13 +3610,19 @@ async function candForLedger(ledger) {
 // Manual-sold removal (shared by the periodic pass and the reactive ticks)
 // ---------------------------------------------------------------------------
 
-// Park ONE listed ledger whose owner carries the manual-sold tick: pull the
-// login off EVERY active row that still carries it (the gameflip live unit +
-// successor, digiseller content line(s), ggsel offer rebuild(s)), then mark
-// the ledger "removed" — NOT sold, NOT released; the account keeps farming.
+// Park ONE listed ledger whose owner carries the manual-sold tick: mark the
+// ledger "removed" (NOT sold, NOT released; the account keeps farming), then
+// pull the login off EVERY active row that still carries it (the gameflip
+// live unit + successor, digiseller content line(s), ggsel offer rebuild(s)).
+//
+// The ledger flip comes FIRST on purpose. While it came last, a parallel
+// removal's Gameflip successor could still read this account as a waiting
+// "listed" unit and publish it as the chain's new head moments before it was
+// parked — which is how a sold R6 account ended up as the live unit of
+// gameflip dab19b8e. Marked first, no publisher can ever pick it up; if the
+// row scrub below fails, the reconcile pass takes that row off sale instead.
 async function removeManualSoldLedger(ledger, opts = {}) {
   if (!ledger || !ledger._id) return false;
-  await removeLoginFromAllRows(ledger, { removeFromProduct: true, log: false });
   await UnclaimedAccount.updateOne(
     { _id: ledger._id, status: "listed" },
     {
@@ -3197,6 +3633,7 @@ async function removeManualSoldLedger(ledger, opts = {}) {
       },
     },
   ).catch(() => {});
+  await removeLoginFromAllRows(ledger, { removeFromProduct: true, log: false });
   await markOwnerUnlisted(ledger);
   logEvent({
     category: "unclaimed",
@@ -3211,6 +3648,15 @@ async function removeManualSoldLedger(ledger, opts = {}) {
       ")",
   });
   return true;
+}
+
+// A ledger the sale/expiry pass meets while its owner already carries the
+// manual-sold tick: park it exactly like the sweep does instead of selling it.
+// The pass has always called this — it was never defined, so both call sites
+// threw a ReferenceError into their catch and the marked unit stayed listed
+// (in the quantity-sale loop it also aborted that row's remaining sales).
+async function removeMarkedLedger(ledger) {
+  return removeManualSoldLedger(ledger, { actor: "unclaimedAutoList" });
 }
 
 // Every listed ledger belonging to ONE owner row that was just ticked
@@ -3511,6 +3957,15 @@ async function expirySalePass() {
 
   // C) Heal Gameflip chains whose live row sold/expired without a successor.
   out.repaired = await repairGameflipChains();
+
+  // D) Reconcile every live row against the ledgers that back it — the net
+  // that catches a zombie listing no matter which path leaked it.
+  try {
+    out.reconcile = await reconcileRowsPass();
+  } catch (e) {
+    console.error("unclaimedAutoList reconcile pass failed:", e.message);
+    out.reconcile = { error: e.message };
+  }
   return out;
 }
 
@@ -3686,6 +4141,12 @@ module.exports = {
   publishProduct,
   addUnitToRow,
   removeUnitFromRow,
+  reconcileRowsPass,
+  reconcileRowPlan,
+  supersededRowIds,
+  delistRowVerified,
+  delistVerdict,
+  withSetMarketLock,
   rowsForLogin,
   removeLoginFromAllRows,
   removeManualSoldLedger,
