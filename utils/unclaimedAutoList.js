@@ -2165,7 +2165,17 @@ async function delistRowVerified(row, reason = "", opts = {}) {
     if (row.marketplace === "gameflip") await mp.gameflipDelist(id);
     else if (row.marketplace === "digiseller") await mp.digisellerDelist(id);
     else if (row.marketplace === "ggsel") await mp.ggselDelist(id);
-    else return { ok: true, changed: false };
+    // A marketplace this engine has no delist path for (unclaimed rows only
+    // ever live on the three above — settings.UNCLAIMED_MARKETS). Reporting
+    // "down" for it would be the swallowed-failure bug all over again on a
+    // market added later, so say so instead of quietly claiming success.
+    else {
+      return {
+        ok: false,
+        changed: false,
+        error: "no delist path for " + row.marketplace,
+      };
+    }
   } catch (e) {
     callError = e.message || String(e);
   }
@@ -2952,7 +2962,9 @@ function reconcileRowPlan(row, isSellable) {
     if (isSellable(live)) return { action: "none" };
     return { action: "delist", bad: [{ login: live }] };
   }
-  const units = row.units || [];
+  // A unit already handed to a buyer is history, not stock — it says nothing
+  // about whether this row can still deliver.
+  const units = (row.units || []).filter((u) => !u.deliveredAt);
   if (!units.length) return { action: "none" };
   const good = units.filter((u) => isSellable(u.login));
   if (good.length === units.length) return { action: "none" };
@@ -2963,9 +2975,17 @@ function reconcileRowPlan(row, isSellable) {
 async function reconcileRowsPass(opts = {}) {
   const apply = opts.apply !== false;
   const out = { rows: 0, duplicates: 0, delisted: 0, repaired: 0, stranded: 0, failed: 0, actions: [] };
+  // Only the markets THIS engine publishes to and owns the stock model of.
+  // An origin:"unclaimed" row can also live on Eldorado, where the offer is a
+  // standing one whose accounts are picked from the ledger at delivery time
+  // (utils/eldoradoFulfiller claimUnclaimedForGame) and whose units[] is a
+  // record of what was already delivered — judged by the rules below it would
+  // look like a row full of spent accounts and be taken off sale for doing
+  // exactly what it is meant to do.
   const rows = await MarketplaceListing.find({
     origin: ORIGIN,
     status: "active",
+    marketplace: { $in: settings.UNCLAIMED_MARKETS },
     ...NOT_LOT,
   })
     .sort({ createdAt: 1 })

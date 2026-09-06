@@ -16,6 +16,7 @@ const assert = require("node:assert");
 
 const {
   delistVerdict,
+  delistRowVerified,
   supersededRowIds,
   reconcileRowPlan,
   withSetMarketLock,
@@ -51,6 +52,21 @@ test("delistVerdict: an unreadable platform stays retryable, never assumed down"
     delistVerdict({ callError: "timeout of 20000ms exceeded", platformState: null }),
     "unknown",
   );
+});
+
+test("delistRowVerified: a marketplace with no delist path is a failure, not a success", async () => {
+  // Unclaimed rows only ever live on gameflip/digiseller/ggsel, but the site
+  // publishes to more markets than that (eldorado, zeusx, g2g, funpay…). If one
+  // is ever wired in here, saying "down" without a delist call would be the
+  // swallowed-failure bug again. Reaches no platform and no Mongo.
+  const out = await delistRowVerified({
+    _id: "row1",
+    status: "active",
+    marketplace: "eldorado",
+    externalId: "e-1",
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /no delist path for eldorado/);
 });
 
 // --- 2. supersededRowIds -----------------------------------------------------
@@ -141,6 +157,30 @@ test("reconcileRowPlan: a product whose every unit is spent comes off sale", () 
   const plan = reconcileRowPlan(r, sellable());
   assert.equal(plan.action, "delist");
   assert.deepStrictEqual(plan.good, []);
+});
+
+test("reconcileRowPlan: units already delivered are history, not stock", () => {
+  // An Eldorado-style row records what it handed out; those accounts are spent
+  // by definition and must not read as "this row has no stock left".
+  const r = row("1", "setA", "digiseller", "600", {
+    units: [
+      { login: "delivered1", deliveredAt: new Date() },
+      { login: "delivered2", deliveredAt: new Date() },
+    ],
+  });
+  assert.equal(reconcileRowPlan(r, sellable()).action, "none");
+
+  const mixed = row("2", "setA", "digiseller", "601", {
+    units: [
+      { login: "delivered1", deliveredAt: new Date() },
+      { login: "spent" },
+      { login: "alive" },
+    ],
+  });
+  const plan = reconcileRowPlan(mixed, sellable("alive"));
+  assert.equal(plan.action, "repair");
+  assert.deepStrictEqual(plan.good.map((u) => u.login), ["alive"]);
+  assert.deepStrictEqual(plan.bad.map((u) => u.login), ["spent"]);
 });
 
 test("reconcileRowPlan: an untouched row and an empty row are both no-ops", () => {
