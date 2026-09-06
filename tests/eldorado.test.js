@@ -109,10 +109,15 @@ test("the hand-over message carries the credential, the term and the rules", () 
   const msg = farm.farmDeliveryMessage(
     [{ login: "someLogin", password: "somePass" }],
     365,
+    "Overwatch",
   );
   assert.match(msg, /someLogin/);
   assert.match(msg, /somePass/);
   assert.match(msg, /1 year/);
-  assert.match(msg, /KEEP IT LINKED/);
+  // the two things that actually protect the sale: keep it linked, don't edit it
+  assert.match(msg, /KEEP THIS ACCOUNT LINKED/);
   assert.match(msg, /do not change the account's password/i);
+  // the term must be restated in the body, not just the title
+  assert.match(msg, /whole 1 year/);
+  assert.match(msg, /for Overwatch/);
 });

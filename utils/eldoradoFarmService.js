@@ -99,32 +99,31 @@ async function parseFarmOrder(order) {
 // The buyer-facing hand-over. Mirrors the copy the operator sends by hand: the
 // credential, then the two things that actually matter (keep it linked, don't
 // change it), then the feedback ask.
-function farmDeliveryMessage(accounts, days) {
+function farmDeliveryMessage(accounts, days, game) {
   const term = days === 365 ? "1 year" : days + " days";
+  const forGame = game ? " for " + game : "";
   const blocks = accounts.map(
     (a, i) =>
       (accounts.length > 1
         ? "=== ACCOUNT " + (i + 1) + " of " + accounts.length + " ===\n"
         : "") +
-      "Username: " +
-      a.login +
-      "\nPassword: " +
-      a.password,
+      "Username: " + a.login + "\nPassword: " + a.password,
   );
   return (
     blocks.join("\n\n") +
-    "\n\nYour " +
-    term +
-    " of automatic farming has started.\n\n" +
-    "Please link this Twitch account to your game account and KEEP IT LINKED. " +
-    "Everything is farmed and claimed automatically by our bot whenever an " +
-    "event is live — you do not have to do anything.\n\n" +
-    "Please do not change the account's password or email: the automatic " +
+    "\n\nYour " + term + " of automatic farming starts now.\n\n" +
+    "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
+    "drop event" + forGame + " and claims the items automatically the moment " +
+    "they unlock — you do not have to watch any streams or do anything at " +
+    "all. New items will keep appearing on the account for the whole " + term +
+    ", so just check back and claim them whenever you like.\n\n" +
+    "Please do not change the account's password or email — the automatic " +
     "farming stops if you do, and that is not covered by a refund.\n\n" +
     "If our bot ever misses an item you can also claim it by hand at " +
     "https://www.twitch.tv/drops/inventory\n\n" +
-    "Any issue at all, message me here first and I will sort it out. If you " +
-    "are happy with the order, a feedback would really be appreciated!"
+    "Any problem at all, message me here first and I will sort it out. And if " +
+    "you are happy with the order, leaving a feedback would genuinely mean a " +
+    "lot — it helps a small seller more than you would think. Thank you!"
   );
 }
 
@@ -282,7 +281,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       }
       await mp.eldoradoSendOrderMessage(
         order,
-        farmDeliveryMessage(creds, parsed.days),
+        farmDeliveryMessage(creds, parsed.days, parsed.game),
       );
       row.messageSentAt = new Date();
       row.state = "sent";

@@ -33,20 +33,25 @@ const ELD_CLAIM_TAG = "eldorado";
 function eldoradoDeliveryCode(login, password) {
   return (
     "TWITCH DROP ACCOUNT\n\n" +
-    "Login: " +
-    login +
-    "\n" +
-    "Password: " +
-    password +
-    "\n\n" +
-    "1. Log in to this Twitch account, then open " +
-    "https://www.twitch.tv/drops/inventory and scroll to the bottom of the " +
-    'page, to the "Received" section.\n\n' +
-    '2. Click the purple "Connect" button under the item you want, and follow ' +
-    "the instructions to link it to YOUR OWN game account.\n\n" +
-    "3. Please claim within the first hour — the drops are guaranteed at the " +
-    "moment of delivery.\n\n" +
-    "Any problem at all, reply here first and I will sort it out."
+    "Username: " + login + "\n" +
+    "Password: " + password + "\n\n" +
+    "HOW TO CLAIM\n" +
+    "1. Log in to this Twitch account and open " +
+    "https://www.twitch.tv/drops/inventory\n" +
+    '2. Scroll to the "Received" section at the bottom of the page.\n' +
+    '3. Click the purple "Connect" button under each item and follow the steps ' +
+    "to link it to YOUR OWN game account.\n\n" +
+    "KEEP IT LINKED\n" +
+    "If this event is still running, more items can still land on this " +
+    "account — our farm keeps collecting them automatically. Just leave it " +
+    "linked and check the drops inventory page again in a day or two, and " +
+    "claim anything new that has appeared.\n\n" +
+    "Please do not change the account's password or email, and claim your " +
+    "items reasonably soon — drops stay claimable only for a limited time " +
+    "after an event ends.\n\n" +
+    "Any problem at all, message me here first and I will make it right. And " +
+    "if you are happy with the order, leaving a feedback would genuinely mean " +
+    "a lot — it helps a small seller more than you would think. Thank you!"
   );
 }
 
@@ -275,11 +280,61 @@ async function deliverOrder(order, { dryRun }) {
   // auto-delivery listing at all — it is a service (e.g. "Automatic farming,
   // 120 days") or an offer the operator fulfils by hand. Skip it quietly rather
   // than erroring every tick for an order the bot was never meant to deliver.
-  if (!(listing.units || []).length) {
+  if (!listing.autoClaimSet && !(listing.units || []).length) {
     return {
       orderId,
       skipped: "manual-delivery listing (no unclaimedGame and no reserved units)",
     };
+  }
+
+  // Bundle listings whose stock is the Drop Archive (NOT the no-claim farm):
+  // claim accounts that hold this listing's exact set at delivery time.
+  if (listing.autoClaimSet && listing.set) {
+    const DropSet = require("../models/DropSet");
+    const set = await DropSet.findById(listing.set).lean();
+    if (!set) return { orderId, error: "listing's DropSet is missing" };
+    if (dryRun) {
+      const { availableAccountsForSet } = require("../routes/shopRoutes");
+      const avail = await availableAccountsForSet(set).catch(() => []);
+      return {
+        orderId,
+        dryRun: true,
+        source: "dropset:" + set.name,
+        wouldSend: qty + " of " + avail.length + " available account(s)",
+      };
+    }
+    const claimed = await claimAccountsForSet(set, qty);
+    if (claimed.length < qty) {
+      await releaseAccounts(claimed.map((c) => c.accountId)).catch(() => {});
+      return {
+        orderId,
+        error:
+          "only " + claimed.length + " of " + qty +
+          " accounts still held the full set at delivery time",
+      };
+    }
+    const blocks = claimed.map((c) => eldoradoDeliveryCode(c.login, c.password));
+    const message =
+      qty > 1
+        ? blocks
+            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
+            .join("\n\n")
+        : blocks[0];
+    await mp.eldoradoSendOrderMessage(order, message);
+    await mp.eldoradoMarkDelivered(orderId);
+    listing.units = (listing.units || []).concat(
+      claimed.map((c) => ({
+        contentId: "",
+        accountId: c.accountId,
+        login: c.login,
+        addedAt: new Date(),
+        deliveredAt: new Date(),
+        orderId,
+      })),
+    );
+    listing.markModified("units");
+    await listing.save();
+    return { orderId, delivered: qty, source: "dropset:" + set.name };
   }
 
   const free = undeliveredUnits(listing);

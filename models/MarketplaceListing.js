@@ -89,6 +89,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     // delivery time instead of consuming a pre-reserved `units[]` entry. This is
     // how the no-claim Overwatch bots feed an Eldorado offer directly.
     unclaimedGame: { type: String, default: "", index: true },
+    // Bundle listings whose stock is the Drop Archive rather than the no-claim
+    // farm: claim accounts holding this row's `set` at delivery time instead of
+    // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.
+    autoClaimSet: { type: Boolean, default: false, index: true },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while
