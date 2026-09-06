@@ -394,9 +394,25 @@ function publicListing(
     kind,
     delivery,
     title: cleanText(deriveTitle({ set, category, kind, eventLabel }), 140),
-    description: cleanText(set.publicDescription || set.note, 600),
+    // An unclaimed set's note is the engine's internal marker ("Unclaimed
+    // auto-list"), never buyer copy: describe the product instead unless the
+    // owner wrote a public description.
+    description: cleanText(
+      set.publicDescription ||
+        (unclaimed
+          ? `${items.length} unclaimed Twitch drop${items.length === 1 ? "" : "s"} for ${category}${eventLabel ? ` (${eventLabel})` : ""}. You log in, link your own game account, then claim the rewards yourself.`
+          : set.note),
+      600,
+    ),
     price: publicPriceFor(set, marketMedian, priceOpts),
-    retailPrice: Math.round((Number(set.price) || 0) * 100) / 100,
+    // For unclaimed sets the reference price is the engine price the public
+    // price was derived from, not the set's stale marketplace price.
+    retailPrice:
+      Math.round(
+        (unclaimed && Number(priceOpts.retail) > 0
+          ? Number(priceOpts.retail)
+          : Number(set.price) || 0) * 100,
+      ) / 100,
     stock: Math.max(0, Number(stock) || 0),
     minQty: Math.max(1, Math.min(1000, Number(set.bulkMinQty) || 5)),
     bulkDiscountPct: Math.max(
