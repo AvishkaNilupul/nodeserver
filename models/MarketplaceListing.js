@@ -20,6 +20,7 @@ const marketplaceListingSchema = new mongoose.Schema(
         "funpay",
         "epicnpc",
         "zeusx",
+        "eldorado",
       ],
       required: true,
       index: true,
@@ -72,11 +73,22 @@ const marketplaceListingSchema = new mongoose.Schema(
           accountId: { type: String, default: "" },
           login: { type: String, default: "" },
           addedAt: { type: Date, default: Date.now },
+          // Eldorado stock bookkeeping: one unit = one reserved account behind
+          // the offer's quantity. Stamped when that unit is actually handed to
+          // a buyer, which is what makes redelivery of an order impossible.
+          deliveredAt: { type: Date, default: null },
+          orderId: { type: String, default: "" },
         },
       ],
       default: [],
     },
     note: { type: String, default: "" },
+    // Eldorado listings whose stock is NOT the auto-farm pool but the unclaimed
+    // / no-claim farm ledger (models/UnclaimedAccount). When set, the Eldorado
+    // fulfiller claims a sellable account for THIS game out of that ledger at
+    // delivery time instead of consuming a pre-reserved `units[]` entry. This is
+    // how the no-claim Overwatch bots feed an Eldorado offer directly.
+    unclaimedGame: { type: String, default: "", index: true },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while

@@ -23,6 +23,7 @@ const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
 // ZeusX sells the same accounts, so its reservations need their own tag or a
 // release on one market would free stock another market is selling.
 const ZX_CLAIM_TAG = "zeusx";
+const ELD_CLAIM_TAG = "eldorado";
 const {
   reserveSetOnAccount,
   releaseSetForAccounts,
@@ -222,6 +223,7 @@ function buildDescription({ game, items, campaignName, postEvent, marketplace })
     digiseller: "message me here on Digiseller",
     ggsel: "message me here on GGSel",
     zeusx: "message me here on ZeusX",
+    eldorado: "message me here on Eldorado",
   };
   const supportLine =
     "Any issue or question — " +
@@ -816,6 +818,63 @@ async function publishZeusxShare({
   };
 }
 
+// Eldorado share. One offer whose QUANTITY is the number of reserved accounts
+// — Eldorado's Twitch Drops category is multi-stock, so unlike ZeusX we do not
+// need a listing per account. The reserved accounts ride along as the row's
+// `units`, which is what utils/eldoradoFulfiller.js hands out (and stamps) when
+// an order is paid. Delivery is a chat message, because Eldorado has no
+// credential vault for this category.
+async function publishEldoradoShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  accounts = await reserveAccountsForPublish(accounts, set, ELD_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.eldoradoPublish({
+      game,
+      title,
+      description,
+      priceUsd: price,
+      quantity: accounts.length,
+      coverImagePath: img,
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "eldorado",
+      externalId: r.id,
+      url: r.url || "",
+      title,
+      description,
+      price,
+      status: "active",
+      origin: "auto",
+      note:
+        "auto-farm: " + accounts.length + " account(s), chat auto-delivery",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      units: accounts.map((a) => ({
+        contentId: "",
+        accountId: String(a.accountId),
+        login: a.login,
+        addedAt: new Date(),
+        deliveredAt: null,
+        orderId: "",
+      })),
+    });
+    return { externalId: r.id, url: r.url || "", qty: accounts.length };
+  });
+}
+
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
 // cost a market. On every sweep tick where the Gameflip listing is alive,
 // try to publish any secondary market that has no externalId yet, using
@@ -1287,6 +1346,13 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       postEvent: false,
       marketplace: "zeusx",
     }),
+    eldorado: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "eldorado",
+    }),
   };
   const description = descriptions.gameflip;
 
@@ -1334,11 +1400,15 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       zeusxGameMapped(af, task.game) ||
       !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
   }
+  // Eldorado needs no per-game mapping: its Twitch Drops category takes every
+  // game, with anything outside its 13-value list going under "Other".
+  const eldoradoEnabled = !!af.eldoradoAuto;
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
   if (zeusxEnabled) marketOrder.push("zeusx");
-  const shares = { gameflip: [], plati: [], ggsel: [], zeusx: [] };
+  if (eldoradoEnabled) marketOrder.push("eldorado");
+  const shares = { gameflip: [], plati: [], ggsel: [], zeusx: [], eldorado: [] };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
   });
@@ -1388,6 +1458,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const plati = { externalId: "", url: "", qty: 0, error: "" };
   const ggsel = { externalId: "", url: "", qty: 0, error: "" };
   const zeusx = { externalId: "", url: "", qty: 0, error: "" };
+  const eldorado = { externalId: "", url: "", qty: 0, error: "" };
   try {
     // reserve → publish → (on throw) release the gameflip unit AND delete the
     // now-empty set (mirrors the no-deliver path above) so a failed publish
@@ -1495,6 +1566,29 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     } else {
       zeusx.error = "no spare account for this market yet";
     }
+
+    if (eldoradoEnabled && shares.eldorado.length) {
+      try {
+        const r = await publishEldoradoShare({
+          set,
+          title,
+          description: descriptions.eldorado,
+          price,
+          img,
+          accounts: shares.eldorado,
+          game: task.game,
+        });
+        eldorado.externalId = r.externalId;
+        eldorado.url = r.url;
+        eldorado.qty = r.qty;
+      } catch (err) {
+        eldorado.error = err.message;
+      }
+    } else if (!af.eldoradoAuto) {
+      eldorado.error = "Eldorado auto-listing is switched off";
+    } else {
+      eldorado.error = "no spare account for this market yet";
+    }
   } finally {
     if (img) await fsp.unlink(img).catch(() => {});
   }
@@ -1529,6 +1623,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     plati,
     ggsel,
     zeusx,
+    eldorado,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,

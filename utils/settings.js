@@ -126,6 +126,20 @@ const AUTO_FARM_DEFAULTS = {
   // one "Coordinated" offer for the whole share, handed over by hand and marked
   // sold from the Drop Archive. Only matters when zeusxAuto is also on.
   zeusxAutoDeliver: false,
+
+  // --- Eldorado.gg (utils/marketplaces.js + utils/eldoradoFulfiller.js) ---
+  // Publishes farmed bundles into Eldorado's native "Twitch Drops" category
+  // (gameId 235 / CustomItem) as ONE offer whose quantity is the account count.
+  // OFF by default.
+  eldoradoAuto: false,
+  // Auto-delivery. Eldorado has no credential vault for this category, so the
+  // fulfiller posts the login into the order's TalkJS chat and then marks the
+  // order delivered. Only matters when eldoradoAuto is also on.
+  eldoradoAutoDeliver: false,
+  // Safety valve for the delivery bot: when true it does everything except
+  // actually send the message and mark the order delivered, and logs what it
+  // WOULD have sent. Leave true until a live order has been watched end to end.
+  eldoradoDeliverDryRun: true,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign

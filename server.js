@@ -68,6 +68,8 @@ const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const zeusxTokenRefresher = require("./utils/zeusxTokenRefresher");
+const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
+const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -720,6 +722,15 @@ mongoose
     // Keep the ZeusX seller token fresh from its (reusable) refresh token so the
     // auto-lister never dies on an expired token. No-op without ZeusX keys.
     zeusxTokenRefresher.start();
+    // Keep the Eldorado seller session alive (cookie auth, renewed in place via
+    // /authentication/refreshTokens) so the auto-lister and the delivery bot
+    // never die on a lapsed cookie. No-op without an Eldorado cookie.
+    eldoradoSessionRefresher.start();
+    // Eldorado auto-delivery: Eldorado has no credential vault for the Twitch
+    // Drops category, so paid orders are fulfilled by posting the login into the
+    // order's chat and marking it delivered. Self-guards on
+    // autoFarm.eldoradoAutoDeliver (and ships in dry-run until proven live).
+    eldoradoFulfiller.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();

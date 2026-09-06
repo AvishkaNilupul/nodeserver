@@ -2838,6 +2838,7 @@ Reliable Daily Rewards</textarea
         funpay: "FunPay",
         epicnpc: "EpicNPC (browser bridge)",
         zeusx: "ZeusX",
+        eldorado: "Eldorado.gg",
       };
       // EpicNPC bridge bookmarklet. Self-contained (runs on epicnpc.com, can't
       // reference this page), it reads the listing payload from the compose
@@ -2993,6 +2994,10 @@ Reliable Daily Rewards</textarea
         ggsel: { apiKey: "API key" },
         funpay: { golden_key: "golden_key (session cookie)" },
         zeusx: { accessToken: "access_token (seller session cookie)" },
+        // Eldorado authenticates with httpOnly session cookies, so the whole
+        // Cookie header is the credential. Paste it once: the server renews it
+        // in place via /authentication/refreshTokens from then on.
+        eldorado: { cookie: "Cookie header (whole line, from a signed-in session)" },
       };
       var mpStatus = null;
 

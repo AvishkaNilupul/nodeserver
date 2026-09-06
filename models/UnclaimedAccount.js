@@ -60,10 +60,11 @@ const unclaimedAccountSchema = new mongoose.Schema(
 
     // Which marketplace this account is attached to as a stock unit:
     // "gameflip" (live unit or waiting in the relist chain), "digiseller" or
-    // "ggsel" (a delivery-code unit on the set's product). "" while deciding.
+    // "ggsel" (a delivery-code unit on the set's product), "eldorado" (handed to
+    // a buyer in an Eldorado order chat). "" while deciding.
     market: {
       type: String,
-      enum: ["", "gameflip", "digiseller", "ggsel"],
+      enum: ["", "gameflip", "digiseller", "ggsel", "eldorado"],
       default: "",
       index: true,
     },

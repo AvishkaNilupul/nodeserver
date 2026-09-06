@@ -30,6 +30,12 @@ const FIELDS = {
   // the operator never has to re-paste — see zeusxRefreshAccessToken +
   // utils/zeusxTokenRefresher.
   zeusx: ["accessToken", "refreshToken"],
+  // Eldorado has no usable public API either. Auth is cookie-based, so the one
+  // credential is the whole Cookie header copied from a signed-in seller
+  // session (DevTools -> Application -> Cookies -> eldorado.gg -> copy all).
+  // The server renews it in place via /authentication/refreshTokens, so this is
+  // a one-time paste — see eldoradoRefreshSession + utils/eldoradoSessionRefresher.
+  eldorado: ["cookie"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -3738,6 +3744,596 @@ async function zeusxMyListings(pageIndex) {
   }
 }
 
+// ------------------------------------------------------------------
+// Eldorado.gg (no usable public API — the seller panel's own JSON endpoints)
+//
+// Eldorado DOES have an official "Seller API", but it is gated behind 50
+// completed orders and — verified 2026-09-06 by reading the full 125-path spec
+// at /swagger/seller/swagger.json — it is the SAME surface on the SAME host.
+// The gate unlocks the documentation, not capability, so there is nothing to
+// wait for. See docs/ELDORADO-INTEGRATION-PLAN.md.
+//
+// Auth is cookie-based: httpOnly session cookies plus a CSRF double-submit.
+// Every call must carry `X-XSRF-Token` whose value is the `__Host-XSRF-TOKEN`
+// cookie — note the `__Host-` prefix, reading a plain `XSRF-TOKEN` yields
+// nothing and the request 403s. This applies to GETs too whenever the jar holds
+// that cookie, which a real signed-in session always does.
+// POST /api/authentication/refreshTokens (no body) renews the session from the
+// cookie, so the operator pastes a session once and the refresher keeps it
+// alive — see utils/eldoradoSessionRefresher.
+//
+// Our product lists under Eldorado's native "Twitch Drops" category:
+// gameId 235 / category CustomItem. Its "Game" selector has only 13 values;
+// everything we farm that is not in that list goes under "Other" (id 11) with
+// the game name carried in the title, which is what the dominant sellers do.
+const ELD_BASE = "https://www.eldorado.gg";
+const ELD_GAME_ID = "235";
+const ELD_CATEGORY = "CustomItem";
+// Eldorado's TalkJS application. Stable; only used to address the chat API.
+const ELD_TALKJS_APP = "49mLECOW";
+// Eldorado rejects anything under $0.50 (appConstants.offerConstants).
+const ELD_MIN_PRICE = 0.5;
+
+function eldCookieJar(str) {
+  const jar = new Map();
+  for (const part of String(str || "").split(/;\s*/)) {
+    if (!part) continue;
+    const i = part.indexOf("=");
+    if (i < 1) continue;
+    jar.set(part.slice(0, i).trim(), part.slice(i + 1));
+  }
+  return jar;
+}
+
+function eldJarHeader(jar) {
+  return [...jar.entries()].map(([k, v]) => k + "=" + v).join("; ");
+}
+
+// Fold a response's set-cookie back into the jar so refreshed session cookies
+// survive. Returns true when anything actually changed (worth persisting).
+function eldAbsorbCookies(jar, setCookie) {
+  const arr = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+  let changed = false;
+  for (const line of arr) {
+    const pair = String(line).split(";")[0];
+    const i = pair.indexOf("=");
+    if (i < 1) continue;
+    const k = pair.slice(0, i).trim();
+    const v = pair.slice(i + 1);
+    if (jar.get(k) !== v) {
+      jar.set(k, v);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function eldXsrf(jar) {
+  const raw = jar.get("__Host-XSRF-TOKEN") || jar.get("XSRF-TOKEN") || "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function eldError(label, e) {
+  if (e && e.__eld) throw e;
+  const status = e && e.response && e.response.status;
+  const body = e && e.response && e.response.data;
+  let detail = "";
+  if (body && typeof body === "object" && Array.isArray(body.messages)) {
+    detail = body.messages.join("; ");
+  } else if (typeof body === "string" && body) {
+    detail = body.slice(0, 300);
+  }
+  if (status === 401) {
+    detail =
+      detail ||
+      "session not accepted — paste a fresh Eldorado cookie header from a " +
+        "signed-in browser session";
+  }
+  const err = new Error(
+    label + " failed" + (status ? " (HTTP " + status + ")" : "") +
+      (detail ? ": " + detail : e && e.message ? ": " + e.message : ""),
+  );
+  err.__eld = true;
+  err.status = status;
+  throw err;
+}
+
+// One request against the seller panel, carrying the stored jar and (for
+// mutations) the CSRF header. Persists renewed cookies back into settings.
+async function eldRequest(method, path, opts = {}) {
+  const keys = requireKeys("eldorado");
+  const jar = eldCookieJar(keys.cookie);
+  const m = String(method).toUpperCase();
+  const headers = {
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Origin: ELD_BASE,
+    Referer: ELD_BASE + "/",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    Cookie: eldJarHeader(jar),
+    ...(opts.headers || {}),
+  };
+  // The header goes on EVERY request, not just mutations: once the jar carries
+  // a `__Host-XSRF-TOKEN` cookie, Eldorado 403s any request whose header does
+  // not match it — GETs included (caught live 2026-09-06 on /authentication/claims).
+  const xsrf = eldXsrf(jar);
+  if (xsrf) headers["X-XSRF-Token"] = xsrf;
+  let data = opts.data;
+  if (data && data.getHeaders) Object.assign(headers, data.getHeaders());
+  else if (data !== undefined && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const r = await axios({
+    method: m,
+    url: ELD_BASE + path,
+    data,
+    headers,
+    timeout: opts.timeout || 45000,
+    responseType: opts.responseType || "json",
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  if (eldAbsorbCookies(jar, r.headers["set-cookie"])) {
+    await setKeys("eldorado", { cookie: eldJarHeader(jar) });
+  }
+  return r.data;
+}
+
+async function eldoradoTest() {
+  try {
+    const claims = await eldRequest("GET", "/api/authentication/claims");
+    const counts = await eldRequest(
+      "GET",
+      "/api/v1/item-management/me/offers/state-count?category=" + ELD_CATEGORY,
+    ).catch(() => null);
+    return {
+      ok: true,
+      detail:
+        "Connected as " +
+        ((claims && claims.email) || "seller") +
+        (counts ? " — " + (counts.activeOffers || 0) + " active offers" : ""),
+    };
+  } catch (e) {
+    return { ok: false, detail: eldSafeMessage(e) };
+  }
+}
+
+function eldSafeMessage(e) {
+  try {
+    eldError("Eldorado", e);
+  } catch (wrapped) {
+    return wrapped.message;
+  }
+  return String((e && e.message) || e);
+}
+
+// The session cookie renews itself from the refresh cookie — no body, no
+// stored refresh token. Returns true when the jar actually moved.
+async function eldoradoRefreshSession() {
+  const keys = requireKeys("eldorado");
+  const jar = eldCookieJar(keys.cookie);
+  const before = eldJarHeader(jar);
+  try {
+    await eldRequest("POST", "/api/authentication/refreshTokens", { data: {} });
+  } catch (e) {
+    eldError("Eldorado session refresh", e);
+  }
+  const after = getKeys("eldorado").cookie || "";
+  return after !== before;
+}
+
+// Cheap liveness probe; refreshes once if the session has lapsed.
+async function eldoradoEnsureFreshSession() {
+  try {
+    await eldRequest("GET", "/api/authentication/claims");
+    return false;
+  } catch (e) {
+    if (e && e.status && e.status !== 401) throw e;
+  }
+  await eldoradoRefreshSession();
+  await eldRequest("GET", "/api/authentication/claims");
+  return true;
+}
+
+// --- Category placement -------------------------------------------------
+// The "Game" selector for Twitch Drops is a fixed 13-value list. Anything not
+// on it (Overwatch, CoD, WoT, Marvel Rivals, Fortnite …) goes under "Other",
+// which is where the two dominant sellers put ~2/3 of their catalogue.
+let eldTradeEnvCache = { at: 0, list: null };
+
+async function eldoradoTradeEnvironments() {
+  if (eldTradeEnvCache.list && Date.now() - eldTradeEnvCache.at < 6 * 3600e3) {
+    return eldTradeEnvCache.list;
+  }
+  const lib = await eldRequest(
+    "GET",
+    "/api/library/" + ELD_GAME_ID + "/" + ELD_CATEGORY + "?locale=en-US",
+  );
+  const list = (lib && lib.tradeEnvironments) || [];
+  if (list.length) eldTradeEnvCache = { at: Date.now(), list };
+  return list;
+}
+
+function eldNorm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+const ELD_GAME_ALIASES = {
+  r6: "Rainbow Six Siege",
+  r6s: "Rainbow Six Siege",
+  rainbowsixsiegex: "Rainbow Six Siege",
+  tomclancysrainbowsixsiege: "Rainbow Six Siege",
+  eft: "Escape from Tarkov",
+  escapefromtarkov: "Escape from Tarkov",
+  pubgbattlegrounds: "PUBG",
+  playerunknownsbattlegrounds: "PUBG",
+  apex: "Apex Legends",
+  bdo: "Black Desert",
+  blackdesertonline: "Black Desert",
+  eve: "EVE Online",
+};
+
+// Resolve one of our game names onto a tradeEnvironment, falling back to
+// "Other". Returns { id, name, value } ready for the create payload.
+async function eldoradoResolveGame(game) {
+  const envs = await eldoradoTradeEnvironments();
+  const want = eldNorm(ELD_GAME_ALIASES[eldNorm(game)] || game);
+  const hit =
+    envs.find((e) => eldNorm(e.value) === want) ||
+    envs.find((e) => want && eldNorm(e.value) === eldNorm(ELD_GAME_ALIASES[want]));
+  const chosen = hit || envs.find((e) => eldNorm(e.value) === "other");
+  if (!chosen) throw new Error("Eldorado: could not resolve a Twitch Drops game slot");
+  return { id: String(chosen.id), name: chosen.name || "Game", value: chosen.value };
+}
+
+// --- Images -------------------------------------------------------------
+// A main image is MANDATORY on create ("Offer main image is missing." otherwise).
+// Upload first, then reference the bare filenames on the offer.
+async function eldoradoUploadImage(imagePath) {
+  const form = new FormData();
+  form.append("image", fs.createReadStream(imagePath));
+  let res;
+  try {
+    res = await eldRequest("POST", "/api/files/me/Offer", {
+      data: form,
+      timeout: 90000,
+    });
+  } catch (e) {
+    eldError("Eldorado image upload", e);
+  }
+  const paths = (res && res.localPaths) || [];
+  const pick = (kind) => {
+    const p = paths.find((x) => new RegExp(kind + "\\.[a-z]+$", "i").test(x));
+    return p ? p.split("/").pop() : "";
+  };
+  const img = {
+    smallImage: pick("Small"),
+    largeImage: pick("Large"),
+    originalSizeImage: pick("Original"),
+  };
+  if (!img.largeImage) throw new Error("Eldorado image upload returned no paths");
+  return img;
+}
+
+// --- Listing ------------------------------------------------------------
+function eldPrice(usd) {
+  const n = Number(usd);
+  if (!isFinite(n) || n <= 0) throw new Error("Eldorado: invalid price");
+  return Math.max(ELD_MIN_PRICE, Math.round(n * 100) / 100);
+}
+
+// Create one Twitch Drops offer. `quantity` is the stock (one unit = one
+// account), which is what makes this strictly better than the ZeusX
+// one-listing-per-account model.
+async function eldoradoPublish({
+  game,
+  title,
+  description,
+  priceUsd,
+  quantity = 1,
+  minQuantity = 1,
+  coverImagePath,
+  deliveryTime = "Minute20",
+  volumeDiscounts = [],
+  extraImagePaths = [],
+}) {
+  requireKeys("eldorado");
+  if (!title) throw new Error("Eldorado: a title is required");
+  if (!coverImagePath) {
+    throw new Error("Eldorado: a cover image is required (the API rejects offers without one)");
+  }
+  const env = await eldoradoResolveGame(game);
+  const mainOfferImage = await eldoradoUploadImage(coverImagePath);
+  const offerImages = [];
+  for (const p of (extraImagePaths || []).slice(0, 4)) {
+    try {
+      offerImages.push(await eldoradoUploadImage(p));
+    } catch (e) {
+      console.error("eldorado extra image failed:", e.message);
+    }
+  }
+  const details = {
+    offerTitle: String(title).slice(0, 160),
+    description: String(description || "").slice(0, 2000),
+    tradeEnvironmentValues: [{ id: env.id, name: env.name, value: env.value }],
+    offerAttributeIdValues: [],
+    attributes: [],
+    guaranteedDeliveryTime: deliveryTime,
+    pricing: {
+      pricePerUnit: { amount: eldPrice(priceUsd), currency: "USD" },
+      quantity: Math.max(1, parseInt(quantity, 10) || 1),
+      minQuantity: Math.max(1, parseInt(minQuantity, 10) || 1),
+      volumeDiscounts: volumeDiscounts || [],
+    },
+    mainOfferImage,
+    offerImages,
+  };
+  const augmentedGame = {
+    gameId: ELD_GAME_ID,
+    category: ELD_CATEGORY,
+    tradeEnvironmentId: env.id,
+  };
+  let created;
+  try {
+    created = await eldRequest("POST", "/api/v1/item-management/me/offers/item", {
+      data: { details, augmentedGame },
+    });
+  } catch (e) {
+    eldError("Eldorado publish", e);
+  }
+  return {
+    id: created && created.id,
+    url: eldoradoOfferUrl(created),
+    raw: created,
+  };
+}
+
+function eldoradoOfferUrl(offer) {
+  if (!offer || !offer.id) return "";
+  return ELD_BASE + "/twitch-drops/i/" + ELD_GAME_ID + "?offerId=" + offer.id;
+}
+
+// Read an offer back. NOTE the endpoint is `/private`; `/details` is PUT-only.
+async function eldoradoOffer(offerId) {
+  try {
+    const r = await eldRequest(
+      "GET",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/private",
+    );
+    return (r && r.offer) || null;
+  } catch (e) {
+    eldError("Eldorado offer", e);
+  }
+}
+
+// Restock without rewriting the offer. The body is a BARE integer, not an
+// object — this is the lever the farm uses to keep stock in step.
+async function eldoradoSetQuantity(offerId, quantity) {
+  const q = Math.max(0, parseInt(quantity, 10) || 0);
+  try {
+    await eldRequest(
+      "PUT",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/quantity",
+      { data: q },
+    );
+  } catch (e) {
+    eldError("Eldorado set quantity", e);
+  }
+  return q;
+}
+
+async function eldoradoReprice(offerId, priceUsd) {
+  const amount = eldPrice(priceUsd);
+  try {
+    await eldRequest(
+      "PUT",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/price",
+      { data: { amount, currency: "USD" } },
+    );
+  } catch (e) {
+    eldError("Eldorado reprice", e);
+  }
+  return amount;
+}
+
+// Pausing takes the offer off the storefront and is reversible; DELETE is
+// permanent, so delisting pauses (same contract as the ZeusX connector).
+async function eldoradoDelist(offerId) {
+  const cur = await eldoradoOffer(offerId).catch(() => null);
+  if (cur && cur.offerState === "Paused") return;
+  try {
+    await eldRequest(
+      "POST",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/pause",
+    );
+  } catch (e) {
+    eldError("Eldorado delist", e);
+  }
+}
+
+async function eldoradoRelist(offerId) {
+  const cur = await eldoradoOffer(offerId).catch(() => null);
+  if (cur && cur.offerState === "Active") return;
+  try {
+    await eldRequest(
+      "POST",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/resume",
+    );
+  } catch (e) {
+    eldError("Eldorado relist", e);
+  }
+}
+
+async function eldoradoDeleteOffer(offerId) {
+  try {
+    await eldRequest(
+      "DELETE",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId),
+    );
+  } catch (e) {
+    eldError("Eldorado delete", e);
+  }
+}
+
+async function eldoradoMyListings(pageIndex = 1, pageSize = 50) {
+  try {
+    return await eldRequest(
+      "GET",
+      "/api/v1/item-management/me/offers/me/search?pageIndex=" +
+        (parseInt(pageIndex, 10) || 1) +
+        "&pageSize=" +
+        (parseInt(pageSize, 10) || 50),
+    );
+  } catch (e) {
+    eldError("Eldorado listings", e);
+  }
+}
+
+// --- Orders + delivery ---------------------------------------------------
+// Eldorado has NO native credential vault for CustomItem (its auto-delivery is
+// a Roblox in-game trading bot), so the hand-over is a chat message followed by
+// marking the order delivered — which is exactly how the top seller on this
+// category posts a 35-second median delivery time.
+//
+// The chat is TalkJS. Everything needed to post into it is derivable
+// server-side (all verified live 2026-09-06 against the real chat iframe):
+//   nymId                 = sha1(order.sellerId).hex[:20] + "_n"   <-- NOTE the suffix
+//   conversation internal = sha1(order.talkJsConversationId).hex[:20]  (NO suffix)
+//   sessionId             = client-generated, any stable random id
+//   bearer token          = GET /api/conversations/me/authorize -> { token }
+// then POST {appApi}/{appId}//say/{conversationInternalId}/?sessionId=…
+
+function eldInternalId(externalId) {
+  return crypto.createHash("sha1").update(String(externalId)).digest("hex").slice(0, 20);
+}
+
+// TalkJS USER ids carry a trailing "_n" that conversation ids do not. Without it
+// the send is rejected with 404 {"error":"Sender does not exist"} — which is how
+// this was caught, on a live send test against a completed order (2026-09-06).
+function eldNymId(userId) {
+  return eldInternalId(userId) + "_n";
+}
+
+// Undelivered orders, filtered server-side. `displayFilter` is REQUIRED —
+// omitting it returns 400.
+async function eldoradoPaidOrders({ pageSize = 50 } = {}) {
+  const qs = new URLSearchParams({
+    displayFilter: "DisplaySellingOrders",
+    orderGroup: "Regular",
+    orderState: "Paid",
+    pageSize: String(Math.min(50, Math.max(1, parseInt(pageSize, 10) || 50))),
+    pageDirection: "Next",
+  });
+  try {
+    const r = await eldRequest("GET", "/api/v1/orders/me/seller/orders?" + qs);
+    return (r && r.results) || [];
+  } catch (e) {
+    eldError("Eldorado orders", e);
+  }
+}
+
+async function eldoradoOrderStateCounts() {
+  try {
+    return await eldRequest("GET", "/api/orders/me/statesCount");
+  } catch (e) {
+    eldError("Eldorado order counts", e);
+  }
+}
+
+let eldTalkTokenCache = { at: 0, token: "" };
+
+async function eldoradoTalkjsToken(force) {
+  if (!force && eldTalkTokenCache.token && Date.now() - eldTalkTokenCache.at < 5 * 60e3) {
+    return eldTalkTokenCache.token;
+  }
+  let r;
+  try {
+    r = await eldRequest("GET", "/api/conversations/me/authorize");
+  } catch (e) {
+    eldError("Eldorado chat authorize", e);
+  }
+  const token = (r && r.token) || "";
+  if (!token) throw new Error("Eldorado chat: no TalkJS token returned");
+  eldTalkTokenCache = { at: Date.now(), token };
+  return token;
+}
+
+// One TalkJS session id per process is enough — it only correlates calls.
+const ELD_TALK_SESSION = crypto.randomUUID
+  ? crypto.randomUUID()
+  : crypto.randomBytes(16).toString("hex");
+
+// Post a message into an order's chat as the seller. `order` needs
+// `sellerId` and `talkJsConversationId` (both present on the order rows).
+async function eldoradoSendOrderMessage(order, text) {
+  if (!order || !order.talkJsConversationId) {
+    throw new Error("Eldorado chat: order has no talkJsConversationId");
+  }
+  const body = String(text || "").trim();
+  if (!body) throw new Error("Eldorado chat: refusing to send an empty message");
+  const token = await eldoradoTalkjsToken();
+  const conv = eldInternalId(order.talkJsConversationId);
+  const nymId = eldNymId(order.sellerId);
+  const url =
+    "https://app.talkjs.com/api/v0/" +
+    ELD_TALKJS_APP +
+    "//say/" +
+    conv +
+    "/?sessionId=" +
+    encodeURIComponent(ELD_TALK_SESSION);
+  const payload = {
+    text: body,
+    custom: undefined,
+    nymId,
+    // Makes a retry after a timeout safe — TalkJS dedupes on this.
+    idempotencyKey:
+      "eld-" + String(order.id || "") + "-" + crypto.createHash("sha1").update(body).digest("hex").slice(0, 12),
+  };
+  try {
+    const r = await axios.post(url, payload, {
+      headers: {
+        Authorization: "Bearer " + token,
+        "Content-Type": "application/json",
+        "x-talkjs-client-build": "jssdk-release-2946179",
+      },
+      timeout: 30000,
+    });
+    return r.data || { ok: true };
+  } catch (e) {
+    if (e && e.response && e.response.status === 401) {
+      // Token aged out mid-flight — mint a fresh one and retry once.
+      const fresh = await eldoradoTalkjsToken(true);
+      const r = await axios.post(url, payload, {
+        headers: {
+          Authorization: "Bearer " + fresh,
+          "Content-Type": "application/json",
+          "x-talkjs-client-build": "jssdk-release-2946179",
+        },
+        timeout: 30000,
+      });
+      return r.data || { ok: true };
+    }
+    eldError("Eldorado chat send", e);
+  }
+}
+
+// Never call this before the buyer actually has the credential.
+async function eldoradoMarkDelivered(orderId) {
+  try {
+    await eldRequest("PUT", "/api/orders/me/" + encodeURIComponent(orderId) + "/deliver");
+  } catch (e) {
+    eldError("Eldorado mark delivered", e);
+  }
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -3812,4 +4408,27 @@ module.exports = {
   zeusxOfferUrl,
   zeusxResolveCategory,
   zeusxMenu,
+  eldoradoTest,
+  eldoradoRefreshSession,
+  eldoradoEnsureFreshSession,
+  eldoradoTradeEnvironments,
+  eldoradoResolveGame,
+  eldoradoUploadImage,
+  eldoradoPublish,
+  eldoradoOffer,
+  eldoradoOfferUrl,
+  eldoradoSetQuantity,
+  eldoradoReprice,
+  eldoradoDelist,
+  eldoradoRelist,
+  eldoradoDeleteOffer,
+  eldoradoMyListings,
+  eldoradoPaidOrders,
+  eldoradoOrderStateCounts,
+  eldoradoSendOrderMessage,
+  eldoradoMarkDelivered,
+  ELD_MIN_PRICE,
+  // exported for tests: the TalkJS internal-id derivations the chat send relies on
+  eldInternalId,
+  eldNymId,
 };
