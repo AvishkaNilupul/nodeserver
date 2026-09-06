@@ -298,7 +298,7 @@
 
   <!-- Spent (sold / connected) -->
   <div class="panel">
-    <div class="hd"><b>Spent accounts</b> <span class="muted" style="margin-left:auto;">sold or connected — not worth farming</span></div>
+    <div class="hd"><b>Spent accounts</b> <span class="muted" style="margin-left:auto;">sold — not worth farming</span></div>
     <div class="bd">
       <div class="muted" style="margin-bottom:11px;">
         Finds accounts that are <b>sold</b> (ledger, manual tick, or a live/sold listing still holds the login) or <b>connected</b> to a game account (the drop is already on the buyer's account). Removing them disables the account and takes it off its bot <b>in the registry only</b> — the Pi container keeps the account until that bot is released and re-created.
@@ -989,7 +989,8 @@ async function scanSpent(){
 function reasonChips(a){
   var h='';
   if(a.sold) h+='<span class="chip off">sold'+(a.soldWhy?' · '+esc(a.soldWhy):'')+'</span> ';
-  if(a.connected) h+='<span class="chip warn">connected</span> ';
+  if(a.connected) h+='<span class="chip warn">connected'+((a.connectedGames&&a.connectedGames.length)?' · '+esc(a.connectedGames.join(', ')):'')+'</span> ';
+  if(a.sellable) h+='<span class="chip warn">'+a.sellable+' unclaimed still on it</span> ';
   if(a.tokenStatus&&a.tokenStatus!=='ok') h+='<span class="chip">token '+esc(a.tokenStatus)+'</span>';
   return h||'<span class="muted">—</span>';
 }

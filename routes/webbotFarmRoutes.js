@@ -1259,14 +1259,45 @@ function idsFromBody(list) {
 // Live inventory for one account with the dead-token bookkeeping the single
 // /drops route does: a 401/auth GQL error flips the row "dead" so the next scan
 // skips it. Returns { ok, drops, connected, tokenStatus }.
+// A CONNECTED verdict must be about the game this account farms. `connected`
+// is the campaign-level isAccountConnected, and an account linked for some
+// OTHER game still has this game's drops undelivered — flagging it spent here
+// would strand a perfectly sellable account (the same bug the no-claim spent
+// scan had). Substring semantics, so "rainbow six" matches "rainbow six siege".
+function connectedGamesFrom(drops) {
+  const out = new Set();
+  for (const d of drops || [])
+    if (d.connected && d.game) out.add(settings.normGameName(d.game));
+  out.delete("");
+  return [...out];
+}
+
+function connectedForGame(connGames, game) {
+  const g = settings.normGameName(game);
+  if (!g) return connGames.length > 0;
+  return connGames.some((c) => c.includes(g) || g.includes(c));
+}
+
 async function liveInventoryFor(a) {
   try {
     const inv = await webbotTwitch.fetchInventory(a.webToken);
     const drops = (inv && inv.drops) || [];
+    const connGames = connectedGamesFrom(drops);
+    const game = a.pinnedGame || a.currentGame || "";
     return {
       ok: true,
       drops,
-      connected: drops.some((d) => d.connected),
+      connected: connectedForGame(connGames, game),
+      connectedGames: connGames,
+      // 100%-watched unclaimed drops for that game — live stock. A linked
+      // account holding stock is NOT spent (see the no-claim scan's note).
+      sellable: unclaimedAutoList
+        .sellableDropsFromWebbotInv({ drops })
+        .filter((d) => {
+          const g = settings.normGameName(game);
+          const dg = settings.normGameName(d.game);
+          return !g || !dg || dg.includes(g) || g.includes(dg);
+        }).length,
       tokenStatus: "ok",
       tokenError: "",
     };
@@ -1282,6 +1313,8 @@ async function liveInventoryFor(a) {
       ok: false,
       drops: [],
       connected: false,
+      connectedGames: [],
+      sellable: 0,
       tokenStatus: dead ? "token_invalid" : "error",
       tokenError: (e && e.message) || "error",
     };
@@ -1516,7 +1549,9 @@ router.get("/api/webbot-farm/sellable", requireSuperadmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 // Spent scan: accounts that are SOLD (DB: ledger sold / manual-sold tick /
 // sold unclaimed row carrying the login) or CONNECTED (live Twitch:
-// campaign-level isAccountConnected). Mirrors /api/noclaim-farm/spent/scan.
+// isAccountConnected). Mirrors /api/noclaim-farm/spent/scan: the link is
+// REPORTED but never flags an account — see that route's note for why it is not
+// a spend signal. Only a recorded sale lands an account in `spent`.
 //   GET /api/webbot-farm/spent/scan?botId=<id|idle|all>
 //   → { success, botId, scanned, spent:[{ id, login, botId, game, sold, soldWhy,
 //        connected, listed, tokenStatus, tokenError }] }
@@ -1555,7 +1590,7 @@ router.get("/api/webbot-farm/spent/scan", requireSuperadmin, async (req, res) =>
     rows.forEach((a, i) => {
       const v = verdicts.get(String(a._id)) || { sold: false, why: "", listed: false };
       const l = live[i] || {};
-      if (!v.sold && !l.connected) return;
+      if (!v.sold) return;
       spent.push({
         id: String(a._id),
         login: a.login || a.credUsername || "",
@@ -1564,6 +1599,8 @@ router.get("/api/webbot-farm/spent/scan", requireSuperadmin, async (req, res) =>
         sold: !!v.sold,
         soldWhy: v.why || "",
         connected: !!l.connected,
+        connectedGames: l.connectedGames || [],
+        sellable: l.sellable || 0,
         listed: !!v.listed,
         tokenStatus: l.tokenStatus || "",
         tokenError: l.tokenError || "",

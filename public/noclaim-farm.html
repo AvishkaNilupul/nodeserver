@@ -253,10 +253,10 @@
 
   <!-- Spent (sold / connected) -->
   <div class="panel">
-    <div class="hd"><b>Spent accounts</b> <span class="muted" style="margin-left:auto;">sold or connected — not worth farming</span></div>
+    <div class="hd"><b>Spent accounts</b> <span class="muted" style="margin-left:auto;">sold — not worth farming</span></div>
     <div class="bd">
       <div class="muted" style="margin-bottom:11px;">
-        Scans every bot for accounts that are <b>sold</b> (delivered to a buyer) or <b>connected</b> to a game account (the drop is already on the buyer's account). Review them, then remove them — this rewrites the bot's config without them and restarts it (or stops the bot if it's left empty). Pool rows are left untouched; recycle them from the <b>Spent accounts</b> tab.
+        Scans every bot for accounts with a recorded <b>sale</b> (shop, reseller, bulk order, marketplace or manual mark-sold) — nothing left here to sell. A game-account <b>link</b> is shown for information only and never flags an account: every login that ever farmed on a claiming bot keeps that link, and a linked account still builds unclaimed drops. Review them, then remove them — this rewrites the bot's config without them and restarts it (or stops the bot if it's left empty). Pool rows are left untouched; recycle them from the <b>Spent accounts</b> tab.
       </div>
       <div class="tagrow" style="margin-bottom:12px;">
         <button class="btn primary sm" id="scanSpentBtn">Scan bots for spent</button>
@@ -760,7 +760,8 @@ async function scanSpent(){
 function reasonChips(a){
   var h='';
   if(a.sold) h+='<span class="chip off">sold'+(a.soldWhy?' · '+esc(a.soldWhy):'')+'</span> ';
-  if(a.connected) h+='<span class="chip warn">connected</span> ';
+  if(a.connected) h+='<span class="chip warn">connected'+((a.connectedGames&&a.connectedGames.length)?' · '+esc(a.connectedGames.join(', ')):'')+'</span> ';
+  if(a.sellable) h+='<span class="chip warn">'+a.sellable+' unclaimed still on it</span> ';
   if(a.tokenStatus&&a.tokenStatus!=='ok') h+='<span class="chip">token '+esc(a.tokenStatus)+'</span>';
   return h||'<span class="muted">—</span>';
 }

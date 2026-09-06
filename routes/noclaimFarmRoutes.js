@@ -937,10 +937,15 @@ router.post(
 // Some accounts sitting in a no-claim bot are no longer worth farming:
 //   * SOLD — the account was delivered to a buyer (Shop / reseller / bulk, or a
 //     recycled sold-game marker). Detected from the account DB by clientSecret.
-//   * CONNECTED — the account has been linked to a game account (e.g. an
-//     Overwatch login connected to Battle.net). Once connected, the drop is
-//     delivered to the buyer's game account, so continuing to farm it is waste.
-//     Detected from the LIVE Twitch inventory (isAccountConnected).
+// CONNECTED is NOT a spend signal and no longer flags anything. It was, and it
+// was wrong: `isAccountConnected` only says the Twitch login is linked to a
+// Battle.net / Ubisoft account, which every account that ever farmed on a
+// CLAIMING bot carries forever. A linked account still accumulates
+// 100%-watched UNCLAIMED drops — exactly what this farm sells. Flagging on the
+// link pulled 153 good accounts out of their bots (Sept 2026); 63 of them had
+// never been sold through any channel and were returned to the pool. The live
+// link + stock counts are still reported per row so the operator can see them,
+// but only a recorded sale puts an account on the removal list.
 //
 // The operator scans a bot, reviews the flagged accounts, then removes them.
 // Removal rewrites the bot's config WITHOUT them and restarts the container
@@ -949,6 +954,45 @@ router.post(
 // NOT touch the pool / BotAccount rows — the accounts simply stop being farmed
 // here and are left for the global Spent-accounts tab to recycle manually.
 // ===========================================================================
+
+// Which games this account is CONNECTED for, normalised. `connected` is the
+// campaign-level `isAccountConnected` — the Twitch account is linked to a game
+// account, so that game's drops land on someone else's profile.
+function connectedGamesFor(inv) {
+  const out = new Set();
+  for (const d of (inv && inv.inProgress) || [])
+    if (d.connected && d.game) out.add(settings.normGameName(d.game));
+  for (const d of (inv && inv.drops) || [])
+    if (d.connected && d.game) out.add(settings.normGameName(d.game));
+  out.delete("");
+  return [...out];
+}
+
+// Is one of those connected games the game this bot farms? Substring semantics
+// like soldGameExclusion, so a bot on "rainbow six" matches a connection
+// recorded as "rainbow six siege". A connection for a DIFFERENT game says
+// nothing about this game's drops — an account linked for Escape from Tarkov
+// still has its Overwatch drops undelivered — so it must not read as spent
+// here. With no FavouriteGame to scope by, any connection counts (old rule).
+function connectedForGame(connGames, game) {
+  const g = settings.normGameName(game);
+  if (!g) return connGames.length > 0;
+  return connGames.some((c) => c.includes(g) || g.includes(c));
+}
+
+// How many 100%-watched UNCLAIMED drops this account holds for the bot's game
+// — the exact thing the unclaimed auto-lister sells (sellableDropsFromNoClaimInv).
+// Anything above zero means the account is live stock, whatever its link says.
+function sellableForGame(inv, game) {
+  const g = settings.normGameName(game);
+  let n = 0;
+  for (const d of (inv && inv.inProgress) || []) {
+    if (d.claimed || !(d.percent >= 100)) continue;
+    const dg = settings.normGameName(d.game);
+    if (!g || !dg || dg.includes(g) || g.includes(dg)) n++;
+  }
+  return n;
+}
 
 async function readConfigRaw(id) {
   return await sh(
@@ -985,9 +1029,12 @@ async function soldMapForSecrets(secrets) {
   for (const p of pool) {
     if (map.has(p.clientSecret)) continue; // BotAccount signal already wins
     if (Array.isArray(p.soldGames) && p.soldGames.length) {
-      map.set(p.clientSecret, { sold: true, why: "sold-game marker" });
+      // NOT proof of a sale: a previous spent sweep stamps soldGames for a
+      // CONNECTED account too. Say "spent", not "sold", so the operator is not
+      // told a sale happened that never did.
+      map.set(p.clientSecret, { sold: true, why: "already spent (" + p.soldGames.join(", ") + ")" });
     } else if (/^sold/i.test(String(p.claimedNote || ""))) {
-      map.set(p.clientSecret, { sold: true, why: "sold note" });
+      map.set(p.clientSecret, { sold: true, why: "pool note says sold" });
     }
   }
   return map;
@@ -1021,13 +1068,19 @@ router.get("/api/noclaim-farm/spent/scan", requireSuperadmin, async (req, res) =
         const u = users[i];
         try {
           const inv = await twitchInventory.fetchInventory(u.ClientSecret, { host });
-          const connected =
-            (inv.inProgress || []).some((d) => d.connected) ||
-            (inv.drops || []).some((d) => d.connected);
-          live[i] = { connected, tokenStatus: "ok", tokenError: "" };
+          const connGames = connectedGamesFor(inv);
+          live[i] = {
+            connected: connectedForGame(connGames, game),
+            connectedGames: connGames,
+            sellable: sellableForGame(inv, game),
+            tokenStatus: "ok",
+            tokenError: "",
+          };
         } catch (e) {
           live[i] = {
             connected: false,
+            connectedGames: [],
+            sellable: 0,
             tokenStatus: e && e.code ? e.code : "error",
             tokenError: (e && e.message) || "error",
           };
@@ -1042,7 +1095,7 @@ router.get("/api/noclaim-farm/spent/scan", requireSuperadmin, async (req, res) =
     users.forEach((u, i) => {
       const s = sold.get(u.ClientSecret) || { sold: false, why: "" };
       const l = live[i] || {};
-      if (!s.sold && !l.connected) return;
+      if (!s.sold) return;
       spent.push({
         clientSecret: u.ClientSecret || "",
         login: u.Login || "",
@@ -1050,6 +1103,8 @@ router.get("/api/noclaim-farm/spent/scan", requireSuperadmin, async (req, res) =
         sold: !!s.sold,
         soldWhy: s.why || "",
         connected: !!l.connected,
+        connectedGames: l.connectedGames || [],
+        sellable: l.sellable || 0,
         tokenStatus: l.tokenStatus || "",
         tokenError: l.tokenError || "",
       });
