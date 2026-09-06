@@ -270,6 +270,17 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, delivered: qty, source: "unclaimed:" + listing.unclaimedGame };
   }
 
+  // A row with neither a stock source nor any reserved unit is not an
+  // auto-delivery listing at all — it is a service (e.g. "Automatic farming,
+  // 120 days") or an offer the operator fulfils by hand. Skip it quietly rather
+  // than erroring every tick for an order the bot was never meant to deliver.
+  if (!(listing.units || []).length) {
+    return {
+      orderId,
+      skipped: "manual-delivery listing (no unclaimedGame and no reserved units)",
+    };
+  }
+
   const free = undeliveredUnits(listing);
   if (free.length < qty) {
     return {
