@@ -1751,6 +1751,36 @@ Reliable Daily Rewards</textarea
           </div>
         </div>
 
+        <div id="mpElBox" style="display: none">
+          <div class="mp-ext" style="border-bottom: 0">
+            <b style="font-size: 13px">Eldorado.gg placement</b>
+            <div class="mp-hint">
+              Publishes into Eldorado's native <b>Twitch Drops</b> category using
+              the stored seller session (set it under “Marketplace keys →
+              Eldorado.gg”). One offer carries the whole stock, so Quantity is
+              how many accounts back it. The game is matched to Eldorado's
+              13-game list and falls back to “Other” with the name in the title.
+              A cover image is required and is built automatically.
+            </div>
+            <div class="mp-row" style="margin-top: 8px">
+              <div style="flex: 1">
+                <label style="margin-top: 0">Quantity (stock)</label>
+                <input type="number" id="mpElQty" min="1" value="1" />
+              </div>
+              <div style="flex: 1">
+                <label style="margin-top: 0">Guaranteed delivery</label>
+                <select id="mpElDelivery">
+                  <option value="Minute20" selected>20 minutes</option>
+                  <option value="Hour1">1 hour</option>
+                  <option value="Hour3">3 hours</option>
+                  <option value="Hour12">12 hours</option>
+                  <option value="Day1">1 day</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="mpFpBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">FunPay placement</b>
@@ -3425,6 +3455,10 @@ Reliable Daily Rewards</textarea
         if (zx) {
           $("mpZxBox").style.display = zx.checked ? "block" : "none";
         }
+        var el = e.target.closest('[data-mptarget="eldorado"]');
+        if (el) {
+          $("mpElBox").style.display = el.checked ? "block" : "none";
+        }
         var ep = e.target.closest('[data-mptarget="epicnpc"]');
         if (ep) {
           $("mpEpicBox").style.display = ep.checked ? "block" : "none";
@@ -4083,6 +4117,12 @@ Reliable Daily Rewards</textarea
           body.zeusx = {
             quantity: parseInt($("mpZxQty").value, 10) || 1,
             deliveryHours: parseInt($("mpZxHours").value, 10) || 1,
+          };
+        }
+        if (targets.indexOf("eldorado") !== -1) {
+          body.eldorado = {
+            quantity: parseInt($("mpElQty").value, 10) || 1,
+            deliveryTime: $("mpElDelivery").value || "Minute20",
           };
         }
         if (targets.indexOf("funpay") !== -1) {

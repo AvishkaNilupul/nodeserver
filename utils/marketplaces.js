@@ -4090,6 +4090,9 @@ async function eldoradoPublish({
     eldError("Eldorado publish", e);
   }
   return {
+    // `externalId` is the name every other connector returns and the shared
+    // publish route reads; `id` is kept for callers that already use it.
+    externalId: created && created.id,
     id: created && created.id,
     url: eldoradoOfferUrl(created),
     raw: created,

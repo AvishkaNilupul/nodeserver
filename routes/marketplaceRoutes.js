@@ -115,6 +115,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "ggsel") r = await mp.ggselTest();
     else if (name === "zeusx") r = await mp.zeusxTest();
     else if (name === "funpay") r = await mp.funpayTest();
+    else if (name === "eldorado") r = await mp.eldoradoTest();
     else {
       return res
         .status(400)
@@ -567,7 +568,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
       targets.includes("gameflip") ||
       targets.includes("ggsel") ||
       targets.includes("digiseller") ||
-      targets.includes("zeusx")
+      targets.includes("zeusx") ||
+      // Eldorado rejects an offer with no main image ("Offer main image is
+      // missing."), so it always needs a cover built.
+      targets.includes("eldorado")
     ) {
       try {
         if (wantPromo) {
@@ -939,6 +943,23 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             deliveryDays: zx.deliveryDays,
             deliveryHours: zx.deliveryHours,
           });
+        } else if (name === "eldorado") {
+          const el = body.eldorado || {};
+          r = await mp.eldoradoPublish({
+            title,
+            description,
+            priceUsd,
+            quantity: el.quantity,
+            minQuantity: el.minQuantity,
+            game:
+              el.game ||
+              set.game ||
+              set.coverGame ||
+              ((set.items || []).find((i) => i.game) || {}).game,
+            coverImagePath: gridImage || coverImagePath(set),
+            deliveryTime: el.deliveryTime,
+            volumeDiscounts: el.volumeDiscounts,
+          });
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -1158,6 +1179,8 @@ router.delete(
           await mp.funpayDelist(row.externalId, row.externalNode);
         } else if (row.marketplace === "zeusx") {
           await mp.zeusxDelist(row.externalId);
+        } else if (row.marketplace === "eldorado") {
+          await mp.eldoradoDelist(row.externalId);
         }
       } catch (err) {
         // Already gone or already sold is not a failed delist: the listing is off
