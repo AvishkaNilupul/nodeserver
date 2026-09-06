@@ -77,6 +77,18 @@ function readyToClaim(inv) {
   return ready;
 }
 
+// Total minutes credited across every in-progress drop. A rise between two
+// probes is real progress even when dropCurrentSession has not attached yet
+// (spade credits can land before the session query reflects them).
+function inventoryMinutes(inv) {
+  const progress = inv?.data?.currentUser?.inventory?.dropCampaignsInProgress || [];
+  let total = 0;
+  for (const c of progress) {
+    for (const d of c.timeBasedDrops || []) total += Number(d.self?.currentMinutesWatched) || 0;
+  }
+  return total;
+}
+
 function isIntegrityError(res) {
   return (res?.errors || []).some(
     (e) => e?.extensions?.code === "IntegrityCheckFailed" || /integrity/i.test(e?.message || ""),
@@ -114,14 +126,26 @@ async function claimReady(session, ready, onClaim) {
   return { claims, integrityBlocked };
 }
 
+// Farm one channel until the lease/stop condition. Resolves to
+// { reason, channel, minutesWatched } where reason is one of
+//   "max-minutes" — opts.maxMinutes elapsed
+//   "stop-signal" — opts.stopSignal.stopped flipped (managed mode)
+//   "signal"      — SIGINT/SIGTERM (standalone mode)
+//   "no-session"  — opts.noSessionExitMs > 0 and the drop-session probe has
+//                   said "no active drop-session" continuously for that long
+//                   with no inventory progress either (the channel is not
+//                   crediting — e.g. it is outside the campaign's ACL). The
+//                   manager re-picks a channel avoiding this one.
 export async function watchChannel(session, channelLogin, opts = {}) {
   const maxMinutes = opts.maxMinutes || 0;
   const verbose = !!opts.verbose;
   const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
   const onClaim = typeof opts.onClaim === "function" ? opts.onClaim : null;
   const stopSignal = opts.stopSignal || null; // { stopped: boolean }
+  const noSessionExitMs = Number(opts.noSessionExitMs) > 0 ? Number(opts.noSessionExitMs) : 0; // 0 = off
   const startedAt = Date.now();
   const playSessionId = makePlaySessionId();
+  let exitReason = null;
 
   const channel = await resolveChannel(session, channelLogin);
   log(`resolved: ${channel.displayName} — ${channel.gameName} (broadcast ${channel.broadcastId}, game_id ${channel.gameId})`);
@@ -144,6 +168,11 @@ export async function watchChannel(session, channelLogin, opts = {}) {
   let lastPlaylist = Date.now();
   let lastProgress = 0;
   let stopping = false;
+  // No-session rotation state: when the probe first reported no drop session
+  // (0 = a session/progress was seen on the last probe) and the inventory
+  // minute total at the previous probe, to detect credit without a session.
+  let noSessionSince = 0;
+  let lastInvMinutes = inventoryMinutes(inv0);
   // Once we learn this token can't clear the claim integrity gate, we stop
   // attempting claims entirely (farm-only). The manager can seed this from a
   // previously-recorded WebBotAccount.claimBlocked so we never even try.
@@ -216,6 +245,13 @@ export async function watchChannel(session, channelLogin, opts = {}) {
       if (rows.length) {
         for (const r of rows) log(`  inv · ${r.game} | ${r.drop} — ${r.minutes} ${r.claimed ? "✓" : ""}`);
       }
+      // Reset the no-session clock on any session or any credited minute;
+      // otherwise start it at the first sessionless probe.
+      const invMinutes = inventoryMinutes(inv);
+      const progressed = invMinutes > lastInvMinutes;
+      lastInvMinutes = invMinutes;
+      if ((cur && cur.dropID) || progressed) noSessionSince = 0;
+      else if (!noSessionSince) noSessionSince = now;
       // Claim ready drops (reusing the inventory we just fetched). Skip
       // entirely once integrity-blocked — every retry would fail identically.
       const ready = readyToClaim(inv);
@@ -249,15 +285,25 @@ export async function watchChannel(session, channelLogin, opts = {}) {
         }
       }
       lastProgress = now;
+
+      if (noSessionExitMs && noSessionSince && now - noSessionSince >= noSessionExitMs) {
+        log(
+          `no drop-session on ${channel.login} for ${Math.round(noSessionExitMs / 60000)}m — leaving channel`,
+        );
+        exitReason = "no-session";
+        break;
+      }
     }
 
     if (stopSignal?.stopped) {
       log("stopping (stopSignal)");
+      exitReason = "stop-signal";
       break;
     }
 
     if (maxMinutes > 0 && (now - startedAt) / 60000 >= maxMinutes) {
       log(`max-minutes reached (${maxMinutes}) — stopping`);
+      exitReason = "max-minutes";
       break;
     }
 
@@ -265,6 +311,11 @@ export async function watchChannel(session, channelLogin, opts = {}) {
   }
 
   log("watcher exit");
+  return {
+    reason: exitReason || "signal",
+    channel: channel.login,
+    minutesWatched: Math.floor((Date.now() - startedAt) / 60000),
+  };
 }
 
 function sleep(ms) {

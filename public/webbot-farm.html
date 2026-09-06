@@ -67,10 +67,16 @@
   tr.listedrow td:first-child { box-shadow: inset 3px 0 0 var(--green); }
 
   .bot { border:1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow:hidden; }
-  .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; }
+  .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; flex-wrap:wrap; }
   .bot .row:hover { background: var(--surface-2); }
   .bot .row .g { font-weight:600; } .bot .row .meta { color:var(--muted); font-size:12.5px; }
   .bot .row .sp { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end;}
+  /* Channel-ACL line (from the watcher's channels.json) under the bot title. */
+  .bot .row .chan { flex-basis:100%; font-size:12px; color:var(--muted); overflow-wrap:anywhere; margin-top:-4px; }
+  .bot .row .chan b { color:var(--ink); font-weight:600; }
+  .bot .row .chan .dark { color:var(--red); font-weight:600; } .bot .row .chan .live { color:var(--green); font-weight:600; } .bot .row .chan .stale { color:var(--yellow); }
+  /* Auto power panel: per-bot verdict + heartbeat table. */
+  #autoBots table td, #autoBots table th { white-space:nowrap; }
   .bot .body { border-top:1px solid var(--line); padding: 12px 14px; display:none; background:var(--surface-2); }
   .bot.open .body { display:block; }
   .tabs { display:flex; gap:6px; margin-bottom:10px; }
@@ -200,6 +206,25 @@
     <div class="stat"><b id="stReady">–</b><span>Ready · unclaimed</span></div>
     <div class="stat"><b id="stAccts">–</b><span>Total accounts</span></div>
     <div class="stat"><b id="stImg">–</b><span>Image</span></div>
+  </div>
+
+  <!-- Auto power (utils/webbotFarmWatcher.js live/dark gate + per-bot heartbeat) -->
+  <div class="panel">
+    <div class="hd"><b>Auto power</b> <span class="muted" style="margin-left:auto;">start/stop bots on live streams · heartbeat from container logs</span></div>
+    <div class="bd">
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:600;">
+          <input type="checkbox" id="autoToggle" style="width:18px;height:18px;cursor:pointer;" />
+          <span id="autoLabel">Off</span>
+        </label>
+        <span class="muted" id="autoState" style="margin-left:6px;overflow-wrap:anywhere;"></span>
+      </div>
+      <div class="tagrow" id="autoGames" style="margin-top:11px;"></div>
+      <div class="tbl" id="autoBots" style="margin-top:11px;"></div>
+      <div class="muted" style="margin-top:8px;">
+        When on, each bot runs only while its game has a live campaign stream and is stopped (kept, not released) while the game is dark; uncertainty keeps bots on and a manual <b>Stop</b> stays stopped until you <b>Start</b>. The watcher also writes each bot's <b>channels.json</b> (campaign ACL + live ACL channels) and reads a per-bot <b>heartbeat</b> from its logs — a bot that is running but credits nothing while its game is live is flagged <span class="chip off">idle</span> and alerted on Telegram.
+      </div>
+    </div>
   </div>
 
   <!-- Feeder -->
@@ -375,14 +400,56 @@ function contChip(c){
   return '<span class="chip">'+esc(c.state||'?')+'</span>';
 }
 
+// Heartbeat chip — the watcher's per-bot verdict from container logs
+// (progress / no-drop-session / attach counts over the last 6 min). Only
+// meaningful while the container runs; every field is optional.
+function hbChip(c){
+  if(!c||!c.running) return '';
+  var hb=c.hb||null, v=c.hbVerdict||'unknown';
+  var n=hb&&hb.progress>0?hb.progress:0, ns=hb&&hb.noSession>0?hb.noSession:0, at=hb&&hb.at?new Date(hb.at):null;
+  var tip='heartbeat: '+n+' progress · '+ns+' no-session · '+(hb&&hb.attaches>0?hb.attaches:0)+' attach lines in the last 6 min'+(at?' (read '+at.toLocaleTimeString()+')':'');
+  if(v==='farming') return '<span class="chip on" title="'+esc(tip)+'">farming '+n+'/6m</span>';
+  if(v==='idle') return '<span class="chip off" title="'+esc(tip)+'">idle: no drop session</span>';
+  if(v==='starting') return '<span class="chip warn" title="'+esc(tip)+'">starting</span>';
+  return '<span class="chip" title="no heartbeat yet — the auto-power watcher is off or has not ticked since this bot started">unknown</span>';
+}
+function fmtAgo(iso){ if(!iso) return ''; var ms=Date.now()-new Date(iso).getTime(); if(!(ms>=0)) return ''; var m=Math.round(ms/60000); return m<1?'just now':(m<60?m+'m ago':(Math.floor(m/60)+'h '+(m%60)+'m ago')); }
+// "channels: acl-live 1/8 · R6S S2 2026 1" from the bot's channels.json summary.
+function chanLine(c){
+  var ch=c?c.channels:null;
+  if(ch===undefined) return '';
+  if(!ch) return 'channels: <span class="muted">no channels.json yet (the auto-power watcher writes it each tick)</span>';
+  if(ch.error==='unparsable') return 'channels: <span class="dark">channels.json unreadable</span>';
+  var now=Date.now();
+  var act=(ch.campaigns||[]).filter(function(x){ return !x.endAt||new Date(x.endAt).getTime()>now; });
+  var parts;
+  if(!act.length) parts=['<span class="muted">no active campaign listed</span>'];
+  else parts=act.map(function(x){
+    var lbl;
+    if(!x.gated) lbl='<span class="live">community</span> (un-gated)';
+    else if(x.liveCount>0) lbl='<span class="live">acl-live '+x.liveCount+'/'+x.aclCount+'</span>';
+    else lbl='<span class="dark">acl-dark 0/'+x.aclCount+'</span>';
+    return lbl+' · <b>'+esc(x.name||'(unnamed)')+'</b>';
+  });
+  var ageMs=ch.updatedAt?now-new Date(ch.updatedAt).getTime():NaN;
+  var stale=!(ageMs>=0)||ageMs>45*60000;
+  var age=ch.updatedAt?'<span class="'+(stale?'stale':'')+'" title="'+esc(ch.updatedAt)+(stale?' — older than 45 min: the farmer ignores it and falls back to community streams':'')+'">'+fmtAgo(ch.updatedAt)+(stale?' (stale)':'')+'</span>':'<span class="stale">no timestamp</span>';
+  return 'channels: '+parts.join(' · ')+' · '+age+(ch.error?' · <span class="dark" title="'+esc(ch.error)+'">⚠ '+esc(ch.error)+'</span>':'');
+}
+function botActions(b,id){
+  return contChip(b.cont)+hbChip(b.cont)+
+    (b.cont&&!b.cont.running?'<button class="btn ghost sm" data-bact="start" data-bid="'+id+'">Start</button>':'')+
+    '<button class="btn ghost sm" data-bact="stop" data-bid="'+id+'">Stop</button>'+
+    (b.cont?'<button class="btn ghost sm" data-bact="recreate" data-bid="'+id+'" title="Remove the container and run it again on the current image (config, accounts and stop/parked markers are kept)">Recreate</button>':'')+
+    '<button class="btn danger sm" data-bact="release" data-bid="'+id+'">Release</button>';
+}
 function updateBotChip(id){
   var sp=document.querySelector('#bots .row[data-bid="'+id+'"] .sp');
   if(!sp) return;
   var b=botIndex[id];
-  sp.innerHTML=contChip(b.cont)+
-    (b.cont&&!b.cont.running?'<button class="btn ghost sm" data-bact="start" data-bid="'+id+'">Start</button>':'')+
-    '<button class="btn ghost sm" data-bact="stop" data-bid="'+id+'">Stop</button>'+
-    '<button class="btn danger sm" data-bact="release" data-bid="'+id+'">Release</button>';
+  sp.innerHTML=botActions(b,id);
+  var ch=document.querySelector('#bots .row[data-bid="'+id+'"] .chan');
+  if(ch) ch.innerHTML=chanLine(b.cont);
 }
 
 function renderBots(){
@@ -396,11 +463,8 @@ function renderBots(){
       '<div class="row" data-bid="'+id+'">'+
         '<span class="g">'+esc(b.game||'(any)')+'</span>'+
         '<span class="meta">bot #'+esc(id)+' · '+b.count+' account'+(b.count===1?'':'s')+(b.dead?' · '+b.dead+' dead':'')+'</span>'+
-        '<span class="sp">'+contChip(b.cont)+
-          (b.cont&&!b.cont.running?'<button class="btn ghost sm" data-bact="start" data-bid="'+id+'">Start</button>':'')+
-          '<button class="btn ghost sm" data-bact="stop" data-bid="'+id+'">Stop</button>'+
-          '<button class="btn danger sm" data-bact="release" data-bid="'+id+'">Release</button>'+
-        '</span>'+
+        '<span class="sp">'+botActions(b,id)+'</span>'+
+        '<span class="chan">'+chanLine(b.cont)+'</span>'+
       '</div>'+
       '<div class="body">'+
         '<div class="tabs">'+
@@ -494,12 +558,14 @@ async function loadBotTab(id,tab){
 async function botAct(el){
   var id=el.getAttribute('data-bid'), a=el.getAttribute('data-bact');
   if(a==='release'&&!confirm('Release bot '+id+'? Stops the container and returns its accounts to idle.')) return;
+  if(a==='recreate'&&!confirm('Recreate bot '+id+'? Removes its container and runs it again on the current farmer image. Config and accounts are kept; a stopped or parked bot stays stopped.')) return;
   el.disabled=true;
   try{
-    await api('/api/webbot-farm/bots/'+id+'/'+a,{method:'POST'});
-    toast('Bot '+id+' '+(a==='release'?'released':a+'ped')+'.');
+    var j=await api('/api/webbot-farm/bots/'+id+'/'+a,{method:'POST'});
+    var done={start:'started',stop:'stopped',release:'released',recreate:'recreated'};
+    toast(j&&j.message&&a==='recreate'?j.message:('Bot '+id+' '+(done[a]||a)+'.'));
     if(a==='release'){ delete openBots[id]; }
-    await load();
+    await load(); loadAuto();
   }catch(e){ toast('Failed: '+e.message); el.disabled=false; }
 }
 
@@ -999,7 +1065,74 @@ $('rebuildBtn').onclick=rebuild;
 $('feedBtn').onclick=feed;
 $('valIdleBtn').onclick=validateIdle;
 $('pullBtn').onclick=pull;
-$('refreshBtn').onclick=function(){load();loadPool();};
+$('refreshBtn').onclick=function(){load();loadPool();loadAuto();};
+
+// ---- Auto power (live/dark gate + heartbeat) ----
+// Renders whatever the watcher's status() exposes; every field is optional so
+// an older watcher (no heartbeat yet) still shows its games and bots.
+function fmtMin(ms){ if(!(ms>0)) return ''; var m=Math.round(ms/60000); return m<60?m+'m':(Math.floor(m/60)+'h '+(m%60)+'m'); }
+function verdictChip(x){
+  if(!x) return '<span class="chip">?</span>';
+  var live=x.live, unc=!!x.uncertain;
+  if(x.error&&live!==true&&live!==false) return '<span class="chip warn" title="'+esc(x.error)+'">error</span>';
+  if(live===true) return '<span class="chip on">live'+(unc?' ?':'')+'</span>';
+  if(live===false){
+    if(x.hadCampaign===false) return '<span class="chip">no campaign</span>';
+    return '<span class="chip off">dark'+(unc?' ?':'')+(x.darkForMs>0?' '+fmtMin(x.darkForMs):'')+(x.canStop===false?' — grace':'')+'</span>';
+  }
+  var v=x.verdict||x.state||x.action||'';
+  return v?'<span class="chip">'+esc(v)+'</span>':'<span class="chip">pending</span>';
+}
+function hbCell(hb,v){ return hbChip({running:true,hb:hb||null,hbVerdict:v||'unknown'}); }
+async function loadAuto(){
+  try{
+    var j=await api('/api/webbot-farm/auto');
+    var on=!!j.enabled; $('autoToggle').checked=on; $('autoLabel').textContent=on?'On':'Off';
+    var st=j.watcher||j.status||{}; var el=$('autoState');
+    var bits=[]; var lr=st.lastRun||st.lastRunAt||st.lastTick||null;
+    if(lr) bits.push('checked '+new Date(lr).toLocaleTimeString());
+    if(st.running) bits.push('tick running');
+    if(st.lastError) bits.push('⚠ '+st.lastError);
+    if(!on) bits.unshift('Off — bots run whenever you start them.');
+    el.textContent=bits.join(' · ');
+    var g=st.games; var glist=Array.isArray(g)?g:(g&&typeof g==='object'?Object.keys(g).map(function(k){ return Object.assign({game:k},g[k]||{}); }):[]);
+    $('autoGames').innerHTML=glist.length?glist.map(function(x){
+      return '<span class="chip" style="font-weight:600;">'+esc(x.game||x.name||'?')+'</span>'+verdictChip(x);
+    }).join('&nbsp; '):(on?'<span class="muted">no managed games yet — first check pending</span>':'');
+    var bots=Array.isArray(st.bots)?st.bots:[]; var hbm=st.heartbeat&&typeof st.heartbeat==='object'?st.heartbeat:{};
+    // Fold in bots the watcher lists nowhere but whose heartbeat it has.
+    var seen={}; bots.forEach(function(b){ if(b&&b.id!=null) seen[String(b.id)]=1; });
+    Object.keys(hbm).forEach(function(id){ if(!seen[id]) bots.push({id:id,hb:hbm[id]}); });
+    if(!bots.length){ $('autoBots').innerHTML=''; return; }
+    bots.sort(function(a,b){ return (parseInt(a.id,10)||0)-(parseInt(b.id,10)||0); });
+    $('autoBots').innerHTML='<table><thead><tr><th>Bot</th><th>Game</th><th>Container</th><th>Game verdict</th><th>Heartbeat</th><th>Last decision</th></tr></thead><tbody>'+
+      bots.map(function(b){
+        var id=String(b.id); var hb=b.hb||hbm[id]||null; var v=b.hbVerdict||'';
+        if(!v&&hb){ v=hb.progress>0?'farming':(hb.noSession>0?'idle':'starting'); }
+        var gi=botIndex[id]||{}; var game=b.game||gi.game||'';
+        var run=(typeof b.running==='boolean')?b.running:(gi.cont?!!gi.cont.running:null);
+        var gv=null; glist.forEach(function(x){ if(x&&game&&String(x.game||x.name||'').toLowerCase()===String(game).toLowerCase()) gv=x; });
+        if(!gv&&(b.live===true||b.live===false||b.verdict)) gv=b;
+        var dec=b.action||b.decision||b.lastAction||b.reason||'';
+        var mk=b.marker||(b.operatorOff?'.operatoroff':(b.autoStopped?'.autostopped':''));
+        return '<tr><td><b>#'+esc(id)+'</b></td><td>'+esc(game||'(any)')+'</td>'+
+          '<td>'+(run===true?'<span class="chip on">running</span>':(run===false?'<span class="chip off">stopped</span>':'<span class="chip">?</span>'))+(mk?' <span class="muted">'+esc(mk)+'</span>':'')+'</td>'+
+          '<td>'+verdictChip(gv)+'</td>'+
+          '<td>'+(run===false?'<span class="muted">—</span>':hbCell(hb,v))+(hb&&hb.at?' <span class="muted" title="'+esc(hb.at)+'">'+fmtAgo(hb.at)+'</span>':'')+'</td>'+
+          '<td class="muted">'+esc(dec||'')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }catch(e){ /* leave prior state */ }
+}
+$('autoToggle').onchange=async function(){
+  var want=this.checked; this.disabled=true;
+  try{ var j=await api('/api/webbot-farm/auto',{method:'POST',body:JSON.stringify({enabled:want})});
+    $('autoLabel').textContent=j.enabled?'On':'Off';
+    toast('Auto power '+(j.enabled?'on':'off')+'.');
+    setTimeout(loadAuto,1200);
+  }catch(e){ this.checked=!want; toast('Failed: '+e.message); }
+  finally{ this.disabled=false; }
+};
+setInterval(loadAuto,60000);
 $('sellScanBtn').onclick=function(){ scanSellable(false); };
 $('sellMoreBtn').onclick=function(){ scanSellable(true); };
 $('sellExportBtn').onclick=sellExport;
@@ -1015,7 +1148,7 @@ $('acctSearch').addEventListener('input',function(){
 $('acctPrev').onclick=function(){ if(acctPage>1){ acctPage--; loadAccounts(); } };
 $('acctNext').onclick=function(){ if(acctPage<acctPages){ acctPage++; loadAccounts(); } };
 $('acctPageSize').onchange=function(){ acctPage=1; loadAccounts(); };
-load(); loadPool();
+load(); loadPool(); loadAuto();
 </script>
 <script src="/admin-nav.js"></script>
 </body>

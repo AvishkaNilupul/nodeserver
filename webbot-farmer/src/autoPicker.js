@@ -4,6 +4,9 @@
 // then pick a live channel streaming that game with the DROPS_ENABLED tag.
 
 import { getInventory, getLiveChannelsForGame } from "./twitch.js";
+// Cycle with channelPool.js (it imports fetchDropsChannels from here) — safe:
+// both sides only call hoisted function declarations, never at module load.
+import { readChannelsFile, selectCandidates } from "./channelPool.js";
 
 // Score an in-progress campaign by how close it is to a claimable drop.
 // "closest to complete" beats "just started" because unfinished drops are the
@@ -85,9 +88,20 @@ export async function fetchDropsChannels(session, gameName, limit = 30) {
 // single-account --auto path and by pickGame's priority-availability probe.
 // The multi-account manager uses the round-robin channelPool instead so that
 // many accounts don't all pile onto the top stream.
+//
+// Honours the server-written channels.json the same way the pool does (see
+// channelPool.selectCandidates): a gated campaign with a live ACL channel
+// yields ONLY that channel; a gated campaign with none live yields null — so
+// pickGame's priority probe does not report a game as farmable when nothing
+// can credit it. Without the file (or a stale/other-game one) this is exactly
+// the old drops-tagged-first ranking. `opts.file` lets a caller pass the file
+// text/object in (tests); default reads WEBBOT_CHANNELS_FILE.
 export async function pickChannelForGame(session, gameName, opts = {}) {
   const avoid = new Set((opts.avoid || []).map((s) => String(s).toLowerCase()));
-  const candidates = await fetchDropsChannels(session, gameName, opts.limit || 30);
+  const limit = opts.limit || 30;
+  const all = await fetchDropsChannels(session, gameName, limit);
+  const file = opts.file !== undefined ? opts.file : await readChannelsFile();
+  const { candidates } = selectCandidates(all, file, Date.now(), { game: gameName, topK: limit });
   for (const c of candidates) {
     if (!avoid.has(c.login.toLowerCase())) return c;
   }

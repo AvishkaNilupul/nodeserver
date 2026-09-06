@@ -13,10 +13,10 @@
 // farms continuously just like before — the cap only rotates when there are
 // more accounts than slots.
 
-import { makeSession, validate } from "./twitch.js";
+import { makeSession, validate, getInventory } from "./twitch.js";
 import { watchChannel } from "./watcher.js";
 import { pickGame } from "./autoPicker.js";
-import { createChannelPool } from "./channelPool.js";
+import { createChannelPool, channelsFilePath, doneCampaignsFromInventory } from "./channelPool.js";
 import {
   connect as mongoConnect,
   loadActiveAccounts,
@@ -42,6 +42,18 @@ const LAUNCH_STAGGER_MS = 400;
 const IDLE_BACKOFF_MS = 5 * 60 * 1000; // nothing to farm
 const NO_CHANNEL_BACKOFF_MS = 2 * 60 * 1000; // game had no live channel
 const ERROR_BACKOFF_MS = 60 * 1000; // watch threw
+
+// No-session rotation: leave a channel that has shown "no active drop-session"
+// (and no credited minute) for this long and re-pick, avoiding it — the
+// channel is not crediting (typically outside the campaign's ACL). Once per
+// turn. Env WEBBOT_NO_SESSION_EXIT_MS overrides; 0 disables.
+const DEFAULT_NO_SESSION_EXIT_MS = 10 * 60 * 1000;
+const NO_SESSION_EXIT_MS = (() => {
+  const raw = process.env.WEBBOT_NO_SESSION_EXIT_MS;
+  if (raw === undefined || raw === "") return DEFAULT_NO_SESSION_EXIT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_NO_SESSION_EXIT_MS;
+})();
 
 const log = (msg, extra) => {
   const stamp = new Date().toISOString().replace("T", " ").replace("Z", "");
@@ -108,82 +120,128 @@ async function farmTurn(row, priorityGames, stopSignal, channelPool) {
     return IDLE_BACKOFF_MS;
   }
 
-  // 2. Pick channel — round-robin across the game's live drops channels so
-  // accounts spread out instead of all landing on the single top stream.
-  let channel;
-  try {
-    channel = await channelPool.next(session, target.game);
-  } catch (e) {
-    log(`[${label}] pickChannel(${target.game}) threw: ${e.message}`);
+  // 1b. Per-account campaign exclusion (pinned path only — pickGame already
+  // chose a game with unfinished drops). One inventory read per turn: the
+  // campaigns of the pinned game this account has fully earned are excluded
+  // from channel selection, so a live official channel that only credits a
+  // campaign this account finished does not attract it. A failed read means
+  // no exclusion (fail toward farming).
+  let doneCampaigns = [];
+  if (target.source === "pinned") {
+    try {
+      doneCampaigns = doneCampaignsFromInventory(await getInventory(session), target.game);
+    } catch (e) {
+      log(`[${label}] getInventory threw (no campaign exclusion this turn): ${e.message}`);
+      doneCampaigns = [];
+    }
   }
-  if (!channel) {
-    log(`[${label}] no live channel for ${target.game} — backing off ${NO_CHANNEL_BACKOFF_MS / 60000}m`);
+  const noChannelBackoff = async (suffix = "") => {
+    const done = channelPool.source?.(target.game, { doneCampaigns }) === "done";
+    if (done) {
+      log(`[${label}] every live campaign of ${target.game} already complete${suffix} — backing off ${NO_CHANNEL_BACKOFF_MS / 60000}m`);
+    } else {
+      log(`[${label}] no live channel for ${target.game}${suffix} — backing off ${NO_CHANNEL_BACKOFF_MS / 60000}m`);
+    }
     await writeState(row.webToken, {
-      lastStatus: "attaching",
-      lastStatusMessage: `no live channel for ${target.game}`,
+      lastStatus: done ? "idle" : "attaching",
+      lastStatusMessage: done
+        ? `every live campaign of ${target.game} already complete`
+        : `no live channel for ${target.game}`,
       currentGame: target.game,
       currentChannel: "",
     });
     return NO_CHANNEL_BACKOFF_MS;
-  }
+  };
 
-  log(
-    `[${label}] farming ${target.game} via ${channel.login} ` +
-      `(${channel.viewers}v, drops=${channel.hasDropTag}, src=${target.source})`,
-  );
-
-  // 3. Watch — bounded to a channel-lease so the slot frees for others.
-  await writeState(row.webToken, {
-    lastStatus: "attaching",
-    lastStatusMessage: "watching",
-    currentGame: target.game,
-    currentChannel: channel.login,
-  });
-
+  // 2. Pick channel — round-robin across the game's live drops channels so
+  // accounts spread out instead of all landing on the single top stream.
+  let channel;
   try {
-    await watchChannel(session, channel.login, {
-      maxMinutes: CHANNEL_LEASE_MINUTES,
-      stopSignal,
-      // Seed from the recorded flag so a known-blocked account never even
-      // attempts a claim on its first tick.
-      claimBlocked: !!row.claimBlocked,
-      onProgress: async ({ currentSession, minutesWatched, readyUnclaimed, claimBlocked }) => {
-        // Remember it in-memory so this account's later turns skip claims too.
-        if (claimBlocked) row.claimBlocked = true;
-        const drop = currentSession?.dropID;
-        const patch = {
-          lastStatus: drop ? "ok" : "attaching",
-          lastStatusMessage: drop
-            ? `${currentSession.currentMinutesWatched}/${currentSession.requiredMinutesWatched} on ${currentSession.channel?.displayName || channel.login}` +
-              (readyUnclaimed ? ` · ${readyUnclaimed} ready, needs external claim` : "")
-            : "spade pinging, no drop-session attached yet",
-          currentDropId: drop || "",
-          currentMinutes: currentSession?.currentMinutesWatched || 0,
-          requiredMinutes: currentSession?.requiredMinutesWatched || 0,
-          totalMinutesWatched: (row.totalMinutesWatched || 0) + minutesWatched,
-          dropsReadyUnclaimed: readyUnclaimed || 0,
-          claimBlocked: !!claimBlocked,
-        };
-        await writeState(row.webToken, patch);
-      },
-      onClaim: async ({ ok, drop, campaign }) => {
-        if (ok) {
-          await bumpClaim(row.webToken);
-          log(`[${label}] claimed: ${campaign} / ${drop}`);
-        } else {
-          log(`[${label}] claim FAILED: ${campaign} / ${drop}`);
-        }
-      },
-    });
-    // Lease ended cleanly — eligible for another turn immediately (re-pick).
-    return 0;
+    channel = await channelPool.next(session, target.game, { doneCampaigns });
   } catch (e) {
-    log(`[${label}] watch threw: ${e.message} — backing off ${ERROR_BACKOFF_MS / 1000}s`);
+    log(`[${label}] pickChannel(${target.game}) threw: ${e.message}`);
+  }
+  if (!channel) return noChannelBackoff();
+
+  // 3. Watch — bounded to a channel-lease so the slot frees for others. At
+  // most ONE no-session rotation per turn: if the channel never attaches a
+  // drop session for NO_SESSION_EXIT_MS we re-pick once, avoiding it; a second
+  // no-session exit ends the turn normally (lease semantics unchanged).
+  let rotated = false;
+  while (true) {
+    log(
+      `[${label}] farming ${target.game} via ${channel.login} ` +
+        `(${channel.viewers}v, drops=${channel.hasDropTag}${channel.fromAcl ? ", acl" : ""}, src=${target.source})`,
+    );
     await writeState(row.webToken, {
-      lastStatus: "error",
-      lastStatusMessage: e.message,
+      lastStatus: "attaching",
+      lastStatusMessage: "watching",
+      currentGame: target.game,
+      currentChannel: channel.login,
     });
-    return ERROR_BACKOFF_MS;
+
+    let result;
+    try {
+      result = await watchChannel(session, channel.login, {
+        maxMinutes: CHANNEL_LEASE_MINUTES,
+        stopSignal,
+        noSessionExitMs: NO_SESSION_EXIT_MS,
+        // Seed from the recorded flag so a known-blocked account never even
+        // attempts a claim on its first tick.
+        claimBlocked: !!row.claimBlocked,
+        onProgress: async ({ currentSession, minutesWatched, readyUnclaimed, claimBlocked }) => {
+          // Remember it in-memory so this account's later turns skip claims too.
+          if (claimBlocked) row.claimBlocked = true;
+          const drop = currentSession?.dropID;
+          const patch = {
+            lastStatus: drop ? "ok" : "attaching",
+            lastStatusMessage: drop
+              ? `${currentSession.currentMinutesWatched}/${currentSession.requiredMinutesWatched} on ${currentSession.channel?.displayName || channel.login}` +
+                (readyUnclaimed ? ` · ${readyUnclaimed} ready, needs external claim` : "")
+              : "spade pinging, no drop-session attached yet",
+            currentDropId: drop || "",
+            currentMinutes: currentSession?.currentMinutesWatched || 0,
+            requiredMinutes: currentSession?.requiredMinutesWatched || 0,
+            totalMinutesWatched: (row.totalMinutesWatched || 0) + minutesWatched,
+            dropsReadyUnclaimed: readyUnclaimed || 0,
+            claimBlocked: !!claimBlocked,
+          };
+          await writeState(row.webToken, patch);
+        },
+        onClaim: async ({ ok, drop, campaign }) => {
+          if (ok) {
+            await bumpClaim(row.webToken);
+            log(`[${label}] claimed: ${campaign} / ${drop}`);
+          } else {
+            log(`[${label}] claim FAILED: ${campaign} / ${drop}`);
+          }
+        },
+      });
+    } catch (e) {
+      log(`[${label}] watch threw: ${e.message} — backing off ${ERROR_BACKOFF_MS / 1000}s`);
+      await writeState(row.webToken, {
+        lastStatus: "error",
+        lastStatusMessage: e.message,
+      });
+      return ERROR_BACKOFF_MS;
+    }
+
+    if (result?.reason !== "no-session" || rotated || stopSignal?.stopped) {
+      // Lease ended cleanly — eligible for another turn immediately (re-pick).
+      return 0;
+    }
+
+    rotated = true;
+    const left = channel.login;
+    log(`[${label}] no drop session on ${left} for ${Math.round(NO_SESSION_EXIT_MS / 60000)}m — rotating`);
+    let nextChannel = null;
+    try {
+      nextChannel = await channelPool.next(session, target.game, { avoid: [left], doneCampaigns });
+    } catch (e) {
+      log(`[${label}] pickChannel(${target.game}) threw on rotation: ${e.message}`);
+    }
+    if (!nextChannel) return noChannelBackoff(" after rotation");
+    channel = nextChannel;
   }
 }
 
@@ -274,6 +332,10 @@ export async function farmAccounts({ rows, priorityGames = [], maxConcurrent, st
     cap >= rows.length
       ? `max-concurrent ${cap} >= ${rows.length} accounts — all farm continuously`
       : `max-concurrent ${cap} — ${rows.length} accounts rotate through ${cap} slots`,
+  );
+  log(
+    `channels file: ${channelsFilePath()} (server ACL hints; missing/stale = community discovery) · ` +
+      `no-session rotation: ${NO_SESSION_EXIT_MS ? `${Math.round(NO_SESSION_EXIT_MS / 60000)}m` : "off"}`,
   );
   const channelPool = createChannelPool();
   await runPool(rows, cap, priorityGames, stopSignal, channelPool);

@@ -66,6 +66,7 @@ const PARK_AFTER_DARK_MS =
   Number(process.env.NOCLAIM_PARK_AFTER_DARK_MS) || 20 * 60 * 1000; // 20 min
 
 const norm = (s) => settings.normGameName(s);
+const normLogin = (s) => String(s || "").trim().toLowerCase();
 
 const state = {
   started: false,
@@ -102,7 +103,10 @@ async function aclChannels(campaignId, token) {
     const allow = camp && camp.allow;
     let channels = [];
     if (allow && allow.isEnabled !== false && Array.isArray(allow.channels)) {
-      channels = allow.channels.map((c) => norm(c && c.name)).filter(Boolean);
+      // Twitch LOGINS, not game labels: keep underscores ("ow_esports"), only
+      // lowercase/trim. normGameName turned "ow_esports" into "ow esports", so
+      // getStreamsLive never matched it and the channel could never read live.
+      channels = allow.channels.map((c) => normLogin(c && c.name)).filter(Boolean);
     }
     aclCache.set(campaignId, { channels, fetchedAt: Date.now() });
     return channels;

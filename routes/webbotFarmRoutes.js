@@ -236,21 +236,111 @@ router.get("/api/webbot-farm/state", requireSuperadmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 // Container run-state + image/provisioning (one Pi round trip).
 // ---------------------------------------------------------------------------
+// Summarise a bot's `channels.json` (written per tick by the auto-power
+// watcher — see docs/WEBBOT-ACL-CHANNELS-CONTRACT.md) for the bot card:
+// `{updatedAt, error, campaigns:[{name, gated, liveCount, aclCount}]}`.
+// Unparsable content → `{error:"unparsable", campaigns:[]}` so the page can
+// still say something; a missing file is `null` (handled by the caller).
+function summariseChannelsFile(text) {
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return { updatedAt: null, error: "unparsable", campaigns: [] };
+  }
+  if (!doc || typeof doc !== "object") return { updatedAt: null, error: "unparsable", campaigns: [] };
+  const campaigns = (Array.isArray(doc.campaigns) ? doc.campaigns : []).map((c) => {
+    const acl = Array.isArray(c && c.acl) ? c.acl : null;
+    const live = Array.isArray(c && c.live) ? c.live : [];
+    return {
+      name: String((c && c.name) || ""),
+      endAt: (c && c.endAt) || null,
+      gated: acl !== null,
+      aclCount: acl ? acl.length : 0,
+      liveCount: live.length,
+    };
+  });
+  return {
+    updatedAt: doc.updatedAt || null,
+    game: doc.game || "",
+    error: doc.error ? String(doc.error) : null,
+    campaigns,
+  };
+}
+
+// Heartbeat verdict fallback when the watcher's own `hbVerdict` is absent
+// (mirrors the contract's `heartbeatVerdict`: progress → farming; no-session
+// only → idle; all zero → starting; no heartbeat → unknown).
+function hbVerdictFor(hb) {
+  if (!hb || typeof hb !== "object") return "unknown";
+  const progress = Number(hb.progress) || 0;
+  const noSession = Number(hb.noSession) || 0;
+  if (progress > 0) return "farming";
+  if (noSession > 0) return "idle";
+  return "starting";
+}
+
+// The watcher's per-bot heartbeat, read defensively: `status().heartbeat[id]`
+// and/or `status().bots[].{hb,hbVerdict}`. Any shape the watcher does not yet
+// expose degrades to `{hb:null, hbVerdict:"unknown"}`.
+function watcherHeartbeats() {
+  const out = {};
+  let st = null;
+  try {
+    st = typeof webbotFarmWatcher.status === "function" ? webbotFarmWatcher.status() : null;
+  } catch {
+    st = null;
+  }
+  if (!st || typeof st !== "object") return out;
+  const hbMap = st.heartbeat && typeof st.heartbeat === "object" ? st.heartbeat : {};
+  for (const id of Object.keys(hbMap)) {
+    const hb = hbMap[id] || null;
+    out[String(id)] = { hb, hbVerdict: hbVerdictFor(hb) };
+  }
+  for (const b of Array.isArray(st.bots) ? st.bots : []) {
+    if (!b || b.id == null) continue;
+    const id = String(b.id);
+    const cur = out[id] || { hb: null, hbVerdict: "unknown" };
+    if (b.hb && typeof b.hb === "object") cur.hb = b.hb;
+    if (typeof b.hbVerdict === "string" && b.hbVerdict) cur.hbVerdict = b.hbVerdict;
+    else if (cur.hb) cur.hbVerdict = hbVerdictFor(cur.hb);
+    out[id] = cur;
+  }
+  return out;
+}
+
 router.get("/api/webbot-farm/bots-status", requireSuperadmin, async (req, res) => {
   try {
+    // One round trip: provisioning lock, image, `docker ps`, and every bot's
+    // channels.json (the ACL/live-channel hint the watcher writes per tick).
     const script =
       `prov=no; [ -f ${hosts.shq(BASE + "/.provisioning")} ] && prov=yes; echo "prov=$prov"; ` +
       `img=no; docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1 && img=yes; echo "img=$img"; ` +
-      `echo PS_START; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null; echo PS_END`;
+      `echo PS_START; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null; echo PS_END; ` +
+      `for d in ${hosts.shq(BOTS_DIR)}/*/; do [ -d "$d" ] || continue; bid=$(basename "$d"); ` +
+      `if [ -f "$d/channels.json" ]; then echo "CH_START $bid"; cat "$d/channels.json" 2>/dev/null; echo; echo CH_END; fi; done`;
     const out = await sh(script, { timeout: 25000 });
     const containers = {};
+    const channels = {};
     let provisioning = false;
     let imageBuilt = false;
     let section = "";
+    let chId = "";
+    let chBuf = [];
     for (const raw of out.split("\n")) {
       const line = raw.trim();
+      if (section === "ch") {
+        if (line === "CH_END") {
+          channels[chId] = summariseChannelsFile(chBuf.join("\n"));
+          section = ""; chId = ""; chBuf = [];
+        } else {
+          chBuf.push(raw);
+        }
+        continue;
+      }
       if (line === "PS_START") { section = "ps"; continue; }
       if (line === "PS_END") { section = ""; continue; }
+      if (line.startsWith("CH_START ")) { section = "ch"; chId = line.slice(9).trim(); chBuf = []; continue; }
       if (line.startsWith("prov=")) { provisioning = line.slice(5) === "yes"; continue; }
       if (line.startsWith("img=")) { imageBuilt = line.slice(4) === "yes"; continue; }
       if (section === "ps" && line) {
@@ -258,7 +348,15 @@ router.get("/api/webbot-farm/bots-status", requireSuperadmin, async (req, res) =
         containers[name.replace(CONTAINER_PREFIX, "")] = { state, status, running: state === "running" };
       }
     }
-    res.json({ success: true, provisioning, imageBuilt, containers });
+    const heartbeats = watcherHeartbeats();
+    for (const id of Object.keys(containers)) {
+      const c = containers[id];
+      const h = heartbeats[id] || { hb: null, hbVerdict: "unknown" };
+      c.hb = h.hb;
+      c.hbVerdict = h.hbVerdict;
+      c.channels = channels[id] || null;
+    }
+    res.json({ success: true, provisioning, imageBuilt, containers, channels });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
   }
@@ -836,6 +934,56 @@ router.post("/api/webbot-farm/bots/:id/start", requireSuperadmin, async (req, re
       subject: containerFor(id),
     });
     res.json({ success: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+});
+
+// Recreate: `docker rm -f` + the same `docker run` line /bots uses, so a bot
+// picks up a rebuilt image (after /rebuild) without touching its config or
+// accounts. Auto-power markers are PRESERVED: `.operatoroff` (operator Stop) or
+// `.autostopped` (parked on a dark game) → the fresh container is stopped right
+// after run, so a parked bot stays parked and the watcher wakes it as before.
+router.post("/api/webbot-farm/bots/:id/recreate", requireSuperadmin, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    if (!validId(id)) return res.status(400).json({ success: false, message: "bad id" });
+    const script = [
+      `[ -f ${hosts.shq(BASE + "/.provisioning")} ] && { echo busy; exit 0; }`,
+      `[ -s ${hosts.shq(configPath(id))} ] || { echo noconfig; exit 0; }`,
+      `docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1 || { echo noimage; exit 0; }`,
+      `park=no; [ -f ${hosts.shq(operatorMarkerPath(id))} ] && park=operator; [ -f ${hosts.shq(markerPath(id))} ] && park=auto`,
+      `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
+      `if docker run -d --name ${hosts.shq(containerFor(id))} --restart unless-stopped ` +
+        `-v ${hosts.shq(botDir(id))}:/config:ro ${hosts.shq(IMAGE)} >/dev/null 2>${hosts.shq(BASE + "/recreate.err")}; ` +
+        `then echo ran; else echo "runfail $(tr '\\n' ' ' < ${hosts.shq(BASE + "/recreate.err")})"; exit 0; fi`,
+      `if [ "$park" != no ]; then docker stop ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true; echo "parked $park"; fi`,
+    ].join("; ");
+    const out = await sh(script, { timeout: 60000 });
+    const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
+    const first = lines[0] || "";
+    if (first === "busy") return res.status(409).json({ success: false, message: "A build/provision is running — recreate after it finishes." });
+    if (first === "noconfig") return res.status(404).json({ success: false, message: `Bot ${id} has no config on the Pi (released?).` });
+    if (first === "noimage") return res.status(409).json({ success: false, message: "The farmer image is missing on the Pi — Rebuild image first." });
+    if (first.startsWith("runfail")) {
+      return res.status(500).json({ success: false, message: "docker run failed: " + (first.slice(8).trim() || "unknown error") });
+    }
+    const parkedLine = lines.find((l) => l.startsWith("parked ")) || "";
+    const parked = parkedLine ? parkedLine.slice(7).trim() : "";
+    logEvent({
+      category: "webbot",
+      action: "bot_recreated",
+      actor: actorFromReq(req),
+      subject: containerFor(id),
+      detail:
+        "webbot " + id + " container recreated on " + IMAGE +
+        (parked ? " — kept stopped (" + (parked === "operator" ? ".operatoroff" : ".autostopped") + " marker)" : " — running"),
+    });
+    res.json({
+      success: true,
+      parked: parked || null,
+      message: `Bot ${id} recreated on the current image` + (parked ? ` (kept stopped — ${parked === "operator" ? "operator Stop" : "parked by auto power"}).` : "."),
+    });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
   }
