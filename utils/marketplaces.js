@@ -4117,6 +4117,73 @@ async function eldoradoOffer(offerId) {
   }
 }
 
+// Edit an existing offer in place (title / description / price / stock / game).
+// Reads the current offer and rewrites the same {details, augmentedGame} DTO the
+// create call takes, so an untouched field keeps its current value.
+async function eldoradoUpdateOffer(offerId, patch = {}) {
+  const cur = await eldoradoOffer(offerId);
+  if (!cur) throw new Error("Eldorado: offer " + offerId + " not found");
+  const env =
+    patch.game != null
+      ? await eldoradoResolveGame(patch.game)
+      : {
+          id: String(((cur.tradeEnvironmentValues || [])[0] || {}).id ?? "11"),
+          name: ((cur.tradeEnvironmentValues || [])[0] || {}).name || "Game",
+          value: ((cur.tradeEnvironmentValues || [])[0] || {}).value || "Other",
+        };
+  const details = {
+    offerTitle: String(
+      patch.title != null ? patch.title : cur.offerTitle || "",
+    ).slice(0, 160),
+    description: String(
+      patch.description != null ? patch.description : cur.description || "",
+    ).slice(0, 2000),
+    tradeEnvironmentValues: [{ id: env.id, name: env.name, value: env.value }],
+    offerAttributeIdValues: cur.offerAttributeIdValues || [],
+    attributes: cur.attributes || [],
+    guaranteedDeliveryTime:
+      patch.deliveryTime || cur.guaranteedDeliveryTime || "Minute20",
+    pricing: {
+      pricePerUnit: {
+        amount:
+          patch.priceUsd != null
+            ? eldPrice(patch.priceUsd)
+            : (cur.pricePerUnit && cur.pricePerUnit.amount) || ELD_MIN_PRICE,
+        currency: "USD",
+      },
+      quantity:
+        patch.quantity != null
+          ? Math.max(1, parseInt(patch.quantity, 10) || 1)
+          : cur.quantity,
+      minQuantity: patch.minQuantity != null ? patch.minQuantity : cur.minQuantity || 1,
+      volumeDiscounts: patch.volumeDiscounts || cur.volumeDiscounts || [],
+    },
+    mainOfferImage: patch.mainOfferImage || cur.mainOfferImage,
+    offerImages: patch.offerImages || cur.offerImages || [],
+  };
+  try {
+    await eldRequest(
+      "PUT",
+      "/api/v1/item-management/me/offers/item/" +
+        encodeURIComponent(offerId) +
+        "/details",
+      {
+        data: {
+          details,
+          augmentedGame: {
+            gameId: ELD_GAME_ID,
+            category: ELD_CATEGORY,
+            tradeEnvironmentId: env.id,
+          },
+        },
+      },
+    );
+  } catch (e) {
+    eldError("Eldorado update", e);
+  }
+  return await eldoradoOffer(offerId);
+}
+
 // Restock without rewriting the offer. The body is a BARE integer, not an
 // object — this is the lever the farm uses to keep stock in step.
 async function eldoradoSetQuantity(offerId, quantity) {
@@ -4420,6 +4487,7 @@ module.exports = {
   eldoradoPublish,
   eldoradoOffer,
   eldoradoOfferUrl,
+  eldoradoUpdateOffer,
   eldoradoSetQuantity,
   eldoradoReprice,
   eldoradoDelist,
