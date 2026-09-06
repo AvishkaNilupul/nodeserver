@@ -43,10 +43,27 @@ function baseHeaders(session, extra = {}) {
 }
 
 export async function validate(session) {
-  const r = await fetch("https://id.twitch.tv/oauth2/validate", {
-    headers: { Authorization: "OAuth " + session.token },
-  });
-  if (!r.ok) throw new Error("validate failed: " + r.status);
+  let r;
+  try {
+    r = await fetch("https://id.twitch.tv/oauth2/validate", {
+      headers: { Authorization: "OAuth " + session.token },
+    });
+  } catch (e) {
+    // The request never reached Twitch (DNS, socket, timeout). That says
+    // NOTHING about the token, so mark it as transport so the caller retries
+    // instead of dropping a healthy account from the rotation.
+    const err = new Error("validate unreachable: " + (e && e.message ? e.message : "fetch failed"));
+    err.transport = true;
+    throw err;
+  }
+  if (!r.ok) {
+    const err = new Error("validate failed: " + r.status);
+    err.status = r.status;
+    // Only Twitch actually rejecting the credential is a dead token; 429/5xx
+    // are the service having a bad minute.
+    err.transport = !(r.status === 401 || r.status === 403);
+    throw err;
+  }
   const data = await r.json();
   session.userId = data.user_id;
   session.login = data.login;

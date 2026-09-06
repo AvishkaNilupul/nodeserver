@@ -65,6 +65,16 @@ const dropSetSchema = new mongoose.Schema(
     sourceEventKey: { type: String, default: "", index: true },
     sourceEventName: { type: String, default: "" },
     sourceCampaignIds: { type: [String], default: [] },
+    catalogState: {
+      type: String,
+      enum: ["instock", "preorder", "soldout"],
+      default: "instock",
+      index: true,
+    },
+    farmStartedAt: { type: Date, default: null },
+    campaignEndAt: { type: Date, default: null, index: true },
+    expectedUnits: { type: Number, default: 0 },
+    autoFarmTaskId: { type: String, default: "", index: true },
   },
   { timestamps: true },
 );

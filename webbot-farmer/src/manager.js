@@ -89,6 +89,15 @@ async function farmTurn(row, priorityGames, stopSignal, channelPool) {
   try {
     await validate(session);
   } catch (e) {
+    // A transport failure (Pi network blip, Twitch 5xx/429) is not a dead
+    // token. Dropping on it silently retired healthy accounts for the life of
+    // the container — 7-13 per bot per hour, measured 2026-09-07 — and they
+    // only came back on a recreate. Back off and try again instead; only a
+    // 401/403 retires the account.
+    if (e && e.transport) {
+      log(`[${label}] validate unavailable (${e.message}) — backing off ${ERROR_BACKOFF_MS / 1000}s`);
+      return ERROR_BACKOFF_MS;
+    }
     log(`[${label}] validate failed → dropping from rotation: ${e.message}`);
     await writeState(row.webToken, { lastStatus: "dead", lastStatusMessage: e.message });
     return null;

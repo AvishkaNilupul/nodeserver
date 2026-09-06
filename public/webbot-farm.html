@@ -403,6 +403,20 @@ function contChip(c){
 // Heartbeat chip — the watcher's per-bot verdict from container logs
 // (progress / no-drop-session / attach counts over the last 6 min). Only
 // meaningful while the container runs; every field is optional.
+// True while the container has been up for less than the heartbeat's 6-minute
+// log window, so an empty window is simply incomplete rather than a fault.
+// Docker's Status string is the only age we get here ("Up 5 seconds",
+// "Up About a minute", "Up 4 minutes", "Up 2 hours"); anything we cannot read
+// is treated as old enough.
+function warmingUp(c){
+  var st=String((c&&c.status)||'');
+  if(!/^Up /i.test(st)) return false;
+  if(/second|less than a minute/i.test(st)) return true;
+  if(/About a minute/i.test(st)) return true;
+  var m=st.match(/Up (\d+) minutes?/i);
+  return !!m && +m[1] < 6;
+}
+
 function hbChip(c){
   if(!c||!c.running) return '';
   var hb=c.hb||null, v=c.hbVerdict||'unknown';
@@ -410,6 +424,7 @@ function hbChip(c){
   var tip='heartbeat: '+n+' progress · '+ns+' no-session · '+(hb&&hb.attaches>0?hb.attaches:0)+' attach lines in the last 6 min'+(at?' (read '+at.toLocaleTimeString()+')':'');
   if(v==='farming') return '<span class="chip on" title="'+esc(tip)+'">farming '+n+'/6m</span>';
   if(v==='idle') return '<span class="chip off" title="'+esc(tip)+'">idle: no drop session</span>';
+  if(v==='starting'&&warmingUp(c)) return '<span class="chip" title="'+esc('the heartbeat reads a 6-minute log window and this container ('+((c&&c.status)||'')+') has not filled one yet — not a fault. '+tip)+'">warming up</span>';
   if(v==='starting') return '<span class="chip warn" title="'+esc(tip)+'">starting</span>';
   return '<span class="chip" title="no heartbeat yet — the auto-power watcher is off or has not ticked since this bot started">unknown</span>';
 }

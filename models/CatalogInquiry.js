@@ -13,6 +13,8 @@ const catalogInquirySchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1, max: 1000 },
     contact: { type: String, required: true, trim: true },
     note: { type: String, default: "" },
+    preorder: { type: Boolean, default: false },
+    expectedReadyAt: { type: Date, default: null },
     status: {
       type: String,
       enum: ["new", "contacted", "closed", "spam"],

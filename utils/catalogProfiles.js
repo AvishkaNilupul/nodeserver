@@ -5,10 +5,7 @@ const BotAccount = require("../models/BotAccount");
 const accountState = require("./twitchAccountState");
 
 const DEFAULT_MIN_STOCK = 2;
-// Bundles now group by item TYPE (not exact copy counts), so far fewer distinct
-// bundles form per game — this cap can be generous without flooding the
-// catalog. Lower it if a game produces more public bundles than you want.
-const DEFAULT_MAX_PROFILES_PER_GAME = 40;
+const DEFAULT_MAX_PROFILES_PER_GAME = 6;
 
 // Group accounts by the SET OF ITEM TYPES they hold, independent of how many
 // copies of each they farmed. Accounts farmed at different times accumulate
@@ -43,13 +40,58 @@ function sourceEventKeyFor(game, signature) {
     .digest("hex")}`;
 }
 
-function profileTitle(game, items, totalRewards) {
-  const names = (items || []).map((item) => String(item.name || "").trim());
-  const highlighted = names.find((name) => /rlcs|drop|collection/i.test(name));
-  const label = highlighted
-    ? highlighted.replace(/\s+(drop|collection drop)$/i, "")
-    : `${items.length} reward types`;
-  return `${game} ${label} bundle - ${totalRewards} rewards`;
+function campaignForItems(items) {
+  const campaigns = new Set();
+  for (const item of items || []) {
+    for (const value of item.campaigns || []) {
+      const campaign = String(value || "").trim();
+      if (campaign) campaigns.add(campaign);
+    }
+  }
+  return campaigns.size === 1 ? [...campaigns][0] : "";
+}
+
+function tierForPosition(index, total) {
+  if (total <= 1) return "Complete";
+  const position = index / (total - 1);
+  if (position <= 1 / 3) return "Starter";
+  if (position >= 2 / 3) return "Complete";
+  return "Standard";
+}
+
+function profileTitle(game, items, tier = "Complete") {
+  const campaign = campaignForItems(items);
+  return campaign ? `${game} — ${campaign}` : `${game} Drops — ${tier} Bundle`;
+}
+
+function collapseSubsetProfiles(profiles, maxProfilesPerGame) {
+  const kept = [];
+  const bySize = [...profiles].sort(
+    (a, b) =>
+      b.items.length - a.items.length ||
+      b.accountIds.length - a.accountIds.length ||
+      b.totalRewards - a.totalRewards ||
+      a.signature.localeCompare(b.signature),
+  );
+  for (const candidate of bySize) {
+    const keys = new Set(candidate.items.map((item) => item.itemKey));
+    const redundant = kept.some((larger) => {
+      if (larger.items.length <= candidate.items.length) return false;
+      if (candidate.accountIds.length > larger.accountIds.length) return false;
+      return [...keys].every((key) =>
+        larger.items.some((item) => item.itemKey === key),
+      );
+    });
+    if (!redundant) kept.push(candidate);
+  }
+  return kept
+    .sort(
+      (a, b) =>
+        b.accountIds.length - a.accountIds.length ||
+        b.totalRewards - a.totalRewards ||
+        a.signature.localeCompare(b.signature),
+    )
+    .slice(0, maxProfilesPerGame);
 }
 
 function profileDescription(items, totalRewards) {
@@ -108,6 +150,7 @@ async function buildCatalogProfilePlan({
           _id: { game: "$game", itemKey: "$itemKey" },
           name: { $first: "$name" },
           image: { $first: { $ifNull: ["$imageLocal", "$imageURL"] } },
+          campaigns: { $addToSet: "$campaign" },
         },
       },
     ]),
@@ -123,6 +166,9 @@ async function buildCatalogProfilePlan({
       {
         name: String(row.name || "").trim(),
         image: String(row.image || "").trim(),
+        campaigns: (row.campaigns || [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
       },
     ]),
   );
@@ -165,6 +211,7 @@ async function buildCatalogProfilePlan({
           count: Math.max(1, Number(item.count) || 1),
           name: String(meta.name || "").trim(),
           image: String(meta.image || "").trim(),
+          campaigns: meta.campaigns || [],
           game,
         };
       })
@@ -192,6 +239,12 @@ async function buildCatalogProfilePlan({
         existing.count = Math.min(existing.count, item.count);
         if (!existing.name && item.name) existing.name = item.name;
         if (!existing.image && item.image) existing.image = item.image;
+        existing.campaigns = [
+          ...new Set([
+            ...(existing.campaigns || []),
+            ...(item.campaigns || []),
+          ]),
+        ];
       }
     }
     profile.logins.push(account.login);
@@ -214,6 +267,7 @@ async function buildCatalogProfilePlan({
           name: item.name,
           image: item.image,
           game: item.game,
+          campaigns: item.campaigns || [],
         }))
         .sort((a, b) => a.itemKey.localeCompare(b.itemKey));
       const logins = [...new Set(profile.logins)].sort((a, b) =>
@@ -231,15 +285,27 @@ async function buildCatalogProfilePlan({
         accountIds,
       };
     });
-    const ranked = materialized
+    const eligible = materialized
       .filter((profile) => profile.accountIds.length >= minStock)
       .sort(
         (a, b) =>
           b.accountIds.length - a.accountIds.length ||
           b.totalRewards - a.totalRewards ||
           a.signature.localeCompare(b.signature),
-      )
-      .slice(0, maxProfilesPerGame);
+      );
+    const ranked = collapseSubsetProfiles(eligible, maxProfilesPerGame);
+    const tierOrder = [...ranked].sort(
+      (a, b) =>
+        a.items.length - b.items.length ||
+        a.totalRewards - b.totalRewards ||
+        a.signature.localeCompare(b.signature),
+    );
+    const tierBySignature = new Map(
+      tierOrder.map((profile, index) => [
+        profile.signature,
+        tierForPosition(index, tierOrder.length),
+      ]),
+    );
     for (const profile of ranked) {
       profile.sourceEventKey = sourceEventKeyFor(
         profile.game,
@@ -248,7 +314,7 @@ async function buildCatalogProfilePlan({
       profile.name = profileTitle(
         profile.game,
         profile.items,
-        profile.totalRewards,
+        tierBySignature.get(profile.signature),
       );
       profile.description = profileDescription(
         profile.items,
@@ -267,5 +333,7 @@ module.exports = {
   DEFAULT_MAX_PROFILES_PER_GAME,
   signatureForItems,
   sourceEventKeyFor,
+  profileTitle,
+  collapseSubsetProfiles,
   buildCatalogProfilePlan,
 };
