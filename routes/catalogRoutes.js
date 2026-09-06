@@ -4,13 +4,16 @@ const express = require("express");
 const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
 const CatalogEvent = require("../models/CatalogEvent");
 const CatalogInquiry = require("../models/CatalogInquiry");
+const CatalogSnapshot = require("../models/CatalogSnapshot");
 const DropSet = require("../models/DropSet");
 const AutoFarmTask = require("../models/AutoFarmTask");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const MarketResearch = require("../models/MarketResearch");
 const Purchase = require("../models/Purchase");
 const SaleSignal = require("../models/SaleSignal");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const { stockForSets } = require("./shopRoutes");
 const { stockForSetFromHoldings } = require("./shopRoutes");
 const { AVAILABLE_DROP } = require("../utils/dropReservation");
@@ -35,6 +38,34 @@ const {
   syncActivePreorders,
   syncHistoricalEventSets,
 } = require("../utils/catalogPreorder");
+const {
+  getCatalogConfig,
+  setCatalogConfig,
+  getUnclaimedPricing,
+  gameFloorFor,
+} = require("../utils/settings");
+const { sendTelegram } = require("../utils/telegram");
+const {
+  deriveTitle,
+  dedupeListings,
+  unclaimedSummary,
+  buyLinksFor,
+  scheduleEta,
+  assertPublicShape,
+} = require("../utils/catalogPublic");
+
+// The unclaimed-farms engine (utils/unclaimedAutoList.js) pulls in the host
+// bridge, marketplaces and fulfillers. It is only needed to price unclaimed
+// sets for the public catalog, so it is required lazily on first use — never
+// at module load — and a missing/broken module just means "no engine price".
+function loadUnclaimedAutoList() {
+  try {
+    return require("../utils/unclaimedAutoList");
+  } catch (err) {
+    console.error("catalog unclaimed engine unavailable:", err.message);
+    return null;
+  }
+}
 
 const router = express.Router();
 // Stock aggregation spans the complete DropLog archive and can take tens of
@@ -45,6 +76,10 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const NEW_LISTING_MS = 24 * 60 * 60 * 1000;
 const PUBLIC_PRICE_MIN_USD = 1.01;
 const PUBLIC_PRICE_MAX_USD = 2.99;
+// Ceiling for an admin-entered publicPrice override. Farmed bundles are still
+// clamped to PUBLIC_PRICE_MAX_USD when displayed; unclaimed sets are not, so
+// the override must be able to carry a real marketplace price.
+const PUBLIC_PRICE_ADMIN_MAX_USD = 500;
 const PUBLIC_STOCK_BATCH_SIZE = 25;
 const PUBLIC_STOCK_KEY_BATCH_SIZE = 10;
 const PUBLIC_STOCK_KEY_CONCURRENCY = 12;
@@ -110,24 +145,66 @@ function clampPublicPrice(value) {
   );
 }
 
-function publicPriceFor(set, marketMedian = 0) {
+// Price options shared by publicPriceFor / publicPriceTiers (contract §7.1):
+//   clamp  — default true: the owner's $1.01–$2.99 rule for farmed bundles and
+//            pre-orders. false = unclaimed sets, whose engine price + sold
+//            floor must never be capped below the marketplace price.
+//   floor  — extra floor folded into the set's own minPriceUsd (default 0).
+//   retail — overrides `Number(set.price) || marketMedian` when > 0.
+// Without options every helper is byte-identical to the original behaviour.
+const UNCLAMPED_PRICE_MIN_USD = 0.25;
+
+function priceOptions(opts) {
+  return opts && typeof opts === "object" ? opts : {};
+}
+
+function priceRetail(set, marketMedian, opts) {
+  const custom = Number(priceOptions(opts).retail);
+  if (Number.isFinite(custom) && custom > 0) return custom;
+  return Number(set.price) || marketMedian || 0;
+}
+
+function priceFloor(set, opts) {
+  return Math.max(
+    0,
+    Number(set.minPriceUsd) || 0,
+    Number(priceOptions(opts).floor) || 0,
+  );
+}
+
+// Final rounding: the owner's clamp by default; with clamp:false round to
+// cents and only enforce `>= max(floor, 0.25)` so an unclaimed set is never
+// advertised at $0.
+function finishPublicPrice(value, opts) {
+  const options = priceOptions(opts);
+  if (options.clamp !== false) return clampPublicPrice(value);
+  const amount = Number(value);
+  const rounded = Number.isFinite(amount) ? Math.round(amount * 100) / 100 : 0;
+  const floor = Math.max(Number(options.floor) || 0, UNCLAMPED_PRICE_MIN_USD);
+  return Math.round(Math.max(rounded, floor) * 100) / 100;
+}
+
+function publicPriceFor(set, marketMedian = 0, opts = {}) {
   const override = Number(set.publicPrice) || 0;
-  if (override > 0) return clampPublicPrice(override);
-  const retail = Number(set.price) || marketMedian || 0;
+  if (override > 0) return finishPublicPrice(override, opts);
+  const retail = priceRetail(set, marketMedian, opts);
   const rawDiscount = Number(set.bulkDiscountPct);
   const discount = Math.max(
     0,
     Math.min(60, Number.isFinite(rawDiscount) ? rawDiscount : 8),
   );
-  const floor = Math.max(0, Number(set.minPriceUsd) || 0);
-  return clampPublicPrice(Math.max(floor, retail * (1 - discount / 100)));
+  const floor = priceFloor(set, opts);
+  return finishPublicPrice(
+    Math.max(floor, retail * (1 - discount / 100)),
+    opts,
+  );
 }
 
-function publicPriceTiers(set, marketMedian = 0) {
+function publicPriceTiers(set, marketMedian = 0, opts = {}) {
   const minQty = Math.max(1, Math.min(1000, Number(set.bulkMinQty) || 5));
-  const retail = Number(set.price) || marketMedian || 0;
+  const retail = priceRetail(set, marketMedian, opts);
   const override = Math.max(0, Number(set.publicPrice) || 0);
-  const floor = Math.max(0, Number(set.minPriceUsd) || 0);
+  const floor = priceFloor(set, opts);
   const rawDiscount = Number(set.bulkDiscountPct);
   const discount = Math.max(
     0,
@@ -144,14 +221,15 @@ function publicPriceTiers(set, marketMedian = 0) {
       quantity,
       price:
         index === 0
-          ? publicPriceFor(set, marketMedian)
+          ? publicPriceFor(set, marketMedian, opts)
           : override
-            ? clampPublicPrice(Math.max(floor, override))
-            : clampPublicPrice(
+            ? finishPublicPrice(Math.max(floor, override), opts)
+            : finishPublicPrice(
                 Math.max(
                   floor,
                   retail * (1 - Math.min(60, discount + index * 5) / 100),
                 ),
+                opts,
               ),
     }));
 }
@@ -250,16 +328,60 @@ async function stockForSetsBatched(
   return result;
 }
 
-function publicListing(set, stock, marketMedian = 0, preorder = null) {
-  const category = categoryFor(set);
+const LISTING_KINDS = new Set(["bundle", "preorder", "unclaimed"]);
+
+// Public single-unit buy links, re-shaped so only the four public fields ever
+// reach the payload whatever the caller hands in.
+function publicBuyLinks(links) {
+  return (Array.isArray(links) ? links : [])
+    .filter((link) => link && typeof link === "object")
+    .map((link) => ({
+      marketplace: cleanText(link.marketplace, 40),
+      label: cleanText(link.label, 60),
+      url: String(link.url || ""),
+      price: Math.max(0, Math.round((Number(link.price) || 0) * 100) / 100),
+    }));
+}
+
+// `extra` (contract §7.2) = { kind, delivery, eventLabel, buyLinks,
+// mergedCount, priceOpts } plus an optional `category` override used when an
+// unclaimed set's items carry no game (categoryFor → "Other") and the caller
+// resolved a better label from the set cover / ledger. Absent extras keep the
+// original output, plus the always-present kind/delivery/buyLinks/mergedCount.
+function publicListing(
+  set,
+  stock,
+  marketMedian = 0,
+  preorder = null,
+  extra = {},
+) {
+  const ext = extra && typeof extra === "object" ? extra : {};
+  const category = cleanText(ext.category, 80) || categoryFor(set);
   const items = (set.items || []).slice(0, 120).map((item) => ({
     name: cleanText(item.name, 120),
     game: cleanText(item.game, 80),
     image: thumbnailUrl(item.image),
     qty: Math.max(1, Math.min(99, Number(item.qty) || 1)),
   }));
-  const state =
-    set.catalogState === "preorder"
+  const kind = LISTING_KINDS.has(ext.kind)
+    ? ext.kind
+    : set.catalogState === "preorder"
+      ? "preorder"
+      : "bundle";
+  const unclaimed = kind === "unclaimed";
+  const delivery =
+    ext.delivery === "unclaimed" || ext.delivery === "claimed"
+      ? ext.delivery
+      : unclaimed
+        ? "unclaimed"
+        : "claimed";
+  const eventLabel = cleanText(ext.eventLabel, 180);
+  const priceOpts = priceOptions(ext.priceOpts);
+  const state = unclaimed
+    ? stock > 0
+      ? "instock"
+      : "soldout"
+    : set.catalogState === "preorder"
       ? "preorder"
       : stock > 0
         ? "instock"
@@ -269,9 +391,11 @@ function publicListing(set, stock, marketMedian = 0, preorder = null) {
   return {
     id: String(set._id),
     category,
-    title: cleanText(set.publicTitle || set.name, 140),
+    kind,
+    delivery,
+    title: cleanText(deriveTitle({ set, category, kind, eventLabel }), 140),
     description: cleanText(set.publicDescription || set.note, 600),
-    price: publicPriceFor(set, marketMedian),
+    price: publicPriceFor(set, marketMedian, priceOpts),
     retailPrice: Math.round((Number(set.price) || 0) * 100) / 100,
     stock: Math.max(0, Number(stock) || 0),
     minQty: Math.max(1, Math.min(1000, Number(set.bulkMinQty) || 5)),
@@ -279,9 +403,9 @@ function publicListing(set, stock, marketMedian = 0, preorder = null) {
       0,
       Math.min(60, Number(set.bulkDiscountPct) || 0),
     ),
-    priceTiers: publicPriceTiers(set, marketMedian),
+    priceTiers: publicPriceTiers(set, marketMedian, priceOpts),
     featured: !!set.publicFeatured,
-    exactProfile: set.sourceType === "catalog_profile",
+    exactProfile: unclaimed ? false : set.sourceType === "catalog_profile",
     itemCount: items.reduce((sum, item) => sum + item.qty, 0),
     items,
     createdAt,
@@ -289,12 +413,17 @@ function publicListing(set, stock, marketMedian = 0, preorder = null) {
     isNew:
       Number.isFinite(createdMs) && createdMs > Date.now() - NEW_LISTING_MS,
     state,
-    eventName: cleanText(set.sourceEventName || set.name, 180),
+    eventName: unclaimed
+      ? eventLabel
+      : cleanText(set.sourceEventName || set.name, 180),
     campaignEndsAt: set.campaignEndAt || null,
+    buyLinks: publicBuyLinks(ext.buyLinks),
+    mergedCount: Math.max(0, Number(ext.mergedCount) || 0),
     ...(state === "preorder"
       ? {
           preorder: {
             expectedUnits: Math.max(0, Number(set.expectedUnits) || 0),
+            startedAt: set.farmStartedAt || null,
             ...(preorder || {}),
           },
         }
@@ -576,7 +705,136 @@ router.get("/catalog/thumb/:file", async (req, res) => {
   }
 });
 
+const OBJECT_ID = /^[a-f0-9]{24}$/i;
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Per-build memo for the unclaimed engine lookups: one event catalog and one
+// MarketResearch read per category, however many sets share that game.
+function unclaimedPriceMemo() {
+  return { catalog: new Map(), research: new Map() };
+}
+
+// Engine price for an unclaimed set — the same analytics price the unclaimed
+// auto-lister publishes at (event classification + market research + the
+// set's recent sold floor). Returns { price, soldFloor } or null on ANY
+// failure, so the catalog still builds without the engine.
+async function unclaimedSuggestedPrice(
+  set,
+  category,
+  memo = unclaimedPriceMemo(),
+) {
+  try {
+    const engine = loadUnclaimedAutoList();
+    if (!engine) return null;
+    const key = String(category || "").toLowerCase();
+    if (!memo.catalog.has(key)) {
+      memo.catalog.set(
+        key,
+        Promise.resolve(engine.catalogForGames([category])).catch(
+          () => new Map(),
+        ),
+      );
+    }
+    if (!memo.research.has(key)) {
+      memo.research.set(
+        key,
+        Promise.resolve(
+          MarketResearch.findOne({
+            game: new RegExp(`^${escapeRegExp(category)}$`, "i"),
+          }).lean(),
+        ).catch(() => null),
+      );
+    }
+    const [catalog, research] = await Promise.all([
+      memo.catalog.get(key),
+      memo.research.get(key),
+    ]);
+    const cls = await engine.classificationForSet(set, catalog);
+    const soldFloor = Math.max(
+      0,
+      Number(await engine.soldFloorForSet(set._id)) || 0,
+    );
+    const priced = engine.priceForItems({
+      research,
+      game: category,
+      items: set.items || [],
+      cls,
+      pricing: getUnclaimedPricing(),
+      soldFloorUsd: soldFloor,
+    });
+    const price = Number(priced && priced.price);
+    return {
+      price: Number.isFinite(price) && price > 0 ? price : 0,
+      soldFloor,
+    };
+  } catch (err) {
+    console.error("catalog unclaimed price error:", err.message);
+    return null;
+  }
+}
+
+// Pre-order ETA (contract §7.3c): live farmingProgress rows first; when they
+// yield no readyInMinutes (no rows yet, or a stale snapshot) fall back to the
+// schedule estimate from farmStartedAt + the campaign's top-tier watch
+// minutes, keeping a progress-derived progressPercent when there is one.
+// expectedUnits comes from the task's assigned accounts, else the set.
+function preorderEtaFor(set, task, accountsByLogin) {
+  const progress = task
+    ? computePreorderEta(
+        (task.assignedAccounts || [])
+          .map((login) => accountsByLogin.get(String(login).toLowerCase()))
+          .filter(Boolean),
+        task.campaignName,
+      )
+    : null;
+  let eta = progress && typeof progress === "object" ? { ...progress } : {};
+  if (Number.isFinite(Number(eta.readyInMinutes))) {
+    eta.etaSource = "progress";
+  } else {
+    const schedule = scheduleEta({
+      farmStartedAt: set.farmStartedAt,
+      requiredWatchMinutes: set.requiredWatchMinutes,
+    });
+    if (schedule) {
+      const percent = Number(eta.progressPercent);
+      eta = {
+        ...eta,
+        ...schedule,
+        ...(Number.isFinite(percent) ? { progressPercent: percent } : {}),
+      };
+    }
+  }
+  const assigned = Array.isArray(task?.assignedAccounts)
+    ? task.assignedAccounts.length
+    : 0;
+  eta.expectedUnits = assigned || Math.max(0, Number(set.expectedUnits) || 0);
+  return eta;
+}
+
+// Which DropSet's MarketplaceListing rows are this catalog set's single-unit
+// buy links (contract §7.3d): orphan mirrors name their source set in the
+// key, stack mirrors use the task's stack listing, event mirrors and
+// pre-orders the task's main listing. Anything without a usable task id
+// (manual and catalog_profile sets) falls back to its own id — marketplace
+// rows for those reference the set directly.
+function buySourceIdFor(set, task) {
+  const key = String(set.sourceEventKey || "");
+  let source = "";
+  if (key.startsWith("autofarm:set:")) {
+    source = key.slice("autofarm:set:".length);
+  } else if (key.startsWith("autofarm-stack:")) {
+    source = String(task?.stackListing?.setId || "");
+  } else {
+    source = String(task?.listing?.setId || "");
+  }
+  return OBJECT_ID.test(source) ? source : String(set._id);
+}
+
 async function buildPublicCatalog() {
+  const t0 = Date.now();
   const sets = await DropSet.find({
     listed: true,
     publicCatalog: { $ne: false },
@@ -587,19 +845,33 @@ async function buildPublicCatalog() {
     .lean();
   const stockMap = await stockForSetsBatched(sets);
   const preorderSets = sets.filter((set) => set.catalogState === "preorder");
-  const tasks = preorderSets.length
+  // (b) ONE task read for every set that names a task: pre-orders need the
+  // assigned accounts for their ETA, and every autofarm mirror needs the
+  // task's listing / stack-listing set id to find its marketplace buy links.
+  const taskIds = [
+    ...new Set(
+      sets
+        .map((set) => String(set.autoFarmTaskId || ""))
+        .filter((id) => OBJECT_ID.test(id)),
+    ),
+  ];
+  const tasks = taskIds.length
     ? await AutoFarmTask.find(
-        {
-          _id: {
-            $in: preorderSets.map((set) => set.autoFarmTaskId).filter(Boolean),
-          },
-        },
-        { assignedAccounts: 1, campaignName: 1 },
+        { _id: { $in: taskIds } },
+        "assignedAccounts campaignName status listing.setId stackListing.setId",
       ).lean()
     : [];
   const taskById = new Map(tasks.map((task) => [String(task._id), task]));
+  // Accounts (farmingProgress) are only read for pre-order tasks, as before.
+  const preorderTaskIds = new Set(
+    preorderSets.map((set) => String(set.autoFarmTaskId || "")),
+  );
   const accountLogins = [
-    ...new Set(tasks.flatMap((task) => task.assignedAccounts || [])),
+    ...new Set(
+      tasks
+        .filter((task) => preorderTaskIds.has(String(task._id)))
+        .flatMap((task) => task.assignedAccounts || []),
+    ),
   ];
   const accounts = accountLogins.length
     ? await BotAccount.find(
@@ -637,25 +909,171 @@ async function buildPublicCatalog() {
     if (!pricesByGame.has(key)) pricesByGame.set(key, []);
     pricesByGame.get(key).push(Number(signal.priceUsd) || 0);
   }
-  const listings = sets.map((set) => {
-    const category = categoryFor(set);
-    const stock = stockMap.get(String(set._id))?.stock || 0;
-    const task = taskById.get(String(set.autoFarmTaskId));
-    const progress = task
-      ? computePreorderEta(
-          (task.assignedAccounts || [])
-            .map((login) => accountsByLogin.get(String(login).toLowerCase()))
-            .filter(Boolean),
-          task.campaignName,
-        )
-      : null;
-    return publicListing(
+  // (e) Unclaimed source: sellable no-claim / web-token accounts grouped by
+  // their item-set. Those DropSets are custom:true, so the query above never
+  // sees them — the ledger rows ARE the stock. A failure here only loses this
+  // section; the DropLog-backed catalog still builds.
+  const unclaimedLedgersBySet = new Map();
+  let unclaimedSets = [];
+  try {
+    const ledgers = await UnclaimedAccount.find(
+      { status: { $in: ["listed", "skipped"] }, set: { $ne: null } },
+      { set: 1, status: 1, game: 1, "drops.campaign": 1, bundleLabel: 1 },
+    ).lean();
+    for (const ledger of ledgers) {
+      const id = String(ledger.set || "");
+      if (!OBJECT_ID.test(id)) continue;
+      if (!unclaimedLedgersBySet.has(id)) unclaimedLedgersBySet.set(id, []);
+      unclaimedLedgersBySet.get(id).push(ledger);
+    }
+    unclaimedSets = unclaimedLedgersBySet.size
+      ? await DropSet.find({
+          _id: { $in: [...unclaimedLedgersBySet.keys()] },
+          publicCatalog: { $ne: false },
+        })
+          .sort({ publicFeatured: -1, publicSort: -1, updatedAt: -1 })
+          .lean()
+      : [];
+  } catch (err) {
+    console.error("public catalog unclaimed source error:", err.message);
+    unclaimedLedgersBySet.clear();
+    unclaimedSets = [];
+  }
+
+  // (d) Buy links: ONE MarketplaceListing read over every source set id
+  // (bundle sources + the unclaimed sets, whose rows reference them directly).
+  const buySourceBySet = new Map(
+    sets.map((set) => [
+      String(set._id),
+      buySourceIdFor(set, taskById.get(String(set.autoFarmTaskId))),
+    ]),
+  );
+  const marketRowsBySet = new Map();
+  const buyIds = [
+    ...new Set([
+      ...buySourceBySet.values(),
+      ...unclaimedSets.map((set) => String(set._id)),
+    ]),
+  ];
+  if (buyIds.length) {
+    try {
+      const rows = await MarketplaceListing.find(
+        { set: { $in: buyIds }, status: "active" },
+        { set: 1, marketplace: 1, url: 1, price: 1, status: 1 },
+      ).lean();
+      for (const row of rows) {
+        const id = String(row.set || "");
+        if (!marketRowsBySet.has(id)) marketRowsBySet.set(id, []);
+        marketRowsBySet.get(id).push(row);
+      }
+    } catch (err) {
+      console.error("public catalog buy links error:", err.message);
+    }
+  }
+  // Links for a folded group come from every member's source set, so the
+  // representative card can offer the cheapest live unit wherever it sits.
+  const buyLinksForSets = (ids) =>
+    buyLinksFor(ids.flatMap((id) => marketRowsBySet.get(String(id)) || []));
+
+  // (f) Fold identical items×qty in the same category BEFORE building the
+  // listings, so 140 mirrors of one shop bundle become one card. Mirrors
+  // carry no account scope and share the archive-wide stock, so the group's
+  // stock is the max over its members, never the sum.
+  const mergedIds = [];
+  const bundleRows = dedupeListings(
+    sets.map((set) => ({
       set,
-      stock,
-      median(pricesByGame.get(category.toLowerCase()) || []),
-      progress,
+      stock: stockMap.get(String(set._id))?.stock || 0,
+      category: categoryFor(set),
+    })),
+    { stockMode: "max" },
+  );
+  const bundleListings = bundleRows.map((row) => {
+    const set = row.set;
+    const task = taskById.get(String(set.autoFarmTaskId));
+    // (c) pre-order ETA: progress rows, else the schedule estimate.
+    const preorder =
+      set.catalogState === "preorder"
+        ? preorderEtaFor(set, task, accountsByLogin)
+        : null;
+    const memberIds = [String(set._id), ...(row.mergedIds || [])];
+    mergedIds.push(...(row.mergedIds || []));
+    const listing = publicListing(
+      set,
+      row.stock,
+      median(pricesByGame.get(row.category.toLowerCase()) || []),
+      preorder,
+      {
+        buyLinks: buyLinksForSets(
+          memberIds.map((id) => buySourceBySet.get(id) || id),
+        ),
+        mergedCount: row.mergedCount,
+      },
     );
+    if (row.updatedAt) listing.updatedAt = row.updatedAt;
+    listing.isNew = listing.isNew || !!row.isNewAny;
+    return listing;
   });
+
+  // Unclaimed listings: stock = listed + held ledgers; price = the engine
+  // price, never clamped, floored at the owner's unclaimed floors and the
+  // set's recent sold price. Duplicates fold with SUMMED stock — every ledger
+  // row is a distinct account.
+  const priceMemo = unclaimedPriceMemo();
+  const unclaimedPricing = getUnclaimedPricing();
+  const unclaimedRows = [];
+  for (const set of unclaimedSets) {
+    const ledgers = unclaimedLedgersBySet.get(String(set._id)) || [];
+    const summary = unclaimedSummary({ set, ledgers });
+    if (!summary.stock) continue;
+    let category = categoryFor(set);
+    if (category === "Other") {
+      category =
+        cleanText(set.coverGame, 80) ||
+        cleanText(ledgers[0]?.game, 80) ||
+        "Other";
+    }
+    const suggested = await unclaimedSuggestedPrice(set, category, priceMemo);
+    const retail = Math.max(
+      Number(set.price) || 0,
+      Number(suggested?.price) || 0,
+    );
+    const floor = Math.max(
+      Number(set.minPriceUsd) || 0,
+      Number(unclaimedPricing.floorUsd) || 0,
+      Number(gameFloorFor(category)) || 0,
+      Number(suggested?.soldFloor) || 0,
+    );
+    unclaimedRows.push({
+      set,
+      stock: summary.stock,
+      category,
+      summary,
+      retail,
+      floor,
+    });
+  }
+  const unclaimedListings = dedupeListings(unclaimedRows, {
+    stockMode: "sum",
+  }).map((row) => {
+    const memberIds = [String(row.set._id), ...(row.mergedIds || [])];
+    mergedIds.push(...(row.mergedIds || []));
+    const listing = publicListing(row.set, row.stock, 0, null, {
+      kind: "unclaimed",
+      delivery: "unclaimed",
+      category: row.category,
+      eventLabel: row.summary.eventLabel,
+      buyLinks: buyLinksForSets(memberIds),
+      mergedCount: row.mergedCount,
+      priceOpts: { clamp: false, floor: row.floor, retail: row.retail },
+    });
+    if (row.updatedAt) listing.updatedAt = row.updatedAt;
+    listing.isNew = listing.isNew || !!row.isNewAny;
+    return listing;
+  });
+
+  // (g)
+  const listings = [...bundleListings, ...unclaimedListings];
   const categoryMap = new Map();
   for (const listing of listings) {
     const key = listing.category.toLowerCase();
@@ -667,6 +1085,8 @@ async function buildPublicCatalog() {
         newListingCount: 0,
         preorderCount: 0,
         expectedUnits: 0,
+        unclaimedCount: 0,
+        unclaimedUnits: 0,
         stock: 0,
         fromPrice: 0,
         images: [],
@@ -685,6 +1105,10 @@ async function buildPublicCatalog() {
     if (listing.state === "preorder") {
       row.preorderCount++;
       row.expectedUnits += Number(listing.preorder?.expectedUnits) || 0;
+    }
+    if (listing.kind === "unclaimed") {
+      row.unclaimedCount++;
+      row.unclaimedUnits += listing.stock;
     }
     row.stock += listing.stock;
     if (listing.price > 0 && (!row.fromPrice || listing.price < row.fromPrice))
@@ -710,7 +1134,30 @@ async function buildPublicCatalog() {
           a.name.localeCompare(b.name),
       ),
     listings,
+    // (h) Build diagnostics for the admin overview; the public routes never
+    // send this object (mergedIds lets the admin skip folded-away sets).
+    meta: {
+      buildMs: Date.now() - t0,
+      setsScanned: sets.length + unclaimedSets.length,
+      merged: mergedIds.length,
+      mergedIds,
+      unclaimedSets: unclaimedListings.length,
+      unclaimedUnits: unclaimedListings.reduce(
+        (sum, row) => sum + row.stock,
+        0,
+      ),
+      preorders: listings.filter((row) => row.state === "preorder").length,
+    },
   };
+  // (i) Privacy guard: a leak is logged loudly, never takes the storefront
+  // down (the field lists in publicListing are the real barrier).
+  try {
+    assertPublicShape(data);
+  } catch (err) {
+    console.error("public catalog privacy check failed:", err.message);
+  }
+  // (j) Persist for the next boot — fire-and-forget, never fails the build.
+  savePublicSnapshot(data).catch(() => {});
   return data;
 }
 
@@ -736,6 +1183,48 @@ async function loadPublicCatalog() {
     return publicCache.data;
   }
   return refreshPublicCatalog();
+}
+
+// Persisted public snapshot (contract §7.4) — the cure for the ~46 s cold
+// build after a restart. The last good payload is stored under key "public"
+// and restored into the cache at boot with `at: 0`, so it is served at once
+// while the stale-while-revalidate path rebuilds it in the background.
+async function savePublicSnapshot(data) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.listings))
+    return false;
+  try {
+    await CatalogSnapshot.updateOne(
+      { key: "public" },
+      { $set: { generatedAt: new Date(), data } },
+      { upsert: true },
+    );
+    return true;
+  } catch (err) {
+    console.error("catalog snapshot save error:", err.message);
+    return false;
+  }
+}
+
+async function restorePublicCatalog() {
+  try {
+    const row = await CatalogSnapshot.findOne({ key: "public" }).lean();
+    const data = row && row.data;
+    if (
+      !data ||
+      typeof data !== "object" ||
+      !Array.isArray(data.listings) ||
+      !Array.isArray(data.categories)
+    )
+      return false;
+    // Only ever fills an EMPTY cache: every build persists its own result, so
+    // whatever is already in memory is at least as fresh as the stored copy.
+    if (publicCache.data) return false;
+    publicCache = { at: 0, data };
+    return true;
+  } catch (err) {
+    console.error("catalog snapshot restore error:", err.message);
+    return false;
+  }
 }
 
 router.get("/catalog/categories", catalogReadLimiter, async (req, res) => {
@@ -780,6 +1269,28 @@ router.get("/catalog/listings", catalogReadLimiter, async (req, res) => {
     });
   } catch (err) {
     console.error("public catalog listings error:", err.message);
+    res
+      .status(500)
+      .json({ success: false, message: "Catalog is temporarily unavailable" });
+  }
+});
+
+// Storefront contact details (contract §7.5): only the three public fields of
+// the catalog config, never the sync interval or anything else from settings.
+router.get("/catalog/config", catalogReadLimiter, (req, res) => {
+  try {
+    const config = getCatalogConfig();
+    res.set("Cache-Control", "public, max-age=60");
+    res.json({
+      success: true,
+      contact: {
+        telegram: config.contactTelegram || "",
+        discord: config.contactDiscord || "",
+        replyTime: config.replyTime || "",
+      },
+    });
+  } catch (err) {
+    console.error("public catalog config error:", err.message);
     res
       .status(500)
       .json({ success: false, message: "Catalog is temporarily unavailable" });
@@ -839,6 +1350,52 @@ router.post("/catalog/events", catalogEventLimiter, async (req, res) => {
   }
 });
 
+// Owner alert for a quote request (contract §7.6). Plain text — the telegram
+// util sends without a parse mode. Stamps notifiedAt once the send has been
+// attempted with a configured bot (sendTelegram never throws, so the attempt
+// is the best signal there is). Never awaited by the request handler.
+async function notifyInquiry({
+  inquiry,
+  listing,
+  reference,
+  title,
+  category,
+  kind,
+  quantity,
+  unitPrice,
+  contact,
+  note,
+  base,
+}) {
+  if (!process.env.TG_TOKEN || !process.env.TG_CHAT_IDS) return false;
+  const total = Math.round(quantity * unitPrice * 100) / 100;
+  const stock =
+    listing.state === "preorder"
+      ? `~${Math.max(0, Number(listing.preorder?.expectedUnits) || 0)} expected`
+      : String(Math.max(0, Number(listing.stock) || 0));
+  const text = [
+    `🛒 Catalog request ${reference}`,
+    title,
+    `Kind: ${kind} · Category: ${category}`,
+    `Qty: ${quantity} × $${unitPrice.toFixed(2)} ≈ $${total.toFixed(2)}`,
+    `Contact: ${contact}`,
+    `Note: ${note || "-"}`,
+    `Stock now: ${stock}`,
+    `Admin: ${base}/catalog-admin.html`,
+  ].join("\n");
+  try {
+    await sendTelegram(text);
+    await CatalogInquiry.updateOne(
+      { _id: inquiry._id },
+      { $set: { notifiedAt: new Date() } },
+    );
+    return true;
+  } catch (err) {
+    console.error("catalog inquiry telegram error:", err.message);
+    return false;
+  }
+}
+
 router.post("/catalog/inquiries", catalogInquiryLimiter, async (req, res) => {
   try {
     const body = req.body || {};
@@ -857,48 +1414,69 @@ router.post("/catalog/inquiries", catalogInquiryLimiter, async (req, res) => {
         message: "Listing, quantity, and contact are required",
       });
     }
-    const set = await DropSet.findOne({
-      _id: listingId,
-      listed: true,
-      publicCatalog: { $ne: false },
-      custom: { $ne: true },
-    }).lean();
-    if (!set)
+    // The public snapshot decides what can be requested: it already covers
+    // unclaimed sets (custom:true) and merged representatives, both of which
+    // the old listed/custom DropSet gate rejected.
+    const publicData = await loadPublicCatalog();
+    const listing = (publicData.listings || []).find(
+      (row) => row.id === listingId,
+    );
+    const set = listing ? await DropSet.findById(listingId).lean() : null;
+    if (!listing || !set)
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });
-    if (quantity < Math.max(1, Number(set.bulkMinQty) || 5)) {
+    const minQty = Math.max(1, Number(listing.minQty) || 1);
+    if (quantity < minQty) {
       return res.status(400).json({
         success: false,
-        message: `Minimum order is ${Math.max(1, Number(set.bulkMinQty) || 5)}`,
+        message: `Minimum order is ${minQty}`,
       });
     }
-    const preorder = requestedPreorder && set.catalogState === "preorder";
+    const kind = LISTING_KINDS.has(listing.kind) ? listing.kind : "bundle";
+    const unitPrice = Math.max(0, Number(listing.price) || 0);
+    const preorder = kind === "preorder" && requestedPreorder;
     let expectedReadyAt = null;
     if (preorder) {
-      const publicData = await loadPublicCatalog();
-      const publicRow = publicData.listings.find(
-        (row) => row.id === String(set._id),
-      );
-      const minutes = Number(publicRow?.preorder?.readyInMinutes);
+      const minutes = Number(listing.preorder?.readyInMinutes);
       if (Number.isFinite(minutes) && minutes >= 0) {
         expectedReadyAt = new Date(Date.now() + minutes * 60000);
       }
     }
+    const title = cleanText(listing.title || set.publicTitle || set.name, 140);
+    const category = cleanText(listing.category, 80) || categoryFor(set);
     const inquiry = await CatalogInquiry.create({
       listing: set._id,
-      listingTitle: cleanText(set.publicTitle || set.name, 140),
-      category: categoryFor(set),
+      listingTitle: title,
+      category,
+      kind,
+      unitPrice,
       quantity,
       contact,
       note,
       preorder,
       expectedReadyAt,
     });
-    res.status(201).json({
-      success: true,
-      reference: `RQ-${String(inquiry._id).slice(-8).toUpperCase()}`,
-    });
+    const reference = `RQ-${String(inquiry._id).slice(-8).toUpperCase()}`;
+    res.status(201).json({ success: true, reference });
+    // Owner alert AFTER the response: a slow or failing Telegram call must
+    // never delay or block the buyer's 201.
+    const base = (
+      process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`
+    ).replace(/\/+$/, "");
+    notifyInquiry({
+      inquiry,
+      listing,
+      reference,
+      title,
+      category,
+      kind,
+      quantity,
+      unitPrice,
+      contact,
+      note,
+      base,
+    }).catch(() => {});
   } catch (err) {
     console.error("catalog inquiry error:", err.message);
     res
@@ -939,27 +1517,70 @@ async function adminOverview() {
   const publicStockById = new Map(
     data.listings.map((listing) => [listing.id, listing.stock]),
   );
+  // Sets folded into another card are represented, not hidden: they must not
+  // trigger the (expensive) stock pass reserved for listed-but-hidden sets.
+  const mergedIds = new Set(
+    Array.isArray(data.meta?.mergedIds)
+      ? data.meta.mergedIds.map((id) => String(id))
+      : [],
+  );
   const hiddenSets = adminSets.filter(
-    (set) => !publicStockById.has(String(set._id)),
+    (set) =>
+      !publicStockById.has(String(set._id)) && !mergedIds.has(String(set._id)),
   );
   const hiddenStock = hiddenSets.length
     ? await stockForSets(hiddenSets)
     : new Map();
-  const stockForAdminSet = (set) => {
-    const id = String(set._id);
-    return publicStockById.has(id)
-      ? publicStockById.get(id)
-      : hiddenStock.get(id)?.stock || 0;
-  };
-  const adminListings = adminSets.map((set) => ({
-    ...publicListing(set, stockForAdminSet(set)),
-    visible: set.publicCatalog !== false,
-    publicTitle: cleanText(set.publicTitle, 140),
-    publicDescription: cleanText(set.publicDescription, 600),
-    publicPrice: Number(set.publicPrice) || 0,
-    bulkDiscountPct: Number(set.bulkDiscountPct) || 0,
-    publicSort: Number(set.publicSort) || 0,
-  }));
+  // Every snapshot listing (all kinds: bundles, pre-orders, unclaimed sets,
+  // merged representatives) enriched from ONE DropSet read with the editable
+  // public fields; hidden listed sets are appended as before.
+  const snapshotIds = data.listings
+    .map((listing) => String(listing.id || ""))
+    .filter((id) => OBJECT_ID.test(id));
+  const snapshotSets = snapshotIds.length
+    ? await DropSet.find(
+        { _id: { $in: snapshotIds } },
+        {
+          publicCatalog: 1,
+          publicTitle: 1,
+          publicDescription: 1,
+          publicPrice: 1,
+          bulkDiscountPct: 1,
+          publicSort: 1,
+        },
+      ).lean()
+    : [];
+  const snapshotSetById = new Map(
+    snapshotSets.map((set) => [String(set._id), set]),
+  );
+  const adminFields = (set) => ({
+    visible: !set || set.publicCatalog !== false,
+    publicTitle: cleanText(set && set.publicTitle, 140),
+    publicDescription: cleanText(set && set.publicDescription, 600),
+    publicPrice: Number(set && set.publicPrice) || 0,
+    bulkDiscountPct: Number(set && set.bulkDiscountPct) || 0,
+    publicSort: Number(set && set.publicSort) || 0,
+  });
+  const adminListings = [
+    ...data.listings.map((listing) => ({
+      ...listing,
+      ...adminFields(snapshotSetById.get(String(listing.id))),
+      kind: LISTING_KINDS.has(listing.kind) ? listing.kind : "bundle",
+      buyLinkCount: Array.isArray(listing.buyLinks)
+        ? listing.buyLinks.length
+        : 0,
+      mergedCount: Number(listing.mergedCount) || 0,
+    })),
+    ...hiddenSets.map((set) => ({
+      ...publicListing(set, hiddenStock.get(String(set._id))?.stock || 0),
+      ...adminFields(set),
+      buyLinkCount: 0,
+      mergedCount: 0,
+    })),
+  ];
+  const unclaimedPublic = data.listings.filter(
+    (row) => row.kind === "unclaimed",
+  );
   const eventCounts = Object.fromEntries(
     events.map((row) => [row._id, row.count]),
   );
@@ -990,17 +1611,27 @@ async function adminOverview() {
       openInquiries: inquiries.filter(
         (row) => row.status === "new" || row.status === "contacted",
       ).length,
+      unclaimedListings: unclaimedPublic.length,
+      unclaimedUnits: unclaimedPublic.reduce((sum, row) => sum + row.stock, 0),
+      mergedDuplicates: Number(data.meta?.merged) || 0,
+      preorders: data.listings.filter((row) => row.state === "preorder").length,
     },
+    meta: data.meta || null,
+    preorderSync: preorderSyncStatus(),
+    config: getCatalogConfig(),
     categories: data.categories,
     listings: adminListings,
     inquiries: inquiries.map((row) => ({
       id: String(row._id),
       listingTitle: row.listingTitle,
       category: row.category,
+      kind: row.kind || "bundle",
+      unitPrice: Number(row.unitPrice) || 0,
       quantity: row.quantity,
       contact: row.contact,
       note: row.note,
       status: row.status,
+      notifiedAt: row.notifiedAt || null,
       createdAt: row.createdAt,
     })),
   };
@@ -1041,7 +1672,7 @@ router.put(
       if (body.publicDescription !== undefined)
         set.publicDescription = cleanText(body.publicDescription, 600);
       const numericRules = {
-        publicPrice: [0, PUBLIC_PRICE_MAX_USD],
+        publicPrice: [0, PUBLIC_PRICE_ADMIN_MAX_USD],
         bulkMinQty: [1, 1000],
         bulkDiscountPct: [0, 60],
         publicSort: [-1000000, 1000000],
@@ -1060,7 +1691,7 @@ router.put(
         ) {
           return res.status(400).json({
             success: false,
-            message: `publicPrice must be between $${PUBLIC_PRICE_MIN_USD.toFixed(2)} and $${PUBLIC_PRICE_MAX_USD.toFixed(2)}`,
+            message: `publicPrice must be between $${PUBLIC_PRICE_MIN_USD.toFixed(2)} and $${PUBLIC_PRICE_ADMIN_MAX_USD.toFixed(2)}`,
           });
         }
         set[field] = value;
@@ -1226,6 +1857,122 @@ router.get(
   },
 );
 
+// Pre-order sync loop (contract §7.7): stamps a catalog pre-order set for
+// every active farm2 task within ~catalogPreorderSyncMinutes of its deploy
+// instead of waiting for the 6-hourly variant sync, which lagged 1–46 h.
+let preorderSync = {
+  running: false,
+  lastRunAt: null,
+  lastResult: null,
+  lastError: null,
+  intervalMinutes: 0,
+  firstTimer: null,
+  timer: null,
+};
+
+function preorderSyncStatus() {
+  return {
+    running: preorderSync.running,
+    lastRunAt: preorderSync.lastRunAt,
+    lastResult: preorderSync.lastResult,
+    lastError: preorderSync.lastError,
+    intervalMinutes: preorderSync.intervalMinutes,
+  };
+}
+
+async function runPreorderSync() {
+  // The variant sync runs syncActivePreorders itself — never overlap it, and
+  // never overlap our own previous run (catalogPreorder also guards this).
+  if (preorderSync.running || variantSyncJob.running) return null;
+  preorderSync.running = true;
+  try {
+    const autoLister = require("../utils/autoLister");
+    const result = await syncActivePreorders({
+      AutoFarmTask,
+      DropSet,
+      campaignItems: autoLister.campaignItems,
+      derivePrice: autoLister.derivePrice,
+      researchForGame: (game) => MarketResearch.findOne({ game }).lean(),
+      apply: true,
+    });
+    preorderSync.lastResult = result || null;
+    preorderSync.lastError = null;
+    if ((Number(result?.stamped) || 0) > 0 || (Number(result?.filled) || 0) > 0)
+      invalidateCatalogCache();
+    return result;
+  } catch (err) {
+    preorderSync.lastError = err.message || "Pre-order sync failed";
+    console.error("catalog preorder sync error:", err.message);
+    return null;
+  } finally {
+    preorderSync.running = false;
+    preorderSync.lastRunAt = new Date();
+  }
+}
+
+// Idempotent: re-reads catalogPreorderSyncMinutes and replaces any timers, so
+// it runs at boot and again whenever the admin changes the interval. 0 = off.
+// First run 60 s after start, then every `minutes`. Timers are unref'd so
+// they never keep a shutting-down process alive.
+function startPreorderSyncLoop() {
+  if (preorderSync.firstTimer) clearTimeout(preorderSync.firstTimer);
+  if (preorderSync.timer) clearInterval(preorderSync.timer);
+  preorderSync.firstTimer = null;
+  preorderSync.timer = null;
+  const minutes = Math.max(
+    0,
+    Math.floor(Number(getCatalogConfig().preorderSyncMinutes) || 0),
+  );
+  preorderSync.intervalMinutes = minutes;
+  if (!minutes) {
+    console.log(
+      "[catalog] preorder sync loop off (catalogPreorderSyncMinutes = 0)",
+    );
+    return false;
+  }
+  const tick = () => {
+    runPreorderSync().catch(() => {});
+  };
+  preorderSync.firstTimer = setTimeout(tick, 60 * 1000);
+  preorderSync.firstTimer.unref();
+  preorderSync.timer = setInterval(tick, minutes * 60 * 1000);
+  preorderSync.timer.unref();
+  return true;
+}
+
+// Storefront contact + sync interval (contract §7.8). Only the four catalog
+// keys ever reach settings; a changed interval takes effect immediately.
+router.put(
+  "/catalog/admin/config",
+  requireSuperadmin,
+  enforce2fa,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const patch = {};
+      for (const key of [
+        "contactTelegram",
+        "contactDiscord",
+        "replyTime",
+        "preorderSyncMinutes",
+      ]) {
+        if (body[key] !== undefined) patch[key] = body[key];
+      }
+      const config = await setCatalogConfig(patch, {
+        actor:
+          (req.session && req.session.admin && req.session.admin.username) ||
+          "admin",
+      });
+      if (patch.preorderSyncMinutes !== undefined) startPreorderSyncLoop();
+      invalidateCatalogCache();
+      res.json({ success: true, config });
+    } catch (err) {
+      console.error("catalog config update error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 router.post(
   "/catalog/admin/auto-list",
   requireSuperadmin,
@@ -1311,3 +2058,8 @@ module.exports.syncInventoryVariants = syncInventoryVariants;
 module.exports.startVariantSync = startVariantSync;
 module.exports.variantSyncStatus = publicVariantJob;
 module.exports.updateAutofarmCatalogStates = updateAutofarmCatalogStates;
+// Catalog v2 (docs/CATALOG-V2-CONTRACT.md §7.11)
+module.exports.restorePublicCatalog = restorePublicCatalog;
+module.exports.savePublicSnapshot = savePublicSnapshot;
+module.exports.startPreorderSyncLoop = startPreorderSyncLoop;
+module.exports.preorderSyncStatus = preorderSyncStatus;

@@ -75,6 +75,7 @@ const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
 const streamScout = require("./utils/streamScout");
 const noclaimWatcher = require("./utils/noclaimWatcher");
+const webbotFarmWatcher = require("./utils/webbotFarmWatcher");
 const autoFarmer = require("./utils/autoFarmer");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
@@ -688,11 +689,36 @@ mongoose
       .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
-      catalogRoutes
-        .warmPublicCatalog()
-        .then(() => console.log("[catalog] public snapshot warmed"))
+      // Catalog v2 boot sequence: restore the persisted public snapshot so
+      // the storefront serves instantly, then rebuild it as before, then
+      // start the pre-order sync loop. Every step logs its own failure and
+      // never rejects, so a broken step can't take the others down.
+      Promise.resolve()
+        .then(() => catalogRoutes.restorePublicCatalog())
+        .then((restored) => {
+          if (restored) console.log("[catalog] snapshot restored");
+        })
         .catch((err) =>
-          console.error("[catalog] public snapshot warm failed:", err.message),
+          console.error("[catalog] snapshot restore failed:", err.message),
+        )
+        .then(() =>
+          catalogRoutes
+            .warmPublicCatalog()
+            .then(() => console.log("[catalog] public snapshot warmed"))
+            .catch((err) =>
+              console.error("[catalog] public snapshot warm failed:", err.message),
+            ),
+        )
+        .then(() => {
+          try {
+            catalogRoutes.startPreorderSyncLoop();
+            console.log("[catalog] preorder sync loop started");
+          } catch (err) {
+            console.error("[catalog] preorder sync loop failed to start:", err.message);
+          }
+        })
+        .catch((err) =>
+          console.error("[catalog] startup chain failed:", err.message),
         );
       // Prime the item inventory as soon as Mongo and HTTP are ready. Cold
       // archive aggregation takes tens of seconds on production-sized data, so
@@ -750,6 +776,11 @@ mongoose
     // Pi). Self-guards on autoFarm.noClaimStreamGate — no Twitch calls / no SSH
     // until it is flipped on from the No-claim farming page.
     noclaimWatcher.start();
+    // Web-farm auto power: the same live/dark gate for the standalone web-token
+    // farm's own containers (webbot-bot-* on the Pi). Self-guards on
+    // autoFarm.webbotStreamGate — no Twitch calls / no SSH until it is flipped on
+    // from the Web farm page. Games gated are derived from the live bots' pins.
+    webbotFarmWatcher.start();
     // Unclaimed-farms auto-listing: lists + sells no-claim and web-token
     // accounts, delists on expiry and returns all-expired accounts to the
     // pool. Self-guards on autoFarm.unclaimedAutoList + the pause flag.

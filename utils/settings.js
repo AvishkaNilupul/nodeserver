@@ -262,6 +262,20 @@ const AUTO_FARM_DEFAULTS = {
   // repack, refill, stacked bundles). Requires farm2Enabled. OFF by default;
   // flipped from the Auto farm engine page once the lanes have been trusted.
   farm2Main: false,
+
+  // --- Public catalog v2 (routes/catalogRoutes.js + public/catalog.html) ---
+  // Storefront contact shown to catalog visitors (footer + the quote dialog's
+  // "Message on Telegram" button) and the preorder re-stamp cadence. Read
+  // through getCatalogConfig(), written ONLY through setCatalogConfig() from
+  // the catalog admin page (PUT /catalog/admin/config); all live-editable.
+  // Frozen shape: docs/CATALOG-V2-CONTRACT.md §6.
+  catalogContactTelegram: "", // public handle, no leading @ (empty = no link)
+  catalogContactDiscord: "", // Discord handle or invite (empty = hidden)
+  catalogReplyTime: "within a few hours", // quote-dialog reply-time promise
+  // How often the preorder sync loop re-stamps farm2 preorder sets with their
+  // task's accounts + the campaign's watch minutes, so a new pre-order card
+  // gets its ETA within minutes instead of the 6-hour variant sync. 0 = off.
+  catalogPreorderSyncMinutes: 10,
 };
 
 const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
@@ -523,6 +537,70 @@ function gameFloorFor(game) {
   return 0;
 }
 
+// Public catalog v2 storefront config (docs/CATALOG-V2-CONTRACT.md §6), read
+// fresh each call with the seed defaults under the live values, and normalised
+// on BOTH the read and the write path so the routes and the page never see a
+// raw "@handle ", an over-long string or a NaN interval.
+//   telegram: leading @ stripped, [A-Za-z0-9_] only, <= 64 chars
+//   discord / replyTime: trimmed, <= 80 chars; an empty replyTime falls back
+//     to the default
+//   preorderSyncMinutes: integer clamped 0..1440 (0 = loop off); blank or
+//     non-numeric = the default 10
+function catalogString(v) {
+  return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+}
+function catalogText(v, max) {
+  return catalogString(v).trim().slice(0, max).trim();
+}
+function catalogHandle(v) {
+  return catalogString(v)
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/[^A-Za-z0-9_]/g, "")
+    .slice(0, 64);
+}
+function catalogMinutes(v) {
+  const d = AUTO_FARM_DEFAULTS.catalogPreorderSyncMinutes;
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(1440, Math.max(0, Math.floor(n))) : d;
+}
+function getCatalogConfig() {
+  const af = getAutoFarm() || {};
+  return {
+    contactTelegram: catalogHandle(af.catalogContactTelegram),
+    contactDiscord: catalogText(af.catalogContactDiscord, 80),
+    replyTime:
+      catalogText(af.catalogReplyTime, 80) || AUTO_FARM_DEFAULTS.catalogReplyTime,
+    preorderSyncMinutes: catalogMinutes(af.catalogPreorderSyncMinutes),
+  };
+}
+
+// Apply a storefront-config patch. Accepts the public field names the admin
+// route receives (contactTelegram, contactDiscord, replyTime,
+// preorderSyncMinutes) — or their catalog* settings names — and writes ONLY
+// those four autoFarm keys through setAutoFarm (audited like any settings
+// write; pass opts.actor for the "who did it"). Keys absent from the patch are
+// left untouched, so a partial patch never resets the others. Resolves to the
+// normalised getCatalogConfig().
+async function setCatalogConfig(patch, opts = {}) {
+  const p = patch && typeof patch === "object" ? patch : {};
+  const pick = (pub, key) => (p[pub] !== undefined ? p[pub] : p[key]);
+  const upd = {};
+  const tg = pick("contactTelegram", "catalogContactTelegram");
+  if (tg !== undefined) upd.catalogContactTelegram = catalogHandle(tg);
+  const dc = pick("contactDiscord", "catalogContactDiscord");
+  if (dc !== undefined) upd.catalogContactDiscord = catalogText(dc, 80);
+  const rt = pick("replyTime", "catalogReplyTime");
+  if (rt !== undefined)
+    upd.catalogReplyTime =
+      catalogText(rt, 80) || AUTO_FARM_DEFAULTS.catalogReplyTime;
+  const mins = pick("preorderSyncMinutes", "catalogPreorderSyncMinutes");
+  if (mins !== undefined) upd.catalogPreorderSyncMinutes = catalogMinutes(mins);
+  if (Object.keys(upd).length) await setAutoFarm(upd, opts);
+  return getCatalogConfig();
+}
+
 function getCoworkerAutonomy() {
   return { enabled: !!getAutoFarm().coworkerAutonomy };
 }
@@ -547,6 +625,8 @@ module.exports = {
   gameFloorFor,
   gameMarketsFor,
   gameCapFor,
+  getCatalogConfig,
+  setCatalogConfig,
   UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
 };

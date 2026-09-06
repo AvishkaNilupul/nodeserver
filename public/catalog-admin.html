@@ -68,6 +68,18 @@
         color: #fbbf24;
         border-bottom-color: rgba(251, 191, 36, 0.25);
       }
+      html[data-theme="dark"] .kind {
+        background: rgba(99, 102, 241, 0.2);
+        color: #a5b4fc;
+      }
+      html[data-theme="dark"] .kind.preorder {
+        background: rgba(251, 191, 36, 0.16);
+        color: #fbbf24;
+      }
+      html[data-theme="dark"] .kind.unclaimed {
+        background: #12302c;
+        color: #5eead4;
+      }
       * {
         box-sizing: border-box;
       }
@@ -236,7 +248,7 @@
       }
       .stats {
         display: grid;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
         gap: 10px;
         margin-bottom: 24px;
       }
@@ -256,6 +268,10 @@
         margin-top: 6px;
         color: var(--muted);
         font-size: 11px;
+      }
+      .stat .stat-detail {
+        margin-top: 3px;
+        font-size: 10px;
       }
       .grid {
         display: grid;
@@ -333,6 +349,31 @@
         background: #fff3dc;
         color: var(--amber);
       }
+      /* Listing kind badges: bundle (default) / pre-order / unclaimed. */
+      .kind {
+        display: inline-block;
+        padding: 3px 7px;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .kind.preorder {
+        background: #fff3dc;
+        color: var(--amber);
+      }
+      .kind.unclaimed {
+        background: #d9f4ef;
+        color: #0f766e;
+      }
+      .inquiry-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 6px;
+      }
       .row-actions {
         display: flex;
         gap: 5px;
@@ -374,6 +415,23 @@
         color: var(--muted);
         text-align: center;
         font-size: 12px;
+      }
+      /* Right column: quote requests stacked above the storefront contact panel. */
+      .side {
+        display: grid;
+        gap: 16px;
+        min-width: 0;
+      }
+      .cfg-fields {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .cfg-form .hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
       }
       .plan {
         margin-top: 16px;
@@ -486,7 +544,8 @@
         .stat b {
           font-size: 21px;
         }
-        .edit-fields {
+        .edit-fields,
+        .cfg-fields {
           grid-template-columns: 1fr;
         }
       }
@@ -587,6 +646,9 @@
         <div class="stat"><b>—</b><span>30d catalog views</span></div>
         <div class="stat"><b>—</b><span>30d shop revenue</span></div>
         <div class="stat"><b>—</b><span>Open quote requests</span></div>
+        <div class="stat"><b>—</b><span>Unclaimed listings / units</span></div>
+        <div class="stat"><b>—</b><span>Folded duplicates</span></div>
+        <div class="stat"><b>—</b><span>Preorder sync</span></div>
       </section>
       <div class="grid">
         <section class="panel">
@@ -599,28 +661,95 @@
               <thead>
                 <tr>
                   <th>Set</th>
+                  <th>Kind</th>
                   <th>Category</th>
                   <th>Stock</th>
                   <th>Public price</th>
+                  <th>Links</th>
                   <th>Visibility</th>
                   <th>Controls</th>
                 </tr>
               </thead>
               <tbody id="listings">
                 <tr>
-                  <td colspan="6" class="empty">Loading...</td>
+                  <td colspan="8" class="empty">Loading...</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </section>
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Quote requests</h2>
-            <span>Newest first</span>
-          </div>
-          <div id="inquiries"><div class="empty">Loading...</div></div>
-        </section>
+        <div class="side">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Quote requests</h2>
+              <span>Newest first</span>
+            </div>
+            <div id="inquiries"><div class="empty">Loading...</div></div>
+          </section>
+          <section class="panel" id="configPanel">
+            <div class="panel-head">
+              <h2>Storefront contact</h2>
+              <span>Shown on the public catalog</span>
+            </div>
+            <form class="edit-form cfg-form" id="configForm" autocomplete="off">
+              <div class="cfg-fields">
+                <label
+                  >Telegram handle
+                  <input
+                    id="cfgTelegram"
+                    name="contactTelegram"
+                    maxlength="64"
+                    placeholder="handle, no @"
+                    title="Public Telegram username buyers can message (letters, digits, underscore)"
+                  />
+                </label>
+                <label
+                  >Discord
+                  <input
+                    id="cfgDiscord"
+                    name="contactDiscord"
+                    maxlength="80"
+                    placeholder="username or invite"
+                  />
+                </label>
+                <label
+                  >Reply time
+                  <input
+                    id="cfgReplyTime"
+                    name="replyTime"
+                    maxlength="80"
+                    placeholder="within a few hours"
+                  />
+                </label>
+                <label
+                  >Pre-order sync (minutes)
+                  <input
+                    id="cfgSyncMinutes"
+                    name="preorderSyncMinutes"
+                    type="number"
+                    min="0"
+                    max="1440"
+                    step="1"
+                    placeholder="10"
+                    title="How often new farm2 pre-orders are stamped into the catalog. 0 = off"
+                  />
+                </label>
+              </div>
+              <p class="hint" id="configPreview"></p>
+              <p class="hint">
+                Buyers get a “Message on Telegram” button and the reply-time
+                promise on the quote form; Discord shows in the footer. The sync
+                interval is read when the server starts (0 = off).
+              </p>
+              <p id="configMessage" class="status"></p>
+              <div class="edit-actions">
+                <button class="btn primary" type="submit" id="configSave">
+                  Save contact
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
       </div>
       <section class="panel plan" id="planPanel" hidden>
         <div class="panel-head">
@@ -679,7 +808,7 @@
               name="publicPrice"
               type="number"
               min="0"
-              max="2.99"
+              max="500"
               step="0.01"
             />
           </label>
@@ -743,9 +872,34 @@
               timeStyle: "short",
             })
           : "—";
+      // Listing kinds per the catalog v2 contract: bundle (claimed drops on
+      // farmed accounts), preorder (still farming), unclaimed (buyer claims).
+      const KIND_LABELS = {
+        bundle: "Bundle",
+        preorder: "Pre-order",
+        unclaimed: "Unclaimed",
+      };
+      const kindOf = (v) => (KIND_LABELS[v] ? v : "bundle");
+      const kindBadge = (v) =>
+        '<span class="kind ' +
+        kindOf(v) +
+        '">' +
+        KIND_LABELS[kindOf(v)] +
+        "</span>";
+      const relTime = (v) => {
+        const t = v ? new Date(v).getTime() : NaN;
+        if (!Number.isFinite(t)) return "never";
+        const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+        if (s < 45) return "just now";
+        if (s < 3600) return Math.round(s / 60) + "m ago";
+        if (s < 86400) return Math.round(s / 3600) + "h ago";
+        return Math.round(s / 86400) + "d ago";
+      };
+      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
       let overview = null;
       let currentPlan = [];
       let editingId = "";
+      let configDirty = false;
       async function api(url, options) {
         const r = await fetch(url, {
           credentials: "same-origin",
@@ -760,76 +914,172 @@
         $("status").textContent = text || "";
         $("status").className = "status" + (error ? " error" : "");
       }
+      // Pre-order sync tile: interval 0 = off; otherwise the last run's
+      // relative time plus stamped/filled counts from overview.preorderSync.
+      function preorderSyncTile() {
+        const s = overview.preorderSync;
+        const label = "Preorder sync";
+        if (!s) return { value: "—", label, detail: "status not reported" };
+        const every = num(s.intervalMinutes);
+        if (!every)
+          return { value: "off", label, detail: "interval 0 — set it below" };
+        const r = s.lastResult || {};
+        const value = s.running
+          ? "running"
+          : s.lastRunAt
+            ? relTime(s.lastRunAt)
+            : "pending";
+        const detail = s.lastError
+          ? "error: " + s.lastError
+          : s.lastRunAt
+            ? num(r.stamped) +
+              " stamped · " +
+              num(r.filled) +
+              " filled · every " +
+              every +
+              " min"
+            : "first run ~60 s after start · every " + every + " min";
+        return {
+          value,
+          label,
+          detail,
+          title: s.lastRunAt ? "Last run " + date(s.lastRunAt) : "",
+        };
+      }
       function renderStats() {
-        const t = overview.totals;
-        const values = [
-          t.categories,
-          t.listings,
-          t.units,
-          t.views30d,
-          money(t.shopRevenue30d),
-          t.openInquiries,
+        const t = overview.totals || {};
+        const meta = overview.meta || {};
+        const preorders = num(
+          t.preorders != null ? t.preorders : meta.preorders,
+        );
+        const tiles = [
+          { value: t.categories, label: "Categories" },
+          {
+            value: t.listings,
+            label: "Public listings",
+            detail: preorders
+              ? preorders + " pre-order" + (preorders === 1 ? "" : "s")
+              : "",
+          },
+          { value: t.units, label: "Available units" },
+          { value: t.views30d, label: "30d catalog views" },
+          { value: money(t.shopRevenue30d), label: "30d shop revenue" },
+          { value: t.openInquiries, label: "Open quote requests" },
+          {
+            value: num(t.unclaimedListings) + " / " + num(t.unclaimedUnits),
+            label: "Unclaimed listings / units",
+          },
+          {
+            value: num(
+              t.mergedDuplicates != null ? t.mergedDuplicates : meta.merged,
+            ),
+            label: "Folded duplicates",
+            detail: meta.setsScanned
+              ? num(meta.setsScanned) + " sets scanned"
+              : "",
+          },
+          preorderSyncTile(),
         ];
-        $("stats").innerHTML = values
+        $("stats").innerHTML = tiles
           .map(
-            (v, i) =>
-              '<div class="stat"><b>' +
-              esc(v) +
+            (tile) =>
+              '<div class="stat"' +
+              (tile.title ? ' title="' + esc(tile.title) + '"' : "") +
+              "><b>" +
+              esc(tile.value == null ? "—" : tile.value) +
               "</b><span>" +
-              [
-                "Categories",
-                "Public listings",
-                "Available units",
-                "30d catalog views",
-                "30d shop revenue",
-                "Open quote requests",
-              ][i] +
-              "</span></div>",
+              esc(tile.label) +
+              "</span>" +
+              (tile.detail
+                ? '<span class="stat-detail">' + esc(tile.detail) + "</span>"
+                : "") +
+              "</div>",
           )
           .join("");
       }
       function renderListings() {
         const rows = overview.listings || [];
-        $("listingMeta").textContent = rows.length + " listed sets";
+        const byKind = {};
+        rows.forEach((row) => {
+          const k = kindOf(row.kind);
+          byKind[k] = (byKind[k] || 0) + 1;
+        });
+        $("listingMeta").textContent =
+          rows.length +
+          " listed sets" +
+          (byKind.preorder ? " · " + byKind.preorder + " pre-order" : "") +
+          (byKind.unclaimed ? " · " + byKind.unclaimed + " unclaimed" : "");
         $("listings").innerHTML = rows.length
-          ? rows
-              .map(
-                (row) =>
-                  '<tr><td><div class="name">' +
-                  esc(row.title) +
-                  '</div><span class="muted">' +
-                  row.itemCount +
-                  " rewards</span></td><td>" +
-                  esc(row.category) +
-                  "</td><td>" +
-                  (row.stock
-                    ? '<span class="pill">' + row.stock + "</span>"
-                    : '<span class="pill warn">0</span>') +
-                  "</td><td><strong>" +
-                  money(row.price) +
-                  '</strong><br><span class="muted">retail ' +
-                  money(row.retailPrice) +
-                  "</span></td><td>" +
-                  (row.visible
-                    ? '<span class="pill">public</span>'
-                    : '<span class="pill off">hidden</span>') +
-                  (row.stock
-                    ? ""
-                    : ' <span class="pill warn">out of stock</span>') +
-                  '</td><td><div class="row-actions"><button class="btn" data-toggle="' +
-                  esc(row.id) +
-                  '">' +
-                  (row.visible ? "Hide" : "Show") +
-                  '</button><button class="btn" data-feature="' +
-                  esc(row.id) +
-                  '">' +
-                  (row.featured ? "Unfeature" : "Feature") +
-                  '</button><button class="btn" data-edit="' +
-                  esc(row.id) +
-                  '">Edit</button></div></td></tr>',
-              )
-              .join("")
-          : '<tr><td colspan="6" class="empty">No listed sets yet.</td></tr>';
+          ? rows.map(listingRow).join("")
+          : '<tr><td colspan="8" class="empty">No listed sets yet.</td></tr>';
+      }
+      function listingRow(row) {
+        const kind = kindOf(row.kind);
+        const folded = num(row.mergedCount);
+        const links = num(row.buyLinkCount);
+        const pre = row.preorder || {};
+        // Pre-orders have no stock yet: show the expected units and farming
+        // progress instead of an "out of stock" warning.
+        const stockCell =
+          kind === "preorder"
+            ? '<span class="pill warn">~' +
+              num(pre.expectedUnits) +
+              " expected</span>" +
+              (pre.progressPercent != null
+                ? '<br><span class="muted">' +
+                  Math.round(num(pre.progressPercent)) +
+                  "% farmed" +
+                  (pre.overdue ? " · overdue" : "") +
+                  "</span>"
+                : "")
+            : row.stock
+              ? '<span class="pill">' + row.stock + "</span>"
+              : '<span class="pill warn">0</span>';
+        return (
+          '<tr><td><div class="name">' +
+          esc(row.title) +
+          '</div><span class="muted">' +
+          row.itemCount +
+          " rewards</span></td><td>" +
+          kindBadge(kind) +
+          (folded
+            ? '<br><span class="muted" title="Duplicate listings folded into this one">' +
+              folded +
+              " folded</span>"
+            : "") +
+          "</td><td>" +
+          esc(row.category) +
+          "</td><td>" +
+          stockCell +
+          "</td><td><strong>" +
+          money(row.price) +
+          '</strong><br><span class="muted">retail ' +
+          money(row.retailPrice) +
+          "</span></td><td>" +
+          (links
+            ? '<span class="pill" title="Active marketplace buy links">' +
+              links +
+              "</span>"
+            : '<span class="muted">—</span>') +
+          "</td><td>" +
+          (row.visible
+            ? '<span class="pill">public</span>'
+            : '<span class="pill off">hidden</span>') +
+          (row.stock || kind === "preorder"
+            ? ""
+            : ' <span class="pill warn">out of stock</span>') +
+          '</td><td><div class="row-actions"><button class="btn" data-toggle="' +
+          esc(row.id) +
+          '">' +
+          (row.visible ? "Hide" : "Show") +
+          '</button><button class="btn" data-feature="' +
+          esc(row.id) +
+          '">' +
+          (row.featured ? "Unfeature" : "Feature") +
+          '</button><button class="btn" data-edit="' +
+          esc(row.id) +
+          '">Edit</button></div></td></tr>'
+        );
       }
       function renderInquiries() {
         const rows = overview.inquiries || [];
@@ -841,7 +1091,9 @@
                   esc(row.listingTitle) +
                   " · " +
                   row.quantity +
-                  ' units</strong><span class="pill ' +
+                  " units" +
+                  (num(row.unitPrice) > 0 ? " × " + money(row.unitPrice) : "") +
+                  '</strong><span class="pill ' +
                   (row.status === "new"
                     ? "warn"
                     : row.status === "closed"
@@ -849,7 +1101,14 @@
                       : "") +
                   '">' +
                   esc(row.status) +
-                  "</span></div><p>" +
+                  '</span></div><div class="inquiry-tags">' +
+                  kindBadge(row.kind) +
+                  (row.notifiedAt
+                    ? '<span class="pill" title="Telegram alert sent ' +
+                      esc(date(row.notifiedAt)) +
+                      '">✓ Telegram</span>'
+                    : "") +
+                  "</div><p>" +
                   esc(row.contact) +
                   (row.note ? "<br>" + esc(row.note) : "") +
                   "</p><small>" +
@@ -877,7 +1136,15 @@
           renderStats();
           renderListings();
           renderInquiries();
-          message("Updated " + date(overview.generatedAt));
+          renderConfig();
+          const buildMs = num(overview.meta && overview.meta.buildMs);
+          message(
+            "Updated " +
+              date(overview.generatedAt) +
+              (buildMs
+                ? " · catalog built in " + (buildMs / 1000).toFixed(1) + "s"
+                : ""),
+          );
         } catch (e) {
           message(e.message, true);
         }
@@ -1168,6 +1435,66 @@
           await load();
         } catch (e) {
           message(e.message, true);
+        }
+      });
+      // Storefront contact panel — prefilled from overview.config, saved via
+      // PUT /catalog/admin/config. A background refresh never clobbers
+      // unsaved edits (dirty flag + focus check); a save re-syncs from the
+      // server's normalised config.
+      function renderConfigPreview() {
+        const handle = $("cfgTelegram").value.trim().replace(/^@+/, "");
+        $("configPreview").textContent = handle
+          ? "Quote form links to https://t.me/" + handle
+          : "No Telegram handle yet — buyers only get the request form.";
+      }
+      function renderConfig(force) {
+        const c = (overview && overview.config) || {};
+        if (
+          !force &&
+          (configDirty || $("configForm").contains(document.activeElement))
+        )
+          return;
+        $("cfgTelegram").value = c.contactTelegram || "";
+        $("cfgDiscord").value = c.contactDiscord || "";
+        $("cfgReplyTime").value = c.replyTime || "";
+        $("cfgSyncMinutes").value =
+          c.preorderSyncMinutes == null ? "" : c.preorderSyncMinutes;
+        renderConfigPreview();
+      }
+      $("configForm").addEventListener("input", () => {
+        configDirty = true;
+        renderConfigPreview();
+      });
+      $("configForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = $("configSave");
+        const body = {
+          contactTelegram: $("cfgTelegram").value.trim().replace(/^@+/, ""),
+          contactDiscord: $("cfgDiscord").value.trim(),
+          replyTime: $("cfgReplyTime").value.trim(),
+        };
+        // A blank interval leaves the stored value alone; 0 switches it off.
+        if ($("cfgSyncMinutes").value.trim() !== "")
+          body.preorderSyncMinutes = Number($("cfgSyncMinutes").value);
+        button.disabled = true;
+        $("configMessage").textContent = "Saving...";
+        $("configMessage").className = "status";
+        try {
+          const d = await api("/catalog/admin/config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          configDirty = false;
+          if (overview && d.config) overview.config = d.config;
+          renderConfig(true);
+          $("configMessage").textContent =
+            "Saved. The public catalog picks the contact up within a minute.";
+        } catch (e) {
+          $("configMessage").textContent = e.message;
+          $("configMessage").className = "status error";
+        } finally {
+          button.disabled = false;
         }
       });
       load();

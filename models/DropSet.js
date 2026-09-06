@@ -74,6 +74,10 @@ const dropSetSchema = new mongoose.Schema(
     farmStartedAt: { type: Date, default: null },
     campaignEndAt: { type: Date, default: null, index: true },
     expectedUnits: { type: Number, default: 0 },
+    // Top-tier watch minutes for the preorder's campaign (schedule-based ETA
+    // fallback); -1 = looked up, unknown (never retried). Declared so strict
+    // mode keeps the $set.
+    requiredWatchMinutes: { type: Number, default: 0 },
     autoFarmTaskId: { type: String, default: "", index: true },
   },
   { timestamps: true },

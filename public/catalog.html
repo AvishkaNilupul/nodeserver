@@ -38,6 +38,9 @@
         --preorder: #9a5b08;
         --preorder-soft: #fff2d6;
         --preorder-line: #e8b45f;
+        --unclaimed: #0f766e;
+        --unclaimed-soft: #d9f4ef;
+        --unclaimed-line: #7fd0c3;
         --empty-bg: rgba(255, 255, 255, 0.5);
         --footer: #ffffff;
         --skeleton-1: #eceff1;
@@ -63,6 +66,9 @@
         --preorder: #ffd083;
         --preorder-soft: #352817;
         --preorder-line: #765222;
+        --unclaimed: #5eead4;
+        --unclaimed-soft: #12302c;
+        --unclaimed-line: #1f5c54;
         --empty-bg: rgba(24, 29, 32, 0.62);
         --footer: #151a1d;
         --skeleton-1: #20272a;
@@ -259,6 +265,8 @@
       }
       .preorder-rail {
         display: grid;
+        min-width: 0;
+        max-width: 100%;
         grid-auto-flow: column;
         grid-auto-columns: minmax(300px, 390px);
         gap: 12px;
@@ -268,6 +276,7 @@
         padding: 2px 2px 10px;
       }
       .preorder-card {
+        min-width: 0;
         scroll-snap-align: start;
         padding: 16px;
         border: 1px solid var(--preorder-line);
@@ -295,6 +304,7 @@
       .preorder-card h3 {
         margin: 5px 0 6px;
         font-size: 17px;
+        overflow-wrap: anywhere;
       }
       .preorder-badge {
         display: inline-flex;
@@ -345,6 +355,39 @@
         color: var(--preorder);
         font-size: 11px;
         font-weight: 800;
+      }
+      .preorder-card .preorder-meta {
+        margin-top: 10px;
+      }
+      .preorder-meta .preorder-started {
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .unclaimed-badge,
+      .unclaimed-pill {
+        display: inline-flex;
+        flex: none;
+        border: 1px solid var(--unclaimed-line);
+        border-radius: 999px;
+        padding: 3px 7px;
+        background: var(--unclaimed-soft);
+        color: var(--unclaimed);
+        font-size: 10px;
+        font-weight: 800;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      .unclaimed-pill {
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.04em;
+      }
+      .category-pills {
+        display: flex;
+        flex: none;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 4px;
       }
       .categories {
         display: grid;
@@ -631,6 +674,17 @@
         color: var(--preorder);
         font-weight: 800;
       }
+      .stock-accounts {
+        color: var(--unclaimed);
+        font-weight: 800;
+      }
+      .unclaimed-hint {
+        margin: -4px 0 9px;
+        color: var(--unclaimed);
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.3;
+      }
       .price-tiers {
         margin: 7px 0 0;
         color: var(--muted);
@@ -836,9 +890,17 @@
       }
       .dialog-actions {
         display: flex;
+        flex-wrap: wrap;
         justify-content: flex-end;
         gap: 9px;
         margin-top: 3px;
+      }
+      .telegram-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-right: auto;
+        text-decoration: none;
       }
       .form-message {
         min-height: 18px;
@@ -965,6 +1027,77 @@
       .detail-price-row .price {
         font-size: 28px;
       }
+      .delivery-note {
+        margin: 0 0 16px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--brand);
+        border-radius: 6px;
+        background: var(--surface-2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .delivery-note strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+      .delivery-note p {
+        margin: 0;
+        color: var(--muted);
+      }
+      .delivery-note.unclaimed {
+        border-color: var(--unclaimed-line);
+        border-left-color: var(--unclaimed);
+        background: var(--unclaimed-soft);
+      }
+      .delivery-note.unclaimed strong {
+        color: var(--unclaimed);
+      }
+      .delivery-note.unclaimed p {
+        color: var(--ink);
+      }
+      .delivery-note .preorder-eta {
+        margin: 6px 0 0;
+        color: var(--preorder);
+        font-weight: 800;
+      }
+      .buy-links {
+        margin-top: 14px;
+        font-size: 12px;
+      }
+      .buy-links strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+      .buy-link-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .buy-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: 100%;
+        min-height: 32px;
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--surface);
+        color: var(--brand-dark);
+        font-weight: 800;
+        text-decoration: none;
+        overflow-wrap: anywhere;
+      }
+      .buy-link:hover {
+        border-color: var(--brand);
+      }
+      .buy-link small {
+        color: var(--muted);
+        font-weight: 700;
+      }
       .items-section {
         padding: 0 22px 22px;
       }
@@ -1041,6 +1174,25 @@
         gap: 20px;
         font-size: 12px;
       }
+      .footer-contact {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 10px;
+      }
+      .footer-contact[hidden] {
+        display: none;
+      }
+      .footer-contact a {
+        color: var(--brand-dark);
+        font-weight: 750;
+        text-decoration: none;
+      }
+      .filter.unclaimed.active {
+        border-left-color: var(--unclaimed);
+        background: var(--unclaimed-soft);
+        color: var(--unclaimed);
+      }
       @media (max-width: 980px) {
         .categories {
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1065,6 +1217,10 @@
         .filter.active {
           border-left-color: transparent;
           border-bottom-color: var(--brand);
+        }
+        .filter.unclaimed.active {
+          border-left-color: transparent;
+          border-bottom-color: var(--unclaimed);
         }
       }
       @media (max-width: 720px) {
@@ -1147,6 +1303,10 @@
         }
         .form-row {
           grid-template-columns: 1fr;
+        }
+        .telegram-btn {
+          flex-basis: 100%;
+          margin-right: 0;
         }
         .detail-grid,
         .items-section {
@@ -1283,7 +1443,7 @@
         ><span
           >Availability and pricing can change before a quote is
           confirmed.</span
-        >
+        ><span class="footer-contact" id="footerContact" hidden></span>
       </div>
     </footer>
 
@@ -1308,6 +1468,8 @@
         query: "",
         onlyNew: false,
         sort: "newest",
+        kind: "",
+        config: { contact: { telegram: "", discord: "", replyTime: "" } },
         visibleCount: 24,
         filtered: [],
         selected: null,
@@ -1383,6 +1545,20 @@
           )
           .join("");
       }
+      function categoryPills(category) {
+        const pills = [];
+        const fresh = Number(category.newListingCount) || 0;
+        const unclaimed = Number(category.unclaimedCount) || 0;
+        if (fresh > 0)
+          pills.push('<span class="new-badge">' + fresh + " new</span>");
+        if (unclaimed > 0)
+          pills.push(
+            '<span class="unclaimed-pill">' + unclaimed + " unclaimed</span>",
+          );
+        return pills.length
+          ? '<span class="category-pills">' + pills.join("") + "</span>"
+          : "";
+      }
       function renderCategories() {
         $("categoryCount").textContent =
           state.categories.length +
@@ -1402,9 +1578,7 @@
                   '<span class="category-title-row"><strong>' +
                   esc(category.name) +
                   "</strong>" +
-                  (category.newListingCount
-                    ? '<span class="new-badge">' + category.newListingCount + " new</span>"
-                    : "") +
+                  categoryPills(category) +
                   "</span>" +
                   "<small>" +
                   category.listingCount +
@@ -1415,13 +1589,24 @@
                   '<span class="available">' +
                   (category.stock
                     ? category.stock + " units available"
-                    : category.preorderCount + " farming now · ~" + category.expectedUnits + " expected") +
+                    : category.preorderCount
+                      ? category.preorderCount + " farming now · ~" + category.expectedUnits + " expected"
+                      : "Sold out") +
                   "</span></button>",
               )
               .join("")
           : '<div class="empty">No public categories are available right now.</div>';
       }
+      function filterActive(name) {
+        if (name === "__new__") return state.onlyNew;
+        if (name === "__unclaimed__") return state.kind === "unclaimed";
+        if (!name) return !state.onlyNew && !state.kind && !state.active;
+        return state.active === name;
+      }
       function renderFilters() {
+        const unclaimedTotal = state.listings.filter(
+          (row) => row.kind === "unclaimed",
+        ).length;
         const rows = [
           { name: "", label: "All games", listingCount: state.listings.length },
           {
@@ -1429,6 +1614,16 @@
             label: "Newly listed",
             listingCount: state.listings.filter((row) => row.isNew).length,
           },
+          ...(unclaimedTotal
+            ? [
+                {
+                  name: "__unclaimed__",
+                  label: "Unclaimed drops",
+                  listingCount: unclaimedTotal,
+                  className: " unclaimed",
+                },
+              ]
+            : []),
           ...state.categories.map((c) => ({
             name: c.name,
             label: c.name,
@@ -1439,7 +1634,8 @@
           .map(
             (row) =>
               '<button class="filter' +
-              ((row.name === "__new__" ? state.onlyNew : state.active === row.name) ? " active" : "") +
+              (row.className || "") +
+              (filterActive(row.name) ? " active" : "") +
               '" data-filter="' +
               attr(row.name) +
               '"><span>' +
@@ -1489,10 +1685,165 @@
         const days = Math.round(hours / 24);
         return days + " day" + (days === 1 ? "" : "s") + " ago";
       }
+      function etaMinutes(preorder) {
+        const raw = preorder ? preorder.readyInMinutes : null;
+        if (raw == null || raw === "") return null;
+        const minutes = Number(raw);
+        return Number.isFinite(minutes) && minutes >= 0 ? minutes : null;
+      }
       function readyText(minutes) {
-        if (!Number.isFinite(Number(minutes))) return "Timing being confirmed";
+        if (minutes == null || minutes === "" || !Number.isFinite(Number(minutes)))
+          return "Timing being confirmed";
         const hours = Math.max(0, Math.round(Number(minutes) / 60));
         return hours < 1 ? "Ready in under 1h" : "Ready in ~" + hours + "h";
+      }
+      function preorderEta(preorder) {
+        const info = preorder || {};
+        if (info.overdue) return "Finishing up — timing being confirmed";
+        const minutes = etaMinutes(info);
+        const text = readyText(minutes);
+        return info.etaSource === "schedule" && minutes != null
+          ? text + " (estimate)"
+          : text;
+      }
+      function startedText(preorder) {
+        const raw = preorder ? preorder.startedAt : null;
+        if (!raw || !Number.isFinite(new Date(raw).getTime())) return "";
+        return "Started " + relativeTime(raw);
+      }
+      function progressValue(preorder) {
+        const raw = preorder ? preorder.progressPercent : null;
+        if (raw == null || raw === "" || !Number.isFinite(Number(raw)))
+          return null;
+        return Math.max(0, Math.min(100, Math.round(Number(raw))));
+      }
+      function expectedUnitsText(preorder) {
+        const units = Number(preorder ? preorder.expectedUnits : 0) || 0;
+        return units > 0
+          ? "~" + units + " units expected"
+          : "Unit count being confirmed";
+      }
+      function stockMeta(listing) {
+        if (listing.state === "preorder") {
+          const preorder = listing.preorder || {};
+          const started = startedText(preorder);
+          return (
+            '<span class="expected-stock">' +
+            esc(expectedUnitsText(preorder)) +
+            "</span><span>" +
+            esc(preorderEta(preorder)) +
+            "</span>" +
+            (started ? "<span>" + esc(started) + "</span>" : "")
+          );
+        }
+        const stock = Number(listing.stock) || 0;
+        if (!stock) return '<span class="stock-zero">Out of stock</span>';
+        if (listing.kind === "unclaimed")
+          return (
+            '<span class="stock-accounts">' +
+            stock +
+            (stock === 1 ? " account available" : " accounts available") +
+            "</span>"
+          );
+        return '<span class="stock-ok">' + stock + " in stock</span>";
+      }
+      function deliveryKind(listing) {
+        return (
+          listing.delivery ||
+          (listing.kind === "unclaimed" ? "unclaimed" : "claimed")
+        );
+      }
+      function deliveryCopy(listing) {
+        return deliveryKind(listing) === "unclaimed"
+          ? "Rewards are NOT claimed yet. Log in, link your own game account first, then claim — they land straight in your game account. This is the right product for Overwatch, Rainbow Six, Call of Duty and Marvel Rivals."
+          : "Rewards are already claimed on the Twitch account. Log in and link your game account to receive them.";
+      }
+      function buyLinksHtml(listing) {
+        const links = (Array.isArray(listing.buyLinks) ? listing.buyLinks : [])
+          .filter(
+            (link) => link && /^https?:\/\//i.test(String(link.url || "")),
+          )
+          .slice(0, 5);
+        if (!links.length) return "";
+        return (
+          '<div class="buy-links"><strong>Buy a single unit now:</strong><div class="buy-link-list">' +
+          links
+            .map(
+              (link) =>
+                '<a class="buy-link" href="' +
+                attr(link.url) +
+                '" target="_blank" rel="noopener">' +
+                esc(link.label || link.marketplace || "Marketplace") +
+                (Number(link.price) > 0
+                  ? "<small>" + esc(money(link.price)) + "</small>"
+                  : "") +
+                "</a>",
+            )
+            .join("") +
+          "</div></div>"
+        );
+      }
+      function telegramHandle() {
+        return String(state.config.contact.telegram || "")
+          .replace(/^@+/, "")
+          .replace(/[^A-Za-z0-9_]/g, "")
+          .slice(0, 64);
+      }
+      function telegramOrderUrl(listing, qty) {
+        const handle = telegramHandle();
+        if (!handle) return "";
+        const text =
+          "Hi! I'd like to order " +
+          qty +
+          "× " +
+          listing.title +
+          " (" +
+          listing.category +
+          ") at " +
+          money(listing.price) +
+          "/unit. Ref: catalog";
+        return (
+          "https://t.me/" +
+          handle +
+          "?text=" +
+          encodeURIComponent(text).replace(
+            /[!'()*]/g,
+            (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+          )
+        );
+      }
+      function replyTimeText() {
+        const value = String(state.config.contact.replyTime || "")
+          .trim()
+          .slice(0, 80);
+        return value || "within one business day";
+      }
+      function renderContact() {
+        const handle = telegramHandle();
+        const discord = String(state.config.contact.discord || "")
+          .trim()
+          .slice(0, 80);
+        const parts = [];
+        if (handle)
+          parts.push(
+            '<a href="https://t.me/' +
+              attr(handle) +
+              '" target="_blank" rel="noopener">Telegram @' +
+              esc(handle) +
+              "</a>",
+          );
+        if (discord)
+          parts.push(
+            /^https?:\/\//i.test(discord)
+              ? '<a href="' +
+                  attr(discord) +
+                  '" target="_blank" rel="noopener">Discord</a>'
+              : "<span>Discord: " + esc(discord) + "</span>",
+          );
+        $("footerContact").innerHTML = parts.join(
+          '<span aria-hidden="true">·</span>',
+        );
+        $("footerContact").hidden = !parts.length;
       }
       function endingSoon(listing) {
         if (!listing.campaignEndsAt) return false;
@@ -1511,10 +1862,8 @@
         $("preorderRail").innerHTML = rows
           .map((listing) => {
             const preorder = listing.preorder || {};
-            const percent = Math.max(
-              0,
-              Math.min(100, Number(preorder.progressPercent) || 0),
-            );
+            const percent = progressValue(preorder);
+            const started = startedText(preorder);
             return (
               '<article class="preorder-card" role="button" tabindex="0" data-preorder-details="' +
               attr(listing.id) +
@@ -1531,16 +1880,22 @@
               "<h3>" +
               esc(listing.eventName || listing.title) +
               "</h3>" +
-              '<div class="progress-track" aria-label="' +
-              attr(percent + "% farmed") +
-              '"><span style="width:' +
-              percent +
-              '%"></span></div>' +
+              (percent == null
+                ? ""
+                : '<div class="progress-track" aria-label="' +
+                  attr(percent + "% farmed") +
+                  '"><span style="width:' +
+                  percent +
+                  '%"></span></div>') +
               '<div class="preorder-meta"><span>' +
-              esc(readyText(preorder.readyInMinutes)) +
-              "</span><span>~" +
-              (Number(preorder.expectedUnits) || 0) +
-              " units expected</span></div>" +
+              esc(preorderEta(preorder)) +
+              "</span><span>" +
+              esc(expectedUnitsText(preorder)) +
+              "</span>" +
+              (started
+                ? '<span class="preorder-started">' + esc(started) + "</span>"
+                : "") +
+              "</div>" +
               '<div class="card-foot" style="margin-top:14px"><span class="price">' +
               money(listing.price) +
               '<small>per unit · reserve volume</small></span><button class="quote-btn" data-preorder-quote="' +
@@ -1550,8 +1905,16 @@
           })
           .join("");
       }
+      function soldOut(listing) {
+        return (
+          listing.state === "soldout" ||
+          (listing.state !== "preorder" && !(Number(listing.stock) > 0))
+        );
+      }
       function sortRows(rows) {
         return [...rows].sort((a, b) => {
+          const sink = soldOut(a) - soldOut(b);
+          if (sink) return sink;
           if (state.sort === "price-asc")
             return a.price - b.price || b.stock - a.stock;
           if (state.sort === "price-desc")
@@ -1571,6 +1934,7 @@
       function renderCards({ reset = true } = {}) {
         let rows = state.listings;
         if (state.onlyNew) rows = rows.filter((row) => row.isNew);
+        if (state.kind) rows = rows.filter((row) => row.kind === state.kind);
         if (state.active)
           rows = rows.filter((row) => row.category === state.active);
         if (state.query) {
@@ -1590,10 +1954,14 @@
         $("listingTitle").textContent =
           state.onlyNew
             ? "Newly listed"
-            : state.active || (state.query ? "Search results" : "All inventory");
+            : state.kind === "unclaimed"
+              ? "Unclaimed drops"
+              : state.active || (state.query ? "Search results" : "All inventory");
         $("listingSub").textContent = state.onlyNew
           ? "Bundles and event listings added in the last 24 hours"
-          : state.query
+          : state.kind === "unclaimed"
+            ? "Accounts holding drops that are not claimed yet — you link your game account and claim them"
+            : state.query
           ? 'Matching "' + state.query + '"'
           : state.active
             ? "Bulk sets currently available for " + state.active
@@ -1627,11 +1995,13 @@
                 (listing.isNew ? '<span class="new-badge">New</span>' : "") +
                 (listing.state === "preorder"
                   ? '<span class="preorder-badge">Pre-order</span>'
-                  : listing.featured
-                    ? '<span class="badge">Featured</span>'
-                    : listing.exactProfile
-                      ? '<span class="badge">Exact profile</span>'
-                      : "") +
+                  : listing.kind === "unclaimed"
+                    ? '<span class="unclaimed-badge">Unclaimed drops</span>'
+                    : listing.featured
+                      ? '<span class="badge">Featured</span>'
+                      : listing.exactProfile
+                        ? '<span class="badge">Exact profile</span>'
+                        : "") +
                 "</span>" +
                 "</div>" +
                 "<h3>" +
@@ -1650,18 +2020,11 @@
                 " rewards</span><span>Min. " +
                 listing.minQty +
                 "</span>" +
-                (listing.state === "preorder"
-                  ? '<span class="expected-stock">~' +
-                    (Number(listing.preorder?.expectedUnits) || 0) +
-                    " units expected</span>"
-                  : '<span class="' +
-                    (listing.stock ? "stock-ok" : "stock-zero") +
-                    '">' +
-                    (listing.stock
-                      ? listing.stock + " in stock"
-                      : "Out of stock") +
-                    "</span>") +
+                stockMeta(listing) +
                 "</div>" +
+                (listing.kind === "unclaimed"
+                  ? '<div class="unclaimed-hint">You link your game account and claim</div>'
+                  : "") +
                 '<div class="card-foot"><div class="price">' +
                 money(listing.price) +
                 '<small>per unit for bulk orders</small><div class="price-tiers">' +
@@ -1704,8 +2067,9 @@
         }
       }
       function selectCategory(name) {
-        if (name === "__new__") {
-          state.onlyNew = true;
+        if (name === "__new__" || name === "__unclaimed__") {
+          state.onlyNew = name === "__new__";
+          state.kind = name === "__unclaimed__" ? "unclaimed" : "";
           state.active = "";
           state.query = "";
           $("searchInput").value = "";
@@ -1716,6 +2080,7 @@
           return;
         }
         state.onlyNew = false;
+        state.kind = "";
         state.active = name;
         state.query = "";
         $("searchInput").value = "";
@@ -1783,9 +2148,11 @@
           '</div><div class="detail-summary"><span class="eyebrow">' +
           (listing.state === "preorder"
             ? "Pre-order event bundle"
-            : listing.exactProfile
-              ? "Exact farmed inventory profile"
-              : "Bulk set") +
+            : listing.kind === "unclaimed"
+              ? "Unclaimed drops — you claim them"
+              : listing.exactProfile
+                ? "Exact farmed inventory profile"
+                : "Bulk set") +
           "</span><h2>" +
           esc(listing.title) +
           "</h2><p>" +
@@ -1799,13 +2166,33 @@
           listing.items.length +
           '</strong><span>Distinct items</span></div><div class="detail-stat"><strong>' +
           (listing.state === "preorder"
-            ? "~" + (Number(listing.preorder?.expectedUnits) || 0)
-            : listing.stock) +
+            ? Number(listing.preorder?.expectedUnits) > 0
+              ? "~" + Number(listing.preorder.expectedUnits)
+              : "—"
+            : Number(listing.stock) || 0) +
           "</strong><span>" +
           (listing.state === "preorder"
             ? "Expected units"
-            : "Available units") +
-          '</span></div></div><div class="detail-price-row"><div class="price">' +
+            : listing.kind === "unclaimed"
+              ? "Accounts available"
+              : "Available units") +
+          "</span></div></div>" +
+          '<div class="delivery-note' +
+          (deliveryKind(listing) === "unclaimed" ? " unclaimed" : "") +
+          '"><strong>How delivery works</strong><p>' +
+          esc(deliveryCopy(listing)) +
+          "</p>" +
+          (listing.state === "preorder"
+            ? '<p class="preorder-eta">' +
+              esc(
+                [preorderEta(listing.preorder), startedText(listing.preorder)]
+                  .filter(Boolean)
+                  .join(" · "),
+              ) +
+              "</p>"
+            : "") +
+          "</div>" +
+          '<div class="detail-price-row"><div class="price">' +
           money(listing.price) +
           "<small>per unit · minimum " +
           listing.minQty +
@@ -1815,7 +2202,9 @@
           (listing.state === "preorder" || listing.stock ? "" : "disabled") +
           ">" +
           (listing.state === "preorder" ? "Reserve now" : "Request quote") +
-          "</button></div></div></div>" +
+          "</button></div>" +
+          buyLinksHtml(listing) +
+          "</div></div>" +
           '<section class="items-section"><h3>Included rewards and quantities</h3><ul class="item-list">' +
           items +
           "</ul></section>";
@@ -1827,6 +2216,16 @@
           category: listing.category,
           listingId: listing.id,
         });
+        const defaultQty = Math.max(
+          listing.minQty,
+          Math.min(
+            10,
+            listing.state === "preorder"
+              ? Number(listing.preorder?.expectedUnits) || listing.minQty
+              : listing.stock,
+          ),
+        );
+        const telegramUrl = telegramOrderUrl(listing, defaultQty);
         $("quoteContent").innerHTML =
           '<div class="dialog-head"><div><h2>' +
           esc(listing.title) +
@@ -1840,16 +2239,14 @@
           '<form class="quote-form" id="quoteForm"><div class="form-row"><div class="field"><label for="quoteQty">Quantity</label><input id="quoteQty" name="quantity" type="number" min="' +
           listing.minQty +
           '" max="1000" value="' +
-          Math.max(
-            listing.minQty,
-            Math.min(
-              10,
-              listing.state === "preorder"
-                ? Number(listing.preorder?.expectedUnits) || listing.minQty
-                : listing.stock,
-            ),
-          ) +
-          '" required /></div><div class="field"><label for="quoteContact">Telegram, Discord, or email</label><input id="quoteContact" name="contact" maxlength="180" autocomplete="off" required placeholder="@handle, username, or name@example.com" /></div></div><p style="margin:0;color:var(--muted);font-size:12px">We normally reply within one business day.</p><div class="field"><label for="quoteNote">Order note (optional)</label><textarea id="quoteNote" name="note" maxlength="800" placeholder="Preferred platform, delivery timing, or other details"></textarea></div><p class="form-message" id="formMessage"></p><div class="dialog-actions"><button type="button" class="ghost-btn" data-close>Cancel</button><button class="primary-btn" type="submit">' +
+          defaultQty +
+          '" required /></div><div class="field"><label for="quoteContact">Telegram, Discord, or email</label><input id="quoteContact" name="contact" maxlength="180" autocomplete="off" required placeholder="@handle, username, or name@example.com" /></div></div><p style="margin:0;color:var(--muted);font-size:12px">We normally reply ' + esc(replyTimeText()) + '.</p><div class="field"><label for="quoteNote">Order note (optional)</label><textarea id="quoteNote" name="note" maxlength="800" placeholder="Preferred platform, delivery timing, or other details"></textarea></div><p class="form-message" id="formMessage"></p><div class="dialog-actions">' +
+          (telegramUrl
+            ? '<a class="ghost-btn telegram-btn" id="quoteTelegram" href="' +
+              attr(telegramUrl) +
+              '" target="_blank" rel="noopener">Message on Telegram</a>'
+            : "") +
+          '<button type="button" class="ghost-btn" data-close>Cancel</button><button class="primary-btn" type="submit">' +
           (listing.state === "preorder"
             ? "Reserve pre-order"
             : "Send request") +
@@ -1857,12 +2254,17 @@
         $("quoteDialog").showModal();
       }
       function expectedReadyCopy(listing) {
-        const minutes = Number(listing.preorder?.readyInMinutes);
-        if (!Number.isFinite(minutes) || minutes < 0)
+        const preorder = listing.preorder || {};
+        if (preorder.overdue)
+          return "Farming is finishing up; the delivery timing is being confirmed.";
+        const minutes = etaMinutes(preorder);
+        if (minutes == null)
           return "The delivery timing is still being confirmed.";
         const readyAt = new Date(Date.now() + minutes * 60000);
         return (
-          "Current delivery estimate: " +
+          (preorder.etaSource === "schedule"
+            ? "Estimated delivery (schedule-based): "
+            : "Current delivery estimate: ") +
           readyAt.toLocaleString([], {
             month: "short",
             day: "numeric",
@@ -1963,6 +2365,7 @@
       $("searchForm").addEventListener("submit", (event) => {
         event.preventDefault();
         state.onlyNew = false;
+        state.kind = "";
         state.query = $("searchInput").value.trim().slice(0, 80);
         state.active = "";
         renderCategories();
@@ -1988,6 +2391,17 @@
           event.preventDefault();
           submitQuote(event.target);
         }
+      });
+      $("quoteDialog").addEventListener("input", (event) => {
+        if (event.target.id !== "quoteQty" || !state.selected) return;
+        const link = $("quoteTelegram");
+        if (!link) return;
+        const qty = Math.max(
+          1,
+          Math.round(Number(event.target.value)) || state.selected.minQty || 1,
+        );
+        const url = telegramOrderUrl(state.selected, qty);
+        if (url) link.href = url;
       });
       $("detailsDialog").addEventListener("click", (event) => {
         const quote = event.target.closest("[data-detail-quote]");
@@ -2067,12 +2481,22 @@
       applyTheme(document.documentElement.dataset.theme, false);
       async function init() {
         try {
-          const [categories, listings] = await Promise.all([
+          const [categories, listings, config] = await Promise.all([
             api("/catalog/categories"),
             api("/catalog/listings?limit=1000"),
+            api("/catalog/config").catch(() => null),
           ]);
           state.categories = categories.categories || [];
           state.listings = listings.listings || [];
+          const contact = (config && config.contact) || {};
+          state.config = {
+            contact: {
+              telegram: String(contact.telegram || ""),
+              discord: String(contact.discord || ""),
+              replyTime: String(contact.replyTime || ""),
+            },
+          };
+          renderContact();
           renderPreorders();
           renderCategories();
           renderFilters();

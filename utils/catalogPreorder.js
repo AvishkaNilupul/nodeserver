@@ -1,10 +1,49 @@
 const STALE_PROGRESS_MS = 12 * 60 * 60 * 1000;
 const HISTORICAL_EVENT_NOTE_RE = /^Auto-farmed Twitch drops \(/;
+// Preorder mirrors stamped from a live campaign (never orphan `autofarm:set:` keys).
+const PREORDER_EVENT_KEY_RE = /^autofarm:(?!set:)/;
+// Only preorders that started inside this window get a watch-minutes lookup.
+const REQUIRED_MINUTES_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+// Duplicate-signature fold: lower rank survives.
+const FOLD_KIND_RANK = { event: 0, stack: 1, orphan: 2 };
 
 function norm(value) {
   return String(value || "")
     .trim()
     .toLowerCase();
+}
+
+function toMs(value) {
+  if (value == null) return Date.now();
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : Date.now();
+}
+
+// Same rule as catalogPublic.signatureFor, re-implemented locally so this file
+// stays dependency-free: "<itemKey>x<qty>|..." sorted; items without an
+// itemKey are skipped; no items → "".
+function signature(set) {
+  return ((set && set.items) || [])
+    .filter((item) => item && item.itemKey)
+    .map((item) => `${item.itemKey}x${Math.max(1, Number(item.qty) || 1)}`)
+    .sort()
+    .join("|");
+}
+
+// Top-tier watch requirement of a campaign: max(items[].requiredMinutes) || 0.
+function maxRequiredMinutes(items) {
+  let max = 0;
+  for (const item of Array.isArray(items) ? items : []) {
+    const minutes = Number(item && item.requiredMinutes);
+    if (Number.isFinite(minutes) && minutes > max) max = minutes;
+  }
+  return max;
+}
+
+// Duplicate-signature fold order: lower kind rank wins, then more stock, then
+// a newer source.updatedAt (missing → oldest). Ties keep the first candidate.
+function foldOrder(a, b) {
+  return a.rank - b.rank || b.stock - a.stock || b.updated - a.updated;
 }
 
 function computePreorderEta(accounts, campaignName, now = new Date()) {
@@ -95,6 +134,7 @@ async function stampPreorderSet(
     catalogState: "preorder",
     campaignEndAt: task.campaignEndAt || null,
     expectedUnits: (task.assignedAccounts || []).length,
+    requiredWatchMinutes: maxRequiredMinutes(items),
     autoFarmTaskId: String(task._id),
   };
   return DropSet.updateOne(
@@ -114,7 +154,19 @@ function orphanMirrorKey(set) {
   return `autofarm:set:${set._id}`;
 }
 
-async function syncActivePreorders({
+let activePreorderRun = null;
+
+// Module-level in-flight guard: while a run is in progress every caller gets
+// the SAME promise, so overlapping schedulers never run twice or double-upsert.
+function syncActivePreorders(opts) {
+  if (activePreorderRun) return activePreorderRun;
+  activePreorderRun = runActivePreorders(opts).finally(() => {
+    activePreorderRun = null;
+  });
+  return activePreorderRun;
+}
+
+async function runActivePreorders({
   AutoFarmTask,
   DropSet,
   campaignItems,
@@ -122,18 +174,29 @@ async function syncActivePreorders({
   researchForGame,
   apply = true,
   now = new Date(),
-}) {
+  fillRequiredMinutes = true,
+  fillLimit = 5,
+} = {}) {
   const tasks = await AutoFarmTask.find(
     { status: "active", campaignId: { $exists: true, $nin: ["", null] } },
-    { game: 1, campaignId: 1, campaignName: 1, campaignEndAt: 1, assignedAccounts: 1 },
+    {
+      game: 1,
+      campaignId: 1,
+      campaignName: 1,
+      campaignEndAt: 1,
+      assignedAccounts: 1,
+    },
   ).lean();
-  if (!tasks.length) return { candidates: 0, stamped: 0 };
   const keys = tasks.map((task) => `autofarm:${task.campaignId}`);
-  const existing = await DropSet.find(
-    { sourceType: "autofarm_event", sourceEventKey: { $in: keys } },
-    { sourceEventKey: 1 },
-  ).lean();
-  const existingKeys = new Set(existing.map((set) => String(set.sourceEventKey)));
+  const existing = tasks.length
+    ? await DropSet.find(
+        { sourceType: "autofarm_event", sourceEventKey: { $in: keys } },
+        { sourceEventKey: 1 },
+      ).lean()
+    : [];
+  const existingKeys = new Set(
+    existing.map((set) => String(set.sourceEventKey)),
+  );
   let stamped = 0;
   for (const task of tasks) {
     if (existingKeys.has(`autofarm:${task.campaignId}`)) continue;
@@ -148,7 +211,58 @@ async function syncActivePreorders({
       now,
     });
   }
-  return { candidates: tasks.length, stamped };
+  // Backfill requiredWatchMinutes on recent live preorders that were stamped
+  // before the field existed (or whose lookup yielded 0). Bounded per run;
+  // -1 marks "looked up, unknown" so a set is never retried forever.
+  let filled = 0;
+  const limit = Math.max(0, Math.floor(Number(fillLimit) || 0));
+  if (
+    apply &&
+    fillRequiredMinutes &&
+    limit > 0 &&
+    typeof campaignItems === "function"
+  ) {
+    const pending = await DropSet.find(
+      {
+        sourceType: "autofarm_event",
+        catalogState: "preorder",
+        listed: true,
+        sourceEventKey: PREORDER_EVENT_KEY_RE,
+        farmStartedAt: {
+          $gte: new Date(toMs(now) - REQUIRED_MINUTES_WINDOW_MS),
+        },
+        $or: [
+          { requiredWatchMinutes: { $exists: false } },
+          { requiredWatchMinutes: 0 },
+        ],
+      },
+      { sourceEventKey: 1, sourceEventName: 1, "items.game": 1 },
+      { limit },
+    ).lean();
+    for (const set of (pending || []).slice(0, limit)) {
+      const campaignId = String(set.sourceEventKey || "").slice(
+        "autofarm:".length,
+      );
+      if (!campaignId) continue;
+      let items = [];
+      try {
+        items = await campaignItems(
+          campaignId,
+          set.items?.[0]?.game || "",
+          set.sourceEventName,
+        );
+      } catch (err) {
+        console.error("catalog preorder watch minutes:", err.message);
+      }
+      const minutes = maxRequiredMinutes(items);
+      await DropSet.updateOne(
+        { _id: set._id },
+        { $set: { requiredWatchMinutes: minutes > 0 ? minutes : -1 } },
+      );
+      filled++;
+    }
+  }
+  return { candidates: tasks.length, stamped, filled };
 }
 
 function sourceSetId(task, kind) {
@@ -222,7 +336,14 @@ async function syncHistoricalEventSets({
     });
   }
   if (!candidates.length) {
-    return { candidates: 0, stocked: 0, published: 0, retired: 0 };
+    return {
+      candidates: 0,
+      stocked: 0,
+      published: 0,
+      preordered: 0,
+      retired: 0,
+      deduped: 0,
+    };
   }
   const sourceById = new Map(sourceSets.map((set) => [String(set._id), set]));
   const usable = candidates.filter((row) => {
@@ -234,7 +355,9 @@ async function syncHistoricalEventSets({
       candidates: candidates.length,
       stocked: 0,
       published: 0,
+      preordered: 0,
       retired: 0,
+      deduped: 0,
     };
   }
   const existing = await DropSet.find({
@@ -247,11 +370,54 @@ async function syncHistoricalEventSets({
   const stockMap = await stockForSets(
     usable.map((row) => sourceById.get(row.setId)),
   );
+  // Fold duplicates: the same game + identical items×qty publishes ONE mirror.
+  // Losers are never published and their listed mirrors are retired. Empty
+  // signatures (items without itemKeys) are never grouped.
+  const groups = new Map();
+  for (const row of usable) {
+    const source = sourceById.get(row.setId);
+    const sig = signature(source);
+    if (!sig) continue;
+    const game = String(source.items[0]?.game || "").toLowerCase();
+    const groupKey = `${game}::${sig}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(row);
+  }
+  const folded = new Set();
+  let deduped = 0;
+  for (const rows of groups.values()) {
+    if (rows.length < 2) continue;
+    const scored = rows.map((row) => {
+      const source = sourceById.get(row.setId);
+      return {
+        row,
+        rank: FOLD_KIND_RANK[row.kind] ?? 9,
+        stock: stockMap.get(String(source._id))?.stock || 0,
+        updated: new Date(source.updatedAt).getTime() || 0,
+      };
+    });
+    const best = scored.reduce((keep, entry) =>
+      foldOrder(entry, keep) < 0 ? entry : keep,
+    ).row;
+    for (const row of rows) {
+      if (row === best) continue;
+      folded.add(row);
+      const current = existingByKey.get(row.key);
+      if (!current || !current.listed) continue;
+      deduped++;
+      if (!apply) continue;
+      await DropSet.updateOne(
+        { _id: current._id },
+        { $set: { listed: false } },
+      );
+    }
+  }
   let stocked = 0;
   let published = 0;
   let preordered = 0;
   let retired = 0;
   for (const row of usable) {
+    if (folded.has(row)) continue;
     const source = sourceById.get(row.setId);
     const stock = stockMap.get(String(source._id))?.stock || 0;
     const current = existingByKey.get(row.key);
@@ -367,11 +533,19 @@ async function syncHistoricalEventSets({
     }
     retired++;
   }
-  return { candidates: usable.length, stocked, published, preordered, retired };
+  return {
+    candidates: usable.length,
+    stocked,
+    published,
+    preordered,
+    retired,
+    deduped,
+  };
 }
 
 module.exports = {
   STALE_PROGRESS_MS,
+  signature,
   computePreorderEta,
   stampPreorderSet,
   syncActivePreorders,
