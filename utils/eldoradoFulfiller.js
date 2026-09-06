@@ -24,6 +24,7 @@ const {
 const { getAutoFarm } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
+const farmService = require("./eldoradoFarmService");
 
 // Distinct from the Shop / Gameflip / GGSel / Digiseller tags so the same
 // account can never be handed out twice across platforms.
@@ -377,10 +378,33 @@ async function deliverPaidOrders() {
   }
   if (!orders.length) return { orders: 0 };
 
+  // The pool is the hard limit on rent-farm sales, and it is small. Surface it
+  // once per tick rather than discovering it order by order.
+  let poolLeft = null;
+  try {
+    poolLeft = (await require("./operatorFarm").previewFreshAccounts({ count: 1 }))
+      .eligibleTotal;
+    if (poolLeft <= POOL_LOW_WATERMARK) {
+      console.error(
+        "eldorado fulfiller: only " + poolLeft + " pristine pool accounts left — " +
+          "rent-farm orders will start failing. Top the pool up or pause the " +
+          "farming listings.",
+      );
+    }
+  } catch {
+    /* the guard must never stop a delivery */
+  }
+
   const results = [];
   for (const order of orders) {
     try {
-      const r = await deliverOrder(order, { dryRun });
+      // Two products share this queue. A rent-farm order provisions a pool
+      // account into the farm for a window; a bundle order hands over a farmed
+      // account. deliverFarmOrder returns null when the order is not a rent-farm
+      // one, which is what routes it to the bundle path.
+      const r =
+        (await farmService.deliverFarmOrder(order, { dryRun })) ||
+        (await deliverOrder(order, { dryRun }));
       results.push(r);
       if (r.error)
         console.error("eldorado deliver " + r.orderId + ":", r.error);
@@ -405,6 +429,9 @@ async function deliverPaidOrders() {
 // Delivery is only worth polling often — a buyer waiting on credentials is the
 // whole product. 60s keeps us well inside the "20 min" promise on the offers
 // while staying nowhere near Eldorado's rate limits.
+// Below this many pristine pool accounts, rent-farm orders are at risk.
+const POOL_LOW_WATERMARK = 15;
+
 const TICK_MS = 60 * 1000;
 let started = false;
 

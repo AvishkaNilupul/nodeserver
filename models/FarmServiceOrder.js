@@ -1,0 +1,56 @@
+const mongoose = require("mongoose");
+
+// One row per Eldorado "Twitch Drops Automatic Farming" order (the rent-farm
+// service, NOT the drops-bundle listings that hand over a farmed account).
+//
+// This row is what makes automatic fulfilment safe to retry. Each order burns
+// PRISTINE pool accounts, so a retry that re-provisions would quietly spend the
+// pool twice. The row is claimed on a unique orderId BEFORE anything is
+// provisioned, and each stage is stamped as it completes, so a tick that dies
+// half-way resumes at the right step instead of starting over.
+const farmServiceOrderSchema = new mongoose.Schema(
+  {
+    // The Eldorado order. Unique — this is the idempotency key.
+    orderId: { type: String, required: true, unique: true, index: true },
+    offerId: { type: String, default: "", index: true },
+    offerTitle: { type: String, default: "" },
+    buyerUsername: { type: String, default: "" },
+
+    // Parsed from the offer title, which is where the contract with the buyer
+    // lives: "<Game> Twitch Drops Automatic Farming <term>".
+    game: { type: String, default: "", index: true },
+    days: { type: Number, default: 0 },
+    quantity: { type: Number, default: 1 },
+
+    // The pool accounts handed to this buyer, and the window they farm for.
+    accounts: {
+      type: [
+        {
+          _id: false,
+          login: { type: String, default: "" },
+          poolId: { type: String, default: "" },
+          farmUntil: { type: Date, default: null },
+        },
+      ],
+      default: [],
+    },
+
+    // Stage stamps. Fulfilment is: claim -> provision -> send -> deliver.
+    // Never mark delivered before the credential has actually reached the buyer.
+    provisionedAt: { type: Date, default: null },
+    messageSentAt: { type: Date, default: null },
+    deliveredAt: { type: Date, default: null },
+
+    state: {
+      type: String,
+      enum: ["claimed", "provisioned", "sent", "delivered", "failed"],
+      default: "claimed",
+      index: true,
+    },
+    attempts: { type: Number, default: 0 },
+    lastError: { type: String, default: "" },
+  },
+  { timestamps: true },
+);
+
+module.exports = mongoose.model("FarmServiceOrder", farmServiceOrderSchema);

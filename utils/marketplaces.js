@@ -3842,9 +3842,26 @@ function eldError(label, e) {
   throw err;
 }
 
-// One request against the seller panel, carrying the stored jar and (for
-// mutations) the CSRF header. Persists renewed cookies back into settings.
+// One request against the seller panel, carrying the stored jar and the CSRF
+// header. Persists renewed cookies back into settings.
+//
+// Eldorado's id token is short-lived, so ANY call can come back 401 at any
+// moment — a pre-flight "is the session alive?" probe races that and loses. So
+// a 401 refreshes the session and replays the request exactly once, which is
+// what makes a long-running tick survive token expiry without operator input.
 async function eldRequest(method, path, opts = {}) {
+  try {
+    return await eldRequestOnce(method, path, opts);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    const isRefresh = String(path).includes("authentication/refreshTokens");
+    if (status !== 401 || isRefresh || opts.__retried) throw e;
+    await eldoradoRefreshSession();
+    return await eldRequestOnce(method, path, { ...opts, __retried: true });
+  }
+}
+
+async function eldRequestOnce(method, path, opts = {}) {
   const keys = requireKeys("eldorado");
   const jar = eldCookieJar(keys.cookie);
   const m = String(method).toUpperCase();
@@ -3928,7 +3945,8 @@ async function eldoradoRefreshSession() {
   return after !== before;
 }
 
-// Cheap liveness probe; refreshes once if the session has lapsed.
+// Cheap liveness probe. eldRequest already refreshes-and-retries on any 401, so
+// this is a health check for the refresher tick, not the thing keeping calls alive.
 async function eldoradoEnsureFreshSession() {
   try {
     await eldRequest("GET", "/api/authentication/claims");
@@ -4292,13 +4310,14 @@ function eldNymId(userId) {
   return eldInternalId(userId) + "_n";
 }
 
-// Undelivered orders, filtered server-side. `displayFilter` is REQUIRED —
-// omitting it returns 400.
-async function eldoradoPaidOrders({ pageSize = 50 } = {}) {
+// Seller orders in one state, filtered server-side. `displayFilter` is REQUIRED
+// — omitting it returns 400. States: Paid | Disputed | Delivered | Received |
+// Completed | Canceled | PendingReview.
+async function eldoradoOrders({ orderState = "Paid", pageSize = 50 } = {}) {
   const qs = new URLSearchParams({
     displayFilter: "DisplaySellingOrders",
     orderGroup: "Regular",
-    orderState: "Paid",
+    orderState,
     pageSize: String(Math.min(50, Math.max(1, parseInt(pageSize, 10) || 50))),
     pageDirection: "Next",
   });
@@ -4308,6 +4327,11 @@ async function eldoradoPaidOrders({ pageSize = 50 } = {}) {
   } catch (e) {
     eldError("Eldorado orders", e);
   }
+}
+
+// The fulfiller's queue: paid but not yet delivered.
+async function eldoradoPaidOrders(opts = {}) {
+  return eldoradoOrders({ ...opts, orderState: "Paid" });
 }
 
 async function eldoradoOrderStateCounts() {
@@ -4494,6 +4518,7 @@ module.exports = {
   eldoradoRelist,
   eldoradoDeleteOffer,
   eldoradoMyListings,
+  eldoradoOrders,
   eldoradoPaidOrders,
   eldoradoOrderStateCounts,
   eldoradoSendOrderMessage,
