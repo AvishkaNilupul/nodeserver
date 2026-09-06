@@ -590,22 +590,31 @@ function buildSyncScript(runningIds, writes) {
         `then echo "WR|$id|ok"; else rm -f "$d/channels.json.tmp"; echo "WR|$id|fail"; fi; done`,
     );
   }
+  // Heartbeat whatever docker says is running RIGHT NOW, rather than the
+  // caller's `runningIds`. That list is a snapshot taken at the top of the
+  // tick, before the Twitch liveness calls and before start/stop actions are
+  // applied, so any container that came up in between (an operator restart, a
+  // recreate, a crash-loop recovery) got no heartbeat at all and the page
+  // showed it as "unknown" — indistinguishable from a broken bot. Discovering
+  // the set inside the same script keeps the one-round-trip design and cannot
+  // go stale. `runningIds` is still the caller's own view, used to decide which
+  // bots to alert on; unknown ids in this output are dropped at parse time.
   parts.push('echo "HB_START"');
-  if (okRunning.length) parts.push("hb=$(mktemp 2>/dev/null || echo /tmp/webbot-hb.$$)");
-  for (const id of okRunning) {
-    parts.push(
-      `docker logs --since ${HEARTBEAT_WINDOW} ${hosts.shq(containerFor(id))} > "$hb" 2>&1 </dev/null || true; ` +
-        `p=$(grep -c -F 'progress → drop' "$hb"); ` +
-        `s=$(grep -c -F 'no active drop-session' "$hb"); ` +
-        `a=$(grep -c -E 'farming .* via' "$hb"); ` +
-        `pa=$(grep -F 'progress → drop' "$hb" | ${DISTINCT_LABELS}); ` +
-        `sa=$(grep -F 'no active drop-session' "$hb" | ${DISTINCT_LABELS}); ` +
-        `echo "${id}|$p|$s|$a|$pa|$sa"`,
-    );
-  }
-  if (okRunning.length) parts.push('rm -f "$hb"');
+  parts.push("hb=$(mktemp 2>/dev/null || echo /tmp/webbot-hb.$$)");
+  parts.push(
+    `for c in $(docker ps --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}' 2>/dev/null); do ` +
+      `id=\${c#${CONTAINER_PREFIX}}; ` +
+      `docker logs --since ${HEARTBEAT_WINDOW} "$c" > "$hb" 2>&1 </dev/null || true; ` +
+      `p=$(grep -c -F 'progress → drop' "$hb"); ` +
+      `s=$(grep -c -F 'no active drop-session' "$hb"); ` +
+      `a=$(grep -c -E 'farming .* via' "$hb"); ` +
+      `pa=$(grep -F 'progress → drop' "$hb" | ${DISTINCT_LABELS}); ` +
+      `sa=$(grep -F 'no active drop-session' "$hb" | ${DISTINCT_LABELS}); ` +
+      `echo "$id|$p|$s|$a|$pa|$sa"; done`,
+  );
+  parts.push('rm -f "$hb"');
   parts.push('echo "HB_END"');
-  return { script: parts.join("; "), input };
+  return { script: parts.join("; "), input, runningIds: okRunning };
 }
 
 // PURE. Parse buildSyncScript's output → { heartbeat: {id: {progress,noSession,attaches}}, written: [id], failed: [id] }.
@@ -754,10 +763,13 @@ async function syncChannelsAndHeartbeat(bots, verdict, runningIds, now = Date.no
   for (const w of writes) {
     if (parsed.written.includes(w.id)) state.lastWritten[w.id] = { hash: w.hash, at: now };
   }
+  // The script reports every container docker found running, which is the
+  // truth at heartbeat time; the caller's `runningIds` can be stale by a whole
+  // tick. Keep any row for a bot we actually know about.
+  const known = new Set(bots.map((b) => b.id));
   const heartbeat = {};
-  for (const id of runningIds) {
-    const hb = parsed.heartbeat[id];
-    if (hb) heartbeat[id] = { at: new Date(now), ...hb };
+  for (const [id, hb] of Object.entries(parsed.heartbeat)) {
+    if (known.has(id)) heartbeat[id] = { at: new Date(now), ...hb };
   }
   state.heartbeat = heartbeat;
   state.lastSyncAt = new Date(now);
@@ -770,7 +782,9 @@ async function syncChannelsAndHeartbeat(bots, verdict, runningIds, now = Date.no
   } catch {
     alertsOn = true;
   }
-  const running = new Set(runningIds);
+  // Same correction for the verdict/alert pass: a bot the script heartbeated is
+  // running, even if it was not in the snapshot.
+  const running = new Set([...runningIds, ...Object.keys(heartbeat)]);
   for (const b of bots) {
     const hb = heartbeat[b.id] || null;
     const key = norm(b.game);

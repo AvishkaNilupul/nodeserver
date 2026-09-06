@@ -424,9 +424,9 @@ function hbChip(c){
   var tip='heartbeat: '+n+' progress · '+ns+' no-session · '+(hb&&hb.attaches>0?hb.attaches:0)+' attach lines in the last 6 min'+(at?' (read '+at.toLocaleTimeString()+')':'');
   if(v==='farming') return '<span class="chip on" title="'+esc(tip)+'">farming '+n+'/6m</span>';
   if(v==='idle') return '<span class="chip off" title="'+esc(tip)+'">idle: no drop session</span>';
-  if(v==='starting'&&warmingUp(c)) return '<span class="chip" title="'+esc('the heartbeat reads a 6-minute log window and this container ('+((c&&c.status)||'')+') has not filled one yet — not a fault. '+tip)+'">warming up</span>';
+  if((v==='starting'||v==='unknown')&&warmingUp(c)) return '<span class="chip" title="'+esc('the heartbeat reads a 6-minute log window and this container ('+((c&&c.status)||'')+') has not filled one yet — not a fault. '+tip)+'">warming up</span>';
   if(v==='starting') return '<span class="chip warn" title="'+esc(tip)+'">starting</span>';
-  return '<span class="chip" title="no heartbeat yet — the auto-power watcher is off or has not ticked since this bot started">unknown</span>';
+  return '<span class="chip" title="no heartbeat for this bot yet — the auto-power watcher is off, or has not completed a tick since this container started. It is not a report that the bot is broken.">no reading yet</span>';
 }
 function fmtAgo(iso){ if(!iso) return ''; var ms=Date.now()-new Date(iso).getTime(); if(!(ms>=0)) return ''; var m=Math.round(ms/60000); return m<1?'just now':(m<60?m+'m ago':(Math.floor(m/60)+'h '+(m%60)+'m ago')); }
 // "channels: acl-live 1/8 · R6S S2 2026 1" from the bot's channels.json summary.

@@ -271,18 +271,37 @@ test("buildSyncScript: writes ride stdin, heartbeat greps run per running bot, u
   // atomic tmp→mv, no heredoc
   assert.ok(script.includes('base64 -d > "$d/channels.json.tmp" && mv "$d/channels.json.tmp" "$d/channels.json"'));
   assert.ok(!script.includes("<<"));
-  // one docker logs per running bot + the three contract counts
-  assert.ok(script.includes("docker logs --since 6m 'webbot-bot-5'"));
-  assert.ok(script.includes("docker logs --since 6m 'webbot-bot-6'"));
+  // The heartbeat discovers running containers from docker itself, so a bot
+  // that came up after the tick's snapshot still gets sampled. No per-id
+  // `docker logs` line, and the caller's ids never reach the shell.
+  assert.ok(script.includes("docker ps --filter name=^/webbot-bot- --format '{{.Names}}'"));
+  assert.ok(script.includes('docker logs --since 6m "$c"'));
+  assert.ok(!script.includes("docker logs --since 6m 'webbot-bot-5'"));
   assert.ok(!script.includes("evil"));
   assert.ok(script.includes("grep -c -F 'progress → drop'"));
   assert.ok(script.includes("grep -c -F 'no active drop-session'"));
   assert.ok(script.includes("grep -c -E 'farming .* via'"));
-  // no running bots + no writes → still a parseable (empty) heartbeat block
+  // The caller's own (possibly stale) view is echoed back, SAFE-filtered, for
+  // the alert pass — it no longer decides what gets sampled.
+  const { runningIds } = buildSyncScript(["5", "6", "../evil"], []);
+  assert.deepStrictEqual(runningIds, ["5", "6"]);
+  // no writes → still a parseable heartbeat block, and it still sweeps docker
   const empty = buildSyncScript([], []);
   assert.strictEqual(empty.input, "");
-  assert.ok(!empty.script.includes("docker logs"));
-  assert.ok(empty.script.includes('echo "HB_START"; echo "HB_END"'));
+  assert.ok(empty.script.includes('echo "HB_START"'));
+  assert.ok(empty.script.includes('echo "HB_END"'));
+  assert.ok(empty.script.includes("docker ps --filter"));
+});
+
+test("buildSyncScript: a bot missing from runningIds is still heartbeated", () => {
+  // The regression: bots 7/8 were recreated after the tick's snapshot, so they
+  // were absent from runningIds and the page showed them as "unknown".
+  const { script } = buildSyncScript([], []);
+  assert.ok(script.includes("docker ps --filter"), "must sweep docker, not the caller's list");
+  // and the parser accepts whatever ids come back
+  const out = parseSyncOutput(["HB_START", "7|245|4|51|50|4", "8|241|6|51|50|6", "HB_END"].join("\n"));
+  assert.deepStrictEqual(Object.keys(out.heartbeat).sort(), ["7", "8"]);
+  assert.strictEqual(out.heartbeat["7"].progressAccounts, 50);
 });
 
 test("parseSyncOutput: heartbeat rows and write receipts", () => {
@@ -381,7 +400,9 @@ test("buildSyncScript: emits distinct-account counts as a 6-field row", () => {
   assert.match(script, /sort -u \| wc -l/);
   assert.ok(script.includes("pa=$(grep -F 'progress → drop'"));
   assert.ok(script.includes("sa=$(grep -F 'no active drop-session'"));
-  assert.ok(script.includes('echo "5|$p|$s|$a|$pa|$sa"'));
+  // The id now comes from the container name docker reported, not the caller.
+  assert.ok(script.includes('echo "$id|$p|$s|$a|$pa|$sa"'));
+  assert.ok(script.includes('id=${c#webbot-bot-}'));
   // The load-bearing grep strings the farmer's log lines must keep matching.
   assert.ok(script.includes("grep -c -F 'progress → drop'"));
   assert.ok(script.includes("grep -c -F 'no active drop-session'"));
