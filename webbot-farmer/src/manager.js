@@ -184,6 +184,9 @@ async function farmTurn(row, priorityGames, stopSignal, channelPool) {
     try {
       result = await watchChannel(session, channel.login, {
         maxMinutes: CHANNEL_LEASE_MINUTES,
+        // Tag this account's log lines so the server heartbeat can count
+        // distinct accounts progressing rather than raw lines.
+        label,
         stopSignal,
         noSessionExitMs: NO_SESSION_EXIT_MS,
         // Seed from the recorded flag so a known-blocked account never even

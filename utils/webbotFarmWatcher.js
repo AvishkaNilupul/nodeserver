@@ -72,6 +72,15 @@ const HEARTBEAT_WINDOW = "6m";
 // Idle alert: verdict "idle" on this many consecutive ticks, at most one
 // Telegram per bot per cooldown.
 const IDLE_ALERT_TICKS = 2;
+// A bot is only "farming" when at least this share of its accounts credited a
+// drop minute in the heartbeat window. Below it (but above zero) the bot is
+// PARTIAL: some accounts are earning and some are silently not — the failure
+// mode a raw line count cannot see. Deliberately loose: accounts legitimately
+// go quiet while rotating channels or during a lease hand-off, so this catches
+// a collapsed fleet, not routine churn.
+const COVERAGE_MIN = Number(process.env.WEBBOT_COVERAGE_MIN) || 0.5;
+// Heartbeat verdicts that mean "this bot is not doing its job".
+const ALERTABLE = new Set(["idle", "partial"]);
 const IDLE_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 const TICK_MS = Number(process.env.WEBBOT_WATCHER_TICK_MS) || 3 * 60 * 1000; // 3 min
@@ -505,10 +514,23 @@ function channelsHash(file) {
 //              has no drop session (the R6 ACL failure mode);
 //   starting — nothing at all yet (fresh container / still picking a channel);
 //   unknown  — no heartbeat for this bot.
-function heartbeatVerdict(hb, gameVerdict) { // eslint-disable-line no-unused-vars
+function heartbeatVerdict(hb, gameVerdict, totalAccounts) { // eslint-disable-line no-unused-vars
   if (!hb || typeof hb !== "object") return "unknown";
   const progress = Number(hb.progress) || 0;
   const noSession = Number(hb.noSession) || 0;
+  const pa = Number(hb.progressAccounts);
+  const total = Number(totalAccounts) || 0;
+  // Prefer DISTINCT-ACCOUNT coverage when the farmer labels its lines. A raw
+  // line count says "farming" when a single healthy account out of fifty is
+  // logging, which is how partial farm loss went unnoticed for days.
+  //
+  // A pre-label farmer image reports progressAccounts = 0 while progress > 0.
+  // That is "coverage unknown", NOT a stalled fleet, so it must fall through to
+  // the line-count verdict — otherwise a rolling image upgrade would alert on
+  // every healthy bot.
+  if (total > 0 && Number.isFinite(pa) && pa > 0) {
+    return pa / total >= COVERAGE_MIN ? "farming" : "partial";
+  }
   if (progress > 0) return "farming";
   if (noSession > 0) return "idle";
   return "starting";
@@ -519,12 +541,14 @@ function heartbeatVerdict(hb, gameVerdict) { // eslint-disable-line no-unused-va
 // alert went out for it within the cooldown. `prevVerdicts` = earlier verdicts,
 // most recent last; `lastAlertAt` = ms or null.
 function shouldAlertIdle(prevVerdicts, nowVerdict, lastAlertAt, now = Date.now()) {
-  if (nowVerdict !== "idle") return false;
+  if (!ALERTABLE.has(nowVerdict)) return false;
   const prev = Array.isArray(prevVerdicts) ? prevVerdicts : [];
   const need = IDLE_ALERT_TICKS - 1;
   if (prev.length < need) return false;
+  // Consecutive BAD ticks, not consecutive identical ones: a bot flapping
+  // idle → partial → idle is still failing and must not dodge the alert.
   for (let i = prev.length - need; i < prev.length; i++) {
-    if (prev[i] !== "idle") return false;
+    if (!ALERTABLE.has(prev[i])) return false;
   }
   if (lastAlertAt && now - lastAlertAt < IDLE_ALERT_COOLDOWN_MS) return false;
   return true;
@@ -533,6 +557,13 @@ function shouldAlertIdle(prevVerdicts, nowVerdict, lastAlertAt, now = Date.now()
 // Bot ids are directory names read off the Pi; only plain ones may be spliced
 // into a shell script / path.
 const SAFE_ID = /^[A-Za-z0-9_.-]+$/;
+
+// Pulls the account label out of a farmer log line
+// (`[<stamp>] [<login>] progress → drop …`) and de-duplicates it, so the
+// heartbeat reports DISTINCT ACCOUNTS. `sed -n …p` prints only on a match, so a
+// farmer image that predates per-account labels yields 0 rather than a bogus
+// count — heartbeatVerdict reads that as "coverage unknown" and falls back.
+const DISTINCT_LABELS = `sed -n -E 's/^\\[[^]]*\\] \\[([^]]+)\\].*/\\1/p' | sort -u | wc -l | tr -d ' '`;
 
 // PURE. The ONE SSH script for a tick → { script, input }. Heredoc-free:
 //   * channels.json writes travel on STDIN as `<id> <base64>` lines (a big ACL
@@ -567,7 +598,9 @@ function buildSyncScript(runningIds, writes) {
         `p=$(grep -c -F 'progress → drop' "$hb"); ` +
         `s=$(grep -c -F 'no active drop-session' "$hb"); ` +
         `a=$(grep -c -E 'farming .* via' "$hb"); ` +
-        `echo "${id}|$p|$s|$a"`,
+        `pa=$(grep -F 'progress → drop' "$hb" | ${DISTINCT_LABELS}); ` +
+        `sa=$(grep -F 'no active drop-session' "$hb" | ${DISTINCT_LABELS}); ` +
+        `echo "${id}|$p|$s|$a|$pa|$sa"`,
     );
   }
   if (okRunning.length) parts.push('rm -f "$hb"');
@@ -593,13 +626,21 @@ function parseSyncOutput(stdout) {
     }
     if (inHb) {
       const cols = line.split("|");
-      if (cols.length !== 4) continue; // docker/grep noise, not a row
-      const [id, p, s, a] = cols;
+      // 6 = labelled farmer (with distinct-account counts), 4 = the older
+      // image. Anything else is docker/grep noise, not a row.
+      if (cols.length !== 4 && cols.length !== 6) continue;
+      const [id, p, s, a, pa, sa] = cols;
       if (!SAFE_ID.test(id)) continue;
       heartbeat[id] = {
         progress: Number(p) || 0,
         noSession: Number(s) || 0,
         attaches: Number(a) || 0,
+        // Present ONLY on a labelled image, so the verdict can tell "no
+        // coverage data" (key absent) from "no accounts progressing" (key 0).
+        // Absent rather than undefined keeps the pre-label row shape identical.
+        ...(cols.length === 6
+          ? { progressAccounts: Number(pa) || 0, noSessionAccounts: Number(sa) || 0 }
+          : null),
       };
     }
   }
@@ -734,7 +775,7 @@ async function syncChannelsAndHeartbeat(bots, verdict, runningIds, now = Date.no
     const hb = heartbeat[b.id] || null;
     const key = norm(b.game);
     const v = Object.keys(verdict).map((k) => (gameMatches(b.game, k) ? verdict[k] : null)).find(Boolean) || null;
-    const hbVerdict = running.has(b.id) ? heartbeatVerdict(hb, v) : "unknown";
+    const hbVerdict = running.has(b.id) ? heartbeatVerdict(hb, v, b.accounts) : "unknown";
     b.hb = hb;
     b.hbVerdict = hbVerdict;
     if (!running.has(b.id)) {
@@ -746,9 +787,19 @@ async function syncChannelsAndHeartbeat(bots, verdict, runningIds, now = Date.no
     if (gameLive && alertsOn && shouldAlertIdle(prev, hbVerdict, state.lastIdleAlertAt[b.id], now)) {
       state.lastIdleAlertAt[b.id] = now;
       const liveAcl = [...new Set((b.channels ? b.channels.campaigns : []).flatMap((c) => c.live))];
+      const total = b.accounts || 0;
+      const paRaw = hb ? Number(hb.progressAccounts) : NaN;
+      const pa = Number.isFinite(paRaw) ? paRaw : null;
+      // "partial" is the failure a raw line count hides: the bot IS farming,
+      // just not on most of its accounts. Name the ratio so the alert is
+      // actionable without opening the console.
+      const what =
+        hbVerdict === "partial" && pa !== null
+          ? `only ${pa} of ${total} accounts credited a drop minute in the last 6 min`
+          : "credited 0 minutes for 6+ min";
       const text =
-        `⚠️ ${containerFor(b.id)} (${b.game || key || "?"}, ${b.accounts || 0} accounts) is running but ` +
-        `credited 0 minutes for 6+ min while the game is live — channel ACL: ` +
+        `⚠️ ${containerFor(b.id)} (${b.game || key || "?"}, ${total} accounts) is running but ` +
+        `${what} while the game is live — channel ACL: ` +
         (liveAcl.length ? liveAcl.join(", ") : "none live");
       try {
         await sendTelegram(text);
@@ -763,8 +814,9 @@ async function syncChannelsAndHeartbeat(bots, verdict, runningIds, now = Date.no
           container: containerFor(b.id),
           count: b.accounts || 0,
           actor: "webbot-watcher",
-          reason: "running but 0 minutes credited for 6+ min while live — ACL live: " +
+          reason: `running but ${what} while live — ACL live: ` +
             (liveAcl.length ? liveAcl.join(", ") : "none"),
+          verdict: hbVerdict,
         });
       } catch {
         /* audit is best-effort */

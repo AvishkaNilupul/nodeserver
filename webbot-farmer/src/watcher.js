@@ -6,7 +6,7 @@ const SPADE_INTERVAL_MS = 20_000;
 const PLAYLIST_INTERVAL_MS = 60_000;
 const PROGRESS_INTERVAL_MS = 60_000;
 
-const log = (msg, obj) => {
+const emit = (msg, obj) => {
   const stamp = new Date().toISOString().replace("T", " ").replace("Z", "");
   if (obj !== undefined) {
     console.log(`[${stamp}] ${msg}`, obj);
@@ -14,6 +14,14 @@ const log = (msg, obj) => {
     console.log(`[${stamp}] ${msg}`);
   }
 };
+const log = emit;
+
+// Every line a single account's watch emits carries that account's label, so the
+// server-side heartbeat can count DISTINCT ACCOUNTS progressing instead of raw
+// log lines. Without it a bot where 49 of 50 accounts are stalled still greps
+// `progress → drop` > 0 from the one healthy account and reads "farming" — which
+// is exactly how partial farm loss stayed invisible.
+export const scopedLog = (label) => (label ? (msg, obj) => emit(`[${label}] ${msg}`, obj) : emit);
 
 async function resolveChannel(session, login) {
   const res = await getChannelShell(session, login);
@@ -143,6 +151,10 @@ export async function watchChannel(session, channelLogin, opts = {}) {
   const onClaim = typeof opts.onClaim === "function" ? opts.onClaim : null;
   const stopSignal = opts.stopSignal || null; // { stopped: boolean }
   const noSessionExitMs = Number(opts.noSessionExitMs) > 0 ? Number(opts.noSessionExitMs) : 0; // 0 = off
+  // Shadows the module logger for this whole call: every line below is tagged
+  // with the account so the heartbeat can attribute it.
+  const label = opts.label ? String(opts.label) : "";
+  const log = scopedLog(label);
   const startedAt = Date.now();
   const playSessionId = makePlaySessionId();
   let exitReason = null;

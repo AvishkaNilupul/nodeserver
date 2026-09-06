@@ -295,3 +295,119 @@ test("parseSyncOutput: heartbeat rows and write receipts", () => {
   assert.deepStrictEqual(out.heartbeat["6"], { progress: 0, noSession: 40, attaches: 2 });
   assert.strictEqual(out.heartbeat["junk line"], undefined);
 });
+
+// --- Per-account coverage: the partial-failure blind spot -------------------
+// A raw `grep -c 'progress → drop'` says "farming" whenever ANY line exists, so
+// a bot with 49 of 50 accounts stalled and one healthy looked perfectly fine.
+// These lock in the distinct-ACCOUNT verdict that replaced it.
+
+test("heartbeatVerdict: full coverage is farming, thin coverage is partial", () => {
+  const gv = { live: true, uncertain: false };
+  // 50 of 50 accounts credited a minute → healthy.
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 300, noSession: 0, attaches: 50, progressAccounts: 50 }, gv, 50),
+    "farming",
+  );
+  // Exactly at the threshold (25/50 = 0.5) is still farming — rotation churn.
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 150, noSession: 30, attaches: 50, progressAccounts: 25 }, gv, 50),
+    "farming",
+  );
+  // THE BUG: one healthy account out of fifty. Raw line count said "farming".
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 6, noSession: 280, attaches: 50, progressAccounts: 1 }, gv, 50),
+    "partial",
+  );
+  // 24/50 = 0.48, just under the line.
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 144, noSession: 90, attaches: 50, progressAccounts: 24 }, gv, 50),
+    "partial",
+  );
+});
+
+test("heartbeatVerdict: a pre-label farmer image must NOT read as partial", () => {
+  const gv = { live: true, uncertain: false };
+  // Old image: plenty of progress lines but no labels to count, so the row
+  // carries no progressAccounts key at all. Falling through to the line count
+  // is what stops a rolling image upgrade alerting on every healthy bot.
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 300, noSession: 0, attaches: 50 }, gv, 50),
+    "farming",
+  );
+  // Same row shape, genuinely idle → still idle.
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 0, noSession: 280, attaches: 50 }, gv, 50),
+    "idle",
+  );
+});
+
+test("heartbeatVerdict: labelled image with zero accounts progressing is idle, not partial", () => {
+  const gv = { live: true, uncertain: false };
+  assert.strictEqual(
+    heartbeatVerdict(
+      { progress: 0, noSession: 280, attaches: 50, progressAccounts: 0, noSessionAccounts: 50 },
+      gv,
+      50,
+    ),
+    "idle",
+  );
+  // No account count known (bot config unreadable) → cannot judge coverage.
+  assert.strictEqual(
+    heartbeatVerdict({ progress: 6, noSession: 280, attaches: 50, progressAccounts: 1 }, gv, 0),
+    "farming",
+  );
+});
+
+test("shouldAlertIdle: partial alerts, and idle/partial flapping still alerts", () => {
+  const NOW = 1758000000000;
+  assert.strictEqual(shouldAlertIdle(["partial"], "partial", null, NOW), true);
+  // A bot alternating between the two bad states is still failing.
+  assert.strictEqual(shouldAlertIdle(["idle"], "partial", null, NOW), true);
+  assert.strictEqual(shouldAlertIdle(["partial"], "idle", null, NOW), true);
+  // One bad tick alone is not enough.
+  assert.strictEqual(shouldAlertIdle(["farming"], "partial", null, NOW), false);
+  // Recovery silences it.
+  assert.strictEqual(shouldAlertIdle(["partial"], "farming", null, NOW), false);
+  // Cooldown still applies across the widened verdict set.
+  assert.strictEqual(shouldAlertIdle(["partial"], "partial", NOW - 30 * MIN, NOW), false);
+  assert.strictEqual(shouldAlertIdle(["partial"], "partial", NOW - 61 * MIN, NOW), true);
+});
+
+test("buildSyncScript: emits distinct-account counts as a 6-field row", () => {
+  const { script } = buildSyncScript(["5"], []);
+  // The distinct extractor must de-duplicate, and `sed -n …p` must print only
+  // on a match so an unlabelled log yields 0 rather than a bogus count.
+  assert.match(script, /sed -n -E/);
+  assert.match(script, /sort -u \| wc -l/);
+  assert.ok(script.includes("pa=$(grep -F 'progress → drop'"));
+  assert.ok(script.includes("sa=$(grep -F 'no active drop-session'"));
+  assert.ok(script.includes('echo "5|$p|$s|$a|$pa|$sa"'));
+  // The load-bearing grep strings the farmer's log lines must keep matching.
+  assert.ok(script.includes("grep -c -F 'progress → drop'"));
+  assert.ok(script.includes("grep -c -F 'no active drop-session'"));
+});
+
+test("parseSyncOutput: 6-field rows carry coverage, 4-field rows stay untouched", () => {
+  const out = parseSyncOutput(
+    ["HB_START", "5|300|0|50|50|0", "6|6|280|50|1|49", "7|3|120|1", "HB_END"].join("\n"),
+  );
+  assert.deepStrictEqual(out.heartbeat["5"], {
+    progress: 300, noSession: 0, attaches: 50, progressAccounts: 50, noSessionAccounts: 0,
+  });
+  assert.deepStrictEqual(out.heartbeat["6"], {
+    progress: 6, noSession: 280, attaches: 50, progressAccounts: 1, noSessionAccounts: 49,
+  });
+  // Pre-label row: identical shape to before this change, no coverage keys.
+  assert.deepStrictEqual(out.heartbeat["7"], { progress: 3, noSession: 120, attaches: 1 });
+  // A 5-field row is malformed and must be ignored, not half-parsed.
+  const bad = parseSyncOutput(["HB_START", "5|1|2|3|4", "HB_END"].join("\n"));
+  assert.strictEqual(bad.heartbeat["5"], undefined);
+});
+
+test("end-to-end: the 49-of-50-stalled bot now reports partial and alerts", () => {
+  const gv = { live: true, uncertain: false };
+  const { heartbeat } = parseSyncOutput(["HB_START", "5|6|280|50|1|49", "HB_END"].join("\n"));
+  const verdict = heartbeatVerdict(heartbeat["5"], gv, 50);
+  assert.strictEqual(verdict, "partial");
+  assert.strictEqual(shouldAlertIdle([verdict], verdict, null, Date.now()), true);
+});
