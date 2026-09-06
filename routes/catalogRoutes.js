@@ -836,6 +836,22 @@ function preorderEtaFor(set, task, accountsByLogin) {
 // pre-orders the task's main listing. Anything without a usable task id
 // (manual and catalog_profile sets) falls back to its own id — marketplace
 // rows for those reference the set directly.
+// A single-unit link priced far below the card's own bulk unit price would
+// advertise a marketplace row the owner has not repriced yet (unclaimed rows
+// keep their pre-v3 $0.75 until unclaimedRepriceExisting is turned on). Drop
+// those rather than undercut the bulk offer on our own storefront.
+const BUY_LINK_MIN_PRICE_RATIO = 0.6;
+function pruneUndercutLinks(listing) {
+  const unit = Number(listing?.price) || 0;
+  if (!unit || !Array.isArray(listing.buyLinks)) return listing;
+  listing.buyLinks = listing.buyLinks.filter(
+    (link) =>
+      !(Number(link.price) > 0) ||
+      Number(link.price) >= unit * BUY_LINK_MIN_PRICE_RATIO,
+  );
+  return listing;
+}
+
 function buySourceIdFor(set, task) {
   const key = String(set.sourceEventKey || "");
   let source = "";
@@ -1026,6 +1042,7 @@ async function buildPublicCatalog() {
         mergedCount: row.mergedCount,
       },
     );
+    pruneUndercutLinks(listing);
     if (row.updatedAt) listing.updatedAt = row.updatedAt;
     listing.isNew = listing.isNew || !!row.isNewAny;
     return listing;
@@ -1083,6 +1100,7 @@ async function buildPublicCatalog() {
       mergedCount: row.mergedCount,
       priceOpts: { clamp: false, floor: row.floor, retail: row.retail },
     });
+    pruneUndercutLinks(listing);
     if (row.updatedAt) listing.updatedAt = row.updatedAt;
     listing.isNew = listing.isNew || !!row.isNewAny;
     return listing;
