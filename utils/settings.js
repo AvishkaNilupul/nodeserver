@@ -64,6 +64,15 @@ const AUTO_FARM_DEFAULTS = {
   // Consecutive empty inventory reads (>= 20 min apart) before a listed
   // account counts as expired — one empty read used to delist + release.
   unclaimedExpiryConfirmPasses: 2,
+  // Per-game marketplace restriction for unclaimed auto-listing, keyed like
+  // noClaimGames (substring of the normalised label): { "overwatch":
+  // ["gameflip"] } lists Overwatch ONLY on Gameflip and leaves the other
+  // accounts unlisted for manual bulk sale. Empty = every enabled market.
+  unclaimedGameMarkets: {},
+  // Per-game cap on auto-listed accounts (overrides the engine's default 70):
+  // { "overwatch": 25 }. Accounts above the cap stay unlisted = available for
+  // hand sales. 0 / missing = default cap.
+  unclaimedGameCaps: {},
   // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
   // account on — World of Tanks and UFL sell too thin to be worth burning new
   // accounts. For these, the brain only ever REUSES accounts it has already
@@ -418,6 +427,8 @@ const UNCLAIMED_PRICING_DEFAULTS = {
   lotSize: 5,
   lotDiscountPct: 10,
   expiryConfirmPasses: 2,
+  gameMarkets: {},
+  gameCaps: {},
 };
 function num(v, d) {
   const n = Number(v);
@@ -441,7 +452,47 @@ function getUnclaimedPricing() {
     lotSize: Math.max(2, Math.floor(num(af.unclaimedLotSize, D.lotSize))),
     lotDiscountPct: Math.min(90, Math.max(0, num(af.unclaimedLotDiscountPct, D.lotDiscountPct))),
     expiryConfirmPasses: Math.max(1, Math.floor(num(af.unclaimedExpiryConfirmPasses, D.expiryConfirmPasses))),
+    gameMarkets:
+      af.unclaimedGameMarkets && typeof af.unclaimedGameMarkets === "object"
+        ? af.unclaimedGameMarkets
+        : {},
+    gameCaps:
+      af.unclaimedGameCaps && typeof af.unclaimedGameCaps === "object"
+        ? af.unclaimedGameCaps
+        : {},
   };
+}
+
+// First matching key of a substring-keyed per-game map (same rule as
+// noClaimGames / gameFloorFor). Returns the value or undefined.
+function gameMapLookup(map, game) {
+  const g = normGameName(game);
+  if (!g || !map) return undefined;
+  for (const k of Object.keys(map)) {
+    const key = normGameName(k);
+    if (key && g.includes(key)) return map[k];
+  }
+  return undefined;
+}
+
+const UNCLAIMED_MARKETS = ["gameflip", "digiseller", "ggsel"];
+
+// Marketplaces an unclaimed game may be auto-listed on, or null for "every
+// enabled market" (no restriction configured).
+function gameMarketsFor(game) {
+  const v = gameMapLookup(getUnclaimedPricing().gameMarkets, game);
+  if (!Array.isArray(v)) return null;
+  const list = v
+    .map((m) => String(m || "").trim().toLowerCase())
+    .filter((m) => UNCLAIMED_MARKETS.includes(m));
+  return list.length ? [...new Set(list)] : null;
+}
+
+// Per-game auto-list cap, or 0 for "engine default".
+function gameCapFor(game) {
+  const v = gameMapLookup(getUnclaimedPricing().gameCaps, game);
+  const n = Math.floor(num(v, 0));
+  return n > 0 ? n : 0;
 }
 
 // Per-game unclaimed price floor: the first unclaimedGameFloors key that is a
@@ -480,5 +531,8 @@ module.exports = {
   getCoworkerAutonomy,
   getUnclaimedPricing,
   gameFloorFor,
+  gameMarketsFor,
+  gameCapFor,
+  UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
 };

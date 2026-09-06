@@ -2,7 +2,7 @@
 <html>
 
 <head>
-<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}try{if(/[?&]embed=1(&|$)/.test(location.search))document.documentElement.classList.add('embed');}catch(e){}})();</script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>No-claim farming</title>
@@ -86,6 +86,82 @@
   .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width:380px;}
   .toast.show { opacity:1; transform:none; }
   code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
+
+  /* Table scroll wrapper: every table sits inside one so a wide table scrolls
+     within its own box instead of pushing the page sideways. Transparent on
+     desktop (table stays 100% wide); the mobile block below gives it a floor. */
+  .tw { overflow-x:auto; -webkit-overflow-scrolling:touch; max-width:100%; }
+  .tw > table { min-width:100%; }
+
+  /* ---- Mobile (≤720px). This tab is used from a phone, embedded via an
+     iframe (?embed=1) in unclaimed-farms.html at ~375px wide. Desktop is
+     untouched: everything here lives inside the media query. ---- */
+  @media (max-width: 720px) {
+    body { overflow-x:hidden; }
+    .page { padding: 14px 12px; overflow-x:hidden; }
+    .page h1 { font-size: 19px; }
+    .sub { font-size: 12.5px; }
+    .head { gap: 8px; }
+    .head > div:last-child { margin-left: 0 !important; width: 100%; }
+    .head > div:last-child .btn { width: 100%; }
+    .banner { margin: 10px 0; padding: 10px 12px; font-size: 12px; }
+
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+    .stat { padding: 8px 11px; min-width: 0; }
+    .stat b { font-size: 16px; }
+
+    .panel { margin-bottom: 12px; border-radius: 12px; }
+    .panel .hd { padding: 10px 12px; gap: 8px; }
+    .panel .bd { padding: 11px 12px; }
+
+    /* Full-width form controls; 16px stops iOS Safari from zooming the page
+       on focus. Inline widths (#count 120px, #game/#newGame min-width) are
+       overridden so nothing sticks out of the 375px column. */
+    input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+      width: 100% !important; min-width: 0 !important; max-width: 100%;
+      font-size: 16px; padding: 10px 12px;
+    }
+    textarea { display:block; resize: vertical; }
+    .form-row { flex-direction: column; align-items: stretch; gap: 10px; }
+    .form-row > div { width: 100%; }
+    .form-row > .btn { width: 100%; }
+    .gamerow { flex-wrap: wrap; }
+    .gamerow input { flex: 1 1 100%; }
+    .gamerow .btn { flex: 1 1 auto; }
+
+    .btn { padding: 9px 13px; }
+    .tagrow { gap: 6px; }
+    .tabs { flex-wrap: wrap; gap: 5px; }
+    .tab { padding: 6px 10px; }
+
+    /* Bot rows: name/meta on the first line, status + action buttons wrap
+       onto their own line instead of being squeezed off the right edge. */
+    .bot .row { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    .bot .row .g { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    .bot .row .sp { margin-left: 0; flex-basis: 100%; flex-wrap: wrap; }
+    .bot .body { padding: 10px; }
+
+    /* Tables: keep columns readable with a min-width and let the wrapper
+       scroll sideways. .wide is the accounts table (password + secrets). */
+    .tw > table { min-width: 560px; }
+    .tw.wide > table { min-width: 760px; }
+    .tw td.mono { white-space: nowrap; }
+    th, td { padding: 6px 7px; }
+
+    pre.log { max-height: 220px; font-size: 11px; padding: 9px; }
+    .prog { min-width: 50px; }
+    .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+  }
+
+  /* Embedded in the Unclaimed farms iframe (?embed=1): admin-nav.js injects
+     its own 54px "RedeemHub" top bar + off-canvas drawer at ≤768px, which
+     would duplicate the parent page's chrome inside the frame. Suppress it
+     there; the standalone page keeps the drawer. Breakpoint matches the
+     script's own (768px), not 720px, so no width gets the bar. */
+  @media (max-width: 768px) {
+    html.embed body { padding-top: 0; }
+    html.embed .nav, html.embed .mobile-topbar, html.embed .nav-backdrop { display: none; }
+  }
 </style>
 </head>
 
@@ -109,7 +185,7 @@
 </aside>
 
 <main class="page">
-  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+  <div class="head" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
     <div>
       <h1>No-claim farming</h1>
       <div class="sub">Standalone farming for games that can't be click-claimed (Overwatch, Rainbow Six). Farms unclaimed; you list manually.</div>
@@ -150,7 +226,7 @@
   <div class="panel">
     <div class="hd"><b>New no-claim bot</b> <span class="muted" id="poolNote" style="margin-left:auto;"></span></div>
     <div class="bd">
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="form-row" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
         <div><label for="game">Game</label><select id="game" style="min-width:200px;"></select></div>
         <div><label for="count">Accounts from pool</label><input id="count" type="number" min="1" max="70" value="5" style="width:120px;" /></div>
         <button class="btn primary" id="createBtn">Create &amp; farm</button>
@@ -186,7 +262,7 @@
     <div class="hd"><b>No-claim games</b> <span class="muted" style="margin-left:auto;">excluded from the normal auto-farmer &amp; auto-lister</span></div>
     <div class="bd">
       <div class="tagrow" id="gamesTags"></div>
-      <div style="margin-top:11px;display:flex;gap:8px;">
+      <div class="gamerow" style="margin-top:11px;display:flex;gap:8px;">
         <input id="newGame" placeholder="keyword e.g. overwatch, rainbow six" style="min-width:260px;" />
         <button class="btn ghost sm" id="addGameBtn">Add</button>
       </div>
@@ -386,7 +462,7 @@ async function loadAccounts(id,c){
             '<button class="btn ghost sm" data-exp="json">Export JSON</button>'+
             '<button class="btn ghost sm" data-exp="copy">Copy user:pass</button>'+
           '</div>';
-    h+='<table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
+    h+='<div class="tw wide"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
     j.accounts.forEach(function(a){
       h+='<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'">'+
          '<td><input type="checkbox" class="msold" data-secret="'+esc(a.clientSecret)+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td>'+
@@ -395,7 +471,7 @@ async function loadAccounts(id,c){
          '<td class="mono">'+esc(a.twitchId)+'</td>'+
          '<td class="mono">'+esc(a.clientSecret)+'</td></tr>';
     });
-    h+='</tbody></table>';
+    h+='</tbody></table></div>';
     c.innerHTML=h;
     c.querySelectorAll('button[data-exp]').forEach(function(btn){
       btn.onclick=function(){ exportAccounts(id,btn.getAttribute('data-exp')); };
@@ -442,7 +518,7 @@ async function loadDrops(id,c){
   c.innerHTML='<div class="muted">Querying Twitch for each account… (this can take a moment)</div>';
   try{ var j=await api('/api/noclaim-farm/bots/'+id+'/drops');
     var rows=j.accounts||[]; var unclaimed=0;
-    var h='<table><thead><tr><th>Account</th><th>Drop</th><th>Progress</th><th>Status</th></tr></thead><tbody>';
+    var h='<div class="tw"><table><thead><tr><th>Account</th><th>Drop</th><th>Progress</th><th>Status</th></tr></thead><tbody>';
     rows.forEach(function(a){
       if(!a.ok){ h+='<tr><td>'+esc(a.login)+'</td><td colspan="3"><span class="chip off">'+esc(a.error||'error')+'</span></td></tr>'; return; }
       if(!a.drops.length){ h+='<tr><td>'+esc(a.login)+'</td><td colspan="3" class="muted">no in-progress drops yet</td></tr>'; return; }
@@ -455,7 +531,7 @@ async function loadDrops(id,c){
            '<td>'+stat+'</td></tr>';
       });
     });
-    h+='</tbody></table>';
+    h+='</tbody></table></div>';
     if(unclaimed) h+='<div class="chip off" style="display:inline-block;margin-top:10px;">✓ '+unclaimed+' drop(s) farmed &amp; left UNCLAIMED</div>';
     c.innerHTML=h;
   }catch(e){ c.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }
@@ -623,14 +699,14 @@ function renderSpentCandidates(){
         '<span class="muted">'+spentRows.length+' candidate'+(spentRows.length===1?'':'s')+' — review, then remove</span>'+
         '<button class="btn danger sm" id="removeSpentBtn" style="margin-left:auto;">Remove selected</button>'+
         '</div>'+
-        '<table><thead><tr><th style="width:26px;"><input type="checkbox" id="spentAll" checked></th>'+
+        '<div class="tw"><table><thead><tr><th style="width:26px;"><input type="checkbox" id="spentAll" checked></th>'+
         '<th>Login</th><th>Bot</th><th>Game</th><th>Reason</th></tr></thead><tbody>';
   spentRows.forEach(function(a,i){
     h+='<tr><td><input type="checkbox" class="spentck" data-i="'+i+'" checked></td>'+
        '<td>'+esc(a.login)+'</td><td class="muted">#'+esc(a.botId)+'</td>'+
        '<td>'+esc(a.game||'')+'</td><td class="tagrow">'+reasonChips(a)+'</td></tr>';
   });
-  h+='</tbody></table>';
+  h+='</tbody></table></div>';
   c.innerHTML=h;
   $('spentAll').onchange=function(){ var on=this.checked; c.querySelectorAll('.spentck').forEach(function(x){ x.checked=on; }); };
   $('removeSpentBtn').onclick=removeSpent;
@@ -664,14 +740,14 @@ async function loadSpentHistory(){
           '<span class="muted">'+rows.length+'</span>'+
           (rows.length?'<button class="btn ghost sm" id="clearSpentBtn" style="margin-left:auto;">Clear list</button>':'')+'</div>';
     if(!rows.length){ el.innerHTML=h+'<div class="muted">Nothing removed yet.</div>'; return; }
-    h+='<table><thead><tr><th>Login</th><th>Game</th><th>From</th><th>Reason</th><th>When</th><th></th></tr></thead><tbody>';
+    h+='<div class="tw"><table><thead><tr><th>Login</th><th>Game</th><th>From</th><th>Reason</th><th>When</th><th></th></tr></thead><tbody>';
     rows.forEach(function(a){
       h+='<tr><td>'+esc(a.login)+'</td><td>'+esc(a.game||'')+'</td><td class="muted">#'+esc(a.botId)+'</td>'+
          '<td class="tagrow">'+reasonChips(a)+'</td>'+
          '<td class="muted">'+(a.sweptAt?new Date(a.sweptAt).toLocaleString():'')+'</td>'+
          '<td><button class="btn ghost sm" data-del="'+esc(a._id)+'" title="Dismiss from list">×</button></td></tr>';
     });
-    h+='</tbody></table>'; el.innerHTML=h;
+    h+='</tbody></table></div>'; el.innerHTML=h;
     var cb=$('clearSpentBtn'); if(cb) cb.onclick=async function(){ if(!confirm('Clear the removed list? This only clears the view — it does not affect any account.')) return; try{ await api('/api/noclaim-farm/spent/all',{method:'DELETE'}); loadSpentHistory(); }catch(e){ toast('Failed: '+e.message); } };
     el.querySelectorAll('button[data-del]').forEach(function(b){ b.onclick=async function(){ try{ await api('/api/noclaim-farm/spent/'+b.getAttribute('data-del'),{method:'DELETE'}); loadSpentHistory(); }catch(e){ toast('Failed: '+e.message); } }; });
   }catch(e){ el.innerHTML='<div class="chip off" style="display:inline-block">'+esc(e.message)+'</div>'; }

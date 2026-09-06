@@ -468,8 +468,14 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
     const pricing = settings.getUnclaimedPricing();
     const gameFilter = String(req.query.game || "").trim();
 
-    const ledgerFilter = { status: { $in: ["listed", "sold"] } };
-    if (gameFilter) ledgerFilter.game = gameFilter;
+    const ledgerFilter = { status: { $in: ["listed", "sold", "skipped"] } };
+    // ?game= is matched on the normalised label (case/punctuation-insensitive,
+    // like every other game lookup here) — an exact Mongo match on "overwatch"
+    // silently missed every "Overwatch" ledger.
+    if (gameFilter) {
+      const esc = gameFilter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*");
+      ledgerFilter.game = new RegExp("^\\s*" + esc + "\\s*$", "i");
+    }
     const rowFilter = { origin: engine.ORIGIN, status: "active" };
 
     const [ledgers, activeRows] = await Promise.all([
@@ -569,10 +575,14 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
     const perGameTotals = new Map();
     for (const l of ledgers) {
       const gk = gameKeyOf(l.game);
-      const t = perGameTotals.get(gk) || { listed: 0, sold: 0 };
+      const t = perGameTotals.get(gk) || { listed: 0, sold: 0, held: 0 };
       if (l.status === "listed") t.listed++;
       else if (l.status === "sold") t.sold++;
+      else if (l.status === "skipped") t.held++;
       perGameTotals.set(gk, t);
+      // "held" (skipped) ledgers hold their drops but sit on no listing —
+      // they are the manual bulk-sale stock, not set units.
+      if (l.status === "skipped") continue;
       if (!l.set) continue;
       const id = String(l.set);
       if (!ledgersBySet.has(id)) ledgersBySet.set(id, []);
@@ -590,7 +600,7 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
     for (const game of games) {
       const gk = gameKeyOf(game);
       const research = researchFor(researchRows, game);
-      const totals = perGameTotals.get(gk) || { listed: 0, sold: 0 };
+      const totals = perGameTotals.get(gk) || { listed: 0, sold: 0, held: 0 };
       const setRows = [];
 
       for (const [setId, set] of setById) {
@@ -690,6 +700,9 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
         research: researchSummary(research),
         listed: totals.listed,
         sold: totals.sold,
+        held: totals.held || 0,
+        cap: engine.capForGame ? engine.capForGame(game) : engine.GAME_CAP,
+        markets: settings.gameMarketsFor ? settings.gameMarketsFor(game) : null,
         events: eventsForGame(catalog, game, now),
         sets: setRows,
       });
@@ -788,6 +801,8 @@ const UNCLAIMED_PRICING_KEYS = {
   unclaimedLotSize: ["number", 2, 100, true, "lotSize"],
   unclaimedLotDiscountPct: ["number", 0, 90, false, "lotDiscountPct"],
   unclaimedExpiryConfirmPasses: ["number", 1, 50, true, "expiryConfirmPasses"],
+  unclaimedGameMarkets: ["markets", null, null, false, "gameMarkets"],
+  unclaimedGameCaps: ["caps", null, null, false, "gameCaps"],
 };
 const UNCLAIMED_ALIAS_TO_KEY = Object.fromEntries(
   Object.entries(UNCLAIMED_PRICING_KEYS).map(([k, spec]) => [spec[4], k]),
@@ -846,6 +861,47 @@ function validatePricingPatch(body) {
         floors[name] = n;
       }
       patch[key] = floors;
+    } else if (type === "markets") {
+      // { "overwatch": ["gameflip"] } — allowed marketplaces per game; an
+      // empty list / "" removes the restriction for that key.
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        errors.push(key + " must be an object of { game: [markets] }");
+        continue;
+      }
+      const out = {};
+      for (const [g, v] of Object.entries(value)) {
+        const name = String(g || "").trim();
+        if (!name) continue;
+        const arr = Array.isArray(v) ? v : String(v || "").split(/[,\s]+/);
+        const list = [...new Set(arr.map((m) => String(m || "").trim().toLowerCase()).filter(Boolean))];
+        if (!list.length) continue;
+        const bad = list.filter((m) => !settings.UNCLAIMED_MARKETS.includes(m));
+        if (bad.length) {
+          errors.push(key + "." + name + ": unknown market(s) " + bad.join(", "));
+          continue;
+        }
+        out[name] = list;
+      }
+      patch[key] = out;
+    } else if (type === "caps") {
+      // { "overwatch": 25 } — per-game auto-list cap; 0 / "" removes it.
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        errors.push(key + " must be an object of { game: cap }");
+        continue;
+      }
+      const out = {};
+      for (const [g, v] of Object.entries(value)) {
+        const name = String(g || "").trim();
+        if (!name) continue;
+        if (v === "" || v === null || v === 0 || v === "0") continue;
+        const n = typeof v === "string" ? Number(v.trim()) : Number(v);
+        if (!Number.isInteger(n) || n < 1 || n > 5000) {
+          errors.push(key + "." + name + " must be an integer 1..5000");
+          continue;
+        }
+        out[name] = n;
+      }
+      patch[key] = out;
     }
   }
   return { patch, ignored, errors };
@@ -891,6 +947,69 @@ router.post("/api/unclaimed-auto/pricing", requireSuperadmin, async (req, res) =
       pricing: settings.getUnclaimedPricing(),
       raw: rawPricingKeys(),
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Bulk credential export for hand sales: the HELD (status "skipped") ledgers
+// of one game — accounts that still hold their unclaimed drops but sit on no
+// auto-listing (over the cap, or freed from a marketplace). text/plain
+// `login:password` lines, audited by count only. Optional ?source=noclaim|webbot
+// and ?status=skipped|listed (default skipped — listed accounts are on sale and
+// must not be hand-sold without the manual-sold tick).
+router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const game = String(body.game || "").trim();
+    if (!game) return res.status(400).json({ success: false, message: "game required" });
+    const status = body.status === "listed" ? "listed" : "skipped";
+    const source = body.source === "noclaim" || body.source === "webbot" ? body.source : "";
+    const limit = Math.min(2000, Math.max(1, parseInt(body.limit, 10) || 500));
+    const want = settings.normGameName(game);
+    const filter = { status };
+    if (source) filter.source = source;
+    const ledgers = await UnclaimedAccount.find(filter, {
+      login: 1,
+      game: 1,
+      source: 1,
+      poolAccountId: 1,
+      webBotAccountId: 1,
+      drops: 1,
+      bundleLabel: 1,
+    })
+      .sort({ updatedAt: -1 })
+      .limit(4000)
+      .lean();
+    const mine = ledgers.filter((l) => settings.normGameName(l.game) === want).slice(0, limit);
+    const lines = [];
+    let skippedNoPw = 0;
+    for (const l of mine) {
+      let cred = null;
+      try {
+        cred = await engine.credentialForLedger(l);
+      } catch {
+        cred = null;
+      }
+      if (!cred || !cred.login || !cred.password) {
+        skippedNoPw++;
+        continue;
+      }
+      lines.push(cred.login + ":" + cred.password);
+    }
+    logEvent({
+      category: "unclaimed",
+      action: "creds_exported",
+      actor: (req.session && req.session.admin && req.session.admin.username) || "admin",
+      game,
+      count: lines.length,
+      detail: status + " " + (source || "all") + " accounts exported for manual bulk sale (" + lines.length + ", " + skippedNoPw + " without password)",
+    });
+    res.set("Content-Type", "text/plain; charset=utf-8");
+    res.set("Cache-Control", "no-store");
+    res.set("X-Exported-Count", String(lines.length));
+    res.set("X-Skipped-No-Password", String(skippedNoPw));
+    res.send(lines.join("\n") + (lines.length ? "\n" : ""));
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

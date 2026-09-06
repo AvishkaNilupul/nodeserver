@@ -1088,7 +1088,20 @@ async function enabledMarketsForGame(game) {
   }
   if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   if (ggselCategoryId) markets.push("ggsel");
+  // Per-game restriction (settings.unclaimedGameMarkets): e.g. Overwatch on
+  // Gameflip only, so the other accounts stay free for manual bulk sale.
+  const allowed = settings.gameMarketsFor ? settings.gameMarketsFor(game) : null;
+  if (Array.isArray(allowed) && allowed.length) {
+    const kept = markets.filter((m) => allowed.includes(m));
+    return { markets: kept, ggselCategoryId: kept.includes("ggsel") ? ggselCategoryId : "" };
+  }
   return { markets, ggselCategoryId };
+}
+
+// Effective per-game cap: settings.unclaimedGameCaps override, else GAME_CAP.
+function capForGame(game) {
+  const n = settings.gameCapFor ? settings.gameCapFor(game) : 0;
+  return n > 0 ? n : GAME_CAP;
 }
 
 // Sorted [itemKey, qty] pairs of a stored set (missing qty = 1, like the
@@ -2585,6 +2598,12 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
   const login = cand.login || "";
   const loginLower = String(login).toLowerCase();
   const existing = await UnclaimedAccount.findOne({ loginLower, source: cand.source }).lean();
+  // A ledger that is NOT listed right now (skipped / expired / released /
+  // removed) is being attached afresh, so its market MUST follow the new
+  // attachment. `$setOnInsert:{market}` alone left a re-listed-in-place ledger
+  // with its OLD market, and rowForLedger then looked on the wrong marketplace
+  // (the trap the R6 re-bundle recipe worked around by deleting ledgers).
+  const repointMarket = !existing || existing.status !== "listed";
   if (existing && existing.status === "listed" && existing.market && existing.market !== market) {
     // Defense-in-depth: a listed ledger already committed to one marketplace
     // must never be re-pointed at another — one account, one buyer.
@@ -2630,8 +2649,9 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
         emptyReads: 0,
         firstEmptyAt: null,
         lotId: "",
+        ...(repointMarket ? { market } : {}),
       },
-      $setOnInsert: { market },
+      ...(repointMarket ? {} : { $setOnInsert: { market } }),
     },
     { upsert: true, new: true },
   );
@@ -2828,10 +2848,11 @@ async function scanAndListPass() {
     const prev = gameLocks.get(gkey) || Promise.resolve();
     const run = prev.then(() => {
       const cur = gameListed.get(gkey) || 0;
-      if (cur >= GAME_CAP) {
+      const cap = capForGame(gkey);
+      if (cur >= cap) {
         skipped.push({
           login,
-          error: "game at cap (" + GAME_CAP + ") — kept unlisted for manual sale",
+          error: "game at cap (" + cap + ") — kept unlisted for manual sale",
         });
         return false;
       }
@@ -3688,6 +3709,8 @@ module.exports = {
   consistencyIssues,
   ORIGIN,
   GAME_CAP,
+  capForGame,
+  enabledMarketsForGame,
   TICK_MS,
   SCAN_LIMIT,
   CHECK_LIMIT,

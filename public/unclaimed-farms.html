@@ -105,6 +105,60 @@
   .frm textarea { min-height:84px; font-family: ui-monospace, Menlo, monospace; font-size:12px; resize:vertical; }
   .frm label.tog { flex-direction:row; align-items:center; gap:8px; color:var(--ink); font-weight:500; padding-top:22px; }
   .frm label.tog input { width:16px; height:16px; }
+
+  /* Bundles panel header actions, per-game header row, held-creds box */
+  .hd-actions { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .bt-head { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  tr.bt-game .bt-head .chip { margin-left:0; }
+  .bt-head .btn { margin-left:auto; }
+  .creds-box { display:none; margin-bottom:12px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--surface-2); }
+  .creds-box.show { display:block; }
+  .creds-box .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+  .creds-box textarea { width:100%; padding:8px 11px; border-radius:10px; border:1.5px solid var(--line); background:var(--surface); color:var(--ink); font-family: ui-monospace, Menlo, monospace; font-size:12px; resize:vertical; outline:none; }
+
+  /* Phone layout (<=720px). admin-nav.js already turns .nav into an off-canvas
+     drawer behind a fixed 54px top bar at <=768px; these rules make the page
+     itself flow on a 375px screen: document scroll instead of the
+     flex/overflow:hidden shell, a horizontally scrolling tab strip, 2-column
+     stats, stacked panels, every table scrolling inside its wrapper, the two
+     modals as full-width sheets, 16px inputs so iOS never zooms. Desktop is
+     untouched. */
+  @media (max-width: 720px) {
+    html, body { overflow-x:hidden; }
+    body { display:block; height:auto; min-height:100vh; overflow:visible; overflow-x:hidden; }
+    .page { display:block; padding:14px 12px 28px; overflow:visible; max-width:100vw; }
+    .page h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .banner { margin:10px 0; padding:10px 12px; font-size:12px; }
+    .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; margin:12px 0 10px; padding-bottom:2px; }
+    .tabs::-webkit-scrollbar { display:none; }
+    .tab { flex:0 0 auto; white-space:nowrap; padding:8px 13px; font-size:12.5px; }
+    .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+    .stat { padding:8px 11px; min-width:0; }
+    .stat b { font-size:16px; }
+    .stat span { font-size:10px; }
+    .panel { border-radius:12px; margin-bottom:12px; }
+    .panel .hd { padding:10px 12px; gap:8px; }
+    .panel .bd { padding:10px 12px; }
+    .hd-actions { margin-left:0; width:100%; }
+    .bt-head .btn { margin-left:0; }
+    table { min-width:600px; }
+    .btn { padding:9px 13px; }
+    .btn.sm { padding:7px 10px; font-size:12px; }
+    .sec { min-height:0; }
+    .sec iframe { display:block; width:100%; height:calc(100vh - 90px); min-height:480px; border-radius:10px; }
+    .arc-bar input[type="search"] { min-width:0; flex-basis:100%; }
+    .arc-bar select { flex:1 1 auto; min-width:0; }
+    #arcGameChip { margin-left:0 !important; }
+    input, select, textarea { font-size:16px !important; }
+    .modal-bg { padding:0; align-items:stretch; z-index:250; }
+    .modal { max-width:none !important; width:100%; min-height:100%; border-radius:0; border-left:0; border-right:0; display:flex; flex-direction:column; }
+    .modal > header { position:sticky; top:0; z-index:2; background:var(--surface); padding:12px 14px; flex-wrap:wrap; }
+    .modal > header b { font-size:15px; }
+    .mbody { padding:14px 12px 24px; flex:1; }
+    .frm { grid-template-columns:1fr; gap:10px; }
+    .frm label.tog { padding-top:0; }
+  }
 </style>
 </head>
 
@@ -159,7 +213,7 @@
         <span class="chip" id="bdLotsFlag" title="unclaimedGameflipLots">lots –</span>
         <span class="chip" id="bdRepriceFlag" title="unclaimedRepriceExisting">auto-reprice –</span>
         <span class="muted" id="bdTotal"></span>
-        <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <span class="hd-actions">
           <span class="muted" id="bdMsg"></span>
           <button class="btn ghost sm" id="bdRefreshBtn">Refresh</button>
           <button class="btn ghost sm" id="repriceBtn">Reprice (dry-run)</button>
@@ -167,6 +221,7 @@
         </span>
       </div>
       <div class="bd">
+        <div class="creds-box" id="bdCreds"></div>
         <div style="overflow-x:auto;">
           <table id="bundleTable">
             <thead><tr><th>Game</th><th>Event / bundle</th><th>Waves</th><th>Items</th><th>Listed <span style="text-transform:none;font-weight:500;">(GF live/wait · DG · GG)</span></th><th>Lots</th><th>Sold</th><th>Price → Suggested</th></tr></thead>
@@ -369,6 +424,10 @@
           <input type="number" id="prBonus" min="0" step="1" required /></label>
         <label class="wide">Per-game floors<small>unclaimedGameFloors — one <code>game=price</code> per line, e.g. <code>overwatch=1.5</code> (substring match like noClaimGames)</small>
           <textarea id="prGameFloors" placeholder="overwatch=1.5&#10;rainbow six=2"></textarea></label>
+        <label class="wide">Per-game markets<small>unclaimedGameMarkets — one <code>game=market,market</code> per line (gameflip, digiseller, ggsel), e.g. <code>overwatch=gameflip</code>; the other accounts stay unlisted for manual bulk sale. Blank = every enabled market.</small>
+          <textarea id="prGameMarkets" placeholder="overwatch=gameflip&#10;rainbow six=gameflip,ggsel"></textarea></label>
+        <label class="wide">Per-game caps<small>unclaimedGameCaps — one <code>game=N</code> per line, e.g. <code>overwatch=25</code>; accounts above the cap stay unlisted (held for bulk). Blank = engine default.</small>
+          <textarea id="prGameCaps" placeholder="overwatch=25&#10;rainbow six=40"></textarea></label>
         <label class="tog"><input type="checkbox" id="prRepriceExisting" /> Reprice existing rows periodically <small class="muted">(unclaimedRepriceExisting)</small></label>
         <label>Reprice drift %<small>unclaimedRepriceDriftPct — only rows drifting at least this much are patched</small>
           <input type="number" id="prDriftPct" min="1" step="1" required /></label>
@@ -577,8 +636,17 @@ function researchChips(r, noClaim){
 function renderGameRows(g){
   var sets=g.sets||[], events=g.events||[];
   var byKey={}; events.forEach(function(ev){ if(ev&&ev.key) byKey[ev.key]=ev; });
-  var head='<tr class="bt-game"><td colspan="8">'+esc(g.game||'(no game)')+researchChips(g.research, g.noClaim)+
-    '<span class="muted" style="margin-left:8px;font-weight:500;">'+events.length+' event'+(events.length===1?'':'s')+' · '+sets.length+' bundle'+(sets.length===1?'':'s')+'</span></td></tr>';
+  // held = accounts holding drops but on NO listing (manual bulk-sale stock);
+  // cap = per-game auto-list cap; markets = allowed markets or null (= all).
+  var held=Number(g.held)||0, cap=Number(g.cap)||0;
+  var mk=Array.isArray(g.markets)&&g.markets.length?g.markets.join(', '):'all';
+  var head='<tr class="bt-game"><td colspan="8"><div class="bt-head"><span>'+esc(g.game||'(no game)')+'</span>'+researchChips(g.research, g.noClaim)+
+    '<span class="chip '+(held?'warn':'')+'" title="accounts holding drops but on no listing — manual bulk-sale stock">held '+held+' for bulk</span>'+
+    '<span class="chip" title="per-game auto-list cap (unclaimedGameCaps)">cap '+(cap?esc(cap):'default')+'</span>'+
+    '<span class="chip" title="allowed marketplaces (unclaimedGameMarkets)">markets: '+esc(mk)+'</span>'+
+    '<span class="muted" style="font-weight:500;">'+events.length+' event'+(events.length===1?'':'s')+' · '+sets.length+' bundle'+(sets.length===1?'':'s')+'</span>'+
+    '<button type="button" class="btn ghost sm" data-exportheld="'+esc(g.game||'')+'"'+(held&&g.game?'':' disabled')+' title="Export login:password lines for the held (unlisted) accounts of this game — audited">Export held creds</button>'+
+    '</div></td></tr>';
   if(!sets.length) return head+'<tr><td></td><td colspan="7" class="muted">No bundles listed for this game yet.</td></tr>';
   return head+sets.map(function(s){
     var ev=s.eventKey?byKey[s.eventKey]:null;
@@ -646,6 +714,56 @@ async function loadLots(){
     // break the bundles panel.
     wrap.style.display='none';
   }
+}
+
+// ---- Export held creds (manual bulk sale) -----------------------------------
+// POST /export-creds {game} answers text/plain login:password lines (header
+// X-Exported-Count), so this bypasses the JSON helper. Same creds-box pattern
+// as webbot-farm.html: readonly textarea + Copy + Download .txt.
+
+async function exportHeldCreds(game, btn){
+  game=String(game||'').trim();
+  if(!game) return;
+  if(btn) btn.disabled=true;
+  bundleToast('exporting held creds for '+game+'…');
+  try{
+    var r=await fetch('/api/unclaimed-auto/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({game:game})});
+    if(!r.ok){ var msg='HTTP '+r.status; try{ var ej=await r.json(); if(ej&&ej.message) msg=ej.message; }catch(e){} throw new Error(msg); }
+    var text=await r.text();
+    var n=parseInt(r.headers.get('X-Exported-Count'),10);
+    if(!isFinite(n)) n=text.split(/\r?\n/).filter(Boolean).length;
+    var skipped=parseInt(r.headers.get('X-Skipped-No-Password'),10);
+    showBundleCreds(game, text, n, isFinite(skipped)?skipped:0);
+    bundleToast('exported '+n+' credential'+(n===1?'':'s')+' for '+game);
+  }catch(e){ bundleToast('Export failed: '+e.message); }
+  finally{ if(btn) btn.disabled=false; }
+}
+
+function showBundleCreds(game, text, count, skipped){
+  var box=$('bdCreds'); if(!box) return;
+  box.classList.add('show');
+  box.innerHTML='<div class="row"><b style="font-size:13px;">Held credentials — '+esc(game)+'</b>'+
+    '<span class="muted">'+count+' line'+(count===1?'':'s')+' · login:password'+(skipped?' · '+skipped+' without password skipped':'')+' · this export is audited</span>'+
+    '<button type="button" class="btn ghost sm" id="bdCredsCopyBtn" style="margin-left:auto;">Copy</button>'+
+    '<button type="button" class="btn ghost sm" id="bdCredsDlBtn">Download .txt</button>'+
+    '<button type="button" class="btn ghost sm" id="bdCredsCloseBtn">Close</button></div>'+
+    '<textarea id="bdCredsText" rows="'+Math.min(12,Math.max(3,count))+'" readonly spellcheck="false"></textarea>';
+  $('bdCredsText').value=count?text:'(no exportable credentials — held accounts without a stored password are skipped)';
+  $('bdCredsCopyBtn').disabled=!count;
+  $('bdCredsDlBtn').disabled=!count;
+  $('bdCredsCopyBtn').onclick=function(){
+    copyText(text).then(
+      function(){ bundleToast('copied '+count+' line'+(count===1?'':'s')); },
+      function(){ var ta=$('bdCredsText'); ta.focus(); ta.select(); bundleToast('copy blocked — text selected, press Ctrl/Cmd+C'); });
+  };
+  $('bdCredsDlBtn').onclick=function(){
+    var slug=String(game).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'game';
+    var u=URL.createObjectURL(new Blob([text],{type:'text/plain'}));
+    var a=document.createElement('a'); a.href=u; a.download='unclaimed-held-'+slug+'-'+new Date().toISOString().slice(0,10)+'.txt';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ URL.revokeObjectURL(u); },1000);
+  };
+  $('bdCredsCloseBtn').onclick=function(){ box.classList.remove('show'); box.innerHTML=''; };
+  try{ box.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(e){}
 }
 
 // ---- Reprice (dry-run → Apply) --------------------------------------------
@@ -740,6 +858,48 @@ function parseGameFloors(txt){
   });
   return out;
 }
+// "game=market,market" lines → { game: [markets] } (unclaimedGameMarkets).
+// Markets are validated client-side against the three unclaimed markets;
+// blank lines ignored; anything else is a validation error.
+var UNCLAIMED_MARKETS=['gameflip','digiseller','ggsel'];
+function gameMarketsToLines(o){
+  o=o||{};
+  return Object.keys(o).map(function(k){ var v=o[k]; return k+'='+(Array.isArray(v)?v.join(','):String(v||'')); }).join('\n');
+}
+function parseGameMarkets(txt){
+  var out={};
+  String(txt||'').split(/\r?\n/).forEach(function(line,i){
+    var s=line.trim(); if(!s) return;
+    var m=s.match(/^(.+?)\s*[=:]\s*(.+)$/);
+    if(!m) throw new Error('Per-game markets line '+(i+1)+' must be game=market,market (got "'+s+'")');
+    var k=m[1].trim().toLowerCase();
+    var list=[]; m[2].split(/[,\s]+/).forEach(function(x){ x=x.trim().toLowerCase(); if(x&&list.indexOf(x)<0) list.push(x); });
+    if(!k) throw new Error('Per-game markets line '+(i+1)+': missing game');
+    if(!list.length) throw new Error('Per-game markets line '+(i+1)+': no markets given');
+    var bad=list.filter(function(x){ return UNCLAIMED_MARKETS.indexOf(x)<0; });
+    if(bad.length) throw new Error('Per-game markets line '+(i+1)+': unknown market '+bad.join(', ')+' (use '+UNCLAIMED_MARKETS.join(', ')+')');
+    out[k]=list;
+  });
+  return out;
+}
+// "game=N" lines → { game: N } (unclaimedGameCaps); N a whole number ≥ 1.
+function gameCapsToLines(o){
+  o=o||{};
+  return Object.keys(o).map(function(k){ return k+'='+o[k]; }).join('\n');
+}
+function parseGameCaps(txt){
+  var out={};
+  String(txt||'').split(/\r?\n/).forEach(function(line,i){
+    var s=line.trim(); if(!s) return;
+    var m=s.match(/^(.+?)\s*[=:]\s*(\d+)\s*$/);
+    if(!m) throw new Error('Per-game caps line '+(i+1)+' must be game=N (got "'+s+'")');
+    var k=m[1].trim().toLowerCase(), v=parseInt(m[2],10);
+    if(!k) throw new Error('Per-game caps line '+(i+1)+': missing game');
+    if(!isFinite(v)||v<1) throw new Error('Per-game caps line '+(i+1)+': cap must be a whole number ≥ 1');
+    out[k]=v;
+  });
+  return out;
+}
 function numField(id, label, opts){
   opts=opts||{};
   var v=Number($(id).value);
@@ -760,6 +920,8 @@ async function openPricing(){
     $('prCap').value=p.itemCapMult!=null?p.itemCapMult:2.5;
     $('prBonus').value=p.fullEventBonusPct!=null?p.fullEventBonusPct:25;
     $('prGameFloors').value=gameFloorsToLines(p.gameFloors);
+    $('prGameMarkets').value=gameMarketsToLines(p.gameMarkets);
+    $('prGameCaps').value=gameCapsToLines(p.gameCaps);
     $('prRepriceExisting').checked=!!p.repriceExisting;
     $('prDriftPct').value=p.repriceDriftPct!=null?p.repriceDriftPct:20;
     $('prLots').checked=!!p.lots;
@@ -778,6 +940,8 @@ async function savePricing(){
     var body={
       unclaimedPriceFloorUsd: numField('prFloor','Price floor',{min:0}),
       unclaimedGameFloors: parseGameFloors($('prGameFloors').value),
+      unclaimedGameMarkets: parseGameMarkets($('prGameMarkets').value),
+      unclaimedGameCaps: parseGameCaps($('prGameCaps').value),
       unclaimedItemStepPct: numField('prStep','Item step %',{min:0}),
       unclaimedItemCapMult: numField('prCap','Item cap ×',{min:1}),
       unclaimedFullEventBonusPct: numField('prBonus','Full-event bonus %',{min:0}),
@@ -1101,6 +1265,7 @@ document.addEventListener('click',function(e){
       return 'delisted';
     });
   }
+  if(t.dataset&&t.dataset.exportheld!=null){ exportHeldCreds(t.dataset.exportheld, t); return; }
   var itemRow=t.closest?t.closest('tr[data-itemkey]'):null;
   if(itemRow){ openArcItem(itemRow.dataset.itemkey, itemRow.dataset.itemname); return; }
   var gameRow=t.closest?t.closest('tr[data-game]'):null;

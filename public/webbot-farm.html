@@ -2,7 +2,7 @@
 <html>
 
 <head>
-<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}try{if(/[?&]embed=1(&|$)/.test(location.search))document.documentElement.classList.add('embed');}catch(e){}})();</script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Web-token farm</title>
@@ -89,6 +89,57 @@
   .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width:380px;}
   .toast.show { opacity:1; transform:none; }
   code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
+  .tbl { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+
+  /* ---- Mobile (also the ?embed=1 iframe inside unclaimed-farms.html on a phone) ---- */
+  @media (max-width: 720px) {
+    body { flex-direction:column; height:100vh; height:100dvh; }
+    /* Sidebar becomes a wrapping top bar; the iframe embed drops it entirely. */
+    .nav { width:100%; flex-direction:row; flex-wrap:wrap; align-items:center; border-right:none; border-bottom:1px solid var(--line); }
+    .nav .brand { padding:10px 12px; border-bottom:none; }
+    .nav .links { flex:1 1 auto; flex-direction:row; flex-wrap:wrap; gap:2px; padding:6px 8px; min-width:0; }
+    .nav .links a { padding:7px 10px; font-size:13px; gap:7px; }
+    .nav .me { border-top:none; padding:6px 10px; margin-left:auto; }
+    .nav .me .who { display:none; }
+    html.embed .nav { display:none; }
+
+    .page { padding:14px 12px; min-height:0; overflow-x:hidden; }
+    .page h1 { font-size:19px; }
+    .pagehead { gap:10px; }
+    .pagehead .headacts { margin-left:0 !important; width:100%; flex-wrap:wrap; }
+    .sub { font-size:13px; }
+    .banner { padding:10px 12px; font-size:12px; overflow-wrap:anywhere; }
+
+    .stats { gap:8px; margin:12px 0; }
+    .stat { flex:1 1 calc(33.333% - 8px); min-width:96px; padding:8px 10px; }
+    .stat b { font-size:16px; }
+
+    .panel { border-radius:12px; margin-bottom:12px; }
+    .panel .hd { padding:10px 12px; gap:8px; }
+    .panel .bd { padding:12px; }
+
+    /* Full-width controls; 16px stops iOS from zooming on focus. */
+    input, select, textarea { width:100% !important; min-width:0 !important; max-width:100%; font-size:16px; }
+    textarea { font-size:14px; }
+    input[type="checkbox"] { width:auto !important; }
+    .formrow { gap:10px; }
+    .formrow > div { flex:1 1 100%; }
+    .formrow > .btn { width:100%; }
+    .acctcols > div { flex:1 1 100% !important; min-width:0 !important; }
+    .btn { padding:9px 13px; }
+    .tagrow, .tabs { flex-wrap:wrap; }
+
+    /* Every table scrolls inside its own wrapper; the body never scrolls sideways. */
+    .tbl table { min-width:560px; }
+    th, td { padding:6px 7px; white-space:nowrap; }
+    td.tagrow { white-space:normal; }
+
+    .bot .row { flex-wrap:wrap; gap:6px 10px; padding:10px 12px; }
+    .bot .row .sp { margin-left:0; width:100%; justify-content:flex-start; }
+    .bot .body { padding:10px 12px; }
+    pre.log { font-size:11px; max-height:240px; }
+    .toast { left:12px; right:12px; bottom:12px; max-width:none; }
+  }
 </style>
 </head>
 
@@ -112,12 +163,12 @@
 </aside>
 
 <main class="page">
-  <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+  <div class="pagehead" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
     <div>
       <h1>Web-token farm <span class="chip warn" style="vertical-align:middle;">TEST</span></h1>
       <div class="sub">Isolated drop-farm bots using web-client OAuth tokens (the <code>webbot-drops</code> farmer), running as their own Docker containers on the Pi.</div>
     </div>
-    <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn ghost sm" id="rebuildBtn" title="Rebuild the farmer image on the Pi after a code change">Rebuild image</button><button class="btn ghost sm" id="refreshBtn">Refresh</button></div>
+    <div class="headacts" style="margin-left:auto;display:flex;gap:8px;"><button class="btn ghost sm" id="rebuildBtn" title="Rebuild the farmer image on the Pi after a code change">Rebuild image</button><button class="btn ghost sm" id="refreshBtn">Refresh</button></div>
   </div>
 
   <div class="banner">
@@ -157,7 +208,7 @@
   <div class="panel">
     <div class="hd"><b>New farm bot</b> <span class="muted" id="idleNote" style="margin-left:auto;"></span></div>
     <div class="bd">
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="formrow" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
         <div><label for="game">Game</label>
           <input id="game" list="gamelist" placeholder="e.g. Rust" style="min-width:220px;" autocomplete="off" />
           <datalist id="gamelist">
@@ -226,7 +277,7 @@
     <details class="acctwrap">
       <summary class="hd"><b>Accounts</b> <span class="muted" id="acctCount" style="margin-left:auto;">click to manage</span></summary>
       <div class="bd">
-        <div style="display:flex;gap:20px;flex-wrap:wrap;">
+        <div class="acctcols" style="display:flex;gap:20px;flex-wrap:wrap;">
           <div style="flex:1;min-width:280px;">
             <label>Add accounts</label>
             <div class="muted">Use the <b>Feed accounts</b> panel above to add <code>user:pass:token</code> lines into this farm's own storage.</div>
@@ -244,7 +295,7 @@
           <input id="acctSearch" type="search" placeholder="Search account name or token…" style="flex:1;min-width:220px;" />
           <span class="muted" id="acctTotal"></span>
         </div>
-        <div style="overflow-x:auto;margin-top:10px;">
+        <div class="tbl" style="margin-top:10px;">
           <table>
             <thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Account</th><th>Password</th><th>Client secret</th><th>Status</th><th>Bot</th><th>Claim</th><th style="text-align:right;">Actions</th></tr></thead>
             <tbody id="rows"><tr><td colspan="8" class="muted" style="padding:14px;">Loading…</td></tr></tbody>
@@ -366,8 +417,8 @@ async function loadBotTab(id,tab){
     if(tab==='accounts'){
       var j=await api('/api/webbot-farm/bots/'+id+'/accounts');
       if(!j.accounts.length){ box.innerHTML='<div class="muted">No accounts.</div>'; return; }
-      box.innerHTML='<table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
-        j.accounts.map(a=>'<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table>';
+      box.innerHTML='<div class="tbl"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th>Login</th><th>Token</th><th>Last check</th></tr></thead><tbody>'+
+        j.accounts.map(a=>'<tr class="'+(a.manualSold?'soldrow ':'')+(a.listed?'listedrow':'')+'"><td><input type="checkbox" class="msold" data-id="'+a.id+'"'+(a.manualSold?' checked':'')+' title="Manual sold — tick to remember this account already went to a buyer"></td><td><input type="checkbox" class="mlisted" data-id="'+a.id+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td><td>'+esc(a.login||'(unvalidated)')+'</td><td class="mono">…'+esc(a.tokenTail)+'</td><td class="muted">'+esc(a.lastStatusMessage||a.lastStatus)+'</td></tr>').join('')+'</tbody></table></div>';
       box.querySelectorAll('input.msold').forEach(function(cb){
         cb.onchange=function(){ toggleManualSold(cb,id); };
       });
@@ -388,7 +439,7 @@ async function loadBotTab(id,tab){
             '<td><span class="prog"><i class="'+(pct>=100?'done':'')+'" style="width:'+pct+'%"></i></span> <span class="mono">'+d.current+'/'+d.required+'</span></td><td>'+st+'</td></tr>');
         });
       });
-      box.innerHTML='<table><thead><tr><th>Account</th><th>Drop</th><th>Progress</th><th>State</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+      box.innerHTML='<div class="tbl"><table><thead><tr><th>Account</th><th>Drop</th><th>Progress</th><th>State</th></tr></thead><tbody>'+rows.join('')+'</tbody></table></div>';
     } else if(tab==='logs'){
       var j=await api('/api/webbot-farm/bots/'+id+'/logs');
       box.innerHTML='<div class="muted" style="margin-bottom:6px;">Container logs</div><pre class="log">'+esc(j.container||'(none)')+'</pre>'+
@@ -628,7 +679,7 @@ function renderSellable(){
   st.textContent=sellRows.length?('scanned '+sellScanned+' · ready '+ready+' · listed '+listed+' · full bundles '+full):'';
   moreBtn.style.display=sellCursor?'':'none';
   if(!sellRows.length){ c.innerHTML='<div class="muted">'+(sellScanned?'No sellable accounts in this scope.':'Not scanned yet — pick a scope and press Scan.')+'</div>'; sellBulkState(); return; }
-  var h='<div style="overflow-x:auto;"><table><thead><tr><th>Login</th><th>Bot</th><th>Game</th><th>Ready drops</th><th>Bundle</th><th>Connected</th><th>Ledger</th>'+
+  var h='<div class="tbl"><table><thead><tr><th>Login</th><th>Bot</th><th>Game</th><th>Ready drops</th><th>Bundle</th><th>Connected</th><th>Ledger</th>'+
         '<th style="width:26px;text-align:right;"><input type="checkbox" id="sellAll" title="Select all"></th></tr></thead><tbody>';
   sellRows.forEach(function(a,i){
     var cls=a.manualSold?'soldrow':(a.ledgerStatus==='listed'?'listedrow':'');
@@ -734,7 +785,7 @@ function renderSpentCandidates(){
         '<span class="muted">'+spentRows.length+' candidate'+(spentRows.length===1?'':'s')+' — review, then remove</span>'+
         '<button class="btn danger sm" id="removeSpentBtn" style="margin-left:auto;">Remove selected</button>'+
         '</div>'+
-        '<div style="overflow-x:auto;"><table><thead><tr><th style="width:26px;"><input type="checkbox" id="spentAll" checked></th>'+
+        '<div class="tbl"><table><thead><tr><th style="width:26px;"><input type="checkbox" id="spentAll" checked></th>'+
         '<th>Login</th><th>Bot</th><th>Reason</th></tr></thead><tbody>';
   spentRows.forEach(function(a,i){
     h+='<tr><td><input type="checkbox" class="spentck" data-i="'+i+'" checked></td>'+
