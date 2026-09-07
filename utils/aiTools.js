@@ -25,6 +25,24 @@ const clamp = (n, lo, hi, dflt) => {
 };
 const trunc = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "…" : s);
 
+// Never send a raw account login upstream. Two independent reasons:
+//   1. PRIVACY — the model provider is a third-party reseller; our account list
+//      is not theirs to keep.
+//   2. RELIABILITY — the reseller runs a "sensitive words" content filter that
+//      false-positives on random supplier-generated logins. Measured on prod:
+//      the pool username "ixugvt459igiw" is rejected with HTTP 500
+//      `sensitive_words_detected` ON ITS OWN, which killed the whole turn every
+//      time that account appeared in a tool result. Masking removes a class of
+//      unfixable, provider-side turn failures.
+// The operator still gets full logins — in their own browser, next to the
+// password, via the reveal URL.
+function maskLogin(s) {
+  const v = String(s || "").trim();
+  if (!v) return "";
+  if (v.length <= 4) return v[0] + "***";
+  return v.slice(0, 3) + "***" + v.slice(-1);
+}
+
 // ---- Tool implementations ---------------------------------------------------
 
 // Query the unified audit trail. The workhorse: "what errored today", "why did
@@ -308,12 +326,6 @@ const REGISTRY = {
     fields: "accountLogin status dropCount orderNo setName qtyOrdered price buyerLabel guaranteeUntil active revealedAt",
     date: "",
   },
-  webbot_accounts: {
-    model: () => M("WebBotAccount"),
-    desc: "The web-token 'web farm' bots: which bot (botId, '' = idle) each account is in, its game (pinnedGame), status, drops. GROUP BY botId to see each bot's size, by pinnedGame for games. NO tokens/creds.",
-    fields: "login botId pinnedGame currentGame enabled host lastStatus lastStatusMessage dropsClaimed dropsReadyUnclaimed manualSold listed fromPool twitchId",
-    date: "lastCheckedAt",
-  },
 };
 
 function projection(fields) {
@@ -446,67 +458,6 @@ async function propose(a = {}) {
   });
 }
 
-// EXECUTABLE proposal: split a web-farm bot into halves. Files an action the
-// operator runs with one tap (which drives the existing webbot-farm endpoints).
-async function propose_webbot_split(a = {}) {
-  const botId = String(a.botId || "").trim();
-  const game = String(a.game || "").trim();
-  if (!/^[0-9]+$/.test(botId) || !game) return { error: "botId (digits) and game are required" };
-  let parts = Array.isArray(a.parts) ? a.parts.map((n) => parseInt(n, 10)).filter((n) => n > 0) : [];
-  if (parts.length < 2) parts = []; // executor splits the live count evenly if unspecified
-  const label = parts.length ? parts.join(" + ") : "two equal halves";
-  return store.addProposal({
-    kind: "bots",
-    title: `Split web-farm bot ${botId} (${game}) into ${parts.length ? parts.length : 2}`,
-    detail: (a.reason ? a.reason + "\n\n" : "") +
-      `Release web-farm bot ${botId} (its accounts return to idle), then recreate as ${label} accounts, all game "${game}". Runs on the Pi via the existing webbot-farm endpoints; drop progress is server-side so nothing is lost.`,
-    severity: "medium",
-    targets: [`webbot-bot-${botId}`, game],
-    action: { type: "webbot_split", botId, game, parts },
-  });
-}
-
-// EXECUTABLE proposal: RE-PIN the exact accounts currently in some web-farm
-// bot(s) to a different game (collect their logins → release → recreate on the
-// new game with those same accounts). Use this for "put these accounts back on
-// game X" — it does NOT scatter accounts like a plain split can.
-async function propose_webbot_repin(a = {}) {
-  const botIds = Array.isArray(a.botIds) ? a.botIds.map((s) => String(s).trim()).filter((s) => /^[0-9]+$/.test(s)) : [];
-  const game = String(a.game || "").trim();
-  if (!botIds.length || !game) return { error: "botIds (array of digit ids) and game are required" };
-  let parts = Array.isArray(a.parts) ? a.parts.map((n) => parseInt(n, 10)).filter((n) => n > 0) : [];
-  return store.addProposal({
-    kind: "bots",
-    title: `Re-pin web-farm bot(s) ${botIds.join(", ")} → ${game}`,
-    detail: (a.reason ? a.reason + "\n\n" : "") +
-      `Take the EXACT accounts now in web-farm bot(s) ${botIds.join(", ")}, release them, and recreate ${parts.length ? "as " + parts.join(" + ") : "the same number of"} bot(s) pinned to "${game}" using those same accounts. Keeps the accounts together (uses explicit logins on create), unlike a plain split.`,
-    severity: "medium",
-    targets: botIds.map((b) => `webbot-bot-${b}`).concat([game]),
-    action: { type: "webbot_repin", botIds, game, parts },
-  });
-}
-
-// EXECUTABLE proposal: create NEW web-farm bot(s) for a game — from idle
-// accounts (count only) or a specific login set the coworker identified.
-async function propose_webbot_create(a = {}) {
-  const game = String(a.game || "").trim();
-  let parts = Array.isArray(a.parts) ? a.parts.map((n) => parseInt(n, 10)).filter((n) => n > 0) : [];
-  const logins = Array.isArray(a.logins) ? a.logins.map((s) => String(s)).filter(Boolean) : [];
-  if (!game) return { error: "game is required" };
-  if (!parts.length && logins.length) parts = [logins.length];
-  if (!parts.length) return { error: "parts (e.g. [50,50]) is required" };
-  const src = logins.length ? `${logins.length} specific accounts` : "idle accounts";
-  return store.addProposal({
-    kind: "bots",
-    title: `Create ${parts.length} web-farm bot(s) for ${game} (${parts.join(" + ")})`,
-    detail: (a.reason ? a.reason + "\n\n" : "") +
-      `Create ${parts.length} new web-farm bot(s) — ${parts.join(" + ")} accounts — pinned to "${game}", using ${src}. Runs on the Pi via the existing create endpoint.`,
-    severity: "medium",
-    targets: [game],
-    action: { type: "webbot_create", game, parts, logins },
-  });
-}
-
 // Register the expanded tool set.
 TOOLS.push(
   { schema: { type: "function", function: {
@@ -588,36 +539,55 @@ TOOLS.push(
       severity: { type: "string", enum: ["low", "medium", "high"] },
     }, required: ["title", "detail"] },
   } }, impl: propose },
+
+  // --- ACT tools: performed by the coworker ITSELF, server-side ------------
+  // These do NOT file a proposal — they carry out the work immediately, subject
+  // to the tier/blast-radius guards in utils/coworkerActs.js and the
+  // settings.coworkerAutonomy master switch.
   { schema: { type: "function", function: {
-    name: "propose_webbot_split",
-    description: "File an EXECUTABLE proposal to split a web-farm ('web farm') bot into halves — the operator approves it with one tap and it runs on the Pi. First confirm the bot's id, game, and account count with db_group on webbot_accounts (group_by botId, and by pinnedGame). Use this ONLY for the web farm (WebBotAccount / webbot-bot-*), not the regular bot fleet.",
+    name: "preview_fresh_accounts",
+    description: "READ-ONLY: how many pristine, never-used accounts the pool could hand out right now, and which ones. 'Pristine' = available, verified token, has a password, and NOT deployed on a bot / sold / listed / assigned to auto-farm. Call this before farm_fresh_account to check supply.",
     parameters: { type: "object", properties: {
-      botId: { type: "string", description: "the web-farm bot id, digits only (e.g. '2' for webbot-bot-2)" },
-      game: { type: "string", description: "the bot's game (pinnedGame), needed because release clears it" },
-      parts: { type: "array", items: { type: "number" }, description: "account counts per new bot, e.g. [50,50]. Omit to split the live count evenly in two." },
-      reason: { type: "string", description: "one line on why" },
-    }, required: ["botId", "game"] },
-  } }, impl: propose_webbot_split },
+      count: { type: "number", description: "how many you intend to take (default 1)" },
+    }, required: [] },
+  } }, impl: async (a) => {
+    const r = await require("./operatorFarm").previewFreshAccounts(a || {});
+    return {
+      ...r,
+      preview: (r.preview || []).map((p) => ({
+        account: maskLogin(p.username),
+        lastCheckStatus: p.lastCheckStatus,
+        dropCount: p.dropCount,
+      })),
+      note: "Logins are masked. Report the COUNTS to the operator; individual logins are revealed only in their browser.",
+    };
+  } },
   { schema: { type: "function", function: {
-    name: "propose_webbot_repin",
-    description: "File an EXECUTABLE proposal to RE-PIN the exact accounts in one or more web-farm bots to a different game (one-tap Approve & run). Use for 'put these accounts back on game X' / 'these bots should farm Y instead' — it keeps the same accounts together (no scatter). First confirm the bots + their game with db_group on webbot_accounts.",
+    name: "farm_fresh_account",
+    description: "ACT — you DO this yourself, immediately (no operator approval needed). Takes N pristine unused accounts from the account pool and starts them farming ONE named game for a fixed window, then returns the logins. Use for requests like 'grab me a fresh account with nothing in it and farm Apex Legends for 180 days'. Give the window as `duration` in the operator's own words (e.g. '180 days', '3 months') and it is parsed and sanity-checked; or pass an explicit `days` number. It NEVER returns passwords — the reply includes a per-account URL the operator's own browser uses to reveal credentials, so say plainly that the password is revealed there, not by you. The window self-expires (the account is released automatically when it lapses). Max 5 accounts per call.",
     parameters: { type: "object", properties: {
-      botIds: { type: "array", items: { type: "string" }, description: "web-farm bot ids to re-pin, digits (e.g. ['3','4'])" },
-      game: { type: "string", description: "the game to pin them to" },
-      parts: { type: "array", items: { type: "number" }, description: "optional account counts per resulting bot (e.g. [50,50]); omit to keep the same number of bots evenly" },
-      reason: { type: "string" },
-    }, required: ["botIds", "game"] },
-  } }, impl: propose_webbot_repin },
-  { schema: { type: "function", function: {
-    name: "propose_webbot_create",
-    description: "File an EXECUTABLE proposal to create NEW web-farm bot(s) for a game (one-tap Approve & run). Use for 'make N bots for game X' / 'take these idle accounts and make bots'. parts is the account count per bot (e.g. [50,50] = two bots of 50). Pass `logins` to use a SPECIFIC set of idle accounts you identified (else it takes oldest-idle). Confirm idle availability with db_count/db_query on webbot_accounts (botId '') first.",
-    parameters: { type: "object", properties: {
-      game: { type: "string", description: "game to pin the new bots to" },
-      parts: { type: "array", items: { type: "number" }, description: "accounts per bot, e.g. [50,50]" },
-      logins: { type: "array", items: { type: "string" }, description: "optional exact account logins to use (idle); omit for oldest-idle" },
-      reason: { type: "string" },
-    }, required: ["game", "parts"] },
-  } }, impl: propose_webbot_create },
+      game: { type: "string", description: "exact game name to farm, e.g. 'Apex Legends'" },
+      duration: { type: "string", description: "farming window in the operator's words, e.g. '180 days', '3 months'. Preferred over days." },
+      days: { type: "number", description: "explicit window in days (use if you already have a number)" },
+      count: { type: "number", description: "how many accounts (default 1, max 5)" },
+    }, required: ["game"] },
+  } }, impl: async (a) => {
+    const r = await require("./coworkerActs").runAct("farm_fresh_account", a || {}, { actor: "coworker" });
+    // Mask the provisioned logins for the same reason previews are masked (see
+    // maskLogin). The operator gets the real login AND the password together
+    // from the reveal URL in their own browser, which is where credentials
+    // belong anyway.
+    if (r && r.result && Array.isArray(r.result.added)) {
+      r.result.added = r.result.added.map((x) => ({
+        account: maskLogin(x.login),
+        revealCredentials: `/account-pool/${x.poolId}/password`,
+      }));
+      r.result.tellOperator =
+        "Provisioned. Give them the count and the reveal link(s); the full username and " +
+        "password appear in their browser, not here.";
+    }
+    return r;
+  } },
 );
 
 const SCHEMAS = TOOLS.map((t) => t.schema);

@@ -1,12 +1,9 @@
 // ---------------------------------------------------------------------------
 // UNCLAIMED-FARMS AUTO-LISTING engine (v2).
 //
-// Lists + sells accounts from the TWO unclaimed-drops farms on the same
-// marketplaces the auto-farmer uses:
-//   * no-claim farm  — accounts live in Pi configs (noclaim-bot-*) and farm
-//     with Android tokens; ground truth = twitchInventory.fetchInventory.
-//   * web-token farm — accounts live in the WebBotAccount registry and farm
-//     with web tokens; ground truth = webbotTwitch.fetchInventory.
+// Lists + sells accounts from the no-claim farm on the same marketplaces the
+// auto-farmer uses: accounts live in Pi configs (noclaim-bot-*) and farm with
+// Android tokens; ground truth = twitchInventory.fetchInventory.
 //
 // A drop is sellable ONLY when live inventory shows 100% watched + unclaimed.
 // The account (login+password, unclaimed drops intact) is the deliverable, so
@@ -40,14 +37,13 @@
 // priced from market analytics (bundlePrice) with per-game floors; live rows
 // can be repriced (repriceUnclaimedRows, flag unclaimedRepriceExisting, default
 // OFF); Gameflip lots of N accounts (utils/unclaimedLots.js, flag
-// unclaimedGameflipLots, default OFF); webbot expiry keeps the account on its bot.
+// unclaimedGameflipLots, default OFF).
 // ---------------------------------------------------------------------------
 const fsp = require("fs/promises");
 const mongoose = require("mongoose");
 const hosts = require("./botHosts");
 const settings = require("./settings");
 const twitchInventory = require("./twitchInventory");
-const webbotTwitch = require("./webbotTwitch");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
@@ -60,7 +56,6 @@ const { sendTelegram } = require("./telegram");
 const { logEvent } = require("./systemLog");
 const { recordPoolUsage } = require("./poolUsageLog");
 const AvailableAccount = require("../models/AvailableAccount");
-const WebBotAccount = require("../models/WebBotAccount");
 const BotAccount = require("../models/BotAccount");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
@@ -248,30 +243,6 @@ function sellableDropsFromNoClaimInv(inv) {
   return out;
 }
 
-// Webbot inventory: farmed-unclaimed drops from webbotTwitch.fetchInventory.
-function sellableDropsFromWebbotInv(inv) {
-  const out = [];
-  for (const d of (inv && inv.drops) || []) {
-    if (d.farmedUnclaimed) {
-      out.push({
-        name: d.name || "Reward",
-        game: d.game || "",
-        campaign: d.campaign || "",
-        imageURL: d.imageURL || "",
-        itemKey:
-          String(d.name || "")
-            .trim()
-            .toLowerCase() +
-          "|" +
-          String(d.game || "")
-            .trim()
-            .toLowerCase(),
-      });
-    }
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Unclaimed Drop archive views (read-only browsing over UnclaimedAccount).
 // The collection is small, so the endpoints feed a projected find() output
@@ -314,9 +285,9 @@ function archiveItemKey(drop, game) {
   );
 }
 
-// The two farms an unclaimed account can come from. Anything else is ignored
-// for the per-source split (so a blank/unknown source never inflates a count).
-const ARCHIVE_SOURCES = ["noclaim", "webbot"];
+// The farm an unclaimed account can come from. Anything else is ignored for
+// the per-source split (so a blank/unknown source never inflates a count).
+const ARCHIVE_SOURCES = ["noclaim"];
 function archiveSource(row) {
   const s = String((row && row.source) || "").trim().toLowerCase();
   return ARCHIVE_SOURCES.includes(s) ? s : "";
@@ -364,7 +335,7 @@ function groupArchiveByItem(rows, withStatus) {
           name: String((drop && drop.name) || "").trim(),
           labels: new Map(),
           accounts: new Set(),
-          bySourceAccts: { noclaim: new Set(), webbot: new Set() },
+          bySourceAccts: { noclaim: new Set() },
           units: 0,
           byStatus: withStatus ? Object.assign({}, ARCHIVE_STATUS_ZERO) : null,
         };
@@ -387,10 +358,7 @@ function groupArchiveByItem(rows, withStatus) {
       game: pickGameLabel(it.labels),
       accounts: it.accounts.size,
       units: it.units,
-      bySource: {
-        noclaim: it.bySourceAccts.noclaim.size,
-        webbot: it.bySourceAccts.webbot.size,
-      },
+      bySource: { noclaim: it.bySourceAccts.noclaim.size },
       byStatus: it.byStatus,
     }))
     .sort(
@@ -418,7 +386,7 @@ function groupArchiveByGame(rows, withStatus) {
         labels: new Map(),
         accounts: new Set(),
         items: new Set(),
-        bySource: { noclaim: 0, webbot: 0 },
+        bySource: { noclaim: 0 },
         byStatus: withStatus ? Object.assign({}, ARCHIVE_STATUS_ZERO) : null,
       };
       games.set(key, g);
@@ -445,8 +413,8 @@ function groupArchiveByGame(rows, withStatus) {
     );
 }
 
-// Stored credentials are secretBox-encrypted, except legacy webbot rows which
-// carry a "plain:" prefix. Return the usable plaintext or "".
+// Stored credentials are secretBox-encrypted; some legacy rows carry a
+// "plain:" prefix. Return the usable plaintext or "".
 function plainPassword(enc) {
   const p = decrypt(enc);
   return String(p || "").replace(/^plain:/i, "");
@@ -468,7 +436,7 @@ function poolPassword(poolRow) {
   return pw || "";
 }
 
-// Numeric-friendly bot sort key ("3" < "10" < webbot-bot-1 < idle "").
+// Numeric-friendly bot sort key ("3" < "10" < idle "").
 function padBot(id) {
   const n = parseInt(String(id || ""), 10);
   if (Number.isFinite(n)) return String(n).padStart(8, "0");
@@ -624,11 +592,10 @@ function uniqueDrops(drops) {
 }
 
 // Ledger -> owner key used to match a manual-sold tick ("p:" = pool row for a
-// no-claim account, "w:" = WebBotAccount row for a webbot account).
+// no-claim account).
 function manualSoldKey(ledger) {
   if (!ledger) return "";
   if (ledger.source === "noclaim" && ledger.poolAccountId) return "p:" + ledger.poolAccountId;
-  if (ledger.source === "webbot" && ledger.webBotAccountId) return "w:" + ledger.webBotAccountId;
   return "";
 }
 
@@ -640,7 +607,7 @@ function filterManualSoldLedgers(ledgers, markedOwnerKeys) {
 }
 
 // Batch-load which of these ledgers' owner rows carry the manual-sold tick.
-// Returns a Set of manualSoldKey() values ("p:<poolId>" / "w:<webBotId>").
+// Returns a Set of manualSoldKey() values ("p:<poolId>").
 async function manualSoldOwnerKeys(ledgers) {
   const marked = new Set();
   const poolIds = [
@@ -650,26 +617,12 @@ async function manualSoldOwnerKeys(ledgers) {
         .map((l) => l.poolAccountId),
     ),
   ];
-  const webIds = [
-    ...new Set(
-      (ledgers || [])
-        .filter((l) => l && l.source === "webbot" && l.webBotAccountId)
-        .map((l) => l.webBotAccountId),
-    ),
-  ];
   if (poolIds.length) {
     const rows = await AvailableAccount.find(
       { _id: { $in: poolIds }, manualSold: true },
       { _id: 1 },
     ).lean();
     for (const r of rows) marked.add("p:" + String(r._id));
-  }
-  if (webIds.length) {
-    const rows = await WebBotAccount.find(
-      { _id: { $in: webIds }, manualSold: true },
-      { _id: 1 },
-    ).lean();
-    for (const r of rows) marked.add("w:" + String(r._id));
   }
   return marked;
 }
@@ -1015,58 +968,16 @@ async function collectNoClaimCandidates() {
   return out;
 }
 
-// Every enabled, non-dead web-token account. The botId field is not a
-// requirement — an idle account can still hold farmed-unclaimed drops, and the
-// live-inventory check decides sellability either way.
-async function collectWebbotCandidates() {
-  const rows = await WebBotAccount.find(
-    { enabled: true, lastStatus: { $ne: "dead" } },
-    {
-      _id: 1,
-      login: 1,
-      twitchId: 1,
-      webToken: 1,
-      credPasswordEnc: 1,
-      hasPassword: 1,
-      manualSold: 1,
-      currentGame: 1,
-      pinnedGame: 1,
-      botId: 1,
-    },
-  ).lean();
-  const out = [];
-  for (const a of rows) {
-    if (!a.webToken) continue;
-    out.push({
-      source: "webbot",
-      id: String(a._id),
-      login: a.login || "",
-      twitchId: a.twitchId || "",
-      webToken: a.webToken,
-      password: plainPassword(a.credPasswordEnc),
-      hasPassword: !!a.hasPassword,
-      manualSold: !!a.manualSold,
-      game: a.pinnedGame || a.currentGame || "",
-      botId: a.botId || "",
-    });
-  }
-  return out;
-}
-
 // Live inventory for one candidate, plus the sellable drops in it.
 async function inventoryForCandidate(cand) {
-  if (cand.source === "noclaim") {
-    const inv = await twitchInventory.fetchInventory(cand.clientSecret, {
-      host: pi(),
-    });
-    return {
-      inv,
-      sellable: sellableDropsFromNoClaimInv(inv),
-      login: inv.login || cand.login,
-    };
-  }
-  const inv = await webbotTwitch.fetchInventory(cand.webToken);
-  return { inv, sellable: sellableDropsFromWebbotInv(inv), login: cand.login };
+  const inv = await twitchInventory.fetchInventory(cand.clientSecret, {
+    host: pi(),
+  });
+  return {
+    inv,
+    sellable: sellableDropsFromNoClaimInv(inv),
+    login: inv.login || cand.login,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,8 +1206,8 @@ async function rowForLedger(ledger) {
 }
 
 // The owner row's email, secretBox-encrypted where present. Pool rows carry
-// it under `email`; legacy/noclaim rows may use `credEmail`; webbot rows have
-// no email field at all. Absent values return "" — never a decrypt error.
+// it under `email`; legacy/noclaim rows may use `credEmail`. Absent values
+// return "" — never a decrypt error.
 function ownerEmail(row) {
   if (!row) return "";
   const enc = row.credEmail || row.email || "";
@@ -1310,7 +1221,7 @@ function ownerEmail(row) {
   }
 }
 
-// Rebuild a credential object for a ledger row (pool row / webbot row).
+// Rebuild a credential object for a ledger row (pool row).
 // Passwords and emails are decrypted here, ON DEMAND — never in list payloads.
 async function credentialForLedger(ledger) {
   if (!ledger) return { login: "", password: "", email: "" };
@@ -1321,16 +1232,6 @@ async function credentialForLedger(ledger) {
         login: ledger.login || pool.login || "",
         password: poolPassword(pool),
         email: ownerEmail(pool),
-      };
-    }
-  }
-  if (ledger.source === "webbot" && ledger.webBotAccountId) {
-    const wb = await WebBotAccount.findById(ledger.webBotAccountId).lean();
-    if (wb) {
-      return {
-        login: ledger.login || wb.login || "",
-        password: plainPassword(wb.credPasswordEnc),
-        email: ownerEmail(wb),
       };
     }
   }
@@ -2050,7 +1951,7 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
     }
     const cand = {
       source: waiting.source,
-      id: waiting.poolAccountId || waiting.webBotAccountId || "",
+      id: waiting.poolAccountId || "",
       poolAccountId: waiting.poolAccountId,
       login: cred.login,
       password: cred.password,
@@ -2378,7 +2279,7 @@ async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
     }).lean();
     const cred = ledger ? await credentialForLedger(ledger) : null;
     if (cred && cred.password && cred.login) {
-      units.push({ login: cred.login, password: cred.password, id: ledger.poolAccountId || ledger.webBotAccountId || "" });
+      units.push({ login: cred.login, password: cred.password, id: ledger.poolAccountId || "" });
     }
   }
   // Claim the rebuild: only the caller that actually flips this offer from
@@ -2538,19 +2439,6 @@ async function spendAccount(ledger, reason, opts = {}) {
       },
       { upsert: true },
     ).catch(() => {});
-  } else if (ledger.source === "webbot" && ledger.webBotAccountId) {
-    await WebBotAccount.updateOne(
-      { _id: ledger.webBotAccountId },
-      {
-        $set: {
-          enabled: false,
-          botId: "",
-          pinnedGame: "",
-          lastStatus: "idle",
-          note: "auto-sold via unclaimed auto-list (" + reason + ")",
-        },
-      },
-    ).catch(() => {});
   }
 
   await UnclaimedAccount.updateOne(
@@ -2623,8 +2511,8 @@ async function expireAccount(ledger, opts = {}) {
   return ok;
 }
 
-// Release an account whose drops all expired. No-claim -> pool row back to
-// available; webbot -> idle in its own registry.
+// Release an account whose drops all expired: the no-claim pool row goes back
+// to available.
 async function releaseToPool(ledger) {
   if (!ledger) return false;
   if (ledger.source === "noclaim" && ledger.poolAccountId) {
@@ -2650,17 +2538,6 @@ async function releaseToPool(ledger) {
       return true;
     }
     return false;
-  }
-  if (ledger.source === "webbot" && ledger.webBotAccountId) {
-    // v3 (owner decision after the expiry flap): expiry does NOT scatter the
-    // bot. The account stays on its bot (botId / pinnedGame / lastStatus
-    // untouched) and keeps farming that game for the next wave; only the
-    // ledger's "listed" tick is cleared.
-    await WebBotAccount.updateOne(
-      { _id: ledger.webBotAccountId },
-      { $set: { listed: false } },
-    );
-    return true;
   }
   return false;
 }
@@ -2718,11 +2595,6 @@ async function markOwnerListed(cand) {
       { _id: cand.poolAccountId, listed: { $ne: true } },
       { $set: { listed: true } },
     ).catch(() => {});
-  } else if (cand.source === "webbot" && (cand.webBotAccountId || cand.id)) {
-    await WebBotAccount.updateOne(
-      { _id: cand.webBotAccountId || cand.id, listed: { $ne: true } },
-      { $set: { listed: true } },
-    ).catch(() => {});
   }
 }
 
@@ -2736,16 +2608,6 @@ async function markOwnerUnlisted(ledger) {
     if (still) return;
     await AvailableAccount.updateOne(
       { _id: ledger.poolAccountId, listed: { $ne: false } },
-      { $set: { listed: false } },
-    ).catch(() => {});
-  } else if (ledger.source === "webbot" && ledger.webBotAccountId) {
-    const still = await UnclaimedAccount.exists({
-      webBotAccountId: ledger.webBotAccountId,
-      status: "listed",
-    });
-    if (still) return;
-    await WebBotAccount.updateOne(
-      { _id: ledger.webBotAccountId, listed: { $ne: false } },
       { $set: { listed: false } },
     ).catch(() => {});
   }
@@ -2787,7 +2649,6 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
         game,
         set: set._id,
         poolAccountId: cand.poolAccountId || "",
-        webBotAccountId: cand.source === "webbot" ? cand.id || "" : "",
         botId: cand.botId || "",
         container: cand.container || "",
         drops: (sellable || []).map((d) => ({
@@ -2997,7 +2858,7 @@ async function reconcileRowsPass(opts = {}) {
   // Every listed unit, not just those of the sets that still have a live row —
   // a set whose only row was taken down is exactly where a stranded unit hides.
   const ledgers = await UnclaimedAccount.find({ status: "listed" })
-    .select("loginLower login set market lotId listedAt poolAccountId webBotAccountId source")
+    .select("loginLower login set market lotId listedAt poolAccountId source")
     .lean();
   const marked = await manualSoldOwnerKeys(ledgers);
   const sellable = new Set();
@@ -3197,11 +3058,7 @@ async function reconcileRowsPass(opts = {}) {
 async function scanAndListPass() {
   const cands = [];
   try {
-    const [noClaim, webbot] = await Promise.all([
-      collectNoClaimCandidates(),
-      collectWebbotCandidates(),
-    ]);
-    cands.push(...noClaim, ...webbot);
+    cands.push(...(await collectNoClaimCandidates()));
   } catch (e) {
     return { skipped: true, error: e.message };
   }
@@ -3266,15 +3123,13 @@ async function scanAndListPass() {
       const pool = poolBySecret.get(c.clientSecret);
       if (pool && pool.manualSold) continue;
     }
-    if (c.source === "webbot" && c.manualSold) continue;
-    if (c.source === "webbot" && c.password === "") continue; // nothing to sell
     work.push(c);
   }
-  // Ready no-claim bot accounts scan first (numeric bot id, so bot 3-6 come
-  // before bot 10), then webbot accounts on a bot, then idle webbot accounts.
+  // Ready no-claim bot accounts scan in bot order (numeric bot id, so bot 3-6
+  // come before bot 10).
   work.sort((a, b) => {
-    const ka = (a.source === "webbot" ? 1 : 0) + ":" + padBot(a.botId);
-    const kb = (b.source === "webbot" ? 1 : 0) + ":" + padBot(b.botId);
+    const ka = padBot(a.botId);
+    const kb = padBot(b.botId);
     return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
   const batch = work.slice(0, SCAN_LIMIT);
@@ -3319,15 +3174,6 @@ async function scanAndListPass() {
 
   await mapLimit(batch, CONCURRENCY, async (cand) => {
     try {
-      if (cand.source === "webbot" && !cand.login) {
-        try {
-          const v = await webbotTwitch.validateToken(cand.webToken);
-          cand.login = v.login || "";
-          cand.twitchId = v.twitchId || "";
-        } catch {
-          return; // dead token — not listable
-        }
-      }
       const active = await activeListingsForLogin(cand.login);
       if (active.length) return; // already on an active listing somewhere
       let inv;
@@ -3602,27 +3448,15 @@ async function repairGameflipChains() {
 // Rebuild a credential-bearing candidate object for a listed ledger (used by
 // the expiry/sale pass to re-read live inventory).
 async function candForLedger(ledger) {
-  if (ledger.source === "noclaim") {
-    const pool = ledger.poolAccountId
-      ? await AvailableAccount.findById(ledger.poolAccountId).lean()
-      : null;
-    if (!pool || !pool.clientSecret) return null;
-    return {
-      source: "noclaim",
-      login: ledger.login,
-      clientSecret: pool.clientSecret,
-      password: poolPassword(pool),
-    };
-  }
-  const wb = ledger.webBotAccountId
-    ? await WebBotAccount.findById(ledger.webBotAccountId).lean()
+  const pool = ledger.poolAccountId
+    ? await AvailableAccount.findById(ledger.poolAccountId).lean()
     : null;
-  if (!wb || !wb.webToken) return null;
+  if (!pool || !pool.clientSecret) return null;
   return {
-    source: "webbot",
+    source: "noclaim",
     login: ledger.login,
-    webToken: wb.webToken,
-    password: plainPassword(wb.credPasswordEnc),
+    clientSecret: pool.clientSecret,
+    password: poolPassword(pool),
   };
 }
 
@@ -3688,8 +3522,6 @@ async function removeManualSoldOwner(owner = {}) {
   const out = { ledgers: 0, removed: 0, errors: [] };
   const or = [];
   if (owner.poolAccountId) or.push({ poolAccountId: String(owner.poolAccountId) });
-  if (owner.webBotAccountId)
-    or.push({ webBotAccountId: String(owner.webBotAccountId) });
   if (!or.length) return out;
   const ledgers = await UnclaimedAccount.find({ status: "listed", $or: or }).lean();
   out.ledgers = ledgers.length;
@@ -3731,23 +3563,12 @@ async function expirySalePass() {
     { manualSold: true },
     { _id: 1 },
   ).lean();
-  const msWeb = await WebBotAccount.find(
-    { manualSold: true },
-    { _id: 1 },
-  ).lean();
   const msPoolIds = msPool.map((p) => String(p._id));
-  const msWebIds = msWeb.map((w) => String(w._id));
-  const markedKeys = new Set([
-    ...msPoolIds.map((id) => "p:" + id),
-    ...msWebIds.map((id) => "w:" + id),
-  ]);
-  const msLedgers = msPoolIds.length || msWebIds.length
+  const markedKeys = new Set(msPoolIds.map((id) => "p:" + id));
+  const msLedgers = msPoolIds.length
     ? await UnclaimedAccount.find({
         status: "listed",
-        $or: [
-          { poolAccountId: { $in: msPoolIds } },
-          { webBotAccountId: { $in: msWebIds } },
-        ],
+        poolAccountId: { $in: msPoolIds },
       })
         .sort({ lastCheckedAt: 1, _id: 1 })
         .limit(CHECK_LIMIT)
@@ -4127,7 +3948,6 @@ module.exports = {
   markOwnerListed,
   markOwnerUnlisted,
   sellableDropsFromNoClaimInv,
-  sellableDropsFromWebbotInv,
   plainPassword,
   signatureFor,
   dedupeSetItems,
@@ -4179,7 +3999,6 @@ module.exports = {
   publishGameflipSuccessor,
   oldestListedUnit,
   collectNoClaimCandidates,
-  collectWebbotCandidates,
   inventoryForCandidate,
   runOnce,
   acquireRunLock,

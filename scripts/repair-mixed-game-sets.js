@@ -23,7 +23,6 @@ const UnclaimedAccount = require("../models/UnclaimedAccount");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const DropSet = require("../models/DropSet");
 const AvailableAccount = require("../models/AvailableAccount");
-const WebBotAccount = require("../models/WebBotAccount");
 
 const APPLY = process.argv.includes("--apply");
 const norm = (s) =>
@@ -52,16 +51,6 @@ async function unitCreds(ledger) {
     try { pw = decrypt(pool.password || ""); } catch { pw = ""; }
     if (!pw) pw = engine.plainPassword(pool.credPasswordEnc);
     return { login: ledger.login || pool.login || "", password: pw, id: String(pool._id), poolAccountId: String(pool._id) };
-  }
-  if (ledger.source === "webbot" && ledger.webBotAccountId) {
-    const wb = await WebBotAccount.findById(ledger.webBotAccountId).lean();
-    if (!wb) return null;
-    return {
-      login: ledger.login || wb.login || "",
-      password: engine.plainPassword(wb.credPasswordEnc),
-      id: String(wb._id),
-      webBotAccountId: String(wb._id),
-    };
   }
   return null;
 }

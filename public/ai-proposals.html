@@ -132,7 +132,7 @@
         setTimeout(load, 1200);
       }catch(e){
         logTo(id, "⚠ "+e.message, "err");
-        logTo(id, "Left OPEN so you can retry or finish it by hand on /webbot-farm.html.", "err");
+        logTo(id, "Left OPEN so you can retry or finish it by hand.", "err");
         btn.disabled=false; btn.textContent="✓ Approve & run";
       }
     }

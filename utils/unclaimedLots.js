@@ -325,7 +325,7 @@ async function publishLotIfReady(setOrId, opts = {}) {
     lotId,
     units: members.map((m, i) => ({
       login: logins[i],
-      accountId: m.poolAccountId || m.webBotAccountId || "",
+      accountId: m.poolAccountId || "",
     })),
     accountId: "",
     accountLogin: logins.join(", "),

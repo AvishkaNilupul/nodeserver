@@ -31,7 +31,6 @@ const botConfigRoutes = require("./routes/botConfigRoutes");
 const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
-const webbotFarmRoutes = require("./routes/webbotFarmRoutes");
 const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
 const unclaimedAutoList = require("./utils/unclaimedAutoList");
 const botHealthMonitor = require("./utils/botHealthMonitor");
@@ -77,7 +76,6 @@ const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
 const streamScout = require("./utils/streamScout");
 const noclaimWatcher = require("./utils/noclaimWatcher");
-const webbotFarmWatcher = require("./utils/webbotFarmWatcher");
 const autoFarmer = require("./utils/autoFarmer");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
@@ -441,12 +439,6 @@ app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
   serveFarmPage(req, res, "noclaim-farm.html");
 });
 
-// Web-token farm (superadmin only) — standalone TEST console for the
-// web-client-OAuth drop farmer, driven by the standalone WebBotAccount model.
-app.get("/webbot-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
-  serveFarmPage(req, res, "webbot-farm.html");
-});
-
 app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "backup.html"));
 });
@@ -596,8 +588,8 @@ app.get("/ai-chat.html", requireAdmin, enforce2fa, (req, res) => {
 });
 
 // Coworker Proposals inbox — superadmin-only, because approving a proposal can
-// run real actions (via the existing superadmin webbot-farm endpoints, in this
-// operator's own authenticated browser).
+// run real actions through existing superadmin endpoints, in this operator's
+// own authenticated browser.
 app.get("/ai-proposals.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.set("Cache-Control", "no-store");
   res.sendFile(path.join(__dirname, "public", "ai-proposals.html"));
@@ -645,7 +637,6 @@ app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, noclaimFarmRoutes);
-app.use(enforce2fa, webbotFarmRoutes);
 app.use(enforce2fa, unclaimedAutoRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
@@ -788,14 +779,9 @@ mongoose
     // Pi). Self-guards on autoFarm.noClaimStreamGate — no Twitch calls / no SSH
     // until it is flipped on from the No-claim farming page.
     noclaimWatcher.start();
-    // Web-farm auto power: the same live/dark gate for the standalone web-token
-    // farm's own containers (webbot-bot-* on the Pi). Self-guards on
-    // autoFarm.webbotStreamGate — no Twitch calls / no SSH until it is flipped on
-    // from the Web farm page. Games gated are derived from the live bots' pins.
-    webbotFarmWatcher.start();
-    // Unclaimed-farms auto-listing: lists + sells no-claim and web-token
-    // accounts, delists on expiry and returns all-expired accounts to the
-    // pool. Self-guards on autoFarm.unclaimedAutoList + the pause flag.
+    // Unclaimed-farms auto-listing: lists + sells no-claim accounts, delists
+    // on expiry and returns all-expired accounts to the pool. Self-guards on
+    // autoFarm.unclaimedAutoList + the pause flag.
     unclaimedAutoList.start();
     // Fleet metric history: a periodic snapshot of account / pool / listing
     // counts so a future "the count dropped" question can be answered from data

@@ -181,7 +181,7 @@
   <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
     <div>
       <h1>Unclaimed farms</h1>
-      <div class="sub">No-claim farm + web-token farm — auto-listed, auto-sold, expiry-aware.</div>
+      <div class="sub">No-claim farm — auto-listed, auto-sold, expiry-aware.</div>
     </div>
   </div>
 
@@ -192,7 +192,6 @@
   <div class="tabs">
     <button class="tab active" data-sec="autolist">Auto-list</button>
     <button class="tab" data-sec="noclaim">No-claim farm</button>
-    <button class="tab" data-sec="webbot">Web-token farm</button>
     <button class="tab" data-sec="archive">Drop archive</button>
   </div>
 
@@ -298,7 +297,6 @@
   </section>
 
   <section class="sec hidden" id="sec-noclaim"></section>
-  <section class="sec hidden" id="sec-webbot"></section>
 
   <section class="sec hidden" id="sec-archive">
     <div class="panel">
@@ -322,7 +320,6 @@
         <select id="arcSource" title="Filter by farm">
           <option value="">All farms</option>
           <option value="noclaim">No-claim farm</option>
-          <option value="webbot">Web-token farm</option>
         </select>
         <input id="arcSearch" type="search" placeholder="Search items, games, logins…" />
         <span class="muted" id="arcResult"></span>
@@ -467,13 +464,12 @@ var arcItemLoadedKey='', arcGameLoadedKey='';
 
 function switchSec(sec){
   document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('active',b.dataset.sec===sec);});
-  ['autolist','noclaim','webbot','archive'].forEach(function(s){
+  ['autolist','noclaim','archive'].forEach(function(s){
     var el=$('sec-'+s); if(!el) return;
     el.classList.toggle('hidden', s!==sec);
   });
   if(sec==='autolist'){ loadState(); loadBundles(); loadAccounts(); loadListings(); }
   if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
-  if(sec==='webbot' && !secLoaded.webbot){ secLoaded.webbot=true; $('sec-webbot').innerHTML='<iframe src="/webbot-farm.html?embed=1" title="Web-token farm"></iframe>'; }
   if(sec==='archive'){ secLoaded.archive=true; switchArcSub(arcSub); }
 }
 
@@ -718,8 +714,8 @@ async function loadLots(){
 
 // ---- Export held creds (manual bulk sale) -----------------------------------
 // POST /export-creds {game} answers text/plain login:password lines (header
-// X-Exported-Count), so this bypasses the JSON helper. Same creds-box pattern
-// as webbot-farm.html: readonly textarea + Copy + Download .txt.
+// X-Exported-Count), so this bypasses the JSON helper: readonly textarea +
+// Copy + Download .txt.
 
 async function exportHeldCreds(game, btn){
   game=String(game||'').trim();
@@ -963,8 +959,8 @@ async function savePricing(){
 }
 
 // ---------------------------------------------------------------------------
-// Drop archive — read-only browsing over UnclaimedAccount (no-claim + webbot
-// rows that never appear in the real Drop Archive). By item / By game /
+// Drop archive — read-only browsing over UnclaimedAccount (no-claim rows that
+// never appear in the real Drop Archive). By item / By game /
 // Accounts share one status filter + search box; credentials are fetched per
 // account on click only.
 // ---------------------------------------------------------------------------
@@ -995,12 +991,11 @@ function statusChips(byStatus){
     return '<span class="chip '+cls+'">'+esc(k)+' '+byStatus[k]+'</span>';
   }).join(' ');
 }
-// no-claim vs web-token split for a rollup row.
+// Per-farm split for a rollup row.
 function srcCell(bs){
   if(!bs) return '<span class="muted">–</span>';
   var parts=[];
   if(bs.noclaim) parts.push('<span class="chip">no-claim '+bs.noclaim+'</span>');
-  if(bs.webbot) parts.push('<span class="chip">web-token '+bs.webbot+'</span>');
   return parts.length?parts.join(' '):'<span class="muted">–</span>';
 }
 

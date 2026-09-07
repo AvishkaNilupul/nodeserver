@@ -184,26 +184,35 @@ const ANALYST_BASE = [
   "gameflip relist retries, campaignWatcher integrity checks, Mongoose deprecations)",
   "is NOT a failure — ignore unless asked.",
   "",
-  "YOU DO NOT CHANGE ANYTHING DIRECTLY. You investigate and RECOMMEND; the operator",
-  "approves and applies. Two ways to recommend:",
-  "- `propose` — an advisory recommendation the operator does by hand (a code fix",
-  "  with exact file + before/after, a price move, etc.).",
-  "WEB-FARM BOT OPERATIONS ARE EXECUTABLE — when the operator asks you to DO one,",
-  "ALWAYS file the matching action tool (never just `propose`), so they get a",
-  "one-tap 'Approve & run' button. Confirm ids/games/counts with db_group on",
-  "webbot_accounts first, then file:",
-  "  · `propose_webbot_split` — split a bot into halves.",
-  "  · `propose_webbot_repin` — re-pin the EXACT accounts in bot(s) to another game",
-  "    (keeps the accounts together). For 'put these accounts on game X'.",
-  "  · `propose_webbot_create` — create NEW bot(s) for a game, from idle accounts",
-  "    (or a specific login set you identify). For 'make N bots for game X'.",
-  "Do NOT only describe the steps — file the action.",
-  "`propose` is ONLY for advisory things with NO action tool (a code fix, a price",
-  "move). When you use it, SAY plainly it's a recommendation you can't run yourself",
-  "yet, and why — so it's never mistaken for something you did.",
-  "Never claim you already changed something — you file the action; the operator",
-  "taps Approve & run. (More action types will be added; for anything without an",
-  "action tool yet, use `propose`.)",
+  "WHAT YOU DO YOURSELF vs WHAT NEEDS THE OPERATOR — three levels:",
+  "1. ACT TOOLS — you carry these out YOURSELF, immediately, no approval needed:",
+  "   · `farm_fresh_account` — take pristine, never-used accounts from the pool and",
+  "     start them farming ONE game for a fixed window. This is the tool for 'grab",
+  "     me a fresh account with nothing in it and farm X for N days'. Check supply",
+  "     first with `preview_fresh_accounts`. Pass the window as `duration` in the",
+  "     operator's own words ('180 days', '3 months') — it is sanity-checked.",
+  "   These are capped and reversible and every run is audited. If one returns",
+  "   blocked (autonomy switched off, over the cap, absurd window) SAY SO plainly",
+  "   and do not pretend it ran. Report exactly what the tool returned.",
+  "2. ADVISORY `propose` — ONLY for things with no tool at all (a code fix with",
+  "   exact file + before/after, a price move). Say plainly it is a recommendation",
+  "   you cannot run yourself, so it is never mistaken for something you did.",
+  "NEVER claim you changed something you did not.",
+  "PASSWORDS: you never see or return them. `farm_fresh_account` gives back a URL",
+  "the operator's OWN browser uses to reveal the credentials — point them at it,",
+  "and never ask for or repeat a password in chat.",
+  "",
+  "INVESTIGATION DISCIPLINE — this is where mistakes actually come from:",
+  "· ENUMERATE THE WHOLE SET before concluding. Asked about 'the bots', list ALL",
+  "  of them, not the ones you happened to look at. A conclusion from a partial",
+  "  view is wrong even when every fact in it is true.",
+  "· Verify state from DATA, not from logs or from memory. 'No active campaign'",
+  "  means you checked the campaign catalog — not that the logs looked quiet.",
+  "· The two farms are SEPARATE systems that never share bots or containers:",
+  "  the managed fleet (twitchbotN — run by the auto-farm engine + botWaker) and",
+  "  no-claim (noclaim-bot-N). A fact about one tells you NOTHING about the",
+  "  other; never generalise across them.",
+  "· State what you did NOT check. An honest gap beats a confident guess.",
 ].join("\n");
 
 async function buildAnalystSystem() {
@@ -216,24 +225,71 @@ async function buildAnalystSystem() {
 
 const MAX_ROUNDS = 12;
 
+// The upstream is a gray-market reseller and it is genuinely erratic: it returns
+// 500 "sensitive words detected" on requests with nothing sensitive in them
+// (measured: the literal string "You are a helpful assistant." fails 12/12 while
+// a 3KB domain prompt succeeds), plus the usual 429/5xx/socket noise. A single
+// blip must not kill a turn that has already spent ~40s gathering data, so
+// transient failures are retried with a short backoff. A 4xx other than 429 is a
+// REAL request error (e.g. the reasoning_content contract) and is never retried —
+// retrying a malformed request just wastes time and money.
+// Last-ditch scrub of account identifiers before text goes upstream on the
+// salvage path. Tools already mask logins (utils/aiTools.js maskLogin); this
+// catches any identifier that reached a tool result by another route, so one
+// unlucky username can't make an entire turn unanswerable.
+function redactIdentifiers(s) {
+  return String(s || "").replace(
+    /("(?:username|login|account|credUsername|accountLogin)"\s*:\s*")([^"]{1,64})(")/gi,
+    (_m, a, v, b) => a + (v.length > 3 ? v.slice(0, 3) + "***" : "***") + b,
+  );
+}
+
+const RETRY_ATTEMPTS = 3;
+const isRetryableStatus = (s) => s === 429 || (s >= 500 && s <= 599);
+const napMs = (attempt) => 600 * (attempt + 1);
+
 async function callModel(messages, { noTools = false } = {}) {
-  const resp = await fetch(`${config.AI.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: upstreamHeaders(),
-    body: JSON.stringify({
-      model: config.AI.model,
-      messages,
-      // noTools forces a plain text answer (used to recover an empty final turn
-      // — DeepSeek is a reasoning model and occasionally returns empty content).
-      ...(noTools ? { tool_choice: "none" } : { tools: SCHEMAS, tool_choice: "auto" }),
-      stream: false,
-    }),
-  });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`provider ${resp.status}: ${t.slice(0, 200)}`);
+  let lastErr = null;
+  for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(`${config.AI.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: upstreamHeaders(),
+        body: JSON.stringify({
+          model: config.AI.model,
+          messages,
+          // noTools forces a plain text answer (used to recover an empty final
+          // turn — DeepSeek is a reasoning model and occasionally returns empty
+          // content).
+          ...(noTools ? { tool_choice: "none" } : { tools: SCHEMAS, tool_choice: "auto" }),
+          stream: false,
+        }),
+      });
+      if (resp.ok) return resp.json();
+      const t = await resp.text().catch(() => "");
+      const err = new Error(`provider ${resp.status}: ${t.slice(0, 200)}`);
+      err.status = resp.status;
+      // The reseller's "sensitive words" filter is DETERMINISTIC — the same
+      // payload is rejected every time (measured: a random pool username fails
+      // 12/12 on its own). Retrying identical content just burns time and money,
+      // so flag it and bail immediately; the caller retries with REDACTED text.
+      if (/sensitive[_ ]words[_ ]detected/i.test(t)) {
+        err.sensitiveWords = true;
+        throw err;
+      }
+      if (!isRetryableStatus(resp.status)) throw err;
+      lastErr = err;
+    } catch (err) {
+      // A thrown fetch (socket reset / DNS / abort) is transient; a tagged
+      // non-retryable status is not.
+      if (err && err.status && !isRetryableStatus(err.status)) throw err;
+      lastErr = err;
+    }
+    if (attempt < RETRY_ATTEMPTS - 1) {
+      await new Promise((r) => setTimeout(r, napMs(attempt)));
+    }
   }
-  return resp.json();
+  throw lastErr || new Error("provider call failed");
 }
 
 // Background-job turn runner. Runs an assistant turn (analyst tool loop, or a
@@ -260,6 +316,7 @@ async function runTurn(chatId) {
 
   const trace = [];
   const turnActions = []; // executable actions the coworker proposed this turn
+  const findings = []; // {tool, result} — kept so a provider blip can't bin the work
   let finalAnswer = "";
   let errMsg = "";
   try {
@@ -284,6 +341,10 @@ async function runTurn(chatId) {
             try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* keep {} */ }
             const result = await runTool(call.function?.name, args);
             trace.push({ tool: call.function?.name, ok: !result?.error });
+            findings.push({
+              tool: call.function?.name,
+              result: JSON.stringify(result).slice(0, 2000),
+            });
             // If the coworker filed an EXECUTABLE proposal, surface it inline as
             // an Approve & run button on this chat turn.
             if (result && result.proposed && result.action) {
@@ -321,6 +382,40 @@ async function runTurn(chatId) {
   } catch (err) {
     console.error("runTurn error:", err.message);
     errMsg = err.message;
+    // SALVAGE. The loop died — almost always an upstream blip — but we may
+    // already hold everything needed to answer, sometimes after ~40s of work.
+    // Retry once with a SANITISED history: system + question + the tool findings
+    // as plain text. Dropping the assistant messages, tool_calls and
+    // reasoning_content also sidesteps the two provider contract failures we
+    // actually observe: "reasoning_content must be passed back" (400) and
+    // "sensitive words detected" (500) when that same field is echoed back.
+    if (mode === "analyst" && findings.length) {
+      try {
+        const digest = redactIdentifiers(
+          findings.map((f) => `- ${f.tool}: ${f.result}`).join("\n"),
+        ).slice(0, 12000);
+        const salvage = await callModel(
+          [
+            { role: "system", content: await buildAnalystSystem() },
+            {
+              role: "user",
+              content:
+                `${question}\n\nYou already gathered this from the live system:\n${digest}\n\n` +
+                `Answer the question from these findings, as plain text. Do not call any tools.`,
+            },
+          ],
+          { noTools: true },
+        );
+        const salvaged = salvage?.choices?.[0]?.message?.content || "";
+        if (salvaged) {
+          finalAnswer = salvaged;
+          errMsg = "";
+          console.log("runTurn salvaged after provider error using", findings.length, "tool result(s)");
+        }
+      } catch (e2) {
+        console.error("runTurn salvage failed:", e2.message);
+      }
+    }
   }
 
   turn.content = finalAnswer;

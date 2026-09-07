@@ -45,14 +45,12 @@ function fakeModel(rows = []) {
 function loadEngine({ ledgers = [], listingRows = [] } = {}) {
   const Unclaimed = fakeModel(ledgers);
   const Pool = fakeModel([]);
-  const Web = fakeModel([]);
   const Listing = fakeModel(listingRows);
   const events = [];
 
   const stubs = new Map([
     [require.resolve("../models/UnclaimedAccount"), Unclaimed],
     [require.resolve("../models/AvailableAccount"), Pool],
-    [require.resolve("../models/WebBotAccount"), Web],
     [require.resolve("../models/MarketplaceListing"), Listing],
     [require.resolve("../utils/systemLog"), { logEvent: (e) => events.push(e), actorFromReq: () => "test" }],
   ]);
@@ -77,7 +75,7 @@ function loadEngine({ ledgers = [], listingRows = [] } = {}) {
     Module._load = origLoad;
     delete require.cache[enginePath];
   }
-  return { engine, Unclaimed, Pool, Web, Listing, events };
+  return { engine, Unclaimed, Pool, Listing, events };
 }
 
 test("removeManualSoldOwner: no owner id does nothing at all", async () => {
@@ -94,12 +92,6 @@ test("removeManualSoldOwner: only LISTED ledgers of that owner are touched", asy
   const q = Unclaimed.calls.find[0];
   assert.strictEqual(q.status, "listed");
   assert.deepStrictEqual(q.$or, [{ poolAccountId: "pool1" }]);
-});
-
-test("removeManualSoldOwner: a webbot owner queries by its own id", async () => {
-  const { engine, Unclaimed } = loadEngine({ ledgers: [] });
-  await engine.removeManualSoldOwner({ webBotAccountId: "web9" });
-  assert.deepStrictEqual(Unclaimed.calls.find[0].$or, [{ webBotAccountId: "web9" }]);
 });
 
 test("removeManualSoldOwner: each ledger is parked removed, never sold or released", async () => {

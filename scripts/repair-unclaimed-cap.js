@@ -17,7 +17,6 @@ const engine = require("../utils/unclaimedAutoList");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const AvailableAccount = require("../models/AvailableAccount");
-const WebBotAccount = require("../models/WebBotAccount");
 
 const APPLY = process.argv.includes("--apply");
 const { GAME_CAP } = engine;
@@ -25,7 +24,6 @@ const { GAME_CAP } = engine;
 function ownerKey(l) {
   if (!l) return "";
   if (l.source === "noclaim" && l.poolAccountId) return "p:" + String(l.poolAccountId);
-  if (l.source === "webbot" && l.webBotAccountId) return "w:" + String(l.webBotAccountId);
   return "";
 }
 
@@ -49,11 +47,7 @@ async function main() {
     const msPool = new Set(
       (await AvailableAccount.find({ manualSold: true }, { _id: 1 }).lean()).map((x) => String(x._id)),
     );
-    const msWeb = new Set(
-      (await WebBotAccount.find({ manualSold: true }, { _id: 1 }).lean()).map((x) => String(x._id)),
-    );
     const msKeys = new Set([...msPool].map((id) => "p:" + id));
-    for (const id of msWeb) msKeys.add("w:" + id);
 
     // ---- 1. Collapse duplicate rows per set+marketplace --------------------
     const bySetMkt = new Map();

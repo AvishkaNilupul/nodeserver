@@ -9,7 +9,6 @@ const assert = require("node:assert");
 
 const {
   sellableDropsFromNoClaimInv,
-  sellableDropsFromWebbotInv,
   plainPassword,
   listingTitle,
   listingDescription,
@@ -47,39 +46,10 @@ test("no-claim inventory: missing/empty inventory yields no drops", () => {
   assert.deepStrictEqual(sellableDropsFromNoClaimInv({}), []);
 });
 
-test("webbot inventory: only farmedUnclaimed drops are sellable", () => {
-  const inv = {
-    drops: [
-      { name: "Spray", game: "Marvel Rivals", percent: 100, farmedUnclaimed: true },
-      { name: "Ticker", game: "Marvel Rivals", percent: 40, farmedUnclaimed: false },
-      { name: "Done+claimed", game: "Marvel Rivals", percent: 100, farmedUnclaimed: false, claimed: true },
-    ],
-  };
-  const out = sellableDropsFromWebbotInv(inv);
-  assert.strictEqual(out.length, 1);
-  assert.strictEqual(out[0].name, "Spray");
-});
-
-test("webbot inventory: drop image URL is carried into the sellable drop", () => {
-  const img = "https://static-cdn.jtvnw.net/twitch-quests-assets/REWARD/abc.png";
-  const out = sellableDropsFromWebbotInv({
-    drops: [
-      { name: "Daredevil Costume", game: "Marvel Rivals", percent: 100, farmedUnclaimed: true, imageURL: img },
-    ],
-  });
-  assert.strictEqual(out.length, 1);
-  assert.strictEqual(out[0].imageURL, img);
-  // A drop with no image yields an empty URL (text tile fallback), never junk.
-  const none = sellableDropsFromWebbotInv({
-    drops: [{ name: "No Art", game: "R6", percent: 100, farmedUnclaimed: true }],
-  });
-  assert.strictEqual(none[0].imageURL, "");
-});
-
 test("plainPassword: decrypts secretBox and strips legacy plain: prefix", () => {
   // A plain (non-encrypted) value is returned as-is.
   assert.strictEqual(plainPassword("hunter2"), "hunter2");
-  // Legacy webbot rows carry "plain:" + pass.
+  // Legacy rows carry "plain:" + pass.
   assert.strictEqual(plainPassword("plain:hunter2"), "hunter2");
   assert.strictEqual(plainPassword(""), "");
   assert.strictEqual(plainPassword(null), "");
@@ -483,18 +453,14 @@ test("dedupeSetItems: duplicate drops collapse to one item per key WITH qty", ()
   );
 });
 
-test("manualSoldKey: owner key per source (p: pool / w: webbot)", () => {
+test("manualSoldKey: owner key for a no-claim pool row (p:)", () => {
   assert.strictEqual(
     manualSoldKey({ source: "noclaim", poolAccountId: "abc123" }),
     "p:abc123",
   );
-  assert.strictEqual(
-    manualSoldKey({ source: "webbot", webBotAccountId: "xyz789" }),
-    "w:xyz789",
-  );
   // No owner ref or unknown source => no key (never treated as marked).
   assert.strictEqual(manualSoldKey({ source: "noclaim" }), "");
-  assert.strictEqual(manualSoldKey({ source: "webbot", poolAccountId: "abc" }), "");
+  assert.strictEqual(manualSoldKey({ source: "reseller", poolAccountId: "abc" }), "");
   assert.strictEqual(manualSoldKey(null), "");
 });
 
@@ -553,10 +519,10 @@ test("filterManualSoldLedgers: drops ledgers whose owner is manual-sold", () => 
   const ledgers = [
     { _id: "1", source: "noclaim", poolAccountId: "a" },
     { _id: "2", source: "noclaim", poolAccountId: "b" },
-    { _id: "3", source: "webbot", webBotAccountId: "w1" },
-    { _id: "4", source: "webbot", webBotAccountId: "w2" },
+    { _id: "3", source: "noclaim", poolAccountId: "c" },
+    { _id: "4", source: "noclaim", poolAccountId: "d" },
   ];
-  const marked = new Set(["p:b", "w:w2"]);
+  const marked = new Set(["p:b", "p:d"]);
   const kept = filterManualSoldLedgers(ledgers, marked);
   assert.deepStrictEqual(
     kept.map((l) => l._id),

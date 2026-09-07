@@ -2,7 +2,7 @@
 //
 // Frozen API: docs/UNCLAIMED-BUNDLES-CONTRACT.md, section
 // "utils/unclaimedBundles.js — frozen API (agent B)". Every consumer (the
-// unclaimed auto-list engine, the lot publisher, the webbot sellable scan, the
+// unclaimed auto-list engine, the lot publisher, the
 // /bundles route, the research page) codes against that section, so the
 // shapes returned here are load-bearing — change the contract first.
 //
@@ -893,18 +893,7 @@ async function loadCatalog({ games } = {}) {
       return !!g && wanted.some((k) => g === k || g.includes(k));
     };
   } else {
-    let pinned = [];
-    try {
-      const WebBotAccount = require("../models/WebBotAccount");
-      pinned = await WebBotAccount.distinct("pinnedGame", { enabled: true });
-    } catch {
-      pinned = [];
-    }
-    const pinnedKeys = new Set(
-      pinned.map((g) => settings.normGameName(g)).filter(Boolean),
-    );
-    keep = (c) =>
-      settings.isNoClaimGame(c.game) || pinnedKeys.has(settings.normGameName(c.game));
+    keep = (c) => settings.isNoClaimGame(c.game);
   }
   return finishCatalog(campaigns.filter(keep), CampaignDrops);
 }

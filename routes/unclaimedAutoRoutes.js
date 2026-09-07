@@ -82,7 +82,7 @@ router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) =
     else if (status && status !== "all") filter.status = status;
     if (q) filter.loginLower = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     if (game) filter.game = game;
-    if (source === "noclaim" || source === "webbot") filter.source = source;
+    if (source === "noclaim") filter.source = source;
     const total = await UnclaimedAccount.countDocuments(filter);
     const rows = await UnclaimedAccount.find(filter)
       .sort({ listedAt: -1, updatedAt: -1 })
@@ -143,10 +143,10 @@ function archiveStatusParam(req) {
   return String(req.query.status || "").trim().toLowerCase();
 }
 
-// ?source=: "noclaim" | "webbot" restricts to one farm; anything else = both.
+// ?source=: "noclaim" restricts to the farm; anything else = unrestricted.
 function archiveSourceParam(req) {
   const s = String(req.query.source || "").trim().toLowerCase();
-  return s === "noclaim" || s === "webbot" ? s : "";
+  return s === "noclaim" ? s : "";
 }
 
 // By-item rollup: one row per distinct item key, with distinct-account and
@@ -955,7 +955,7 @@ router.post("/api/unclaimed-auto/pricing", requireSuperadmin, async (req, res) =
 // Bulk credential export for hand sales: the HELD (status "skipped") ledgers
 // of one game — accounts that still hold their unclaimed drops but sit on no
 // auto-listing (over the cap, or freed from a marketplace). text/plain
-// `login:password` lines, audited by count only. Optional ?source=noclaim|webbot
+// `login:password` lines, audited by count only. Optional ?source=noclaim
 // and ?status=skipped|listed (default skipped — listed accounts are on sale and
 // must not be hand-sold without the manual-sold tick).
 router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, res) => {
@@ -964,7 +964,7 @@ router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, r
     const game = String(body.game || "").trim();
     if (!game) return res.status(400).json({ success: false, message: "game required" });
     const status = body.status === "listed" ? "listed" : "skipped";
-    const source = body.source === "noclaim" || body.source === "webbot" ? body.source : "";
+    const source = body.source === "noclaim" ? body.source : "";
     const limit = Math.min(2000, Math.max(1, parseInt(body.limit, 10) || 500));
     const want = settings.normGameName(game);
     const filter = { status };
@@ -974,7 +974,6 @@ router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, r
       game: 1,
       source: 1,
       poolAccountId: 1,
-      webBotAccountId: 1,
       drops: 1,
       bundleLabel: 1,
     })

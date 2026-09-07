@@ -252,12 +252,6 @@ const AUTO_FARM_DEFAULTS = {
   // itself stopped (an operator Stop stays stopped) — so it never fights manual
   // control. See utils/noclaimWatcher.js.
   noClaimStreamGate: false,
-  // Web-farm auto-power master switch (utils/webbotFarmWatcher.js). Same
-  // contract as noClaimStreamGate but for the standalone webbot-bot-* fleet, and
-  // OFF by default so it never surprise-kills a manually pre-positioned bot until
-  // the operator turns it on. The games it manages are derived dynamically from
-  // the pinned games of the live bots — no separate list.
-  webbotStreamGate: false,
   // Master switch for the AI coworker's AUTONOMOUS actions (utils/coworkerActs.js).
   // OFF by default: while false the coworker executes nothing itself and can only
   // investigate and propose, exactly as before. Turning it on lets it perform the
@@ -450,12 +444,6 @@ function getNoClaimGate() {
   return { enabled: !!getAutoFarm().noClaimStreamGate };
 }
 
-// Web-farm auto-power master switch, read fresh each call (live-editable).
-// The games it manages are the pinned games of the live webbot bots.
-function getWebbotGate() {
-  return { enabled: !!getAutoFarm().webbotStreamGate };
-}
-
 // AI coworker autonomy master switch, read fresh each call (live-editable), so
 // it can be revoked instantly without a restart if the coworker misbehaves.
 // Unclaimed-farms v3 pricing/bundle/bulk knobs, read fresh each call with the
@@ -637,7 +625,6 @@ module.exports = {
   streamGatedGameEntry,
   isStreamGatedGame,
   getNoClaimGate,
-  getWebbotGate,
   getCoworkerAutonomy,
   getUnclaimedPricing,
   gameFloorFor,

@@ -18,11 +18,10 @@ const mongoose = require("mongoose");
 // elsewhere.
 const unclaimedAccountSchema = new mongoose.Schema(
   {
-    // Where the account came from: "noclaim" (Pi no-claim bot config) or
-    // "webbot" (WebBotAccount registry).
+    // Where the account came from: "noclaim" (Pi no-claim bot config).
     source: {
       type: String,
-      enum: ["noclaim", "webbot"],
+      enum: ["noclaim"],
       required: true,
       index: true,
     },
@@ -32,11 +31,10 @@ const unclaimedAccountSchema = new mongoose.Schema(
     twitchId: { type: String, default: "" },
     game: { type: String, default: "", index: true },
 
-    // Owner references: the pool row (no-claim) / WebBotAccount row (webbot).
+    // Owner reference: the pool row (no-claim).
     poolAccountId: { type: String, default: "" },
-    webBotAccountId: { type: String, default: "" },
 
-    // The no-claim bot this account was farming from ("" for webbot).
+    // The no-claim bot this account was farming from.
     botId: { type: String, default: "" },
     container: { type: String, default: "" },
 

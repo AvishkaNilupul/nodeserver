@@ -14,8 +14,8 @@
 //      unclaimedGameMarkets[game] = the markets NOT freed (e.g. ["gameflip"]),
 //      unclaimedGameCaps[game]   = --cap, else (gameflip ledgers left + 2),
 //   5. resumes the engine and VERIFIES unclaimedAutoListPaused === false.
-// Pool / WebBotAccount rows are never touched. Gameflip rows are never
-// touched unless "gameflip" is in --markets.
+// Pool rows are never touched. Gameflip rows are never touched unless
+// "gameflip" is in --markets.
 require("dotenv").config();
 const mongoose = require("mongoose");
 const settings = require("../utils/settings");
@@ -75,7 +75,7 @@ async function delistRow(row) {
     // the game's (via its listed ledgers), plus a title safety net.
     const ledgers = await UnclaimedAccount.find(
       { status: "listed", market: { $in: MARKETS } },
-      { game: 1, set: 1, market: 1, login: 1, loginLower: 1, source: 1, poolAccountId: 1, webBotAccountId: 1 },
+      { game: 1, set: 1, market: 1, login: 1, loginLower: 1, source: 1, poolAccountId: 1 },
     ).lean();
     const mine = ledgers.filter((l) => sameGame(l.game));
     const setIds = [...new Set(mine.map((l) => String(l.set)).filter(Boolean))];
