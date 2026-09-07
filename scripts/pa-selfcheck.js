@@ -10,7 +10,19 @@
 //   node scripts/pa-selfcheck.js
 //   node scripts/pa-selfcheck.js --orders     # also dump the delivery queue
 //
-// It writes nothing, publishes nothing and delivers nothing.
+// It writes nothing, publishes nothing and delivers nothing — and in
+// particular it does NOT refresh the session.
+//
+// ⚠ ONLY ONE MACHINE MAY EVER HOLD A GIVEN PLAYERAUCTIONS COOKIE.
+// PlayerAuctions rotates the entire session on refresh: a successful
+// /SignIn/RefreshToken mints a new session id and invalidates every other copy
+// of that jar, and presenting an already-spent refresh token reads as token
+// reuse and revokes the whole family — signing the browser out too. An earlier
+// version of this script refreshed as a "test", which is exactly how a session
+// was destroyed: it ran on a laptop, then the same paste was installed on prod.
+//
+// So: paste the cookie into the ONE host that will own it (prod), and run this
+// there. Never install the same paste in two places.
 require("dotenv").config();
 
 const mp = require("../utils/marketplaces");
@@ -138,9 +150,21 @@ async function main() {
     );
   });
 
-  await step("session refresh works", async () => {
-    const moved = await mp.playerauctionsRefreshSession();
-    return moved ? "cookies rotated and were persisted" : "session already current";
+  // NOT a refresh. Refreshing here would be actively destructive — see the
+  // banner at the top of this file. Report the token's own expiry instead,
+  // which is what the operator actually wants to know.
+  await step("session has life left in it", async () => {
+    const jar = require("../utils/marketplaces");
+    const exp = jar.playerauctionsTokenExpiry();
+    if (!exp.access && !exp.refresh) return "could not read token expiry (jar shape changed?)";
+    const mins = (d) => (d ? Math.round((d - Date.now()) / 60000) + " min" : "unknown");
+    if (exp.refresh && exp.refresh < Date.now()) {
+      throw new Error("the refresh token has EXPIRED — a new sign-in is needed");
+    }
+    return (
+      "access token " + mins(exp.access) + " left, refresh token " + mins(exp.refresh) +
+      " left (the server renews both on its own)"
+    );
   });
 
   await step("offers readable", async () => {

@@ -4712,8 +4712,49 @@ async function playerauctionsSellerLevel() {
   return Number.isFinite(lvl) ? lvl : 0;
 }
 
+// Read the JWT expiry out of the stored jar without calling PlayerAuctions.
+// Used by the self-check to report session health, because the obvious
+// alternative — "test the refresh" — destroys the session (see below).
+function playerauctionsTokenExpiry() {
+  const out = { access: null, refresh: null };
+  let cookie = "";
+  try {
+    cookie = getKeys("playerauctions").cookie || "";
+  } catch {
+    return out;
+  }
+  const jar = paCookieJar(cookie);
+  for (const [name, key] of [
+    ["Production_access_token", "access"],
+    ["Production_refresh_token", "refresh"],
+  ]) {
+    const raw = jar.get(name);
+    if (!raw) continue;
+    try {
+      const body = JSON.parse(
+        Buffer.from(String(raw).split(".")[1], "base64").toString("utf8"),
+      );
+      if (body && body.exp) out[key] = new Date(body.exp * 1000);
+    } catch {
+      /* a jar we cannot parse is not an error, just unknown */
+    }
+  }
+  return out;
+}
+
 // Renews the session from the refresh cookie. Body is an empty object; the new
 // cookies come back as Set-Cookie and are folded into the stored jar.
+//
+// ⚠ THIS IS DESTRUCTIVE TO EVERY OTHER COPY OF THE JAR.
+// PlayerAuctions rotates the WHOLE session on refresh: a success mints a new
+// session id (the `sid` claim changes) and invalidates every other copy of that
+// cookie, and presenting an already-spent refresh token reads as token reuse
+// and revokes the entire family — signing the operator's browser out with it.
+// Learned the hard way 2026-09-07: the same paste was installed on a laptop and
+// on prod, each refreshed once, and the account was signed out everywhere.
+//
+// Rule: exactly ONE host owns a given cookie, and only its session refresher
+// ever calls this. Never "test" it from a second machine.
 async function playerauctionsRefreshSession() {
   const keys = requireKeys("playerauctions");
   const before = paJarHeader(paCookieJar(keys.cookie));
@@ -5404,6 +5445,7 @@ module.exports = {
   playerauctionsMe,
   playerauctionsSellerLevel,
   playerauctionsRefreshSession,
+  playerauctionsTokenExpiry,
   playerauctionsEnsureFreshSession,
   playerauctionsGames,
   playerauctionsResolveGame,
