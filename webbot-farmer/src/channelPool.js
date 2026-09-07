@@ -80,6 +80,21 @@ export function normalizeDoneCampaigns(names) {
   return [...set].sort();
 }
 
+// PURE. Do a bot's pinned game and a campaign's game refer to the same title?
+// Exact-equal is too strict: a bot pinned "Overwatch 2" (the Twitch category)
+// reads campaigns whose inventory `game.displayName` is "Overwatch", so it
+// could never tell that its accounts had finished the event and cycled
+// channels forever — measured on prod 2026-09-07, three bots and 150 accounts.
+// Only a whole leading word counts, so "overwatch"/"overwatch 2" match while
+// unrelated titles do not. Widening this can only ever change WHICH campaigns
+// are considered; whether one is finished is still judged exactly, per drop.
+export function sameGame(a, b) {
+  const x = normalizeGame(a);
+  const y = normalizeGame(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(y + " ") || y.startsWith(x + " ");
+}
+
 // PURE. From a getInventory result, the names of `game`'s in-progress
 // campaigns this account has nothing left to earn from: every timeBasedDrop
 // is claimed, or fully watched (currentMinutesWatched >= requiredMinutesWatched
@@ -87,10 +102,9 @@ export function normalizeDoneCampaigns(names) {
 // done (nothing to judge → fail toward farming). Game compare is normalised.
 export function doneCampaignsFromInventory(inv, game) {
   const progress = inv?.data?.currentUser?.inventory?.dropCampaignsInProgress;
-  const g = normalizeGame(game);
   const out = [];
   for (const c of Array.isArray(progress) ? progress : []) {
-    if (!c || !c.name || normalizeGame(c.game?.displayName) !== g) continue;
+    if (!c || !c.name || !sameGame(game, c.game?.displayName)) continue;
     const drops = Array.isArray(c.timeBasedDrops) ? c.timeBasedDrops : [];
     if (!drops.length) continue;
     const allDone = drops.every((d) => {
