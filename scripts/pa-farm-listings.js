@@ -39,7 +39,16 @@ const val = (f, d) => {
 };
 
 const APPLY = has("--apply");
-const STOCK = parseInt(val("--stock", "1000"), 10) || 1000;
+// Deliberately NOT the 1000 the Eldorado script advertises.
+//
+// Every rent-farm sale burns a PRISTINE pool account for 120-365 days, and the
+// pool is the hard ceiling: 147 eligible accounts on prod, with the holder
+// renter capping at 200 concurrent. Those accounts do not come back quickly.
+// 26 games x 3 tiers x 1000 would advertise 78,000 units against 147, and
+// PlayerAuctions charges for a delivery it thinks you missed (penalty fee, then
+// the offers get hidden) — so overselling is not a harmless vanity number here
+// the way it is elsewhere. Raise it with --stock once the pool is deeper.
+const STOCK = parseInt(val("--stock", "5"), 10) || 5;
 const MIN_TASKS = parseInt(val("--min-tasks", "3"), 10) || 3;
 const DAYS_BACK = parseInt(val("--days-back", "90"), 10) || 90;
 const LIMIT = parseInt(val("--limit", "0"), 10) || 0;
@@ -141,15 +150,23 @@ async function main() {
     resolved.push({ game: g, pa: row });
   }
 
-  // Existing titles on the account — this is what makes re-runs safe.
+  // Existing titles on the account — this is what makes re-runs safe. A dry run
+  // still has to work without a credential, so a read failure degrades to
+  // "assume nothing is live" and says so, rather than killing the plan.
   const existing = new Set();
-  for (let page = 1; page <= 20; page++) {
-    const r = await mp.playerauctionsMyListings(page, 50);
-    const items = (r && r.items) || [];
-    for (const o of items) {
-      if (o && o.title) existing.add(o.title.trim().toLowerCase());
+  try {
+    for (let page = 1; page <= 20; page++) {
+      const r = await mp.playerauctionsMyListings(page, 50);
+      const items = (r && r.items) || [];
+      for (const o of items) {
+        if (o && o.title) existing.add(o.title.trim().toLowerCase());
+      }
+      if (items.length < 50) break;
     }
-    if (items.length < 50) break;
+  } catch (e) {
+    console.log("note: could not read live PlayerAuctions offers (" + e.message + ")");
+    console.log("      the plan below assumes none of these titles exist yet.");
+    if (APPLY) throw e;
   }
 
   const plan = [];
