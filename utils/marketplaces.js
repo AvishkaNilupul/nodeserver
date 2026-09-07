@@ -5220,7 +5220,7 @@ function paSanitizeTitle(title) {
   // a publish over.
   t = t.replace(/[^\x20-\x7E]/g, "");
   // Folding can leave doubled separators ("A - - B") and edge punctuation.
-  t = t.replace(/\s+/g, " ").replace(/(\s-)+\s-/g, " -").replace(/^[\s\-]+|[\s\-]+$/g, "");
+  t = t.replace(/\s+/g, " ").replace(/(\s-)+\s-/g, " -").replace(/^[\s-]+|[\s-]+$/g, "");
   return t.slice(0, 150).trim();
 }
 

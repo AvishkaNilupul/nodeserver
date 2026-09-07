@@ -265,7 +265,7 @@ test("Overwatch, Rainbow Six and Call of Duty are no-claim games", () => {
   }
 });
 
-test("an already-claimed drop is never handed to a buyer", async (t) => {
+test("an already-claimed drop is never handed to a buyer", async () => {
   // Per-account, not per-game: a claimed drop is worthless whatever the game,
   // because it has already gone to whoever the farm account was linked to.
   const DropLog = require("../models/DropLog");
