@@ -4893,16 +4893,21 @@ async function playerauctionsRefreshSession() {
 
 // Cheap liveness probe for the refresher tick. paRequest already refreshes and
 // replays on 401, so this is a health check, not the thing keeping calls alive.
+// Health check for the refresher tick — NOT a pre-flight probe.
+//
+// paRequest already refreshes-and-retries on 401, under the cross-process lock.
+// So this only has to answer "is the session usable?". The earlier version
+// called playerauctionsRefreshSession() DIRECTLY when the probe failed, which
+// bypassed the lock and spent the refresh token a second time — the exact
+// "a pre-flight liveness probe races the refresh and loses" trap the Eldorado
+// integration had already documented.
+//
+// Nothing on the hot path should call this: the fulfiller does not need it,
+// because its first real request refreshes on its own if it has to.
 async function playerauctionsEnsureFreshSession() {
-  try {
-    await paRequest("GET", PA_USER_API, "/User/status");
-    return false;
-  } catch (e) {
-    if (e && e.response && e.response.status !== 401) throw e;
-  }
-  await playerauctionsRefreshSession();
+  const before = paStoredAccessToken();
   await paRequest("GET", PA_USER_API, "/User/status");
-  return true;
+  return paStoredAccessToken() !== before;
 }
 
 // --- Taxonomy -----------------------------------------------------------

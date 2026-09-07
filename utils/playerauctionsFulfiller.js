@@ -545,7 +545,9 @@ async function deliverPendingOrders() {
 
   let orders;
   try {
-    await mp.playerauctionsEnsureFreshSession();
+    // No pre-flight probe. paRequest refreshes-and-retries on 401 under the
+    // cross-process lock, so an extra liveness call here would only be a second
+    // racing refresher — which is what it was, once per 60s tick.
     orders = await mp.playerauctionsPendingOrders();
   } catch (e) {
     console.error("playerauctions fulfiller: could not read orders:", e.message);
