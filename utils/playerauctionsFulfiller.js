@@ -335,6 +335,20 @@ async function markUnitsDelivered(listing, orderId) {
 // delivery path asks it.
 // `claim` is injectable so the rule can be tested without Mongo, the same way
 // paRefreshOnce takes its refresher.
+// How many ACTIVE listings draw on the same no-claim game pool. Two offers
+// backed by "Overwatch" both see the same 11 sellable accounts, so reporting 11
+// on each advertises 22 — and the second buyer to arrive cannot be served.
+// Splitting the pool is the honest number.
+async function sharersOfUnclaimedGame(listing) {
+  if (!listing.unclaimedGame) return 1;
+  const n = await MarketplaceListing.countDocuments({
+    marketplace: "playerauctions",
+    status: "active",
+    unclaimedGame: listing.unclaimedGame,
+  });
+  return Math.max(1, n);
+}
+
 async function stockFor(listing, claim) {
   // Drop-Archive-backed bundles hold NO units — they claim at delivery time —
   // so counting units would report 0 and the reconciler would hide a listing
@@ -357,7 +371,8 @@ async function stockFor(listing, claim) {
     UNCLAIMED_STOCK_MAX,
     { dryRun: true, offerId: listing.externalId },
   );
-  return free.length;
+  const share = await sharersOfUnclaimedGame(listing);
+  return share > 1 ? Math.floor(free.length / share) : free.length;
 }
 
 async function syncStock(listing) {
@@ -815,6 +830,7 @@ module.exports = {
   releaseAccounts,
   undeliveredUnits,
   paItemCount,
+  sharersOfUnclaimedGame,
   alertUnfulfillable,
   alertedOrders,
   unitsForOrder,
