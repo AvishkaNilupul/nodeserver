@@ -341,12 +341,19 @@ async function markUnitsDelivered(listing, orderId) {
 // Splitting the pool is the honest number.
 async function sharersOfUnclaimedGame(listing) {
   if (!listing.unclaimedGame) return 1;
-  const n = await MarketplaceListing.countDocuments({
-    marketplace: "playerauctions",
-    status: "active",
-    unclaimedGame: listing.unclaimedGame,
-  });
-  return Math.max(1, n);
+  try {
+    const n = await MarketplaceListing.countDocuments({
+      marketplace: "playerauctions",
+      status: "active",
+      unclaimedGame: listing.unclaimedGame,
+    });
+    return Math.max(1, n);
+  } catch {
+    // Never let a bookkeeping lookup change what stockFor reports. Falling back
+    // to "one listing" reproduces the behaviour from before the split existed,
+    // which is the conservative direction: it cannot hide stock we do have.
+    return 1;
+  }
 }
 
 async function stockFor(listing, claim) {
