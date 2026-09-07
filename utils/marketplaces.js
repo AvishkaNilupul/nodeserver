@@ -5088,9 +5088,12 @@ async function playerauctionsPublish(opts = {}) {
   let screenShot = opts.screenShot;
   if (!blobName && opts.coverImagePath) {
     try {
+      // The upload answers {blobName, sasUri, created, length, verified} —
+      // note `sasUri`, not `url`. Missing it left every cover half-wired: the
+      // blob name was set but the offer carried no image URL.
       const up = await playerauctionsUploadImage(opts.coverImagePath, gameId);
       blobName = (up && (up.blobName || up.name)) || "";
-      screenShot = (up && (up.url || up.imageUrl || up.path)) || "";
+      screenShot = (up && (up.sasUri || up.url || up.imageUrl || up.path)) || "";
     } catch (e) {
       console.error("playerauctions image upload:", e.message);
     }
