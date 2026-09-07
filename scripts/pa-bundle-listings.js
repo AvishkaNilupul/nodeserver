@@ -34,6 +34,8 @@ const mongoose = require("mongoose");
 
 const mp = require("../utils/marketplaces");
 const { isNoClaimGame } = require("../utils/settings");
+const { unclaimedOnly } = require("../utils/playerauctionsFulfiller");
+const { loginsOnActiveListings, notListed } = require("../utils/listedLogins");
 const autoLister = require("../utils/autoLister");
 const copy = require("../utils/playerauctionsCopy");
 const { buildSetGridImage } = require("../utils/setImage");
@@ -115,6 +117,7 @@ async function main() {
   // 37 minutes without finishing. Cheap disqualifiers go first.
   const rows = [];
   const preGame = new Map();
+  const listedLogins = await loginsOnActiveListings();
   for (const [setId, sales] of salesBySet) {
     const set = await DropSet.findById(setId).lean();
     if (!set) continue;
@@ -130,9 +133,18 @@ async function main() {
     if (!pa) continue;
     if (!String(pa.productType || "").toLowerCase().split(",").includes("item")) continue;
 
+    // Count stock the way DELIVERY counts it, not the way the archive does.
+    // availableAccountsForSet returns every account holding the set — including
+    // ones already on another live listing, and ones whose drops are ALREADY
+    // CLAIMED. The fulfiller refuses both, so publishing that raw number
+    // advertises stock we cannot ship: the six existing mirrors had to be
+    // corrected from 118/155/153 down to 57/78/77 for exactly this reason, and
+    // every correction REPLACES the offer. Getting it right at publish time
+    // avoids 157 immediate rewrites.
     let avail = 0;
     try {
-      avail = (await availableAccountsForSet(set)).length;
+      const cands = notListed(await availableAccountsForSet(set), listedLogins).slice(0, 200);
+      avail = (await unclaimedOnly(set, cands)).length;
     } catch {
       avail = 0;
     }
