@@ -58,6 +58,10 @@ const PA_SELLABLE_STATUSES = ["released", "skipped"];
 // from a dry-run claim, which resolves a credential per candidate, so it is
 // bounded rather than "however many the farm holds".
 const UNCLAIMED_STOCK_MAX = 25;
+// Ceiling for a Drop-Archive stock COUNT. Deliberately NOT UNCLAIMED_STOCK_MAX:
+// that is a claim batch size, and reusing it here would quietly cut every
+// bundle mirror from ~130 advertised units to 25. Matches the publishers' cap.
+const ARCHIVE_STOCK_MAX = 200;
 
 // How many drops the buyer was promised, for the delivery-proof receipt.
 // MarketplaceListing has no items field of its own, so this reads the title,
@@ -119,20 +123,25 @@ async function releaseAccounts(accountIds) {
 }
 
 // Drop the candidates whose advertised drops have already been claimed.
+//
+// ONE query for the whole candidate list, not one per account. The per-account
+// loop this replaces was fine at delivery time (a handful of accounts) but the
+// stock reconciler runs it over every candidate for every listing on a timer —
+// ~1000 round trips a tick, which on Atlas is the exact shape that has bitten
+// this codebase before. Asking only for rows that ARE claimed also keeps the
+// bytes returned tiny, which is the real Atlas bound.
 async function unclaimedOnly(set, candidates) {
   const DropLog = require("../models/DropLog");
   const names = ((set && set.items) || []).map((i) => i.name).filter(Boolean);
   if (!names.length) return candidates;
-  const out = [];
-  for (const c of candidates) {
-    const logs = await DropLog.find(
-      { login: c.login, name: { $in: names } },
-      { claimed: 1 },
-    ).lean();
-    if (logs.some((l) => l.claimed)) continue;
-    out.push(c);
-  }
-  return out;
+  const logins = [...new Set(candidates.map((c) => c.login).filter(Boolean))];
+  if (!logins.length) return candidates;
+  const spentRows = await DropLog.find(
+    { login: { $in: logins }, name: { $in: names }, claimed: true },
+    { login: 1 },
+  ).lean();
+  const spent = new Set(spentRows.map((r) => r.login));
+  return candidates.filter((c) => !spent.has(c.login));
 }
 
 // --- Stock source 2: the no-claim farm ----------------------------------
@@ -339,7 +348,7 @@ async function stockFor(listing, claim) {
     const cands = notListed(
       await availableAccountsForSet(set).catch(() => []),
       await loginsOnActiveListings(),
-    );
+    ).slice(0, ARCHIVE_STOCK_MAX);
     return (await unclaimedOnly(set, cands)).length;
   }
   if (!listing.unclaimedGame) return undeliveredUnits(listing).length;

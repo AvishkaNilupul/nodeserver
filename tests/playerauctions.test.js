@@ -270,15 +270,20 @@ test("an already-claimed drop is never handed to a buyer", async () => {
   // because it has already gone to whoever the farm account was linked to.
   const DropLog = require("../models/DropLog");
   const set = { items: [{ name: "Esports Loot Box 41" }, { name: "OWWC Busan Spray" }] };
-  const rows = {
-    clean: [{ claimed: false }, { claimed: false }],
-    spent: [{ claimed: false }, { claimed: true }],
-  };
+  // One batched query for every candidate, asking only for rows that ARE
+  // claimed — the per-account loop this replaced was ~1000 round trips a tick.
   const real = DropLog.find;
-  DropLog.find = (q) => ({ lean: async () => rows[q.login] || [] });
+  let queries = 0;
+  DropLog.find = (q) => {
+    queries++;
+    assert.ok(q.login && q.login.$in, "must query all logins in one go");
+    assert.strictEqual(q.claimed, true, "must ask only for claimed rows");
+    return { lean: async () => [{ login: "spent" }] };
+  };
   try {
     const kept = await fulfiller.unclaimedOnly(set, [{ login: "clean" }, { login: "spent" }]);
     assert.deepStrictEqual(kept.map((c) => c.login), ["clean"]);
+    assert.strictEqual(queries, 1, "one query for the whole candidate list");
   } finally {
     DropLog.find = real;
   }
