@@ -102,6 +102,25 @@ const marketplaceListingSchema = new mongoose.Schema(
     // delivery time instead of consuming a pre-reserved `units[]` entry. This is
     // how the no-claim Overwatch bots feed an Eldorado offer directly.
     unclaimedGame: { type: String, default: "", index: true },
+    // What this listing ADVERTISES, with counts — the contract the buyer agreed
+    // to. A no-claim-backed row picks its stock by game at delivery time, so
+    // without this there is nothing to check the picked account against: Eldorado
+    // order 99d443eb was filled from a 10-item CAH listing with a 7-item account
+    // carrying ONE of the two advertised Esports Loot Boxes. When set, the
+    // fulfillers refuse any account that does not hold every entry (counts
+    // included) unclaimed, and the stock sync advertises only accounts that do.
+    // Empty = undeclared, and delivery keeps its pre-gate behaviour, so this can
+    // be turned on one listing at a time as each item list is confirmed.
+    requiredDrops: {
+      type: [
+        {
+          _id: false,
+          name: { type: String, default: "" },
+          qty: { type: Number, default: 1 },
+        },
+      ],
+      default: [],
+    },
     // Bundle listings whose stock is the Drop Archive rather than the no-claim
     // farm: claim accounts holding this row's `set` at delivery time instead of
     // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.

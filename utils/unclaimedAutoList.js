@@ -4148,6 +4148,7 @@ module.exports = {
   oldestListedUnit,
   collectNoClaimCandidates,
   inventoryForCandidate,
+  candForLedger,
   runOnce,
   acquireRunLock,
   releaseRunLock,

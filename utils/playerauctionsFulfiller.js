@@ -33,6 +33,7 @@ const {
 const { getAutoFarm } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
+const coverage = require("./unclaimedCoverage");
 const copy = require("./playerauctionsCopy");
 const proof = require("./playerauctionsProof");
 const farmService = require("./playerauctionsFarmService");
@@ -58,6 +59,10 @@ const PA_SELLABLE_STATUSES = ["released", "skipped"];
 // from a dry-run claim, which resolves a credential per candidate, so it is
 // bounded rather than "however many the farm holds".
 const UNCLAIMED_STOCK_MAX = 25;
+
+// Most live inventory reads one call to claimUnclaimedForGame may make. Bounds
+// the Twitch fan-out of both delivery and the periodic stock sync.
+const LIVE_CHECK_MAX = 40;
 // Ceiling for a Drop-Archive stock COUNT. Deliberately NOT UNCLAIMED_STOCK_MAX:
 // that is a claim batch size, and reusing it here would quietly cut every
 // bundle mirror from ~130 advertised units to 25. Matches the publishers' cap.
@@ -153,7 +158,16 @@ function unclaimedGameFilter(game) {
   return new RegExp("^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
-async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
+// `requiredDrops` is the listing's advertised item list. With it set, an account
+// qualifies only when it holds every entry (counts included) and none of them is
+// already claimed. Picking by game alone is what filled a 10-item Overwatch CAH
+// order with a 7-item account on Eldorado (order 99d443eb, 2026-09-07); the two
+// PlayerAuctions rows backed by that same ledger advertise the same bundles.
+async function claimUnclaimedForGame(
+  game,
+  want,
+  { orderId, offerId, dryRun, requiredDrops, shortfall },
+) {
   const {
     credentialForLedger,
     manualSoldOwnerKeys,
@@ -162,6 +176,10 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
   } = require("./unclaimedAutoList");
 
   const n = Math.max(1, parseInt(want, 10) || 1);
+  const required = coverage.requiredCounts(requiredDrops);
+  // A coverage gate rejects most candidates on their drops alone, so read a
+  // deeper slice — otherwise rare stock reads as no stock.
+  const scan = required.size ? Math.max(n * 6, 200) : n * 6;
   const candidates = await UnclaimedAccount.find({
     source: "noclaim",
     game: unclaimedGameFilter(game),
@@ -169,19 +187,50 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
     soldAt: null,
   })
     .sort({ lastCheckedAt: -1 })
-    .limit(n * 6)
+    .limit(scan)
     .lean();
 
+  // Try the accounts the ledger already vouches for first; the rest stay in the
+  // queue because the ledger is only a partial snapshot and DropLog may still
+  // prove them out. This is ordering, not filtering.
+  const { covering, short } = coverage.partitionByCoverage(candidates, required);
+  const ordered = covering.concat(short);
+
+  // An owner the operator has already hand-sold is off limits even though the
+  // ledger row still looks free.
   const usable = filterManualSoldLedgers(
-    candidates,
-    await manualSoldOwnerKeys(candidates),
+    ordered,
+    await manualSoldOwnerKeys(ordered),
   );
+  const rejected = [];
+  // Live verification is one Twitch call per candidate, and this same function
+  // is what the 15-minute stock sync uses to count stock — so on a big ledger an
+  // unbounded walk would fan out hundreds of GQL reads per sync. Cap the live
+  // checks; the ledger-covering candidates are walked first, so the cap costs
+  // nothing until stock is genuinely scarce, and under-counting stock is the
+  // safe direction to be wrong.
+  let liveChecks = 0;
 
   const out = [];
   for (const row of usable) {
     if (out.length >= n) break;
     const live = await activeListingsForLogin(row.login).catch(() => []);
     if (live && live.length) continue;
+
+    // The gate: hold every advertised item, and hold them UNCLAIMED. A claimed
+    // drop has already been connected to whoever the farm account was linked
+    // to, so shipping it sells the buyer nothing.
+    if (required.size) {
+      if (liveChecks >= LIVE_CHECK_MAX) break;
+      liveChecks += 1;
+      // Live Twitch inventory, not the ledger: an expired wave silently drops
+      // out of what the buyer can claim, and only Twitch knows that.
+      const verdict = await coverage.liveCoverage(row, required);
+      if (!verdict.ok) {
+        rejected.push({ row, verdict });
+        continue;
+      }
+    }
 
     const cred = await credentialForLedger(row);
     if (!cred.login || !cred.password) continue;
@@ -209,6 +258,19 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
     );
     if (!taken) continue;
     out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
+  }
+  // Say WHY the stock fell short, in terms of the advertised items — "no
+  // Overwatch accounts" would be wrong and unactionable when what is actually
+  // missing is the second wave's loot box.
+  if (shortfall && out.length < n && rejected.length) {
+    shortfall.detail = coverage.summarizeMissing(
+      rejected.map((r) => r.verdict.missing),
+    );
+    const claimed = rejected.filter((r) => r.verdict.claimed.length);
+    if (claimed.length) {
+      shortfall.claimed =
+        claimed.length + " account(s) already had an advertised drop CLAIMED";
+    }
   }
   return out;
 }
@@ -376,7 +438,11 @@ async function stockFor(listing, claim) {
   const free = await (claim || claimUnclaimedForGame)(
     listing.unclaimedGame,
     UNCLAIMED_STOCK_MAX,
-    { dryRun: true, offerId: listing.externalId },
+    {
+      dryRun: true,
+      offerId: listing.externalId,
+      requiredDrops: listing.requiredDrops,
+    },
   );
   const share = await sharersOfUnclaimedGame(listing);
   return share > 1 ? Math.floor(free.length / share) : free.length;
@@ -543,17 +609,27 @@ async function deliverOrder(order, { dryRun }) {
 
   // No-claim-farm-backed offers resolve stock at delivery time.
   if (row.unclaimedGame) {
+    const shortfall = {};
     const picked = await claimUnclaimedForGame(row.unclaimedGame, qty, {
       orderId,
       offerId: row.externalId,
       dryRun,
+      requiredDrops: row.requiredDrops,
+      shortfall,
     });
     if (picked.length < qty) {
+      // Hold the order rather than ship short: a waiting buyer is recoverable,
+      // an account missing advertised items is a dispute.
       return {
         orderId,
         error:
           "only " + picked.length + " of " + qty + " sellable " +
-          row.unclaimedGame + " account(s) free in the no-claim farm",
+          row.unclaimedGame + " account(s) free in the no-claim farm" +
+          ((row.requiredDrops || []).length
+            ? " holding all " + (row.requiredDrops || []).length +
+              " advertised item(s)" +
+              (shortfall.detail ? " — short of: " + shortfall.detail : "")
+            : ""),
       };
     }
     if (dryRun) {

@@ -25,6 +25,7 @@ const { getAutoFarm } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const farmService = require("./eldoradoFarmService");
+const coverage = require("./unclaimedCoverage");
 
 // Distinct from the Shop / Gameflip / GGSel / Digiseller tags so the same
 // account can never be handed out twice across platforms.
@@ -113,6 +114,10 @@ const ELD_SELLABLE_STATUSES = ["released", "skipped"];
 // bounded rather than "however many the farm holds".
 const UNCLAIMED_STOCK_MAX = 25;
 
+// Most live inventory reads one call to claimUnclaimedForGame may make. Bounds
+// the Twitch fan-out of both delivery and the periodic stock sync.
+const LIVE_CHECK_MAX = 40;
+
 function unclaimedGameFilter(game) {
   // The ledger holds both "Overwatch" and "overwatch" (and callers may pass
   // "Overwatch 2"), so match on a loose, anchored prefix rather than equality.
@@ -122,7 +127,17 @@ function unclaimedGameFilter(game) {
 
 // Pick (and optionally claim) sellable no-claim accounts for a game.
 // `dryRun` selects without mutating anything.
-async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
+//
+// `requiredDrops` is the listing's advertised item list. When it is set, an
+// account only qualifies if it holds EVERY entry (counts included) and none of
+// them is already claimed — picking by game alone is what shipped a 7-item
+// account against a 10-item CAH listing on order 99d443eb. `shortfall` is filled
+// in with why the stock fell short, so the caller can say it out loud.
+async function claimUnclaimedForGame(
+  game,
+  want,
+  { orderId, offerId, dryRun, requiredDrops, shortfall },
+) {
   const {
     credentialForLedger,
     manualSoldOwnerKeys,
@@ -131,6 +146,11 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
   } = require("./unclaimedAutoList");
 
   const n = Math.max(1, parseInt(want, 10) || 1);
+  const required = coverage.requiredCounts(requiredDrops);
+  // With a coverage gate most candidates are rejected on their drops alone, so
+  // read a deeper slice of the ledger — otherwise a listing whose stock is rare
+  // reads as out of stock while covering accounts sit just past the cut.
+  const scan = required.size ? Math.max(n * 6, 200) : n * 6;
   const candidates = await UnclaimedAccount.find({
     source: "noclaim",
     game: unclaimedGameFilter(game),
@@ -138,15 +158,29 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
     soldAt: null,
   })
     .sort({ lastCheckedAt: -1 })
-    .limit(n * 6)
+    .limit(scan)
     .lean();
+
+  // Try the accounts the ledger already vouches for first; the rest stay in the
+  // queue because the ledger is only a partial snapshot and DropLog may still
+  // prove them out. This is ordering, not filtering.
+  const { covering, short } = coverage.partitionByCoverage(candidates, required);
+  const ordered = covering.concat(short);
 
   // An owner the operator has already hand-sold is off limits even though the
   // ledger row still looks free.
   const usable = filterManualSoldLedgers(
-    candidates,
-    await manualSoldOwnerKeys(candidates),
+    ordered,
+    await manualSoldOwnerKeys(ordered),
   );
+  const rejected = [];
+  // Live verification is one Twitch call per candidate, and this same function
+  // is what the 15-minute stock sync uses to count stock — so on a big ledger an
+  // unbounded walk would fan out hundreds of GQL reads per sync. Cap the live
+  // checks; the ledger-covering candidates are walked first, so the cap costs
+  // nothing until stock is genuinely scarce, and under-counting stock is the
+  // safe direction to be wrong.
+  let liveChecks = 0;
 
   const out = [];
   for (const row of usable) {
@@ -154,6 +188,21 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
     // Never ship an account that is live on another marketplace's listing.
     const live = await activeListingsForLogin(row.login).catch(() => []);
     if (live && live.length) continue;
+
+    // The gate: hold every advertised item, and hold them UNCLAIMED. A claimed
+    // drop has already been connected to whoever the farm account was linked
+    // to, so shipping it sells the buyer nothing.
+    if (required.size) {
+      if (liveChecks >= LIVE_CHECK_MAX) break;
+      liveChecks += 1;
+      // Live Twitch inventory, not the ledger: an expired wave silently drops
+      // out of what the buyer can claim, and only Twitch knows that.
+      const verdict = await coverage.liveCoverage(row, required);
+      if (!verdict.ok) {
+        rejected.push({ row, verdict });
+        continue;
+      }
+    }
 
     const cred = await credentialForLedger(row);
     if (!cred.login || !cred.password) continue;
@@ -181,6 +230,19 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
     );
     if (!taken) continue;
     out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
+  }
+  // Say WHY the stock fell short, in terms of the advertised items — "no
+  // Overwatch accounts" would be wrong and unactionable when what is actually
+  // missing is the second wave's loot box.
+  if (shortfall && out.length < n && rejected.length) {
+    shortfall.detail = coverage.summarizeMissing(
+      rejected.map((r) => r.verdict.missing),
+    );
+    const claimed = rejected.filter((r) => r.verdict.claimed.length);
+    if (claimed.length) {
+      shortfall.claimed =
+        claimed.length + " account(s) already had an advertised drop CLAIMED";
+    }
   }
   return out;
 }
@@ -233,17 +295,27 @@ async function deliverOrder(order, { dryRun }) {
   // Unclaimed-farm-backed offers resolve their stock at delivery time out of the
   // no-claim ledger rather than from pre-reserved units.
   if (listing.unclaimedGame) {
+    const shortfall = {};
     const picked = await claimUnclaimedForGame(listing.unclaimedGame, qty, {
       orderId,
       offerId,
       dryRun,
+      requiredDrops: listing.requiredDrops,
+      shortfall,
     });
     if (picked.length < qty) {
+      // Hold the order rather than ship a short account: the buyer waiting is
+      // recoverable, an account missing half the advertised items is a dispute.
       return {
         orderId,
         error:
           "only " + picked.length + " of " + qty + " sellable " +
-          listing.unclaimedGame + " account(s) free in the no-claim farm",
+          listing.unclaimedGame + " account(s) free in the no-claim farm" +
+          ((listing.requiredDrops || []).length
+            ? " holding all " + (listing.requiredDrops || []).length +
+              " advertised item(s)" +
+              (shortfall.detail ? " — short of: " + shortfall.detail : "")
+            : ""),
       };
     }
     const blocks = picked.map((p) => eldoradoDeliveryCode(p.login, p.password));
@@ -473,6 +545,7 @@ async function syncBundleStock({ dryRun = false } = {}) {
         await claimUnclaimedForGame(row.unclaimedGame, UNCLAIMED_STOCK_MAX, {
           dryRun: true,
           offerId: row.externalId,
+          requiredDrops: row.requiredDrops,
         }).catch(() => [])
       ).length;
     } else {
