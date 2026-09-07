@@ -55,46 +55,17 @@ function listingLogins(rows) {
   return out;
 }
 
-async function gatherSpentAccounts() {
-  // `clientSecret` is deliberately NOT projected here: it is a long encrypted
-  // blob on every one of thousands of pool rows, and Atlas bills this page in
-  // bytes returned. The one path that needs it (the farm-spent rescan) reads it
-  // for the single account being recycled.
-  const [pool, listingRows, botRows, unclaimedLive, botOnlyDelivered] = await Promise.all([
-    AvailableAccount.find(
-      { status: { $in: ["claimed", "available"] } },
-      { username: 1, usernameLower: 1, status: 1, claimedAt: 1, claimedNote: 1, soldGames: 1, lastCheckStatus: 1, listed: 1 },
-    ).lean(),
-    MarketplaceListing.find(
-      { status: "active", $or: [{ accountLogin: { $ne: "" } }, { "units.0": { $exists: true } }] },
-      { accountLogin: 1, "units.login": 1 },
-    ).lean(),
-    BotAccount.find(
-      { login: { $ne: "" } },
-      { login: 1, _id: 1, configFile: 1, lastScanStatus: 1, lastScanAt: 1 },
-    ).lean(),
-    // Live stock of the unclaimed auto-lister. Its accounts are farmed by the
-    // standalone no-claim bots and are often absent from DropLog entirely, so
-    // the MarketplaceListing join alone can miss an account that is on sale
-    // right now — and recycling one would hand its drops back to the farmer
-    // while a buyer can still purchase them.
-    UnclaimedAccount.distinct("loginLower", { status: "listed" }).catch(() => []),
-    DropLog.distinct("login", {
-      $or: [{ connected: true }, { soldAt: { $ne: null } }],
-    }).catch(() => []),
-  ]);
-  const names = [
-    ...new Set(
-      [...pool.map((row) => row.username), ...botOnlyDelivered].filter(Boolean),
-    ),
-  ];
-  if (!names.length) return [];
-  // Bucket to one row per (login, game, buyer, connected, sold) FIRST, then
-  // roll the buckets up per login. The previous single-stage $addToSet carried
-  // each drop's four timestamps inside the set element, so almost nothing
-  // deduplicated and the group shipped back roughly one object per drop —
-  // which is what made this page take over a minute against Atlas (the bound
-  // here is bytes returned, not query time).
+// One document per login carrying the drop facts the eligibility rule needs.
+// `logins` scopes the scan to a handful of accounts for the recycle path; left
+// out, it rolls up the whole archive.
+//
+// Bucket to one row per (login, game, buyer, connected, sold) FIRST, then roll
+// the buckets up per login. A single-stage $addToSet carried each drop's four
+// timestamps inside the set element, so almost nothing deduplicated and the
+// group shipped back roughly one object per drop — which is what made this page
+// take over a minute against Atlas (the bound here is bytes returned, not query
+// time).
+function dropRollupPipeline(logins) {
   const buyerLower = { $toLower: { $ifNull: ["$soldToUsername", ""] } };
   const deliveryDate = {
     $ifNull: [
@@ -107,8 +78,8 @@ async function gatherSpentAccounts() {
       },
     ],
   };
-  const groupedDrops = await DropLog.aggregate([
-    { $match: { login: { $in: names } } },
+  return [
+    ...(logins ? [{ $match: { login: { $in: logins } } }] : []),
     {
       $group: {
         _id: {
@@ -156,8 +127,116 @@ async function gatherSpentAccounts() {
         },
       },
     },
+    // A login with nothing delivered can never be a spent account, and the two
+    // gates that could still have used its counts are unreachable without a
+    // delivery: `soldUnconnected` is a subset of `delivered`, and a row that
+    // reaches the `available` gate at all got here through `soldGames`, which
+    // only the farm engines (which bypass that gate) and a past recycle (which
+    // is rejected earlier) ever stamp. Dropping them here is what turns a
+    // 4590-row transfer into an 870-row one.
+    { $match: { delivered: { $gt: 0 } } },
+  ];
+}
+
+function uniqueLower(values) {
+  return [...new Set(values.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+}
+
+// Every record that can hold a live sale: the marketplace listing rows and the
+// unclaimed engine's ledger. Always read fresh — for a farm-spent account this
+// is the ONLY thing standing between still-purchasable stock and the farmer
+// taking it back, so it must never come from a cached snapshot.
+function loadLiveStock() {
+  return Promise.all([
+    MarketplaceListing.find(
+      { status: "active", $or: [{ accountLogin: { $ne: "" } }, { "units.0": { $exists: true } }] },
+      { accountLogin: 1, "units.login": 1 },
+    ).lean(),
+    UnclaimedAccount.distinct("loginLower", { status: "listed" }).catch(() => []),
   ]);
-  const dropAggBy = new Map(groupedDrops.map((row) => [row._id, row]));
+}
+
+// BotAccount.login is stored in the account's own casing (661 of 4692 on prod
+// carry capitals), so an $in against lowercase logins would silently miss them
+// — and a missed bot row reads as "not deployed", which is exactly the way this
+// page must never be wrong. The lowercase compare therefore happens server-side.
+function loadBots(loginsLower) {
+  return BotAccount.aggregate([
+    { $match: { login: { $ne: "" } } },
+    { $set: { loginLower: { $toLower: "$login" } } },
+    { $match: { loginLower: { $in: loginsLower } } },
+    { $project: { login: 1, configFile: 1, lastScanStatus: 1, lastScanAt: 1 } },
+  ]);
+}
+
+// `clientSecret` is deliberately NOT projected: it is a long encrypted blob on
+// every one of thousands of pool rows, and Atlas bills this page in bytes
+// returned. The one path that needs it (the farm-spent rescan) reads it for the
+// single account being recycled.
+const POOL_FIELDS = {
+  username: 1,
+  usernameLower: 1,
+  status: 1,
+  claimedAt: 1,
+  claimedNote: 1,
+  soldGames: 1,
+  lastCheckStatus: 1,
+  listed: 1,
+};
+
+// Pass `logins` to gather just those accounts — the recycle paths do, so a
+// write never pays for a full-archive scan (and gets a fresher read than the
+// bulk snapshot could give it). Without it, every spent account is gathered.
+//
+// The shape matters: the old version pulled ALL 3235 pool rows and ALL 4692 bot
+// rows and matched DropLog against a 4801-name $in, to end up rendering ~800
+// rows. Now the archive rollup names its own candidates first and only those
+// rows are fetched.
+async function gatherSpentAccounts(options = {}) {
+  const scope = Array.isArray(options.logins) ? uniqueLower(options.logins) : null;
+  let pool;
+  let dropRows;
+  let botRows;
+  let listingRows;
+  let unclaimedLive;
+  let candidates;
+
+  if (scope) {
+    if (!scope.length) return [];
+    // Pool first, only to learn each account's own casing: 210 archive logins
+    // carry capitals and DropLog.login stores them exactly as the pool does.
+    pool = await AvailableAccount.find(
+      { status: { $in: ["claimed", "available"] }, usernameLower: { $in: scope } },
+      POOL_FIELDS,
+    ).lean();
+    const variants = [...new Set([...scope, ...pool.map((row) => row.username).filter(Boolean)])];
+    candidates = scope;
+    [dropRows, botRows, [listingRows, unclaimedLive]] = await Promise.all([
+      DropLog.aggregate(dropRollupPipeline(variants)),
+      loadBots(scope),
+      loadLiveStock(),
+    ]);
+  } else {
+    let soldGameLogins;
+    [dropRows, soldGameLogins, [listingRows, unclaimedLive]] = await Promise.all([
+      DropLog.aggregate(dropRollupPipeline(null)),
+      // The other half of the final filter: a farm engine can stamp soldGames on
+      // an account that never entered the drop archive at all.
+      AvailableAccount.distinct("usernameLower", { "soldGames.0": { $exists: true } }),
+      loadLiveStock(),
+    ]);
+    candidates = uniqueLower([...dropRows.map((row) => row._id), ...soldGameLogins]);
+    if (!candidates.length) return [];
+    [pool, botRows] = await Promise.all([
+      AvailableAccount.find(
+        { status: { $in: ["claimed", "available"] }, usernameLower: { $in: candidates } },
+        POOL_FIELDS,
+      ).lean(),
+      loadBots(candidates),
+    ]);
+  }
+
+  const dropAggBy = new Map(dropRows.map((row) => [row._id, row]));
   const listed = listingLogins(listingRows);
   for (const login of unclaimedLive) {
     const key = String(login || "").trim().toLowerCase();
@@ -170,7 +249,7 @@ async function gatherSpentAccounts() {
     botsBy.get(key).push(bot);
   }
   const poolKeys = new Set(pool.map((account) => String(account.usernameLower || account.username || "").toLowerCase()));
-  const candidates = [
+  const accounts = [
     ...pool,
     ...botRows
       .filter((bot) => !poolKeys.has(String(bot.login || "").toLowerCase()))
@@ -180,7 +259,7 @@ async function gatherSpentAccounts() {
   const cooldownDays = Number(settings.getAutoFarm().recycleCooldownDays) || 14;
   const now = Date.now();
 
-  return candidates.map((account) => {
+  return accounts.map((account) => {
     const key = String(account.usernameLower || account.username || "").toLowerCase();
     const agg = dropAggBy.get(key) || {};
     const delivered = (agg.soldDetails || []).filter(Boolean);
@@ -278,6 +357,36 @@ async function gatherSpentAccounts() {
 function publicRow(row) {
   const { _pool, _facts, botId, ...safe } = row;
   return safe;
+}
+
+// A full gather is ~9s of Atlas transfer even after the narrowing, and this is
+// a manual review queue whose contents only change when someone recycles or a
+// farm engine stamps a pool row. So the list serves a short-lived snapshot and
+// the page's Refresh button (?fresh=1) forces a new one; a recycle drops it.
+// The write paths never read this — they run their own scoped, fresh gather.
+const LIST_TTL_MS = 60000;
+let snapshot = null; // { at, rows }
+let inFlight = null;
+
+function invalidateListSnapshot() {
+  snapshot = null;
+}
+
+function listSnapshot(force) {
+  if (!force && snapshot && Date.now() - snapshot.at < LIST_TTL_MS) return Promise.resolve(snapshot);
+  // Concurrent callers (two tabs, or a reload mid-gather) share one gather
+  // rather than each paying for their own.
+  if (!inFlight) {
+    inFlight = gatherSpentAccounts()
+      .then((rows) => {
+        snapshot = { at: Date.now(), rows };
+        return snapshot;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+  }
+  return inFlight;
 }
 
 // Pure matcher: pick the row for a {login} or {id} body out of an existing
@@ -453,19 +562,49 @@ async function recycleFarmSpentRow(row) {
   return { login, recycled: true, status: "recycled", soldGames };
 }
 
-async function recycleOne(body) {
-  const rows = await gatherSpentAccounts();
-  const row = matchRow(rows, body);
-  if (!row) {
-    return { login: String((body && body.login) || ""), recycled: false, status: "not_found", reason: "spent account not found" };
-  }
-  return recycleRow(row);
+// Turn whatever the client sent — a login, a pool id, or a mix — into the set
+// of lowercase logins the scoped gather needs. Only an id costs a lookup.
+async function loginsForBodies(bodies) {
+  const ids = bodies.map((body) => body && body.id).filter((id) => id != null && String(id) !== "");
+  const byId = ids.length
+    ? await AvailableAccount.find({ _id: { $in: ids } }, { usernameLower: 1 }).lean().catch(() => [])
+    : [];
+  return uniqueLower([
+    ...bodies.map((body) => (body && body.login) || ""),
+    ...byId.map((row) => row.usernameLower),
+  ]);
 }
 
-router.get("/spent-accounts/list", requireSuperadmin, async (_req, res) => {
+// The recycle paths gather ONLY the accounts they are about to touch. That is
+// both far cheaper than a full-archive scan and strictly safer than reusing the
+// list snapshot: every guard — on an active listing, still deployed, stock left
+// to sell — is read at the moment of the write, not up to a minute earlier.
+async function recycleBodies(bodies) {
+  const logins = await loginsForBodies(bodies);
+  const rows = logins.length ? await gatherSpentAccounts({ logins }) : [];
+  const results = [];
+  for (const body of bodies) {
+    const row = matchRow(rows, body);
+    results.push(
+      row
+        ? await recycleRow(row)
+        : { login: String((body && body.login) || ""), recycled: false, status: "not_found", reason: "spent account not found" },
+    );
+  }
+  if (results.some((result) => result.recycled)) invalidateListSnapshot();
+  return results;
+}
+
+router.get("/spent-accounts/list", requireSuperadmin, async (req, res) => {
   try {
-    const accounts = await gatherSpentAccounts();
-    res.json({ success: true, accounts: accounts.map(publicRow) });
+    const snapshot = await listSnapshot(req.query && String(req.query.fresh || "") === "1");
+    res.json({
+      success: true,
+      accounts: snapshot.rows.map(publicRow),
+      gatheredAt: new Date(snapshot.at).toISOString(),
+      ageMs: Date.now() - snapshot.at,
+      ttlMs: LIST_TTL_MS,
+    });
   } catch (err) {
     console.error("spent-accounts list error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -474,7 +613,7 @@ router.get("/spent-accounts/list", requireSuperadmin, async (_req, res) => {
 
 router.post("/spent-accounts/recycle", requireSuperadmin, async (req, res) => {
   try {
-    const result = await recycleOne(req.body || {});
+    const [result] = await recycleBodies([req.body || {}]);
     const code = result.status === "not_found" ? 404 : (!result.recycled && result.status === "not_eligible" ? 409 : 200);
     res.status(code).json({ success: result.recycled, result });
   } catch (err) {
@@ -505,17 +644,8 @@ router.post("/spent-accounts/recycle-bulk", requireSuperadmin, async (req, res) 
       return res.status(400).json({ success: false, message: "Provide an array of logins or account ids" });
     }
     const capped = unique.length > RECYCLE_BATCH;
-    const bodies = unique.slice(0, RECYCLE_BATCH);
-    const rows = await gatherSpentAccounts(); // ONE gather for the whole batch
-    const results = [];
-    for (const body of bodies) {
-      const row = matchRow(rows, body);
-      results.push(
-        row
-          ? await recycleRow(row)
-          : { login: String(body.login || ""), recycled: false, status: "not_found", reason: "spent account not found" },
-      );
-    }
+    // ONE scoped gather for the whole batch.
+    const results = await recycleBodies(unique.slice(0, RECYCLE_BATCH));
     res.json({ success: results.some((result) => result.recycled), results, capped });
   } catch (err) {
     console.error("spent-accounts recycle-bulk error:", err.message);
@@ -524,3 +654,8 @@ router.post("/spent-accounts/recycle-bulk", requireSuperadmin, async (req, res) 
 });
 
 module.exports = router;
+module.exports.gatherSpentAccounts = gatherSpentAccounts;
+module.exports.dropRollupPipeline = dropRollupPipeline;
+module.exports.matchRow = matchRow;
+module.exports.publicRow = publicRow;
+module.exports.invalidateListSnapshot = invalidateListSnapshot;
