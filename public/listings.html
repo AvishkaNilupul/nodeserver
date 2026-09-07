@@ -2870,6 +2870,7 @@ Reliable Daily Rewards</textarea
         zeusx: "ZeusX",
         eldorado: "Eldorado.gg",
         playerauctions: "PlayerAuctions",
+        z2u: "Z2U",
       };
       // EpicNPC bridge bookmarklet. Self-contained (runs on epicnpc.com, can't
       // reference this page), it reads the listing payload from the compose
@@ -3036,6 +3037,11 @@ Reliable Daily Rewards</textarea
         playerauctions: {
           cookie: "Cookie header (whole line, from a signed-in session)",
         },
+        // Z2U has no API at all: the seller panel is a plain PHP site driven
+        // with the session cookie. Copy the Cookie header from any request on
+        // www.z2u.com while signed in. There is no Cloudflare challenge on
+        // these paths, so the server can use it directly.
+        z2u: { cookie: "Cookie header (whole line, from a signed-in session)" },
       };
       var mpStatus = null;
 

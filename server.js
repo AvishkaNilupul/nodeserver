@@ -34,6 +34,7 @@ const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
 const unclaimedAutoList = require("./utils/unclaimedAutoList");
 const botHealthMonitor = require("./utils/botHealthMonitor");
+const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
@@ -71,6 +72,7 @@ const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
 const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
 const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
+const z2uFulfiller = require("./utils/z2uFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
@@ -739,6 +741,12 @@ mongoose
     // something the bot can't handle) and pings Telegram — see
     // utils/botHealthMonitor.js.
     botHealthMonitor.start();
+    // Periodically re-verify pool accounts against Twitch. Until this ran, the
+    // pool was only ever checked on import or on an operator clicking Check —
+    // prod had 1,504 accounts unchecked for 30+ days while readyPoolQuery()
+    // still counted them as spendable supply, because a dead token keeps its
+    // last "ok" forever. See the sweep section in utils/accountPoolChecker.js.
+    accountPoolChecker.start();
     // Listen for admins confirming a Telegram link from inside the app's bot.
     // No-op when TG_TOKEN is unset.
     telegramBot.start();
@@ -775,6 +783,14 @@ mongoose
     // server's copy — unpreventable, and silent until a buyer is left waiting.
     // This checks every 5 minutes and Telegrams once when it breaks.
     playerauctionsSessionWatch.start();
+    // Z2U shelf keeper + auto-delivery. A Z2U offer carries a DURATION and the
+    // site silently takes it off sale when that runs out, which is why 34 of the
+    // account's 47 offers were dark on 2026-09-08 while only 2 were really empty.
+    // This extends what is about to lapse, relists what lapsed, pulls down
+    // anything we can no longer back with claimable stock, and hands over the
+    // credential on a waiting order. Self-guards on autoFarm.z2uAuto /
+    // z2uAutoDeliver, and both halves ship in dry-run.
+    z2uFulfiller.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();

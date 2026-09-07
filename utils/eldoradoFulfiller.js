@@ -60,7 +60,12 @@ function eldoradoDeliveryCode(login, password) {
 // bundle. Mirrors the Digiseller claimer, including the cross-marketplace
 // exclusion: the buyer receives the whole account, so an account already
 // attached to any other live listing would ship that listing's drops too.
-async function claimAccountsForSet(set, max) {
+// `claimTag` is which shop the reservation belongs to. It is a parameter and
+// not a constant because the Z2U fulfiller reuses this exact claim path: a
+// second copy would drift, and a drifted copy of THIS function oversells an
+// account. The tag must be one of utils/marketClaimTags, or the drop archive
+// reads a merely-reserved account as really sold.
+async function claimAccountsForSet(set, max, { claimTag = ELD_CLAIM_TAG } = {}) {
   const want = Math.max(1, parseInt(max, 10) || 1);
   const candidates = notListed(
     await availableAccountsForSet(set),
@@ -70,7 +75,7 @@ async function claimAccountsForSet(set, max) {
   for (const c of candidates) {
     if (claimed.length >= want) break;
     const ok = await reserveSetOnAccount(c.accountId, set, {
-      soldToUsername: ELD_CLAIM_TAG,
+      soldToUsername: claimTag,
       soldSetId: String(set._id),
     });
     if (!ok) continue;
@@ -84,7 +89,7 @@ async function claimAccountsForSet(set, max) {
     // A unit with no readable password is not deliverable, so never let it
     // stand behind the offer's quantity.
     if (!login || !password) {
-      await releaseAccounts([c.accountId]);
+      await releaseAccounts([c.accountId], claimTag);
       continue;
     }
     claimed.push({ accountId: String(c.accountId), login, password });
@@ -92,8 +97,8 @@ async function claimAccountsForSet(set, max) {
   return claimed;
 }
 
-async function releaseAccounts(accountIds) {
-  await releaseAccountsForTag(accountIds, ELD_CLAIM_TAG);
+async function releaseAccounts(accountIds, claimTag = ELD_CLAIM_TAG) {
+  await releaseAccountsForTag(accountIds, claimTag);
 }
 
 
@@ -136,7 +141,7 @@ function unclaimedGameFilter(game) {
 async function claimUnclaimedForGame(
   game,
   want,
-  { orderId, offerId, dryRun, requiredDrops, shortfall },
+  { orderId, offerId, dryRun, requiredDrops, shortfall, market = "eldorado" },
 ) {
   const {
     credentialForLedger,
@@ -220,8 +225,11 @@ async function claimUnclaimedForGame(
         $set: {
           status: "sold",
           soldAt: now,
-          market: "eldorado",
-          note: "eldorado order " + (orderId || ""),
+          // Which shop actually took this unit. Defaulted rather than hardcoded
+          // so the Z2U fulfiller can reuse this claim path verbatim — a copy of
+          // it would drift, and the drift would be an oversold account.
+          market,
+          note: market + " order " + (orderId || ""),
           lastCheckedAt: now,
         },
         $addToSet: { listingExternalIds: String(offerId || "") },

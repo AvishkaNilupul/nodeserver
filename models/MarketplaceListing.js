@@ -28,6 +28,7 @@ const marketplaceListingSchema = new mongoose.Schema(
         "zeusx",
         "eldorado",
         "playerauctions",
+        "z2u",
       ],
       required: true,
       index: true,

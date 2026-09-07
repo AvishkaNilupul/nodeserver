@@ -42,6 +42,12 @@ const FIELDS = {
   // whole credential really is just the Cookie header from a signed-in seller
   // session (DevTools -> Network -> any request -> copy the Cookie header).
   playerauctions: ["cookie"],
+  // Z2U has no API at all — the seller panel is a server-rendered PHP site, so
+  // the one credential is the whole Cookie header from a signed-in session.
+  // Unlike the old note in this repo, prod reaches z2u.com fine: there is no
+  // Cloudflare challenge on these paths (verified from the prod host
+  // 2026-09-08), so no browser bridge is needed.
+  z2u: ["cookie"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -2132,6 +2138,33 @@ async function ggselOfferStatus(offerId) {
         "ggsel status unreadable for offer " + offerId + ": " +
           (e.response ? "HTTP " + e.response.status : e.message),
       );
+      return null;
+    }
+  }
+}
+
+// The offer's current price in ROUBLES, or null when it cannot be read.
+//
+// Exists because GGSel's PATCH is unreliable about reporting success: a live
+// reprice canary got `504 Gateway Time-out` from nginx for an update whose
+// outcome was genuinely unknown. Without a way to read the price back, a
+// caller cannot tell "applied" from "not applied", so it cannot decide whether
+// to record the new price — and it would either leave the DB disagreeing with
+// the live offer or retry blindly. Mirrors ggselOfferStatus's shape, including
+// its fall back to the paginated offer list (an older offer is invisible to a
+// direct GET; see ggselFindOfferInList).
+async function ggselOfferPrice(offerId) {
+  const keys = requireKeys("ggsel");
+  const priceOf = (o) => {
+    const p = Number(o && o.price);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  };
+  try {
+    return priceOf(await ggselReadOffer(keys, offerId));
+  } catch {
+    try {
+      return priceOf(await ggselFindOfferInList(keys, offerId));
+    } catch {
       return null;
     }
   }
@@ -5712,9 +5745,695 @@ async function playerauctionsMarkDelivered(orderId, proofImagePaths = []) {
   );
 }
 
+// ------------------------------------------------------------------
+// Z2U (z2u.com)
+//
+// Z2U has no API of any kind — not even the half-API ZeusX exposes. The seller
+// panel is a server-rendered PHP site (ThinkPHP) and every "endpoint" is the
+// same form the browser posts, so this connector drives the site the way
+// FunPay is driven: one stored session cookie, scrape the page, re-submit its
+// own form.
+//
+// Auth is the whole Cookie header from a signed-in session, pasted once
+// (DevTools -> Network -> any z2u.com request -> copy the Cookie header). The
+// session cookies are httpOnly, so the operator is the only possible source.
+// Renewed cookies are absorbed back into settings on every call, so the paste
+// keeps rolling for as long as Z2U keeps the session alive.
+//
+// **Z2U does NOT challenge server-side calls.** Verified live 2026-09-08 from
+// the production host: `/` answers 200 and `/sell/manage` answers a plain 302
+// to the login page — a WAF would have returned 403. An older note in this
+// codebase claimed cf_clearance was bound to the operator's browser IP and
+// that prod would need an extension bridge to publish; that is not true of
+// these paths today, and the bridge was never needed.
+//
+// The seller panel surface, all confirmed live against the real account:
+//   GET  /sell/manage                          -> the game tiles (service+game ids)
+//   GET  /sell/manageList?service=&game=       -> every offer in one group
+//   GET  /sell/manageEdit.html?id=<pk>         -> one offer's editor form
+//   POST /sell/manageListToUpdate              -> save that form (price/stock/text)
+//   POST /sell/productAction {list_pk,list_action}
+//                                              -> on_line | off_line | extend
+//   POST /sell/submitSellInfo                  -> create a new offer
+//   GET  /sellOrder/index/order_status/<S>     -> sold orders (S = ALL,
+//                                                 WAIT_DELIVERY, DELIVERED,
+//                                                 COMMENT, CANCELED)
+//   GET  /sellOrder?order_id=<Z…>              -> one order + its delivery form
+//   POST /sellOrder/form_submit                -> deliver that order
+//   POST /public/createToken                   -> the per-request CSRF token
+//
+// Ajax replies are ThinkPHP envelopes: {code, msg, data, url, wait}, where
+// code 1 is success and code 0 carries a human message in `msg`.
+const Z2U_BASE = "https://www.z2u.com";
+// Z2U rejects anything under $0.30 on the item categories we sell in.
+const Z2U_MIN_PRICE = 0.3;
+
+// The seller-panel status codes on `.set_status[data-value]`, read off the
+// live shelf 2026-09-08. 1 is the only one that is actually on sale; the two
+// off-sale codes are worth telling apart because they need different repairs:
+// a seller-paused offer just needs `on_line`, while one Z2U itself pulled for
+// running out its duration needs `extend` first or it falls straight back off.
+const Z2U_STATUS = {
+  1: "online",
+  4: "paused",
+  5: "expired",
+};
+
+function z2uJar(str) {
+  const jar = new Map();
+  for (const part of String(str || "").split(/;\s*/)) {
+    if (!part) continue;
+    const i = part.indexOf("=");
+    if (i < 1) continue;
+    jar.set(part.slice(0, i).trim(), part.slice(i + 1));
+  }
+  return jar;
+}
+
+function z2uJarHeader(jar) {
+  return [...jar.entries()].map(([k, v]) => k + "=" + v).join("; ");
+}
+
+// Fold Set-Cookie replies back into the jar. Returns true when anything moved,
+// so the caller only writes settings when there is something to write.
+function z2uAbsorbCookies(jar, setCookie) {
+  const arr = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+  let moved = false;
+  for (const raw of arr) {
+    const pair = String(raw).split(";")[0];
+    const i = pair.indexOf("=");
+    if (i < 1) continue;
+    const k = pair.slice(0, i).trim();
+    const v = pair.slice(i + 1);
+    // A logout/expiry clears the cookie by setting it empty — never let that
+    // overwrite a live value, or one stray response burns the session.
+    if (!v || v === "deleted") continue;
+    if (jar.get(k) !== v) {
+      jar.set(k, v);
+      moved = true;
+    }
+  }
+  return moved;
+}
+
+function z2uHtmlText(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    // Cell HTML is cut mid-tag by the row splitter, so the fragment ends with a
+    // dangling "<div" that has no ">" to close it and survives the strip above.
+    .replace(/<[^>]*$/, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// A signed-out session does not error — Z2U just 302s to the login page, and
+// following that redirect would hand the caller a perfectly valid 200 of the
+// wrong page. So redirects are NOT followed and a 3xx to /login is the session
+// check.
+function z2uCheckSession(r, what) {
+  const loc = String((r.headers && r.headers.location) || "");
+  if (r.status >= 300 && r.status < 400 && /login|signin|passport/i.test(loc)) {
+    const e = new Error(
+      what +
+        ": Z2U session expired — paste a fresh Cookie header under " +
+        "Marketplace keys -> Z2U (DevTools -> Network -> any z2u.com request " +
+        "-> copy the Cookie header).",
+    );
+    e.__z2uAuth = true;
+    throw e;
+  }
+}
+
+async function z2uRequest(method, path, opts = {}) {
+  const keys = requireKeys("z2u");
+  const jar = z2uJar(keys.cookie);
+  const headers = {
+    Accept: opts.ajax
+      ? "application/json, text/javascript, */*; q=0.01"
+      : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    Cookie: z2uJarHeader(jar),
+    Referer: Z2U_BASE + "/sell/manage",
+    Origin: Z2U_BASE,
+    ...(opts.headers || {}),
+  };
+  if (opts.ajax) headers["X-Requested-With"] = "XMLHttpRequest";
+  let data = opts.data;
+  if (data && data.getHeaders) Object.assign(headers, data.getHeaders());
+  else if (data && typeof data === "object" && !(data instanceof String)) {
+    data = new URLSearchParams(data).toString();
+    headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+  }
+  const r = await axios({
+    method: String(method).toUpperCase(),
+    url: Z2U_BASE + path,
+    data,
+    headers,
+    timeout: opts.timeout || 45000,
+    maxRedirects: 0,
+    // 3xx must reach us as a value, not an exception, so z2uCheckSession can
+    // tell "signed out" from every other failure.
+    validateStatus: (s) => s >= 200 && s < 400,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  z2uCheckSession(r, opts.what || "Z2U");
+  if (z2uAbsorbCookies(jar, r.headers["set-cookie"])) {
+    await setKeys("z2u", { cookie: z2uJarHeader(jar) });
+  }
+  return r.data;
+}
+
+// ThinkPHP's ajaxReturn envelope. code 1 = success; anything else carries a
+// message worth surfacing verbatim, because Z2U's are specific ("Order does
+// not exist.", "Insufficient inventory").
+function z2uAjax(what, body) {
+  let j = body;
+  if (typeof j === "string") {
+    try {
+      j = JSON.parse(j);
+    } catch {
+      throw new Error(
+        what + ": Z2U returned HTML, not JSON (session or CSRF problem)",
+      );
+    }
+  }
+  if (!j || typeof j !== "object") throw new Error(what + ": empty reply");
+  if (Number(j.code) !== 1) {
+    throw new Error(
+      what + ": " + String(j.msg || j.data || "failed").slice(0, 200),
+    );
+  }
+  return j;
+}
+
+// Z2U mints a one-shot CSRF token per mutating form post. The value comes back
+// in the envelope's `url` field (ThinkPHP reuses the slot); `data` is used on
+// some builds, so accept either rather than pinning to one.
+async function z2uCsrf() {
+  const body = await z2uRequest("POST", "/public/createToken", {
+    ajax: true,
+    what: "Z2U token",
+    data: {},
+  });
+  const j = z2uAjax("Z2U token", body);
+  const tok = String(j.url || j.data || "").trim();
+  if (!tok) throw new Error("Z2U token: no token in reply");
+  return tok;
+}
+
+// ---- parsers (pure, exported so they can be tested without a session) ----
+
+// The "Manage Listing" landing page: one tile per (service, game) the seller
+// has offers in. These ids are the only way to address a group, and they are
+// account-specific, so they are discovered rather than hard-coded.
+function parseZ2uGroups(html) {
+  const out = [];
+  const seen = new Set();
+  const re =
+    /<a[^>]+href="[^"]*\/sell\/manageList\?service=(\d+)&(?:amp;)?game=(\d+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(String(html || "")))) {
+    const key = m[1] + ":" + m[2];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const text = z2uHtmlText(m[3]);
+    const offers = /(\d+)\s*Offers?/i.exec(text);
+    out.push({
+      service: m[1],
+      game: m[2],
+      // The tile reads "5 Offers Albion Online (Global) Items" — the count is
+      // a badge, not part of the name.
+      label: text.replace(/^\s*\d+\s*Offers?\s*/i, "").trim(),
+      offers: offers ? Number(offers[1]) : null,
+    });
+  }
+  return out;
+}
+
+// Split one offer row into its cells, keyed by the cell's own <div class=
+// "title"> label ("Unit Price", "Stock", …) rather than by column position:
+// Z2U has shuffled columns before, and a positional parser silently reads the
+// wrong number rather than failing.
+function z2uRowCells(chunk) {
+  const cells = {};
+  const parts = String(chunk).split(/class="div-table-cell/);
+  for (const part of parts.slice(1)) {
+    // The split lands INSIDE the opening tag, so the rest of that tag has to go
+    // or every cell text starts with a stray `">`.
+    const body = part.slice(part.indexOf(">") + 1);
+    const t = /<div[^>]*class="title"[^>]*>([\s\S]*?)<\/div>/i.exec(body);
+    const label = t ? z2uHtmlText(t[1]).replace(/[:.]$/, "").trim() : "";
+    if (!label) continue;
+    // Drop the label block itself: it is the column heading Z2U repeats in
+    // every row ("Unit Price", "Stock"), not part of the value.
+    cells[label.toLowerCase()] = body.replace(t[0], " ");
+  }
+  return cells;
+}
+
+function z2uFirstInt(s) {
+  const m = /(-?\d+)/.exec(String(s || ""));
+  return m ? Number(m[1]) : null;
+}
+
+// Every offer in one (service, game) group. Z2U renders the whole group in one
+// page — the "Expire soon / Low Stock / Deactivated" tabs are client-side
+// filters over these same rows — so one fetch is the whole truth.
+function parseZ2uOffers(html) {
+  const out = [];
+  const chunks = String(html || "").split(/class="div-table-row"/);
+  for (const chunk of chunks.slice(1)) {
+    const pk = /data="(\d+)"/.exec(chunk);
+    if (!pk) continue;
+    const cells = z2uRowCells(chunk);
+    const nameCell = cells["product name"] || "";
+    const nameText = z2uHtmlText(nameCell);
+    const published = /Publish\s*(\d{4}\/\d{2}\/\d{2})/i.exec(nameText);
+    const statusCell = cells["status"] || "";
+    const sv = /class="set_status"[^>]*data-value="(\d+)"/i.exec(statusCell);
+    const statusCode = sv ? Number(sv[1]) : null;
+    const priceCell = cells["unit price"] || "";
+    const price = /value="([\d.]+)"/.exec(priceCell);
+    const attr = z2uHtmlText(cells["attribute"] || "").replace(/^Attribute:?\s*/i, "");
+    out.push({
+      pk: pk[1],
+      title: nameText
+        .replace(/^\s*Product Name\s*/i, "")
+        .replace(/^\s*Publish\s*\d{4}\/\d{2}\/\d{2}\s*/i, "")
+        .replace(/#\d+\s*$/, "")
+        .trim(),
+      publishedAt: published ? published[1] : "",
+      price: price ? Number(price[1]) : null,
+      currency: (/\b([A-Z]{3})\b/.exec(z2uHtmlText(priceCell).replace(/Unit Price/i, "")) || [])[1] || "USD",
+      stock: z2uFirstInt(z2uHtmlText(cells["stock"] || "").replace(/^Stock/i, "")),
+      minQty: z2uFirstInt(z2uHtmlText(cells["min qty"] || "").replace(/^Min QTY\.?/i, "")),
+      expiryDays: z2uFirstInt(
+        z2uHtmlText(cells["product expiration date"] || "").replace(
+          /^Product expiration date/i,
+          "",
+        ),
+      ),
+      delivery: z2uHtmlText(cells["delivery method"] || "")
+        .replace(/^Delivery Method\s*/i, "")
+        .trim(),
+      attribute: attr,
+      statusCode,
+      status: Z2U_STATUS[statusCode] || (statusCode == null ? "unknown" : "offline"),
+      // The one thing that actually matters: is it on sale right now.
+      online: statusCode === 1,
+      canExtend: /class="[^"]*set_extend/i.test(statusCell),
+    });
+  }
+  return out;
+}
+
+// One page of sold orders. Each order is a `.orderPanel` block; the fields we
+// need (id, buyer, money, state) are plain text inside it, and the opaque
+// `oid` hash — needed for the delivery-record page — hangs off the
+// showProRecord link.
+function parseZ2uOrders(html) {
+  const out = [];
+  const chunks = String(html || "").split(/class="[^"]*orderPanel/);
+  for (const raw of chunks.slice(1)) {
+    // Same mid-tag split as the offer rows: drop the rest of the opening tag.
+    const chunk = raw.slice(raw.indexOf(">") + 1);
+    const id = /\b(Z\d{9,12})\b/.exec(chunk);
+    if (!id) continue;
+    const text = z2uHtmlText(chunk);
+    const buyer = /buyer\s*:?\s*([^\s]+)/i.exec(text);
+    const date = /Date:?\s*(\d{4}-\d{2}-\d{2}[\s\d:]*)/i.exec(text);
+    const amount = /Total Amount:?\s*([A-Z]{3})\s*([\d.]+)/i.exec(text);
+    const oid = /showProRecord\?oid=([a-f0-9]{16,})/i.exec(chunk);
+    // The product title sits between the date and the unit price; take the
+    // longest run of text that is neither, which survives Z2U's spacing.
+    const title = /\d{2}:\d{2}:\d{2}\s*(.+?)\s*(?:USD|EUR|GBP)\s*[\d.]/i.exec(text);
+    // Z2U prints a state badge ("Waiting for buyer reply") between the date and
+    // the product name, so it lands inside the title capture.
+    const badge = /^\s*(?:Waiting for buyer reply|WAIT FOR CONFIRMED|Cancell?ed|Delivered|Completed|Refunded)\s*/i;
+    let titleText = title ? title[1].trim() : "";
+    while (badge.test(titleText)) titleText = titleText.replace(badge, "").trim();
+    out.push({
+      orderId: id[1],
+      buyer: buyer ? buyer[1] : "",
+      date: date ? date[1].trim() : "",
+      title: titleText,
+      amount: amount ? Number(amount[2]) : null,
+      currency: amount ? amount[1] : "USD",
+      oid: oid ? oid[1] : "",
+      state: /WAIT FOR CONFIRMED/i.test(text)
+        ? "wait_confirm"
+        : /Cancell?ed/i.test(text)
+          ? "canceled"
+          : /Waiting for buyer reply/i.test(text)
+            ? "wait_buyer"
+            : "",
+      text: text.slice(0, 400),
+    });
+  }
+  return out;
+}
+
+// Read a <form>'s current state back out as name/value pairs — the same set a
+// browser would submit. This is what makes editing safe: Z2U's save endpoint
+// replaces the whole offer, so anything not sent back is wiped. Rather than
+// reconstruct 18 fields from our own model (and silently blank the two we
+// forgot), we re-submit the page's own answer with only the fields we mean to
+// change patched.
+function parseZ2uForm(html, formId) {
+  const src = String(html || "");
+  const scoped = formId
+    ? (new RegExp(
+        '<form[^>]*id=["\']' + formId + '["\'][^>]*>([\\s\\S]*?)</form>',
+        "i",
+      ).exec(src) || [])[1]
+    : src;
+  const body = scoped || "";
+  const out = [];
+  // inputs
+  const inputRe = /<input\b([^>]*)>/gi;
+  let m;
+  while ((m = inputRe.exec(body))) {
+    const tag = m[1];
+    const name = (/name=["']([^"']+)["']/i.exec(tag) || [])[1];
+    if (!name) continue;
+    const type = String((/type=["']([^"']+)["']/i.exec(tag) || [])[1] || "text").toLowerCase();
+    if (type === "submit" || type === "button" || type === "file") continue;
+    // An unchecked box or radio is simply absent from a real submission.
+    if ((type === "checkbox" || type === "radio") && !/\bchecked\b/i.test(tag)) continue;
+    const value = (/value=["']([^"']*)["']/i.exec(tag) || [])[1] || "";
+    out.push([name, value]);
+  }
+  // textareas
+  const taRe = /<textarea\b([^>]*)>([\s\S]*?)<\/textarea>/gi;
+  while ((m = taRe.exec(body))) {
+    const name = (/name=["']([^"']+)["']/i.exec(m[1]) || [])[1];
+    if (!name) continue;
+    out.push([
+      name,
+      m[2]
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0?39;/g, "'")
+        .replace(/&amp;/gi, "&"),
+    ]);
+  }
+  // selects — take the selected option(s); with none marked, a browser submits
+  // the first option, so mirror that rather than dropping the field.
+  const selRe = /<select\b([^>]*)>([\s\S]*?)<\/select>/gi;
+  while ((m = selRe.exec(body))) {
+    const name = (/name=["']([^"']+)["']/i.exec(m[1]) || [])[1];
+    if (!name) continue;
+    const opts = [];
+    const optRe = /<option\b([^>]*)>/gi;
+    let o;
+    while ((o = optRe.exec(m[2]))) {
+      opts.push({
+        value: (/value=["']([^"']*)["']/i.exec(o[1]) || [])[1] || "",
+        selected: /\bselected\b/i.test(o[1]),
+      });
+    }
+    const chosen = opts.filter((x) => x.selected);
+    if (chosen.length) for (const c of chosen) out.push([name, c.value]);
+    else if (opts.length) out.push([name, opts[0].value]);
+  }
+  return out;
+}
+
+async function z2uTest() {
+  try {
+    const html = await z2uRequest("GET", "/sell/manage", { what: "Z2U test" });
+    const groups = parseZ2uGroups(html);
+    const offers = groups.reduce((n, g) => n + (g.offers || 0), 0);
+    return {
+      ok: true,
+      detail:
+        "Connected — " +
+        groups.length +
+        " game groups, " +
+        offers +
+        " offers on the shelf",
+    };
+  } catch (e) {
+    return { ok: false, detail: String((e && e.message) || e).slice(0, 300) };
+  }
+}
+
+async function z2uGroups() {
+  return parseZ2uGroups(
+    await z2uRequest("GET", "/sell/manage", { what: "Z2U groups" }),
+  );
+}
+
+async function z2uOffers(service, game) {
+  const html = await z2uRequest(
+    "GET",
+    "/sell/manageList?service=" +
+      encodeURIComponent(service) +
+      "&game=" +
+      encodeURIComponent(game),
+    { what: "Z2U offers" },
+  );
+  return parseZ2uOffers(html).map((o) => ({
+    ...o,
+    service: String(service),
+    game: String(game),
+  }));
+}
+
+// The whole shelf, group by group. Z2U is a shared-hosting PHP site and each
+// group page is ~500KB, so the caller gets a small pause between fetches
+// rather than 16 parallel requests.
+async function z2uAllOffers({ delayMs = 800 } = {}) {
+  const groups = await z2uGroups();
+  const out = [];
+  for (const g of groups) {
+    const rows = await z2uOffers(g.service, g.game);
+    for (const r of rows) out.push({ ...r, groupLabel: g.label });
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return out;
+}
+
+// on_line / off_line / extend. `extend` is the one that matters most: every
+// offer carries a duration (7/14/30 days) and Z2U pulls it off sale when that
+// runs out, which is why a shelf nobody tends goes dark on its own.
+async function z2uSetOfferStatus(pk, action) {
+  const allowed = ["on_line", "off_line", "extend"];
+  if (!allowed.includes(action)) {
+    throw new Error("Z2U: unknown offer action " + action);
+  }
+  const body = await z2uRequest("POST", "/sell/productAction", {
+    ajax: true,
+    what: "Z2U " + action,
+    data: { list_pk: String(pk), list_action: action },
+  });
+  return z2uAjax("Z2U " + action, body);
+}
+
+const z2uRelist = (pk) => z2uSetOfferStatus(pk, "on_line");
+const z2uDelist = (pk) => z2uSetOfferStatus(pk, "off_line");
+const z2uExtend = (pk) => z2uSetOfferStatus(pk, "extend");
+
+// Patch an existing offer by re-submitting its own editor form.
+//
+// Z2U's save replaces the offer wholesale, so the form is read back first and
+// only the named fields are changed — see parseZ2uForm. Price and stock are
+// the two that matter for keeping a shelf honest.
+async function z2uUpdateOffer(pk, patch = {}) {
+  const html = await z2uRequest(
+    "GET",
+    "/sell/manageEdit.html?id=" + encodeURIComponent(pk),
+    { what: "Z2U edit" },
+  );
+  const fields = parseZ2uForm(html, "form");
+  if (!fields.length) {
+    throw new Error(
+      "Z2U edit: offer " + pk + " has no editor form (deleted, or session lost)",
+    );
+  }
+  const patched = {
+    ...(patch.priceUsd != null
+      ? { list_unit_price: String(Math.max(Z2U_MIN_PRICE, Number(patch.priceUsd)).toFixed(2)) }
+      : {}),
+    ...(patch.stock != null
+      ? { list_stock_num: String(Math.max(0, parseInt(patch.stock, 10) || 0)) }
+      : {}),
+    ...(patch.title ? { list_title: String(patch.title).slice(0, 200) } : {}),
+    ...(patch.description ? { list_description: String(patch.description) } : {}),
+    ...(patch.expiryDays ? { list_term_of_validity: String(patch.expiryDays) } : {}),
+  };
+  const form = new FormData();
+  const applied = new Set();
+  for (const [name, value] of fields) {
+    const bare = name.replace(/\[\]$/, "");
+    if (Object.prototype.hasOwnProperty.call(patched, bare)) {
+      // Multi-value fields keep every entry; a patched one collapses to the
+      // new single value, and only once.
+      if (applied.has(bare)) continue;
+      applied.add(bare);
+      form.append(name, patched[bare]);
+      continue;
+    }
+    form.append(name, value);
+  }
+  for (const [k, v] of Object.entries(patched)) {
+    if (!applied.has(k)) form.append(k, v);
+  }
+  form.append("list_pk", String(pk));
+  form.append("__token__", await z2uCsrf());
+  const body = await z2uRequest("POST", "/sell/manageListToUpdate", {
+    ajax: true,
+    what: "Z2U update",
+    data: form,
+  });
+  return z2uAjax("Z2U update", body);
+}
+
+// Sold orders. WAIT_DELIVERY is the queue a fulfiller drains; ALL is what an
+// audit reads.
+async function z2uOrders(status = "WAIT_DELIVERY", { page = 1 } = {}) {
+  const s = String(status || "ALL").toUpperCase();
+  // Paging is ?page=N. The path-segment form Z2U uses elsewhere (/p/2) is
+  // silently ignored here and returns page 1 again — which would make a paging
+  // loop spin forever on the same 20 rows.
+  const p = Math.max(1, parseInt(page, 10) || 1);
+  const html = await z2uRequest(
+    "GET",
+    "/sellOrder/index/order_status/" +
+      encodeURIComponent(s) +
+      (p > 1 ? "?page=" + p : ""),
+    { what: "Z2U orders" },
+  );
+  return parseZ2uOrders(html);
+}
+
+// Walk every page of one order state. Stops when a page repeats the previous
+// page (Z2U answers 200 with page 1 rather than an empty list past the end).
+async function z2uAllOrders(status = "ALL", { maxPages = 10, delayMs = 500 } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (let p = 1; p <= maxPages; p++) {
+    const rows = await z2uOrders(status, { page: p });
+    const fresh = rows.filter((r) => !seen.has(r.orderId));
+    if (!fresh.length) break;
+    for (const r of fresh) {
+      seen.add(r.orderId);
+      out.push(r);
+    }
+    if (rows.length < 20) break;
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return out;
+}
+
+async function z2uOrderPage(orderId) {
+  return z2uRequest("GET", "/sellOrder?order_id=" + encodeURIComponent(orderId), {
+    what: "Z2U order",
+  });
+}
+
+// Hand the buyer their goods.
+//
+// The delivery form is per-category and only rendered while an order is
+// actually awaiting delivery, so it is read off the live order page instead of
+// being reconstructed here — same reasoning as z2uUpdateOffer. If the page
+// carries no delivery form the order is not deliverable (already delivered,
+// cancelled, or in dispute) and this refuses loudly rather than posting a
+// payload Z2U will quietly drop.
+async function z2uDeliver(orderId, message) {
+  const text = String(message || "").trim();
+  if (!text) throw new Error("Z2U deliver: refusing to send an empty delivery");
+  const html = await z2uOrderPage(orderId);
+  const fields = parseZ2uForm(html, "form_submit");
+  const hasTextField = /<textarea\b/i.test(
+    (new RegExp('<form[^>]*id=["\']form_submit["\'][^>]*>([\\s\\S]*?)</form>', "i").exec(
+      String(html),
+    ) || [])[1] || "",
+  );
+  if (!fields.length || !hasTextField) {
+    throw new Error(
+      "Z2U deliver: order " +
+        orderId +
+        " has no delivery form on its page — it is not awaiting delivery " +
+        "(already delivered, cancelled, or under dispute).",
+    );
+  }
+  const form = new FormData();
+  let filled = false;
+  const src = String(html);
+  const scoped =
+    (new RegExp('<form[^>]*id=["\']form_submit["\'][^>]*>([\\s\\S]*?)</form>', "i").exec(src) ||
+      [])[1] || "";
+  const textareaNames = new Set();
+  const taRe = /<textarea\b([^>]*)>/gi;
+  let m;
+  while ((m = taRe.exec(scoped))) {
+    const n = (/name=["']([^"']+)["']/i.exec(m[1]) || [])[1];
+    if (n) textareaNames.add(n);
+  }
+  for (const [name, value] of fields) {
+    if (textareaNames.has(name)) {
+      form.append(name, text);
+      filled = true;
+      continue;
+    }
+    form.append(name, value);
+  }
+  if (!filled) {
+    throw new Error("Z2U deliver: could not find the delivery text field");
+  }
+  form.append("order_id", String(orderId));
+  form.append("__token__", await z2uCsrf());
+  const body = await z2uRequest("POST", "/sellOrder/form_submit", {
+    ajax: true,
+    what: "Z2U deliver",
+    data: form,
+  });
+  return z2uAjax("Z2U deliver", body);
+}
+
+function z2uOfferUrl(pk) {
+  return Z2U_BASE + "/sell/manageEdit.html?id=" + encodeURIComponent(pk);
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
+  // --- Z2U (see the Z2U section above; scraper-driven, no API) ---
+  Z2U_MIN_PRICE,
+  Z2U_STATUS,
+  z2uTest,
+  z2uGroups,
+  z2uOffers,
+  z2uAllOffers,
+  z2uSetOfferStatus,
+  z2uRelist,
+  z2uDelist,
+  z2uExtend,
+  z2uUpdateOffer,
+  z2uOrders,
+  z2uAllOrders,
+  z2uOrderPage,
+  z2uDeliver,
+  z2uOfferUrl,
+  // Pure parsers, exported so the HTML shapes can be tested without a session.
+  parseZ2uGroups,
+  parseZ2uOffers,
+  parseZ2uOrders,
+  parseZ2uForm,
   delistOutcome,
   setKeys,
   keyStatus,
@@ -5758,10 +6477,20 @@ module.exports = {
   ggselCategories,
   ggselPublish,
   ggselUpdateOffer,
+  // GGSel prices in roubles, and ggselUpdateOffer takes `priceRub` only — so
+  // any caller repricing a GGSel row needs the rate. Callers already probe for
+  // this (`typeof mp.usdToRub === "function"` in unclaimedAutoList's reprice)
+  // and skip GGSel rows when it is missing, which it always was: every GGSel
+  // row in that path was silently unrepriceable. Exporting it closes that gap
+  // and lets scripts/reprice-listings.js convert without duplicating the rate
+  // fetch, its 6h cache, or the 90₽ fallback — a wrong rate here would mean
+  // prices off by ~90x in either direction.
+  usdToRub,
   ggselAddProducts,
   ggselOfferStock,
   ggselOfferStockDetailed,
   ggselOfferStatus,
+  ggselOfferPrice,
   ggselStockField,
   ggselResolveCategoryId,
   ggselTitle,

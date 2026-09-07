@@ -117,6 +117,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "funpay") r = await mp.funpayTest();
     else if (name === "eldorado") r = await mp.eldoradoTest();
     else if (name === "playerauctions") r = await mp.playerauctionsTest();
+    else if (name === "z2u") r = await mp.z2uTest();
     else {
       return res
         .status(400)
@@ -1186,6 +1187,11 @@ router.delete(
           // Hide, not Cancel: hiding keeps the offer so it can be relisted,
           // while Cancel is permanent.
           await mp.playerauctionsDelist(row.externalId);
+        } else if (row.marketplace === "z2u") {
+          // off_line, not delete: Z2U keeps a deactivated offer (and its stock)
+          // so the shelf keeper can put it back when stock returns, while a
+          // delete is permanent and loses the offer id the row is joined on.
+          await mp.z2uDelist(row.externalId);
         }
       } catch (err) {
         // Already gone or already sold is not a failed delist: the listing is off
