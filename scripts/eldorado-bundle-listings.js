@@ -25,6 +25,7 @@ const fsp = require("fs/promises");
 const mongoose = require("mongoose");
 
 const mp = require("../utils/marketplaces");
+const { isNoClaimGame } = require("../utils/settings");
 const autoLister = require("../utils/autoLister");
 const { buildSetGridImage } = require("../utils/setImage");
 
@@ -126,7 +127,21 @@ async function main() {
       bySig.set(r.sig, { ...r, dupes: (cur ? cur.dupes : 0) + (cur ? 1 : 0) });
     }
   }
+  // Overwatch / Rainbow Six / Call of Duty drops must reach the buyer UNCLAIMED
+  // so they can connect and claim to their own game account. The regular
+  // auto-farm claims as it farms, so its archive accounts are exactly the wrong
+  // stock for these games — that is the whole reason the no-claim farm exists.
+  // Those games are only sellable from an unclaimedGame-backed listing.
+  const skippedNoClaim = [...bySig.values()].filter((r) => isNoClaimGame(r.game));
+  if (skippedNoClaim.length) {
+    console.log(
+      "skipping " + skippedNoClaim.length +
+        " set(s) for no-claim games (must come from the unclaimed farm): " +
+        [...new Set(skippedNoClaim.map((r) => r.game))].join(", "),
+    );
+  }
   let plan = [...bySig.values()]
+    .filter((r) => !isNoClaimGame(r.game))
     .filter((r) => r.avail > 0 && !r.alreadyLive && r.price > 0 && (r.set.items || []).length)
     .sort((a, b) => b.sales - a.sales || b.avail - a.avail);
   if (LIMIT) plan = plan.slice(0, LIMIT);

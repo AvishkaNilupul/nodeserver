@@ -303,14 +303,34 @@ async function deliverOrder(order, { dryRun }) {
         wouldSend: qty + " of " + avail.length + " available account(s)",
       };
     }
-    const claimed = await claimAccountsForSet(set, qty);
+    // A claimed drop cannot be connected to the buyer's game account — it has
+    // already gone to whoever the farm account was linked to. Shipping one is
+    // selling nothing. This is the reason Overwatch / Rainbow Six / Call of Duty
+    // have their own no-claim farm, but the invariant holds for every game, so
+    // it is enforced here rather than by game name.
+    const unclaimedOnly = async (cands) => {
+      const DropLog = require("../models/DropLog");
+      const names = (set.items || []).map((i) => i.name).filter(Boolean);
+      const out = [];
+      for (const c of cands) {
+        const logs = await DropLog.find(
+          { login: c.login, name: { $in: names } },
+          { claimed: 1 },
+        ).lean();
+        if (logs.some((l) => l.claimed)) continue;
+        out.push(c);
+      }
+      return out;
+    };
+
+    const claimed = await unclaimedOnly(await claimAccountsForSet(set, qty));
     if (claimed.length < qty) {
       await releaseAccounts(claimed.map((c) => c.accountId)).catch(() => {});
       return {
         orderId,
         error:
           "only " + claimed.length + " of " + qty +
-          " accounts still held the full set at delivery time",
+          " accounts still held the full set UNCLAIMED at delivery time",
       };
     }
     const blocks = claimed.map((c) => eldoradoDeliveryCode(c.login, c.password));
