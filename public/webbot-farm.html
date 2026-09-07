@@ -422,6 +422,7 @@ function hbChip(c){
   var hb=c.hb||null, v=c.hbVerdict||'unknown';
   var n=hb&&hb.progress>0?hb.progress:0, ns=hb&&hb.noSession>0?hb.noSession:0, at=hb&&hb.at?new Date(hb.at):null;
   var tip='heartbeat: '+n+' progress · '+ns+' no-session · '+(hb&&hb.attaches>0?hb.attaches:0)+' attach lines in the last 6 min'+(at?' (read '+at.toLocaleTimeString()+')':'');
+  if(v==='complete') return '<span class="chip on" title="'+esc('every live campaign for this game is finished on these accounts — the drops are held at 100% unclaimed, ready to sell. '+tip)+'">event complete</span>';
   if(v==='farming') return '<span class="chip on" title="'+esc(tip)+'">farming '+n+'/6m</span>';
   if(v==='idle') return '<span class="chip off" title="'+esc(tip)+'">idle: no drop session</span>';
   if((v==='starting'||v==='unknown')&&warmingUp(c)) return '<span class="chip" title="'+esc('the heartbeat reads a 6-minute log window and this container ('+((c&&c.status)||'')+') has not filled one yet — not a fault. '+tip)+'">warming up</span>';

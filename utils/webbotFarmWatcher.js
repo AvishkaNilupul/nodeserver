@@ -519,7 +519,18 @@ function heartbeatVerdict(hb, gameVerdict, totalAccounts) { // eslint-disable-li
   const progress = Number(hb.progress) || 0;
   const noSession = Number(hb.noSession) || 0;
   const pa = Number(hb.progressAccounts);
+  const ca = Number(hb.completeAccounts) || 0;
   const total = Number(totalAccounts) || 0;
+
+  // "Every live campaign already complete" is the farm SUCCEEDING: the accounts
+  // hold their drops at 100% unclaimed, which is the product. It used to read
+  // as "partial"/"idle" — both alertable — so a bot that had just finished an
+  // event paged the operator. Measured 2026-09-07: all 5 Overwatch bots
+  // finished the CAH Championship Finals within 25 minutes of each other and
+  // every one of them would have alerted.
+  if (ca > 0 && (pa > 0 ? total > 0 && (ca + pa) / total >= COVERAGE_MIN : true)) {
+    return "complete";
+  }
   // Prefer DISTINCT-ACCOUNT coverage when the farmer labels its lines. A raw
   // line count says "farming" when a single healthy account out of fifty is
   // logging, which is how partial farm loss went unnoticed for days.
@@ -610,7 +621,8 @@ function buildSyncScript(runningIds, writes) {
       `a=$(grep -c -E 'farming .* via' "$hb"); ` +
       `pa=$(grep -F 'progress → drop' "$hb" | ${DISTINCT_LABELS}); ` +
       `sa=$(grep -F 'no active drop-session' "$hb" | ${DISTINCT_LABELS}); ` +
-      `echo "$id|$p|$s|$a|$pa|$sa"; done`,
+      `ca=$(grep -F 'already complete' "$hb" | ${DISTINCT_LABELS}); ` +
+      `echo "$id|$p|$s|$a|$pa|$sa|$ca"; done`,
   );
   parts.push('rm -f "$hb"');
   parts.push('echo "HB_END"');
@@ -635,10 +647,10 @@ function parseSyncOutput(stdout) {
     }
     if (inHb) {
       const cols = line.split("|");
-      // 6 = labelled farmer (with distinct-account counts), 4 = the older
-      // image. Anything else is docker/grep noise, not a row.
-      if (cols.length !== 4 && cols.length !== 6) continue;
-      const [id, p, s, a, pa, sa] = cols;
+      // 7 = current (adds the finished-the-campaign count), 6 = labelled
+      // farmer, 4 = the older image. Anything else is docker/grep noise.
+      if (cols.length !== 4 && cols.length !== 6 && cols.length !== 7) continue;
+      const [id, p, s, a, pa, sa, ca] = cols;
       if (!SAFE_ID.test(id)) continue;
       heartbeat[id] = {
         progress: Number(p) || 0,
@@ -647,9 +659,10 @@ function parseSyncOutput(stdout) {
         // Present ONLY on a labelled image, so the verdict can tell "no
         // coverage data" (key absent) from "no accounts progressing" (key 0).
         // Absent rather than undefined keeps the pre-label row shape identical.
-        ...(cols.length === 6
+        ...(cols.length >= 6
           ? { progressAccounts: Number(pa) || 0, noSessionAccounts: Number(sa) || 0 }
           : null),
+        ...(cols.length === 7 ? { completeAccounts: Number(ca) || 0 } : null),
       };
     }
   }

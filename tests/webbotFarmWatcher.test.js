@@ -401,8 +401,9 @@ test("buildSyncScript: emits distinct-account counts as a 6-field row", () => {
   assert.ok(script.includes("pa=$(grep -F 'progress → drop'"));
   assert.ok(script.includes("sa=$(grep -F 'no active drop-session'"));
   // The id now comes from the container name docker reported, not the caller.
-  assert.ok(script.includes('echo "$id|$p|$s|$a|$pa|$sa"'));
+  assert.ok(script.includes('echo "$id|$p|$s|$a|$pa|$sa|$ca"'));
   assert.ok(script.includes('id=${c#webbot-bot-}'));
+  assert.ok(script.includes("ca=$(grep -F 'already complete'"));
   // The load-bearing grep strings the farmer's log lines must keep matching.
   assert.ok(script.includes("grep -c -F 'progress → drop'"));
   assert.ok(script.includes("grep -c -F 'no active drop-session'"));
@@ -432,3 +433,32 @@ test("end-to-end: the 49-of-50-stalled bot now reports partial and alerts", () =
   assert.strictEqual(verdict, "partial");
   assert.strictEqual(shouldAlertIdle([verdict], verdict, null, Date.now()), true);
 });
+
+// A bot whose accounts have FINISHED the event is the farm working, not a
+// stall. Both signals it used to produce — thin progress coverage ("partial")
+// and no drop session ("idle") — are alertable, so on 2026-09-07 all five
+// Overwatch bots finished the CAH Championship Finals and every one of them
+// would have paged the operator.
+test("heartbeatVerdict: a finished campaign reads complete, not partial/idle", () => {
+  const done = { progress: 0, noSession: 50, attaches: 50, progressAccounts: 0, noSessionAccounts: 50, completeAccounts: 50 };
+  assert.strictEqual(heartbeatVerdict(done, null, 50), "complete");
+  // mid-transition: a few still finishing their last drop, the rest done
+  const mixed = { progress: 20, noSession: 10, attaches: 50, progressAccounts: 3, noSessionAccounts: 48, completeAccounts: 45 };
+  assert.strictEqual(heartbeatVerdict(mixed, null, 50), "complete");
+  // a genuinely thin bot with nothing complete still reports partial
+  const thin = { progress: 6, noSession: 280, attaches: 50, progressAccounts: 1, noSessionAccounts: 49, completeAccounts: 0 };
+  assert.strictEqual(heartbeatVerdict(thin, null, 50), "partial");
+  // and "complete" must never be alertable
+  assert.strictEqual(shouldAlertIdle(["complete"], "complete", null, Date.now()), false);
+});
+
+test("parseSyncOutput: 7-field rows carry the complete count; 6- and 4-field rows still parse", () => {
+  const out = parseSyncOutput(
+    ["HB_START", "8|0|50|50|0|50|50", "9|300|0|50|50|0", "10|3|120|1", "HB_END"].join("\n"),
+  );
+  assert.strictEqual(out.heartbeat["8"].completeAccounts, 50);
+  assert.strictEqual(out.heartbeat["9"].progressAccounts, 50);
+  assert.ok(!("completeAccounts" in out.heartbeat["9"]), "6-field row must not invent a complete count");
+  assert.ok(!("progressAccounts" in out.heartbeat["10"]), "4-field row shape unchanged");
+});
+
