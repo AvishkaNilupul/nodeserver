@@ -4940,30 +4940,122 @@ async function playerauctionsDeliveryTimes(gameId) {
   );
 }
 
-// Pick the leaf item to file a drops bundle under. Drops are cosmetics, so a
-// generic "Other ..." leaf is both honest and what the existing hand-made
-// listings use (Overwatch: Skins -> Other Skins). Falls back to the first leaf
-// of the first category so a game with an odd tree still publishes.
+// Pick the leaf item to file a drops bundle under, or refuse.
+//
+// PlayerAuctions' item trees are per-game and often narrow, so there is not
+// always an honest home for a Twitch-drops bundle. Real examples:
+//
+//   Overwatch      Skins > Other Skins          <- good
+//   Call of Duty   Bundle > Other Bundles       <- good (what the live offers use)
+//   Marvel Rivals  Twitch Drops > Twitch Drops  <- a literal category, perfect
+//   Fortnite       Ore > Copper Ore, Skins > Spider-Man, ...
+//   NBA 2K         VC > 15000 VC                <- currency only
+//   Palia          {id:-1, "Others", no subs}   <- a sentinel, not a category
+//
+// The first pass here filed Fortnite under "Copper Ore" and NBA 2K under
+// "15000 VC". Both were accepted by the API and both are wrong: a buyer
+// browsing NBA 2K currency would find a drops bundle. Mis-filing is worse than
+// not listing on a marketplace that penalises disputes, so this REFUSES
+// (returns null) unless it finds a defensible home, and the publishers report
+// the game as unlistable instead.
+// Roots that can honestly hold a cosmetic drops bundle, best first. Tree order
+// is not preference order — Fortnite lists "Weapons" before "Skins" — so these
+// are scored rather than scanned.
+const PA_ROOT_PREFERENCE = [
+  /twitch\s*drops?/i,
+  /drop/i,
+  /skin|cosmetic/i,
+  /coating|armou?r/i,
+  /bundle|pack/i,
+  /outfit|emote|spray|charm|banner|icon/i,
+  /weapon/i,
+];
+// Currency and hard-goods roots. A drops bundle filed under "15000 VC" or
+// "Copper Ore" is accepted by the API and is still wrong — a buyer browsing
+// NBA 2K currency should not find one.
+const PA_ROOT_DENY =
+  /^(vc|gold|coin|credit|currenc|cash|silver|gem|token|ore|crystal|powder|twine|material|mechanical)/i;
+
+function paRootScore(name) {
+  const n = String(name || "");
+  if (PA_ROOT_DENY.test(n.trim())) return -1;
+  for (let i = 0; i < PA_ROOT_PREFERENCE.length; i++) {
+    if (PA_ROOT_PREFERENCE[i].test(n)) return i;
+  }
+  return -1;
+}
+
 async function playerauctionsPickItemPath(gameId, hint) {
   const tree = await playerauctionsItemCategories(gameId);
   if (!tree.length) return null;
   const want = paNorm(hint || "");
-  const leaves = [];
-  for (const root of tree) {
-    for (const sub of root.subCategorys || []) {
-      leaves.push({ rootItem: root.id, rootName: root.name, itemId: sub.id, itemName: sub.name });
-    }
-    if (!(root.subCategorys || []).length) {
-      leaves.push({ rootItem: root.id, rootName: root.name, itemId: root.id, itemName: root.name });
+  // id <= 0 is a sentinel row, not a real category; filing under it yields
+  // "Invalid Item Name" on create.
+  const roots = tree.filter((r) => Number(r.id) > 0);
+  if (!roots.length) return null;
+
+  const asLeaf = (root, sub) => ({
+    rootItem: root.id,
+    rootName: root.name,
+    itemId: sub ? sub.id : root.id,
+    itemName: sub ? sub.name : root.name,
+    itemPath: root.id + "|" + (sub ? sub.id : root.id),
+  });
+  const subsOf = (root) => (root.subCategorys || []).filter((x) => Number(x.id) > 0);
+
+  // 1. A category literally named for our product wins outright.
+  const native = roots.find((r) => /twitch\s*drops?/i.test(String(r.name || "")));
+  if (native) {
+    const subs = subsOf(native);
+    return asLeaf(native, subs[0] || null);
+  }
+
+  // 2. An explicit hint, anywhere in the tree.
+  if (want) {
+    for (const root of roots) {
+      for (const sub of subsOf(root)) {
+        if (paNorm(sub.name) === want || paNorm(sub.name).includes(want)) {
+          return asLeaf(root, sub);
+        }
+      }
     }
   }
-  if (!leaves.length) return null;
-  const pick =
-    (want && leaves.find((l) => paNorm(l.itemName) === want)) ||
-    (want && leaves.find((l) => paNorm(l.itemName).includes(want))) ||
-    leaves.find((l) => /^other/i.test(String(l.itemName).trim())) ||
-    leaves[0];
-  return { ...pick, itemPath: pick.rootItem + "|" + pick.itemId };
+
+  // 3. The best-scoring cosmetic root. Its "Other ..." leaf if it has one —
+  //    the honest catch-all the hand-made listings on this account use — and
+  //    otherwise its first leaf, which is the same compromise the operator's
+  //    own live Halo offer makes (Armor Coatings > Funko). The ROOT is what
+  //    categorises the listing; the title carries the real product.
+  const ranked = roots
+    .map((r) => ({ root: r, score: paRootScore(r.name) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => a.score - b.score);
+  for (const { root } of ranked) {
+    const subs = subsOf(root);
+    if (!subs.length) return asLeaf(root, null);
+    const neutral = subs.find((x) => /^(other|misc|general|any)/i.test(String(x.name).trim()));
+    return asLeaf(root, neutral || subs[0]);
+  }
+
+  // No cosmetic root at all — a currency-only tree (NBA 2K) or nothing but the
+  // sentinel (Palia). Better no listing than a misfiled one.
+  return null;
+}
+
+// The delivery-guarantee enum is PER GAME, not global. Marvel Rivals and Palia
+// have no 20-minute tier at all, and sending customId 5 there is rejected with
+// "Delivery time can't be empty or error delivery time." So resolve the wanted
+// tier against the game's own list and fall back to the fastest it does offer —
+// a slower guarantee is a worse listing, but no listing is worse still.
+async function playerauctionsResolveDelivery(gameId, wanted) {
+  const tiers = await playerauctionsDeliveryTimes(gameId).catch(() => []);
+  const usable = tiers.filter((t) => t && t.isEnable !== false);
+  if (!usable.length) return wanted;
+  if (usable.some((t) => t.customId === Number(wanted))) return Number(wanted);
+  const fastest = usable
+    .slice()
+    .sort((a, b) => (a.convertToHour || 0) - (b.convertToHour || 0))[0];
+  return fastest ? fastest.customId : wanted;
 }
 
 // --- Offers -------------------------------------------------------------
@@ -5098,12 +5190,17 @@ async function playerauctionsPublish(opts = {}) {
       console.error("playerauctions image upload:", e.message);
     }
   }
+  const deliveryGuarantee = await playerauctionsResolveDelivery(
+    gameId,
+    opts.deliveryGuarantee != null ? opts.deliveryGuarantee : PA_DELIVERY.min20,
+  );
   const body = paItemOfferBody({
     ...opts,
     gameId,
     itemPath,
     rootItem,
     itemId,
+    deliveryGuarantee,
     blobName,
     screenShot,
   });
@@ -5518,6 +5615,7 @@ module.exports = {
   playerauctionsServers,
   playerauctionsDeliveryTimes,
   playerauctionsPickItemPath,
+  playerauctionsResolveDelivery,
   playerauctionsPublish,
   playerauctionsOffer,
   playerauctionsOfferUrl,

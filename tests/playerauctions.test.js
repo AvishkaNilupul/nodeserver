@@ -328,6 +328,42 @@ test("our campaign game names resolve onto PlayerAuctions' storefront names", as
   );
 });
 
+test("a drops bundle is never filed under currency or raw materials", async () => {
+  // The first real publish run filed Fortnite under "Ore > Copper Ore" and
+  // NBA 2K under "VC > 15000 VC". Both were ACCEPTED by the API and both are
+  // wrong — a buyer browsing NBA 2K currency should not find a drops bundle.
+  const games = await mp.playerauctionsGames().catch(() => []);
+  if (!games.length) return; // offline
+
+  // Marvel Rivals has a literal "Twitch Drops" category; it must win outright.
+  const mr = await mp.playerauctionsPickItemPath(14147);
+  assert.ok(mr && /twitch/i.test(mr.rootName), "Marvel Rivals should use its Twitch Drops category");
+
+  // Overwatch and Call of Duty must land where the hand-made live offers are.
+  assert.strictEqual((await mp.playerauctionsPickItemPath(7097)).itemPath, "1653|8305");
+  assert.strictEqual((await mp.playerauctionsPickItemPath(7313)).itemName, "Other Bundles");
+
+  // Fortnite has no generic leaf, but Skins is still the right ROOT — and it
+  // must not fall back to the Ore/Weapons roots that come before it.
+  const fn = await mp.playerauctionsPickItemPath(7876);
+  assert.ok(fn && /skin/i.test(fn.rootName), "Fortnite should file under Skins, got " + (fn && fn.rootName));
+
+  // A currency-only tree and a sentinel-only tree must both REFUSE.
+  assert.strictEqual(await mp.playerauctionsPickItemPath(10063), null, "NBA 2K is VC-only");
+  assert.strictEqual(await mp.playerauctionsPickItemPath(13444), null, "Palia has only the -1 sentinel");
+});
+
+test("the delivery guarantee falls back to what the game actually offers", async () => {
+  const games = await mp.playerauctionsGames().catch(() => []);
+  if (!games.length) return;
+  // Overwatch has the 20-minute tier; Marvel Rivals and Palia do not, and
+  // sending customId 5 there is rejected outright.
+  assert.strictEqual(await mp.playerauctionsResolveDelivery(7097, mp.PA_DELIVERY.min20), 5);
+  const mr = await mp.playerauctionsResolveDelivery(14147, mp.PA_DELIVERY.min20);
+  assert.notStrictEqual(mr, 5);
+  assert.strictEqual(mr, mp.PA_DELIVERY.hour1);
+});
+
 test("item-only product gating is enforced per game", async () => {
   // Only 149 of PlayerAuctions' ~400 games accept Item offers. Publishing a
   // bundle for an account-only game is rejected by the API, so the publisher
