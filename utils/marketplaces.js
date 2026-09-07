@@ -120,6 +120,13 @@ function delistOutcome(message) {
   const m = String(message || "").toLowerCase();
   if (/\(sold\)|already sold/.test(m)) return "sold";
   if (/not found|http_status":\s*404/.test(m)) return "gone";
+  // Already off sale. Eldorado answers "To pause an offer it must be active"
+  // when the offer is not active, which is the delist goal already met — not a
+  // failure. Left unmatched it strands the row as active-with-an-error, holding
+  // its accounts reserved forever.
+  if (/must be active|already (paused|inactive|hidden|cancell?ed|delisted)/.test(m)) {
+    return "gone";
+  }
   return "";
 }
 

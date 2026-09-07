@@ -243,6 +243,21 @@ test("units reserved for an order are found again on a retry", () => {
   );
 });
 
+test("an offer that is already off sale is a successful delist, not a failure", () => {
+  // Eldorado answers "To pause an offer it must be active" when the offer is
+  // not active — the delist goal already met. Left unmatched it stranded the
+  // row as active-with-an-error, holding its accounts reserved forever.
+  assert.strictEqual(
+    mp.delistOutcome("Eldorado delist failed (HTTP 400): To pause an offer it must be active."),
+    "gone",
+  );
+  assert.strictEqual(mp.delistOutcome("offer already paused"), "gone");
+  assert.strictEqual(mp.delistOutcome("listing not found"), "gone");
+  assert.strictEqual(mp.delistOutcome("item (sold)"), "sold");
+  // A real failure must still read as a failure.
+  assert.strictEqual(mp.delistOutcome("connection reset"), "");
+});
+
 /* ------------------------- the no-claim rule ---------------------------- */
 
 test("Overwatch, Rainbow Six and Call of Duty are no-claim games", () => {
