@@ -94,6 +94,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     // farm: claim accounts holding this row's `set` at delivery time instead of
     // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.
     autoClaimSet: { type: Boolean, default: false, index: true },
+    // Paused by the stock sync because nothing claimable was left, as opposed to
+    // paused deliberately by the operator. Only rows carrying this flag are ever
+    // resumed automatically.
+    autoPaused: { type: Boolean, default: false },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while

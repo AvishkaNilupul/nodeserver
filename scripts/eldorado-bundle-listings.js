@@ -54,6 +54,14 @@ async function main() {
   const MarketplaceListing = require("../models/MarketplaceListing");
   const DropSet = require("../models/DropSet");
   const { availableAccountsForSet } = require("../routes/shopRoutes");
+  const { loginsOnActiveListings, notListed } = require("../utils/listedLogins");
+  // Stock must be counted the way the CLAIMER counts it. availableAccountsForSet
+  // alone includes accounts already attached to a live listing on another
+  // marketplace, which the claimer then refuses — publishing that raw number
+  // advertises stock we cannot hand over. It shipped an Overwatch listing with
+  // "1 available" whose single account was already sold elsewhere, so the first
+  // buyer sat undelivered.
+  const listedElsewhere = await loginsOnActiveListings();
 
   // 1. Sets that have actually sold somewhere.
   const sold = await MarketplaceListing.find(
@@ -92,7 +100,7 @@ async function main() {
     if (!set) continue;
     let avail = 0;
     try {
-      avail = (await availableAccountsForSet(set)).length;
+      avail = notListed(await availableAccountsForSet(set), listedElsewhere).length;
     } catch {
       avail = 0;
     }

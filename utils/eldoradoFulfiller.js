@@ -414,6 +414,68 @@ async function deliverOrder(order, { dryRun }) {
   return { orderId, delivered: qty };
 }
 
+
+// Keep every claim-from-archive listing's advertised stock equal to what can
+// ACTUALLY be claimed, and take a listing off sale the moment that reaches zero.
+//
+// Advertised stock drifts on its own: accounts get sold on other marketplaces,
+// attached to other listings, or lose their drops. A listing that keeps selling
+// past that point takes money for something the fulfiller then cannot hand over
+// — which is exactly how one Overwatch order sat undelivered, retrying every
+// tick, while the buyer waited.
+async function syncBundleStock({ dryRun = false } = {}) {
+  const MarketplaceListing = require("../models/MarketplaceListing");
+  const DropSet = require("../models/DropSet");
+  const { availableAccountsForSet } = require("../routes/shopRoutes");
+  const listedElsewhere = await loginsOnActiveListings();
+  const rows = await MarketplaceListing.find({
+    marketplace: "eldorado",
+    autoClaimSet: true,
+  });
+  const changes = [];
+  for (const row of rows) {
+    const set = await DropSet.findById(row.set).lean();
+    if (!set) continue;
+    const real = notListed(
+      await availableAccountsForSet(set).catch(() => []),
+      listedElsewhere,
+    ).length;
+    let offer = null;
+    try {
+      offer = await mp.eldoradoOffer(row.externalId);
+    } catch {
+      continue;
+    }
+    if (!offer) continue;
+
+    if (real <= 0 && offer.offerState === "Active") {
+      changes.push({ title: row.title, action: "pause (no claimable stock)" });
+      if (!dryRun) {
+        await mp.eldoradoDelist(row.externalId).catch(() => {});
+        row.autoPaused = true;
+        row.lastError = "paused: no claimable stock";
+        await row.save();
+      }
+      continue;
+    }
+    // Only resume what WE paused — never override a deliberate pause.
+    if (real > 0 && offer.offerState === "Paused" && row.autoPaused) {
+      changes.push({ title: row.title, action: "resume (" + real + " back in stock)" });
+      if (!dryRun) {
+        await mp.eldoradoRelist(row.externalId).catch(() => {});
+        row.autoPaused = false;
+        row.lastError = "";
+        await row.save();
+      }
+    }
+    if (real > 0 && offer.quantity !== real) {
+      changes.push({ title: row.title, action: offer.quantity + " -> " + real });
+      if (!dryRun) await mp.eldoradoSetQuantity(row.externalId, real).catch(() => {});
+    }
+  }
+  return changes;
+}
+
 // One pass over every paid-but-undelivered Eldorado order.
 async function deliverPaidOrders() {
   const af = getAutoFarm() || {};
@@ -488,6 +550,9 @@ async function deliverPaidOrders() {
 const POOL_LOW_WATERMARK = 15;
 
 const TICK_MS = 60 * 1000;
+// Stock drifts slowly; re-syncing every delivery tick would be a lot of API
+// calls for nothing, so it runs on its own slower clock.
+const STOCK_SYNC_MS = 15 * 60 * 1000;
 let started = false;
 
 function start() {
@@ -506,6 +571,24 @@ function start() {
   // is a no-op until the flag is flipped on.
   const t = setTimeout(tick, 45 * 1000);
   if (t.unref) t.unref();
+
+  const stockTick = async () => {
+    try {
+      const af = getAutoFarm() || {};
+      if (af.eldoradoAutoDeliver && (mp.keyStatus().eldorado || {}).configured) {
+        const changes = await syncBundleStock();
+        for (const c of changes) {
+          console.log("eldorado stock sync: " + c.action + " — " + c.title);
+        }
+      }
+    } catch (e) {
+      console.error("eldorado stock sync error:", e.message);
+    }
+    const t2 = setTimeout(stockTick, STOCK_SYNC_MS);
+    if (t2.unref) t2.unref();
+  };
+  const t2 = setTimeout(stockTick, 90 * 1000);
+  if (t2.unref) t2.unref();
 }
 
 module.exports = {
@@ -520,4 +603,5 @@ module.exports = {
   undeliveredUnits,
   deliverOrder,
   deliverPaidOrders,
+  syncBundleStock,
 };
