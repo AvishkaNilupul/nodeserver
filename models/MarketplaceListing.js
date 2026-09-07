@@ -79,6 +79,12 @@ const marketplaceListingSchema = new mongoose.Schema(
           // a buyer, which is what makes redelivery of an order impossible.
           deliveredAt: { type: Date, default: null },
           orderId: { type: String, default: "" },
+          // PlayerAuctions only: a hand-over there can be SEVERAL messages plus
+          // a separate confirm-delivery call, so "credential sent" and "order
+          // marked delivered" are distinct states. Stamped once the messages
+          // have landed, so a retry whose confirm-delivery failed re-confirms
+          // instead of sending the buyer their credentials a second time.
+          messagedAt: { type: Date, default: null },
         },
       ],
       default: [],

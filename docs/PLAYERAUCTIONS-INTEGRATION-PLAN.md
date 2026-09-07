@@ -431,3 +431,68 @@ Eldorado enforces max 100 *active* offers per game category, with everything out
 games sharing one "Other" bucket that fills instantly. **Nothing equivalent was observed on
 PlayerAuctions** — the limits here are the $5 floor and the write throttle, so the whole shelf can
 go up. Pacing is ~26s between creates.
+
+
+---
+
+## 11. Five more create-time rules, all found by publishing for real (2026-09-07)
+
+None of these showed up in the original probing, because **each sits behind a check that fails
+earlier** — the validator returns one message at a time, so you only ever see the next rule after
+satisfying the last. Publishing for real is the only way to reach them.
+
+| rule | error | fix |
+|---|---|---|
+| `instruction` < 500 chars | `Delivery instructions should less than 500 characters.` | Both guides rewritten to fit (465 / 449). It is a **second budget**, not the unlimited home for what would not fit in the 300-char message. |
+| Titles must be plain ASCII | `Title format error.` (no detail) | `paSanitizeTitle` folds em dashes, `…`, curly quotes and `|` down to ASCII. Our own listing copy introduces all of them. |
+| `deliveryGuarantee` is **per game** | `Delivery time can't be empty or error delivery time.` | Marvel Rivals and Palia have **no 20-minute tier**. `playerauctionsResolveDelivery` checks the game's own list and falls back to its fastest. |
+| A root with `id: -1` is a sentinel | `Invalid Item Name` | Fortnite's tree ends in `{id:-1,"Others",no subs}`. Non-positive ids are skipped. |
+| **Some games have no honest category at all** | *(none — the API accepts it)* | The dangerous one. See below. |
+
+### The rule with no error message
+
+The first run filed **Fortnite under "Ore > Copper Ore"** and **NBA 2K under "VC > 15000 VC"**.
+Both were **accepted**. Both are wrong — a buyer browsing NBA 2K currency should not find a Twitch
+drops bundle, and that is exactly the kind of thing that becomes a dispute on a marketplace that
+penalises them.
+
+`playerauctionsPickItemPath` now scores roots by preference rather than scanning in tree order
+(Fortnite lists `Weapons` before `Skins`), denies currency and raw-material roots outright, takes a
+literal **"Twitch Drops"** category when a game has one (Marvel Rivals: root 2010 — the ideal
+placement), and **refuses** when a game has no cosmetic root at all. Both publishers resolve the
+item path up front, so an unlistable game is reported rather than costing a 26s throttled write.
+
+Verified against the placements the operator's own hand-made offers already use: Overwatch
+`Skins > Other Skins`, Call of Duty `Bundle > Other Bundles`, Halo `Armor Coatings`.
+
+That refusal is why the farm run publishes **45 offers across 15 games, not 78 across 26**: eleven
+games accept Item offers but have nowhere to file a cosmetics bundle.
+
+### Also fixed
+
+The media upload answers `{blobName, sasUri, created, length, verified}` — **`sasUri`, not `url`**.
+The publisher was reading `url`/`imageUrl`/`path`, so every offer got a blob name with no image URL
+beside it and rendered without a cover.
+
+## 12. Live state
+
+**Session:** installed on **prod only** this time, and the self-check no longer refreshes, so the
+rotation trap in §9 cannot repeat. `pa-selfcheck.js` → **11/11 pass**.
+
+**Published:** 12 bundle mirrors + the 4 pre-existing hand-made offers, plus the rent-farm shelf.
+Every new listing advertises a **20-minute delivery guarantee** where the game allows it (the
+hand-made ones sit at 6–12 hours), which is the single biggest conversion lever on this marketplace
+and the whole point of having a delivery bot.
+
+**Withdrawn:** the NBA 2K mirror, published under `VC > 15000 VC` before the category rule existed.
+Cancelled on PlayerAuctions and its row marked `delisted`.
+
+**Not mirrored, and correctly so:** eight games are account-only on PlayerAuctions (Rainbow Six,
+Rocket League ×2, Metin 2, Phasmophobia, Brawlhalla, Marvel Contest of Champions, Hunt: Showdown),
+NBA 2K and Palia have no cosmetic category, and Assassin's Creed Black Flag Resynced is not in the
+catalogue at all.
+
+**Message and confirm-delivery endpoints** were probed against a deliberately invalid order id, so
+auth and payload shape are proven without touching a real buyer: the message API answers
+`code 3: "…your Offer ID / Order ID is invalid or you are not the seller/buyer of this order."`
+and confirm-delivery answers `403` — both are the correct rejections, from the right endpoints.

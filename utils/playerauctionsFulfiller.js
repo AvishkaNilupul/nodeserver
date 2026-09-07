@@ -182,10 +182,20 @@ async function claimUnclaimedForGame(game, want, { orderId, offerId, dryRun }) {
 // Send every message, then confirm delivery with a proof image. Order is
 // load-bearing: the credential must actually reach the buyer before the order
 // is marked delivered.
-async function handOver({ orderId, accounts, kind, days, game, offerTitle, itemCount }) {
+// `alreadyMessaged` short-circuits the send half. A hand-over is several HTTP
+// calls, so a confirm-delivery that fails after the messages landed must not
+// re-send them — the buyer would get their credentials again every 60s until
+// the confirm started working.
+async function handOver({
+  orderId, accounts, kind, days, game, offerTitle, itemCount,
+  alreadyMessaged = false, onMessaged,
+}) {
   const messages = copy.deliveryMessages(accounts, { kind, days, game });
-  for (const m of messages) {
-    await mp.playerauctionsSendOrderMessage(orderId, m);
+  if (!alreadyMessaged) {
+    for (const m of messages) {
+      await mp.playerauctionsSendOrderMessage(orderId, m);
+    }
+    if (onMessaged) await onMessaged();
   }
   let img = null;
   try {
@@ -249,6 +259,15 @@ async function reserveOnListing(listing, orderId, picked) {
       orderId: String(orderId),
     })),
   );
+  listing.markModified("units");
+  await listing.save();
+}
+
+async function markUnitsMessaged(listing, orderId) {
+  const now = new Date();
+  for (const u of listing.units || []) {
+    if (String(u.orderId || "") === String(orderId) && !u.messagedAt) u.messagedAt = now;
+  }
   listing.markModified("units");
   await listing.save();
 }
@@ -334,12 +353,15 @@ async function deliverOrder(order, { dryRun }) {
       };
     }
     const creds = await credentialsForUnits(mine);
+    const messaged = mine.every((u) => u.messagedAt);
     const sent = await handOver({
       orderId,
       accounts: creds,
       kind: "bundle",
       offerTitle,
       itemCount: paItemCount(row),
+      alreadyMessaged: messaged,
+      onMessaged: () => markUnitsMessaged(row, orderId),
     });
     await markUnitsDelivered(row, orderId);
     await syncStock(row);
@@ -380,6 +402,7 @@ async function deliverOrder(order, { dryRun }) {
       kind: "bundle",
       offerTitle,
       itemCount: paItemCount(row),
+      onMessaged: () => markUnitsMessaged(row, orderId),
     });
     await markUnitsDelivered(row, orderId);
     await syncStock(row);
@@ -432,6 +455,7 @@ async function deliverOrder(order, { dryRun }) {
       kind: "bundle",
       offerTitle,
       itemCount: paItemCount(row),
+      onMessaged: () => markUnitsMessaged(row, orderId),
     });
     await markUnitsDelivered(row, orderId);
     await syncStock(row);
@@ -588,6 +612,7 @@ module.exports = {
   unitsForOrder,
   credentialsForUnits,
   reserveOnListing,
+  markUnitsMessaged,
   markUnitsDelivered,
   syncStock,
   handOver,

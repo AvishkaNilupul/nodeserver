@@ -199,6 +199,30 @@ test("quantity never reads the item count as a unit count", () => {
   assert.strictEqual(fulfiller.paQuantity({}), 1);
 });
 
+test("a failed confirm-delivery does not re-send the buyer their credentials", async () => {
+  // A hand-over is several HTTP calls: N messages, then confirm-delivery. If
+  // the confirm fails, the next tick must re-confirm ONLY — re-sending would
+  // hand the buyer their credentials again every 60s until it started working.
+  const sent = [];
+  const saved = require("../utils/marketplaces");
+  const realSend = saved.playerauctionsSendOrderMessage;
+  const realMark = saved.playerauctionsMarkDelivered;
+  saved.playerauctionsSendOrderMessage = async (_id, text) => sent.push(text);
+  saved.playerauctionsMarkDelivered = async () => ({ ok: true });
+  try {
+    const accounts = [{ login: "l", password: "p" }];
+    await fulfiller.handOver({ orderId: "1", accounts, kind: "bundle", offerTitle: "T" });
+    assert.strictEqual(sent.length, 1, "first attempt should send");
+    await fulfiller.handOver({
+      orderId: "1", accounts, kind: "bundle", offerTitle: "T", alreadyMessaged: true,
+    });
+    assert.strictEqual(sent.length, 1, "retry must not send a second time");
+  } finally {
+    saved.playerauctionsSendOrderMessage = realSend;
+    saved.playerauctionsMarkDelivered = realMark;
+  }
+});
+
 test("units reserved for an order are found again on a retry", () => {
   // This is what stops a part-failed multi-message hand-over from spending a
   // second set of accounts on the next tick.
