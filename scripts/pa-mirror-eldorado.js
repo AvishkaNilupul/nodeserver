@@ -150,6 +150,17 @@ async function main() {
       skipped.push([row.title, game + " is account-only on PlayerAuctions"]);
       continue;
     }
+    // A game can accept Item offers and still have nowhere honest to file a
+    // cosmetics bundle — NBA 2K's tree is currency only, Palia's is a single
+    // sentinel row. Check before spending a 26s write on a rejection.
+    const leaf = await mp.playerauctionsPickItemPath(pa.gameId).catch(() => null);
+    if (!leaf) {
+      skipped.push([
+        row.title,
+        game + " has no cosmetic category on PlayerAuctions (currency/empty tree)",
+      ]);
+      continue;
+    }
 
     // Real, claimable stock — never the advertised Eldorado number.
     let stock = 0;

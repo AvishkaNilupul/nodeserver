@@ -147,6 +147,13 @@ async function main() {
       unusable.push([g, "account-only on PlayerAuctions (" + row.productType + ")"]);
       continue;
     }
+    // Accepting Item offers is not the same as having somewhere to put one:
+    // NBA 2K's item tree is currency only and Palia's is a bare sentinel.
+    const leaf = await mp.playerauctionsPickItemPath(row.gameId).catch(() => null);
+    if (!leaf) {
+      unusable.push([g, "no cosmetic category on PlayerAuctions (currency/empty tree)"]);
+      continue;
+    }
     resolved.push({ game: g, pa: row });
   }
 
