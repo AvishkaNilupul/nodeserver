@@ -496,3 +496,55 @@ catalogue at all.
 auth and payload shape are proven without touching a real buyer: the message API answers
 `code 3: "…your Offer ID / Order ID is invalid or you are not the seller/buyer of this order."`
 and confirm-delivery answers `403` — both are the correct rejections, from the right endpoints.
+
+---
+
+## 13. The two rules that cost real damage
+
+### A concurrent refresh revokes the whole session — and "one machine" was the wrong diagnosis
+
+§9 said only one *machine* may hold a cookie. That was **insufficient**, and the session died a
+second time proving it — entirely server-side, with the cookie installed in exactly one place.
+
+The pm2 fulfiller ticks every 60s while a publishing script runs for an hour **in its own process**,
+both reading the same jar from `utils/settings.json`. When the 30-minute access token expires they
+401 moments apart, both call `SignIn/RefreshToken`, and the second presents an already-spent refresh
+token. PlayerAuctions reads that as reuse and revokes the family.
+
+**The real rule: exactly one PROCESS may refresh at a time.**
+
+`paRefreshOnce()` now serialises across processes with an atomic lock file
+(`utils/.playerauctions-refresh.lock`, gitignored). The load-bearing half is not the lock but the
+**re-check under it**: if `paStoredAccessToken()` has moved, another process already refreshed and
+we use its result instead of spending ours. A 15s cool-down (`.playerauctions-refresh.stamp`) covers
+the case where a refresh does not change the token.
+
+PlayerAuctions' own web client solves the cross-tab version of this identically — its HTTP
+interceptor carries `refreshTokenLock`, `LOCK_TIMEOUT` and `COOL_DOWN_PERIOD`. That was visible in
+the bundle from the very first read and should have been taken as a design hint, not a curiosity.
+
+Tested with 10 concurrent callers: exactly 1 refresh, lock released.
+
+**Procedure for a long publishing run:** park `playerauctionsAutoDeliver=false` so the pm2 tick
+cannot touch the session, run the script as sole owner, re-enable afterwards. The lock makes this
+belt-and-braces rather than mandatory, but it costs nothing.
+
+### No-claim games can never be sold from the claimed Drop Archive
+
+**Overwatch, Rainbow Six and Call of Duty** (`settings.noClaimGames`, matched as a substring so
+"Overwatch 2" and "Tom Clancy's Rainbow Six Siege" both hit) drops must reach the buyer
+**UNCLAIMED**, so they can press Connect and claim to their own game account. The regular auto-farm
+claims as it farms, so its Drop Archive accounts are exactly the wrong stock for those games — which
+is the entire reason the no-claim farm exists.
+
+Eldorado already guarded this (commit `5f77f4c`). The PlayerAuctions mirror did not, and published
+four such listings (2 Overwatch, 2 Call of Duty) from the claimed archive before they were caught
+and withdrawn. Two guards now, mirroring Eldorado:
+
+- **Publishers** skip a no-claim game unless the row is `unclaimedGame`-backed.
+- **Fulfiller** `unclaimedOnly()` refuses **per account** to hand over a drop already marked
+  `DropLog.claimed` — worthless whatever the game, since it has gone to whoever the farm account
+  was linked to.
+
+Those games are still sellable here, but only from an `unclaimedGame`-backed listing fed by the
+no-claim farm. The live CAH Overwatch offer is exactly that shape and is unaffected.
