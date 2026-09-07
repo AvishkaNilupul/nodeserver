@@ -1,6 +1,18 @@
 // Pure eligibility rule for the manual spent-account review tab. The route
 // gathers all facts in bulk; keeping this function DB-free makes every guard
 // easy to test and keeps the write path fail-closed.
+// The farm engines hand an account to the recycler by stamping its pool row
+// with a "spent — …" claimedNote: "spent — no-claim removed <game>" from a
+// no-claim bot sweep, "spent — unclaimed auto-listed (<reason>)" from the
+// unclaimed auto-lister. Match the PREFIX, never one engine's wording — keying
+// on a single engine's phrasing is what stranded every account the other
+// engine sold: pulled from its bot, sold-game blocked, never recyclable.
+const FARM_SPENT_NOTE = /^spent — /i;
+
+function isFarmSpentNote(claimedNote) {
+  return FARM_SPENT_NOTE.test(String(claimedNote || "").trim());
+}
+
 function cooldownPassedAt(newestDeliveredAt, cooldownDays, now) {
   if (!newestDeliveredAt) return false;
   const delivered = new Date(newestDeliveredAt).getTime();
@@ -17,22 +29,29 @@ function spentAccountEligibility(facts = {}) {
     cooldownPassed: false,
   });
   const note = String(facts.claimedNote || "").trim();
-  // Accounts pulled out of the standalone no-claim bots (sold/connected) have
-  // no DropLog delivery history — the spent signal IS the pool-row stamp the
-  // no-claim remove writes. For those, "delivered" is implied, the cooldown is
-  // anchored to the removal, and any DropLog "available" rows are stale
-  // pre-delivery snapshots (the account is connected/sold, so the drops are on
-  // the buyer's side), so they become recyclable immediately instead of being
+  // Accounts handed over by a standalone farm engine — the no-claim bots or the
+  // unclaimed auto-lister — carry a "spent — …" stamp on their pool row and
+  // generally have NO DropLog history at all (they never entered the drop
+  // archive). The stamp IS the delivery record: without this bypass they are
   // rejected forever on "no delivered drops" / "still has N drops left to
-  // sell" / "within the 14-day cooldown". Every other guard still applies
-  // (rented, recycled, on listing, deployed, sold-but-undelivered drops).
-  const noClaimSpent = !!facts.noClaimSpent;
+  // sell" / "within the 14-day cooldown", which strands them as claimed,
+  // sold-game-blocked and un-recyclable.
+  //
+  // The DropLog counts genuinely say nothing about these accounts, so skipping
+  // them is right — but that also means this branch has NO stock gate of its
+  // own. What protects live stock is `onActiveListing`, which the caller must
+  // compute from every record that can hold a sale: the marketplace listing
+  // rows, the unclaimed engine's ledger, AND the pool row's `listed` flag.
+  // Do NOT re-introduce a "connected" signal here as a spend test — a Twitch
+  // account stays linked to Battle.net/Ubisoft forever, so it says nothing
+  // about whether the stock is gone (it once flagged 153 healthy accounts).
+  const farmSpent = !!facts.farmSpent;
   if (/^rented to/i.test(note)) return reject("rented to a renter");
   if (/^recycled/i.test(note)) return reject("already recycled");
-  if ((Number(facts.availableDrops) || 0) > 0 && !noClaimSpent) {
+  if ((Number(facts.availableDrops) || 0) > 0 && !farmSpent) {
     return reject("still has " + Number(facts.availableDrops) + " drop(s) left to sell");
   }
-  if ((Number(facts.deliveredDrops) || 0) < 1 && !noClaimSpent) {
+  if ((Number(facts.deliveredDrops) || 0) < 1 && !farmSpent) {
     return reject("no delivered drops");
   }
   if ((Number(facts.soldUnconnectedDrops) || 0) > 0) {
@@ -43,7 +62,7 @@ function spentAccountEligibility(facts = {}) {
   if (facts.onActiveListing) return reject("on an active marketplace listing");
   if (facts.deployed) return reject("still deployed to a bot");
 
-  const passed = noClaimSpent
+  const passed = farmSpent
     ? true
     : cooldownPassedAt(facts.newestDeliveredAt, facts.cooldownDays, facts.now);
   return {
@@ -53,4 +72,9 @@ function spentAccountEligibility(facts = {}) {
   };
 }
 
-module.exports = { spentAccountEligibility, cooldownPassed: cooldownPassedAt };
+module.exports = {
+  spentAccountEligibility,
+  cooldownPassed: cooldownPassedAt,
+  isFarmSpentNote,
+  FARM_SPENT_NOTE,
+};

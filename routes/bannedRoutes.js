@@ -208,15 +208,7 @@ async function dropsByLogin(logins) {
 // writes a buyer's name. On the banned population that split is 792 platform
 // reservations against 14 actual deliveries — so treating them alike would
 // report ~800 wronged customers where there are about a dozen.
-const MARKET_CLAIM_TAGS = [
-  "gameflip",
-  "ggsel",
-  "digiseller",
-  "plati",
-  "funpay",
-  "epicnpc",
-  "zeusx",
-];
+const { MARKET_CLAIM_TAGS } = require("../utils/marketClaimTags");
 
 function commitmentOf(soldToUsername) {
   const v = String(soldToUsername || "").trim();

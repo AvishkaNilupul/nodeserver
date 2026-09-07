@@ -48,13 +48,9 @@ const { stopFarmingGame } = require("./farmControl");
 // (a shop username, "manual", a bulk-order tag, an operator name) means the
 // game actually SOLD. Farming must stop on sold/connected games, but a
 // listed-but-unsold game must keep farming so its stock keeps stacking.
-const MARKET_CLAIM_TAGS = [
-  "gameflip",
-  "ggsel",
-  "digiseller",
-  "funpay",
-  "zeusx",
-];
+// Reservation tags written by the marketplace fulfillers (one shared list —
+// see utils/marketClaimTags.js for why this must not be copy-pasted).
+const { MARKET_CLAIM_TAGS } = require("./marketClaimTags");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // How long a worker whose host just went unreachable waits before re-probing.

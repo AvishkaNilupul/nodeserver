@@ -5,6 +5,7 @@ const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const dropScanner = require("../utils/dropScanner");
 const hosts = require("../utils/botHosts");
 const settings = require("../utils/settings");
@@ -12,10 +13,10 @@ const twitchInventory = require("../utils/twitchInventory");
 const { normGame } = require("../utils/gameLabel");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { recordAutoFarmEvent } = require("../utils/autoFarmEventLog");
-const { spentAccountEligibility } = require("../utils/spentAccountEligibility");
+const { spentAccountEligibility, isFarmSpentNote } = require("../utils/spentAccountEligibility");
+const { MARKET_CLAIM_TAGS } = require("../utils/marketClaimTags");
 
 const router = express.Router();
-const MARKET_CLAIM_TAGS = new Set(["gameflip", "ggsel", "digiseller", "funpay", "zeusx"]);
 const DAY_MS = 86400000;
 const RECYCLE_BATCH = 20;
 // Only these persisted scan statuses prove the buyer took the account over. A
@@ -38,11 +39,6 @@ function resolvePiHost() {
   return host;
 }
 
-function isRealSale(drop) {
-  if (!drop.soldAt) return false;
-  return !MARKET_CLAIM_TAGS.has(String(drop.soldToUsername || "").trim().toLowerCase());
-}
-
 function deliveredAt(drop) {
   return drop.soldAt || drop.awardedAt || drop.firstSeenAt || drop.updatedAt || drop.lastSeenAt || null;
 }
@@ -60,10 +56,14 @@ function listingLogins(rows) {
 }
 
 async function gatherSpentAccounts() {
-  const [pool, listingRows, botRows] = await Promise.all([
+  // `clientSecret` is deliberately NOT projected here: it is a long encrypted
+  // blob on every one of thousands of pool rows, and Atlas bills this page in
+  // bytes returned. The one path that needs it (the farm-spent rescan) reads it
+  // for the single account being recycled.
+  const [pool, listingRows, botRows, unclaimedLive, botOnlyDelivered] = await Promise.all([
     AvailableAccount.find(
       { status: { $in: ["claimed", "available"] } },
-      { username: 1, usernameLower: 1, status: 1, claimedAt: 1, claimedNote: 1, soldGames: 1, lastCheckStatus: 1, clientSecret: 1 },
+      { username: 1, usernameLower: 1, status: 1, claimedAt: 1, claimedNote: 1, soldGames: 1, lastCheckStatus: 1, listed: 1 },
     ).lean(),
     MarketplaceListing.find(
       { status: "active", $or: [{ accountLogin: { $ne: "" } }, { "units.0": { $exists: true } }] },
@@ -73,35 +73,29 @@ async function gatherSpentAccounts() {
       { login: { $ne: "" } },
       { login: 1, _id: 1, configFile: 1, lastScanStatus: 1, lastScanAt: 1 },
     ).lean(),
+    // Live stock of the unclaimed auto-lister. Its accounts are farmed by the
+    // standalone no-claim bots and are often absent from DropLog entirely, so
+    // the MarketplaceListing join alone can miss an account that is on sale
+    // right now — and recycling one would hand its drops back to the farmer
+    // while a buyer can still purchase them.
+    UnclaimedAccount.distinct("loginLower", { status: "listed" }).catch(() => []),
+    DropLog.distinct("login", {
+      $or: [{ connected: true }, { soldAt: { $ne: null } }],
+    }).catch(() => []),
   ]);
-  const botOnlyDelivered = await DropLog.distinct("login", {
-    $or: [{ connected: true }, { soldAt: { $ne: null } }],
-  }).catch(() => []);
   const names = [
     ...new Set(
       [...pool.map((row) => row.username), ...botOnlyDelivered].filter(Boolean),
     ),
   ];
   if (!names.length) return [];
-  const soldAtExists = { $ne: [{ $ifNull: ["$soldAt", null] }, null] };
-  const realSale = {
-    $and: [
-      soldAtExists,
-      {
-        $not: [
-          {
-            $in: [
-              { $toLower: { $ifNull: ["$soldToUsername", ""] } },
-              [...MARKET_CLAIM_TAGS],
-            ],
-          },
-        ],
-      },
-    ],
-  };
-  const deliveredDrop = {
-    $or: [{ $eq: ["$connected", true] }, realSale],
-  };
+  // Bucket to one row per (login, game, buyer, connected, sold) FIRST, then
+  // roll the buckets up per login. The previous single-stage $addToSet carried
+  // each drop's four timestamps inside the set element, so almost nothing
+  // deduplicated and the group shipped back roughly one object per drop —
+  // which is what made this page take over a minute against Atlas (the bound
+  // here is bytes returned, not query time).
+  const buyerLower = { $toLower: { $ifNull: ["$soldToUsername", ""] } };
   const deliveryDate = {
     $ifNull: [
       "$soldAt",
@@ -117,46 +111,44 @@ async function gatherSpentAccounts() {
     { $match: { login: { $in: names } } },
     {
       $group: {
-        _id: { $toLower: "$login" },
+        _id: {
+          login: { $toLower: "$login" },
+          game: { $ifNull: ["$game", ""] },
+          buyer: buyerLower,
+          connected: { $eq: ["$connected", true] },
+          sold: { $ne: [{ $ifNull: ["$soldAt", null] }, null] },
+        },
+        n: { $sum: 1 },
+        newestAt: { $max: deliveryDate },
+        buyerLabel: { $first: { $ifNull: ["$soldToUsername", ""] } },
+      },
+    },
+    {
+      // A reservation tag means "attached to a live listing", not "sold to
+      // someone" — so only a buyer-tagged reservation counts as delivered.
+      $set: { realSale: { $and: ["$_id.sold", { $not: [{ $in: ["$_id.buyer", MARKET_CLAIM_TAGS] }] }] } },
+    },
+    { $set: { delivered: { $or: ["$_id.connected", "$realSale"] } } },
+    {
+      $group: {
+        _id: "$_id.login",
         available: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $ne: ["$connected", true] },
-                  { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
-                ],
-              },
-              1,
-              0,
-            ],
-          },
+          $sum: { $cond: [{ $and: [{ $not: ["$_id.connected"] }, { $not: ["$_id.sold"] }] }, "$n", 0] },
         },
-        delivered: { $sum: { $cond: [deliveredDrop, 1, 0] } },
+        delivered: { $sum: { $cond: ["$delivered", "$n", 0] } },
         soldUnconnected: {
-          $sum: {
-            $cond: [
-              { $and: [{ $ne: ["$connected", true] }, realSale] },
-              1,
-              0,
-            ],
-          },
+          $sum: { $cond: [{ $and: [{ $not: ["$_id.connected"] }, "$realSale"] }, "$n", 0] },
         },
-        newestDeliveredAt: {
-          $max: { $cond: [deliveredDrop, deliveryDate, null] },
-        },
+        newestDeliveredAt: { $max: { $cond: ["$delivered", "$newestAt", null] } },
         soldDetails: {
-          $addToSet: {
+          $push: {
             $cond: [
-              { $and: [{ $ne: ["$game", ""] }, deliveredDrop] },
+              { $and: ["$delivered", { $ne: ["$_id.game", ""] }] },
               {
-                game: "$game",
-                connected: "$connected",
-                soldAt: "$soldAt",
-                soldToUsername: "$soldToUsername",
-                awardedAt: "$awardedAt",
-                firstSeenAt: "$firstSeenAt",
-                updatedAt: "$updatedAt",
+                game: "$_id.game",
+                connected: "$_id.connected",
+                soldToUsername: "$buyerLabel",
+                soldAt: "$newestAt",
               },
               null,
             ],
@@ -167,6 +159,10 @@ async function gatherSpentAccounts() {
   ]);
   const dropAggBy = new Map(groupedDrops.map((row) => [row._id, row]));
   const listed = listingLogins(listingRows);
+  for (const login of unclaimedLive) {
+    const key = String(login || "").trim().toLowerCase();
+    if (key) listed.add(key);
+  }
   const botsBy = new Map();
   for (const bot of botRows) {
     const key = String(bot.login || "").toLowerCase();
@@ -179,7 +175,7 @@ async function gatherSpentAccounts() {
     ...botRows
       .filter((bot) => !poolKeys.has(String(bot.login || "").toLowerCase()))
       .filter((bot, index, rows) => rows.findIndex((other) => String(other.login || "").toLowerCase() === String(bot.login || "").toLowerCase()) === index)
-      .map((bot) => ({ username: bot.login, usernameLower: String(bot.login || "").toLowerCase(), status: "needs_pool_import", claimedNote: "", soldGames: [], lastCheckStatus: bot.lastScanStatus || "", _id: null })),
+      .map((bot) => ({ username: bot.login, usernameLower: String(bot.login || "").toLowerCase(), status: "needs_pool_import", claimedNote: "", soldGames: [], lastCheckStatus: bot.lastScanStatus || "", listed: false, _id: null })),
   ];
   const cooldownDays = Number(settings.getAutoFarm().recycleCooldownDays) || 14;
   const now = Date.now();
@@ -211,13 +207,19 @@ async function gatherSpentAccounts() {
       const bScore = (b.configFile ? 4 : 0) + (b.lastScanStatus === "ok" ? 2 : 0) + (b.lastScanAt ? 1 : 0);
       return bScore - aScore;
     })[0] || null;
+    // On sale by ANY of the three records that can hold it: a marketplace
+    // listing row, the unclaimed engine's live ledger, or the engine-owned
+    // `listed` flag on the pool row itself. Farm-spent accounts skip the
+    // DropLog stock gate, so this is the only thing standing between a
+    // still-purchasable account and the farmer taking it back.
+    const onSale = listed.has(key) || account.listed === true;
     const facts = {
       claimedNote: account.claimedNote,
-      noClaimSpent: /^spent — no-claim/i.test(String(account.claimedNote || "")),
+      farmSpent: isFarmSpentNote(account.claimedNote),
       availableDrops: available,
       deliveredDrops: deliveredCount,
       soldUnconnectedDrops: soldUnconnectedCount,
-      onActiveListing: listed.has(key),
+      onActiveListing: onSale,
       deployed,
       newestDeliveredAt,
       cooldownDays,
@@ -230,7 +232,11 @@ async function gatherSpentAccounts() {
         ? "needs pool import — out of scope v1"
         : "already available in the pool";
     }
-    if (!bot && eligibility.recyclable) {
+    // A farm-spent account never had a BotAccount — the standalone no-claim
+    // bots farm pool rows directly — so recycle verifies its stored token
+    // against Twitch instead. Demanding a BotAccount here contradicted that
+    // path and is what kept those accounts un-recyclable in practice.
+    if (!bot && !facts.farmSpent && eligibility.recyclable) {
       eligibility.recyclable = false;
       eligibility.reason = "no BotAccount available for a fresh rescan";
     }
@@ -255,13 +261,14 @@ async function gatherSpentAccounts() {
       recyclable: eligibility.recyclable,
       reason: eligibility.reason,
       deployed,
-      listed: listed.has(key),
+      listed: onSale,
       rented: /^rented to/i.test(String(account.claimedNote || "")),
       lastCheckStatus: (bot && bot.lastScanStatus) || account.lastCheckStatus || "",
       lastScanAt: (bot && bot.lastScanAt) || null,
       botId: bot ? bot._id : null,
       outOfScope: !account._id,
-      needsBotRescan: !bot,
+      // Only a blocker when there is no stored token to fall back on.
+      needsBotRescan: !bot && !facts.farmSpent,
       _pool: account._id ? account : null,
       _facts: facts,
     };
@@ -303,11 +310,11 @@ async function recycleRow(row) {
     // A no-claim-spent account has no BotAccount to rescan with, but its pool
     // row carries the token it farmed on — verify that token directly instead
     // of refusing it. Everything else (eligibility, guarded update) is shared.
-    if (row._facts && row._facts.noClaimSpent && row._pool && row._pool.clientSecret) {
+    if (row._facts && row._facts.farmSpent && row._pool) {
       if (!row.recyclable) {
         return { login, recycled: false, status: "not_eligible", reason: row.reason || "not eligible" };
       }
-      return recycleNoClaimRow(row);
+      return recycleFarmSpentRow(row);
     }
     return { login, recycled: false, status: "out_of_scope", reason: "needs pool import — no BotAccount to rescan" };
   }
@@ -369,18 +376,26 @@ async function recycleRow(row) {
   return { login, recycled: true, status: "recycled", soldGames };
 }
 
-// Recycle a spent account pulled from the standalone no-claim bots: verify the
-// pool row's own token (fresh GQL via the Pi), then return it to the pool with
-// the sold games excluded — the same end state the managed-bot path produces.
-// A dead/reclaimed token is branded so it never resurfaces as recyclable; a
-// transient Twitch error is NOT branded (fail closed, let the operator retry).
-async function recycleNoClaimRow(row) {
+// Recycle a spent account handed over by one of the standalone farm engines
+// (no-claim removal, unclaimed auto-list sale): verify the pool row's own token
+// (fresh GQL via the Pi), then return it to the pool with the sold games
+// excluded — the same end state the managed-bot path produces. A dead/reclaimed
+// token is branded so it never resurfaces as recyclable; a transient Twitch
+// error is NOT branded (fail closed, let the operator retry).
+async function recycleFarmSpentRow(row) {
   const login = row.username;
+  // The list gather skips clientSecret (thousands of encrypted blobs); read it
+  // for just this account, at the moment it is actually needed.
+  const secretRow = await AvailableAccount.findById(row._pool._id, { clientSecret: 1 }).lean();
+  const clientSecret = (secretRow && secretRow.clientSecret) || "";
+  if (!clientSecret) {
+    return { login, recycled: false, status: "rescan_unverified", reason: "no stored token to verify — cannot recycle" };
+  }
   let healthy = false;
   let tokenDead = false;
   let error = "";
   try {
-    const inv = await twitchInventory.fetchInventory(row._pool.clientSecret, {
+    const inv = await twitchInventory.fetchInventory(clientSecret, {
       host: resolvePiHost(),
     });
     healthy = !!(inv && inv.twitchId);
@@ -433,7 +448,7 @@ async function recycleNoClaimRow(row) {
     type: "recycled",
     count: 1,
     actor: "spentAccountsTab",
-    reason: "manual recycle (no-claim)",
+    reason: "manual recycle (farm-spent)",
   });
   return { login, recycled: true, status: "recycled", soldGames };
 }

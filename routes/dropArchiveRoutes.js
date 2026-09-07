@@ -30,13 +30,7 @@ const unclaimedAutoList = require("../utils/unclaimedAutoList");
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
 // listing, not sold to anyone yet.
-const MARKET_CLAIM_TAGS = [
-  "gameflip",
-  "ggsel",
-  "digiseller",
-  "funpay",
-  "zeusx",
-];
+const { MARKET_CLAIM_TAGS } = require("../utils/marketClaimTags");
 
 const router = express.Router();
 
