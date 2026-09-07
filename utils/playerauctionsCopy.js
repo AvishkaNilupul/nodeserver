@@ -75,56 +75,59 @@ function farmDeliveryMessage(accounts, days, _game) {
   ]);
 }
 
-// --- The long guide, for offer.instruction ------------------------------
-// This is what the 300-char message points at. No length limit applies, and it
-// is rendered on PlayerAuctions' own order page, so the twitch.tv link is fine
-// here even though a URL inside a chat message is the kind of thing a
-// marketplace filters.
+// --- The guide, for offer.instruction ---------------------------------
+// PlayerAuctions caps `instruction` at 500 characters ("Delivery instructions
+// should less than 500 characters"), so this is NOT the place for the full
+// Eldorado claim guide either — it is a second, smaller budget rather than an
+// unlimited one. The split that survives both caps:
+//
+//   title + description  — unlimited-ish, carries the sales copy and item list
+//   instruction (<500)   — how to claim, shown to the buyer before they order
+//   message (<=300)      — the credential and a pointer, nothing else
+//
+// No URL scheme here: "twitch.tv/..." rather than "https://twitch.tv/...",
+// because a bare link is the kind of thing marketplaces strip, and the buyer
+// can paste it either way.
+const INSTRUCTION_LIMIT = 500;
+
+function clampInstruction(text) {
+  const t = String(text || "").trim();
+  if (t.length <= INSTRUCTION_LIMIT) return t;
+  // Trim on a paragraph boundary rather than mid-sentence.
+  const cut = t.slice(0, INSTRUCTION_LIMIT);
+  const stop = Math.max(cut.lastIndexOf("\n\n"), cut.lastIndexOf(". "));
+  return (stop > 200 ? cut.slice(0, stop) : cut).trim();
+}
+
 function bundleInstruction() {
-  return [
-    "HOW TO CLAIM YOUR DROPS",
-    "",
-    "1. Log in to the Twitch account with the username and password sent to you in the order messages.",
-    "2. Open https://www.twitch.tv/drops/inventory",
-    '3. Scroll to the "Received" section at the bottom of the page.',
-    '4. Click the purple "Connect" button under each item and follow the steps to link it to YOUR OWN game account.',
-    "",
-    "KEEP IT LINKED",
-    "If the event is still running, more items can still land on this account — our farm keeps collecting them automatically. Leave it linked, check the drops inventory page again in a day or two, and claim anything new that has appeared.",
-    "",
-    "IMPORTANT",
-    "Please do not change the account's password or email. Claim your items reasonably soon — drops stay claimable only for a limited time after an event ends.",
-    "",
-    "Any problem at all, message me here first and I will make it right. And if you are happy with the order, leaving feedback would genuinely mean a lot — it helps a small seller more than you would think. Thank you!",
-  ].join("\n");
+  return clampInstruction(
+    [
+      "HOW TO CLAIM",
+      "1. Log in to the Twitch account sent to you in the order messages.",
+      "2. Open twitch.tv/drops/inventory",
+      '3. Under "Received", click Connect on each item and link it to your own game account.',
+      "",
+      "If the event is still running, more items can still land on this account - our farm keeps collecting them, so leave it linked and check again in a day or two.",
+      "",
+      "Please do not change the password or email. Any problem, message me here first and I will make it right.",
+    ].join("\n"),
+  );
 }
 
 function farmInstruction(days, game) {
   const term = days === 365 ? "1 year" : days + " days";
-  const forGame = game ? " for " + game : "";
-  return [
-    "AUTOMATIC TWITCH DROPS FARMING — " + term.toUpperCase(),
-    "",
-    "You will receive a Twitch account in the order messages. Our farm runs it for you: it watches every drop event" +
-      forGame +
-      " and claims the items automatically the moment they unlock. You do not have to watch any streams or do anything at all.",
-    "",
-    "TO COLLECT YOUR ITEMS",
-    "1. Log in to the Twitch account with the credentials sent to you.",
-    "2. Open https://www.twitch.tv/drops/inventory",
-    '3. Under "Received", press Connect on each item to link it to your own game account.',
-    "4. Repeat whenever a new event finishes — new items appear on their own.",
-    "",
-    "KEEP THE FARM RUNNING",
-    "Do not change the account's password or email. If you do, the automatic farm stops working and the remaining term cannot be refunded.",
-    "",
-    "WHAT IS GUARANTEED",
-    "All events running during your " +
-      term +
-      " are collected automatically. Items are guaranteed for events lasting at least 24 hours; shorter events and periods with no active events cannot be guaranteed. Each account is sold to one buyer only.",
-    "",
-    "Any problem at all, message me here first and I will make it right.",
-  ].join("\n");
+  return clampInstruction(
+    [
+      "AUTOMATIC FARMING - " + term.toUpperCase(),
+      "",
+      "You receive a Twitch account in the order messages. Our farm runs it for you and claims every drop automatically" +
+        (game ? " for " + game : "") + " - you do not have to watch anything.",
+      "",
+      "TO COLLECT: log in, open twitch.tv/drops/inventory, and under \"Received\" press Connect on each item to link it to your game account. Repeat as new events finish.",
+      "",
+      "Do NOT change the password or email or the farm stops. Events under 24h are not guaranteed.",
+    ].join("\n"),
+  );
 }
 
 // --- Chunking, for orders too large for one message ---------------------
@@ -190,6 +193,8 @@ function deliveryMessages(accounts, { kind = "bundle", days, game } = {}) {
 
 module.exports = {
   LIMIT,
+  INSTRUCTION_LIMIT,
+  clampInstruction,
   fit,
   credLine,
   credBlock,

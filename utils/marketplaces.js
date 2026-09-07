@@ -4981,6 +4981,33 @@ function paSearchParameters() {
   return { keywords: "", productType: "All", listingStatus: "Active" };
 }
 
+// PlayerAuctions rejects a title it does not like with a flat
+// "Title format error." and no detail. Every title on the account that DOES
+// work is plain ASCII, and the ones that failed all carried typographic
+// characters our own listing copy introduces — an em dash in "Fortnite Twitch
+// Drops (5 Items) — …", a "…" ellipsis, a "|" separator. So fold the
+// typography down to ASCII rather than dropping the listing.
+const PA_TITLE_FOLD = [
+  [/[\u2010-\u2015\u2212]/g, "-"],   // hyphens, en/em dashes, minus
+  [/\u2026/g, "..."],                 // ellipsis
+  [/[\u2018\u2019\u201B]/g, "'"],     // curly single quotes
+  [/[\u201C\u201D\u201F]/g, '"'],     // curly double quotes
+  [/[\u00D7\u2715\u2716]/g, "x"],     // multiplication signs
+  [/[\u00A0\u2007\u202F]/g, " "],     // non-breaking spaces
+  [/[|]/g, "-"],                      // pipe reads as a format error too
+];
+
+function paSanitizeTitle(title) {
+  let t = String(title || "");
+  for (const [re, to] of PA_TITLE_FOLD) t = t.replace(re, to);
+  // Anything still outside printable ASCII goes; a title is not worth failing
+  // a publish over.
+  t = t.replace(/[^\x20-\x7E]/g, "");
+  // Folding can leave doubled separators ("A - - B") and edge punctuation.
+  t = t.replace(/\s+/g, " ").replace(/(\s-)+\s-/g, " -").replace(/^[\s\-]+|[\s\-]+$/g, "");
+  return t.slice(0, 150).trim();
+}
+
 // Build the Item offer DTO. `isAgree`/`agreeCheck` are forced true because the
 // server reads them back as false, so a read-modify-write would drop the
 // Secure Seller Delivery Agreement and the write would be rejected.
@@ -5012,7 +5039,7 @@ function paItemOfferBody({
     itemId: Number(itemId),
     categoryId: Number(categoryId) || 0,
     serverId: Number(serverId) || 0,
-    title: String(title || "").slice(0, 150),
+    title: paSanitizeTitle(title),
     offerDesc: String(description || ""),
     instruction: String(instruction || ""),
     price,
@@ -5492,6 +5519,7 @@ module.exports = {
   playerauctionsOffer,
   playerauctionsOfferUrl,
   playerauctionsOfferIdFromUrl,
+  paSanitizeTitle,
   playerauctionsUpdateOffer,
   playerauctionsSetQuantity,
   playerauctionsReprice,
