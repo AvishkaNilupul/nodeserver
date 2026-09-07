@@ -4833,6 +4833,9 @@ const PA_GAME_ALIASES = {
   eve: "EVE Online",
   wot: "World of Tanks",
   lol: "League of Legends",
+  callofdutymodernwarfare: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  callofdutyblackops: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  callofdutywarzone2: "Call of Duty - Warzone / BO7 & All Legacy Versions",
   cs2: "Counter-Strike 2",
   counterstrike2: "Counter-Strike 2",
   thefinals: "The Finals",
@@ -4842,16 +4845,48 @@ const PA_GAME_ALIASES = {
 
 // Resolve one of our game names to a PlayerAuctions catalogue row.
 // Returns null when the game is not on PlayerAuctions at all.
+//
+// Our names come from Twitch campaign data and are usually MORE specific than
+// PlayerAuctions' storefront name — "NBA 2K27" vs their "NBA 2K",
+// "Call of Duty: Modern Warfare 4" vs their one giant
+// "Call of Duty - Warzone / BO7 & All Legacy Versions" row. So the useful
+// direction is mostly "is their name a prefix of ours?", not the reverse, and
+// a bare exact match resolves only a minority of the catalogue.
 async function playerauctionsResolveGame(game) {
   const raw = String(game || "").trim();
   if (!raw) return null;
   const games = await playerauctionsGames();
-  const want = paNorm(PA_GAME_ALIASES[paNorm(raw)] || raw);
+  const alias = (t) => PA_GAME_ALIASES[paNorm(t)];
+  const want = paNorm(alias(raw) || raw);
   if (!want) return null;
+
+  // 1. Exact, after normalisation.
   const exact = games.find((g) => paNorm(g.gameName) === want);
   if (exact) return exact;
-  // "Call of Duty" should reach "Call of Duty - Warzone / BO7 & All Legacy
-  // Versions", but a 3-letter fragment must not match half the catalogue.
+
+  // 2. The part before a colon, through the alias map. This is what carries
+  //    every "Call of Duty: <subtitle>" onto their single Call of Duty row.
+  if (raw.includes(":")) {
+    const head = raw.split(":")[0].trim();
+    const mapped = alias(head);
+    if (mapped) {
+      const hit = games.find((g) => paNorm(g.gameName) === paNorm(mapped));
+      if (hit) return hit;
+    }
+  }
+
+  // 3. THEIR name is a prefix of ours — "NBA 2K" for our "NBA 2K27",
+  //    "Hunt: Showdown" for our "Hunt: Showdown 1896", "Overwatch" for
+  //    "Overwatch 2". Longest wins, so "Call of Duty Mobile" can never beat a
+  //    better match, and a very short storefront name cannot swallow
+  //    everything that happens to start with it.
+  const prefixes = games
+    .filter((g) => paNorm(g.gameName).length >= 4 && want.startsWith(paNorm(g.gameName)))
+    .sort((a, b) => paNorm(b.gameName).length - paNorm(a.gameName).length);
+  if (prefixes.length) return prefixes[0];
+
+  // 4. OURS is a prefix of theirs, or merely contained in it. Both are looser,
+  //    so they need a longer needle before they are allowed to fire.
   if (want.length >= 6) {
     const pre = games.find((g) => paNorm(g.gameName).startsWith(want));
     if (pre) return pre;

@@ -299,6 +299,35 @@ test("proof markup escapes offer titles that carry XML metacharacters", () => {
 
 /* ----------------------------- game mapping ---------------------------- */
 
+test("our campaign game names resolve onto PlayerAuctions' storefront names", async () => {
+  // Our names come from Twitch campaign data and are usually MORE specific than
+  // the storefront's, so exact matching alone resolved barely half the shelf:
+  // "NBA 2K27", "Call of Duty: Modern Warfare 4" and "Hunt: Showdown 1896" all
+  // missed, and three real listings were silently skipped as "no such game".
+  const games = await mp.playerauctionsGames().catch(() => []);
+  if (!games.length) return; // offline
+  const cases = [
+    ["NBA 2K27", "NBA 2K"],
+    ["Call of Duty: Modern Warfare 4", "Call of Duty - Warzone / BO7 & All Legacy Versions"],
+    ["Call of Duty: Black Ops 7", "Call of Duty - Warzone / BO7 & All Legacy Versions"],
+    ["Hunt: Showdown 1896", "Hunt: Showdown"],
+    ["Overwatch 2", "Overwatch"],
+    ["Halo: Campaign Evolved", "Halo Infinite"],
+    ["Metin2", "Metin 2"],
+  ];
+  for (const [ours, theirs] of cases) {
+    const g = await mp.playerauctionsResolveGame(ours);
+    assert.ok(g, `${ours} resolved to nothing`);
+    assert.strictEqual(g.gameName.trim(), theirs, `${ours} resolved to ${g.gameName}`);
+  }
+  // A game that genuinely is not on PlayerAuctions must stay null rather than
+  // fuzzy-matching onto something unrelated.
+  assert.strictEqual(
+    await mp.playerauctionsResolveGame("Assassin's Creed Black Flag Resynced"),
+    null,
+  );
+});
+
 test("item-only product gating is enforced per game", async () => {
   // Only 149 of PlayerAuctions' ~400 games accept Item offers. Publishing a
   // bundle for an account-only game is rejected by the API, so the publisher
