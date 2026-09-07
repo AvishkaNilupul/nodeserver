@@ -548,3 +548,34 @@ and withdrawn. Two guards now, mirroring Eldorado:
 
 Those games are still sellable here, but only from an `unclaimedGame`-backed listing fed by the
 no-claim farm. The live CAH Overwatch offer is exactly that shape and is unaffected.
+
+---
+
+## 14. The session, finally understood
+
+Four deaths, three different causes, and the first two diagnoses were both incomplete.
+
+1. **The self-check refreshed as a "test"** and spent the token; the same paste then went to prod.
+   → the check no longer refreshes (§9).
+2. **Two processes on prod refreshed at once** — the 60s fulfiller tick and an hour-long publishing
+   script. → cross-process lock (§13).
+3. **The operator's browser rotated the session.** PlayerAuctions allows ONE session per account;
+   signing in anywhere invalidates every other copy. Proven by the `sid` claim changing between two
+   pastes (`…e288` → `…e929`) while prod sat idle and refreshed nothing — the refresh endpoint then
+   answered 401 **with logout cookies** (all three session cookies expired to 1900), which is a
+   terminated session, not a rejected token. **Not preventable from the server.**
+4. **A pre-flight probe inside our own fulfiller.** `deliverPendingOrders` opened every tick with
+   `playerauctionsEnsureFreshSession()`, which called `playerauctionsRefreshSession()` *directly*,
+   bypassing the lock. Prod logged a 401 per tick while a standalone process on the same host read
+   the account fine. This is the trap the Eldorado plan already documents — *"a pre-flight liveness
+   probe races that and loses"* — reintroduced despite the note. Removed; `ensureFreshSession` now
+   goes through `paRequest`, so **no unlocked refresh path remains**.
+
+### What this means operationally
+
+- The server keeps the session alive indefinitely **on its own**, as long as nothing else signs in.
+- **Opening PlayerAuctions in a browser kills it.** That is inherent to the marketplace.
+- `utils/playerauctionsSessionWatch.js` checks every 5 minutes and Telegrams once when it breaks
+  (with the recovery steps) and once when it recovers. Recovery is one paste into the keys modal.
+- For a long publishing run, park `playerauctionsAutoDeliver=false` first so the tick cannot
+  compete, then re-enable. Belt and braces on top of the lock.
