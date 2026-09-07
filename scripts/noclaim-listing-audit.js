@@ -30,6 +30,9 @@ const { isNoClaimGame } = require("../utils/settings");
 const { unclaimedOnly } = require("../utils/playerauctionsFulfiller");
 const { loginsOnActiveListings, notListed } = require("../utils/listedLogins");
 
+// "<Game> Twitch Drops Automatic Farming <term>" — the rent-farm product.
+const FARM_TITLE = /\bAutomatic\s+Farming\b/i;
+
 const args = process.argv.slice(2);
 const APPLY = args.includes("--apply");
 const ONLY = (args.find((a) => a.startsWith("--market=")) || "").split("=")[1] || "";
@@ -39,8 +42,12 @@ const DELAY_MS = parseInt(
 );
 
 // Markets we can take a listing down on programmatically.
+// Mirrors the dispatch in routes/marketplaceRoutes.js. Only EpicNPC is absent
+// there too — it is a browser bridge with no per-offer API.
 const DELISTERS = {
   gameflip: (r) => mp.gameflipDelist(r.externalId),
+  digiseller: (r) => mp.digisellerDelist(r.externalId),
+  g2g: (r) => mp.g2gDelist(r.externalId),
   ggsel: (r) => mp.ggselDelist(r.externalId),
   zeusx: (r) => mp.zeusxDelist(r.externalId),
   eldorado: (r) => mp.eldoradoDelist(r.externalId),
@@ -62,8 +69,20 @@ async function main() {
   const findings = [];
 
   for (const row of rows) {
-    // A row fed by the no-claim farm is correct by construction.
-    if (row.unclaimedGame) continue;
+    // A row fed by the no-claim farm is correct by construction. TWO different
+    // conventions mark one, and both must be honoured:
+    //   * unclaimedGame — the Eldorado / PlayerAuctions fulfillers' field
+    //   * origin "unclaimed" — utils/unclaimedAutoList.js, which pins a specific
+    //     ledger account via accountLogin instead
+    // Missing the second flagged five perfectly good Gameflip listings.
+    if (row.unclaimedGame || row.origin === "unclaimed") continue;
+    // RENT-FARM listings are a different product entirely: they sell a WINDOW
+    // of automated farming and are fulfilled by provisioning a pristine pool
+    // account, not by picking archive stock. They carry a DropSet only for
+    // bookkeeping, so the deliverability test below is meaningless for them —
+    // and the first run flagged a live Eldorado farming listing as
+    // unfulfillable, which would have been a straight revenue loss.
+    if (FARM_TITLE.test(row.title || "")) continue;
     const set = row.set ? await DropSet.findById(row.set).lean() : null;
     const game =
       (set && (set.coverGame || ((set.items || []).find((i) => i.game) || {}).game)) || "";
@@ -114,12 +133,12 @@ async function main() {
     }
   }
 
-  console.log("\nUNFULFILLABLE:");
+  console.log("\nUNFULFILLABLE (market / origin / game / title):");
   for (const f of broken) {
     const can = DELISTERS[f.row.marketplace] ? "" : "   (no delist API — remove by hand)";
     console.log(
-      "  " + f.row.marketplace.padEnd(12) + f.game.padEnd(20) +
-        String(f.title).slice(0, 44) + can,
+      "  " + f.row.marketplace.padEnd(12) + (f.row.origin || "?").padEnd(8) +
+        f.game.padEnd(20) + String(f.title).slice(0, 40) + can,
     );
   }
 
