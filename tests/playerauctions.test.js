@@ -284,6 +284,42 @@ test("an already-claimed drop is never handed to a buyer", async () => {
   }
 });
 
+/* ------------------------- the session watchdog ------------------------- */
+
+test("a dead session alerts once, and recovery alerts once", async () => {
+  // The expensive part of an outage is not the outage, it is the hours before
+  // anyone notices — so this must fire promptly, and then shut up.
+  const watch = require("../utils/playerauctionsSessionWatch");
+  const tg = require("../utils/telegram");
+  const realSend = tg.sendTelegram;
+  const realTest = mp.playerauctionsTest;
+  const realStatus = mp.keyStatus;
+  const sent = [];
+  tg.sendTelegram = async (t) => sent.push(t);
+  mp.keyStatus = () => ({ playerauctions: { configured: true } });
+  try {
+    watch.state.alerted = false;
+    mp.playerauctionsTest = async () => ({ ok: false, detail: "session not accepted" });
+    await watch.check();
+    await watch.check();
+    await watch.check();
+    assert.strictEqual(sent.length, 1, "should alert once per outage, not per tick");
+    assert.match(sent[0], /DEAD/);
+    assert.match(sent[0], /ONE session per account/);
+
+    mp.playerauctionsTest = async () => ({ ok: true, detail: "Connected" });
+    await watch.check();
+    await watch.check();
+    assert.strictEqual(sent.length, 2, "should announce recovery exactly once");
+    assert.match(sent[1], /back/i);
+  } finally {
+    tg.sendTelegram = realSend;
+    mp.playerauctionsTest = realTest;
+    mp.keyStatus = realStatus;
+    watch.state.alerted = false;
+  }
+});
+
 /* --------------------------- the refresh lock --------------------------- */
 
 test("concurrent refreshes are serialised into exactly one", async () => {

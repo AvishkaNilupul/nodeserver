@@ -71,6 +71,7 @@ const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
 const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
 const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
+const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -760,6 +761,11 @@ mongoose
     // autoFarm.playerauctionsAutoDeliver (and ships in dry-run until proven).
     playerauctionsSessionRefresher.start();
     playerauctionsFulfiller.start();
+    // PlayerAuctions allows ONE session per account, so the operator opening
+    // the site in a browser rotates the session id and invalidates the
+    // server's copy — unpreventable, and silent until a buyer is left waiting.
+    // This checks every 5 minutes and Telegrams once when it breaks.
+    playerauctionsSessionWatch.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();
