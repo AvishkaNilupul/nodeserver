@@ -2000,6 +2000,16 @@ async function publishStackedListing({
 const BUNDLE_PLAN_TTL_MS = 5 * 60 * 1000;
 const bundlePlanCache = new Map(); // normalised game -> { at, plans }
 
+// "Nobody holds this bundle yet" is the NORMAL answer, and it is the expensive
+// one: measured on prod 2026-09-08, 15 of 16 planned bundles had zero holders
+// because their waves were farmed by different accounts, and each of those
+// verdicts costs a DropLog aggregation. Every wave's task is swept, so without
+// this the same verdict is recomputed several times a tick, forever. Keyed by
+// the bundle's item signature, so the moment the bundle changes the cache
+// entry stops matching and a fresh answer is computed.
+const BUNDLE_WAIT_TTL_MS = 10 * 60 * 1000;
+const bundleWaitCache = new Map(); // eventKey|signature -> at
+
 async function eventBundlePlans(game, { fresh = false } = {}) {
   const key = settings.normGameName(game);
   const hit = bundlePlanCache.get(key);
@@ -2061,6 +2071,18 @@ async function listEventBundle(task, { dryRun = false } = {}) {
     };
   }
 
+  const waitKey = plan.key + "|" + plan.signature;
+  const waitedAt = bundleWaitCache.get(waitKey);
+  if (waitedAt && Date.now() - waitedAt < BUNDLE_WAIT_TTL_MS) {
+    return {
+      skipped:
+        "still waiting for an account that holds the whole " +
+        plan.eventName +
+        " bundle",
+      waiting: true,
+    };
+  }
+
   // Only accounts that provably hold EVERY item at the promised copy count,
   // unconnected, unsold, and not already on a live listing — so the bundle can
   // never take stock the wave listings are selling.
@@ -2070,12 +2092,14 @@ async function listEventBundle(task, { dryRun = false } = {}) {
     plan.items,
   );
   if (!eligible.length) {
+    bundleWaitCache.set(waitKey, Date.now());
     return {
       skipped:
         "no free account holds the whole " + plan.eventName + " bundle yet",
       waiting: true,
     };
   }
+  bundleWaitCache.delete(waitKey);
   // Half now, half kept back: the next wave of the event bundles on top of it.
   const split = computeSplit(eligible.length);
   const accounts = eligible.slice(0, split.listNow);
