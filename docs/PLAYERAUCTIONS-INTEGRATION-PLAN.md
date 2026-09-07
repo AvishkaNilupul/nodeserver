@@ -357,3 +357,77 @@ should be watched.
 - **Item-only games.** Rainbow Six, Apex, Rocket League, Dead by Daylight, The Finals and several
   others cannot take an Item offer at all. The publishers skip them with a reason; selling those
   bundles here would mean the Accounts category (§7) and a different delivery path.
+
+---
+
+## 9. Deployed to prod 2026-09-07 — and one session destroyed on the way
+
+**Deployed.** Backup `_deploy_backup_20260907_033447_playerauctions` (9 files). The 9 modified
+files were **patched onto prod's own copies** (`patch -p1`, clean, offsets only) rather than
+overwritten, because prod runs a mix of branch tips; the 8 new files were copied and hash-verified
+against local. Every module load-tested before restart. `pm2 restart redeemer` → online,
+`unstable_restarts: 0`, "MongoDB connected" / "Server started", no PlayerAuctions errors.
+
+### ⚠ ONLY ONE MACHINE MAY EVER HOLD A GIVEN PLAYERAUCTIONS COOKIE
+
+This was learned by breaking it. **PlayerAuctions rotates the entire session on refresh**: a
+successful `POST /SignIn/RefreshToken` mints a new session id (the `sid` claim changes) and
+invalidates every other copy of that jar. Presenting an already-spent refresh token then reads as
+**token reuse and revokes the whole family — including the operator's browser session.**
+
+What happened: the cookie was installed on a laptop and self-checked (the self-check called
+`playerauctionsRefreshSession()` as a "does refresh work?" test, which *spent* the token), then the
+same original paste was installed on prod, whose first call refreshed with the now-spent token.
+Result: 401 everywhere, and the operator was signed out of PlayerAuctions in their own browser.
+
+Fixed so it cannot recur:
+- `scripts/pa-selfcheck.js` **no longer refreshes**. It reports the JWT's own expiry via
+  `playerauctionsTokenExpiry()`, which decodes the stored jar and calls nothing.
+- Both the script and `playerauctionsRefreshSession()` carry the single-owner rule in a banner.
+
+**The install procedure is therefore:** sign in, copy the `Cookie` header, install it on **prod
+only**, and run the self-check **on prod**. Never install the same paste twice, and never run the
+authenticated half of the self-check from a second machine.
+
+The dead cookie has been cleared from both hosts, so nothing is running against a revoked session.
+
+## 10. The publication plan (dry-run against prod, 2026-09-07)
+
+Everything below is staged and verified; each is one command away once a cookie is installed.
+
+### `scripts/pa-mirror-eldorado.js` — the Eldorado shelf → **14 of 23 bundles**
+
+Carries each row's stock source across (`unclaimedGame` / `autoClaimSet`), so a mirrored listing is
+wired to auto-deliver from the same place its Eldorado twin is. Prices lift to the **$5 floor**
+(Eldorado runs $0.75–$3.00 here) — which is not a guess: all four existing PlayerAuctions offers on
+this account sit at exactly $5.00 and 51 orders have completed at it. Stock is **real claimable
+stock**, never Eldorado's advertised number.
+
+The 9 that cannot be mirrored are genuine, not bugs: **eight games are account-only on
+PlayerAuctions** (Rainbow Six, Rocket League ×2, Metin 2, Phasmophobia, Brawlhalla, Marvel Contest
+of Champions, Hunt: Showdown) and **Assassin's Creed Black Flag Resynced is not in their catalogue
+at all**. Selling those here would mean the Accounts category (§7) and a different delivery path.
+
+> The first dry run said only 11. The other 3 were a **resolver bug**, not a limit: our game names
+> come from Twitch campaign data and are consistently *more specific* than the storefront's, so
+> `NBA 2K27`, `Call of Duty: Modern Warfare 4` and `Call of Duty: Black Ops 7` all reported "no such
+> game" — including Call of Duty, which is a proven seller on this account.
+> `playerauctionsResolveGame` now also tries the part before a colon through the alias map, and
+> **their** name as a prefix of **ours**, longest-match-wins.
+
+### `scripts/pa-farm-listings.js` — rent-farm → **78 offers** (26 games × 3 terms)
+
+Tiers are **$5 / $6 / $9** for 120 days / 180 days / 1 year, not Eldorado's $3/$4/$7 — the cheap
+tier would be refused outright under the $5 floor.
+
+**Stock defaults to 5 per listing, not Eldorado's 1000.** The pool is the ceiling: prod has **147
+eligible pristine accounts** and the holder renter caps at **200 concurrent**, and each sale burns
+one for 120–365 days. 78 × 1000 would advertise 78,000 units against 147. Override with `--stock`
+once the pool is deeper.
+
+### No breadth cap to worry about
+
+Eldorado enforces max 100 *active* offers per game category, with everything outside its 12 named
+games sharing one "Other" bucket that fills instantly. **Nothing equivalent was observed on
+PlayerAuctions** — the limits here are the $5 floor and the write throttle, so the whole shelf can
+go up. Pacing is ~26s between creates.
