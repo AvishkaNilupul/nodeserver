@@ -308,6 +308,18 @@ async function main() {
       ok++;
       console.log("ok   " + r.title.slice(0, 60) + "  $" + r.listPrice + " x" + r.qty);
     } catch (e) {
+      // "Operated too frequent" (code 1) is the write throttle rejecting the
+      // call — nothing was created, so retrying is safe and is the difference
+      // between losing a listing for the run and simply waiting. Sustained
+      // publishing tightens it beyond the fixed pacing, so back off and retry
+      // rather than dropping the set on the floor.
+      if (e.retryable && !r.__retried) {
+        r.__retried = true;
+        console.log("throttled, backing off 90s: " + r.title.slice(0, 48));
+        await new Promise((res) => setTimeout(res, 90000));
+        limited.push(r); // the array iterator picks up the append
+        continue;
+      }
       failed++;
       console.error("FAIL " + r.title.slice(0, 60) + ": " + e.message);
     } finally {
