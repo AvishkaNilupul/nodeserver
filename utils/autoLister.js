@@ -32,6 +32,10 @@ const {
 } = require("./dropReservation");
 const settings = require("./settings");
 const mp = require("./marketplaces");
+// Event bundles: which of a game's farmed waves belong to the same Twitch
+// event, what the merged bundle promises, and what it is worth. Pure + read
+// only; it never publishes anything itself (docs/AUTOFARM-BUNDLES-CONTRACT.md).
+const autoFarmBundles = require("./autoFarmBundles");
 const paCopy = require("./playerauctionsCopy");
 const { isNoClaimGame } = require("./settings");
 const { decrypt } = require("./secretBox");
@@ -221,7 +225,14 @@ function buildTitle({ game, items, campaignName }) {
 // product, and vice versa. marketplace is one of "gameflip", "digiseller",
 // "ggsel", "zeusx", "eldorado", "playerauctions" (or anything else → a neutral
 // line with no site name).
-function buildDescription({ game, items, campaignName, postEvent, marketplace }) {
+function buildDescription({
+  game,
+  items,
+  campaignName,
+  postEvent,
+  marketplace,
+  extraLines = [],
+}) {
   const support = {
     gameflip: "message me here on Gameflip",
     digiseller: "message me here on Digiseller",
@@ -249,6 +260,13 @@ function buildDescription({ game, items, campaignName, postEvent, marketplace })
   } else if (campaignName) {
     lines.push(game + " — " + campaignName + " Twitch Drops.", "");
   }
+  // Facts the house template has no slot for — which event and waves an event
+  // bundle covers, which items arrive as several copies. Empty for every
+  // non-bundle listing, so those descriptions stay byte-identical.
+  const extras = (extraLines || [])
+    .map((l) => String(l == null ? "" : l).trim())
+    .filter(Boolean);
+  if (extras.length) lines.push(...extras, "");
   lines.push("Includes:");
   for (const i of items) {
     lines.push(
@@ -1807,143 +1825,26 @@ function stackedBundlePrice(basePrice, priorPrice) {
   return Math.max(base, round25(bumped));
 }
 
-// Publish a SECOND listing for a task whose accounts were reused across this
-// game's earlier campaigns: those accounts hold every prior bundle PLUS the
-// current one, so the stack sells as its own combined-bundle listing at a
-// combined price — while the task's main listing keeps selling the current
-// event solo from its other accounts.
+/* ------------------------- shared bundle publisher ----------------------- */
+
+// Publish one already-decided second listing for a task (an EVENT bundle or
+// the older cross-event stack) and record it on `task.stackListing`.
 //
-// Only accounts that verifiably hold EVERY item of the combined stack qualify
-// (the same holdings gate the solo listing uses), and pickDeliveryAccounts
-// already excludes anything attached to a live listing — so the stack is fed
-// exactly by the reused/held-back accounts, never by stock the solo listing
-// (or any other listing) is selling. Half of the qualifying stack is listed
-// now; the rest stays unlisted so the NEXT event can stack on top of it again.
-async function listStackedBundle(taskId, { dryRun = false } = {}) {
-  const task = await AutoFarmTask.findById(taskId);
-  if (!task) return { skipped: "task not found" };
-  if (task.stackListing && task.stackListing.externalId) {
-    return { skipped: "already listed" };
-  }
-  // The solo listing goes first — it anchors the current event's stock split.
-  if (!task.listing || !task.listing.externalId) {
-    return { skipped: "no solo listing yet" };
-  }
-
-  // Prior bundles: every OTHER auto-farm set this game has published.
-  const siblings = await AutoFarmTask.find(
-    {
-      game: task.game,
-      _id: { $ne: task._id },
-      "listing.setId": { $nin: ["", null] },
-    },
-    { "listing.setId": 1 },
-  ).lean();
-  const setIds = [
-    ...new Set(
-      siblings.map((t) => t.listing && t.listing.setId).filter(Boolean),
-    ),
-  ];
-  if (!setIds.length) return { skipped: "no prior campaign bundles" };
-  const priorSets = await DropSet.find({ _id: { $in: setIds } }).lean();
-  if (!priorSets.length) return { skipped: "prior sets gone" };
-
-  const current = await campaignItems(
-    task.campaignId,
-    task.game,
-    task.campaignName,
-  );
-  const items = stackItems([...priorSets, { items: current }]);
-  // The stack must actually be BIGGER than the solo bundle, or it's the same
-  // listing twice.
-  if (items.length <= current.length) {
-    return { skipped: "nothing extra to stack" };
-  }
-
-  const research = await MarketResearch.findOne({ game: task.game }).lean();
-  const priorPrice = priorSets.reduce(
-    (m, s) => Math.max(m, Number(s.price) || 0),
-    0,
-  );
-  const price = stackedBundlePrice(derivePrice(research), priorPrice);
-  const title = buildTitle({
-    game: task.game,
-    items,
-    campaignName: task.campaignName,
-  });
-  const descriptions = {
-    gameflip: buildDescription({
-      game: task.game,
-      items,
-      campaignName: task.campaignName,
-      postEvent: false,
-      marketplace: "gameflip",
-    }),
-    digiseller: buildDescription({
-      game: task.game,
-      items,
-      campaignName: task.campaignName,
-      postEvent: false,
-      marketplace: "digiseller",
-    }),
-    ggsel: buildDescription({
-      game: task.game,
-      items,
-      campaignName: task.campaignName,
-      postEvent: false,
-      marketplace: "ggsel",
-    }),
-  };
+// Extracted so both callers publish through the exact same path: the market
+// split, the Gameflip reservation and its rollback, the Plati/GGSel shares and
+// the bookkeeping row are all behaviour that was already load-bearing here and
+// must not fork. The caller owns everything ABOVE this line — which items, what
+// title, what price, and which accounts back them.
+async function publishStackedListing({
+  task,
+  set,
+  title,
+  descriptions,
+  price,
+  accounts,
+  split,
+}) {
   const description = descriptions.gameflip;
-
-  // Candidate accounts: everything this GAME's auto-farm tasks ever assigned
-  // (the previous events' held-back stash lives on older tasks, not this one),
-  // minus anything currently assigned to a DIFFERENT game's live plan (its
-  // solo listing counts on those accounts). Deliberately never the manual
-  // fleet — that stash is the owner's to sell by hand.
-  const gameTasks = await AutoFarmTask.find(
-    { game: task.game },
-    { assignedAccounts: 1 },
-  ).lean();
-  const candidates = new Set();
-  for (const t of gameTasks) {
-    for (const u of t.assignedAccounts || []) {
-      const k = String(u).toLowerCase();
-      if (k) candidates.add(k);
-    }
-  }
-  for (const t of await AutoFarmTask.find(
-    { game: { $ne: task.game }, status: { $in: ["active", "planned"] } },
-    { assignedAccounts: 1 },
-  ).lean()) {
-    for (const u of t.assignedAccounts || []) {
-      candidates.delete(String(u).toLowerCase());
-    }
-  }
-  if (!candidates.size) return { skipped: "no candidate accounts" };
-
-  // Everyone who provably holds the WHOLE stack and isn't already on a live
-  // listing. List half, keep half for the next event's stack.
-  const eligible = await pickDeliveryAccounts(
-    { assignedAccounts: [...candidates] },
-    candidates.size,
-    items,
-  );
-  if (!eligible.length) {
-    return {
-      skipped: "no free account holds the full stack yet",
-      waiting: true,
-    };
-  }
-  const split = computeSplit(eligible.length);
-  const accounts = eligible.slice(0, split.listNow);
-
-  if (dryRun) {
-    return {
-      wouldList: { title, price, qty: accounts.length, items: items.length },
-    };
-  }
-
   // Same market split as the solo flow: Gameflip first, then Plati, then GGSel.
   const af = settings.getAutoFarm();
   const platiEnabled = !!af.platiCategoryId;
@@ -1960,32 +1861,6 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   const shares = { gameflip: [], plati: [], ggsel: [] };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
-
-  const set = await DropSet.create({
-    name:
-      task.game +
-      " — stacked bundle (" +
-      (task.campaignName || task.campaignId) +
-      " + " +
-      priorSets.length +
-      " earlier event" +
-      (priorSets.length === 1 ? "" : "s") +
-      ")",
-    note:
-      "Auto-farmed Twitch drops, stacked across campaigns (" + task.game + ")",
-    items: items.map(({ itemKey, name, game, image, qty: q }) => ({
-      itemKey,
-      name,
-      game,
-      image,
-      qty: q,
-    })),
-    price,
-    minPriceUsd: price,
-    listed: false,
-    custom: true,
-    coverGame: task.game,
   });
 
   let img = "";
@@ -2113,6 +1988,374 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   };
   await task.save();
   return { listed: task.stackListing };
+}
+
+/* ---------------------------- event bundles ------------------------------ */
+
+// Plans describe a whole GAME and change only when a task or a campaign does,
+// so a sweep of fifty tasks must not rebuild them fifty times (four queries
+// each, on a shared-tier Atlas that bills bytes returned). One short-lived
+// cache per game, kept well under the sweep interval so a newly farmed wave is
+// picked up on the next tick rather than the next restart.
+const BUNDLE_PLAN_TTL_MS = 5 * 60 * 1000;
+const bundlePlanCache = new Map(); // normalised game -> { at, plans }
+
+async function eventBundlePlans(game, { fresh = false } = {}) {
+  const key = settings.normGameName(game);
+  const hit = bundlePlanCache.get(key);
+  if (!fresh && hit && Date.now() - hit.at < BUNDLE_PLAN_TTL_MS)
+    return hit.plans;
+  const plans = await autoFarmBundles.plansForGame(game);
+  bundlePlanCache.set(key, { at: Date.now(), plans });
+  return plans;
+}
+
+// Publish this task's EVENT as one bundle: every wave of it the auto-farm has
+// actually farmed, merged, titled as the event, priced on evidence.
+//
+// Returns null when the task belongs to no multi-wave event — that is the
+// signal for listStackedBundle to fall back to its older cross-event stack.
+// Any other return value (published, dry-run or a reasoned skip) is final.
+async function listEventBundle(task, { dryRun = false } = {}) {
+  const plans = await eventBundlePlans(task.game);
+  const plan = autoFarmBundles.planForTask(task, plans);
+  if (!plan) return null;
+
+  // The bundle has to be strictly bigger than what this task's own listing
+  // already sells, or it is the same listing published twice.
+  let soloCount = 0;
+  const soloSetId = String((task.listing && task.listing.setId) || "");
+  if (soloSetId) {
+    try {
+      const soloSet = await DropSet.findById(soloSetId, { items: 1 }).lean();
+      soloCount = ((soloSet && soloSet.items) || []).length;
+    } catch {
+      soloCount = 0;
+    }
+  }
+  if (plan.items.length <= soloCount) {
+    return {
+      skipped:
+        "the event bundle adds nothing to this task's own listing (" +
+        plan.items.length +
+        " vs " +
+        soloCount +
+        " items)",
+    };
+  }
+
+  // One live bundle per event. Every wave's task is swept, so without this the
+  // same event would be published once per wave — the duplicate-set sprawl
+  // that had three Halo sets competing over one pool of accounts.
+  const live = await autoFarmBundles.liveBundleForEvent(plan.key);
+  if (live) {
+    return {
+      skipped:
+        '"' +
+        plan.eventName +
+        '" is already selling as a bundle (' +
+        live.marketplace +
+        " " +
+        live.externalId +
+        ")",
+    };
+  }
+
+  // Only accounts that provably hold EVERY item at the promised copy count,
+  // unconnected, unsold, and not already on a live listing — so the bundle can
+  // never take stock the wave listings are selling.
+  const eligible = await pickDeliveryAccounts(
+    { assignedAccounts: plan.logins },
+    plan.logins.length,
+    plan.items,
+  );
+  if (!eligible.length) {
+    return {
+      skipped:
+        "no free account holds the whole " + plan.eventName + " bundle yet",
+      waiting: true,
+    };
+  }
+  // Half now, half kept back: the next wave of the event bundles on top of it.
+  const split = computeSplit(eligible.length);
+  const accounts = eligible.slice(0, split.listNow);
+
+  const research = await MarketResearch.findOne({ game: task.game }).lean();
+  const soldFloorUsd = await autoFarmBundles.soldFloorForEvent(plan.key);
+  const priced = await autoFarmBundles.priceBundle({
+    plan,
+    game: task.game,
+    marketplace: "gameflip",
+    research,
+    soldFloorUsd,
+  });
+  // The shared engine, not derivePrice: this bundle's size, its completeness
+  // and what it has already sold for are all inputs, and derivePrice has none
+  // of them (it also anchors on gameflip.lowest, which is often our own row).
+  // If the engine is unavailable the old stacked price still applies — a
+  // bundle is never published at an invented number.
+  const price =
+    priced && Number(priced.price) > 0
+      ? Number(priced.price)
+      : stackedBundlePrice(derivePrice(research), soldFloorUsd);
+
+  const title = autoFarmBundles.bundleTitleFor(plan);
+  const describe = (marketplace) =>
+    buildDescription({
+      game: task.game,
+      items: plan.items,
+      campaignName: plan.eventName,
+      postEvent: false,
+      marketplace,
+      extraLines: autoFarmBundles.bundleDescriptionLinesFor(plan, marketplace),
+    });
+  const descriptions = {
+    gameflip: describe("gameflip"),
+    digiseller: describe("digiseller"),
+    ggsel: describe("ggsel"),
+  };
+
+  if (dryRun) {
+    return {
+      wouldList: {
+        title,
+        price,
+        qty: accounts.length,
+        items: plan.items.length,
+        event: plan.eventName,
+        waves: plan.labels,
+        full: plan.full,
+        priceBasis: (priced && priced.basis) || "fallback",
+      },
+    };
+  }
+
+  const set = await DropSet.create({
+    name: autoFarmBundles.bundleSetName(plan),
+    note: autoFarmBundles.bundleSetNote(plan),
+    items: plan.items.map(({ itemKey, name, game, image, qty }) => ({
+      itemKey,
+      name,
+      game,
+      image: image || "",
+      qty,
+    })),
+    price,
+    minPriceUsd: price,
+    listed: false,
+    custom: true,
+    coverGame: task.game,
+    sourceType: autoFarmBundles.SOURCE_TYPE,
+    sourceEventKey: plan.key,
+    sourceEventName: plan.eventName,
+    sourceCampaignIds: plan.campaignIds,
+    // Stock stays inside the accounts the auto-farmer assigned to this event's
+    // waves. Without the scope, a relist would resolve delivery against the
+    // whole archive and could hand out an account no task here ever farmed.
+    accountScopeLogins: plan.logins,
+  });
+
+  const out = await publishStackedListing({
+    task,
+    set,
+    title,
+    descriptions,
+    price,
+    accounts,
+    split,
+  });
+  // The plan is stale the moment a bundle publishes (those accounts are now on
+  // a live listing), so the next task of this game re-reads rather than
+  // re-publishing against a cached view.
+  bundlePlanCache.delete(settings.normGameName(task.game));
+  return out;
+}
+
+// Publish a SECOND listing for a task whose accounts were reused across this
+// game's earlier campaigns: those accounts hold every prior bundle PLUS the
+// current one, so the stack sells as its own combined-bundle listing at a
+// combined price — while the task's main listing keeps selling the current
+// event solo from its other accounts.
+//
+// Only accounts that verifiably hold EVERY item of the combined stack qualify
+// (the same holdings gate the solo listing uses), and pickDeliveryAccounts
+// already excludes anything attached to a live listing — so the stack is fed
+// exactly by the reused/held-back accounts, never by stock the solo listing
+// (or any other listing) is selling. Half of the qualifying stack is listed
+// now; the rest stays unlisted so the NEXT event can stack on top of it again.
+async function listStackedBundle(taskId, { dryRun = false } = {}) {
+  const task = await AutoFarmTask.findById(taskId);
+  if (!task) return { skipped: "task not found" };
+  if (task.stackListing && task.stackListing.externalId) {
+    return { skipped: "already listed" };
+  }
+  // The solo listing goes first — it anchors the current event's stock split.
+  if (!task.listing || !task.listing.externalId) {
+    return { skipped: "no solo listing yet" };
+  }
+
+  // Event bundles come first. A game's campaigns are WAVES of an event, and
+  // "Week 1 + Finals, complete" is a product; "this campaign plus every other
+  // campaign this game ever ran" is not, which is why the union below is
+  // usually refused by the holdings gate. Only a task belonging to no
+  // multi-wave event falls through to it.
+  if (settings.getAutoFarm().autoFarmEventBundles !== false) {
+    try {
+      const bundled = await listEventBundle(task, { dryRun });
+      if (bundled) return bundled;
+    } catch (e) {
+      console.error("autoLister event bundle failed:", e.message);
+    }
+  }
+
+  // Prior bundles: every OTHER auto-farm set this game has published.
+  const siblings = await AutoFarmTask.find(
+    {
+      game: task.game,
+      _id: { $ne: task._id },
+      "listing.setId": { $nin: ["", null] },
+    },
+    { "listing.setId": 1 },
+  ).lean();
+  const setIds = [
+    ...new Set(
+      siblings.map((t) => t.listing && t.listing.setId).filter(Boolean),
+    ),
+  ];
+  if (!setIds.length) return { skipped: "no prior campaign bundles" };
+  const priorSets = await DropSet.find({ _id: { $in: setIds } }).lean();
+  if (!priorSets.length) return { skipped: "prior sets gone" };
+
+  const current = await campaignItems(
+    task.campaignId,
+    task.game,
+    task.campaignName,
+  );
+  const items = stackItems([...priorSets, { items: current }]);
+  // The stack must actually be BIGGER than the solo bundle, or it's the same
+  // listing twice.
+  if (items.length <= current.length) {
+    return { skipped: "nothing extra to stack" };
+  }
+
+  const research = await MarketResearch.findOne({ game: task.game }).lean();
+  const priorPrice = priorSets.reduce(
+    (m, s) => Math.max(m, Number(s.price) || 0),
+    0,
+  );
+  const price = stackedBundlePrice(derivePrice(research), priorPrice);
+  const title = buildTitle({
+    game: task.game,
+    items,
+    campaignName: task.campaignName,
+  });
+  const descriptions = {
+    gameflip: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "gameflip",
+    }),
+    digiseller: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "digiseller",
+    }),
+    ggsel: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "ggsel",
+    }),
+  };
+
+  // Candidate accounts: everything this GAME's auto-farm tasks ever assigned
+  // (the previous events' held-back stash lives on older tasks, not this one),
+  // minus anything currently assigned to a DIFFERENT game's live plan (its
+  // solo listing counts on those accounts). Deliberately never the manual
+  // fleet — that stash is the owner's to sell by hand.
+  const gameTasks = await AutoFarmTask.find(
+    { game: task.game },
+    { assignedAccounts: 1 },
+  ).lean();
+  const candidates = new Set();
+  for (const t of gameTasks) {
+    for (const u of t.assignedAccounts || []) {
+      const k = String(u).toLowerCase();
+      if (k) candidates.add(k);
+    }
+  }
+  for (const t of await AutoFarmTask.find(
+    { game: { $ne: task.game }, status: { $in: ["active", "planned"] } },
+    { assignedAccounts: 1 },
+  ).lean()) {
+    for (const u of t.assignedAccounts || []) {
+      candidates.delete(String(u).toLowerCase());
+    }
+  }
+  if (!candidates.size) return { skipped: "no candidate accounts" };
+
+  // Everyone who provably holds the WHOLE stack and isn't already on a live
+  // listing. List half, keep half for the next event's stack.
+  const eligible = await pickDeliveryAccounts(
+    { assignedAccounts: [...candidates] },
+    candidates.size,
+    items,
+  );
+  if (!eligible.length) {
+    return {
+      skipped: "no free account holds the full stack yet",
+      waiting: true,
+    };
+  }
+  const split = computeSplit(eligible.length);
+  const accounts = eligible.slice(0, split.listNow);
+
+  if (dryRun) {
+    return {
+      wouldList: { title, price, qty: accounts.length, items: items.length },
+    };
+  }
+
+  const set = await DropSet.create({
+    name:
+      task.game +
+      " — stacked bundle (" +
+      (task.campaignName || task.campaignId) +
+      " + " +
+      priorSets.length +
+      " earlier event" +
+      (priorSets.length === 1 ? "" : "s") +
+      ")",
+    note:
+      "Auto-farmed Twitch drops, stacked across campaigns (" + task.game + ")",
+    items: items.map(({ itemKey, name, game, image, qty: q }) => ({
+      itemKey,
+      name,
+      game,
+      image,
+      qty: q,
+    })),
+    price,
+    minPriceUsd: price,
+    listed: false,
+    custom: true,
+    coverGame: task.game,
+  });
+
+  return publishStackedListing({
+    task,
+    set,
+    title,
+    descriptions,
+    price,
+    accounts,
+    split,
+  });
 }
 
 /* --------------------------- campaign end flow --------------------------- */
@@ -2427,6 +2670,9 @@ module.exports = {
   publishPlayerAuctionsShare,
   listActivatedTask,
   listStackedBundle,
+  listEventBundle,
+  eventBundlePlans,
+  publishStackedListing,
   stackedBundlePrice,
   onCampaignEnded,
   refillMarkets,

@@ -183,6 +183,18 @@ const AUTO_FARM_DEFAULTS = {
   // holdback stays intact. 3 markets x 3 x 2 = 18 accounts on a full-market
   // game - the pool (180+ ready) supports this comfortably.
   perMarketStock: 3,
+  // Auto-farm EVENT bundles (utils/autoFarmBundles.js): a game's campaigns are
+  // waves of an event ("CAH Championship Week 1" then "Finals"), and the
+  // accounts that farmed several waves hold the whole event. When on, the
+  // stacked-bundle sweep sells that event as ONE complete bundle — titled with
+  // its event and waves, priced by the shared pricing engine with the
+  // full-event bonus and a sold floor — instead of the older blind union of
+  // every campaign the game ever ran. ON by default: the union it replaces was
+  // almost always refused by the holdings gate ("no free account holds the full
+  // stack"), so this is a strictly better use of the same sweep. Turn it OFF to
+  // get exactly the previous behaviour back.
+  // See docs/AUTOFARM-BUNDLES-CONTRACT.md.
+  autoFarmEventBundles: true,
   // Recycle sold-out accounts back into farming. OFF by default (opt-in): a
   // sold account's login:password is in the buyer's hands, so it is only reused
   // once it is fully spent, every drop the buyer bought is connected, the

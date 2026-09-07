@@ -14,6 +14,9 @@ const BotAccount = require("../models/BotAccount");
 const autoFarmSnapshot = require("../utils/autoFarmSnapshot");
 const allocationForecast = require("../utils/allocationForecast");
 const { recordAutoFarmEvent } = require("../utils/autoFarmEventLog");
+const autoFarmBundles = require("../utils/autoFarmBundles");
+const autoLister = require("../utils/autoLister");
+const MarketResearch = require("../models/MarketResearch");
 
 const router = express.Router();
 
@@ -322,6 +325,104 @@ router.get("/auto-farm/tasks", requireSuperadmin, async (req, res) => {
   }
 });
 
+// READ-ONLY: which of a game's farmed events could be sold as ONE bundle, what
+// each would be titled and priced at, and whether stock actually backs it.
+// Publishes nothing — the stacked-bundle sweep does that
+// (docs/AUTOFARM-BUNDLES-CONTRACT.md). ?game= narrows to one game; ?stock=1
+// adds the verified-holder count, which costs a DropLog aggregation per bundle
+// and so is opt-in.
+const BUNDLE_GAME_LIMIT = 40;
+router.get("/auto-farm/bundles", requireSuperadmin, async (req, res) => {
+  try {
+    const only = String(req.query.game || "").trim();
+    const withStock = req.query.stock === "1" || req.query.stock === "true";
+    const games = only
+      ? [only]
+      : (
+          await AutoFarmTask.distinct("game", {
+            status: { $in: [...autoFarmBundles.STOCK_STATUSES] },
+          })
+        )
+          .filter(Boolean)
+          .sort()
+          .slice(0, BUNDLE_GAME_LIMIT);
+
+    const out = [];
+    for (const game of games) {
+      let plans = [];
+      try {
+        plans = await autoFarmBundles.plansForGame(game);
+      } catch (err) {
+        out.push({ game, error: err.message, bundles: [] });
+        continue;
+      }
+      if (!plans.length) continue;
+      const research = await MarketResearch.findOne({ game }).lean();
+      const rows = [];
+      for (const plan of plans) {
+        const live = await autoFarmBundles.liveBundleForEvent(plan.key);
+        const soldFloorUsd = await autoFarmBundles.soldFloorForEvent(plan.key);
+        const priced = await autoFarmBundles.priceBundle({
+          plan,
+          game,
+          marketplace: "gameflip",
+          research,
+          soldFloorUsd,
+        });
+        let ready = null;
+        if (withStock) {
+          try {
+            ready = (
+              await autoLister.pickDeliveryAccounts(
+                { assignedAccounts: plan.logins },
+                plan.logins.length,
+                plan.items,
+              )
+            ).length;
+          } catch {
+            ready = null;
+          }
+        }
+        rows.push({
+          key: plan.key,
+          event: plan.eventName,
+          full: plan.full,
+          wavesHeld: plan.wavesHeld,
+          wavesTotal: plan.wavesTotal,
+          wavesUnresolved: plan.wavesUnresolved,
+          waves: plan.labels,
+          campaignIds: plan.campaignIds,
+          items: plan.items.length,
+          totalQty: plan.totalQty,
+          assigned: plan.logins.length,
+          title: autoFarmBundles.bundleTitleFor(plan),
+          price: priced ? priced.price : null,
+          priceBasis: priced ? priced.basis : "",
+          priceClamped: priced ? priced.clamped : "",
+          soldFloorUsd,
+          ready,
+          live: live
+            ? {
+                marketplace: live.marketplace,
+                externalId: live.externalId,
+                price: live.price,
+                title: live.title,
+              }
+            : null,
+        });
+      }
+      out.push({ game, bundles: rows });
+    }
+    res.json({
+      success: true,
+      enabled: settings.getAutoFarm().autoFarmEventBundles !== false,
+      games: out,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // UPDATE settings. maxPerGame is clamped to 30 — the hard business cap.
 router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
   try {
@@ -371,6 +472,10 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
       patch.probeCooldownDays = clamp(b.probeCooldownDays, 0, 365);
     if ("perMarketStock" in b)
       patch.perMarketStock = clamp(b.perMarketStock, 1, 10);
+    // Event bundles (docs/AUTOFARM-BUNDLES-CONTRACT.md). Off = the older
+    // cross-event stack, exactly as before.
+    if ("autoFarmEventBundles" in b)
+      patch.autoFarmEventBundles = !!b.autoFarmEventBundles;
     if ("maxAutoBots" in b) patch.maxAutoBots = clamp(b.maxAutoBots, 1, 50);
     if ("minHoursLeft" in b) patch.minHoursLeft = clamp(b.minHoursLeft, 0, 168);
     // Permanently delete accounts Twitch has deleted. Irreversible, so it is an
