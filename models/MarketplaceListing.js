@@ -7,7 +7,13 @@ const marketplaceListingSchema = new mongoose.Schema(
     set: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "DropSet",
-      required: true,
+      // Required for every listing whose stock is the Drop Archive — the set IS
+      // what gets claimed at delivery. A row backed by the no-claim farm has no
+      // DropSet at all: it claims by GAME out of UnclaimedAccount, and pointing
+      // it at some near-enough set would just mislabel what the buyer receives.
+      required: function () {
+        return !this.unclaimedGame;
+      },
       index: true,
     },
     marketplace: {
