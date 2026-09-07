@@ -33,6 +33,7 @@ const fsp = require("fs/promises");
 const mongoose = require("mongoose");
 
 const mp = require("../utils/marketplaces");
+const { isNoClaimGame } = require("../utils/settings");
 const autoLister = require("../utils/autoLister");
 const copy = require("../utils/playerauctionsCopy");
 const { buildSetGridImage } = require("../utils/setImage");
@@ -125,7 +126,20 @@ async function main() {
       bySig.set(r.sig, { ...r, dupes: (cur ? cur.dupes : 0) + (cur ? 1 : 0) });
     }
   }
+  // Overwatch / Rainbow Six / Call of Duty drops have to reach the buyer
+  // UNCLAIMED. Everything this script can offer comes from the CLAIMED Drop
+  // Archive, so those games are simply not sellable here — they need an
+  // unclaimedGame-backed listing instead.
+  const noClaim = [...bySig.values()].filter((r) => isNoClaimGame(r.game));
+  if (noClaim.length) {
+    console.log(
+      "skipping " + noClaim.length + " set(s) for no-claim games " +
+        "(must come from the unclaimed farm): " +
+        [...new Set(noClaim.map((r) => r.game))].join(", "),
+    );
+  }
   let candidates = [...bySig.values()]
+    .filter((r) => !isNoClaimGame(r.game))
     .filter((r) => r.avail > 0 && !r.alreadyLive && r.price > 0 && (r.set.items || []).length)
     .sort((a, b) => b.sales - a.sales || b.avail - a.avail);
 

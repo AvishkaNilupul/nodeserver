@@ -243,6 +243,112 @@ test("units reserved for an order are found again on a retry", () => {
   );
 });
 
+/* ------------------------- the no-claim rule ---------------------------- */
+
+test("Overwatch, Rainbow Six and Call of Duty are no-claim games", () => {
+  // These drops must reach the buyer UNCLAIMED so they can connect and claim to
+  // their own game account. The regular auto-farm claims as it farms, so its
+  // Drop Archive accounts are exactly the wrong stock for them.
+  const { isNoClaimGame } = require("../utils/settings");
+  for (const g of [
+    "Overwatch",
+    "Overwatch 2",
+    "Rainbow Six Siege",
+    "Tom Clancys Rainbow Six Siege",
+    "Call of Duty: Modern Warfare 4",
+    "Call of Duty: Black Ops 7",
+  ]) {
+    assert.strictEqual(isNoClaimGame(g), true, `${g} should be a no-claim game`);
+  }
+  for (const g of ["Fortnite", "Marvel Rivals", "Halo Infinite", "Palia"]) {
+    assert.strictEqual(isNoClaimGame(g), false, `${g} should NOT be a no-claim game`);
+  }
+});
+
+test("an already-claimed drop is never handed to a buyer", async (t) => {
+  // Per-account, not per-game: a claimed drop is worthless whatever the game,
+  // because it has already gone to whoever the farm account was linked to.
+  const DropLog = require("../models/DropLog");
+  const set = { items: [{ name: "Esports Loot Box 41" }, { name: "OWWC Busan Spray" }] };
+  const rows = {
+    clean: [{ claimed: false }, { claimed: false }],
+    spent: [{ claimed: false }, { claimed: true }],
+  };
+  const real = DropLog.find;
+  DropLog.find = (q) => ({ lean: async () => rows[q.login] || [] });
+  try {
+    const kept = await fulfiller.unclaimedOnly(set, [{ login: "clean" }, { login: "spent" }]);
+    assert.deepStrictEqual(kept.map((c) => c.login), ["clean"]);
+  } finally {
+    DropLog.find = real;
+  }
+});
+
+/* --------------------------- the refresh lock --------------------------- */
+
+test("concurrent refreshes are serialised into exactly one", async () => {
+  // This is the bug that destroyed two live sessions on 2026-09-07. The pm2
+  // server ticks every 60s while a publishing script runs for an hour in its
+  // own process; both read the same jar, both 401 when the 30-minute access
+  // token expires, both refresh — and the second one presents a spent refresh
+  // token, which PlayerAuctions reads as reuse and revokes the whole family.
+  const fs = require("fs");
+  const pathmod = require("path");
+  const lock = pathmod.join(__dirname, "..", "utils", ".playerauctions-refresh.lock");
+  const stamp = pathmod.join(__dirname, "..", "utils", ".playerauctions-refresh.stamp");
+  for (const f of [lock, stamp]) {
+    try {
+      fs.unlinkSync(f);
+    } catch {
+      /* not present */
+    }
+  }
+
+  let refreshes = 0;
+  // Stands in for the network call. The delay is what makes the race real: the
+  // window between "lock looks free" and "we hold it" is where a double
+  // refresh would slip through.
+  const fakeRefresh = async () => {
+    refreshes++;
+    await new Promise((r) => setTimeout(r, 60));
+    return true;
+  };
+  try {
+    // Ten callers that all believe the same (empty) token is current.
+    await Promise.all(
+      Array.from({ length: 10 }, () => mp.paRefreshOnce("", fakeRefresh)),
+    );
+    assert.strictEqual(
+      refreshes,
+      1,
+      `expected exactly 1 refresh across 10 concurrent callers, got ${refreshes}`,
+    );
+  } finally {
+    for (const f of [lock, stamp]) {
+      try {
+        fs.unlinkSync(f);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  // And the lock must not be left behind, or every later refresh wedges.
+  assert.strictEqual(fs.existsSync(lock), false, "lock file was not released");
+});
+
+test("a caller whose token is already stale does not refresh at all", async () => {
+  let refreshes = 0;
+  const fakeRefresh = async () => {
+    refreshes++;
+    return true;
+  };
+  // "a-token-that-is-not-in-the-jar" is not what the jar holds, i.e. another
+  // process has already rotated it. Spending ours again revokes the family.
+  const did = await mp.paRefreshOnce("a-token-that-is-not-in-the-jar", fakeRefresh);
+  assert.strictEqual(did, false, "should have deferred to the other process");
+  assert.strictEqual(refreshes, 0, "must not refresh when the jar already moved");
+});
+
 /* ------------------------------ farm orders ---------------------------- */
 
 const farm = require("../utils/playerauctionsFarmService");

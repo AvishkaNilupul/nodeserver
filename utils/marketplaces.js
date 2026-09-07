@@ -4579,13 +4579,16 @@ function paError(label, e) {
 // lived, so any call can 401 at any moment and a pre-flight liveness probe
 // races that and loses (the lesson Eldorado taught).
 async function paRequest(method, base, path, opts = {}) {
+  const tokenWeUsed = paStoredAccessToken();
   try {
     return await paRequestOnce(method, base, path, opts);
   } catch (e) {
     const status = e && e.response && e.response.status;
     const isRefresh = String(path).includes("SignIn/RefreshToken");
     if (status !== 401 || isRefresh || opts.__retried) throw e;
-    await playerauctionsRefreshSession();
+    // Serialised across processes; may be a no-op if someone else refreshed
+    // first, in which case the retry simply picks up their jar.
+    await paRefreshOnce(tokenWeUsed);
     return await paRequestOnce(method, base, path, { ...opts, __retried: true });
   }
 }
@@ -4710,6 +4713,127 @@ async function playerauctionsSellerLevel() {
   const st = await playerauctionsMe().catch(() => null);
   const lvl = st && st.members ? st.members.level : null;
   return Number.isFinite(lvl) ? lvl : 0;
+}
+
+// --- The refresh lock ---------------------------------------------------
+//
+// PlayerAuctions rotates the whole session on refresh, and presenting a spent
+// refresh token revokes the family. That makes a CONCURRENT refresh fatal, and
+// concurrency here is normal, not exotic: the pm2 server's fulfiller ticks every
+// 60s while a publishing script runs for an hour in its own process, both
+// reading the same jar out of settings.json. When the 30-minute access token
+// expires they 401 within moments of each other, both refresh, and the second
+// one kills the session. That is exactly how it died twice on 2026-09-07.
+//
+// PlayerAuctions' own web client has this problem across browser tabs and
+// solves it the same way — its HTTP interceptor carries a localStorage
+// refreshTokenLock with a 15s timeout and a 5s cool-down. This is the
+// server-side equivalent, using an atomic exclusive file create as the lock.
+//
+// The important half is not the lock but the RE-CHECK under it: if the stored
+// access token has changed since our request was built, somebody else already
+// refreshed and we simply use their result instead of spending the token again.
+const PA_LOCK_FILE = path.join(__dirname, ".playerauctions-refresh.lock");
+const PA_STAMP_FILE = path.join(__dirname, ".playerauctions-refresh.stamp");
+const PA_LOCK_TIMEOUT_MS = 30000;
+const PA_LOCK_POLL_MS = 250;
+// A second refresh this soon after a successful one is a stampede, not a real
+// need. Belt and braces alongside the token comparison: if a refresh ever fails
+// to change the stored token, the comparison cannot dedupe and only this can.
+// PlayerAuctions' own client carries the same idea as COOL_DOWN_PERIOD.
+const PA_COOLDOWN_MS = 15000;
+
+function paStoredAccessToken() {
+  try {
+    return paCookieJar(getKeys("playerauctions").cookie || "").get("Production_access_token") || "";
+  } catch {
+    return "";
+  }
+}
+
+function paLastRefreshAge() {
+  try {
+    return Date.now() - Number(fs.readFileSync(PA_STAMP_FILE, "utf8").trim());
+  } catch {
+    return null; // never refreshed on this host
+  }
+}
+
+function paStampRefresh() {
+  try {
+    fs.writeFileSync(PA_STAMP_FILE, String(Date.now()), "utf8");
+  } catch {
+    /* the stamp is an optimisation, not a correctness requirement */
+  }
+}
+
+function paLockAge() {
+  try {
+    return Date.now() - fs.statSync(PA_LOCK_FILE).mtimeMs;
+  } catch {
+    return null; // no lock
+  }
+}
+
+function paTryLock() {
+  try {
+    fs.closeSync(fs.openSync(PA_LOCK_FILE, "wx"));
+    return true;
+  } catch {
+    // A lock left behind by a killed process must not wedge every future
+    // refresh, so one older than the timeout is taken over.
+    const age = paLockAge();
+    if (age != null && age > PA_LOCK_TIMEOUT_MS) {
+      try {
+        fs.unlinkSync(PA_LOCK_FILE);
+        fs.closeSync(fs.openSync(PA_LOCK_FILE, "wx"));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
+function paUnlock() {
+  try {
+    fs.unlinkSync(PA_LOCK_FILE);
+  } catch {
+    /* already gone */
+  }
+}
+
+const paSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Refresh at most once across every process on this host. `tokenWeUsed` is the
+// access token the failed request carried; when the stored one no longer
+// matches it, another process has already refreshed and we skip straight to the
+// retry.
+// `doRefresh` exists so the serialisation can be tested without a live session;
+// production always uses the real refresh.
+async function paRefreshOnce(tokenWeUsed, doRefresh = playerauctionsRefreshSession) {
+  if (tokenWeUsed && paStoredAccessToken() !== tokenWeUsed) return false;
+
+  const deadline = Date.now() + PA_LOCK_TIMEOUT_MS;
+  while (!paTryLock()) {
+    if (Date.now() > deadline) break; // give up waiting; re-check below
+    await paSleep(PA_LOCK_POLL_MS);
+    // Whoever holds the lock may have finished in the meantime.
+    if (tokenWeUsed && paStoredAccessToken() !== tokenWeUsed) return false;
+  }
+  try {
+    // Re-check under the lock — the window between "lock is free" and "we hold
+    // it" is exactly where a double refresh would slip through.
+    if (tokenWeUsed && paStoredAccessToken() !== tokenWeUsed) return false;
+    const age = paLastRefreshAge();
+    if (age != null && age >= 0 && age < PA_COOLDOWN_MS) return false;
+    await doRefresh();
+    paStampRefresh();
+    return true;
+  } finally {
+    paUnlock();
+  }
 }
 
 // Read the JWT expiry out of the stored jar without calling PlayerAuctions.
@@ -5608,6 +5732,9 @@ module.exports = {
   playerauctionsSellerLevel,
   playerauctionsRefreshSession,
   playerauctionsTokenExpiry,
+  paRefreshOnce,
+  paStoredAccessToken,
+  PA_COOLDOWN_MS,
   playerauctionsEnsureFreshSession,
   playerauctionsGames,
   playerauctionsResolveGame,

@@ -109,6 +109,23 @@ async function releaseAccounts(accountIds) {
   await releaseAccountsForTag(accountIds, PA_CLAIM_TAG);
 }
 
+// Drop the candidates whose advertised drops have already been claimed.
+async function unclaimedOnly(set, candidates) {
+  const DropLog = require("../models/DropLog");
+  const names = ((set && set.items) || []).map((i) => i.name).filter(Boolean);
+  if (!names.length) return candidates;
+  const out = [];
+  for (const c of candidates) {
+    const logs = await DropLog.find(
+      { login: c.login, name: { $in: names } },
+      { claimed: 1 },
+    ).lean();
+    if (logs.some((l) => l.claimed)) continue;
+    out.push(c);
+  }
+  return out;
+}
+
 // --- Stock source 2: the no-claim farm ----------------------------------
 // Only "released" and "skipped" rows are sellable: "listed" means the account is
 // already a stock unit on ANOTHER marketplace and selling it here would ship
@@ -438,14 +455,19 @@ async function deliverOrder(order, { dryRun }) {
         wouldSend: qty + " of " + avail.length + " available account(s)",
       };
     }
-    const claimed = await claimAccountsForSet(set, qty);
+    // A CLAIMED drop cannot be connected to the buyer's own game account — it
+    // has already gone to whoever the farm account was linked to, so shipping
+    // one sells nothing. This is the whole reason the no-claim farm exists for
+    // Overwatch / Rainbow Six / Call of Duty. Enforced per-account rather than
+    // by game name, because a claimed drop is worthless whatever the game.
+    const claimed = await unclaimedOnly(set, await claimAccountsForSet(set, qty));
     if (claimed.length < qty) {
       await releaseAccounts(claimed.map((c) => c.accountId)).catch(() => {});
       return {
         orderId,
         error:
           "only " + claimed.length + " of " + qty +
-          " accounts still held the full set at delivery time",
+          " accounts still held the full set UNCLAIMED at delivery time",
       };
     }
     await reserveOnListing(row, orderId, claimed);
@@ -604,6 +626,7 @@ module.exports = {
   POOL_LOW_WATERMARK,
   start,
   claimAccountsForSet,
+  unclaimedOnly,
   claimUnclaimedForGame,
   unclaimedGameFilter,
   releaseAccounts,

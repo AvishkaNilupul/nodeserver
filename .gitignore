@@ -84,3 +84,7 @@ android/key.properties
 
 # Local paper-trading output (simulated order logs only)
 tools/pump-paper-bot/runs/
+
+# PlayerAuctions cross-process refresh lock (see utils/marketplaces.js)
+utils/.playerauctions-refresh.lock
+utils/.playerauctions-refresh.stamp

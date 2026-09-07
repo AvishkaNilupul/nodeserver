@@ -37,6 +37,7 @@ const fsp = require("fs/promises");
 const mongoose = require("mongoose");
 
 const mp = require("../utils/marketplaces");
+const { isNoClaimGame } = require("../utils/settings");
 const copy = require("../utils/playerauctionsCopy");
 const { buildSetGridImage } = require("../utils/setImage");
 
@@ -122,6 +123,19 @@ async function main() {
 
     if (!row.unclaimedGame && !row.autoClaimSet) {
       skipped.push([row.title, "no stock source — would publish unfulfillable"]);
+      continue;
+    }
+    // Overwatch / Rainbow Six / Call of Duty drops must reach the buyer
+    // UNCLAIMED so they can connect and claim to their own game account. The
+    // regular auto-farm claims as it farms, so its Drop Archive accounts are
+    // exactly the wrong stock for those games — which is why the no-claim farm
+    // exists. Only an unclaimedGame-backed row may sell them.
+    if (!row.unclaimedGame && isNoClaimGame(game)) {
+      skipped.push([
+        row.title,
+        game + " is a no-claim game — sellable only from the unclaimed farm, " +
+          "not the claimed Drop Archive",
+      ]);
       continue;
     }
     if (liveTitles.has(String(row.title || "").trim().toLowerCase()) || liveSigs.has(sig)) {
