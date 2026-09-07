@@ -25,6 +25,12 @@
 //       record what a listing advertises WITHOUT touching its live text, so the
 //       delivery gate and this audit have a contract to check against.
 //
+//   node scripts/unclaimed-listing-audit.js --shop [--max 10] [--marketplace ggsel]
+//       audit EVERY active listing that sells no-claim-game drops, whichever
+//       pool it draws on — the no-claim ledger (by game or by set) and the Drop
+//       Archive alike. Reads only; it never touches listing text or quantity.
+//       --max caps how many candidate accounts are live-read per DropSet.
+//
 //   node scripts/unclaimed-listing-audit.js --listing <id> --retitle [--qty N] [--apply]
 //       rewrite ONE listing down to the set its stock actually holds: declares
 //       requiredDrops, and rewrites the live title + description to match.
@@ -42,7 +48,16 @@ function arg(n) {
   return i > 0 ? process.argv[i + 1] : null;
 }
 
-const MARK = { ok: "OK   ", short: "SHORT", stale: "STALE", empty: "EMPTY", unknown: "?    " };
+const MARK = {
+  ok: "OK   ",
+  short: "SHORT",
+  stale: "STALE",
+  empty: "EMPTY",
+  unknown: "?    ",
+  unreadable: "NOREAD",
+  service: "farm ",
+  unauditable: "n/a  ",
+};
 
 function fmtItems(items) {
   return (items || [])
@@ -187,9 +202,106 @@ async function retitle(listingId, { apply }) {
   console.log("published, and requiredDrops declared — delivery now verifies it");
 }
 
+// Shop-wide, read-only. Groups by verdict because the action differs per
+// verdict: STALE needs the listing corrected, SHORT needs a quantity, EMPTY
+// needs farming, and "?" needs its item list declared before anything can be
+// said at all.
+async function shopReport() {
+  const max = Math.max(1, parseInt(arg("max"), 10) || audit.ARCHIVE_SAMPLE);
+  const marketplace = arg("marketplace") || "";
+  // Route the Twitch reads through the same host the scanners use, so a big
+  // audit does not fan out from this server.
+  const host = (process.env.DROP_SCAN_HOSTS || "").split(",")[0].trim() || undefined;
+  console.log(
+    "auditing every active no-claim listing against LIVE Twitch inventory " +
+      "(sampling up to " + max + " accounts per set" +
+      (host ? ", via host " + host : "") + ")\n",
+  );
+  const rows = await audit.auditShop({
+    max,
+    host,
+    marketplace,
+    onProgress: (k) => process.stderr.write("  reading stock for " + k + "\n"),
+  });
+
+  const order = ["stale", "empty", "unreadable", "short", "unknown", "ok", "service", "unauditable"];
+  const byVerdict = new Map(order.map((v) => [v, []]));
+  for (const r of rows) (byVerdict.get(r.verdict) || byVerdict.get("unauditable")).push(r);
+
+  console.log("=".repeat(78));
+  console.log("TOTAL no-claim listings audited: " + rows.length);
+  for (const v of order) {
+    const n = (byVerdict.get(v) || []).length;
+    if (n) console.log("  " + (MARK[v] || v).trim().padEnd(12) + n);
+  }
+  console.log("=".repeat(78));
+
+  for (const v of order) {
+    const group = byVerdict.get(v) || [];
+    if (!group.length) continue;
+    console.log("\n\n##### " + v.toUpperCase() + " (" + group.length + ")");
+    if (v === "stale") {
+      console.log("      advertises items NO candidate account still holds unclaimed.");
+    }
+    if (v === "unreadable") {
+      console.log("      no account could be read, so nothing is known — check tokens/host, then re-run.");
+    }
+    if (v === "service") {
+      console.log("      rent-farm listings: they sell a farming window, not an account — nothing to check.");
+    }
+    if (v === "unauditable") {
+      console.log("      no DropSet with items, so there is no item contract to check against.");
+    }
+    for (const r of group) {
+      const l = r.listing;
+      console.log(
+        "\n  " + l.marketplace + " " + l.externalId + "  [" + r.kind + "]  $" + (l.price || 0) +
+          // A row this audit already took off sale is still status:"active" in
+          // our DB, so say so rather than let it read as still selling.
+          (l.autoPaused ? "  (ALREADY PAUSED by the audit)" : ""),
+      );
+      console.log("      " + String(l.title || "").slice(0, 100));
+      if (v === "service" || v === "unauditable") continue;
+      console.log(
+        "      advertises (" + r.advertised.source + ", " + r.advertised.items.length +
+          " items): " + (fmtItems(r.advertised.items).slice(0, 150) || "NOTHING DECLARED"),
+      );
+      console.log(
+        "      can honour it: " + r.covering + " of " + r.stock + " account(s) read" +
+          (r.candidates != null ? " (of " + r.candidates + " candidate(s))" : "") +
+          (r.unreadable ? ", " + r.unreadable + " unreadable" : "") +
+          (r.truncated ? " [sampled — a count-based shortfall cannot be judged]" : ""),
+      );
+      if (r.via && r.via !== r.kind) console.log("      note: " + r.via);
+      if (r.missing && r.verdict !== "ok") {
+        console.log("      stock is short of: " + r.missing.slice(0, 200));
+      }
+      if (r.verdict === "stale" && r.suggest.count) {
+        console.log(
+          "      -> stock actually holds: " +
+            fmtItems(audit.itemsToRequired(r.suggest.items)).slice(0, 150) +
+            "  (on " + r.suggest.count + " account(s))",
+        );
+      }
+    }
+  }
+  console.log(
+    "\n\nNOTHING WAS CHANGED. Fixing a listing's text is a pricing/marketing " +
+      "decision, so choose per row:\n" +
+      "  --listing <id> --declare \"<items>\"        record what it advertises (no live edit)\n" +
+      "  --listing <id> --retitle [--qty N] --apply  rewrite it to what its stock holds\n",
+  );
+}
+
 (async () => {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI, {});
   const id = arg("listing");
+
+  if (has("shop")) {
+    await shopReport();
+    await mongoose.disconnect();
+    return;
+  }
 
   if (has("declare")) {
     if (!id) throw new Error("--declare needs --listing <id>");

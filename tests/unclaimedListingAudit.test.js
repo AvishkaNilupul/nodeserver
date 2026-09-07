@@ -135,3 +135,127 @@ test("the game filter matches the ledger's spellings of one game", () => {
   assert.ok(f.test("overwatch"));
   assert.ok(!f.test("Rainbow Six Siege"));
 });
+
+// --- the other 87: DropSet-backed listings --------------------------------
+// The archive and the no-claim ledger disagree about what "still sellable"
+// means, and using the ledger's rule on an archive account would condemn every
+// healthy listing in the shop.
+
+test("a listing is routed to the pool it actually sells from", () => {
+  const set = { items: [{ name: "A", itemKey: "a|g" }] };
+  // A rent-farm listing sells a window, not an account — no item contract.
+  assert.strictEqual(
+    audit.classify({ title: "Overwatch Twitch Drops Automatic Farming" }, set),
+    "service",
+  );
+  assert.strictEqual(
+    audit.classify({ title: "x", unclaimedGame: "Overwatch" }, set),
+    "ledger-game",
+  );
+  // Published by the unclaimed auto-lister: carries a set, but its stock is the
+  // no-claim ledger, not the archive.
+  assert.strictEqual(
+    audit.classify({ title: "x", origin: "unclaimed" }, set),
+    "ledger-set",
+  );
+  assert.strictEqual(audit.classify({ title: "x", origin: "auto" }, set), "archive");
+  // No set with items = no contract to check, which must not read as passing.
+  assert.strictEqual(audit.classify({ title: "x" }, null), "unauditable");
+  assert.strictEqual(audit.classify({ title: "x" }, { items: [] }), "unauditable");
+});
+
+test("lowercase 'automatic farming' is still a rent-farm listing", () => {
+  // The live Gameflip row is titled "... Twitch Drops Automatic farming 120 days".
+  assert.strictEqual(
+    audit.classify(
+      { title: "Tom Clancy's Rainbow Six Siege X Twitch Drops Automatic farming 120 days" },
+      { items: [{ name: "A" }] },
+    ),
+    "service",
+  );
+});
+
+test("a no-claim game is recognised from the set, not just the title", () => {
+  assert.ok(
+    audit.touchesNoClaimGame({ title: "Bundle" }, { items: [{ game: "Overwatch" }] }),
+  );
+  assert.ok(audit.touchesNoClaimGame({ title: "Bundle" }, { coverGame: "Rainbow Six Siege" }));
+  // Falls back to the title for a row whose set is missing.
+  assert.ok(audit.touchesNoClaimGame({ title: "Call of Duty Twitch Drops" }, null));
+  assert.ok(!audit.touchesNoClaimGame({ title: "Rust bundle" }, { items: [{ game: "Rust" }] }));
+});
+
+test("an archive drop stays sellable while claimed but NOT connected", () => {
+  // The auto-farm claims as it farms, so "claimed" is the normal state and must
+  // not disqualify anything. What spends a drop is being connected to somebody's
+  // game account — after that no new buyer can ever claim it.
+  const { sellable, connected } = audit.sellableDropsFromArchiveInv({
+    drops: [
+      { name: "Esports Pack", state: "connect", connected: false, count: 1 },
+      { name: "Alpha Pack", state: "claimed", connected: false, count: 1 },
+      { name: "Already Linked", state: "connected", connected: true, count: 1 },
+    ],
+  });
+  assert.deepStrictEqual(sellable.map((d) => d.name), ["Esports Pack", "Alpha Pack"]);
+  assert.deepStrictEqual(connected.map((d) => d.name), ["Already Linked"]);
+});
+
+test("an archive account's copy count is expanded, so two really is two", () => {
+  const { sellable } = audit.sellableDropsFromArchiveInv({
+    drops: [{ name: "Esports Loot Box", connected: false, count: 2 }],
+  });
+  assert.strictEqual(sellable.length, 2);
+  const req = require("../utils/unclaimedCoverage").requiredCounts([
+    { name: "Esports Loot Box", qty: 2 },
+  ]);
+  const cov = require("../utils/unclaimedCoverage");
+  assert.deepStrictEqual(cov.shortOf(cov.countLogNames(sellable), req), []);
+});
+
+test("a connected copy does not count toward the advertised quantity", () => {
+  // One claimable + one already linked must NOT satisfy a promise of two.
+  const { sellable } = audit.sellableDropsFromArchiveInv({
+    drops: [
+      { name: "Esports Loot Box", connected: false, count: 1 },
+      { name: "Esports Loot Box", connected: true, count: 1 },
+    ],
+  });
+  const cov = require("../utils/unclaimedCoverage");
+  const missing = cov.shortOf(
+    cov.countLogNames(sellable),
+    cov.requiredCounts([{ name: "Esports Loot Box", qty: 2 }]),
+  );
+  assert.deepStrictEqual(missing, [{ name: "esports loot box", need: 2, have: 1 }]);
+});
+
+test("all-unreadable stock is NOT reported as empty", () => {
+  // A dead token or a Pi outage is an absence of evidence, not evidence of
+  // absence. Calling it "empty" would pause healthy listings on a hiccup — and
+  // it did: three live Call of Duty listings whose 17 units were fine read as
+  // empty because their unit ids resolved to nothing.
+  const honest = { source: "requiredDrops", items: [{ name: "A" }] };
+  const stock = [
+    { row: null, items: [], unreadable: true },
+    { row: null, items: [], unreadable: true },
+  ];
+  const r = audit.judge({ qtyTarget: 0 }, honest, stock);
+  assert.strictEqual(r.verdict, "unreadable");
+  assert.strictEqual(r.unreadable, 2);
+});
+
+test("a sampled read never yields a count-based SHORT verdict", () => {
+  // covering is capped by the sample size, so comparing it to a larger quantity
+  // on sale would mark every big listing short for no reason.
+  const honest = { source: "requiredDrops", items: [{ name: "A" }] };
+  const stock = stockOf(6, ["A"]);
+  assert.strictEqual(audit.judge({ qtyTarget: 50 }, honest, stock).verdict, "short");
+  assert.strictEqual(
+    audit.judge({ qtyTarget: 50 }, honest, stock, { truncated: true }).verdict,
+    "ok",
+  );
+  // A sample can still prove the negative, so "stale" is unaffected by it.
+  const none = audit.judge({ qtyTarget: 50 }, { source: "x", items: [{ name: "Z" }] }, stock, {
+    truncated: true,
+  });
+  assert.strictEqual(none.verdict, "stale");
+});
