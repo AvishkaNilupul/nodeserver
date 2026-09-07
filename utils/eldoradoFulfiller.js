@@ -108,6 +108,11 @@ async function releaseAccounts(accountIds) {
 // that listing's drops too; "sold"/"expired"/"removed" are spent or gone.
 const ELD_SELLABLE_STATUSES = ["released", "skipped"];
 
+// Ceiling on the stock an unclaimed-backed offer may advertise. The count comes
+// from a dry-run claim, which resolves a credential per candidate, so it is
+// bounded rather than "however many the farm holds".
+const UNCLAIMED_STOCK_MAX = 25;
+
 function unclaimedGameFilter(game) {
   // The ledger holds both "Overwatch" and "overwatch" (and callers may pass
   // "Overwatch 2"), so match on a loose, anchored prefix rather than equality.
@@ -448,18 +453,36 @@ async function syncBundleStock({ dryRun = false } = {}) {
   const DropSet = require("../models/DropSet");
   const { availableAccountsForSet } = require("../routes/shopRoutes");
   const listedElsewhere = await loginsOnActiveListings();
+  // Two stock sources, one rule. `autoClaimSet` rows are backed by the Drop
+  // Archive; `unclaimedGame` rows are backed by the no-claim ledger and were
+  // not covered here at all, so their advertised quantity was whatever they
+  // were published with, for as long as they stayed up.
   const rows = await MarketplaceListing.find({
     marketplace: "eldorado",
-    autoClaimSet: true,
+    $or: [
+      { autoClaimSet: true },
+      { unclaimedGame: { $nin: ["", null] }, status: "active" },
+    ],
   });
   const changes = [];
   for (const row of rows) {
-    const set = await DropSet.findById(row.set).lean();
-    if (!set) continue;
-    const real = notListed(
-      await availableAccountsForSet(set).catch(() => []),
-      listedElsewhere,
-    ).length;
+    let real;
+    if (row.unclaimedGame) {
+      // Ask the ledger exactly what the delivery path would ask it.
+      real = (
+        await claimUnclaimedForGame(row.unclaimedGame, UNCLAIMED_STOCK_MAX, {
+          dryRun: true,
+          offerId: row.externalId,
+        }).catch(() => [])
+      ).length;
+    } else {
+      const set = await DropSet.findById(row.set).lean();
+      if (!set) continue;
+      real = notListed(
+        await availableAccountsForSet(set).catch(() => []),
+        listedElsewhere,
+      ).length;
+    }
     let offer = null;
     try {
       offer = await mp.eldoradoOffer(row.externalId);

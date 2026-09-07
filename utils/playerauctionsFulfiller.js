@@ -48,7 +48,16 @@ const POOL_LOW_WATERMARK = 15;
 // expired" notice, then fees and hidden offers), so polling is frequent.
 const TICK_MS = 60 * 1000;
 
+// Stock drift is slow next to order arrival, and every correction replaces the
+// offer, so this runs far less often than the delivery tick.
+const STOCK_SYNC_MS = 30 * 60 * 1000;
+
 const PA_SELLABLE_STATUSES = ["released", "skipped"];
+
+// Ceiling on the stock an unclaimed-backed offer may advertise. The count comes
+// from a dry-run claim, which resolves a credential per candidate, so it is
+// bounded rather than "however many the farm holds".
+const UNCLAIMED_STOCK_MAX = 25;
 
 // How many drops the buyer was promised, for the delivery-proof receipt.
 // MarketplaceListing has no items field of its own, so this reads the title,
@@ -306,10 +315,31 @@ async function markUnitsDelivered(listing, orderId) {
 // An update REPLACES the offer and issues a NEW offerId, so the listing row's
 // externalId must be re-pointed in the same breath or the next order will not
 // resolve to any listing at all.
+// What an offer may honestly advertise right now.
+//
+// For a pre-reserved offer that is the units nobody has been given yet. For an
+// unclaimed-backed offer it is NOT: those rows resolve their stock out of the
+// no-claim ledger at delivery time and every unit on the row is a record of a
+// hand-over that already happened, so `undeliveredUnits` is 0 the instant the
+// first order lands — which advertised nothing while the farm still held a
+// shelf full of sellable accounts. Ask the ledger the same question the
+// delivery path asks it.
+// `claim` is injectable so the rule can be tested without Mongo, the same way
+// paRefreshOnce takes its refresher.
+async function stockFor(listing, claim) {
+  if (!listing.unclaimedGame) return undeliveredUnits(listing).length;
+  const free = await (claim || claimUnclaimedForGame)(
+    listing.unclaimedGame,
+    UNCLAIMED_STOCK_MAX,
+    { dryRun: true, offerId: listing.externalId },
+  );
+  return free.length;
+}
+
 async function syncStock(listing) {
   const af = getAutoFarm() || {};
   if (af.playerauctionsSyncStock === false) return null;
-  const left = undeliveredUnits(listing).length;
+  const left = await stockFor(listing);
   try {
     const r = await mp.playerauctionsSetQuantity(listing.externalId, left);
     if (r && r.replaced && r.offerId) {
@@ -322,6 +352,80 @@ async function syncStock(listing) {
     console.error("playerauctions stock sync:", e.message);
     return null;
   }
+}
+
+// Keep every unclaimed-backed offer's advertised stock equal to what the
+// no-claim farm can actually hand over, and take it off sale the moment that
+// reaches zero.
+//
+// Delivery-time sync alone is not enough: the stock behind these offers moves
+// on its own — accounts get sold on Gameflip, attached to another listing,
+// hand-sold, or lose their drops — so between orders the number drifts with
+// nothing watching. An offer that keeps selling past that point takes money for
+// something the fulfiller then cannot hand over.
+//
+// An update REPLACES the offer and issues a new offerId, so this only writes
+// when the live number actually differs from what we can deliver.
+async function syncUnclaimedStock({ dryRun = false } = {}) {
+  const af = getAutoFarm() || {};
+  if (af.playerauctionsSyncStock === false) return [];
+  const rows = await MarketplaceListing.find({
+    marketplace: "playerauctions",
+    status: "active",
+    unclaimedGame: { $nin: ["", null] },
+  });
+  const changes = [];
+  for (const row of rows) {
+    let real;
+    try {
+      real = await stockFor(row);
+    } catch (e) {
+      console.error("playerauctions stock sync (" + row.externalId + "):", e.message);
+      continue;
+    }
+    let offer = null;
+    try {
+      offer = await mp.playerauctionsOffer(row.externalId);
+    } catch {
+      continue;
+    }
+    if (!offer) continue;
+    const advertised = Number(offer.totalUnit);
+
+    if (real <= 0) {
+      // Nothing to sell. Hide rather than set quantity 0 — a zero-stock offer
+      // is still an offer, and hiding is the reversible half of the pair.
+      if (!row.autoPaused) {
+        changes.push({ offerId: row.externalId, title: row.title, action: "hide (no sellable stock)" });
+        if (!dryRun) {
+          await mp.playerauctionsHide(row.externalId).catch((e) =>
+            console.error("playerauctions hide:", e.message),
+          );
+          row.autoPaused = true;
+          row.lastError = "hidden: no sellable " + row.unclaimedGame + " stock in the no-claim farm";
+          await row.save();
+        }
+      }
+      continue;
+    }
+    // Only bring back what WE hid — never override a deliberate pause.
+    if (row.autoPaused) {
+      changes.push({ offerId: row.externalId, title: row.title, action: "display (" + real + " back in stock)" });
+      if (!dryRun) {
+        await mp.playerauctionsDisplay(row.externalId).catch((e) =>
+          console.error("playerauctions display:", e.message),
+        );
+        row.autoPaused = false;
+        row.lastError = "";
+        await row.save();
+      }
+    }
+    if (Number.isFinite(advertised) && advertised !== real) {
+      changes.push({ offerId: row.externalId, title: row.title, action: advertised + " -> " + real });
+      if (!dryRun) await syncStock(row);
+    }
+  }
+  return changes;
 }
 
 // Deliver one paid order. Returns a short result the tick can log directly.
@@ -621,6 +725,25 @@ function start() {
   // unconditionally is a no-op until the flag is flipped on.
   const t = setTimeout(tick, 50 * 1000);
   if (t.unref) t.unref();
+
+  // The unclaimed-backed offers advertise stock that lives in the no-claim
+  // ledger, which moves without any order being placed here.
+  const stockTick = async () => {
+    try {
+      const af = getAutoFarm() || {};
+      if (af.playerauctionsAutoDeliver && (mp.keyStatus().playerauctions || {}).configured) {
+        for (const c of await syncUnclaimedStock()) {
+          console.log("playerauctions stock sync: " + c.action + " — " + c.title);
+        }
+      }
+    } catch (e) {
+      console.error("playerauctions stock sync error:", e.message);
+    }
+    const t2 = setTimeout(stockTick, STOCK_SYNC_MS);
+    if (t2.unref) t2.unref();
+  };
+  const t2 = setTimeout(stockTick, 100 * 1000);
+  if (t2.unref) t2.unref();
 }
 
 module.exports = {
@@ -639,7 +762,9 @@ module.exports = {
   reserveOnListing,
   markUnitsMessaged,
   markUnitsDelivered,
+  stockFor,
   syncStock,
+  syncUnclaimedStock,
   handOver,
   paQuantity,
   deliverOrder,

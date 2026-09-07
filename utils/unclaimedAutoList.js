@@ -1612,6 +1612,24 @@ async function repriceUnclaimedRows({ apply = false } = {}) {
             continue;
           }
           await mp.ggselUpdateOffer(row.externalId, { priceRub: Math.ceil(target * rubRate) });
+        } else if (row.marketplace === "eldorado") {
+          await mp.eldoradoReprice(row.externalId, target);
+        } else if (row.marketplace === "playerauctions") {
+          // A PlayerAuctions update is cancel-old + create-new, so the row must
+          // follow the offer to its new id or the fulfiller loses the listing.
+          const r = await mp.playerauctionsReprice(row.externalId, target);
+          if (r && r.replaced && r.offerId) {
+            await MarketplaceListing.updateOne(
+              { _id: row._id },
+              {
+                $set: {
+                  externalId: String(r.offerId),
+                  url: mp.playerauctionsOfferUrl(r.offerId),
+                },
+              },
+            ).catch(() => {});
+            entry.externalId = String(r.offerId);
+          }
         } else {
           entry.error = "skipped: unsupported marketplace";
           out.plan.push(entry);
@@ -1779,6 +1797,68 @@ async function publishDigisellerProduct(set, units, game, drops, price, img, cat
   return row;
 }
 
+// GGSel's stock-then-activate dance, with the verdict kept.
+//
+// `ggselFinalizeStock` is the ONE thing in the system that can tell a live
+// offer from one GGSel accepted and left off sale: batch_activate answers 2xx
+// either way, so it re-reads the status and reports `activationStuck` plus the
+// status it stuck at ("draft" = published and never went live, "paused" = was
+// live and got taken down). Both call sites used to be
+// `.catch(() => {})` with the return value dropped on the floor, so an offer
+// could sit in `draft` indefinitely with stock attached and nothing anywhere
+// — not the panel, not consistencyIssues, not the guardian (which only heals
+// `autoDeliver` rows) — able to see it. Offer 102819378 did exactly that for
+// six days with 16 accounts behind it.
+//
+// The verdict is written to the row's `lastError` so it surfaces in the
+// console and in consistencyIssues without another network call.
+const GGSEL_STUCK_PREFIX = "off sale: GGSel left the offer ";
+
+// `finalize` is injectable so the verdict handling can be tested without a live
+// GGSel session, the same way paRefreshOnce takes its refresher.
+async function finalizeGgselOffer(externalId, rowId, finalize) {
+  const call = finalize || ((id) => mp.ggselFinalizeStock(id));
+  const note = async (msg) => {
+    if (msg) console.error("unclaimedAutoList ggsel " + externalId + ": " + msg);
+    if (!rowId) return;
+    await MarketplaceListing.updateOne(
+      { _id: rowId },
+      { $set: { lastError: msg || "" } },
+    ).catch(() => {});
+  };
+  let fin;
+  try {
+    fin = await call(externalId);
+  } catch (e) {
+    await note("could not finalize/activate: " + e.message);
+    logEvent({
+      category: "unclaimed",
+      action: "ggsel_activate_failed",
+      actor: "unclaimedAutoList",
+      subject: String(externalId),
+      detail: "finalize threw: " + e.message,
+    });
+    return { ok: false, status: "", error: e.message };
+  }
+  if (fin && fin.activationStuck) {
+    const status = fin.activationStatus || "off sale";
+    await note(
+      GGSEL_STUCK_PREFIX + status + " after activation — it needs a click in " +
+        "the GGSel dashboard; nothing can be sold from it until then",
+    );
+    logEvent({
+      category: "unclaimed",
+      action: "ggsel_activate_stuck",
+      actor: "unclaimedAutoList",
+      subject: String(externalId),
+      detail: "batch_activate accepted but the offer is still " + status,
+    });
+    return { ok: false, status, error: "" };
+  }
+  await note("");
+  return { ok: true, status: "active", error: "" };
+}
+
 async function publishGgselOffer(set, units, game, drops, price, img, categoryId, cls) {
   const title = listingTitle(game, drops, cls);
   const description = listingDescription(game, drops, "ggsel", cls);
@@ -1792,7 +1872,6 @@ async function publishGgselOffer(set, units, game, drops, price, img, categoryId
     products: units.map((u) => ggselDeliveryCode(u.login, u.password)),
   });
   await mp.ggselEnableAutoselling(r.externalId).catch(() => {});
-  await mp.ggselFinalizeStock(r.externalId).catch(() => {});
   const row = await MarketplaceListing.create({
     set: set._id,
     marketplace: "ggsel",
@@ -1815,6 +1894,8 @@ async function publishGgselOffer(set, units, game, drops, price, img, categoryId
     })),
     note: "unclaimed auto-list — stock offer",
   });
+  // After the row exists, so a stuck activation has somewhere to be recorded.
+  await finalizeGgselOffer(r.externalId, row._id);
   const stock = await mp.ggselOfferStock(r.externalId).catch(() => null);
   if (stock != null) {
     await MarketplaceListing.updateOne(
@@ -1876,7 +1957,9 @@ async function addUnitToRowLocked(row, cand) {
   }
   if (row.marketplace === "ggsel") {
     await mp.ggselAddProducts(row.externalId, [ggselDeliveryCode(cand.login, cand.password)]);
-    await mp.ggselFinalizeStock(row.externalId).catch(() => {});
+    // Adding a product pauses the offer, so this re-activation is what puts it
+    // back on sale — its verdict is exactly what must not be swallowed.
+    await finalizeGgselOffer(row.externalId, row._id);
     const units = [
       ...(row.units || []),
       {
@@ -2689,8 +2772,20 @@ async function consistencyIssues() {
   // unclaimedLots.checkLots; here they would only masquerade as a bad live unit.
   const rows = await MarketplaceListing.find(
     { origin: ORIGIN, status: "active", ...NOT_LOT },
-    { marketplace: 1, set: 1, accountLogin: 1, units: 1 },
+    { marketplace: 1, set: 1, accountLogin: 1, units: 1, externalId: 1, lastError: 1 },
   ).lean();
+  // A row the reconcile sweep found off sale on the platform. The verdict is
+  // already on the row, so this costs no network call — and without it an
+  // offer GGSel left in draft looks perfectly healthy here while selling
+  // nothing (see reconcileRowsPass step 5).
+  for (const r of rows) {
+    if (!String(r.lastError || "").startsWith(GGSEL_STUCK_PREFIX)) continue;
+    issues.push({
+      type: "off-sale",
+      login: r.externalId || "",
+      detail: r.marketplace + " " + r.externalId + " — " + r.lastError,
+    });
+  }
   // Keyed by set+marketplace: several items (game + drop set) share the same
   // marketplace, so a per-market map would collapse them and misreport.
   const rowBySetMarket = new Map();
@@ -2786,6 +2881,9 @@ const RECONCILE_GRACE_MS = 10 * 60 * 1000; // let a fresh publish attach its led
 // which is what a manual reconcile wants.
 const ONSALE_SWEEP_MS = 30 * 60 * 1000;
 let lastOnsaleSweepAt = 0;
+// The mirror of the Gameflip sweep for GGSel: rows we believe are on sale that
+// GGSel has sitting in draft/paused. Same throttle, same reason.
+let lastGgselSweepAt = 0;
 
 // Which active rows are duplicates of another row for the same set+market?
 // Pure: `rows` oldest-first, the NEWEST row of a group is the survivor (it is
@@ -2835,7 +2933,7 @@ function reconcileRowPlan(row, isSellable) {
 
 async function reconcileRowsPass(opts = {}) {
   const apply = opts.apply !== false;
-  const out = { rows: 0, duplicates: 0, delisted: 0, repaired: 0, stranded: 0, failed: 0, actions: [] };
+  const out = { rows: 0, duplicates: 0, delisted: 0, repaired: 0, stranded: 0, offSale: 0, failed: 0, actions: [] };
   // Only the markets THIS engine publishes to and owns the stock model of.
   // An origin:"unclaimed" row can also live on Eldorado, where the offer is a
   // standing one whose accounts are picked from the ledger at delivery time
@@ -3036,6 +3134,54 @@ async function reconcileRowsPass(opts = {}) {
       }
     } catch (e) {
       console.error("unclaimedAutoList onsale cross-check failed:", e.message);
+    }
+  }
+
+  // 5. The GGSel mirror of (4): rows we believe are ACTIVE that GGSel has off
+  // sale. GGSel accepts batch_activate and can still leave an offer in "draft"
+  // (published, never went live) or "paused" — and unlike Gameflip, nothing
+  // else was watching: the marketplace guardian's re-activation heal only runs
+  // on autoDeliver rows, and unclaimed digiseller/ggsel rows are not that. So
+  // an offer sat in draft for six days holding 16 accounts nobody could buy.
+  // One status read per row, throttled like the Gameflip sweep.
+  if (opts.force || Date.now() - lastGgselSweepAt >= ONSALE_SWEEP_MS) {
+    lastGgselSweepAt = Date.now();
+    for (const row of rows) {
+      if (row.marketplace !== "ggsel") continue;
+      if (superseded.has(String(row._id))) continue;
+      if (new Date(row.createdAt || 0).getTime() > cutoff) continue;
+      let status = "";
+      try {
+        status = await mp.ggselOfferStatus(row.externalId);
+      } catch (e) {
+        console.error("unclaimedAutoList ggsel status " + row.externalId + ":", e.message);
+        continue;
+      }
+      if (status === "active") {
+        // Clear a stale stuck-marker once it really is live again.
+        if (apply && String(row.lastError || "").startsWith(GGSEL_STUCK_PREFIX)) {
+          await MarketplaceListing.updateOne(
+            { _id: row._id },
+            { $set: { lastError: "" } },
+          ).catch(() => {});
+        }
+        continue;
+      }
+      out.offSale = (out.offSale || 0) + 1;
+      out.actions.push({
+        action: "off-sale",
+        marketplace: "ggsel",
+        externalId: row.externalId,
+        detail: "we call it active; GGSel says " + (status || "unknown"),
+      });
+      if (!apply) continue;
+      // Re-activation is idempotent and is the guardian's own remedy, so try it
+      // once; when it does not take, finalizeGgselOffer records why on the row.
+      const fin = await withSetMarketLock(row.set, "ggsel", () =>
+        finalizeGgselOffer(row.externalId, row._id),
+      );
+      if (fin.ok) out.repaired++;
+      else out.failed++;
     }
   }
 
@@ -3983,6 +4129,8 @@ module.exports = {
   removeUnitFromRow,
   reconcileRowsPass,
   reconcileRowPlan,
+  finalizeGgselOffer,
+  GGSEL_STUCK_PREFIX,
   supersededRowIds,
   delistRowVerified,
   delistVerdict,
