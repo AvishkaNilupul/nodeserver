@@ -275,8 +275,8 @@ test("buildSyncScript: writes ride stdin, heartbeat greps run per running bot, u
   // that came up after the tick's snapshot still gets sampled. No per-id
   // `docker logs` line, and the caller's ids never reach the shell.
   assert.ok(script.includes("docker ps --filter name=^/webbot-bot- --format '{{.Names}}'"));
-  assert.ok(script.includes('docker logs --since 6m "$c"'));
-  assert.ok(!script.includes("docker logs --since 6m 'webbot-bot-5'"));
+  assert.ok(script.includes('docker logs --since 20m "$c"'));
+  assert.ok(!script.includes("docker logs --since 20m 'webbot-bot-5'"));
   assert.ok(!script.includes("evil"));
   assert.ok(script.includes("grep -c -F 'progress → drop'"));
   assert.ok(script.includes("grep -c -F 'no active drop-session'"));

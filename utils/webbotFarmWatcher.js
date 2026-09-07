@@ -68,7 +68,13 @@ const channelsPath = (id) => BOTS_DIR + "/" + id + "/channels.json";
 // an `updatedAt` older than 45 min as stale, so 20 keeps it fresh with slack.
 const CHANNELS_REWRITE_MS = Number(process.env.WEBBOT_CHANNELS_REWRITE_MS) || 20 * 60 * 1000;
 // Heartbeat window: how far back `docker logs --since` looks per running bot.
-const HEARTBEAT_WINDOW = "6m";
+// Must be comfortably longer than the farmer's own cycles — a 10-minute
+// no-drop-session channel lease and a 2-minute backoff — or a perfectly
+// healthy fleet reads as thin coverage purely because accounts are mid-rotation.
+// Measured on prod 2026-09-07, distinct accounts crediting on one healthy bot:
+// 6m → 3, 10m → 7, 15m → 19, 20m → 25, 30m → 50. A 7-bot sweep at 20m costs
+// 3.8s against a 60s budget and a 3-minute tick, so the window is cheap.
+const HEARTBEAT_WINDOW = process.env.WEBBOT_HEARTBEAT_WINDOW || "20m";
 // Idle alert: verdict "idle" on this many consecutive ticks, at most one
 // Telegram per bot per cooldown.
 const IDLE_ALERT_TICKS = 2;
@@ -574,7 +580,12 @@ const SAFE_ID = /^[A-Za-z0-9_.-]+$/;
 // heartbeat reports DISTINCT ACCOUNTS. `sed -n …p` prints only on a match, so a
 // farmer image that predates per-account labels yields 0 rather than a bogus
 // count — heartbeatVerdict reads that as "coverage unknown" and falls back.
-const DISTINCT_LABELS = `sed -n -E 's/^\\[[^]]*\\] \\[([^]]+)\\].*/\\1/p' | sort -u | wc -l | tr -d ' '`;
+// Distinct accounts in a set of log lines. The account label is the first
+// bracket after the timestamp on a watcher line (`[stamp] [login] …`) but the
+// SECOND on a manager line (`[stamp] [mgr] [login] …`), so the optional
+// `[mgr] ` group must be skipped — counting it as the label made every
+// manager-sourced count come back as 1 ("mgr").
+const DISTINCT_LABELS = `sed -n -E 's/^\\[[^]]*\\] (\\[mgr\\] )?\\[([^]]+)\\].*/\\2/p' | sort -u | wc -l | tr -d ' '`;
 
 // PURE. The ONE SSH script for a tick → { script, input }. Heredoc-free:
 //   * channels.json writes travel on STDIN as `<id> <base64>` lines (a big ACL
