@@ -186,6 +186,28 @@ Delta Force (95), Brawlhalla (59), Dead by Daylight (56), Dark and Darker (39).
   be filled from the no-claim ledger. `keepShelfAlive` corrects the advertised
   quantity and pauses at zero.
 
+## Writes are verified by read-back, never trusted
+
+Two of this codebase's other marketplaces lie about whether an update landed:
+**ZeusX returns a 500 for updates it HAS applied**, and **GGSel a 504 for ones
+it has NOT**. Both were caught by a canary rather than by reasoning, and
+trusting the status code left the database disagreeing with the live offer.
+
+Z2U is a shared-hosting PHP site answering with a hand-rolled envelope, so it
+gets the same distrust. `keepShelfAlive` acts on a whole game group, then
+re-reads that group **once** and marks each action verified or mismatched
+against what the offer actually looks like now — a group page is ~500KB, so
+one re-read covering every action in it is what keeps this affordable.
+
+The consequences are the point:
+
+- an action that **reported an error but did land** is recorded as applied, and
+  its error is dropped;
+- an action that **reported success but did not land** is flagged
+  (`reported success but the offer did not change`);
+- the `autoPaused` flag is only written once the change is confirmed real, so
+  the database never claims to have paused an offer that is still on sale.
+
 ## Traps
 
 - **Never sell Overwatch / Rainbow Six / Call of Duty from the Drop Archive.**

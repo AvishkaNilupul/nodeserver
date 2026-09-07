@@ -245,3 +245,17 @@ test("an order matches its listing by title, and never by a guess", () => {
   );
   assert.strictEqual(ful.matchRowForOrder({ title: "" }, rows), null);
 });
+
+// Two of this codebase's other marketplaces lie about whether a write landed —
+// ZeusX returns a 500 for updates it HAS applied, GGSel a 504 for ones it has
+// NOT — so the Z2U shelf keeper verifies every write by reading the offer back.
+// These pin what "verified" has to mean for each action.
+test("every action states what the offer should look like afterwards", () => {
+  assert.deepStrictEqual(ful.expectedAfter("off_line"), { online: false });
+  assert.deepStrictEqual(ful.expectedAfter("on_line"), { online: true });
+  assert.deepStrictEqual(ful.expectedAfter("stock", 12), { stock: 12 });
+  // An extend cannot be checked by a count, only by the offer no longer being
+  // in the state that made it need extending.
+  assert.deepStrictEqual(ful.expectedAfter("extend"), { notExpired: true });
+  assert.deepStrictEqual(ful.expectedAfter("nonsense"), {});
+});

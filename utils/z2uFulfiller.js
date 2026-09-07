@@ -157,11 +157,35 @@ function planForOffer(entry, { now = Date.now(), extendWithin = EXTEND_WITHIN_DA
   return { actions, note: "" };
 }
 
+// What the offer should look like once an action has been applied. This is
+// what makes read-back verification possible rather than hopeful.
+function expectedAfter(action, value) {
+  if (action === "off_line") return { online: false };
+  if (action === "on_line") return { online: true };
+  if (action === "extend") return { notExpired: true };
+  if (action === "stock") return { stock: value };
+  return {};
+}
+
 // One pass over the shelf.
+//
+// Writes are VERIFIED BY READ-BACK, never trusted. Two of this codebase's other
+// marketplaces lie about whether an update succeeded — ZeusX returns a 500 for
+// updates it HAS applied, GGSel a 504 for ones it has NOT — and both were
+// caught by a canary rather than by reasoning. Z2U is a shared-hosting PHP site
+// answering with a hand-rolled envelope, so it gets the same distrust: after
+// acting on a game group, the group is re-read once and each action is marked
+// verified or mismatched against what the offer actually looks like now.
+//
+// Re-reading per group rather than per offer is what keeps that affordable —
+// a group page is ~500KB, and one re-read covers every action in it.
 async function keepShelfAlive({ dryRun = true, limit = 0 } = {}) {
   const entries = await shelf();
   const done = [];
   let acted = 0;
+
+  // Plan everything first, so the work can be grouped by the page it lives on.
+  const work = [];
   for (const entry of entries) {
     const { actions, note } = planForOffer(entry);
     if (!actions.length) {
@@ -170,16 +194,31 @@ async function keepShelfAlive({ dryRun = true, limit = 0 } = {}) {
     }
     if (limit && acted >= limit) break;
     acted++;
-    for (const a of actions) {
-      const label = a.action + (a.value != null ? " " + a.value : "");
-      const record = {
-        pk: entry.offer.pk,
-        title: entry.offer.title,
-        action: label,
-        why: a.why,
-        applied: false,
-      };
-      if (!dryRun) {
+    work.push({ entry, actions });
+  }
+
+  const groups = new Map();
+  for (const w of work) {
+    const key = w.entry.offer.service + ":" + w.entry.offer.game;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(w);
+  }
+
+  for (const [key, items] of groups) {
+    const applied = [];
+    for (const { entry, actions } of items) {
+      for (const a of actions) {
+        const record = {
+          pk: entry.offer.pk,
+          title: entry.offer.title,
+          action: a.action + (a.value != null ? " " + a.value : ""),
+          why: a.why,
+          applied: false,
+        };
+        if (dryRun) {
+          done.push(record);
+          continue;
+        }
         try {
           if (a.action === "stock") {
             await mp.z2uUpdateOffer(entry.offer.pk, { stock: a.value });
@@ -187,27 +226,72 @@ async function keepShelfAlive({ dryRun = true, limit = 0 } = {}) {
             await mp.z2uSetOfferStatus(entry.offer.pk, a.action);
           }
           record.applied = true;
-          if (entry.row) {
-            const row = await MarketplaceListing.findById(entry.row._id);
-            if (row) {
-              if (a.action === "off_line") {
-                row.autoPaused = true;
-                row.lastError = "paused: no claimable stock";
-              }
-              if (a.action === "on_line") {
-                row.autoPaused = false;
-                row.lastError = "";
-              }
-              await row.save();
-            }
-          }
         } catch (e) {
+          // NOT a failure yet: the read-back below decides. A platform that
+          // reports an error for a write it applied would otherwise leave the
+          // database disagreeing with the live offer.
           record.error = String((e && e.message) || e).slice(0, 200);
         }
+        record.expected = expectedAfter(a.action, a.value);
+        record.wasExpired = entry.offer.status === "expired";
+        applied.push({ record, entry });
+        done.push(record);
+        // Z2U is shared-hosting PHP; space the writes out.
+        await new Promise((r) => setTimeout(r, 1200));
       }
-      done.push(record);
-      // Z2U is a shared-hosting PHP site; space the writes out.
-      if (!dryRun) await new Promise((r) => setTimeout(r, 1200));
+    }
+    if (dryRun || !applied.length) continue;
+
+    // ---- read-back ----
+    const [service, game] = key.split(":");
+    let after = [];
+    try {
+      after = await mp.z2uOffers(service, game);
+    } catch (e) {
+      for (const { record } of applied) {
+        record.verified = null;
+        record.verifyNote = "could not re-read the group: " + String((e && e.message) || e).slice(0, 80);
+      }
+      continue;
+    }
+    const byPk = new Map(after.map((o) => [String(o.pk), o]));
+    for (const { record, entry } of applied) {
+      const now = byPk.get(String(record.pk));
+      if (!now) {
+        record.verified = false;
+        record.verifyNote = "offer vanished from its group page";
+        continue;
+      }
+      const exp = record.expected || {};
+      let ok = true;
+      if (exp.online != null && now.online !== exp.online) ok = false;
+      if (exp.stock != null && now.stock !== exp.stock) ok = false;
+      if (exp.notExpired && now.status === "expired") ok = false;
+      record.verified = ok;
+      // The whole point: an error the read-back contradicts was not a failure.
+      if (ok && record.error) {
+        record.verifyNote = "reported an error but the change IS live: " + record.error;
+        record.applied = true;
+        delete record.error;
+      }
+      if (!ok && !record.error) {
+        record.verifyNote = "reported success but the offer did not change";
+      }
+      // Persist the pause/resume flag only once the change is real.
+      if (ok && entry.row) {
+        const row = await MarketplaceListing.findById(entry.row._id);
+        if (row) {
+          if (exp.online === false) {
+            row.autoPaused = true;
+            row.lastError = "paused: no claimable stock";
+            await row.save();
+          } else if (exp.online === true) {
+            row.autoPaused = false;
+            row.lastError = "";
+            await row.save();
+          }
+        }
+      }
     }
   }
   return done;
@@ -392,6 +476,7 @@ function start() {
 
 module.exports = {
   Z2U_CLAIM_TAG,
+  expectedAfter,
   EXTEND_WITHIN_DAYS,
   STOCK_MAX,
   start,
