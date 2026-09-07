@@ -284,6 +284,34 @@ test("an already-claimed drop is never handed to a buyer", async () => {
   }
 });
 
+/* --------------------- unfulfillable-order alerting --------------------- */
+
+test("a paid order the bot cannot ship alerts once, not every tick", async () => {
+  // The four offers made by hand on PlayerAuctions have no listing row, so a
+  // sale on one looks like a routine "skipped" line while the buyer waits and
+  // the delivery guarantee runs down.
+  const tg = require("../utils/telegram");
+  const real = tg.sendTelegram;
+  const sent = [];
+  tg.sendTelegram = async (t) => sent.push(t);
+  try {
+    fulfiller.alertedOrders.clear();
+    const order = { orderId: "16460001", orderTitle: "Overwatch Twitch Drops (26 Items)", name: "someBuyer", price: "$5.00" };
+    await fulfiller.alertUnfulfillable(order, "no listing row for ...");
+    await fulfiller.alertUnfulfillable(order, "no listing row for ...");
+    await fulfiller.alertUnfulfillable(order, "no listing row for ...");
+    assert.strictEqual(sent.length, 1, "should alert once per order");
+    assert.match(sent[0], /16460001/);
+    assert.match(sent[0], /cannot ship/);
+    // A different order still gets its own alert.
+    await fulfiller.alertUnfulfillable({ orderId: "16460002", orderTitle: "x" }, "no listing row");
+    assert.strictEqual(sent.length, 2);
+  } finally {
+    tg.sendTelegram = real;
+    fulfiller.alertedOrders.clear();
+  }
+});
+
 /* ------------------------- the session watchdog ------------------------- */
 
 test("a dead session alerts once, and recovery alerts once", async () => {

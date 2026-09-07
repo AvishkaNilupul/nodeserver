@@ -327,6 +327,21 @@ async function markUnitsDelivered(listing, orderId) {
 // `claim` is injectable so the rule can be tested without Mongo, the same way
 // paRefreshOnce takes its refresher.
 async function stockFor(listing, claim) {
+  // Drop-Archive-backed bundles hold NO units — they claim at delivery time —
+  // so counting units would report 0 and the reconciler would hide a listing
+  // that is actually in stock. Count what a delivery would really find: the
+  // accounts still holding the whole set, not on another live listing, and
+  // still UNCLAIMED (a claimed drop is worthless to the buyer).
+  if (listing.autoClaimSet && listing.set) {
+    const DropSet = require("../models/DropSet");
+    const set = await DropSet.findById(listing.set).lean();
+    if (!set) return 0;
+    const cands = notListed(
+      await availableAccountsForSet(set).catch(() => []),
+      await loginsOnActiveListings(),
+    );
+    return (await unclaimedOnly(set, cands)).length;
+  }
   if (!listing.unclaimedGame) return undeliveredUnits(listing).length;
   const free = await (claim || claimUnclaimedForGame)(
     listing.unclaimedGame,
@@ -369,10 +384,14 @@ async function syncStock(listing) {
 async function syncUnclaimedStock({ dryRun = false } = {}) {
   const af = getAutoFarm() || {};
   if (af.playerauctionsSyncStock === false) return [];
+  // Both stock sources drift without an order being placed here: the no-claim
+  // ledger moves on its own, and the Drop Archive drains as accounts sell on
+  // OTHER marketplaces. A bundle mirror's quantity is frozen at publish time
+  // otherwise, so it keeps advertising stock that has already gone.
   const rows = await MarketplaceListing.find({
     marketplace: "playerauctions",
     status: "active",
-    unclaimedGame: { $nin: ["", null] },
+    $or: [{ unclaimedGame: { $nin: ["", null] } }, { autoClaimSet: true }],
   });
   const changes = [];
   for (const row of rows) {
@@ -402,7 +421,9 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
             console.error("playerauctions hide:", e.message),
           );
           row.autoPaused = true;
-          row.lastError = "hidden: no sellable " + row.unclaimedGame + " stock in the no-claim farm";
+          row.lastError = row.unclaimedGame
+            ? "hidden: no sellable " + row.unclaimedGame + " stock in the no-claim farm"
+            : "hidden: no account still holds this set unclaimed in the Drop Archive";
           await row.save();
         }
       }
@@ -688,6 +709,14 @@ async function deliverPendingOrders() {
         (await deliverOrder(order, { dryRun }));
       results.push(r);
       const id = r.orderId;
+      // A paid order the bot cannot ship is the WORST silent state: the buyer
+      // is waiting, the delivery guarantee is running down, and the log line
+      // reads like a routine skip. The four hand-made offers on this account
+      // have no listing row at all, so this is exactly what a sale on one of
+      // them looks like. Tell the operator once, while there is still time.
+      if (r.skipped && /no listing row|manual-delivery listing/.test(r.skipped)) {
+        await alertUnfulfillable(order, r.skipped);
+      }
       if (r.error) console.error("playerauctions deliver " + id + ":", r.error);
       else if (r.dryRun)
         console.log("playerauctions deliver (DRY RUN) " + id + ":", r.wouldSend);
@@ -705,6 +734,26 @@ async function deliverPendingOrders() {
     }
   }
   return { orders: orders.length, results };
+}
+
+// One alert per order, not one per 60s tick. Resets on restart, which at worst
+// costs a single duplicate for an order that is still stuck.
+const alertedOrders = new Set();
+
+async function alertUnfulfillable(order, why) {
+  const id = String(order.orderId || order.id || "");
+  if (!id || alertedOrders.has(id)) return;
+  alertedOrders.add(id);
+  const notify = (t) => require("./telegram").sendTelegram(t);
+  await notify(
+    "⚠️ PlayerAuctions order " + id + " is PAID and the bot cannot ship it.\n\n" +
+      String(order.orderTitle || "").slice(0, 120) + "\n" +
+      "Buyer: " + (order.name || "?") + "   " + (order.price || "") + "\n\n" +
+      "Reason: " + why + "\n\n" +
+      "This one needs delivering by hand, and the delivery guarantee is running. " +
+      "Offers made directly on PlayerAuctions have no listing row here, so the " +
+      "bot does not know what stock backs them.",
+  ).catch(() => {});
 }
 
 let started = false;
@@ -757,6 +806,8 @@ module.exports = {
   releaseAccounts,
   undeliveredUnits,
   paItemCount,
+  alertUnfulfillable,
+  alertedOrders,
   unitsForOrder,
   credentialsForUnits,
   reserveOnListing,
