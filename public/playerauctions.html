@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PlayerAuctions — Console</title>
+<link rel="stylesheet" href="/admin-nav.css" />
+<style>
+  :root {
+    --bg: #0f1621; --panel: #16202e; --line: #24324a; --text: #e6edf6;
+    --dim: #93a4bd; --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #f0a92b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 18px 16px 60px; }
+  h1 { font-size: 22px; margin: 6px 0 4px; }
+  .sub { color: var(--dim); margin-bottom: 18px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 14px 16px; margin-bottom: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .row > .panel { flex: 1 1 220px; margin-bottom: 0; }
+  .k { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .v { font-size: 22px; font-weight: 600; margin-top: 2px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px;
+          font-weight: 600; }
+  .pill.ok { background: rgba(63,185,80,.15); color: var(--ok); }
+  .pill.bad { background: rgba(248,81,73,.15); color: var(--bad); }
+  .pill.warn { background: rgba(210,153,34,.15); color: var(--warn); }
+  button { background: #23334c; color: var(--text); border: 1px solid var(--line);
+           border-radius: 7px; padding: 7px 13px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #2c3f5d; }
+  button.primary { background: var(--accent); color: #241a05; border-color: var(--accent);
+                   font-weight: 600; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 16px 0 12px; }
+  .tabs button.active { background: var(--accent); color: #241a05; border-color: var(--accent);
+                        font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase;
+       letter-spacing: .04em; }
+  tr:last-child td { border-bottom: 0; }
+  .scroll { overflow-x: auto; }
+  .muted { color: var(--dim); }
+  .dead { border-color: var(--bad); }
+  .dead h2 { color: var(--bad); margin: 0 0 6px; font-size: 16px; }
+  code { background: #0b1220; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  .empty { color: var(--dim); padding: 18px 4px; }
+</style>
+</head>
+<body>
+<div id="adminNav"></div>
+<div class="wrap">
+  <h1>PlayerAuctions</h1>
+  <div class="sub">
+    Read-only. Everything here comes through the server's session — so you never
+    have to open PlayerAuctions in a browser, which is the one thing that kills it.
+  </div>
+
+  <div id="sessionBox"></div>
+  <div class="row" id="stats"></div>
+
+  <div class="tabs" id="tabs"></div>
+  <div class="panel" id="view"><div class="empty">Loading…</div></div>
+</div>
+
+<script src="/admin-nav.js"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { tab: "pending", snapshot: null };
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function get(path) {
+    return fetch(path, { credentials: "same-origin" }).then(function (r) { return r.json(); });
+  }
+
+  // PlayerAuctions allows one session per account, so a dead session is an
+  // expected state with a known one-step fix — say exactly that, not "error".
+  function renderSessionDead(msg, howToFix) {
+    $("sessionBox").innerHTML =
+      '<div class="panel dead"><h2>Session is dead — auto-delivery has stopped</h2>' +
+      '<div class="muted" style="margin-bottom:8px">' + esc(msg || "") + "</div>" +
+      "<div>" + esc(howToFix || "") + "</div></div>";
+  }
+
+  function renderSession(d) {
+    if (!d.configured) {
+      renderSessionDead(
+        "No PlayerAuctions cookie is stored.",
+        "Paste the Cookie header into the PlayerAuctions credential in the listings keys modal."
+      );
+      return;
+    }
+    var access = d.accessMinsLeft;
+    var cls = access == null ? "warn" : access > 0 ? "ok" : "warn";
+    var txt = access == null ? "unknown"
+      : access > 0 ? access + " min left"
+      : "expired " + Math.abs(access) + " min ago (the server renews it on the next call)";
+    $("sessionBox").innerHTML =
+      '<div class="panel"><span class="k">Session</span> ' +
+      '<span class="pill ' + cls + '">' + esc(txt) + "</span> " +
+      '<span class="muted" style="margin-left:10px">refresh token ' +
+      esc(d.refreshMinsLeft == null ? "?" : Math.round(d.refreshMinsLeft / 60) + "h") +
+      " left</span>" +
+      '<button style="float:right" onclick="window.__paCheck()">Check now</button></div>';
+  }
+
+  function stat(k, v, cls) {
+    return '<div class="panel"><div class="k">' + esc(k) + "</div>" +
+      '<div class="v ' + (cls || "") + '">' + esc(v) + "</div></div>";
+  }
+
+  function renderStats(s) {
+    var pend = (s.pending || []).length;
+    $("stats").innerHTML =
+      stat("Seller", s.seller.nickName + " (L" + s.seller.level + ")") +
+      stat("Active offers", s.offers.count) +
+      stat("Lifetime orders", s.orders.count) +
+      stat("Awaiting delivery", pend);
+  }
+
+  var TABS = [
+    ["pending", "Awaiting delivery"],
+    ["orders", "Orders"],
+    ["offers", "Offers"],
+    ["messages", "Messages"],
+    ["balance", "Balance"]
+  ];
+
+  function renderTabs() {
+    $("tabs").innerHTML = TABS.map(function (t) {
+      return '<button class="' + (state.tab === t[0] ? "active" : "") +
+        '" onclick="window.__paTab(\'' + t[0] + '\')">' + esc(t[1]) + "</button>";
+    }).join("");
+  }
+
+  function table(cols, rows) {
+    if (!rows.length) return '<div class="empty">Nothing here.</div>';
+    return '<div class="scroll"><table><thead><tr>' +
+      cols.map(function (c) { return "<th>" + esc(c) + "</th>"; }).join("") +
+      "</tr></thead><tbody>" +
+      rows.map(function (r) {
+        return "<tr>" + r.map(function (c) { return "<td>" + c + "</td>"; }).join("") + "</tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+
+  function show(html) { $("view").innerHTML = html; }
+
+  function loadTab() {
+    renderTabs();
+    show('<div class="empty">Loading…</div>');
+    var s = state.snapshot;
+
+    if (state.tab === "pending") {
+      var p = (s && s.pending) || [];
+      show(
+        '<div class="muted" style="margin-bottom:10px">Orders the delivery bot will ship on its next tick (it runs every 60 seconds).</div>' +
+        table(["Order", "Title", "Buyer", "Price", "Qty", "Placed"],
+          p.map(function (o) {
+            return ['<code>' + esc(o.orderId) + "</code>", esc(o.title), esc(o.buyer),
+              esc(o.price), esc(o.quantity), esc(o.createTime)];
+          }))
+      );
+      return;
+    }
+
+    if (state.tab === "orders") {
+      var o = (s && s.orders) || { items: [], byStatus: {} };
+      var chips = Object.keys(o.byStatus || {}).map(function (k) {
+        return '<span class="pill warn" style="margin-right:6px">' +
+          esc(o.byStatus[k] + " " + k) + "</span>";
+      }).join("");
+      show('<div style="margin-bottom:10px">' + chips + "</div>" +
+        table(["Order", "Title", "Buyer", "Price", "Status", "Placed"],
+          (o.items || []).map(function (r) {
+            return ['<code>' + esc(r.orderId) + "</code>", esc(r.orderTitle), esc(r.name),
+              esc(r.price), esc(r.status), esc(r.createTime)];
+          })));
+      return;
+    }
+
+    if (state.tab === "offers") {
+      var f = (s && s.offers) || { items: [] };
+      show(table(["Offer", "Title", "Game", "Price", "Delivery", "Expires"],
+        (f.items || []).map(function (r) {
+          return ['<code>' + esc(r.offerId) + "</code>", esc(r.title), esc(r.gameName),
+            esc(r.totalPrice), esc(r.deliveryGuarantee), esc(r.expiredTimeString)];
+        })));
+      return;
+    }
+
+    if (state.tab === "messages") {
+      get("/playerauctions/messages").then(function (r) {
+        if (!r.success) return show('<div class="empty">' + esc(r.message) + "</div>");
+        var items = (r.data && (r.data.items || r.data.list || r.data)) || [];
+        if (!Array.isArray(items)) items = [];
+        show(table(["From", "Subject", "When"], items.map(function (m) {
+          return [esc(m.senderName || m.from || "—"),
+            esc(m.title || m.subject || m.content || "—"),
+            esc(m.createTime || m.date || "")];
+        })));
+      });
+      return;
+    }
+
+    if (state.tab === "balance") {
+      get("/playerauctions/balance").then(function (r) {
+        if (!r.success) return show('<div class="empty">' + esc(r.message) + "</div>");
+        show('<pre style="white-space:pre-wrap;font-size:12px">' +
+          esc(JSON.stringify(r.data, null, 2)) + "</pre>");
+      });
+    }
+  }
+
+  window.__paTab = function (t) { state.tab = t; loadTab(); };
+
+  window.__paCheck = function () {
+    get("/playerauctions/health").then(function () { boot(); });
+  };
+
+  function boot() {
+    get("/playerauctions/session").then(function (r) {
+      if (r.success) renderSession(r.data);
+    });
+    get("/playerauctions/snapshot").then(function (r) {
+      if (!r.success) {
+        renderSessionDead(r.message, r.howToFix);
+        $("stats").innerHTML = "";
+        show('<div class="empty">Nothing can be read until the session is restored.</div>');
+        renderTabs();
+        return;
+      }
+      state.snapshot = r.data;
+      renderStats(r.data);
+      loadTab();
+    });
+  }
+
+  boot();
+  setInterval(boot, 60000);
+})();
+</script>
+</body>
+</html>

@@ -194,6 +194,12 @@
           superOnly: true,
         },
         {
+          href: "/playerauctions.html",
+          label: "PlayerAuctions",
+          icon: ICONS.listings,
+          superOnly: true,
+        },
+        {
           href: "/bulk-orders.html",
           label: "Bulk orders",
           icon: ICONS.bulkOrders,

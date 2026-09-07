@@ -5595,6 +5595,73 @@ async function playerauctionsPendingOrders(opts = {}) {
   return out;
 }
 
+// --- Read-only console feeds --------------------------------------------
+// These exist so the operator never has to open PlayerAuctions in a browser.
+// That is not a convenience: signing in anywhere rotates the session id and
+// kills the server's copy, so the browser is the single thing that breaks
+// auto-delivery. Reading through the server's own session removes the reason
+// to go there at all.
+
+async function playerauctionsBalance() {
+  return await paGet(PA_USER_API, "/Disburse/detail", "PlayerAuctions balance");
+}
+
+async function playerauctionsMessages() {
+  return await paGet(PA_USER_API, "/User/Messages", "PlayerAuctions messages");
+}
+
+async function playerauctionsMessageThread(id, isFromSystem = false) {
+  return await paGet(
+    PA_USER_API,
+    "/messages/detail?id=" + encodeURIComponent(id) + "&isFromSystem=" + !!isFromSystem,
+    "PlayerAuctions message",
+  );
+}
+
+async function playerauctionsNotifications({ pageIndex = 1, pageSize = 20 } = {}) {
+  return await paGet(
+    PA_USER_API,
+    "/User/Notifications?pageIndex=" + pageIndex + "&pageSize=" + pageSize,
+    "PlayerAuctions notifications",
+  );
+}
+
+// One cheap call the console opens on: who we are, how the session is doing,
+// what is on sale and what is waiting to ship.
+async function playerauctionsSnapshot() {
+  const out = { at: new Date().toISOString() };
+  const exp = playerauctionsTokenExpiry();
+  out.session = {
+    accessMinsLeft: exp.access ? Math.round((exp.access - Date.now()) / 60000) : null,
+    refreshMinsLeft: exp.refresh ? Math.round((exp.refresh - Date.now()) / 60000) : null,
+  };
+  const me = await playerauctionsMe();
+  const m = (me && me.members) || {};
+  out.seller = {
+    nickName: m.nickName,
+    memberId: m.memberId,
+    level: m.level,
+    role: m.role,
+    isSeller: !!(me && me.isSeller),
+  };
+  const offers = await playerauctionsMyListings(1, 50);
+  out.offers = { count: offers.count, items: offers.items };
+  const orders = await playerauctionsOrders({ pageSize: 100 });
+  const byStatus = {};
+  for (const o of orders.items) byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+  out.orders = { count: orders.count, byStatus, items: orders.items.slice(0, 40) };
+  out.pending = (await playerauctionsPendingOrders({ pageSize: 100 })).map((o) => ({
+    orderId: o.orderId,
+    title: o.orderTitle,
+    buyer: o.name,
+    price: o.price,
+    quantity: o.quantity,
+    createTime: o.createTime,
+    status: o.status,
+  }));
+  return out;
+}
+
 // --- Delivery -----------------------------------------------------------
 // The credential travels as an order message. PlayerAuctions caps a message at
 // 300 characters (50 for a brand-new member), which is why the long claim guide
@@ -5765,6 +5832,11 @@ module.exports = {
   playerauctionsUploadImage,
   playerauctionsOrders,
   playerauctionsOrderDetail,
+  playerauctionsBalance,
+  playerauctionsMessages,
+  playerauctionsMessageThread,
+  playerauctionsNotifications,
+  playerauctionsSnapshot,
   playerauctionsPendingOrders,
   playerauctionsNeedsDelivery,
   playerauctionsDetailNeedsDelivery,

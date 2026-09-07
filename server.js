@@ -72,6 +72,7 @@ const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
 const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
+const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -440,6 +441,10 @@ app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
   serveFarmPage(req, res, "noclaim-farm.html");
 });
 
+app.get("/playerauctions.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "playerauctions.html"));
+});
+
 app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "backup.html"));
 });
@@ -638,6 +643,10 @@ app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, noclaimFarmRoutes);
+// Read-only PlayerAuctions console. It exists so the operator never has to open
+// member.playerauctions.com in a browser — signing in there rotates the session
+// id and kills the server's copy, which is the one thing that stops delivery.
+app.use(enforce2fa, playerauctionsRoutes);
 app.use(enforce2fa, unclaimedAutoRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
