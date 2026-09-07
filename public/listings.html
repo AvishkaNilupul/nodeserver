@@ -2869,6 +2869,7 @@ Reliable Daily Rewards</textarea
         epicnpc: "EpicNPC (browser bridge)",
         zeusx: "ZeusX",
         eldorado: "Eldorado.gg",
+        playerauctions: "PlayerAuctions",
       };
       // EpicNPC bridge bookmarklet. Self-contained (runs on epicnpc.com, can't
       // reference this page), it reads the listing payload from the compose
@@ -3028,6 +3029,13 @@ Reliable Daily Rewards</textarea
         // Cookie header is the credential. Paste it once: the server renews it
         // in place via /authentication/refreshTokens from then on.
         eldorado: { cookie: "Cookie header (whole line, from a signed-in session)" },
+        // PlayerAuctions is the same shape as Eldorado — httpOnly session
+        // cookies, renewed in place via account-api /SignIn/RefreshToken — with
+        // no CSRF token to carry alongside. Copy the Cookie header from any
+        // request on member.playerauctions.com in a signed-in session.
+        playerauctions: {
+          cookie: "Cookie header (whole line, from a signed-in session)",
+        },
       };
       var mpStatus = null;
 

@@ -140,6 +140,24 @@ const AUTO_FARM_DEFAULTS = {
   // actually send the message and mark the order delivered, and logs what it
   // WOULD have sent. Leave true until a live order has been watched end to end.
   eldoradoDeliverDryRun: true,
+
+  // --- PlayerAuctions (utils/marketplaces.js + utils/playerauctionsFulfiller.js) ---
+  // Publishes farmed bundles as PlayerAuctions "Item" offers, one offer per
+  // event wave per game, totalUnit = the account count. OFF by default.
+  playerauctionsAuto: false,
+  // Auto-delivery. PlayerAuctions has no credential vault for Item offers
+  // (deliveryMethod is "Face to Face"), so the fulfiller posts the login into
+  // the order's message thread and then confirms delivery with a generated
+  // proof image. Only matters when playerauctionsAuto is also on.
+  playerauctionsAutoDeliver: false,
+  // Safety valve: when true the fulfiller does everything except send the
+  // message and confirm delivery, and logs what it WOULD have sent. Leave true
+  // until a live order has been watched end to end.
+  playerauctionsDeliverDryRun: true,
+  // Keep each offer's advertised totalUnit in step with stock we can actually
+  // ship. PlayerAuctions penalises late/failed delivery directly, so overselling
+  // is more expensive here than on other marketplaces.
+  playerauctionsSyncStock: true,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign

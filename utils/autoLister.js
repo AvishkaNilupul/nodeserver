@@ -24,6 +24,7 @@ const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
 // release on one market would free stock another market is selling.
 const ZX_CLAIM_TAG = "zeusx";
 const ELD_CLAIM_TAG = "eldorado";
+const PA_CLAIM_TAG = "playerauctions";
 const {
   reserveSetOnAccount,
   releaseSetForAccounts,
@@ -31,6 +32,7 @@ const {
 } = require("./dropReservation");
 const settings = require("./settings");
 const mp = require("./marketplaces");
+const paCopy = require("./playerauctionsCopy");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
 // The stock side (twitchInventory.buildDrops) keys every earned drop through
@@ -216,7 +218,8 @@ function buildTitle({ game, items, campaignName }) {
 // The closing support line names the marketplace the buyer is actually on —
 // "message me here on Gameflip" must never appear on a GGSel or Digiseller
 // product, and vice versa. marketplace is one of "gameflip", "digiseller",
-// "ggsel", "zeusx" (or anything else → a neutral line with no site name).
+// "ggsel", "zeusx", "eldorado", "playerauctions" (or anything else → a neutral
+// line with no site name).
 function buildDescription({ game, items, campaignName, postEvent, marketplace }) {
   const support = {
     gameflip: "message me here on Gameflip",
@@ -224,6 +227,7 @@ function buildDescription({ game, items, campaignName, postEvent, marketplace })
     ggsel: "message me here on GGSel",
     zeusx: "message me here on ZeusX",
     eldorado: "message me here on Eldorado",
+    playerauctions: "message me here on PlayerAuctions",
   };
   const supportLine =
     "Any issue or question — " +
@@ -875,6 +879,88 @@ async function publishEldoradoShare({
   });
 }
 
+// PlayerAuctions publisher.
+//
+// Unlike Eldorado — whose Twitch Drops category takes every game, with the
+// unlisted ones going under "Other" — PlayerAuctions files a drops bundle under
+// the GAME's own Items category, and only 149 of its ~400 games accept Item
+// offers at all. Rainbow Six, Apex, Rocket League, Dead by Daylight and The
+// Finals are account-only there, so this can legitimately have nowhere to put a
+// share; the caller gates on playerauctionsGameEnabled() first.
+//
+// The long claim guide goes in the offer's `instruction` field rather than the
+// hand-over message, because PlayerAuctions caps an order message at 300
+// characters (utils/playerauctionsCopy explains the split).
+async function publishPlayerAuctionsShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  accounts = await reserveAccountsForPublish(accounts, set, PA_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.playerauctionsPublish({
+      game,
+      title,
+      description,
+      instruction: paCopy.bundleInstruction(),
+      priceUsd: Math.max(mp.PA_MIN_PRICE, price),
+      itemsPerUnit: (set.items || []).length || 1,
+      totalUnit: accounts.length,
+      minUnitPerOrder: 1,
+      // A delivery bot can honour the fastest tier PlayerAuctions offers, and
+      // the guarantee is the main conversion lever on this marketplace.
+      deliveryGuarantee: mp.PA_DELIVERY.min20,
+      coverImagePath: img,
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "playerauctions",
+      externalId: r.offerId,
+      url: r.url || "",
+      title,
+      description,
+      price: Math.max(mp.PA_MIN_PRICE, price),
+      status: "active",
+      origin: "auto",
+      note:
+        "auto-farm: " + accounts.length + " account(s), message auto-delivery",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      units: accounts.map((a) => ({
+        contentId: "",
+        accountId: String(a.accountId),
+        login: a.login,
+        addedAt: new Date(),
+        deliveredAt: null,
+        orderId: "",
+      })),
+    });
+    return { externalId: r.offerId, url: r.url || "", qty: accounts.length };
+  });
+}
+
+// PlayerAuctions only accepts an Item offer when the game's catalogue row lists
+// "item" among its product types, so this is a real per-game gate, not a
+// formality.
+async function playerauctionsGameEnabled(game) {
+  try {
+    const g = await mp.playerauctionsResolveGame(game);
+    if (!g) return false;
+    return String(g.productType || "").toLowerCase().split(",").includes("item");
+  } catch {
+    return false;
+  }
+}
+
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
 // cost a market. On every sweep tick where the Gameflip listing is alive,
 // try to publish any secondary market that has no externalId yet, using
@@ -1353,6 +1439,13 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       postEvent: false,
       marketplace: "eldorado",
     }),
+    playerauctions: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "playerauctions",
+    }),
   };
   const description = descriptions.gameflip;
 
@@ -1403,12 +1496,26 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // Eldorado needs no per-game mapping: its Twitch Drops category takes every
   // game, with anything outside its 13-value list going under "Other".
   const eldoradoEnabled = !!af.eldoradoAuto;
+  // PlayerAuctions DOES need a per-game check: a drops bundle is filed under
+  // the game's own Items category, and only 149 of its ~400 games accept Item
+  // offers (Rainbow Six, Apex, Rocket League, Dead by Daylight and The Finals
+  // are account-only there).
+  const paEnabled =
+    !!af.playerauctionsAuto && (await playerauctionsGameEnabled(task.game));
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
   if (zeusxEnabled) marketOrder.push("zeusx");
   if (eldoradoEnabled) marketOrder.push("eldorado");
-  const shares = { gameflip: [], plati: [], ggsel: [], zeusx: [], eldorado: [] };
+  if (paEnabled) marketOrder.push("playerauctions");
+  const shares = {
+    gameflip: [],
+    plati: [],
+    ggsel: [],
+    zeusx: [],
+    eldorado: [],
+    playerauctions: [],
+  };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
   });
@@ -1459,6 +1566,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const ggsel = { externalId: "", url: "", qty: 0, error: "" };
   const zeusx = { externalId: "", url: "", qty: 0, error: "" };
   const eldorado = { externalId: "", url: "", qty: 0, error: "" };
+  const playerauctions = { externalId: "", url: "", qty: 0, error: "" };
   try {
     // reserve → publish → (on throw) release the gameflip unit AND delete the
     // now-empty set (mirrors the no-deliver path above) so a failed publish
@@ -1589,6 +1697,32 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     } else {
       eldorado.error = "no spare account for this market yet";
     }
+
+    if (paEnabled && shares.playerauctions.length) {
+      try {
+        const r = await publishPlayerAuctionsShare({
+          set,
+          title,
+          description: descriptions.playerauctions,
+          price,
+          img,
+          accounts: shares.playerauctions,
+          game: task.game,
+        });
+        playerauctions.externalId = r.externalId;
+        playerauctions.url = r.url;
+        playerauctions.qty = r.qty;
+      } catch (err) {
+        playerauctions.error = err.message;
+      }
+    } else if (!af.playerauctionsAuto) {
+      playerauctions.error = "PlayerAuctions auto-listing is switched off";
+    } else if (!paEnabled) {
+      playerauctions.error =
+        "PlayerAuctions has no Item category for " + task.game;
+    } else {
+      playerauctions.error = "no spare account for this market yet";
+    }
   } finally {
     if (img) await fsp.unlink(img).catch(() => {});
   }
@@ -1624,6 +1758,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     ggsel,
     zeusx,
     eldorado,
+    playerauctions,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,

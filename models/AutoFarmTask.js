@@ -237,6 +237,12 @@ const autoFarmTaskSchema = new mongoose.Schema(
         qty: { type: Number, default: 0 },
         error: { type: String, default: "" },
       },
+      playerauctions: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
       listedAt: { type: Date, default: null },
       repricedAt: { type: Date, default: null },
       postEvent: { type: Boolean, default: false },
@@ -274,6 +280,12 @@ const autoFarmTaskSchema = new mongoose.Schema(
         error: { type: String, default: "" },
       },
       eldorado: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
+      playerauctions: {
         externalId: { type: String, default: "" },
         url: { type: String, default: "" },
         qty: { type: Number, default: 0 },

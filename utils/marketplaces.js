@@ -36,6 +36,12 @@ const FIELDS = {
   // The server renews it in place via /authentication/refreshTokens, so this is
   // a one-time paste — see eldoradoRefreshSession + utils/eldoradoSessionRefresher.
   eldorado: ["cookie"],
+  // PlayerAuctions is the same shape as Eldorado — cookie auth, httpOnly
+  // session cookies, renewed in place via account-api /SignIn/RefreshToken.
+  // The one difference worth remembering: there is NO CSRF token here, so the
+  // whole credential really is just the Cookie header from a signed-in seller
+  // session (DevTools -> Network -> any request -> copy the Cookie header).
+  playerauctions: ["cookie"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -4434,6 +4440,872 @@ async function eldoradoMarkDelivered(orderId) {
   }
 }
 
+// ------------------------------------------------------------------
+// PlayerAuctions
+// ------------------------------------------------------------------
+// Reverse-engineered private API behind member.playerauctions.com (an Angular
+// app). Full verified contract: docs/PLAYERAUCTIONS-INTEGRATION-PLAN.md.
+//
+// Five hosts, split by concern, all cookie-authenticated:
+//   user-api    — the member: messages, notifications, status, API keys
+//   offer-api   — offers, the game/item taxonomy, offer images
+//   order-api   — orders, order detail, delivery confirmation
+//   account-api — sign-in and token refresh
+//   public-api  — anonymous reference data (no credentials sent)
+//
+// Auth is cookie-only and there is NO CSRF token — the Angular bundle carries
+// Angular's stock XSRF names but PlayerAuctions never sets an XSRF-TOKEN
+// cookie, so no header is derived from it. Do not go looking for Eldorado's
+// `__Host-XSRF-TOKEN` equivalent here; it does not exist.
+//
+// The session cookies are httpOnly, so — as with Eldorado — the operator pastes
+// the whole Cookie header from a signed-in seller session once, and the server
+// renews it in place via POST account-api/api/SignIn/RefreshToken (empty body).
+const PA_USER_API = "https://user-api.playerauctions.com/api";
+const PA_OFFER_API = "https://offer-api.playerauctions.com/api";
+const PA_ORDER_API = "https://order-api.playerauctions.com/api";
+const PA_ACCOUNT_API = "https://account-api.playerauctions.com/api";
+const PA_MAIN_SITE = "https://www.playerauctions.com";
+const PA_MEMBER_SITE = "https://member.playerauctions.com";
+
+// PlayerAuctions rejects any trade whose price x minUnitPerOrder is under $5.
+const PA_MIN_PRICE = 5;
+// An order message is capped at 300 chars (50 for a brand-new member). The long
+// claim guide therefore lives in the offer's `instruction` field instead — see
+// paDeliveryMessage.
+const PA_MAX_MESSAGE = 300;
+// Writes are throttled server-side ("Operated too frequent"). Space them out.
+const PA_WRITE_GAP_MS = 25000;
+
+// deliveryGuarantee enum (GET offer-api/api/games/{id}/item/deliveryTimes).
+const PA_DELIVERY = {
+  min20: 5,
+  hour1: 101,
+  hour2: 4,
+  hour6: 106,
+  hour12: 12,
+  hour24: 3,
+  hour48: 6,
+  day7: 1,
+  day10: 102,
+};
+
+function paCookieJar(str) {
+  const jar = new Map();
+  for (const part of String(str || "").split(/;\s*/)) {
+    if (!part) continue;
+    const i = part.indexOf("=");
+    if (i < 1) continue;
+    jar.set(part.slice(0, i).trim(), part.slice(i + 1));
+  }
+  return jar;
+}
+
+function paJarHeader(jar) {
+  return [...jar.entries()].map(([k, v]) => k + "=" + v).join("; ");
+}
+
+// Fold a response's Set-Cookie back into the jar so a refreshed session sticks.
+// Returns true when something actually changed (worth persisting).
+function paAbsorbCookies(jar, setCookie) {
+  const arr = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+  let changed = false;
+  for (const line of arr) {
+    const pair = String(line).split(";")[0];
+    const i = pair.indexOf("=");
+    if (i < 1) continue;
+    const k = pair.slice(0, i).trim();
+    const v = pair.slice(i + 1);
+    if (jar.get(k) !== v) {
+      jar.set(k, v);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// PlayerAuctions answers HTTP 200 for business failures and hides the verdict in
+// the envelope, so every caller goes through this. Branching on the HTTP status
+// alone silently treats a rejected create as a success.
+function paUnwrap(label, body) {
+  if (body && typeof body === "object" && "isSuccess" in body) {
+    if (body.isSuccess === false) {
+      const err = new Error(
+        label +
+          " failed" +
+          (body.code ? " (code " + body.code + ")" : "") +
+          (body.message ? ": " + body.message : ""),
+      );
+      err.__pa = true;
+      err.paCode = body.code;
+      // code 1 is the write throttle — worth retrying, unlike a validation 400.
+      err.retryable = body.code === 1;
+      throw err;
+    }
+    return "data" in body ? body.data : body;
+  }
+  return body;
+}
+
+function paError(label, e) {
+  if (e && e.__pa) throw e;
+  const status = e && e.response && e.response.status;
+  const body = e && e.response && e.response.data;
+  let detail = "";
+  if (body && typeof body === "object" && body.message) detail = String(body.message);
+  else if (typeof body === "string" && body) detail = body.slice(0, 300);
+  if (status === 401) {
+    detail =
+      detail ||
+      "session not accepted — paste a fresh PlayerAuctions cookie header from " +
+        "a signed-in seller session";
+  }
+  if (status === 403) detail = detail || "account suspended";
+  if (status === 429) detail = detail || "rate limited";
+  const err = new Error(
+    label +
+      " failed" +
+      (status ? " (HTTP " + status + ")" : "") +
+      (detail ? ": " + detail : e && e.message ? ": " + e.message : ""),
+  );
+  err.__pa = true;
+  err.status = status;
+  err.retryable = status === 429;
+  throw err;
+}
+
+// One request against the seller API, carrying the stored jar. A 401 refreshes
+// the session and replays exactly once — PlayerAuctions' access token is short
+// lived, so any call can 401 at any moment and a pre-flight liveness probe
+// races that and loses (the lesson Eldorado taught).
+async function paRequest(method, base, path, opts = {}) {
+  try {
+    return await paRequestOnce(method, base, path, opts);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    const isRefresh = String(path).includes("SignIn/RefreshToken");
+    if (status !== 401 || isRefresh || opts.__retried) throw e;
+    await playerauctionsRefreshSession();
+    return await paRequestOnce(method, base, path, { ...opts, __retried: true });
+  }
+}
+
+async function paRequestOnce(method, base, path, opts = {}) {
+  const keys = requireKeys("playerauctions");
+  const jar = paCookieJar(keys.cookie);
+  const m = String(method).toUpperCase();
+  const headers = {
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Origin: PA_MEMBER_SITE,
+    Referer: PA_MEMBER_SITE + "/",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    Cookie: paJarHeader(jar),
+    ...(opts.headers || {}),
+  };
+  let data = opts.data;
+  if (data && data.getHeaders) Object.assign(headers, data.getHeaders());
+  else if (data !== undefined && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const r = await axios({
+    method: m,
+    url: base + path,
+    data,
+    headers,
+    timeout: opts.timeout || 45000,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  if (paAbsorbCookies(jar, r.headers["set-cookie"])) {
+    await setKeys("playerauctions", { cookie: paJarHeader(jar) });
+  }
+  return r.data;
+}
+
+async function paGet(base, path, label) {
+  try {
+    return paUnwrap(label, await paRequest("GET", base, path));
+  } catch (e) {
+    return paError(label, e);
+  }
+}
+
+// The game and item taxonomy answers anonymously, so it must not be gated on
+// having a cookie. This matters more than it looks: the publishers ask "does
+// this game accept Item offers?" BEFORE any credential is needed, and the
+// auto-lister's per-game gate treats a thrown error as "not supported" — so
+// routing taxonomy through the authenticated path would quietly disable
+// PlayerAuctions listing for every game whenever the cookie lapsed.
+async function paPublicGet(base, path, label) {
+  try {
+    const r = await axios({
+      method: "GET",
+      url: base + path,
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        Origin: PA_MEMBER_SITE,
+        Referer: PA_MEMBER_SITE + "/",
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      },
+      timeout: 45000,
+    });
+    return paUnwrap(label, r.data);
+  } catch (e) {
+    return paError(label, e);
+  }
+}
+
+async function paSend(method, base, path, data, label) {
+  try {
+    return paUnwrap(label, await paRequest(method, base, path, { data }));
+  } catch (e) {
+    return paError(label, e);
+  }
+}
+
+async function playerauctionsTest() {
+  try {
+    const st = await paGet(PA_USER_API, "/User/status", "PlayerAuctions status");
+    const offers = await paGet(
+      PA_OFFER_API,
+      "/Offer/Offers?pageIndex=1&pageSize=1&sortField=null&sortOrder=null",
+      "PlayerAuctions offers",
+    ).catch(() => null);
+    const m = (st && st.members) || {};
+    return {
+      ok: true,
+      detail:
+        "Connected as " +
+        (m.nickName || "seller") +
+        (st && st.isSeller ? " (seller)" : "") +
+        (offers ? " — " + (offers.count || 0) + " active offers" : ""),
+    };
+  } catch (e) {
+    return { ok: false, detail: paSafeMessage(e) };
+  }
+}
+
+function paSafeMessage(e) {
+  try {
+    paError("PlayerAuctions", e);
+  } catch (wrapped) {
+    return wrapped.message;
+  }
+  return String((e && e.message) || e);
+}
+
+// The seller's own profile — memberId, nickname, seller level. `level` gates
+// two things that matter: proof-of-delivery screenshots (level 0 must attach
+// them) and the official API-key programme (level 2+).
+async function playerauctionsMe() {
+  return await paGet(PA_USER_API, "/User/status", "PlayerAuctions status");
+}
+
+async function playerauctionsSellerLevel() {
+  const st = await playerauctionsMe().catch(() => null);
+  const lvl = st && st.members ? st.members.level : null;
+  return Number.isFinite(lvl) ? lvl : 0;
+}
+
+// Renews the session from the refresh cookie. Body is an empty object; the new
+// cookies come back as Set-Cookie and are folded into the stored jar.
+async function playerauctionsRefreshSession() {
+  const keys = requireKeys("playerauctions");
+  const before = paJarHeader(paCookieJar(keys.cookie));
+  try {
+    await paRequest("POST", PA_ACCOUNT_API, "/SignIn/RefreshToken", { data: {} });
+  } catch (e) {
+    paError("PlayerAuctions session refresh", e);
+  }
+  const after = getKeys("playerauctions").cookie || "";
+  return after !== before;
+}
+
+// Cheap liveness probe for the refresher tick. paRequest already refreshes and
+// replays on 401, so this is a health check, not the thing keeping calls alive.
+async function playerauctionsEnsureFreshSession() {
+  try {
+    await paRequest("GET", PA_USER_API, "/User/status");
+    return false;
+  } catch (e) {
+    if (e && e.response && e.response.status !== 401) throw e;
+  }
+  await playerauctionsRefreshSession();
+  await paRequest("GET", PA_USER_API, "/User/status");
+  return true;
+}
+
+// --- Taxonomy -----------------------------------------------------------
+// These endpoints answer anonymously, so they stay readable even when the
+// cookie has lapsed. Cached because they change on the order of months.
+let paGamesCache = { at: 0, list: null };
+
+async function playerauctionsGames() {
+  if (paGamesCache.list && Date.now() - paGamesCache.at < 12 * 3600e3) {
+    return paGamesCache.list;
+  }
+  const list = await paPublicGet(PA_OFFER_API, "/games", "PlayerAuctions games");
+  if (Array.isArray(list) && list.length) {
+    paGamesCache = { at: Date.now(), list };
+  }
+  return list || [];
+}
+
+function paNorm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+// Our farm's game names are not PlayerAuctions' storefront names. These are the
+// pairs that do not fall out of a normalised comparison.
+const PA_GAME_ALIASES = {
+  overwatch2: "Overwatch",
+  callofduty: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  cod: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  callofdutywarzone: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  modernwarfare: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  blackops7: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  r6: "Tom Clancys Rainbow Six Siege",
+  r6s: "Tom Clancys Rainbow Six Siege",
+  rainbowsixsiege: "Tom Clancys Rainbow Six Siege",
+  rainbowsixsiegex: "Tom Clancys Rainbow Six Siege",
+  tomclancysrainbowsixsiege: "Tom Clancys Rainbow Six Siege",
+  tomclancysrainbowsixsiegex: "Tom Clancys Rainbow Six Siege",
+  eft: "Escape From Tarkov",
+  escapefromtarkov: "Escape From Tarkov",
+  tarkov: "Escape From Tarkov",
+  halo: "Halo Infinite",
+  halocampaignevolved: "Halo Infinite",
+  rust: "RUST",
+  pubg: "PUBG: BATTLEGROUNDS",
+  pubgbattlegrounds: "PUBG: BATTLEGROUNDS",
+  playerunknownsbattlegrounds: "PUBG: BATTLEGROUNDS",
+  apex: "Apex Legends",
+  bdo: "Black Desert",
+  blackdesertonline: "Black Desert",
+  eve: "EVE Online",
+  wot: "World of Tanks",
+  lol: "League of Legends",
+  cs2: "Counter-Strike 2",
+  counterstrike2: "Counter-Strike 2",
+  thefinals: "The Finals",
+  naraka: "NARAKA: BLADEPOINT",
+  narakabladepoint: "NARAKA: BLADEPOINT",
+};
+
+// Resolve one of our game names to a PlayerAuctions catalogue row.
+// Returns null when the game is not on PlayerAuctions at all.
+async function playerauctionsResolveGame(game) {
+  const raw = String(game || "").trim();
+  if (!raw) return null;
+  const games = await playerauctionsGames();
+  const want = paNorm(PA_GAME_ALIASES[paNorm(raw)] || raw);
+  if (!want) return null;
+  const exact = games.find((g) => paNorm(g.gameName) === want);
+  if (exact) return exact;
+  // "Call of Duty" should reach "Call of Duty - Warzone / BO7 & All Legacy
+  // Versions", but a 3-letter fragment must not match half the catalogue.
+  if (want.length >= 6) {
+    const pre = games.find((g) => paNorm(g.gameName).startsWith(want));
+    if (pre) return pre;
+    const inc = games.find((g) => paNorm(g.gameName).includes(want));
+    if (inc) return inc;
+  }
+  return null;
+}
+
+// Does this game accept the product type we want to list under? Only 149 of
+// PlayerAuctions' ~400 games allow "item" — several games we farm (Rainbow Six,
+// Apex, Rocket League, Dead by Daylight, The Finals) are account-only, and an
+// Item offer for them is rejected. Callers must check before publishing.
+function paGameSupports(game, productType) {
+  const types = String((game && game.productType) || "")
+    .toLowerCase()
+    .split(",")
+    .map((s) => s.trim());
+  return types.includes(String(productType || "").toLowerCase());
+}
+
+// The item tree. NOTE the plural: /games/{id}/Items/categories is the tree,
+// while /games/{id}/Item/categories is a 404. Both spellings are load-bearing.
+async function playerauctionsItemCategories(gameId) {
+  return (
+    (await paPublicGet(
+      PA_OFFER_API,
+      "/games/" + encodeURIComponent(gameId) + "/Items/categories",
+      "PlayerAuctions item categories",
+    )) || []
+  );
+}
+
+async function playerauctionsServers(gameId) {
+  return (
+    (await paPublicGet(
+      PA_OFFER_API,
+      "/games/" + encodeURIComponent(gameId) + "/Item/servers",
+      "PlayerAuctions servers",
+    )) || []
+  );
+}
+
+async function playerauctionsDeliveryTimes(gameId) {
+  return (
+    (await paPublicGet(
+      PA_OFFER_API,
+      "/games/" + encodeURIComponent(gameId) + "/item/deliveryTimes",
+      "PlayerAuctions delivery times",
+    )) || []
+  );
+}
+
+// Pick the leaf item to file a drops bundle under. Drops are cosmetics, so a
+// generic "Other ..." leaf is both honest and what the existing hand-made
+// listings use (Overwatch: Skins -> Other Skins). Falls back to the first leaf
+// of the first category so a game with an odd tree still publishes.
+async function playerauctionsPickItemPath(gameId, hint) {
+  const tree = await playerauctionsItemCategories(gameId);
+  if (!tree.length) return null;
+  const want = paNorm(hint || "");
+  const leaves = [];
+  for (const root of tree) {
+    for (const sub of root.subCategorys || []) {
+      leaves.push({ rootItem: root.id, rootName: root.name, itemId: sub.id, itemName: sub.name });
+    }
+    if (!(root.subCategorys || []).length) {
+      leaves.push({ rootItem: root.id, rootName: root.name, itemId: root.id, itemName: root.name });
+    }
+  }
+  if (!leaves.length) return null;
+  const pick =
+    (want && leaves.find((l) => paNorm(l.itemName) === want)) ||
+    (want && leaves.find((l) => paNorm(l.itemName).includes(want))) ||
+    leaves.find((l) => /^other/i.test(String(l.itemName).trim())) ||
+    leaves[0];
+  return { ...pick, itemPath: pick.rootItem + "|" + pick.itemId };
+}
+
+// --- Offers -------------------------------------------------------------
+function playerauctionsOfferUrl(offer) {
+  if (!offer) return "";
+  if (offer.url) return offer.url;
+  const id = offer.offerId || offer.id || offer;
+  return PA_MAIN_SITE + "/i/" + encodeURIComponent(id) + "/";
+}
+
+// The seller-search filter that Cancel and HideOrDisplay both demand. Omitting
+// it 400s with "The keywords field is required.;The ProductType field is
+// required.;The ListingStatus field is required."
+function paSearchParameters() {
+  return { keywords: "", productType: "All", listingStatus: "Active" };
+}
+
+// Build the Item offer DTO. `isAgree`/`agreeCheck` are forced true because the
+// server reads them back as false, so a read-modify-write would drop the
+// Secure Seller Delivery Agreement and the write would be rejected.
+function paItemOfferBody({
+  gameId,
+  itemPath,
+  rootItem,
+  itemId,
+  categoryId = 0,
+  serverId = 0,
+  title,
+  description,
+  instruction = "",
+  priceUsd,
+  itemsPerUnit = 1,
+  totalUnit = 1,
+  minUnitPerOrder = 1,
+  offerDuration = 30,
+  deliveryGuarantee = PA_DELIVERY.min20,
+  discounts = [],
+  blobName,
+  screenShot,
+}) {
+  const price = Math.max(PA_MIN_PRICE, Number(priceUsd) || 0);
+  const body = {
+    gameId: Number(gameId),
+    itemPath: String(itemPath || ""),
+    rootItem: Number(rootItem),
+    itemId: Number(itemId),
+    categoryId: Number(categoryId) || 0,
+    serverId: Number(serverId) || 0,
+    title: String(title || "").slice(0, 150),
+    offerDesc: String(description || ""),
+    instruction: String(instruction || ""),
+    price,
+    itemsPerUnit: Number(itemsPerUnit) || 1,
+    totalUnit: Number(totalUnit) || 1,
+    minUnitPerOrder: Number(minUnitPerOrder) || 1,
+    offerDuration: Number(offerDuration) || 30,
+    deliveryGuarantee: Number(deliveryGuarantee),
+    discounts: discounts || [],
+    otherItem: "",
+    deliveryTime: 0,
+    isAgree: true,
+    agreeCheck: true,
+  };
+  if (blobName) body.blobName = blobName;
+  if (screenShot) body.screenShot = screenShot;
+  return body;
+}
+
+// Publish one Item offer. Resolves the game and the item leaf when the caller
+// did not pin them, so callers can pass a plain game name.
+async function playerauctionsPublish(opts = {}) {
+  requireKeys("playerauctions");
+  let { gameId, itemPath, rootItem, itemId } = opts;
+  if (!gameId) {
+    const g = await playerauctionsResolveGame(opts.game);
+    if (!g) throw new Error("PlayerAuctions has no game matching " + opts.game);
+    if (!paGameSupports(g, "item")) {
+      throw new Error(
+        "PlayerAuctions game " + g.gameName + " does not accept Item offers " +
+          "(allowed: " + g.productType + ")",
+      );
+    }
+    gameId = g.gameId;
+  }
+  if (!itemPath) {
+    const leaf = await playerauctionsPickItemPath(gameId, opts.itemHint);
+    if (!leaf) throw new Error("no item category found for PlayerAuctions game " + gameId);
+    itemPath = leaf.itemPath;
+    rootItem = leaf.rootItem;
+    itemId = leaf.itemId;
+  }
+  // Artwork is optional here (an Item offer publishes without one), so a failed
+  // upload must never cost us the listing.
+  let blobName = opts.blobName;
+  let screenShot = opts.screenShot;
+  if (!blobName && opts.coverImagePath) {
+    try {
+      const up = await playerauctionsUploadImage(opts.coverImagePath, gameId);
+      blobName = (up && (up.blobName || up.name)) || "";
+      screenShot = (up && (up.url || up.imageUrl || up.path)) || "";
+    } catch (e) {
+      console.error("playerauctions image upload:", e.message);
+    }
+  }
+  const body = paItemOfferBody({
+    ...opts,
+    gameId,
+    itemPath,
+    rootItem,
+    itemId,
+    blobName,
+    screenShot,
+  });
+  const created = await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/offers/Item",
+    body,
+    "PlayerAuctions publish",
+  );
+  const offerId = paOfferIdOf(created);
+  return { offerId, id: offerId, url: playerauctionsOfferUrl(offerId), raw: created };
+}
+
+// Pull an offer id out of a storefront URL. Offer pages are
+// ".../<game>-items/294684983i!<slug>/", so the id is the digits before "i!".
+// The seller ORDERS list carries no offerId field at all — only the order's
+// title and a link on the detail — so this is how an order is tied back to the
+// listing row that knows how to fulfil it.
+function playerauctionsOfferIdFromUrl(url) {
+  const m = String(url || "").match(/\/(\d+)i!/);
+  return m ? m[1] : "";
+}
+
+// The create response has been seen as both a bare id and an object.
+function paOfferIdOf(created) {
+  if (created == null) return "";
+  if (typeof created === "number" || typeof created === "string") return String(created);
+  return String(created.offerId || created.id || "");
+}
+
+async function playerauctionsOffer(offerId) {
+  return await paGet(
+    PA_OFFER_API,
+    "/offers/Item/" + encodeURIComponent(offerId),
+    "PlayerAuctions offer",
+  );
+}
+
+// Update an offer.
+//
+// ⚠ PlayerAuctions implements an update as cancel-old + create-new, so this
+// returns a DIFFERENT offerId and the old one stops resolving. Callers MUST
+// persist the returned id — a stored externalId goes stale on every reprice or
+// restock, and a fulfiller pointed at a dead offer silently stops delivering.
+async function playerauctionsUpdateOffer(offerId, patch = {}) {
+  const cur = await playerauctionsOffer(offerId);
+  if (!cur) throw new Error("PlayerAuctions offer " + offerId + " not found");
+  const body = paItemOfferBody({
+    gameId: cur.gameId,
+    itemPath: cur.itemPath,
+    rootItem: cur.rootItem,
+    itemId: cur.itemId,
+    categoryId: cur.categoryId,
+    serverId: cur.serverId,
+    title: patch.title !== undefined ? patch.title : cur.title,
+    description: patch.description !== undefined ? patch.description : cur.offerDesc,
+    instruction: patch.instruction !== undefined ? patch.instruction : cur.instruction,
+    priceUsd: patch.priceUsd !== undefined ? patch.priceUsd : cur.price,
+    itemsPerUnit: patch.itemsPerUnit !== undefined ? patch.itemsPerUnit : cur.itemsPerUnit,
+    totalUnit: patch.totalUnit !== undefined ? patch.totalUnit : cur.totalUnit,
+    minUnitPerOrder:
+      patch.minUnitPerOrder !== undefined ? patch.minUnitPerOrder : cur.minUnitPerOrder,
+    offerDuration: patch.offerDuration !== undefined ? patch.offerDuration : cur.offerDuration,
+    deliveryGuarantee:
+      patch.deliveryGuarantee !== undefined ? patch.deliveryGuarantee : cur.deliveryGuarantee,
+    discounts: patch.discounts !== undefined ? patch.discounts : cur.discounts,
+    blobName: cur.blobName,
+    screenShot: cur.screenShot,
+  });
+  body.offerId = Number(offerId);
+  const res = await paSend(
+    "PUT",
+    PA_OFFER_API,
+    "/offers/Item",
+    body,
+    "PlayerAuctions update offer",
+  );
+  const newId = paOfferIdOf(res) || String(offerId);
+  return { offerId: newId, replaced: newId !== String(offerId), raw: res };
+}
+
+// Stock and price are ordinary field updates, but they inherit the new-id
+// behaviour above, so both return the id the caller must now store.
+async function playerauctionsSetQuantity(offerId, totalUnit) {
+  return await playerauctionsUpdateOffer(offerId, {
+    totalUnit: Math.max(0, parseInt(totalUnit, 10) || 0),
+  });
+}
+
+async function playerauctionsReprice(offerId, priceUsd) {
+  return await playerauctionsUpdateOffer(offerId, { priceUsd });
+}
+
+async function playerauctionsMyListings(pageIndex = 1, pageSize = 50) {
+  const res = await paGet(
+    PA_OFFER_API,
+    "/Offer/Offers?pageIndex=" + pageIndex + "&pageSize=" + pageSize +
+      "&sortField=null&sortOrder=null",
+    "PlayerAuctions listings",
+  );
+  return { count: (res && res.count) || 0, items: (res && res.items) || [] };
+}
+
+// Hide (delist) / display (relist). Pausing keeps the offer, unlike Cancel.
+async function playerauctionsHide(offerId) {
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/Offer/HideOrDisplay",
+    { flag: "hide", offerIds: [Number(offerId)], isAll: false, parameters: paSearchParameters() },
+    "PlayerAuctions hide offer",
+  );
+}
+
+async function playerauctionsDisplay(offerId) {
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/Offer/HideOrDisplay",
+    { flag: "display", offerIds: [Number(offerId)], isAll: false, parameters: paSearchParameters() },
+    "PlayerAuctions display offer",
+  );
+}
+
+async function playerauctionsDelist(offerId) {
+  return await playerauctionsHide(offerId);
+}
+
+async function playerauctionsRelist(offerId) {
+  return await playerauctionsDisplay(offerId);
+}
+
+// Permanent. Prefer hide() when the offer may come back.
+async function playerauctionsCancelOffer(offerId) {
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/Offer/Cancel",
+    { offerIds: [Number(offerId)], isAll: false, parameters: paSearchParameters() },
+    "PlayerAuctions cancel offer",
+  );
+}
+
+// Offer artwork. Optional — an Item offer publishes without one — but a listing
+// with a cover converts better, so the publishers attach one when they can.
+async function playerauctionsUploadImage(imagePath, gameId, { isTitle = true } = {}) {
+  const fd = new FormData();
+  fd.append("file", fs.createReadStream(imagePath));
+  if (gameId != null) fd.append("gameId", String(gameId));
+  if (isTitle) fd.append("type", "title");
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/media/images",
+    fd,
+    "PlayerAuctions image upload",
+  );
+}
+
+// --- Orders -------------------------------------------------------------
+async function playerauctionsOrders({ pageIndex = 1, pageSize = 100 } = {}) {
+  const res = await paGet(
+    PA_ORDER_API,
+    "/Order/SellerOrders?pageIndex=" + pageIndex + "&pageSize=" + pageSize +
+      "&sortField=null&sortOrder=null",
+    "PlayerAuctions orders",
+  );
+  return { count: (res && res.count) || 0, items: (res && res.items) || [] };
+}
+
+async function playerauctionsOrderDetail(orderId) {
+  return await paGet(
+    PA_ORDER_API,
+    "/orderdetail/" + encodeURIComponent(orderId),
+    "PlayerAuctions order detail",
+  );
+}
+
+// An order is ours to ship when payment has settled and we have not already
+// claimed delivery.
+//
+// Deciding this from a status string alone is not safe, and the reason is
+// concrete: the coarse `status.orderStatus` reads "Pending Delivery" BOTH
+// before and after the seller claims delivery (verified on order 16458589,
+// whose display string had already moved to "Delivery Pending Buyer
+// Confirmation"). And no paid-but-unshipped order existed on the account while
+// this was reverse-engineered, so the exact display string for that state is
+// unobserved — guessing it would either miss every sale or re-ship every
+// completed one.
+//
+// So the authoritative check is the ORDER'S OWN EVENT LOG, which is a factual
+// record rather than a label: payment has settled, and no seller delivery claim
+// has been written. The status strings are used only as a cheap pre-filter to
+// avoid fetching detail for orders that obviously need nothing.
+
+// States that can never need shipping: unpaid, cancelled, refunded, or already
+// seen through to the end.
+// NOTE the absence of a bare "completed": a paid-and-awaiting-delivery order
+// could plausibly be labelled something like "Payment Completed", and matching
+// that would silently stop every delivery. Only delivery/order completion
+// excludes an order here.
+const PA_NOT_SHIPPABLE =
+  /(pending payment|payment failed|cancel|refund|fully completed|order completed|disputed)/i;
+// States that mean the seller has already handed over.
+const PA_ALREADY_SHIPPED = /(pending buyer|inspection|feedback|delivered)/i;
+
+// Event-log evidence.
+const PA_PAID_EVENT = /(payment settlement completed|payment verified|payment received)/i;
+const PA_DELIVERED_EVENT =
+  /(delivery claimed by seller|full delivery claimed|marked as delivered|delivery completed)/i;
+
+function paStatusStrings(order) {
+  const st = order && order.status;
+  return [
+    String((order && order.orderStatus) || ""),
+    String((st && st.orderStatus) || ""),
+    String((st && st.current) || (typeof st === "string" ? st : "")),
+  ].filter(Boolean);
+}
+
+// Cheap pre-filter over a LIST row. Deliberately permissive: anything not
+// obviously finished is worth one detail fetch, because a missed sale is far
+// more expensive than an extra GET.
+function playerauctionsNeedsDelivery(order) {
+  const strings = paStatusStrings(order);
+  if (strings.some((s) => PA_ALREADY_SHIPPED.test(s))) return false;
+  if (strings.some((s) => PA_NOT_SHIPPABLE.test(s))) return false;
+  return true;
+}
+
+// The authoritative check, against a full order detail.
+function playerauctionsDetailNeedsDelivery(detail) {
+  if (!detail) return false;
+  if (!playerauctionsNeedsDelivery(detail)) return false;
+  const logs = (detail.eventLogs || [])
+    .map((e) => String((e && e.content) || "").replace(/<[^>]+>/g, " "))
+    .join(" | ");
+  // Already handed over — never re-ship.
+  if (PA_DELIVERED_EVENT.test(logs)) return false;
+  // Payment has to have settled. When the log carries no payment event at all
+  // (an older order, or a shape we have not seen), fall back to the status
+  // strings rather than refusing to ship a genuine sale.
+  if (PA_PAID_EVENT.test(logs)) return true;
+  return paStatusStrings(detail).some((s) => /pending delivery|delivery pending/i.test(s));
+}
+
+// The delivery queue. The list endpoint carries a display status only, so every
+// candidate is confirmed against its order detail — which is also where the
+// event log and the guarantee clock live.
+async function playerauctionsPendingOrders(opts = {}) {
+  const { items } = await playerauctionsOrders(opts);
+  const out = [];
+  for (const o of items) {
+    if (!playerauctionsNeedsDelivery(o)) continue;
+    const detail = await playerauctionsOrderDetail(o.orderId).catch(() => null);
+    // A detail we could not read is not evidence of anything; skip rather than
+    // ship blind.
+    if (!detail) continue;
+    if (!playerauctionsDetailNeedsDelivery(detail)) continue;
+    out.push({ ...o, detail });
+  }
+  return out;
+}
+
+// --- Delivery -----------------------------------------------------------
+// The credential travels as an order message. PlayerAuctions caps a message at
+// 300 characters (50 for a brand-new member), which is why the long claim guide
+// belongs in the offer's `instruction` field and not in here.
+async function playerauctionsSendOrderMessage(orderId, content) {
+  const text = String(content || "");
+  if (text.length > PA_MAX_MESSAGE) {
+    throw new Error(
+      "PlayerAuctions message is " + text.length + " chars, over the " +
+        PA_MAX_MESSAGE + "-char limit — shorten it or move the detail into the " +
+        "offer's instruction field",
+    );
+  }
+  return await paSend(
+    "POST",
+    PA_USER_API,
+    "/messages",
+    { objectIdType: "Order", objectId: Number(orderId), content: text },
+    "PlayerAuctions send message",
+  );
+}
+
+// Mark an order delivered.
+//
+// ⚠ multipart, not JSON, and at seller level 0 PlayerAuctions REQUIRES 1-2
+// screenshots as proof of delivery. `proofImagePaths` is therefore mandatory in
+// practice for this account — see utils/playerauctionsProof.js, which renders
+// one. Never call this before the buyer actually has the credential.
+async function playerauctionsMarkDelivered(orderId, proofImagePaths = []) {
+  const fd = new FormData();
+  const paths = (Array.isArray(proofImagePaths) ? proofImagePaths : [proofImagePaths])
+    .filter(Boolean)
+    .slice(0, 2);
+  for (const p of paths) fd.append("images", fs.createReadStream(p));
+  return await paSend(
+    "POST",
+    PA_ORDER_API,
+    "/order/confirmdelivery/" + encodeURIComponent(orderId),
+    fd,
+    "PlayerAuctions mark delivered",
+  );
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -4528,6 +5400,42 @@ module.exports = {
   eldoradoPaidOrders,
   eldoradoOrderStateCounts,
   eldoradoSendOrderMessage,
+  playerauctionsTest,
+  playerauctionsMe,
+  playerauctionsSellerLevel,
+  playerauctionsRefreshSession,
+  playerauctionsEnsureFreshSession,
+  playerauctionsGames,
+  playerauctionsResolveGame,
+  playerauctionsItemCategories,
+  playerauctionsServers,
+  playerauctionsDeliveryTimes,
+  playerauctionsPickItemPath,
+  playerauctionsPublish,
+  playerauctionsOffer,
+  playerauctionsOfferUrl,
+  playerauctionsOfferIdFromUrl,
+  playerauctionsUpdateOffer,
+  playerauctionsSetQuantity,
+  playerauctionsReprice,
+  playerauctionsMyListings,
+  playerauctionsHide,
+  playerauctionsDisplay,
+  playerauctionsDelist,
+  playerauctionsRelist,
+  playerauctionsCancelOffer,
+  playerauctionsUploadImage,
+  playerauctionsOrders,
+  playerauctionsOrderDetail,
+  playerauctionsPendingOrders,
+  playerauctionsNeedsDelivery,
+  playerauctionsDetailNeedsDelivery,
+  playerauctionsSendOrderMessage,
+  playerauctionsMarkDelivered,
+  PA_DELIVERY,
+  PA_MIN_PRICE,
+  PA_MAX_MESSAGE,
+  PA_WRITE_GAP_MS,
   eldoradoMarkDelivered,
   ELD_MIN_PRICE,
   // exported for tests: the TalkJS internal-id derivations the chat send relies on

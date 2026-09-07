@@ -1,7 +1,8 @@
 const mongoose = require("mongoose");
 
-// One row per Eldorado "Twitch Drops Automatic Farming" order (the rent-farm
+// One row per marketplace "Twitch Drops Automatic Farming" order (the rent-farm
 // service, NOT the drops-bundle listings that hand over a farmed account).
+// Shared by the Eldorado and PlayerAuctions fulfillers.
 //
 // This row is what makes automatic fulfilment safe to retry. Each order burns
 // PRISTINE pool accounts, so a retry that re-provisions would quietly spend the
@@ -10,8 +11,12 @@ const mongoose = require("mongoose");
 // half-way resumes at the right step instead of starting over.
 const farmServiceOrderSchema = new mongoose.Schema(
   {
-    // The Eldorado order. Unique — this is the idempotency key.
+    // The marketplace order. Unique — this is the idempotency key. Ids from
+    // different marketplaces share this collection, so non-Eldorado ones are
+    // namespaced by their fulfiller ("pa:16458589") to keep them from ever
+    // colliding with an Eldorado UUID.
     orderId: { type: String, required: true, unique: true, index: true },
+    market: { type: String, default: "eldorado", index: true },
     offerId: { type: String, default: "", index: true },
     offerTitle: { type: String, default: "" },
     buyerUsername: { type: String, default: "" },

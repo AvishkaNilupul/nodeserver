@@ -70,6 +70,8 @@ const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const zeusxTokenRefresher = require("./utils/zeusxTokenRefresher");
 const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
 const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
+const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
+const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -757,6 +759,16 @@ mongoose
     // order's chat and marking it delivered. Self-guards on
     // autoFarm.eldoradoAutoDeliver (and ships in dry-run until proven live).
     eldoradoFulfiller.start();
+    // Same pair for PlayerAuctions. That account already carries 72 lifetime
+    // orders delivered by hand — one of them 7h27m after payment, past its
+    // 6-hour guarantee — so the delivery bot is closing a measured gap rather
+    // than opening a new market. Item offers there have no credential vault
+    // either ("Face to Face"), so the credential goes out as an order message
+    // and delivery is confirmed with a generated proof image, which the
+    // endpoint requires while the seller sits at level 0. Self-guards on
+    // autoFarm.playerauctionsAutoDeliver (and ships in dry-run until proven).
+    playerauctionsSessionRefresher.start();
+    playerauctionsFulfiller.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();

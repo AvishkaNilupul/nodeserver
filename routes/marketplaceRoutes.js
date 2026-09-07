@@ -116,6 +116,7 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "zeusx") r = await mp.zeusxTest();
     else if (name === "funpay") r = await mp.funpayTest();
     else if (name === "eldorado") r = await mp.eldoradoTest();
+    else if (name === "playerauctions") r = await mp.playerauctionsTest();
     else {
       return res
         .status(400)
@@ -1181,6 +1182,10 @@ router.delete(
           await mp.zeusxDelist(row.externalId);
         } else if (row.marketplace === "eldorado") {
           await mp.eldoradoDelist(row.externalId);
+        } else if (row.marketplace === "playerauctions") {
+          // Hide, not Cancel: hiding keeps the offer so it can be relisted,
+          // while Cancel is permanent.
+          await mp.playerauctionsDelist(row.externalId);
         }
       } catch (err) {
         // Already gone or already sold is not a failed delist: the listing is off
