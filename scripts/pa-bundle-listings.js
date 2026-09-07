@@ -107,16 +107,36 @@ async function main() {
   }
 
   // 2. Resolve, price and stock-check each.
+  //
+  // ORDER MATTERS. availableAccountsForSet is by far the most expensive call
+  // here — one holdings query per set — while the game/category gates are a
+  // cached lookup against a list already in memory. Stock-checking first meant
+  // paying for all 1437 sets to keep 539 of them, and the planning run sat for
+  // 37 minutes without finishing. Cheap disqualifiers go first.
   const rows = [];
+  const preGame = new Map();
   for (const [setId, sales] of salesBySet) {
     const set = await DropSet.findById(setId).lean();
     if (!set) continue;
+    const g =
+      set.coverGame || ((set.items || []).find((i) => i.game) || {}).game || "";
+    if (!(set.items || []).length) continue;
+    // A no-claim game can never be sold from this (claimed) archive.
+    if (isNoClaimGame(g)) continue;
+    if (!preGame.has(g)) {
+      preGame.set(g, await mp.playerauctionsResolveGame(g).catch(() => null));
+    }
+    const pa = preGame.get(g);
+    if (!pa) continue;
+    if (!String(pa.productType || "").toLowerCase().split(",").includes("item")) continue;
+
     let avail = 0;
     try {
       avail = (await availableAccountsForSet(set)).length;
     } catch {
       avail = 0;
     }
+    if (avail < 1) continue;
     const sig = itemSignature(set);
     rows.push({
       set,
