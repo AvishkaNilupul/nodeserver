@@ -289,6 +289,28 @@ test("an already-claimed drop is never handed to a buyer", async () => {
   }
 });
 
+/* ----------------------- auto-listing no-claim guard --------------------- */
+
+test("the auto-lister refuses to publish a no-claim game from the archive", async () => {
+  // isNoClaimGame appeared NOWHERE in autoLister, so switching auto-listing on
+  // would have published Overwatch/CoD bundles backed by the auto-farm's
+  // CLAIMED archive — drops the buyer can never connect to their own account.
+  const al = require("../utils/autoLister");
+  const set = { _id: "s1", items: [{ name: "x" }] };
+  for (const game of ["Overwatch", "Rainbow Six Siege", "Call of Duty"]) {
+    await assert.rejects(
+      () => al.publishPlayerAuctionsShare({ set, title: "t", game, accounts: [], price: 5 }),
+      /no-claim game/i,
+      game + " should be refused",
+    );
+    await assert.rejects(
+      () => al.publishEldoradoShare({ set, title: "t", game, accounts: [], price: 5 }),
+      /no-claim game/i,
+      game + " should be refused on Eldorado too",
+    );
+  }
+});
+
 /* --------------------- unfulfillable-order alerting --------------------- */
 
 test("a paid order the bot cannot ship alerts once, not every tick", async () => {

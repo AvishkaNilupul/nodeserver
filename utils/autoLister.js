@@ -33,6 +33,7 @@ const {
 const settings = require("./settings");
 const mp = require("./marketplaces");
 const paCopy = require("./playerauctionsCopy");
+const { isNoClaimGame } = require("./settings");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
 // The stock side (twitchInventory.buildDrops) keys every earned drop through
@@ -837,6 +838,14 @@ async function publishEldoradoShare({
   accounts,
   game,
 }) {
+  // Same rule as PlayerAuctions: a claimed drop is worthless to the buyer for
+  // these games, so the auto-farm's archive can never back the listing.
+  if (isNoClaimGame(game)) {
+    throw new Error(
+      game + " is a no-claim game — sellable only from the unclaimed farm, " +
+        "not the auto-farm's claimed archive",
+    );
+  }
   accounts = await reserveAccountsForPublish(accounts, set, ELD_CLAIM_TAG);
   if (!accounts.length) {
     throw new Error(
@@ -900,6 +909,18 @@ async function publishPlayerAuctionsShare({
   accounts,
   game,
 }) {
+  // Overwatch / Rainbow Six / Call of Duty drops have to reach the buyer
+  // UNCLAIMED so they can connect and claim to their own game account. Every
+  // account this publisher can reach comes from the auto-farm, which CLAIMS as
+  // it farms — so for those games the stock is categorically wrong and the
+  // listing could never be honoured. They are sellable here only from an
+  // unclaimedGame-backed row fed by the no-claim farm.
+  if (isNoClaimGame(game)) {
+    throw new Error(
+      game + " is a no-claim game — sellable only from the unclaimed farm, " +
+        "not the auto-farm's claimed archive",
+    );
+  }
   accounts = await reserveAccountsForPublish(accounts, set, PA_CLAIM_TAG);
   if (!accounts.length) {
     throw new Error(
@@ -2400,6 +2421,10 @@ async function onCampaignEnded(taskId) {
 }
 
 module.exports = {
+  // Exported so the no-claim guard on each is testable without driving a whole
+  // auto-farm task through the lister.
+  publishEldoradoShare,
+  publishPlayerAuctionsShare,
   listActivatedTask,
   listStackedBundle,
   stackedBundlePrice,
