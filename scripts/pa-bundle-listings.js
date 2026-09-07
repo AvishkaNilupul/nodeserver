@@ -45,6 +45,12 @@ const val = (f, d) => {
   return hit ? hit.slice(f.length + 1) : d;
 };
 const APPLY = has("--apply");
+// Proven demand is the DEFAULT source and the better one, but it is nearly
+// exhausted: of 38 sets that ever sold elsewhere, 11 are no-claim games and 8
+// are account-only on PlayerAuctions. --all opens it up to the whole Drop
+// Archive (539 candidates), ordered by real stock so the deepest inventory goes
+// up first rather than a random tail of dead events.
+const ALL = has("--all");
 const LIMIT = parseInt(val("--limit", "0"), 10) || 0;
 const DELAY_MS = parseInt(val("--delay", "26000"), 10) || 26000;
 const MAX_QTY = parseInt(val("--max-qty", "200"), 10) || 200;
@@ -76,6 +82,14 @@ async function main() {
   for (const r of sold) {
     const k = String(r.set);
     salesBySet.set(k, (salesBySet.get(k) || 0) + 1);
+  }
+  if (ALL) {
+    // Every set in the archive becomes a candidate; the ones that have sold
+    // keep their sale count so they still sort to the front.
+    for (const s of await DropSet.find({}, { _id: 1 }).lean()) {
+      const k = String(s._id);
+      if (!salesBySet.has(k)) salesBySet.set(k, 0);
+    }
   }
 
   // Products already on PlayerAuctions. Matching on set id alone is NOT enough:
@@ -142,6 +156,11 @@ async function main() {
     .filter((r) => !isNoClaimGame(r.game))
     .filter((r) => r.avail > 0 && !r.alreadyLive && r.price > 0 && (r.set.items || []).length)
     .sort((a, b) => b.sales - a.sales || b.avail - a.avail);
+  if (ALL) {
+    // With no demand signal to rank on, depth of stock is the honest proxy for
+    // what is worth a listing slot.
+    candidates.sort((a, b) => b.avail - a.avail || b.sales - a.sales);
+  }
 
   // 4. Resolve each game against the PlayerAuctions catalogue ONCE. A game
   //    filed as account-only can never take an Item offer, and finding that out
@@ -149,6 +168,7 @@ async function main() {
   const plan = [];
   const unusable = [];
   const gameCache = new Map();
+  const pathCache = new Map();
   for (const r of candidates) {
     const key = String(r.game || "").toLowerCase();
     if (!gameCache.has(key)) {
@@ -161,6 +181,16 @@ async function main() {
     }
     if (!String(pa.productType || "").toLowerCase().split(",").includes("item")) {
       unusable.push([r.game, "account-only on PlayerAuctions (" + pa.productType + ")"]);
+      continue;
+    }
+    // Accepting Item offers is not the same as having somewhere honest to file
+    // a cosmetics bundle — NBA 2K's tree is currency only, Palia's is a bare
+    // sentinel. Check before spending a throttled write on a rejection.
+    if (!pathCache.has(pa.gameId)) {
+      pathCache.set(pa.gameId, await mp.playerauctionsPickItemPath(pa.gameId).catch(() => null));
+    }
+    if (!pathCache.get(pa.gameId)) {
+      unusable.push([r.game, "no cosmetic category on PlayerAuctions (currency/empty tree)"]);
       continue;
     }
     plan.push({ ...r, pa });
