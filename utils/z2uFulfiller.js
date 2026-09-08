@@ -60,6 +60,12 @@ const WRITE_SPACING_MS = 4000;
 // stays overdue forever and the keeper would re-extend it every single tick.
 const EXTEND_COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000;
 
+// Z2U rejects a re-save of any offer whose Platform/Area selection is
+// incomplete: "Please refine attributes such as Platform,Area". No retry fixes
+// that — the offer has to be corrected by hand in the seller panel — so once
+// seen, stop asking. Clearing the row's lastError re-enables it.
+const ATTR_INCOMPLETE = /refine attributes/i;
+
 function todayIsoDays(dateStr) {
   // Z2U prints the publish date as yyyy/mm/dd.
   const m = /(\d{4})\/(\d{2})\/(\d{2})/.exec(String(dateStr || ""));
@@ -195,7 +201,8 @@ function planForOffer(
   // same pass corrects it in the same breath.
   const willBeVisible =
     offer.online || actions.some((a) => a.action === "on_line");
-  if (known && realStock > 0 && offer.stock !== realStock && willBeVisible) {
+  const stockLocked = ATTR_INCOMPLETE.test(String(row.lastError || ""));
+  if (known && realStock > 0 && offer.stock !== realStock && willBeVisible && !stockLocked) {
     actions.push({
       action: "stock",
       value: realStock,
@@ -299,6 +306,16 @@ async function keepShelfAlive({
           // reports an error for a write it applied would otherwise leave the
           // database disagreeing with the live offer.
           record.error = String((e && e.message) || e).slice(0, 200);
+          // ...except this one, which is a permanent property of the offer.
+          if (ATTR_INCOMPLETE.test(record.error) && entry.row) {
+            await MarketplaceListing.updateOne(
+              { _id: entry.row._id },
+              { $set: { lastError: record.error } },
+            ).catch(() => {});
+            record.verifyNote =
+              "offer's Platform/Area is incomplete on Z2U — fix it by hand; " +
+              "this listing's quantity will not be touched again until then";
+          }
         }
         record.expected = expectedAfter(a.action, a.value);
         record.wasExpired = entry.offer.status === "expired";
@@ -583,14 +600,26 @@ async function shelfTick() {
     const done = await keepShelfAlive({ dryRun });
     const acts = done.filter((d) => d.action);
     if (acts.length) {
+      // Report the VERIFIED outcome, not just what was attempted. Without this
+      // an unattended loop that is silently failing every write looks identical
+      // in the logs to one that is working.
+      const ok = acts.filter((a) => a.verified === true).length;
+      const bad = acts.filter((a) => a.verified === false);
       console.log(
         "z2u shelf keeper: " +
           acts.length +
           " action(s)" +
-          (dryRun ? " (DRY RUN)" : "") +
+          (dryRun ? " (DRY RUN)" : " — verified " + ok + "/" + acts.length) +
+          (bad.length ? ", FAILED " + bad.length : "") +
           " — " +
           acts.slice(0, 6).map((a) => a.pk + ":" + a.action).join(", "),
       );
+      for (const a of bad.slice(0, 5)) {
+        console.log(
+          "  z2u FAILED " + a.pk + " " + a.action + ": " +
+            (a.error || a.verifyNote || "offer did not change"),
+        );
+      }
     }
   } catch (e) {
     console.error("z2u shelf keeper:", (e && e.message) || e);

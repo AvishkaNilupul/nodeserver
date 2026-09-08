@@ -437,3 +437,17 @@ test("an offer extended recently is not extended again", () => {
   );
   assert.deepStrictEqual(live.actions.map((a) => a.action), []);
 });
+
+// Z2U refuses to re-save an offer whose own Platform/Area selection is
+// incomplete. No retry fixes that — it needs a human in the seller panel — so
+// once the error is recorded the keeper must stop asking, or it burns a
+// throttled write on the same rejection every 30 minutes forever.
+test("a stock fix is not retried forever on an offer Z2U will not re-save", () => {
+  const live = { pk: "1", title: "t", online: true, status: "online", stock: 10 };
+  const normal = ful.planForOffer(entry(live, { autoPaused: false, lastError: "" }, 56, 20));
+  assert.deepStrictEqual(normal.actions.map((a) => a.action), ["stock"]);
+  const locked = ful.planForOffer(
+    entry(live, { autoPaused: false, lastError: "Z2U update: Please refine attributes such as Platform,Area" }, 56, 20),
+  );
+  assert.deepStrictEqual(locked.actions, []);
+});
