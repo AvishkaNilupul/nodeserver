@@ -79,8 +79,45 @@ function sheetCells(sheetXml, strings) {
   return cells;
 }
 
-// The data-validation column each field lives in, read off row 10 (the first
-// data row). Same column letters the bulk file writes.
+// Header row 8 names, normalised, mapped to the field we mean by them.
+//
+// THE COLUMN LETTERS ARE NOT FIXED ACROSS GAMES. Verified live 2026-09-08:
+// Overwatch runs ... L=Title, M=Add Image, N=Integer, O=MAX, P=Area, Q=Platform,
+// R=Device, while Rocket League and Halo Infinite insert an extra "Items Type"
+// column at L and shift everything after it one to the right. A builder using
+// fixed positions therefore writes the title into "Items Type" and the image URL
+// into Title — garbage listings, silently. So every column is located by its own
+// header text instead.
+const HEADER_FIELDS = {
+  price: "price",
+  description: "description",
+  inventory: "stock",
+  "min unit per order": "minQty",
+  "expiry date days": "expiryDays",
+  "delivery option": "delivery",
+  "online hour": "onlineHour",
+  "set sort num": "sortNum",
+  "product types": "productType",
+  "items type": "itemsType",
+  title: "title",
+  "add image": "imageUrl",
+  "integer multiple required 1 0": "integerMultiple",
+  "max unit per order": "maxQty",
+  area: "area",
+  platform: "platform",
+  device: "device",
+};
+
+function normHeader(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+// The column letters Z2U uses for a game with NO "Items Type" column. Kept only
+// as documentation of the default layout — the parser reads every list from the
+// column that game's own header row assigns, never from this table.
 const VALIDATION_COLUMNS = {
   currencies: "B",
   expiryDays: "G",
@@ -140,9 +177,32 @@ function parseZ2uTemplate(buffer) {
     if (f) byCol.set(m[1], f[1]);
   }
   const out = { gameName: cells.get("A1") || "", service: cells.get("B3") || "" };
-  for (const [field, col] of Object.entries(VALIDATION_COLUMNS)) {
-    out[field] = byCol.has(col) ? resolveList(byCol.get(col), cells) : [];
+  // Locate every data column by the header text in row 8, per game.
+  const columns = { currency: "B" }; // B carries the currency list but no header
+  for (const [ref, val] of cells) {
+    const m = /^([A-Z]+)8$/.exec(ref);
+    if (!m) continue;
+    const field = HEADER_FIELDS[normHeader(val)];
+    if (field && !columns[field]) columns[field] = m[1];
   }
+  out.columns = columns;
+  // Read each dropdown from the column THIS game puts that field in. Using
+  // fixed letters here was subtly wrong for any game carrying the extra
+  // "Items Type" column: Rocket League's Area list would be read as its
+  // platforms and its Platform list as its devices, so an offer got a country
+  // where its platform belongs.
+  const listFor = (field) => {
+    const col = out.columns[field];
+    return col && byCol.has(col) ? resolveList(byCol.get(col), cells) : [];
+  };
+  out.currencies = listFor("currency");
+  out.expiryDays = listFor("expiryDays");
+  out.deliveryOptions = listFor("delivery");
+  out.productTypes = listFor("productType");
+  out.areas = listFor("area");
+  out.platforms = listFor("platform");
+  out.devices = listFor("device");
+  out.itemsTypes = listFor("itemsType");
   return out;
 }
 
@@ -159,8 +219,51 @@ function pickOption(list, preferred) {
   return { value: opts[0], exact: false, options: opts };
 }
 
+// Column letter -> 0-based index. "A" -> 0, "AA" -> 26.
+function colIndex(letters) {
+  let n = 0;
+  for (const ch of String(letters).toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n - 1;
+}
+
+// The template's own first `upTo` rows, as arrays, so a generated file can
+// reproduce the header block byte-for-byte rather than guessing at it. Only
+// columns A..Z are kept: everything further right is the hidden validation
+// lists, which the importer does not read and which would bloat the upload.
+function templateRows(buffer, upTo = 9) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  const sheet = unzipEntry(buf, "xl/worksheets/sheet1.xml").toString("utf8");
+  let strings = [];
+  try {
+    const ss = unzipEntry(buf, "xl/sharedStrings.xml").toString("utf8");
+    strings = [...ss.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) =>
+      decodeXml([...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((t) => t[1]).join("")),
+    );
+  } catch {
+    /* inline-string templates need no shared strings */
+  }
+  const cells = sheetCells(sheet, strings);
+  const rows = [];
+  for (const [ref, val] of cells) {
+    const m = /^([A-Z]+)(\d+)$/.exec(ref);
+    if (!m) continue;
+    const r = Number(m[2]);
+    if (r > upTo) continue;
+    const c = colIndex(m[1]);
+    if (c > 25) continue;
+    if (!rows[r - 1]) rows[r - 1] = [];
+    rows[r - 1][c] = val;
+  }
+  for (let i = 0; i < upTo; i++) if (!rows[i]) rows[i] = [];
+  return rows;
+}
+
 module.exports = {
+  colIndex,
+  templateRows,
   parseZ2uTemplate,
+  normHeader,
+  HEADER_FIELDS,
   pickOption,
   resolveList,
   unzipEntry,

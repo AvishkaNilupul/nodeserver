@@ -7136,10 +7136,25 @@ async function z2uGameOptions(service, game) {
 
 // Create offers by uploading a filled copy of the game's own template.
 //
-// Z2U has no usable create API for our products, but this batch route is the
-// one the seller panel itself offers. The file is built from the template just
-// downloaded, so the columns and the accepted values are this game's, not a
-// guess — see utils/z2uBulk for why that matters.
+// !! NOT WORKING YET — DO NOT WIRE THIS INTO ANYTHING AUTOMATIC. !!
+//
+// The file this builds is correct as far as can be checked offline (columns and
+// enums come from the game's own template), and the endpoint is real: only
+// /platform/Sell/acceptExcelProducts exists, the other casings 404. But every
+// upload is refused with code 0 "Invalid request! Please refresh the page to
+// resubmit". Ruled out on 2026-09-08 against the live account:
+//   * missing CSRF        — a valid token from /public/createToken (read off the
+//                           __token__ RESPONSE header) was sent as a form field,
+//                           as a request header, and as a query param. All three
+//                           refused identically.
+//   * stale session state — the create page was fetched first in the same jar.
+//   * wrong path/casing   — /Sell/…, /sell/…, /sell/showuploaddata all 404.
+// So the guard is something else the browser sends that has not been observed
+// yet. Cracking it needs a real batch upload captured from the seller panel.
+//
+// The one reassuring part: it fails CLOSED. Five upload attempts created
+// nothing — the shelf stayed at exactly 47 offers with no probe rows — so this
+// is safe to retry, unlike the ZeusX create that made junk out of its failures.
 async function z2uBulkPublish({ service, game, offers }) {
   if (!Array.isArray(offers) || !offers.length) {
     throw new Error("Z2U bulk: nothing to publish");

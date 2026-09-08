@@ -380,3 +380,25 @@ test("pickOption reports whether the game really allows what we wanted", () => {
     value: "", exact: false, options: [],
   });
 });
+
+// Delivery is only possible while an order is genuinely awaiting it — Z2U
+// renders the form for no other state, verified against every order on the
+// account. The probe exists so the fulfiller can check BEFORE claiming an
+// account: claiming marks stock sold, and doing that for an undeliverable order
+// spends it on a hand-over that cannot happen.
+test("the delivery-form probe is honest about undeliverable orders", () => {
+  assert.strictEqual(mp.z2uParseDeliveryForm(""), null);
+  assert.strictEqual(mp.z2uParseDeliveryForm("<div>order already delivered</div>"), null);
+  // A form with no textarea is not a delivery form — there is nowhere to put
+  // the credential, so treat it as absent rather than posting an empty send.
+  assert.strictEqual(
+    mp.z2uParseDeliveryForm('<form id="form_submit"><input name="oid" value="1"></form>'),
+    null,
+  );
+  const ok = mp.z2uParseDeliveryForm(
+    '<form id="form_submit"><input type="hidden" name="oid" value="9">' +
+      '<textarea name="content"></textarea></form>',
+  );
+  assert.deepStrictEqual(ok.textareas, ["content"]);
+  assert.deepStrictEqual(ok.fields, [["oid", "9"], ["content", ""]]);
+});

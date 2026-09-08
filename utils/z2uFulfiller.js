@@ -428,6 +428,28 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
       skipped.push([order.orderId, "already delivered"]);
       continue;
     }
+    // Check the order can actually be delivered BEFORE claiming anything.
+    // Claiming marks an account sold; doing that for an order whose delivery
+    // form does not exist would spend stock on a hand-over that cannot happen,
+    // and then rely on the release path to undo it. Not claiming at all is
+    // strictly safer than claiming and giving back.
+    if (!dryRun) {
+      let form = null;
+      try {
+        form = await mp.z2uDeliveryForm(order.orderId);
+      } catch (e) {
+        skipped.push([order.orderId, "could not read the order page: " + String((e && e.message) || e).slice(0, 90)]);
+        continue;
+      }
+      if (!form) {
+        skipped.push([
+          order.orderId,
+          "no delivery form on the order page — not awaiting delivery " +
+            "(already delivered, cancelled, or under dispute)",
+        ]);
+        continue;
+      }
+    }
     let picked = [];
     try {
       if (row.unclaimedGame) {
