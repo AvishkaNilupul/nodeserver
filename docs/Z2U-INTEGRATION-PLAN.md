@@ -239,6 +239,31 @@ dark changes nothing a buyer can see, and a stock change re-submits the whole
 editor form — doing that for ~30 dark offers every sweep would hammer a
 shared-hosting PHP site forever to no effect.
 
+## Z2U throttles writes, and lies about it
+
+Z2U answers seller actions with **"Operation too frequent, please try again one
+hour later!"** — and the message means neither "applied" nor "rejected".
+Measured on a real sweep at 1.2s spacing: 20 actions produced 9 of those
+messages, and reading the offers back proved the change **had been applied
+anyway in 7 of them**; only 2 genuinely did not happen, and both succeeded on a
+spaced retry minutes later (not an hour).
+
+This is the third marketplace in this codebase that lies about whether a write
+landed, after ZeusX (500s on updates it applied) and GGSel (504s on ones it did
+not). It is the whole reason every write here is verified by read-back.
+
+Writes are spaced `WRITE_SPACING_MS` (4s) apart to keep the honest failures rare.
+
+## A failed hand-over must give the account back
+
+Delivery claims the account BEFORE sending the credential, because the reverse
+order can hand one account to two buyers. So when the send fails, the claim has
+to be undone or the account is marked sold to a buyer who never received it and
+no later pass will offer it again. `releaseClaim()` returns it — an
+`UnclaimedAccount` row goes back to `released`, a Drop Archive reservation is
+released under the Z2U tag. Both are guarded on our own claim tag, so a row
+claimed by another marketplace is never touched however the delivery failed.
+
 ## Traps
 
 - **Never sell Overwatch / Rainbow Six / Call of Duty from the Drop Archive.**

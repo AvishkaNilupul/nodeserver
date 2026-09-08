@@ -22,6 +22,7 @@
 // the way the listing claims it.
 const MarketplaceListing = require("../models/MarketplaceListing");
 const DropSet = require("../models/DropSet");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { loginsOnActiveListings, notListed } = require("./listedLogins");
 const { getAutoFarm } = require("./settings");
@@ -42,6 +43,17 @@ const EXTEND_WITHIN_DAYS = 5;
 // Never advertise more than this on one offer, however deep the ledger is —
 // the same ceiling the Eldorado bundles use.
 const STOCK_MAX = 200;
+
+// How long to wait between writes.
+//
+// Z2U throttles seller actions with "Operation too frequent, please try again
+// one hour later!" — and it is NOT an honest error. Measured on a real sweep at
+// 1.2s spacing: 20 actions produced 9 of those messages, and the read-back
+// proved the change had been applied anyway in 7 of them; only 2 genuinely did
+// not happen. So the message means neither "applied" nor "rejected", which is
+// precisely why every write here is verified by reading the offer back instead
+// of by its status. Wider spacing keeps the honest failures rare.
+const WRITE_SPACING_MS = 4000;
 
 function todayIsoDays(dateStr) {
   // Z2U prints the publish date as yyyy/mm/dd.
@@ -277,8 +289,7 @@ async function keepShelfAlive({
         record.wasExpired = entry.offer.status === "expired";
         applied.push({ record, entry });
         done.push(record);
-        // Z2U is shared-hosting PHP; space the writes out.
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise((r) => setTimeout(r, WRITE_SPACING_MS));
       }
     }
     if (dryRun || !applied.length) continue;
@@ -336,6 +347,43 @@ async function keepShelfAlive({
     }
   }
   return done;
+}
+
+// Put a claim back when the hand-over did not happen.
+//
+// This is the difference between a retryable hiccup and a burned account.
+// Claiming marks the account SOLD before the credential is sent, because the
+// alternative — send first, claim after — can hand the same account to two
+// buyers. So when the send fails, the claim MUST be undone, or the account is
+// marked sold to a buyer who never received it and no later pass will ever
+// offer it again.
+//
+// Guarded on our own claim tag both ways: a row claimed by another marketplace
+// is never touched, however the delivery failed.
+async function releaseClaim(row, acct) {
+  try {
+    if (row.unclaimedGame && acct.ledgerId) {
+      await UnclaimedAccount.findOneAndUpdate(
+        { _id: acct.ledgerId, market: Z2U_CLAIM_TAG },
+        {
+          $set: {
+            status: "released",
+            soldAt: null,
+            market: "",
+            note: "z2u delivery failed — returned to stock",
+          },
+        },
+      );
+      return true;
+    }
+    if (acct.accountId) {
+      await eld.releaseAccounts([acct.accountId], Z2U_CLAIM_TAG);
+      return true;
+    }
+  } catch (e) {
+    console.error("z2u fulfiller: RELEASE FAILED for order — account may be stranded:", (e && e.message) || e);
+  }
+  return false;
 }
 
 // Match a sold order back to the offer it came from.
@@ -429,7 +477,15 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
     try {
       await mp.z2uDeliver(order.orderId, message);
     } catch (e) {
-      skipped.push([order.orderId, "deliver failed: " + String((e && e.message) || e).slice(0, 160)]);
+      // The account was claimed a moment ago and nobody got it — give it back
+      // before moving on, or it is spent for nothing.
+      const back = await releaseClaim(row, acct);
+      skipped.push([
+        order.orderId,
+        "deliver failed: " +
+          String((e && e.message) || e).slice(0, 140) +
+          (back ? " (account returned to stock)" : " (ACCOUNT MAY BE STRANDED)"),
+      ]);
       continue;
     }
     row.units = row.units || [];
@@ -517,6 +573,8 @@ function start() {
 
 module.exports = {
   Z2U_CLAIM_TAG,
+  WRITE_SPACING_MS,
+  releaseClaim,
   expectedAfter,
   EXTEND_WITHIN_DAYS,
   STOCK_MAX,
