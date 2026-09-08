@@ -480,13 +480,20 @@ async function recycleRow(row) {
         claimedAt: null,
         claimedNote: "recycled — spent (never re-farm sold games)",
         soldGames,
+        // `manualSold` means "sold, and no operator has reviewed it since" — it
+        // is what keeps a sale from flowing back into supply on its own (every
+        // claim path excludes it). This click IS the review, so clear it or the
+        // account returns to a pool no engine will ever claim from. The sale
+        // itself stays on record: soldGames, the pool-usage log and the no-claim
+        // spent view all keep it.
+        manualSold: false,
       },
     },
   );
   if (!(update.modifiedCount || update.nModified)) {
     return { login, recycled: false, status: "not_eligible", reason: "pool row changed before recycle" };
   }
-  await recordPoolUsage(row._pool._id, { event: "recycled", actor: "spent-accounts", note: "recycled — sold games excluded", game: "" });
+  await recordPoolUsage(row._pool._id, { event: "recycled", actor: "spent-accounts", note: "recycled — sold games excluded" + (row.manualSold ? ", hand-sold flag cleared" : ""), game: "" });
   await recordAutoFarmEvent({ type: "recycled", count: 1, actor: "spentAccountsTab", reason: "manual recycle" });
   return { login, recycled: true, status: "recycled", soldGames };
 }
@@ -547,6 +554,8 @@ async function recycleFarmSpentRow(row) {
         claimedAt: null,
         claimedNote: "recycled — spent (never re-farm sold games)",
         soldGames,
+        // See recycleRow: the operator's click is the review the flag waits for.
+        manualSold: false,
       },
     },
   );
@@ -556,7 +565,7 @@ async function recycleFarmSpentRow(row) {
   await recordPoolUsage(row._pool._id, {
     event: "recycled",
     actor: "spent-accounts",
-    note: "recycled — sold games excluded",
+    note: "recycled — sold games excluded" + (row.manualSold ? ", hand-sold flag cleared" : ""),
     game: "",
   });
   await recordAutoFarmEvent({

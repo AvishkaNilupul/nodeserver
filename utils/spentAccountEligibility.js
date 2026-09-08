@@ -64,13 +64,16 @@ function spentAccountEligibility(facts = {}) {
   if (/^deployed to /i.test(note)) {
     return reject("still in a bot config (pool row reads \"" + note + "\")");
   }
-  // A hand-sold account: the operator gave a buyer the login AND password, not
-  // just the Twitch token. Re-farming one means re-selling an account somebody
-  // already owns outright, and the sold-game block does not help — the buyer can
-  // sign in and take whatever the next campaign farms. The no-claim claim path
-  // (noclaimFarmRoutes.readyPoolQuery) has always treated manualSold as
-  // never-supply; this is the same rule at the other end of the pipe.
-  if (facts.manualSold) return reject("manually sold — the buyer holds the password");
+  // NOTE on `manualSold` (facts carry it; it is deliberately NOT a reject).
+  // A hand-sold account carries exactly the risk this whole tab already accepts
+  // for an automatically-sold one — the buyer holds the credentials either way —
+  // so refusing only the hand-sold half would be inconsistent, and it would
+  // strand the bulk of the queue. What the flag means is "sold, and no operator
+  // has reviewed it since": the claim paths (noclaimFarmRoutes.readyPoolQuery,
+  // autoFarmer.readyPoolQuery, the renter's pristine filter) all exclude it so a
+  // sale can never quietly flow back into supply on its own. Clicking Recycle IS
+  // that review, so the recycle write paths clear the flag; the row surfaces it
+  // as a chip so the operator sees what they are letting back in.
   if ((Number(facts.availableDrops) || 0) > 0 && !farmSpent) {
     return reject("still has " + Number(facts.availableDrops) + " drop(s) left to sell");
   }

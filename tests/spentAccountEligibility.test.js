@@ -159,26 +159,28 @@ test("an account whose pool row still reads 'deployed to …' is never recyclabl
   assert.equal(isFarmSpentNote(row.claimedNote), false);
 });
 
-test("a hand-sold account is never recyclable, on either path", () => {
-  // manualSold means the operator gave a buyer the login AND password. Farming
-  // it again re-sells an account someone already owns outright, and soldGames
-  // cannot help: the buyer can sign in and take whatever the next campaign
-  // farms. noclaimFarmRoutes.readyPoolQuery has always excluded these.
-  const archive = spentAccountEligibility({ ...ok(), manualSold: true });
-  assert.equal(archive.recyclable, false);
-  assert.equal(archive.reason, "manually sold — the buyer holds the password");
-
-  // The farm-spent bypass skips the stock and cooldown gates — it must not skip
-  // this one.
-  const farmSpent = spentAccountEligibility({
+test("a hand-sold account is still recyclable — the click is the review", () => {
+  // manualSold is not a reject: an automatically-sold account carries exactly
+  // the same risk (the buyer holds the credentials either way), so blocking only
+  // the hand-sold half would be inconsistent and would strand most of the queue.
+  // The flag means "sold, not reviewed since", which every CLAIM path excludes;
+  // the recycle write paths clear it, so a reviewed account can be farmed again.
+  assert.equal(spentAccountEligibility({ ...ok(), manualSold: true }).recyclable, true);
+  assert.equal(
+    spentAccountEligibility({
+      ...ok(),
+      claimedNote: "spent — no-claim removed Overwatch",
+      farmSpent: true,
+      manualSold: true,
+    }).recyclable,
+    true,
+  );
+  // …but the guards that do reject still win over it.
+  const inBot = spentAccountEligibility({
     ...ok(),
-    claimedNote: "spent — no-claim removed Overwatch",
-    farmSpent: true,
+    claimedNote: "deployed to noclaim-bot-6 [pi]",
     manualSold: true,
   });
-  assert.equal(farmSpent.recyclable, false);
-  assert.equal(farmSpent.reason, "manually sold — the buyer holds the password");
-
-  // …and an ordinary spent account is still recyclable.
-  assert.equal(spentAccountEligibility({ ...ok(), manualSold: false }).recyclable, true);
+  assert.equal(inBot.recyclable, false);
+  assert.match(inBot.reason, /still in a bot config/);
 });
