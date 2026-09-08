@@ -318,10 +318,20 @@ async function syncOnce() {
   // and because each relist publishes a BRAND-NEW row, a chain that crossed the
   // cap died at its next sale. At 135 rows it hid 35 listings owing 171 units,
   // 4 of which Gameflip had already marked sold.
+  //
+  // `autoDeliver: true` used to be part of this filter, and it was the same
+  // class of bug as the `.limit(100)` above: a condition that silently excluded
+  // a whole population. The owner's HAND-MADE listings carry autoDeliver false
+  // (68 rows) or nothing at all (3), so they were never polled — their sales
+  // were never seen, `status` stayed "active" for months, the sale price never
+  // reached the pricing evidence, and they kept counting as live stock.
+  // Measured 2026-09-09: 26 of them had already sold, worth $51.80 of revenue
+  // this system had no record of, the oldest sitting unnoticed since 14 July.
+  // Reconciling a sale costs one entry in a bulk sweep that was already paid
+  // for, so there is no reason to look only at half the fleet.
   const rows = await MarketplaceListing.find({
     marketplace: "gameflip",
     status: "active",
-    autoDeliver: true,
   }).lean();
   let sold = 0;
   let relisted = 0;
@@ -437,6 +447,13 @@ async function syncOnce() {
           : "Last unit — nothing left to relist.") +
         (row.url ? "\n\n" + row.url : ""),
     ).catch((e) => console.error("gameflip sale notify error:", e.message));
+    // Reconciling and learning from a sale is for EVERY row; relisting is only
+    // ever for the auto-delivery chain. A hand-made listing must never be
+    // republished on the owner's behalf — that is their stock and their
+    // decision. Today every non-autoDeliver row sits at qtyRemaining 0 so this
+    // is belt-and-braces, but the guard is explicit rather than relying on data
+    // that a future import could change.
+    if (!row.autoDeliver) continue;
     if ((Number(row.qtyRemaining) || 0) <= 0) continue;
     let img = "";
     try {
