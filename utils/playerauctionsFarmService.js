@@ -66,25 +66,54 @@ const GAME_ALIASES = {
   fortnight: "Fortnite",
 };
 
-function normGame(s) {
+function normBase(s) {
   return String(s || "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
 
+// Diacritics, not casing, are the hazard here. PlayerAuctions rejects titles
+// that are not plain ASCII, so the catalogue's "Pok\u00e9mon GO" cannot go up
+// verbatim -- and stripping the accent naively turned it into a name the farm
+// could no longer recognise. Two normalisations cover every spelling that can
+// reach us:
+//   normGame          folds \u00e9 -> e   ("pokemon go") -- correct ASCII titles
+//   normGameStripped  drops \u00e9 entirely ("pokmon go") -- titles published by
+//                                            the older sanitiser, still live
+// A name matches if EITHER normalisation agrees, so old and new offers both
+// resolve without having to republish anything.
+function normGame(s) {
+  return normBase(
+    String(s || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, ""),
+  );
+}
+
+function normGameStripped(s) {
+  return normBase(String(s || "").replace(/[^\x00-\x7F]/g, ""));
+}
+
 async function canonicalGame(raw, knownGames) {
   const key = String(raw || "").toLowerCase().trim();
-  const want = normGame(GAME_ALIASES[key] || GAME_ALIASES[normGame(raw)] || raw);
+  const alias = GAME_ALIASES[key] || GAME_ALIASES[normGame(raw)] || raw;
+  const want = normGame(alias);
+  const wantStripped = normGameStripped(alias);
   if (!want) return "";
-  const hit = (knownGames || []).find((g) => normGame(g) === want);
+  const games = knownGames || [];
+  const hit = games.find(
+    (g) => normGame(g) === want || normGameStripped(g) === wantStripped,
+  );
   if (hit) return hit;
   // "Call of Duty: Modern Warfare 4" should still reach the farm's "Call of
   // Duty"; a short fragment must not match half the catalogue.
   if (want.length >= 6) {
     return (
-      (knownGames || []).find((g) => want.startsWith(normGame(g))) ||
-      (knownGames || []).find((g) => normGame(g).startsWith(want)) ||
+      games.find((g) => want.startsWith(normGame(g))) ||
+      games.find((g) => normGame(g).startsWith(want)) ||
+      games.find((g) => wantStripped.startsWith(normGameStripped(g))) ||
+      games.find((g) => normGameStripped(g).startsWith(wantStripped)) ||
       ""
     );
   }

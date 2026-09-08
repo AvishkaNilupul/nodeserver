@@ -520,6 +520,42 @@ test("storefront game spellings resolve onto names the farm knows", async () => 
   assert.strictEqual(await farm.canonicalGame("Some Unknown Game", known), "");
 });
 
+test("an accented catalogue game resolves from its ASCII offer title", async () => {
+  // PlayerAuctions rejects a title that is not plain ASCII, so a game whose
+  // real name carries an accent can NEVER be advertised under that name --
+  // the farm has to recognise the folded spelling instead. It did not, and
+  // six live "Pokmon GO ... Automatic Farming" offers could not resolve their
+  // game at all: every one of them would have taken a buyer's money and
+  // delivered nothing.
+  const known = ["Pok\u00e9mon GO", "MARVEL T\u014cKON: Fighting Souls", "Fortnite"];
+
+  // What the older sanitiser published (the accented letter dropped).
+  assert.strictEqual(await farm.canonicalGame("Pokmon GO", known), "Pok\u00e9mon GO");
+  // What it publishes now (folded to the base letter).
+  assert.strictEqual(await farm.canonicalGame("Pokemon GO", known), "Pok\u00e9mon GO");
+  // And the real name, in case a title ever reaches us unfolded.
+  assert.strictEqual(await farm.canonicalGame("Pok\u00e9mon GO", known), "Pok\u00e9mon GO");
+  // Non-Latin folding, not just Latin-1.
+  assert.strictEqual(
+    await farm.canonicalGame("MARVEL TOKON: Fighting Souls", known),
+    "MARVEL T\u014cKON: Fighting Souls",
+  );
+  // Folding must not turn an unknown game into a false match.
+  assert.strictEqual(await farm.canonicalGame("Pokemon Sleep", known), "");
+});
+
+test("PlayerAuctions titles fold accents rather than dropping the letter", () => {
+  // "Pokmon" is not a word, and it is what the fulfiller has to read the game
+  // back out of.
+  assert.strictEqual(
+    mp.paSanitizeTitle("Pok\u00e9mon GO Twitch Drops Automatic Farming 1 Year"),
+    "Pokemon GO Twitch Drops Automatic Farming 1 Year",
+  );
+  assert.strictEqual(mp.paSanitizeTitle("MARVEL T\u014cKON"), "MARVEL TOKON");
+  // Still ASCII-only afterwards -- the API rejects anything else.
+  assert.ok(!/[^\x20-\x7E]/.test(mp.paSanitizeTitle("caf\u00e9 \u2014 na\u00efve \u65e5\u672c")));
+});
+
 /* --------------------------- proof of delivery -------------------------- */
 
 const proof = require("../utils/playerauctionsProof");

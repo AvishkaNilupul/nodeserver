@@ -5261,6 +5261,12 @@ const PA_TITLE_FOLD = [
 function paSanitizeTitle(title) {
   let t = String(title || "");
   for (const [re, to] of PA_TITLE_FOLD) t = t.replace(re, to);
+  // Accented letters fold to their base letter FIRST, so "Pok\u00e9mon" becomes
+  // "Pokemon" rather than losing the letter to "Pokmon" below. That is not
+  // cosmetic: the rent-farm fulfiller reads the game back out of our own
+  // title, and a dropped letter left six live Pok\u00e9mon GO offers unable to
+  // resolve their game at all.
+  t = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   // Anything still outside printable ASCII goes; a title is not worth failing
   // a publish over.
   t = t.replace(/[^\x20-\x7E]/g, "");
