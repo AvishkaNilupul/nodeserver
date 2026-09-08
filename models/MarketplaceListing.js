@@ -130,6 +130,15 @@ const marketplaceListingSchema = new mongoose.Schema(
     // paused deliberately by the operator. Only rows carrying this flag are ever
     // resumed automatically.
     autoPaused: { type: Boolean, default: false },
+    // When the Z2U shelf keeper last extended this offer's duration.
+    //
+    // Z2U does NOT move the publish date when an offer is extended, and the
+    // published date plus the duration is the only expiry signal the seller
+    // panel gives. So an extended offer keeps computing as overdue forever, and
+    // without this the keeper re-extends the same offers on every tick —
+    // hammering a rate-limited endpoint to no effect. Ours to remember, because
+    // Z2U will not tell us.
+    lastExtendedAt: { type: Date, default: null },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while

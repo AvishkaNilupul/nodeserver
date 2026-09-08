@@ -402,3 +402,38 @@ test("the delivery-form probe is honest about undeliverable orders", () => {
   assert.deepStrictEqual(ok.textareas, ["content"]);
   assert.deepStrictEqual(ok.fields, [["oid", "9"], ["content", ""]]);
 });
+
+// Z2U does not move an offer's publish date when it is extended, and publish
+// date + duration is the only expiry signal the panel gives — so an extended
+// offer reads as overdue forever. Without a cooldown the keeper re-extends the
+// same offers on every 30-minute tick, against a rate-limited endpoint, for no
+// effect. Observed live: the same 15 actions replayed tick after tick.
+test("an offer extended recently is not extended again", () => {
+  const justNow = Date.now();
+  const expired = { pk: "1", title: "t", online: false, status: "expired", stock: 4 };
+  // No record of an extend -> extend and relist.
+  const fresh = ful.planForOffer(
+    entry(expired, { autoPaused: true, lastExtendedAt: null }, 9, null),
+    { now: justNow },
+  );
+  assert.deepStrictEqual(fresh.actions.map((a) => a.action), ["extend", "on_line", "stock"]);
+  // Extended an hour ago -> relist, but do NOT burn another extend.
+  const recent = ful.planForOffer(
+    entry(expired, { autoPaused: true, lastExtendedAt: new Date(justNow - 3600e3) }, 9, null),
+    { now: justNow },
+  );
+  assert.deepStrictEqual(recent.actions.map((a) => a.action), ["on_line", "stock"]);
+  // Past the cooldown -> extending again is right.
+  const old = ful.planForOffer(
+    entry(expired, { autoPaused: true, lastExtendedAt: new Date(justNow - ful.EXTEND_COOLDOWN_MS - 1) }, 9, null),
+    { now: justNow },
+  );
+  assert.deepStrictEqual(old.actions.map((a) => a.action), ["extend", "on_line", "stock"]);
+  // A LIVE offer near expiry is also suppressed while the cooldown holds.
+  const live = ful.planForOffer(
+    entry({ ...expired, online: true, status: "online", stock: 4 },
+          { autoPaused: false, lastExtendedAt: new Date(justNow - 3600e3) }, 4, 2),
+    { now: justNow },
+  );
+  assert.deepStrictEqual(live.actions.map((a) => a.action), []);
+});

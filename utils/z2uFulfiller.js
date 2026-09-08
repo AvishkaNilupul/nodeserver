@@ -55,6 +55,11 @@ const STOCK_MAX = 200;
 // of by its status. Wider spacing keeps the honest failures rare.
 const WRITE_SPACING_MS = 4000;
 
+// Do not extend the same offer again within this window. Z2U keeps the original
+// publish date after an extend, so the "expires in -24d" reading never moves — it
+// stays overdue forever and the keeper would re-extend it every single tick.
+const EXTEND_COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000;
+
 function todayIsoDays(dateStr) {
   // Z2U prints the publish date as yyyy/mm/dd.
   const m = /(\d{4})\/(\d{2})\/(\d{2})/.exec(String(dateStr || ""));
@@ -146,9 +151,19 @@ function planForOffer(
     return { actions, note: known ? "out of stock" : "" };
   }
   const daysLeft = entry.daysLeft != null ? entry.daysLeft : daysUntilExpiry(offer, now);
-  if (offer.status === "expired") {
+  // Suppress a repeat extend: the publish date does not move, so the offer will
+  // still read as overdue on the next tick and every tick after it.
+  const extendedRecently =
+    row.lastExtendedAt && now - new Date(row.lastExtendedAt).getTime() < EXTEND_COOLDOWN_MS;
+  if (offer.status === "expired" && !extendedRecently) {
     actions.push({ action: "extend", why: "duration ran out" });
     actions.push({ action: "on_line", why: "back on sale after extending" });
+  } else if (offer.status === "expired") {
+    // Extended recently but Z2U still shows it off sale — relist without
+    // burning another extend on it.
+    if (row.autoPaused || resumeSellerPaused) {
+      actions.push({ action: "on_line", why: "relist after a recent extend" });
+    }
   } else if (!offer.online) {
     // Only ever resume what this module paused. A deliberate pause by the
     // operator has to survive the tick, or the shelf keeper becomes a way to
@@ -165,7 +180,7 @@ function planForOffer(
         why: "revive: seller-paused with " + realStock + " in stock",
       });
     }
-  } else if (daysLeft != null && daysLeft <= extendWithin) {
+  } else if (daysLeft != null && daysLeft <= extendWithin && !extendedRecently) {
     actions.push({
       action: "extend",
       why: "expires in " + daysLeft + "d",
@@ -333,6 +348,11 @@ async function keepShelfAlive({
       if (ok && entry.row) {
         const row = await MarketplaceListing.findById(entry.row._id);
         if (row) {
+          if (exp.notExpired) {
+            // Remember the extend; Z2U's own dates will not show it.
+            row.lastExtendedAt = new Date();
+            await row.save();
+          }
           if (exp.online === false) {
             row.autoPaused = true;
             row.lastError = "paused: no claimable stock";
@@ -595,6 +615,7 @@ function start() {
 
 module.exports = {
   Z2U_CLAIM_TAG,
+  EXTEND_COOLDOWN_MS,
   WRITE_SPACING_MS,
   releaseClaim,
   expectedAfter,
