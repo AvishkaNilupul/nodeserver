@@ -23,6 +23,7 @@ const botFactory = require("./botFactory");
 const botWaker = require("./botWaker");
 const mp = require("./marketplaces");
 const settings = require("./settings");
+const farmSizing = require("./farmSizing");
 const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
@@ -650,13 +651,75 @@ function salesOf(internalSales) {
   };
 }
 
-function capForGame(af, internalSales = 0) {
+// COVERAGE SIZING (2026-09-08, settings.coverageSizing, ships OFF).
+//
+// The clamp above is a FLAT ceiling: at maxPerGame 30 a game that sold 15 units
+// and a game that sold 200 are both capped at 60. Measured on prod the same
+// week: Overwatch 202 sales in 30 days, Rocket League 83, Brawlhalla 69 — all
+// treated identically to a game that sold 15, so past ~15 sales a game's own
+// success bought it nothing.
+//
+// With the switch on, the ceiling becomes what the game's real sell rate would
+// justify holding (utils/farmSizing.coverageTarget: a sold account is consumed
+// by the buyer, so N sales a week burns N accounts a week). Three properties
+// make this safe to turn on:
+//
+//   * the legacy cap is the FLOOR, never the ceiling — switching on can only
+//     raise a game's headroom, so no game shrinks;
+//   * `coverageMaxPerGame` bounds it absolutely, because a mis-measured game
+//     must not be able to drain the pool;
+//   * it is only a CEILING. The demand tiers still decide the target, the
+//     coverage gate still subtracts stock we already hold, and fairShare, the
+//     pool reserve and container capacity all still bind afterwards. Raising a
+//     cap does not spend an account.
+//
+// `game` is optional and everything degrades without it: no game means no
+// per-game override and no coverage lookup, i.e. exactly the old behaviour.
+// That is why every existing caller keeps working unchanged.
+function capForGame(af, internalSales = 0, game = "") {
   const base = Math.max(1, Number(af.maxPerGame) || 1);
   const { count } = salesOf(internalSales);
-  return Math.min(
+  const legacy = Math.min(
     base + Math.floor(count * SALES_CAP_BONUS_PER_SALE),
     base * SALES_CAP_MULT_MAX,
   );
+
+  // Read the sizing policy OUT OF THE `af` WE WERE GIVEN, not from a fresh
+  // settings read. `af` is the auto-farm settings object the caller already
+  // loaded for this decision, so this keeps one decision on one consistent
+  // snapshot and saves a disk read per campaign per tick.
+  let cfg = null;
+  try {
+    cfg = settings.getFarmSizing ? settings.getFarmSizing(af) : null;
+  } catch {
+    /* settings unreadable — fail closed to the legacy cap */
+  }
+  if (!cfg) return legacy;
+
+  // An explicit per-game number is the operator overriding the model. It wins
+  // over BOTH the legacy cap and the coverage target, in either direction.
+  if (game) {
+    try {
+      const override = settings.gameAccountCapFor(game, af);
+      if (override > 0) return override;
+    } catch {
+      /* fall through to the automatic path */
+    }
+  }
+
+  if (!cfg.enabled) return legacy;
+
+  const perWeek = farmSizing.salesPerWeek(count, SALES_WINDOW_MS / 86400000);
+  const covered = farmSizing.coverageTarget({
+    salesPerWeek: perWeek,
+    coverageDays: game ? cfg.coverageDaysFor(game) : cfg.coverageDays,
+    safetyStock: game ? cfg.safetyStockFor(game) : cfg.safetyStock,
+    min: legacy,
+    max: game ? Math.max(legacy, cfg.maxFor(game)) : Math.max(legacy, cfg.maxPerGame),
+  });
+  // A game with no sales at all gets nothing from the coverage model, so guard
+  // the max() rather than trusting it to have returned the floor.
+  return Math.max(legacy, covered || 0);
 }
 
 function demandAllocation(research, af, internalSales = 0, opts = {}) {
@@ -664,7 +727,12 @@ function demandAllocation(research, af, internalSales = 0, opts = {}) {
   // passes nothing (or probeColdStart is off) probing is simply allowed, which
   // preserves the original unknown-game probe behaviour exactly.
   const probeAllowed = opts.probeAllowed !== false;
-  const cap = capForGame(af, internalSales);
+  // `opts.game` is what lets the per-game override and the coverage model apply.
+  // Omitting it is not a bug in a caller — it degrades to the flat legacy cap,
+  // which is what every caller got before coverage sizing existed. The replay
+  // harness deliberately passes it so a replayed decision is scored against the
+  // same ceiling the live engine used.
+  const cap = capForGame(af, internalSales, opts.game || "");
   const sales = salesOf(internalSales);
   const pf = priceFactor(sales.avgPrice);
   // Own sales are the strongest evidence there is, tilted by what they were
@@ -1659,7 +1727,7 @@ async function processCampaign(c, ctx) {
     probeAllowed = !recentlyFailed && underBudget;
     probeBudgetBlocked = !recentlyFailed && !underBudget;
   }
-  const alloc = demandAllocation(research, af, sales, { probeAllowed });
+  const alloc = demandAllocation(research, af, sales, { probeAllowed, game });
   recordedInputs = buildDecisionInputs({
     research,
     sales,
@@ -3627,7 +3695,9 @@ async function runOnce() {
     const requests = [];
     for (const c of candidates) {
       const info = infoMap.get(c.campaignId);
-      const alloc = demandAllocation(info.research, af, info.sales);
+      const alloc = demandAllocation(info.research, af, info.sales, {
+        game: c.game,
+      });
       if (alloc.skip) {
         requests.push({ key: c.campaignId, want: 0, weight: 0 });
       } else {

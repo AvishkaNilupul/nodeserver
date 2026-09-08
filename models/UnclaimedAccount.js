@@ -94,6 +94,21 @@ const unclaimedAccountSchema = new mongoose.Schema(
 
     listedAt: { type: Date, default: null, index: true },
     soldAt: { type: Date, default: null },
+
+    // What the unit actually sold for, and where. Stamped by spendAccount from
+    // the listing row that carried it.
+    //
+    // The ledger used to record a sale with FIVE fields and no money at all —
+    // `price` was passed into ledgerAccount and never written — so per-game
+    // revenue for the whole no-claim farm could only be reconstructed by joining
+    // the set's CURRENT listing price, which drifts every time the repricer
+    // runs. Unit counts were exact and revenue was a guess, which is the wrong
+    // way round for deciding how many accounts a game deserves.
+    //
+    // 0 means "sold, price unknown" (a buyer-claimed-the-drop detection names no
+    // price), which is deliberately distinct from a genuine $0.
+    soldPriceUsd: { type: Number, default: 0 },
+    soldMarket: { type: String, default: "" },
     expiredAt: { type: Date, default: null },
     releasedAt: { type: Date, default: null },
     lastCheckedAt: { type: Date, default: null, index: true },
@@ -113,5 +128,11 @@ const unclaimedAccountSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// Sales analytics are always "this game, over this window", and `soldAt` was
+// unindexed — so every per-game sell-rate query scanned the collection. The
+// fleet allocator asks this question on every pass.
+unclaimedAccountSchema.index({ game: 1, soldAt: -1 });
+unclaimedAccountSchema.index({ status: 1, soldAt: -1 });
 
 module.exports = mongoose.model("UnclaimedAccount", unclaimedAccountSchema);

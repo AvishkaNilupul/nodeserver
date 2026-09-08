@@ -41,50 +41,29 @@ const unclaimedAutoList = require("../utils/unclaimedAutoList");
 
 const router = express.Router();
 
-// --- Sandbox constants (all on the Pi, separate from the real bot dir) --------
-const HOST_ID = "pi";
-const BASE = "/home/avishka/twitchbot-noclaim";
-const SRC_DIR = BASE + "/src";
-const BOTS_DIR = BASE + "/bots"; // bots/<id>/Configuration/config.json + bots/<id>/logs
-const IMAGE = "twitchbot-noclaim:latest";
-const CONTAINER_PREFIX = "noclaim-bot-";
-const REPO = "https://github.com/AvishkaNilupul/TwitchDropsBot.git";
-const BRANCH = "noclaim-test";
-const CLAIM_NOTE_PREFIX = "noclaim-farm";
-
-function pi() {
-  const host = hosts.resolveHost(HOST_ID);
-  if (!host) {
-    const e = new Error(`Pi host "${HOST_ID}" is not configured.`);
-    e.status = 503;
-    throw e;
-  }
-  return host;
-}
-
-async function sh(script, { timeout = 30000, input } = {}) {
-  try {
-    const { stdout } = await hosts.runShell(pi(), script, { timeout, input });
-    return (stdout || "").trim();
-  } catch (err) {
-    if (err && err.unreachable) {
-      const e = new Error("Raspberry Pi is unreachable over SSH.");
-      e.status = 503;
-      throw e;
-    }
-    throw err;
-  }
-}
-
-const containerFor = (id) => CONTAINER_PREFIX + id;
-const botDir = (id) => BOTS_DIR + "/" + id;
-const configPath = (id) => botDir(id) + "/Configuration/config.json";
-// Markers the auto-power watcher (utils/noclaimWatcher.js) reads. `.autostopped`
-// = the watcher parked this bot on a dark game (resume when live). `.operatoroff`
-// = the operator hit Stop (stay off until Restart/Create). Restart / Create
-// clear BOTH so manual control always wins.
-const markerPath = (id) => botDir(id) + "/.autostopped";
-const operatorMarkerPath = (id) => botDir(id) + "/.operatoroff";
+// --- Sandbox constants + bot machinery -------------------------------------
+//
+// All of this used to be defined inline here. It moved to utils/noclaimFleet.js
+// when the fleet allocator (utils/unclaimedAllocator.js) needed the same
+// primitives — claiming from the pool, writing a config, starting a container —
+// because a second copy of the claim path would drift from this one. Imported
+// under the same names so every handler below reads exactly as it did.
+const fleet = require("../utils/noclaimFleet");
+const {
+  BASE,
+  BOTS_DIR,
+  IMAGE,
+  CONTAINER_PREFIX,
+  MAX_PER_BOT,
+  pi,
+  sh,
+  containerFor,
+  botDir,
+  configPath,
+  markerPath,
+  operatorMarkerPath,
+  readyPoolQuery,
+} = fleet;
 
 // buildSetGridImage writes the cover to a temp file (it's built to feed the
 // marketplace uploaders a path); the social generator only needs to SHOW it in
@@ -112,61 +91,6 @@ async function publishCover(tmpPath, stem) {
   await fsp.copyFile(tmpPath, path.join(SOCIAL_COVER_DIR, file));
   await fsp.unlink(tmpPath).catch(() => {});
   return SOCIAL_COVER_WEB + file + "?v=" + Date.now();
-}
-
-// Build one bot's config.json from a set of pool account docs.
-function buildConfig(accounts, game) {
-  const games = game ? [game] : [];
-  return JSON.stringify(
-    {
-      TwitchSettings: {
-        TwitchUsers: accounts.map((a) => ({
-          Login: a.username || "",
-          Id: String(a.twitchId || ""),
-          ClientSecret: a.clientSecret || "",
-          Enabled: true,
-          FavouriteGames: games,
-        })),
-        OnlyFavouriteGames: games.length > 0,
-        OnlyConnectedAccounts: false,
-        ClaimDrops: false, // the whole point
-      },
-      FavouriteGames: games,
-      WatchBrowserHeadless: true,
-      WaitingSeconds: 300,
-      AttemptToWatch: 5,
-    },
-    null,
-    2,
-  );
-}
-
-// Accounts recycled back to the pool carry soldGames (the canonical game they
-// were spent on). Never re-claim one whose spent game matches the keyword the
-// operator is creating a bot for — substring semantics like isNoClaimGame, so
-// "rainbow six" also matches a soldGames entry of "rainbow six siege".
-function soldGameExclusion(game) {
-  const g = settings.normGameName(game);
-  if (!g) return {};
-  const esc = g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ +/g, "\\s+");
-  return { soldGames: { $not: { $regex: esc } } };
-}
-
-// Ready pool query — mirrors the auto-farmer's definition so the two systems
-// agree on what "ready" means (verified token, available, not suspended). When
-// a game is given, accounts already spent for that game are excluded.
-function readyPoolQuery(game) {
-  const q = {
-    status: "available",
-    clientSecret: { $gt: "" },
-    lastCheckStatus: { $in: ["", "ok"] },
-    // An account the operator handed to a buyer by hand is NOT supply: it must
-    // never be claimed into a new bot, farmed again and re-listed, or the same
-    // login goes out twice.
-    manualSold: { $ne: true },
-  };
-  Object.assign(q, soldGameExclusion(game));
-  return q;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,126 +257,31 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
 // Create a bot: claim N ready pool accounts, write its config, run it.
 // ---------------------------------------------------------------------------
 router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
-  let claimed = [];
   try {
     const game = String(req.body.game || "").trim();
-    const count = Math.max(1, Math.min(70, parseInt(req.body.count, 10) || 0));
-    if (!game)
-      return res.status(400).json({ success: false, message: "Pick a game." });
-    if (!count)
-      return res
-        .status(400)
-        .json({ success: false, message: "Account count required." });
-
-    // Reserve guard: never draw the shared pool below the auto-farm reserve.
-    const reserve = settings.getAutoFarm().poolReserve || 0;
-    const ready = await AvailableAccount.countDocuments(readyPoolQuery(game));
-    if (ready - count < reserve) {
-      return res.status(409).json({
-        success: false,
-        message: `Only ${Math.max(0, ready - reserve)} account(s) spendable (${ready} ready, reserve ${reserve}). Lower the count.`,
-      });
-    }
-
-    // Don't stomp an in-flight provision.
-    const busy = await sh(
-      `[ -f ${hosts.shq(BASE + "/.provisioning")} ] && echo busy || echo free`,
-      { timeout: 15000 },
-    );
-    if (busy === "busy")
-      return res.status(409).json({
-        success: false,
-        message: "A build/provision is already running. Try again shortly.",
-      });
-
-    // Claim N accounts atomically (available -> claimed) with our note so they
-    // can be found and released later.
-    const note = `${CLAIM_NOTE_PREFIX}:${game}`;
-    for (let i = 0; i < count; i++) {
-      const doc = await AvailableAccount.findOneAndUpdate(
-        readyPoolQuery(game),
-        { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-        { new: true, sort: { lastCheckAt: -1 } },
-      );
-      if (!doc) break;
-      claimed.push(doc);
-      await recordPoolUsage(doc._id, { event: "claimed", actor: "noclaim", game, note });
-    }
-    if (!claimed.length)
-      return res
-        .status(409)
-        .json({ success: false, message: "No ready pool accounts to claim." });
-
-    // Pick the next free bot id.
-    const idsRaw = await sh(
-      `ls -1 ${hosts.shq(BOTS_DIR)} 2>/dev/null || true`,
-      { timeout: 15000 },
-    );
-    const used = idsRaw
-      .split("\n")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => Number.isFinite(n));
-    const id = String((used.length ? Math.max(...used) : 0) + 1);
-
-    // Write config (secret list via stdin — never in argv).
-    const config = buildConfig(claimed, game);
-    await sh(
-      `mkdir -p ${hosts.shq(botDir(id) + "/Configuration")} ${hosts.shq(botDir(id) + "/logs")} && ` +
-        `cat > ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
-      { timeout: 20000, input: config },
-    );
-
-    // Provision (clone + build image if missing + run this bot) detached.
-    const provision = [
-      "set -e",
-      `touch ${hosts.shq(BASE + "/.provisioning")}`,
-      `echo "[$(date -u +%FT%TZ)] bot ${id}: ${claimed.length} account(s), game=${game}"`,
-      `if [ -d ${hosts.shq(SRC_DIR + "/.git")} ]; then cd ${hosts.shq(SRC_DIR)} && git fetch --depth 1 origin ${BRANCH} && git checkout -f ${BRANCH} && git reset --hard origin/${BRANCH}; else rm -rf ${hosts.shq(SRC_DIR)} && git clone --depth 1 -b ${BRANCH} ${hosts.shq(REPO)} ${hosts.shq(SRC_DIR)}; fi`,
-      `if ! docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1; then cd ${hosts.shq(SRC_DIR)} && docker build -f TwitchDropsBot.Console/Dockerfile -t ${hosts.shq(IMAGE)} .; fi`,
-      `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
-      `docker run -d --name ${hosts.shq(containerFor(id))} --restart unless-stopped --user 0:0 ` +
-        `-e INSIDE_DOCKER=true -v ${hosts.shq(botDir(id) + "/Configuration")}:/app/Configuration ` +
-        `-v ${hosts.shq(botDir(id) + "/logs")}:/app/logs ${hosts.shq(IMAGE)}`,
-      `echo "[$(date -u +%FT%TZ)] bot ${id} started"`,
-    ].join(" && ");
-    const wrapped =
-      `( { ${provision} ; } > ${hosts.shq(BASE + "/provision.log")} 2>&1; rm -f ${hosts.shq(BASE + "/.provisioning")} )`;
-    await sh(
-      `mkdir -p ${hosts.shq(BASE)}; setsid sh -c ${hosts.shq(wrapped)} >/dev/null 2>&1 < /dev/null &`,
-      { timeout: 20000 },
-    );
-
+    const count = Math.max(1, Math.min(MAX_PER_BOT, parseInt(req.body.count, 10) || 0));
+    const out = await fleet.createBot({
+      game,
+      count,
+      actor: actorFromReq(req),
+    });
     logEvent({
       category: "noclaim",
       action: "bot_created",
       actor: actorFromReq(req),
-      subject: containerFor(id),
+      subject: containerFor(out.id),
       game: game || "",
-      count: claimed.length,
+      count: out.claimed,
       detail:
-        "no-claim bot " + id + " created with " + claimed.length + " account(s)",
+        "no-claim bot " + out.id + " created with " + out.claimed + " account(s)",
     });
     res.json({
       success: true,
-      id,
-      claimed: claimed.length,
-      message: `Bot ${id} created with ${claimed.length} account(s). Building/starting on the Pi — watch the logs.`,
+      id: out.id,
+      claimed: out.claimed,
+      message: `Bot ${out.id} created with ${out.claimed} account(s). Building/starting on the Pi — watch the logs.`,
     });
   } catch (err) {
-    // Roll the claim back so accounts aren't stranded out of the pool.
-    if (claimed.length) {
-      const stillClaimed = await AvailableAccount.find(
-        { _id: { $in: claimed.map((d) => d._id) }, status: "claimed" },
-        { _id: 1 },
-      ).lean();
-      const rolledBack = await AvailableAccount.updateMany(
-        { _id: { $in: claimed.map((d) => d._id) } },
-        { $set: { status: "available", claimedAt: null, claimedNote: "" } },
-      ).catch(() => {});
-      if (rolledBack && (rolledBack.modifiedCount || rolledBack.nModified)) {
-        await recordPoolUsage(stillClaimed.map((d) => d._id), { event: "released", actor: "noclaim" });
-      }
-    }
     res
       .status(err.status || 500)
       .json({ success: false, message: err.message || "Create failed" });

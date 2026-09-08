@@ -131,6 +131,13 @@
           superOnly: true,
         },
         {
+          href: "/farm-sizing.html",
+          label: "Fleet sizing",
+          icon:
+            '<path d="M3 20V10M9 20V4M15 20v-7M21 20v-11"></path>',
+          superOnly: true,
+        },
+        {
           href: "/unclaimed-farms.html",
           label: "Unclaimed farms",
           icon:

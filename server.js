@@ -32,7 +32,9 @@ const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
+const farmSizingRoutes = require("./routes/farmSizingRoutes");
 const unclaimedAutoList = require("./utils/unclaimedAutoList");
+const unclaimedAllocator = require("./utils/unclaimedAllocator");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
@@ -447,6 +449,13 @@ app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
   serveFarmPage(req, res, "noclaim-farm.html");
 });
 
+// Fleet sizing console. Gated like every other farm page — /farm2.html is
+// served by the blanket static mount and therefore has no auth on its shell,
+// which is not a pattern to copy.
+app.get("/farm-sizing.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "farm-sizing.html"));
+});
+
 app.get("/playerauctions.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "playerauctions.html"));
 });
@@ -654,6 +663,10 @@ app.use(enforce2fa, noclaimFarmRoutes);
 // id and kills the server's copy, which is the one thing that stops delivery.
 app.use(enforce2fa, playerauctionsRoutes);
 app.use(enforce2fa, unclaimedAutoRoutes);
+// Fleet sizing: how many accounts each game should farm, and how many of them
+// should be on sale. Reads are always available; the one endpoint that spends
+// accounts dry-runs unless explicitly told to apply.
+app.use(enforce2fa, farmSizingRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
 app.use(enforce2fa, spentAccountsRoutes);
@@ -827,6 +840,11 @@ mongoose
     // on expiry and returns all-expired accounts to the pool. Self-guards on
     // autoFarm.unclaimedAutoList + the pause flag.
     unclaimedAutoList.start();
+    // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
+    // auto-list shelf from what the game actually sells. It MEASURES every pass
+    // (so the panel and the history exist either way) but only ACTS when
+    // autoFarm.noclaimAutoSize is on, which it is not by default.
+    unclaimedAllocator.start();
     // Fleet metric history: a periodic snapshot of account / pool / listing
     // counts so a future "the count dropped" question can be answered from data
     // instead of guesswork. See utils/fleetSnapshot.js.

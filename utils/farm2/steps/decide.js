@@ -470,7 +470,12 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   const sales = b.salesOf(salesRaw);
 
   const { probeAllowed, probeBudgetBlocked } = await probeGate(game, af2);
-  const alloc = b.demandAllocation(research, af2, salesRaw, { probeAllowed });
+  // `game` is what lets the per-game cap override and the coverage model apply
+  // (autoFarmer.capForGame). The legacy tick passes it at both of its own call
+  // sites, so omitting it here would make the lane engine decide a smaller
+  // ceiling than legacy for the same campaign — a disagreement the shadow
+  // comparison would report as a real divergence.
+  const alloc = b.demandAllocation(research, af2, salesRaw, { probeAllowed, game });
 
   // Non-probe campaigns must at least fill every enabled market's shelf. Read
   // here, once, because it is both a coverage-gate input and part of the

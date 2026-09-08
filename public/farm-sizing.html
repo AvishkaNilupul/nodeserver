@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}try{if(/[?&]embed=1(&|$)/.test(location.search))document.documentElement.classList.add('embed');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fleet sizing</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .chip.on{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .chip.off{background:rgba(248,113,113,.14);}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: flex; overflow: hidden; }
+  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent2), var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav .links a:hover { background: var(--surface-2); }
+  .nav .links a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
+  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+  .nav .me .who b { font-size: 13.5px; display: block; } .nav .me .who span { font-size: 11px; color: var(--muted); }
+  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .nav .me .logout + .logout { margin-left: 8px; }
+
+  .page { flex: 1; overflow-y: auto; padding: 24px 28px; min-width: 0; }
+  .page h1 { font-size: 22px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .banner { margin: 14px 0; padding: 11px 14px; border-radius: 12px; border:1px solid var(--line); background: var(--surface-2); font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .banner b { color: var(--ink); }
+
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin: 14px 0; }
+  .stat { background: var(--surface); border:1px solid var(--line); border-radius: 12px; padding: 9px 15px; }
+  .stat b { font-size: 18px; display:block; } .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.04em; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 16px; }
+  .panel .hd { padding: 12px 16px; border-bottom: 1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .panel .hd b { font-size: 14.5px; } .panel .bd { padding: 14px 16px; }
+
+  label { display:block; font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing:.03em; }
+  input, select { padding: 9px 11px; border-radius: 10px; border:1.5px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13.5px; outline:none; font-family:inherit; }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  .btn { border:none; border-radius: 10px; padding: 9px 15px; font-size: 13px; font-weight: 600; cursor: pointer; font-family:inherit; }
+  .btn.primary { background: var(--accent); color: #fff; } .btn.primary:hover{filter:brightness(1.06);}
+  .btn.ghost { background: var(--surface); color: var(--ink); border:1px solid var(--line); } .btn.ghost:hover{background:var(--surface-2);}
+  .btn.danger { background: var(--surface); color: var(--red); border:1px solid var(--line); } .btn.danger:hover{background:#fef2f2;border-color:#fecaca;}
+  .btn.sm { padding: 6px 11px; font-size: 12px; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  .chip { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border:1px solid var(--line); color: var(--muted); background: var(--surface-2); }
+  .chip.on { color: var(--green); background:#ecfdf5; border-color:transparent; }
+  .chip.off { color: var(--red); background:#fef2f2; border-color:transparent; }
+  .chip.warn { color: var(--yellow); background:#fffbeb; border-color:transparent; }
+  tr.soldrow td { background: rgba(248,113,113,.07); }
+  tr.soldrow td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+  tr.listedrow td { background: rgba(5,150,105,.07); }
+  tr.listedrow td:first-child { box-shadow: inset 3px 0 0 var(--green); }
+
+  .bot { border:1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow:hidden; }
+  .bot .row { display:flex; align-items:center; gap:12px; padding: 12px 14px; cursor:pointer; }
+  .bot .row:hover { background: var(--surface-2); }
+  .bot .row .g { font-weight:600; } .bot .row .meta { color:var(--muted); font-size:12.5px; }
+  .bot .row .sp { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .bot .body { border-top:1px solid var(--line); padding: 12px 14px; display:none; background:var(--surface-2); }
+  .bot.open .body { display:block; }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; }
+  .tab { font-size:12px; padding:5px 11px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer; font-weight:600; }
+  .tab.active { background:var(--accent); color:#fff; border-color:transparent; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line); }
+  th { font-size:10.5px; text-transform:uppercase; color:var(--muted); }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size:11.5px; }
+  .prog { height:6px; border-radius:999px; background:var(--surface); overflow:hidden; min-width:70px; display:inline-block; vertical-align:middle;}
+  .prog i { display:block; height:100%; background:var(--accent); } .prog i.done{background:var(--green);}
+  pre.log { margin:0; background:#0b0e14; color:#c8d3e6; border-radius:9px; padding:11px; font-size:11.5px; line-height:1.5; max-height:280px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; }
+  .tagrow { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .tag { display:inline-flex; align-items:center; gap:6px; background:var(--surface-2); border:1px solid var(--line); border-radius:999px; padding:4px 10px; font-size:12.5px; }
+  .tag button { border:none; background:none; color:var(--muted); cursor:pointer; font-size:14px; line-height:1; }
+  .muted { color:var(--muted); font-size:12.5px; }
+  .toast { position: fixed; bottom: 22px; right: 22px; background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 10px; font-size: 13px; opacity:0; transform: translateY(8px); transition:.2s; pointer-events:none; max-width:380px;}
+  .toast.show { opacity:1; transform:none; }
+  code { background: var(--surface-2); padding:1px 6px; border-radius:6px; font-size:12px; }
+
+  /* Table scroll wrapper: every table sits inside one so a wide table scrolls
+     within its own box instead of pushing the page sideways. Transparent on
+     desktop (table stays 100% wide); the mobile block below gives it a floor. */
+  .tw { overflow-x:auto; -webkit-overflow-scrolling:touch; max-width:100%; }
+  .tw > table { min-width:100%; }
+
+  /* ---- Mobile (≤720px). This tab is used from a phone, embedded via an
+     iframe (?embed=1) in unclaimed-farms.html at ~375px wide. Desktop is
+     untouched: everything here lives inside the media query. ---- */
+  @media (max-width: 720px) {
+    body { overflow-x:hidden; }
+    .page { padding: 14px 12px; overflow-x:hidden; }
+    .page h1 { font-size: 19px; }
+    .sub { font-size: 12.5px; }
+    .head { gap: 8px; }
+    .head > div:last-child { margin-left: 0 !important; width: 100%; }
+    .head > div:last-child .btn { width: 100%; }
+    .banner { margin: 10px 0; padding: 10px 12px; font-size: 12px; }
+
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+    .stat { padding: 8px 11px; min-width: 0; }
+    .stat b { font-size: 16px; }
+
+    .panel { margin-bottom: 12px; border-radius: 12px; }
+    .panel .hd { padding: 10px 12px; gap: 8px; }
+    .panel .bd { padding: 11px 12px; }
+
+    /* Full-width form controls; 16px stops iOS Safari from zooming the page
+       on focus. Inline widths (#count 120px, #game/#newGame min-width) are
+       overridden so nothing sticks out of the 375px column. */
+    input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+      width: 100% !important; min-width: 0 !important; max-width: 100%;
+      font-size: 16px; padding: 10px 12px;
+    }
+    textarea { display:block; resize: vertical; }
+    .form-row { flex-direction: column; align-items: stretch; gap: 10px; }
+    .form-row > div { width: 100%; }
+    .form-row > .btn { width: 100%; }
+    .gamerow { flex-wrap: wrap; }
+    .gamerow input { flex: 1 1 100%; }
+    .gamerow .btn { flex: 1 1 auto; }
+
+    .btn { padding: 9px 13px; }
+    .tagrow { gap: 6px; }
+    .tabs { flex-wrap: wrap; gap: 5px; }
+    .tab { padding: 6px 10px; }
+
+    /* Bot rows: name/meta on the first line, status + action buttons wrap
+       onto their own line instead of being squeezed off the right edge. */
+    .bot .row { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    .bot .row .g { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    .bot .row .sp { margin-left: 0; flex-basis: 100%; flex-wrap: wrap; }
+    .bot .body { padding: 10px; }
+
+    /* Tables: keep columns readable with a min-width and let the wrapper
+       scroll sideways. .wide is the accounts table (password + secrets). */
+    .tw > table { min-width: 560px; }
+    .tw.wide > table { min-width: 760px; }
+    .tw td.mono { white-space: nowrap; }
+    th, td { padding: 6px 7px; }
+
+    pre.log { max-height: 220px; font-size: 11px; padding: 9px; }
+    .prog { min-width: 50px; }
+    .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+  }
+
+  /* Embedded in the Unclaimed farms iframe (?embed=1): admin-nav.js injects
+     its own 54px "RedeemHub ☰" top bar + off-canvas drawer + backdrop at
+     ≤768px and pads the body for it, which duplicated the parent page's
+     chrome inside the frame. Deliberately OUTSIDE any media query and
+     !important: the script's own styles are injected later (and its media
+     rule has the same specificity), so an unqualified rule here lost to it
+     at phone widths. The parent page already has the nav at every width;
+     the standalone page (no ?embed=1) keeps the drawer. */
+  html.embed .nav, html.embed .mobile-topbar, html.embed .nav-backdrop { display: none !important; }
+  html.embed body { padding-top: 0 !important; }
+
+  /* Copy fallback: when neither clipboard path works (iOS Safari refuses
+     writes outside a live tap, plain-http has no clipboard API) the text is
+     shown in a readonly textarea the owner can long-press-select. */
+  .copybox { position: fixed; inset: 0; z-index: 60; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .copybox[hidden] { display: none; }
+  .copybox .card { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 12px; width: 100%; max-width: 420px; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+  .copybox .card .hd { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; font-size: 13px; }
+  .copybox textarea { width: 100%; min-height: 120px; max-height: 45vh; font-family: ui-monospace, Menlo, monospace; font-size: 13px; resize: vertical; -webkit-user-select: text; user-select: text; }
+</style>
+</head>
+
+<body>
+<aside class="nav">
+  <div class="brand">
+    <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+    <b>RedeemHub<span>Admin console</span></b>
+  </div>
+  <nav class="links">
+    <a href="/admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg> Inbox</a>
+    <a href="/orders"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M7 14h6"></path></svg> Orders</a>
+    <a href="/inventory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path></svg> Inventory</a>
+  </nav>
+  <div class="me">
+    <span class="av" id="meAvatar">--</span>
+    <div class="who"><b id="meName">Admin</b><span id="meRole">Seller</span></div>
+    <button class="logout" onclick="toggleTheme()" title="Toggle dark mode"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></button>
+    <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg></button>
+  </div>
+</aside>
+<main class="page">
+  <div class="head" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+    <div>
+      <h1>Fleet sizing</h1>
+      <div class="sub">How many accounts each game should farm, and how many of them should be on sale.</div>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn ghost" id="refreshBtn">Refresh</button>
+      <button class="btn ghost" id="policyBtn">Policy</button>
+    </div>
+  </div>
+
+  <div class="banner">
+    A sold account is <b>consumed</b> — the buyer keeps it — so a game selling <b>N a week burns N accounts a week</b>.
+    The target is <b>N x cover + safety stock</b>. Nothing here acts on its own unless you turn it on:
+    auto-sizing is <span id="autoChip" class="chip">…</span> and the auto-farm coverage ceiling is <span id="covChip" class="chip">…</span>.
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b id="stSales">–</b><span>no-claim sales / wk</span></div>
+    <div class="stat"><b id="stStock">–</b><span>sellable now</span></div>
+    <div class="stat"><b id="stFleet">–</b><span>accounts farming</span></div>
+    <div class="stat"><b id="stTarget">–</b><span>target</span></div>
+    <div class="stat"><b id="stNeed">–</b><span>short by</span></div>
+    <div class="stat"><b id="stPool">–</b><span>pool spendable</span></div>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <div class="panel">
+    <div class="hd">
+      <b>No-claim fleet</b>
+      <span class="chip" id="fleetChip">…</span>
+      <span class="muted" id="planNote"></span>
+      <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn ghost sm" id="dryBtn">Preview changes</button>
+        <button class="btn primary sm" id="applyBtn">Apply</button>
+      </div>
+    </div>
+    <div class="bd">
+      <div class="tw">
+        <table>
+          <thead><tr>
+            <th>Game</th><th>Sales/wk</th><th>Avg $</th><th>On sale</th><th>Held</th>
+            <th>Farming</th><th>Target</th><th>Cover</th><th>Shelf cap</th><th>Action</th>
+          </tr></thead>
+          <tbody id="planRows"><tr><td colspan="10" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div id="planNotes" style="margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <div class="panel">
+    <div class="hd">
+      <b>Auto-farm ceilings</b>
+      <span class="muted">What each game's cap is now, and what the coverage model would give it.</span>
+      <div style="margin-left:auto;"><button class="btn ghost sm" id="afBtn">Load</button></div>
+    </div>
+    <div class="bd">
+      <div class="tw">
+        <table>
+          <thead><tr>
+            <th>Game</th><th>Sales/wk</th><th>Farming</th><th>Cap now</th>
+            <th>Flat cap</th><th>Coverage cap</th><th>Override</th>
+          </tr></thead>
+          <tbody id="afRows"><tr><td colspan="7" class="muted">Not loaded — this reads sales per game and takes a moment.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <div class="panel" id="policyPanel" style="display:none;">
+    <div class="hd"><b>Policy</b><span class="muted">Live-edited; takes effect on the next pass, no restart.</span></div>
+    <div class="bd">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;">
+        <div>
+          <label>Coverage days</label>
+          <input id="pCoverageDays" type="number" min="1" max="365" style="width:100%">
+          <div class="muted" style="margin-top:4px;">Days of demand to hold. 28 = four weeks.</div>
+        </div>
+        <div>
+          <label>Safety stock</label>
+          <input id="pSafety" type="number" min="0" max="500" style="width:100%">
+        </div>
+        <div>
+          <label>Max per game</label>
+          <input id="pMax" type="number" min="1" style="width:100%">
+        </div>
+        <div>
+          <label>Max accounts per run</label>
+          <input id="pMaxRun" type="number" min="1" max="1000" style="width:100%">
+        </div>
+        <div>
+          <label>Allocator interval (min)</label>
+          <input id="pInterval" type="number" min="5" max="1440" style="width:100%">
+        </div>
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;align-items:center;">
+        <label style="display:flex;gap:8px;align-items:center;text-transform:none;font-size:13px;margin:0;">
+          <input id="pCoverage" type="checkbox"> Auto-farm coverage ceiling
+        </label>
+        <label style="display:flex;gap:8px;align-items:center;text-transform:none;font-size:13px;margin:0;">
+          <input id="pAuto" type="checkbox"> No-claim auto-sizing (creates + tops up bots)
+        </label>
+      </div>
+      <div style="margin-top:14px;">
+        <label>Per-game account caps — one <code>game = number</code> per line. Overrides everything.</label>
+        <textarea id="pCaps" rows="4" style="width:100%;padding:9px 11px;border-radius:10px;border:1.5px solid var(--line);background:var(--surface-2);color:var(--ink);font-family:ui-monospace,Menlo,monospace;font-size:12.5px;"></textarea>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button class="btn primary" id="saveBtn">Save policy</button>
+        <button class="btn ghost" id="cancelBtn">Close</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+<script>
+function toggleTheme(){var d=document.documentElement.getAttribute('data-theme')==='dark';if(d){document.documentElement.removeAttribute('data-theme');localStorage.setItem('theme','light');}else{document.documentElement.setAttribute('data-theme','dark');localStorage.setItem('theme','dark');}ti();}
+function ti(){var dark=document.documentElement.getAttribute('data-theme')==='dark';document.querySelectorAll('.t-moon').forEach(e=>e.style.display=dark?'none':'');document.querySelectorAll('.t-sun').forEach(e=>e.style.display=dark?'':'none');}
+ti();
+document.getElementById('logoutBtn').onclick=function(){fetch('/logout',{method:'POST'}).finally(()=>location.href='/admin-login.html');};
+var $=function(id){return document.getElementById(id);};
+var toastT; function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),3400);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j={};try{j=await r.json();}catch(e){}if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
+
+var lastPlan=null, lastSettings=null;
+
+function chip(on,onText,offText){return '<span class="chip '+(on?'on':'off')+'">'+esc(on?onText:offText)+'</span>';}
+
+// Days of cover is the number that says "act now" or "leave it alone", so it is
+// the only cell that colours itself: under 3 days is a stock-out in progress.
+function coverCell(d){
+  if(d==null) return '<span class="muted">not moving</span>';
+  var cls = d<3 ? 'off' : (d<7 ? 'warn' : 'on');
+  return '<span class="chip '+cls+'">'+d+'d</span>';
+}
+
+async function loadPlan(){
+  $('planRows').innerHTML='<tr><td colspan="10" class="muted">Reading sales, stock and the Pi fleet…</td></tr>';
+  try{
+    var j=await api('/api/farm-sizing/plan?days=30');
+    lastPlan=j.plan;
+    render(j.plan, j.status);
+  }catch(e){
+    $('planRows').innerHTML='<tr><td colspan="10" class="muted">'+esc(e.message)+'</td></tr>';
+    toast(e.message);
+  }
+}
+
+function render(p, st){
+  $('stSales').textContent=p.totals.salesPerWeek;
+  $('stStock').textContent=p.totals.onHand;
+  $('stFleet').textContent=p.fleetKnown?p.totals.assigned:'?';
+  $('stTarget').textContent=p.totals.target;
+  $('stNeed').textContent=p.totals.fleetNeed;
+  $('stPool').textContent=p.supply.spendable;
+
+  $('autoChip').className='chip '+(p.policy.autoSize?'on':'off');
+  $('autoChip').textContent=p.policy.autoSize?'ON':'OFF';
+
+  $('fleetChip').className='chip '+(p.fleetKnown?'on':'warn');
+  $('fleetChip').textContent=p.fleetKnown?'fleet read OK':'Pi unreachable';
+  $('planNote').textContent=p.fleetKnown
+    ? (p.policy.coverageDays+'d cover · +'+p.policy.safetyStock+' safety · budget '+p.budget)
+    : (p.fleetError||'growth withheld');
+
+  var rows=(p.games||[]).map(function(g){
+    var action = g.fleetNeed>0
+      ? ('<b>+'+g.grant+'</b>'+(g.grant<g.fleetNeed?' <span class="muted">of '+g.fleetNeed+'</span>':''))
+      : (g.spare>0?'<span class="muted">'+g.spare+' spare</span>':'<span class="muted">—</span>');
+    return '<tr>'
+      +'<td><b>'+esc(g.label)+'</b></td>'
+      +'<td>'+g.sales.perWeek+'</td>'
+      +'<td>'+(g.sales.avgPrice?('$'+g.sales.avgPrice):'<span class="muted">–</span>')+'</td>'
+      +'<td>'+g.stock.listed+'</td>'
+      +'<td>'+g.stock.held+'</td>'
+      +'<td>'+(g.fleet.known?g.fleet.assigned:'<span class="muted">?</span>')+'</td>'
+      +'<td><b>'+g.target+'</b></td>'
+      +'<td>'+coverCell(g.daysOfCover)+'</td>'
+      +'<td>'+(g.shelf.need>0
+          ? '<span class="chip warn" title="'+(g.shelf.explicit
+              ? 'You set this cap by hand, so Apply will NOT change it. Raise it here or tick the override.'
+              : 'Apply will raise this — it costs no accounts.')
+            +'">'+g.shelf.cap+' &rarr; '+g.shelf.suggested+(g.shelf.explicit?' 🔒':'')+'</span>'
+          : g.shelf.cap)+'</td>'
+      +'<td>'+action+'</td>'
+      +'</tr>';
+  }).join('');
+  $('planRows').innerHTML=rows||'<tr><td colspan="10" class="muted">No no-claim games configured.</td></tr>';
+
+  var notes=(p.games||[]).filter(g=>g.notes && g.notes.length).map(function(g){
+    return '<div style="margin-bottom:6px;"><b>'+esc(g.label)+'</b> <span class="muted">'
+      +g.notes.map(esc).join(' · ')+'</span></div>';
+  }).join('');
+  $('planNotes').innerHTML=notes;
+  if(st){ $('autoChip').title='last run: '+(st.lastRun||'never'); }
+}
+
+async function preview(){
+  try{
+    var j=await api('/api/farm-sizing/apply',{method:'POST',body:JSON.stringify({apply:false})});
+    var r=j.result;
+    if(r.skipped){ toast(r.skipped); return; }
+    var lines=(r.results||[]).map(function(x){
+      var bits=[];
+      if(x.shelf) bits.push('shelf '+x.shelf.from+'→'+x.shelf.to+(x.shelf.blocked?' (held: set by hand)':''));
+      (x.plannedTopUps||[]).forEach(t=>bits.push('bot '+t.id+' +'+t.add));
+      if(x.plannedCreate) bits.push('new bot ×'+x.plannedCreate);
+      return bits.length?(x.label+': '+bits.join(', ')):null;
+    }).filter(Boolean);
+    toast(lines.length?('Would do — '+lines.join(' | ')):'Nothing to do: every game is at target.');
+  }catch(e){ toast(e.message); }
+}
+
+async function applyPlan(){
+  if(!lastPlan) return;
+  var need=lastPlan.totals.fleetNeed, grant=lastPlan.totals.granted;
+  var raisable=(lastPlan.games||[]).filter(g=>g.shelf.need>0 && !g.shelf.explicit);
+  var locked=(lastPlan.games||[]).filter(g=>g.shelf.need>0 && g.shelf.explicit);
+  if(!grant && !raisable.length && !locked.length){ toast('Nothing to apply.'); return; }
+  var raiseExplicit=false;
+  if(locked.length){
+    raiseExplicit=confirm('These shelf caps were set BY HAND and Apply will leave them alone:\n\n'
+      +locked.map(g=>'  '+g.label+': '+g.shelf.cap+' → '+g.shelf.suggested).join('\n')
+      +'\n\nA hand-set cap usually means you are holding that stock back for bulk sales.\n\n'
+      +'OK = raise them anyway.  Cancel = leave them as they are (recommended).');
+  }
+  var msg='Apply now?\n\n'
+    +'• claim and deploy '+grant+' pool account(s)'+(need>grant?(' (of '+need+' short)'):'')+'\n'
+    +'• raise '+(raisable.length+(raiseExplicit?locked.length:0))+' shelf cap(s)\n\n'
+    +'This claims real accounts and writes bot configs on the Pi.';
+  if(!confirm(msg)) return;
+  $('applyBtn').disabled=true;
+  try{
+    var j=await api('/api/farm-sizing/apply',{method:'POST',body:JSON.stringify({apply:true,raiseExplicit:raiseExplicit})});
+    var r=j.result;
+    toast('Done: +'+r.toppedUp+' account(s), '+r.created+' new bot(s), '+r.shelvesRaised+' shelf cap(s)'
+      +(r.errors.length?(' — '+r.errors.length+' error(s)'):''));
+    if(r.errors.length) console.warn('fleet sizing errors', r.errors);
+    await loadPlan();
+  }catch(e){ toast(e.message); }
+  finally{ $('applyBtn').disabled=false; }
+}
+
+async function loadAutofarm(){
+  $('afRows').innerHTML='<tr><td colspan="7" class="muted">Reading per-game sales…</td></tr>';
+  try{
+    var j=await api('/api/farm-sizing/autofarm?days=45');
+    $('covChip').className='chip '+(j.enabled?'on':'off');
+    $('covChip').textContent=j.enabled?'ON':'OFF';
+    var rows=(j.games||[]).map(function(g){
+      var change=g.capCoverage!==g.capLegacy;
+      return '<tr>'
+        +'<td><b>'+esc(g.game)+'</b></td>'
+        +'<td>'+g.sales.perWeek+'</td>'
+        +'<td>'+g.assigned+'</td>'
+        +'<td><b>'+g.capNow+'</b></td>'
+        +'<td>'+g.capLegacy+'</td>'
+        +'<td>'+(change?'<span class="chip on">'+g.capCoverage+'</span>':g.capCoverage)+'</td>'
+        +'<td>'+(g.override?('<span class="chip warn">'+g.override+'</span>'):'<span class="muted">–</span>')+'</td>'
+        +'</tr>';
+    }).join('');
+    $('afRows').innerHTML=rows||'<tr><td colspan="7" class="muted">No active auto-farm tasks.</td></tr>';
+  }catch(e){
+    $('afRows').innerHTML='<tr><td colspan="7" class="muted">'+esc(e.message)+'</td></tr>';
+  }
+}
+
+function capsToText(o){return Object.keys(o||{}).map(k=>k+' = '+o[k]).join('\n');}
+function textToCaps(t){
+  var out={};
+  String(t||'').split('\n').forEach(function(line){
+    var m=line.match(/^\s*(.+?)\s*=\s*(\d+)\s*$/);
+    if(m) out[m[1]]=parseInt(m[2],10);
+  });
+  return out;
+}
+
+async function loadSettings(){
+  var j=await api('/api/farm-sizing/settings');
+  lastSettings=j.sizing;
+  $('pCoverageDays').value=j.sizing.coverageDays;
+  $('pSafety').value=j.sizing.safetyStock;
+  $('pMax').value=j.sizing.maxPerGame;
+  $('pMaxRun').value=j.sizing.maxPerRun;
+  $('pInterval').value=j.sizing.intervalMin;
+  $('pCoverage').checked=!!j.sizing.enabled;
+  $('pAuto').checked=!!j.sizing.autoSize;
+  $('pCaps').value=capsToText(j.sizing.gameCaps);
+  $('covChip').className='chip '+(j.sizing.enabled?'on':'off');
+  $('covChip').textContent=j.sizing.enabled?'ON':'OFF';
+}
+
+async function savePolicy(){
+  var body={
+    coverageDays:parseInt($('pCoverageDays').value,10),
+    coverageSafetyStock:parseInt($('pSafety').value,10),
+    coverageMaxPerGame:parseInt($('pMax').value,10),
+    noclaimSizeMaxPerRun:parseInt($('pMaxRun').value,10),
+    noclaimSizeIntervalMin:parseInt($('pInterval').value,10),
+    coverageSizing:$('pCoverage').checked,
+    noclaimAutoSize:$('pAuto').checked,
+    gameAccountCaps:textToCaps($('pCaps').value)
+  };
+  if(body.noclaimAutoSize && !(lastSettings&&lastSettings.autoSize)){
+    if(!confirm('Turn ON no-claim auto-sizing?\n\nThe allocator will claim pool accounts and create/top up bots on its own, every '
+      +body.noclaimSizeIntervalMin+' minutes, up to '+body.noclaimSizeMaxPerRun+' accounts a run.')) return;
+  }
+  try{
+    await api('/api/farm-sizing/settings',{method:'POST',body:JSON.stringify(body)});
+    toast('Policy saved.');
+    await loadSettings();
+    await loadPlan();
+  }catch(e){ toast(e.message); }
+}
+
+$('refreshBtn').onclick=loadPlan;
+$('dryBtn').onclick=preview;
+$('applyBtn').onclick=applyPlan;
+$('afBtn').onclick=loadAutofarm;
+$('policyBtn').onclick=function(){var p=$('policyPanel');p.style.display=p.style.display==='none'?'':'none';if(p.style.display==='')p.scrollIntoView({behavior:'smooth'});};
+$('cancelBtn').onclick=function(){$('policyPanel').style.display='none';};
+$('saveBtn').onclick=savePolicy;
+
+(async function(){ await loadSettings().catch(e=>toast(e.message)); await loadPlan(); })();
+</script>
+<script src="/admin-nav.js"></script>
+</body>
+</html>

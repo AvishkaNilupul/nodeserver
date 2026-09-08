@@ -73,6 +73,55 @@ const AUTO_FARM_DEFAULTS = {
   // { "overwatch": 25 }. Accounts above the cap stay unlisted = available for
   // hand sales. 0 / missing = default cap.
   unclaimedGameCaps: {},
+
+  // ---- Demand-driven fleet sizing (utils/farmSizing.js) --------------------
+  //
+  // Both farming systems used to size a game by a flat number: the auto-farmer
+  // capped every game at maxPerGame*2 no matter how well it sold, and the
+  // no-claim farm had no sizing at all (the operator typed the account count
+  // into a form). These keys turn on a coverage model instead — a game that
+  // sells N a week is sized to hold N * coverageDays/7 accounts, because a sold
+  // account is CONSUMED by the buyer.
+  //
+  // BOTH SWITCHES SHIP OFF. With them off every number below is inert and both
+  // systems behave exactly as they did before.
+
+  // Auto-farm: replace capForGame's flat `maxPerGame * 2` ceiling with the
+  // coverage target. The old cap becomes the FLOOR, so turning this on can only
+  // ever raise a game's ceiling, never lower it.
+  coverageSizing: false,
+  // Days of demand to keep on the shelf. 28 = four weeks (operator's choice
+  // 2026-09-08). Drop inventory is time-sensitive, so a long cover buys
+  // availability at the risk of holding stock that goes stale.
+  coverageDays: 28,
+  // Flat buffer on top of the computed cover, so a game that sells slowly but
+  // reliably keeps a few units on the shelf instead of rounding to nothing.
+  coverageSafetyStock: 6,
+  // Absolute ceiling the coverage model may ask for, per game. A blast-radius
+  // limit, not a business one: a corrupted sales count must not be able to
+  // drain the pool into a single game.
+  coverageMaxPerGame: 250,
+  // Per-game hard overrides on the auto-farm ceiling, keyed like noClaimGames
+  // (substring of the normalised label): { "rocket league": 120 }. An override
+  // WINS over both the legacy cap and the coverage model, in either direction —
+  // it is the operator saying "this many, I mean it". 0 / missing = automatic.
+  gameAccountCaps: {},
+
+  // No-claim farm: the fleet allocator (utils/unclaimedAllocator.js). OFF ships
+  // the whole thing in advisory mode — it computes and displays a plan and does
+  // nothing else. Turning it on lets the scheduler create and top up no-claim
+  // bots to close the gap on its own.
+  noclaimAutoSize: false,
+  // How often the allocator acts when noclaimAutoSize is on (minutes).
+  noclaimSizeIntervalMin: 60,
+  // The most accounts one allocator pass may claim, across all games. A rate
+  // limit, so a mis-measured game cannot empty the pool in one cycle.
+  noclaimSizeMaxPerRun: 60,
+  // Per-game overrides on the no-claim target, keyed like noClaimGames:
+  //   { "overwatch": { coverageDays: 21, safetyStock: 10, min: 40, max: 300 } }
+  // Any field may be omitted and falls back to the global value above.
+  noclaimGameSizing: {},
+
   // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
   // account on — World of Tanks and UFL sell too thin to be worth burning new
   // accounts. For these, the brain only ever REUSES accounts it has already
@@ -578,6 +627,83 @@ function gameFloorFor(game) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Demand-driven fleet sizing
+// ---------------------------------------------------------------------------
+
+// Typed, clamped view of the sizing keys — the same read-side convention as
+// getUnclaimedPricing: engines never touch the raw `coverage*` / `noclaim*`
+// keys, so a hand-edited settings.json holding a string or a negative number
+// degrades to the default instead of poisoning an account count.
+//
+// The per-game accessors take a RAW game label and match it the noClaimGames
+// way (substring of the normalised label), so one "overwatch" entry covers
+// "Overwatch", "Overwatch 2" and the lowercase spellings all at once.
+// `af` is optional: callers that already hold the auto-farm settings object
+// (capForGame is handed one on every call) pass it in rather than making this
+// re-read settings.json, which loadSettings does from disk EVERY time. It also
+// makes the sizing policy a pure function of its input, so a test can hand it a
+// settings object instead of writing to the live file.
+function getFarmSizing(afIn) {
+  const af = afIn || getAutoFarm() || {};
+  const gameSizing =
+    af.noclaimGameSizing && typeof af.noclaimGameSizing === "object"
+      ? af.noclaimGameSizing
+      : {};
+  const perGame = (game, field, dflt) => {
+    const entry = gameMapLookup(gameSizing, game);
+    if (!entry || typeof entry !== "object") return dflt;
+    const n = num(entry[field], NaN);
+    return Number.isFinite(n) && n >= 0 ? n : dflt;
+  };
+
+  const coverageDays = Math.max(1, num(af.coverageDays, 28));
+  const safetyStock = Math.max(0, num(af.coverageSafetyStock, 6));
+  const maxPerGame = Math.max(1, Math.floor(num(af.coverageMaxPerGame, 250)));
+
+  return {
+    // Auto-farm side
+    enabled: af.coverageSizing == null ? false : !!af.coverageSizing,
+    coverageDays,
+    safetyStock,
+    maxPerGame,
+    gameCaps:
+      af.gameAccountCaps && typeof af.gameAccountCaps === "object"
+        ? af.gameAccountCaps
+        : {},
+
+    // No-claim side
+    autoSize: af.noclaimAutoSize == null ? false : !!af.noclaimAutoSize,
+    intervalMin: Math.max(5, Math.floor(num(af.noclaimSizeIntervalMin, 60))),
+    maxPerRun: Math.max(1, Math.floor(num(af.noclaimSizeMaxPerRun, 60))),
+    gameSizing,
+
+    // Per-game accessors the demand snapshot reads. Each falls back to the
+    // global value, so a partial override ({ "overwatch": { max: 300 } }) leaves
+    // every other field alone.
+    coverageDaysFor: (game) => perGame(game, "coverageDays", coverageDays),
+    safetyStockFor: (game) => perGame(game, "safetyStock", safetyStock),
+    minFor: (game) => perGame(game, "min", 0),
+    maxFor: (game) => perGame(game, "max", maxPerGame),
+  };
+}
+
+// Explicit per-game account ceiling for the AUTO-FARM, or 0 for "automatic".
+// Unlike every other per-game map here this one overrides in BOTH directions:
+// it is the operator naming a number, so it beats the legacy cap and the
+// coverage model alike.
+function gameAccountCapFor(game, afIn) {
+  const v = gameMapLookup(getFarmSizing(afIn).gameCaps, game);
+  const n = Math.floor(num(v, 0));
+  return n > 0 ? n : 0;
+}
+
+// Alias kept deliberately short because the demand snapshot passes this object
+// around as `cfg`; see utils/farmDemand.js unclaimedDemandSnapshot.
+function getNoclaimSizing() {
+  return getFarmSizing();
+}
+
 // Public catalog v2 storefront config (docs/CATALOG-V2-CONTRACT.md §6), read
 // fresh each call with the seed defaults under the live values, and normalised
 // on BOTH the read and the write path so the routes and the page never see a
@@ -665,6 +791,9 @@ module.exports = {
   gameFloorFor,
   gameMarketsFor,
   gameCapFor,
+  getFarmSizing,
+  getNoclaimSizing,
+  gameAccountCapFor,
   getCatalogConfig,
   setCatalogConfig,
   UNCLAIMED_MARKETS,

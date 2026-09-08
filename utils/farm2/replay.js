@@ -547,6 +547,11 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
   // THE economics — imported, never re-derived.
   const alloc = b.demandAllocation(inputs.research, inputs.af, inputs.sales, {
     probeAllowed: inputs.probeAllowed,
+    // The ceiling is per-game once coverage sizing or a gameAccountCaps
+    // override is in play, so a replay that omitted the game would score every
+    // past decision against a DIFFERENT cap than the engine used and report
+    // manufactured disagreements.
+    game: task.game,
   });
 
   const replayed = {

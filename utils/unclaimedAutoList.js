@@ -2408,9 +2408,19 @@ async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
 // recycler sees it, NEVER return it to the pool.
 async function spendAccount(ledger, reason, opts = {}) {
   const at = new Date();
+  // What this unit sold for. Captured from the listing row that carried it,
+  // BEFORE the unit is removed and before any repricer moves the number — the
+  // ledger's own record of a sale had no money in it at all, so per-game revenue
+  // was only ever reconstructible from a price that had since drifted.
+  // `opts.priceUsd` lets a caller that already knows the realised price (a
+  // marketplace order total) override the shelf price.
+  let soldPriceUsd = Math.max(0, Number(opts.priceUsd) || 0);
+  let soldMarket = String(opts.market || ledger.market || "");
   try {
     const row = await rowForLedger(ledger);
     if (row) {
+      if (!soldPriceUsd) soldPriceUsd = Math.max(0, Number(row.price) || 0);
+      if (!soldMarket) soldMarket = String(row.marketplace || "");
       // `removeFromProduct:false` — the platform already handed this unit to
       // the buyer (a real sale), so its code is gone from the product; only
       // the row bookkeeping needs to drop it.
@@ -2534,7 +2544,16 @@ async function spendAccount(ledger, reason, opts = {}) {
 
   await UnclaimedAccount.updateOne(
     { _id: ledger._id, status: "listed" },
-    { $set: { status: "sold", soldAt: at, note: reason, lastCheckedAt: at } },
+    {
+      $set: {
+        status: "sold",
+        soldAt: at,
+        note: reason,
+        lastCheckedAt: at,
+        soldPriceUsd,
+        soldMarket,
+      },
+    },
   ).catch(() => {});
   await markOwnerUnlisted(ledger);
 

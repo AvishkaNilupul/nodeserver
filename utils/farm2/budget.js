@@ -312,14 +312,57 @@ async function computeCycleBudget(af, opts = {}) {
   // — "pool has no spendable accounts" — for a pool of 340.
   const budget = spendable;
 
+  // The per-game cap here is a RUNAWAY GUARD, not the allocator. The real
+  // per-game ceiling is `alloc.cap` (autoFarmer.capForGame), applied inside
+  // decide.js when it computes `wanted`; this number only has to be high enough
+  // never to clip a legitimate decision.
+  //
+  // It used to be `af.maxPerGame` — the flat base, 30 on prod — while
+  // capForGame already allowed a proven seller up to `maxPerGame * 2`. So a
+  // lane that legitimately decided 60 had its draw silently clamped to 30 by
+  // the arbiter, and the sales headroom the legacy engine grants was
+  // unreachable in the lane engine. It is now the highest cap any game could
+  // legitimately be given, so decide's own per-game number is always the
+  // binding one.
+  const sizing = safeFarmSizing();
+  const explicitCaps = Object.values(sizing.gameCaps || {})
+    .map((v) => Math.floor(Number(v) || 0))
+    .filter((n) => n > 0);
+  const perGameCap = Math.max(
+    0,
+    Math.max(0, Number(af.maxPerGame) || 0) * SALES_CAP_MULT_MAX_MIRROR,
+    sizing.enabled ? sizing.maxPerGame : 0,
+    ...explicitCaps,
+  );
+
   return new BudgetCycle({
     accounts: budget,
     seats,
     containers: containersFree,
-    perGameCap: Math.max(0, Number(af.maxPerGame) || 0),
+    perGameCap,
     hostConcurrency: Number(opts.hostConcurrency) || HOST_CONCURRENCY_DEFAULT,
     reason: reasons.join("; ") || "ok",
   });
+}
+
+// autoFarmer's SALES_CAP_MULT_MAX is not exported and requiring autoFarmer at
+// module scope would close the require cycle this file deliberately avoids
+// (autoFarmer is required lazily inside computeCycleBudget). Mirrored here with
+// the test in tests/farm2Budget.test.js pinning the two together, so a change to
+// one that is not made to the other fails loudly instead of silently clipping
+// lane draws again.
+const SALES_CAP_MULT_MAX_MIRROR = 2;
+
+// Sizing config, fail-closed. An unreadable settings file must leave the guard
+// at the legacy value rather than at zero, which `remainingAccounts` reads as
+// "no per-game cap at all" (Infinity).
+function safeFarmSizing() {
+  try {
+    const settings = require("../settings");
+    return settings.getFarmSizing ? settings.getFarmSizing() : {};
+  } catch {
+    return {};
+  }
 }
 
 module.exports = { BudgetCycle, computeCycleBudget, HOST_CONCURRENCY_DEFAULT };

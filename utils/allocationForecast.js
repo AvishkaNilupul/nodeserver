@@ -300,7 +300,9 @@ function liveRow(camp, task, info, unitPrice, details) {
 function scheduledRow(camp, info, af, unitPrice, details) {
   const sales = (info && info.sales) || { count: 0, revenue: 0, avgPrice: 0 };
   const research = info && info.research;
-  const alloc = autoFarmer.demandAllocation(research, af, sales);
+  const alloc = autoFarmer.demandAllocation(research, af, sales, {
+    game: camp && camp.game,
+  });
   const wanted = wantedFor(alloc, af);
   const covered = info ? num(info.covered) : 0;
   const uncovered = Math.max(0, wanted - covered);
