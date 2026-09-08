@@ -200,7 +200,17 @@ function expectedAfter(action, value) {
 //
 // Re-reading per group rather than per offer is what keeps that affordable —
 // a group page is ~500KB, and one re-read covers every action in it.
-async function keepShelfAlive({ dryRun = true, limit = 0, resumeSellerPaused = false } = {}) {
+async function keepShelfAlive({
+  dryRun = true,
+  limit = 0,
+  resumeSellerPaused = false,
+  // Drop actions that would take an offer OFF sale. Pausing an offer we cannot
+  // back is the right default, but it is a different decision from putting
+  // stocked offers back on sale, and an operator may know about stock this
+  // database does not model (hand-filled from a stash, say). So a run can be
+  // additive-only: relist, extend, correct quantities, touch nothing else.
+  publishOnly = false,
+} = {}) {
   const entries = await shelf();
   const done = [];
   let acted = 0;
@@ -208,7 +218,17 @@ async function keepShelfAlive({ dryRun = true, limit = 0, resumeSellerPaused = f
   // Plan everything first, so the work can be grouped by the page it lives on.
   const work = [];
   for (const entry of entries) {
-    const { actions, note } = planForOffer(entry, { resumeSellerPaused });
+    let { actions, note } = planForOffer(entry, { resumeSellerPaused });
+    if (publishOnly) {
+      // A stock correction only makes sense alongside the action that keeps the
+      // offer visible; on its own here it would be the only change to an offer
+      // we just declined to pause.
+      actions = actions.filter((a) => a.action !== "off_line");
+      if (!actions.some((a) => a.action !== "stock")) {
+        const keep = actions.filter((a) => a.action === "stock");
+        actions = entry.offer.online ? keep : [];
+      }
+    }
     if (!actions.length) {
       if (note) done.push({ pk: entry.offer.pk, title: entry.offer.title, skipped: note });
       continue;

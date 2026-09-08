@@ -5873,6 +5873,12 @@ function z2uCheckSession(r, what) {
 }
 
 async function z2uRequest(method, path, opts = {}) {
+  return (await z2uRequestFull(method, path, opts)).data;
+}
+
+// Same request, but the whole axios response — Z2U returns its CSRF token in a
+// RESPONSE HEADER, so at least one caller needs more than the body.
+async function z2uRequestFull(method, path, opts = {}) {
   const keys = requireKeys("z2u");
   const jar = z2uJar(keys.cookie);
   const headers = {
@@ -5912,7 +5918,7 @@ async function z2uRequest(method, path, opts = {}) {
   if (z2uAbsorbCookies(jar, r.headers["set-cookie"])) {
     await setKeys("z2u", { cookie: z2uJarHeader(jar) });
   }
-  return r.data;
+  return r;
 }
 
 // ThinkPHP's ajaxReturn envelope. code 1 = success; anything else carries a
@@ -5938,18 +5944,29 @@ function z2uAjax(what, body) {
   return j;
 }
 
-// Z2U mints a one-shot CSRF token per mutating form post. The value comes back
-// in the envelope's `url` field (ThinkPHP reuses the slot); `data` is used on
-// some builds, so accept either rather than pinning to one.
+// Z2U mints a one-shot CSRF token per mutating form post.
+//
+// TWO THINGS ARE COUNTER-INTUITIVE HERE, both learned by a live 404:
+//  1. `/public/createToken` is a **GET**. A POST to it 404s.
+//  2. The token is NOT in the JSON body. The body is the ordinary envelope and
+//     its `url` field is a redirect target (the page you came from), which is
+//     easy to mistake for the token because it happens to be about the right
+//     length. The real value comes back as the **`__token__` RESPONSE HEADER** —
+//     the site's own getToken() reads it with
+//     `request.getResponseHeader("__token__")`.
+// Trusting the body silently posts an empty token, and every write 404s.
 async function z2uCsrf() {
-  const body = await z2uRequest("POST", "/public/createToken", {
+  const r = await z2uRequestFull("GET", "/public/createToken", {
     ajax: true,
     what: "Z2U token",
-    data: {},
   });
-  const j = z2uAjax("Z2U token", body);
-  const tok = String(j.url || j.data || "").trim();
-  if (!tok) throw new Error("Z2U token: no token in reply");
+  const h = r.headers || {};
+  const tok = String(h["__token__"] || h["__TOKEN__"] || "").trim();
+  if (!tok) {
+    throw new Error(
+      "Z2U token: no __token__ response header (Z2U changed how it mints CSRF tokens)",
+    );
+  }
   return tok;
 }
 

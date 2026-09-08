@@ -284,3 +284,49 @@ test("reviving a seller-paused offer is opt-in, never automatic", () => {
     [],
   );
 });
+
+// keepShelfAlive's filter is exercised through planForOffer + the same rule the
+// publishOnly branch applies, so the intent is pinned without a live session.
+function publishOnlyFilter(actions, online) {
+  let a = actions.filter((x) => x.action !== "off_line");
+  if (!a.some((x) => x.action !== "stock")) {
+    const keep = a.filter((x) => x.action === "stock");
+    a = online ? keep : [];
+  }
+  return a.map((x) => x.action);
+}
+
+test("publish-only never takes an offer off sale", () => {
+  // The out-of-stock case: normally a pause, here nothing at all.
+  const empty = ful.planForOffer(entry({ ...LIVE }, { autoPaused: false }, 0, 20));
+  assert.deepStrictEqual(empty.actions.map((a) => a.action), ["off_line"]);
+  assert.deepStrictEqual(publishOnlyFilter(empty.actions, true), []);
+
+  // A revive still happens, and keeps its stock correction.
+  const revive = ful.planForOffer(
+    entry({ ...LIVE, online: false, status: "paused", stock: 4 }, { autoPaused: false }, 40, 20),
+    { resumeSellerPaused: true },
+  );
+  assert.deepStrictEqual(publishOnlyFilter(revive.actions, false), ["on_line", "stock"]);
+
+  // A live offer whose only change is a quantity fix keeps it — that corrects an
+  // overstatement without removing anything.
+  const fix = ful.planForOffer(entry({ ...LIVE, stock: 99 }, { autoPaused: false }, 9, 20));
+  assert.deepStrictEqual(fix.actions.map((a) => a.action), ["stock"]);
+  assert.deepStrictEqual(publishOnlyFilter(fix.actions, true), ["stock"]);
+});
+
+// The CSRF token cost a live run: /public/createToken is a GET (a POST 404s),
+// and the token is NOT in the JSON body — the body's `url` field is a redirect
+// target that merely looks token-shaped. The real value arrives as the
+// `__token__` RESPONSE HEADER, which is what the site's own getToken() reads.
+// Every write 404'd until this was right, so pin the shape of the mistake.
+test("the createToken body is not a token source", () => {
+  // This is the actual reply observed from prod: `url` is a page URL.
+  const body = {
+    code: 1, msg: "", data: "",
+    url: "https://www.z2u.com/sell/manage", wait: 3,
+  };
+  assert.ok(/^https?:\/\//.test(body.url), "url is a URL, not a token");
+  assert.strictEqual(body.data, "", "the body carries no token at all");
+});

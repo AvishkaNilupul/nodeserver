@@ -44,10 +44,17 @@ Paste it under **Listings → Marketplace keys → Z2U**, then check it with
 | Sold orders | `GET /sellOrder/index/order_status/<STATE>` |
 | One order + its delivery form | `GET /sellOrder?order_id=<Z…>` |
 | Deliver that order | `POST /sellOrder/form_submit` |
-| CSRF token | `POST /public/createToken` |
+| CSRF token | `GET /public/createToken` — value in the `__token__` RESPONSE HEADER |
 
 `list_action` is one of `on_line` | `off_line` | `extend`.
 Order states are `ALL` | `WAIT_DELIVERY` | `DELIVERED` | `COMMENT` | `CANCELED`.
+
+**The CSRF token is the trap here.** `/public/createToken` is a **GET** (a POST
+404s), and the token is **not in the body**: the envelope’s `url` field is a
+redirect target that merely looks token-shaped, and `data` is empty. The real
+value comes back as the **`__token__` response header** — the site’s own
+`getToken()` reads it with `request.getResponseHeader("__token__")`. Getting
+this wrong makes every write 404 while reads keep working.
 
 Ajax replies are ThinkPHP envelopes — `{code, msg, data, url, wait}` — where
 `code: 1` is success and `code: 0` carries a human message in `msg`

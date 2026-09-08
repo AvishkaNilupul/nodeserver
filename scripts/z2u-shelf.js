@@ -37,6 +37,10 @@ const val = (f, d) => {
 const APPLY = has("--apply");
 const REVIVE = has("--revive");
 const LIMIT = parseInt(val("--limit", "0"), 10) || 0;
+// Additive only: never take an offer off sale. Use this when the operator knows
+// about stock the database does not (hand-filled from a stash), so a zero here
+// is not proof the offer cannot be honoured.
+const PUBLISH_ONLY = has("--publish-only");
 
 async function main() {
   if (!(mp.keyStatus().z2u || {}).configured) {
@@ -49,12 +53,14 @@ async function main() {
   console.log(
     (APPLY ? "APPLYING" : "DRY RUN") +
       (REVIVE ? " (+revive seller-paused)" : "") +
+      (PUBLISH_ONLY ? " (publish only — nothing goes off sale)" : "") +
       (LIMIT ? " limit=" + LIMIT : ""),
   );
   const done = await ful.keepShelfAlive({
     dryRun: !APPLY,
     limit: LIMIT,
     resumeSellerPaused: REVIVE,
+    publishOnly: PUBLISH_ONLY,
   });
 
   const acts = done.filter((d) => d.action);
