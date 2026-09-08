@@ -23,11 +23,15 @@ const FIELDS = {
   // G2G's Open API only accepts pushes for the *account* section, not the Game
   // Items category where every Twitch Drops offer lives, and the account has no
   // API key any more. So G2G is driven through its own internal seller API at
-  // sls.g2g.com, exactly like ZeusX: the operator pastes the session token trio
-  // once (DevTools -> Application -> Local Storage -> www.g2g.com) and the
-  // server mints fresh access tokens from it forever via /user/refresh_access.
-  // See g2gRefreshAccess + utils/g2gSessionRefresher.
-  g2g: ["userId", "accessToken", "refreshToken", "activeDeviceToken"],
+  // sls.g2g.com, exactly like ZeusX: the operator supplies the refresh trio
+  // once and the server mints fresh access tokens from it forever via
+  // /user/refresh_access. See g2gRefreshAccess + utils/g2gSessionRefresher.
+  //
+  // `refresh_token`, `active_device_token` and `long_lived_token` are all set
+  // as ORDINARY COOKIES on g2g.com as well as living in local storage, so the
+  // operator can read them from either. The seller id is the numeric prefix of
+  // refresh_token ("<sellerId>.<secret>") and is also shown in the account menu.
+  g2g: ["userId", "refreshToken", "activeDeviceToken"],
   ggsel: ["apiKey"],
   // FunPay has no API — the single credential is the account's session token.
   funpay: ["golden_key"],
@@ -61,9 +65,14 @@ const FIELDS = {
 // `requireKeys` ignores these; `getKeys`/`setKeys` still round-trip them, so an
 // operator can supply one without it becoming a hard precondition.
 const OPTIONAL_FIELDS = {
-  // G2G sends long_lived_token on /user/refresh_access, but a session that has
-  // never been "remember me"-d does not have one and refreshes fine without it.
-  g2g: ["longLivedToken"],
+  // G2G's access token is deliberately NOT required. The server mints one from
+  // the refresh trio on its very first call, so asking an operator to copy a
+  // short-lived token only adds a value that can expire between the copy and
+  // the paste — and one more secret to move around for no gain. Stored if
+  // supplied, ignored if not.
+  // long_lived_token is genuinely optional: a session that was never
+  // "remember me"-d does not have one, and /user/refresh_access works without.
+  g2g: ["accessToken", "longLivedToken"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -6543,6 +6552,10 @@ async function z2uRequestFull(method, path, opts = {}) {
     data,
     headers,
     timeout: opts.timeout || 45000,
+    // The bulk template is a real .xlsx; without this axios sniffs it as text
+    // and the bytes come back mangled, so the ZIP header parse fails with an
+    // out-of-range offset rather than anything that names the real problem.
+    ...(opts.responseType ? { responseType: opts.responseType } : {}),
     maxRedirects: 0,
     // 3xx must reach us as a value, not an exception, so z2uCheckSession can
     // tell "signed out" from every other failure.
@@ -7006,6 +7019,33 @@ async function z2uOrderPage(orderId) {
 // carries no delivery form the order is not deliverable (already delivered,
 // cancelled, or in dispute) and this refuses loudly rather than posting a
 // payload Z2U will quietly drop.
+// Is this order actually deliverable, and what does its form ask for?
+//
+// Split out from z2uDeliver so a caller can check BEFORE claiming an account.
+// The delivery form is rendered only while an order is genuinely awaiting
+// delivery — on a delivered, cancelled or disputed order the element does not
+// exist at all — so this is the honest test for "can we hand over right now".
+// Returns null when there is no form.
+function z2uParseDeliveryForm(html) {
+  const scoped =
+    (/<form[^>]*id=["']form_submit["'][^>]*>([\s\S]*?)<\/form>/i.exec(String(html)) || [])[1];
+  if (!scoped) return null;
+  const fields = parseZ2uForm(html, "form_submit");
+  const textareas = [];
+  const taRe = /<textarea\b([^>]*)>/gi;
+  let m;
+  while ((m = taRe.exec(scoped))) {
+    const n = (/name=["']([^"']+)["']/i.exec(m[1]) || [])[1];
+    if (n) textareas.push(n);
+  }
+  if (!fields.length || !textareas.length) return null;
+  return { fields, textareas };
+}
+
+async function z2uDeliveryForm(orderId) {
+  return z2uParseDeliveryForm(await z2uOrderPage(orderId));
+}
+
 async function z2uDeliver(orderId, message) {
   const text = String(message || "").trim();
   if (!text) throw new Error("Z2U deliver: refusing to send an empty delivery");
@@ -7058,6 +7098,76 @@ async function z2uDeliver(orderId, message) {
   return z2uAjax("Z2U deliver", body);
 }
 
+// Download the bulk template Z2U hands out for ONE game. It is a real .xlsx and
+// it is the authority on what that game accepts — see utils/z2uTemplate.
+async function z2uTemplateFile(service, game) {
+  const r = await z2uRequestFull(
+    "GET",
+    "/downloadTemp?service=" + encodeURIComponent(service) + "&game=" + encodeURIComponent(game),
+    { what: "Z2U template", responseType: "arraybuffer" },
+  );
+  const buf = Buffer.from(r.data || []);
+  // An .xlsx is a ZIP; anything else means Z2U handed back an error page.
+  if (buf.length < 200 || buf[0] !== 0x50 || buf[1] !== 0x4b) {
+    throw new Error(
+      "Z2U template: service " + service + " / game " + game +
+        " did not return a spreadsheet (" + buf.length + " bytes)",
+    );
+  }
+  return buf;
+}
+
+// What one game will accept, parsed from its own template. Cached briefly: a
+// bulk run asks for the same game repeatedly and the file is ~10KB each time.
+const z2uTemplateCache = new Map();
+const Z2U_TEMPLATE_TTL_MS = 30 * 60 * 1000;
+async function z2uGameOptions(service, game) {
+  const key = service + ":" + game;
+  const hit = z2uTemplateCache.get(key);
+  if (hit && Date.now() - hit.at < Z2U_TEMPLATE_TTL_MS) return hit.value;
+  const buf = await z2uTemplateFile(service, game);
+  const value = {
+    ...require("./z2uTemplate").parseZ2uTemplate(buf),
+    templateBuffer: buf,
+  };
+  z2uTemplateCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+// Create offers by uploading a filled copy of the game's own template.
+//
+// Z2U has no usable create API for our products, but this batch route is the
+// one the seller panel itself offers. The file is built from the template just
+// downloaded, so the columns and the accepted values are this game's, not a
+// guess — see utils/z2uBulk for why that matters.
+async function z2uBulkPublish({ service, game, offers }) {
+  if (!Array.isArray(offers) || !offers.length) {
+    throw new Error("Z2U bulk: nothing to publish");
+  }
+  const templateBuffer = await z2uTemplateFile(service, game);
+  const { buildZ2uBulkFile } = require("./z2uBulk");
+  const built = buildZ2uBulkFile({ templateBuffer, offers });
+  const form = new FormData();
+  form.append("game", String(game));
+  form.append("service", String(service));
+  form.append("upload", built.buffer, {
+    filename: "batch.xlsx",
+    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  // The batch upload is CSRF-guarded like every other mutating post here.
+  // Without it Z2U answers code 0 "Invalid request! Please refresh the page to
+  // resubmit" — which at least fails cleanly and creates nothing, but creates
+  // nothing.
+  form.append("__token__", await z2uCsrf());
+  const body = await z2uRequest("POST", "/platform/Sell/acceptExcelProducts", {
+    ajax: true,
+    what: "Z2U bulk publish",
+    data: form,
+    timeout: 120000,
+  });
+  return { reply: body, rows: built.rows, gameName: built.template.gameName };
+}
+
 function z2uOfferUrl(pk) {
   return Z2U_BASE + "/sell/manageEdit.html?id=" + encodeURIComponent(pk);
 }
@@ -7081,6 +7191,11 @@ module.exports = {
   z2uAllOrders,
   z2uOrderPage,
   z2uDeliver,
+  z2uDeliveryForm,
+  z2uParseDeliveryForm,
+  z2uTemplateFile,
+  z2uGameOptions,
+  z2uBulkPublish,
   z2uOfferUrl,
   // Pure parsers, exported so the HTML shapes can be tested without a session.
   parseZ2uGroups,

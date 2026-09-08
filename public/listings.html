@@ -3028,10 +3028,10 @@ Reliable Daily Rewards</textarea
         // local storage. The server refreshes them in place from then on.
         g2g: {
           userId: "Seller / account ID (numeric)",
-          accessToken: "accessToken (seller session)",
           refreshToken: "refresh_token",
           activeDeviceToken: "active_device_token",
-          longLivedToken: "long_lived_token — OPTIONAL, leave blank if absent",
+          longLivedToken: "long_lived_token — OPTIONAL, blank is fine",
+          accessToken: "accessToken — OPTIONAL, the server mints its own",
         },
         ggsel: { apiKey: "API key" },
         funpay: { golden_key: "golden_key (session cookie)" },
@@ -3057,16 +3057,20 @@ Reliable Daily Rewards</textarea
       // utils/marketplaces.js): blank is a valid answer, so the modal must not
       // read as if something is missing.
       var MP_OPTIONAL_KEYS = {
-        g2g: ["longLivedToken"],
+        g2g: ["longLivedToken", "accessToken"],
       };
       // Where to actually find each credential. One line per paragraph, shown
       // under the marketplace heading in the keys modal.
       var MP_KEY_NOTES = {
         g2g: [
-          "Sign in on g2g.com, then DevTools → Application → Local Storage → " +
-            "www.g2g.com and copy accessToken, refresh_token, " +
-            "active_device_token (and long_lived_token if present). The " +
-            "numeric seller id is in the account menu (Account ID).",
+          "Sign in on g2g.com, then DevTools → Application → Cookies → " +
+            "www.g2g.com and copy refresh_token and active_device_token (plus " +
+            "long_lived_token if it is there). They are also in Local Storage " +
+            "if you prefer. The seller id is the number before the dot in " +
+            "refresh_token, and is shown in the account menu as Account ID.",
+          "Do not send these through chat or email — paste them straight into " +
+            "this form. The server refreshes them in place from then on, so " +
+            "this is a one-time step.",
           "Separate from these: “Export G2G bulk file” and the G2G catalog " +
             "dropdowns still call the legacy G2G Open API, which needs its own " +
             "API key/secret — this account no longer has one.",

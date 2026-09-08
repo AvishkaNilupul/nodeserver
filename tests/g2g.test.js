@@ -528,15 +528,37 @@ test("the delivery verbs are PUTs against the order item, with seller_id", async
 
 /* ------------------- 8. required vs optional credentials ---------------- */
 
-test("g2g is registered with the seller-session credential trio plus the id", () => {
+test("g2g asks for the refresh trio and NOT a short-lived access token", () => {
+  // The operator supplies only what cannot be derived. An access token is
+  // mintable from the refresh trio on the first call, so demanding one adds a
+  // secret that can expire between the copy and the paste, for no gain.
   const { mp } = loadG2G();
   assert.ok(mp.MARKETPLACES.includes("g2g"));
   assert.deepStrictEqual(mp.FIELDS.g2g, [
     "userId",
-    "accessToken",
     "refreshToken",
     "activeDeviceToken",
   ]);
+  assert.ok(mp.FIELDS.g2g.indexOf("accessToken") === -1);
+});
+
+test("with no access token stored, the first call mints one and proceeds", async () => {
+  // This is what makes accessToken optional safe: a cold start refreshes once
+  // and then carries on, rather than failing as "not configured".
+  const { mp, calls } = loadG2G({
+    keys: { accessToken: "" },
+    respond: (cfg) =>
+      /refresh_access/.test(cfg.url)
+        ? okBody({ access_token: FRESH_TOKEN })
+        : okBody({ preparing: 0 }),
+  });
+  await mp.g2gOrderCounts();
+  assert.ok(/refresh_access/.test(calls[0].url), "refreshes first");
+  assert.strictEqual(
+    calls[1].headers.authorization,
+    FRESH_TOKEN,
+    "then uses the freshly minted token, raw",
+  );
 });
 
 test("a missing longLivedToken does not make the session unconfigured", async () => {
@@ -558,7 +580,7 @@ test("a missing longLivedToken does not make the session unconfigured", async ()
 test("a missing REQUIRED credential still stops the call", async () => {
   // The counterweight to the test above: the optional-field mechanism must not
   // have quietly made everything optional.
-  for (const field of ["userId", "accessToken", "refreshToken", "activeDeviceToken"]) {
+  for (const field of ["userId", "refreshToken", "activeDeviceToken"]) {
     const { mp, calls } = loadG2G({ keys: { [field]: "" } });
     assert.strictEqual(
       mp.keyStatus().g2g.configured,
