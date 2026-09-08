@@ -305,11 +305,15 @@ test("a sold-out offer can be set to zero stock", async () => {
 });
 
 test("a price under G2G's floor is refused before it reaches G2G", async () => {
-  assert.strictEqual(loadG2G().mp.G2G_MIN_PRICE, 0.5);
+  // The rule G2G enforces is "(min_qty * unit_price) >= USD 1", and every offer
+  // we publish carries min_qty 1 — so the floor is a whole dollar, not the 50c
+  // the product page implies. Four live publishes were rejected before the
+  // validator said so out loud.
+  assert.strictEqual(loadG2G().mp.G2G_MIN_PRICE, 1);
   const { mp, calls } = loadG2G();
   await assert.rejects(
-    mp.g2gUpdateOffer("G178", { unitPrice: 0.25 }),
-    /minimum price is 0\.50/,
+    mp.g2gUpdateOffer("G178", { unitPrice: 0.75 }),
+    /minimum price is 1\.00/,
   );
   await assert.rejects(mp.g2gUpdateOffer("G178", { unitPrice: 0 }), /above 0/);
   await assert.rejects(mp.g2gUpdateOffer("G178", { unitPrice: -1 }), /above 0/);

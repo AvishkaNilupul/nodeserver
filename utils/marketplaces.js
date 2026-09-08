@@ -2388,7 +2388,12 @@ const G2G_ITEMS_SERVICE = "0765978e-3fdf-48b4-bed3-184823aa439e";
 
 // G2G's floor for a Game Items offer. Mirrored in utils/pricing.js
 // MARKETPLACE_FLOORS.g2g — tests/pricing.test.js asserts the two agree.
-const G2G_MIN_PRICE = 0.5;
+//
+// The rule G2G actually enforces is "(min_qty * unit_price) >= USD 1", not a
+// per-unit floor, and every offer we publish has min_qty 1 — so the effective
+// floor is a whole dollar. It was set to 0.50 from the product page and four
+// live publishes were rejected before the validator spelled it out.
+const G2G_MIN_PRICE = 1;
 
 // Offer statuses seen on live rows. "live" and "delisted" are the two we set.
 const G2G_STATUS = { LIVE: "live", DELISTED: "delisted" };
