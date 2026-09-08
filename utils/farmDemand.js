@@ -204,9 +204,21 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
           // An account sells once. Anonymous quantity-listing units carry no
           // login, so they fall back to their dedupeKey — collapsing those onto
           // one row would read a hundred unit sales as a single sale.
+          //
+          // The test is `login > ""`, NOT $ifNull. SaleSignal.login is declared
+          // `default: ""` (models/SaleSignal.js:27), so it is an empty STRING
+          // and never null — $ifNull would pass it straight through and every
+          // anonymous unit sale on every listing would group under "", reading
+          // a whole quantity listing's sales as one.
           _id: {
             g: "$gameKey",
-            who: { $ifNull: ["$login", { $concat: ["anon:", "$dedupeKey"] }] },
+            who: {
+              $cond: [
+                { $gt: ["$login", ""] },
+                "$login",
+                { $concat: ["anon:", { $ifNull: ["$dedupeKey", "?"] }] },
+              ],
+            },
           },
           sources: { $addToSet: "$source" },
           markets: { $addToSet: "$marketplace" },

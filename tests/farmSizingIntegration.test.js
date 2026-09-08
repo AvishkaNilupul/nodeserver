@@ -392,3 +392,91 @@ test("a plan with an unknown fleet spends nothing at all", async () => {
   assert.ok(out.skipped);
   assert.deepEqual(out.results, []);
 });
+
+// ---------------------------------------------------------------------------
+// The two defects a critical re-read of today's change found
+// ---------------------------------------------------------------------------
+
+test("backfill's ceiling is the game's own cap, not the flat fleet maximum", () => {
+  // Backfill is where most of the pool actually goes (measured on prod: 140 of
+  // 174 claims in a day). It used to clamp every task to
+  // `maxPerGame * SALES_CAP_MULT_MAX` regardless of the game, which silently
+  // overrode every per-game decision made upstream — so coverage sizing and the
+  // operator's own gameAccountCaps could raise a DECISION and never move a
+  // realised account count. Pinned by reading the source: the clamp must call
+  // capForGame, not the flat product.
+  const src = require("fs").readFileSync(require.resolve("../utils/autoFarmer.js"), "utf8");
+  const backfill = src.slice(src.indexOf("async function backfillActiveTasks"));
+  // Strip line comments first — this file EXPLAINS the old ceiling in prose
+  // right above the new one, and a naive source scan matches the explanation.
+  const body = backfill
+    .slice(0, backfill.indexOf("\n}\n"))
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  assert.ok(
+    /capForGame\(af, gameSales, task\.game\)/.test(body),
+    "backfill must clamp to the per-game cap",
+  );
+  assert.ok(
+    !/af\.maxPerGame \* SALES_CAP_MULT_MAX/.test(body),
+    "backfill must not re-introduce the flat fleet ceiling",
+  );
+});
+
+test("an anonymous unit sale is not collapsed by a login that defaults to empty-string", async () => {
+  // SaleSignal.login is declared `default: ""` — an empty STRING, never null.
+  // The first version of the demand union grouped on
+  // `$ifNull: ["$login", <dedupeKey>]`, which passes "" straight through, so
+  // every login-less quantity-listing unit sale on a game grouped under "" and
+  // a hundred unit sales read as ONE. Digiseller and GGSel sell exactly that
+  // way, so this under-counted the games that sell in bulk.
+  const SaleSignal = require("../models/SaleSignal");
+  assert.equal(
+    SaleSignal.schema.path("login").defaultValue,
+    "",
+    "if this default ever becomes null, the $gt test below can go back to $ifNull",
+  );
+  const src = require("fs").readFileSync(require.resolve("../utils/farmDemand.js"), "utf8");
+  assert.ok(
+    /\$gt: \["\$login", ""\]/.test(src),
+    "the grouping key must test for a non-empty login, not for null",
+  );
+  assert.ok(
+    !/who: \{ \$ifNull: \["\$login"/.test(src),
+    "the $ifNull grouping key must not come back",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The Albion trap: an empty reuse row must never become a reuse source
+// ---------------------------------------------------------------------------
+
+test("BOTH reuse-source selectors require the source to hold accounts", () => {
+  // The trap, measured on prod 2026-09-08: a task written with bots and
+  // assignedAccounts:[] became the next campaign's reuse source, that campaign
+  // inherited zero and wrote another empty row with the same bots. Albion ran
+  // at 60 accounts through 08-31 and then sat at 0 for 15 consecutive tasks
+  // while three containers kept farming it — 450 drops in the last week, none
+  // of it listable, because a task with no assigned accounts can never produce
+  // a listing.
+  //
+  // There are TWO selectors and processCampaign prefers the MAP, so fixing only
+  // the function would have left the live path broken. Both are pinned here.
+  const src = require("fs").readFileSync(require.resolve("../utils/autoFarmer.js"), "utf8");
+
+  const fn = src.slice(src.indexOf("async function reusableTaskForGame"));
+  const fnBody = fn.slice(0, fn.indexOf("\n}\n"));
+  assert.ok(
+    /"assignedAccounts\.0": \{ \$exists: true \}/.test(fnBody),
+    "reusableTaskForGame must require the source to hold accounts",
+  );
+
+  const mapStart = src.indexOf("const reusableMap = new Map();");
+  assert.ok(mapStart > 0, "the tick-level reusable map moved");
+  const mapBody = src.slice(mapStart, mapStart + 900);
+  assert.ok(
+    /\(task\.assignedAccounts \|\| \[\]\)\.length > 0/.test(mapBody),
+    "the tick-level reusableMap must apply the same rule as reusableTaskForGame",
+  );
+});

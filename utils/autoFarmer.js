@@ -1578,10 +1578,32 @@ async function expireStalePlans() {
 
 // The most recent task for this game that owns bots we can restart —
 // weekly campaigns reuse infrastructure instead of burning new accounts.
+// THE SOURCE MUST HOLD ACCOUNTS, not just bots.
+//
+// This picked the newest task that owns bots, full stop. That makes an empty
+// reuse row a permanent trap: a task written with bots and `assignedAccounts:
+// []` becomes the next campaign's reuse source, that campaign inherits zero,
+// writes another empty row with the same bots, and the chain never recovers.
+//
+// Measured on prod 2026-09-08. Albion Online ran at 60 accounts through
+// 2026-08-31, dropped to 8 and then 0 on 09-01, and every one of the 15 tasks
+// since inherited 0 — while three containers went on farming it (450 drops
+// across 288 accounts in the last week alone). None of it could be listed,
+// because a task with no assigned accounts can never produce a listing
+// (utils/autoLister.js verifiedHoldersForItems returns [] on an empty set). The
+// same trap had caught Halo Infinite (3 tasks), Rainbow Six (2) and EVE (1).
+//
+// Requiring the source to hold at least one account both stops the chain
+// forming and HEALS one already formed: the query simply skips the empty rows
+// and finds the last good one, whose accounts are still on those same warm
+// bots. Everything downstream re-verifies (holdings against DropLog, exclusion
+// of logins already on another live listing), so reaching further back can
+// surface a stale account but never sell one twice.
 async function reusableTaskForGame(game) {
   return AutoFarmTask.findOne({
     game,
     "bots.0": { $exists: true },
+    "assignedAccounts.0": { $exists: true },
     status: { $in: ["active", "completed", "stopped"] },
   })
     .sort({ createdAt: -1 })
@@ -2268,11 +2290,15 @@ async function executeTask(task, ctx, { append = false } = {}) {
   if (!host) throw new Error("No farm host configured");
   const game = task.game;
 
-  // Ceiling is the sales-boosted maximum, not the flat base: plannedAccounts
-  // was already capped by capForGame at decision time.
+  // Ceiling is the game's OWN cap, re-read at execution time. plannedAccounts
+  // was already capped by capForGame when the plan was made, so this is a
+  // re-check, not the policy — but it has to be the SAME ceiling or it silently
+  // overrides it: with a per-game cap or coverage sizing raising a game above
+  // the flat `maxPerGame * SALES_CAP_MULT_MAX`, that flat product would clip a
+  // legitimate plan on its way to the pool.
   const want = Math.min(
     task.plannedAccounts || 0,
-    af.maxPerGame * SALES_CAP_MULT_MAX,
+    capForGame(af, await internalSalesForGame(game).catch(() => 0), game),
   );
   if (want < 1) throw new Error("Task has no planned accounts");
 
@@ -3541,12 +3567,22 @@ async function runOnce() {
       );
     progress(candidates.length + " campaign(s) to decide this tick.");
 
+    // The tick-level twin of reusableTaskForGame, and it must apply the SAME
+    // rule — processCampaign prefers this map over that function, so a
+    // divergence here is the one that reaches production.
+    //
+    // `assignedAccounts.0` is the load-bearing condition: without it an empty
+    // reuse row (bots, no accounts) becomes the next campaign's source, that
+    // campaign inherits zero and writes another empty row, and the game can
+    // never recover. Albion Online sat in exactly that trap for 15 consecutive
+    // tasks; see reusableTaskForGame for the measurement.
     const reusableMap = new Map();
     const candidateGames = new Set(candidates.map((c) => c.game));
     for (const task of autoTasks) {
       if (
         candidateGames.has(task.game) &&
         ["active", "completed", "stopped"].includes(task.status) &&
+        (task.assignedAccounts || []).length > 0 &&
         !reusableMap.has(task.game)
       ) {
         reusableMap.set(task.game, task);
@@ -4368,6 +4404,8 @@ async function backfillActiveTasks(af, host, progress) {
     Math.floor(Math.max(0, readyNow - af.poolReserve) / 2),
   );
   let added = 0;
+  // Per-pass memo for capForGame's sales input (see the ceiling below).
+  const backfillSales = new Map();
   for (const task of worthTopping) {
     if (added >= backfillCap) {
       progress(
@@ -4383,12 +4421,33 @@ async function backfillActiveTasks(af, host, progress) {
     // after it is created (decision path already exempts probes; this is the
     // matching exemption on the backfill side).
     const floor = task.decision === "probe" ? 0 : marketStockFloor(af);
+    // The ceiling is the game's OWN cap, not the flat fleet maximum.
+    //
+    // This used to be a hard `af.maxPerGame * SALES_CAP_MULT_MAX`. Backfill is
+    // where most of the pool actually goes (measured on prod: 140 of 174 claims
+    // in a day), so a flat 60 here silently overrode every per-game decision
+    // made upstream — a game with a raised cap could be decided at 120 and then
+    // be topped up only to 60, and the operator's own `gameAccountCaps`
+    // override was ignored entirely. capForGame is the single ceiling both
+    // engines use; backfill has to read it too or it is the real policy.
+    //
+    // Sales are looked up once per GAME per pass, not once per task: several
+    // tasks share a game and internalSalesForGame is a full aggregation.
+    let gameSales = backfillSales.get(task.game);
+    if (gameSales === undefined) {
+      gameSales = await internalSalesForGame(task.game).catch(() => ({
+        count: 0,
+        revenue: 0,
+        avgPrice: 0,
+      }));
+      backfillSales.set(task.game, gameSales);
+    }
     const target = Math.min(
       Math.max(
         Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
         floor,
       ),
-      af.maxPerGame * SALES_CAP_MULT_MAX,
+      capForGame(af, gameSales, task.game),
     );
     // Count only accounts that can still farm. The sweep above normally has
     // already unassigned the suspended ones, but this is the check that must not
