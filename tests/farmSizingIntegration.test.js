@@ -480,3 +480,26 @@ test("BOTH reuse-source selectors require the source to hold accounts", () => {
     "the tick-level reusableMap must apply the same rule as reusableTaskForGame",
   );
 });
+
+test("every allocator pass leaves a trace, including the passes that do nothing", () => {
+  // The observability hole this closes: an idle pass writes no SystemEvent,
+  // sends no Telegram and touches no row, so "running fine and finding nothing
+  // to do" and "never started" were indistinguishable from outside the process
+  // — `status().lastRun` only helps a caller inside the same one. That is the
+  // same failure mode as the misleading "0 accounts" Telegram line.
+  const src = require("fs").readFileSync(
+    require.resolve("../utils/unclaimedAllocator.js"),
+    "utf8",
+  );
+  const fn = src.slice(src.indexOf("async function runOnce"));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  // The heartbeat must be emitted BEFORE the autoSize early-return, or advisory
+  // mode — the shipped default — would stay silent.
+  const beat = body.indexOf('console.log(\n      "unclaimedAllocator: "');
+  const earlyReturn = body.indexOf("if (!cfg.autoSize && !force) return");
+  assert.ok(beat > 0, "runOnce must log a heartbeat");
+  assert.ok(
+    beat < earlyReturn,
+    "the heartbeat must come before the advisory-mode early return",
+  );
+});

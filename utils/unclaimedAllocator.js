@@ -433,8 +433,44 @@ async function runOnce({ force = false } = {}) {
     const p = await plan({ days: 30 });
     state.lastRun = new Date();
     state.lastError = "";
+
+    // HEARTBEAT. One line per pass, always — including the passes that decide
+    // to do nothing, which is most of them.
+    //
+    // Without this the loop is invisible: an idle pass writes no SystemEvent,
+    // sends no Telegram and touches no row, so "running fine and finding
+    // nothing to do" and "never started" look identical from outside the
+    // process. `status().lastRun` only helps a caller inside the same process.
+    // A system whose health cannot be read is the same failure as the
+    // Telegram "0 accounts" line that sent us looking here in the first place.
+    console.log(
+      "unclaimedAllocator: " +
+        (cfg.autoSize ? "auto" : "advisory") +
+        " pass — " +
+        p.games.map((g) => `${g.label} ${g.onHand}/${g.target}`).join(", ") +
+        (p.fleetKnown ? "" : " (fleet unknown: " + (p.fleetError || "?") + ")") +
+        " | short by " +
+        p.totals.fleetNeed +
+        ", budget " +
+        p.budget,
+    );
+
     if (!cfg.autoSize && !force) return { planned: true, applied: false, plan: p };
     const applied = await apply({ plan: p, actor: force ? "operator" : "allocator" });
+    if (applied && !applied.skipped) {
+      console.log(
+        "unclaimedAllocator: applied — +" +
+          applied.toppedUp +
+          " account(s), " +
+          applied.created +
+          " bot(s), " +
+          applied.shelvesRaised +
+          " shelf cap(s)" +
+          (applied.errors.length ? ", " + applied.errors.length + " error(s)" : ""),
+      );
+    } else if (applied && applied.skipped) {
+      console.log("unclaimedAllocator: apply skipped — " + applied.skipped);
+    }
     return { planned: true, applied: true, plan: p, result: applied };
   } catch (e) {
     state.lastError = e.message || String(e);
