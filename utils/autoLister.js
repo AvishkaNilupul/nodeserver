@@ -2044,27 +2044,88 @@ async function eventBundlePlans(game, { fresh = false } = {}) {
 // Returns null when the task belongs to no multi-wave event — that is the
 // signal for listStackedBundle to fall back to its older cross-event stack.
 // Any other return value (published, dry-run or a reasoned skip) is final.
-async function listEventBundle(task, { dryRun = false } = {}) {
-  const plans = await eventBundlePlans(task.game);
-  const plan = autoFarmBundles.planForTask(task, plans);
-  if (!plan) return null;
+// Two publishers can reach the same event: the auto-farmer's stacked-bundle
+// sweep (once per active task) and this module's own event-bundle sweep. The
+// duplicate guard below is a read of the live rows followed by a write, so two
+// callers can sit inside that window at once and both publish. Same process,
+// so a Set is enough — and far cheaper than discovering the duplicate on a
+// marketplace, where taking one back is a manual delist.
+const eventBundleInFlight = new Set();
 
-  // The bundle has to be strictly bigger than what this task's own listing
-  // already sells, or it is the same listing published twice.
+/**
+ * Publish this task's EVENT as one bundle.
+ *
+ * `plan` may be passed by a caller that already computed it (the sweep does),
+ * which also removes the second source of truth: without it the sweep decides
+ * on a freshly computed plan and then publishes against a separately cached
+ * one.
+ *
+ * Returns null when the task belongs to no multi-wave event — the signal for
+ * listStackedBundle to fall back to its older cross-event stack. Any other
+ * return value is final.
+ */
+async function listEventBundle(task, { dryRun = false, plan = null } = {}) {
+  let resolved = plan;
+  if (!resolved) {
+    resolved = autoFarmBundles.planForTask(
+      task,
+      await eventBundlePlans(task.game),
+    );
+  }
+  if (!resolved) return null;
+  if (eventBundleInFlight.has(resolved.key)) {
+    return {
+      skipped: "another pass is already publishing this event",
+      waiting: true,
+    };
+  }
+  eventBundleInFlight.add(resolved.key);
+  try {
+    return await publishEventBundleFor(task, resolved, dryRun);
+  } finally {
+    eventBundleInFlight.delete(resolved.key);
+  }
+}
+
+async function publishEventBundleFor(task, plan, dryRun) {
+  // The bundle has to be strictly bigger than what this event ALREADY sells,
+  // or it is the same listing published twice.
+  //
+  // Measured against the biggest of the event's own solo sets, not the owner
+  // task's alone: any of the event's tasks may be chosen as the owner, and
+  // comparing against whichever one happened to be picked made the verdict
+  // depend on that arbitrary choice. onCampaignEnded also grows a solo set to
+  // the sibling union, so one wave's listing frequently already advertises the
+  // whole event — which is exactly the duplicate this refuses to publish.
   let soloCount = 0;
-  const soloSetId = String((task.listing && task.listing.setId) || "");
-  if (soloSetId) {
-    try {
-      const soloSet = await DropSet.findById(soloSetId, { items: 1 }).lean();
-      soloCount = ((soloSet && soloSet.items) || []).length;
-    } catch {
-      soloCount = 0;
+  try {
+    const siblings = await AutoFarmTask.find(
+      { _id: { $in: plan.taskIds } },
+      { "listing.setId": 1 },
+    ).lean();
+    const setIds = [
+      ...new Set(
+        siblings
+          .map((t) => String((t.listing && t.listing.setId) || ""))
+          .filter(Boolean),
+      ),
+    ];
+    if (setIds.length) {
+      const sets = await DropSet.find(
+        { _id: { $in: setIds } },
+        { items: 1 },
+      ).lean();
+      for (const set of sets) {
+        soloCount = Math.max(soloCount, ((set && set.items) || []).length);
+      }
     }
+  } catch {
+    soloCount = 0;
   }
   if (plan.items.length <= soloCount) {
     return {
       skipped:
-        "the event bundle adds nothing to this task's own listing (" +
+        "the event bundle adds nothing over this event's own listings (" +
         plan.items.length +
         " vs " +
         soloCount +
@@ -2483,7 +2544,7 @@ async function publishReadyEventBundles({
     }
     let r;
     try {
-      r = await listEventBundle(task, { dryRun: !apply });
+      r = await listEventBundle(task, { dryRun: !apply, plan });
     } catch (e) {
       console.error("event bundle " + plan.eventName + " failed:", e.message);
       out.skipped.push({ event: plan.eventName, why: "failed: " + e.message });
@@ -2865,6 +2926,7 @@ module.exports = {
   listActivatedTask,
   listStackedBundle,
   listEventBundle,
+  publishEventBundleFor,
   publishReadyEventBundles,
   startEventBundleSweep,
   ownerTaskForPlan,
