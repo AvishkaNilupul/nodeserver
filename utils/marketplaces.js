@@ -2882,6 +2882,27 @@ async function g2gPublish({
     }
   }
 
+  // PUBLISHING IS TWO CALLS, AND THE FIRST ONE IS NOT THE OFFER.
+  //
+  // POST /offer does NOT create the offer you asked for. It answers 200 with a
+  // real-looking offer_id, and every content field comes back empty:
+  // title "", unit_price 0, actual_qty 0, delivery_method_ids []. It is an
+  // empty DRAFT shell, and calling it twice returns the SAME shell — which is
+  // how two different publishes ended up sharing one externalId, each pointing
+  // at an offer that does not exist. The content only lands with the PUT below,
+  // so a create that skips it silently publishes nothing at all.
+  const created = await g2gRequest("post", "/offer", {
+    body: { seller_id: g2gSellerId(), service_id: service, brand_id: brand },
+    what: "G2G create offer",
+  });
+  const offerId = created && (created.offer_id || created.id);
+  if (!offerId) {
+    throw new Error(
+      "G2G create: no offer id in response: " +
+        JSON.stringify(created).slice(0, 300),
+    );
+  }
+
   const body = {
     seller_id: g2gSellerId(),
     service_id: service,
@@ -2890,12 +2911,25 @@ async function g2gPublish({
     offer_type: "public",
     title: String(title || "").slice(0, 128),
     description: String(description || title || "").slice(0, 5000),
-    offer_currency: currency || "USD",
+    // `currency`, NOT `offer_currency` — the offer READS BACK as
+    // offer_currency, so a read-modify-write sends the wrong name and the
+    // write is rejected with "Missing mandatory parameter: currency".
+    currency: currency || "USD",
     unit_price: price,
     min_qty: Math.max(1, Number(minQty) || 1),
+    // Both, deliberately: actual_qty is the stock G2G stores, and a manual
+    // delivery_speed additionally demands `qty` ("Missing mandatory parameter:
+    // qty when delivery_speed is manual").
     actual_qty: stock,
+    qty: stock,
     low_stock_alert_qty: Number(lowStockQty) || 0,
     delivery_method_ids: dmIds,
+    // "manual", never "instant". Instant is the only speed G2G's OPEN api
+    // accepts, which is exactly why the Open API cannot create these offers at
+    // all; the seller API wants the same value our own live offers carry.
+    delivery_speed: "manual",
+    delivery_speed_details: [{ min: 1, max: 2147483647, delivery_time: 10 }],
+    sales_territory_settings: { settings_type: "global", countries: [] },
     status: G2G_STATUS.LIVE,
   };
   if (Array.isArray(attrs) && attrs.length) body.offer_attributes = attrs;
@@ -2903,15 +2937,19 @@ async function g2gPublish({
     body.offer_title_collection_tree = tree;
   }
 
-  const p = await g2gRequest("post", "/offer", {
+  await g2gRequest("put", "/offer/" + encodeURIComponent(offerId), {
     body,
-    what: "G2G create offer",
+    what: "G2G publish offer",
   });
-  const offerId = p && (p.offer_id || p.id);
-  if (!offerId) {
+
+  // Read back before claiming success. A 200 is not evidence that anything
+  // changed here — the create above proves it — and a listing row that records
+  // an offer which does not exist is worse than no row at all, because the
+  // next run reports it as correct.
+  const back = await g2gGetOffer(offerId).catch(() => null);
+  if (!back || !back.title) {
     throw new Error(
-      "G2G create: no offer id in response: " +
-        JSON.stringify(p).slice(0, 300),
+      "G2G publish: offer " + offerId + " did not read back as a live offer",
     );
   }
   return { externalId: String(offerId), url: g2gOfferUrl(offerId) };
