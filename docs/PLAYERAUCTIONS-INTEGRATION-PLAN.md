@@ -579,3 +579,56 @@ Four deaths, three different causes, and the first two diagnoses were both incom
   (with the recovery steps) and once when it recovers. Recovery is one paste into the keys modal.
 - For a long publishing run, park `playerauctionsAutoDeliver=false` first so the tick cannot
   compete, then re-enable. Belt and braces on top of the lock.
+
+## 15. The title is a data channel, not just copy (2026-09-08)
+
+Two bugs, one root cause: **the offer title is load-bearing in both directions**, and nothing in
+either file that touches it says so.
+
+PlayerAuctions refuses any title that is not plain ASCII, so `paSanitizeTitle` folds ours down
+before publishing. But `playerauctionsFarmService.parseFarmOrder` reads the game back **out** of
+that same title (`title.split(/\s+Twitch\s+Drops\b/i)[0]`) to decide which game to provision a
+rent-farm order for. The sanitiser and the fulfiller are therefore coupled through a string.
+
+### 15.1 Accents were dropped, not folded — 6 live offers could not be fulfilled
+
+`paSanitizeTitle` stripped non-ASCII outright, so "Pokémon GO" published as "**Pokmon GO**". The
+matcher could not recover it, because `normGame` replaces the accent with a **space**:
+
+    normGame("Pokémon GO")  ->  "pok mon go"
+    normGame("Pokmon GO")   ->  "pokmon go"      (live title)  -- no match
+    normGame("Pokemon GO")  ->  "pokemon go"     (correct fold) -- no match either
+
+So **six live "Pokmon GO … Automatic Farming" offers resolved to `game: ""`**. They looked perfect
+on PlayerAuctions and would have taken a buyer's money and provisioned nothing.
+
+Fixed at both ends:
+
+- `paSanitizeTitle` NFD-folds `é -> e` **before** the ASCII strip, so new titles read "Pokemon GO".
+- `canonicalGame` compares under **both** normalisations — accent-folded (`"pokemon go"`) and
+  accent-dropped (`"pokmon go"`, what is live right now) — and matches if either agrees. That is
+  what makes the already-published offers work **without republishing** them.
+
+Six accented games are in the 190-game catalogue (5 × Pokémon, MARVEL TŌKON). Eldorado is
+unaffected: it does not fold titles, so its copies keep the accent and match exactly.
+
+**The diagnostic that finds this class of bug:** take every LIVE offer title, run it back through
+`parseFarmOrder`, and assert `game && days > 0`. Nothing else catches it — the offers are valid,
+active and correctly priced on PlayerAuctions; only the round trip is broken.
+
+### 15.2 Bundle titles are not unique — the fallback could ship the wrong set
+
+A bundle title is game + item count + the first item names, truncated. Different events therefore
+collide: **9 duplicated titles across 174 live offers**. Six of those pairs are *distinct DropSets
+with identical titles* — genuinely different products, NOT duplicates. Only the three Pokémon GO
+farm pairs were true duplicates. **Always compare the `set` id before delisting a "duplicate".**
+
+`deliverOrder` falls back to matching an order by title when it cannot recover an offer id, and
+`findOne` would have returned whichever row came back first — delivering an account that does not
+hold what the buyer paid for. A wrong delivery is worse than a late one: it is a dispute *and* the
+stock is spent. An ambiguous title is now refused and alerted (`alertsOperator()`), never guessed.
+
+The same fallback also compared the **stored** title (em dashes, non-ASCII intact) against the
+**order's** title (ASCII-folded by PlayerAuctions), so it could never fire for a folded listing —
+dead code at exactly the moment it is needed. It now folds both sides before comparing, which also
+lines up the API's 150-character truncation.
