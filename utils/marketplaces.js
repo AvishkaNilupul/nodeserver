@@ -2596,7 +2596,13 @@ async function g2gListOffers({ pageSize = 100, maxPages = 30, status } = {}) {
   const seller = g2gSellerId();
   const out = [];
   for (let page = 1; page <= maxPages; page++) {
-    const params = { page, limit: pageSize };
+    // `page_size`, NOT `limit`. G2G ignores an unknown paging param and quietly
+    // serves its default 20 — and because the loop below stops as soon as a
+    // page comes back short, `limit` made this return only the FIRST 20 offers,
+    // for ever. Everything built on it inherited that: the shelf census saw a
+    // fifth of the account, and both publishers' "is this title already live?"
+    // check silently stopped protecting against duplicates past offer 20.
+    const params = { page, page_size: pageSize };
     if (status) params.status = status;
     const p = await g2gRequest(
       "get",
