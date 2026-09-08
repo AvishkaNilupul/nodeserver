@@ -563,16 +563,39 @@ async function deliverOrder(order, { dryRun }) {
         order.detail.orderInfo.offerInfo &&
         order.detail.orderInfo.offerInfo.link,
     );
-  const row =
-    (offerId &&
-      (await MarketplaceListing.findOne({
-        marketplace: "playerauctions",
-        externalId: offerId,
-      }))) ||
+  let row =
+    offerId &&
     (await MarketplaceListing.findOne({
       marketplace: "playerauctions",
-      title: offerTitle,
+      externalId: offerId,
     }));
+
+  // The title fallback is genuinely ambiguous. A bundle title is built from the
+  // game, the item count and the first couple of item names, then truncated --
+  // so two DIFFERENT events routinely render the SAME title. Six pairs are live
+  // on the account right now (distinct DropSets, identical titles), and picking
+  // whichever row the database returned first would hand the buyer an account
+  // that does not hold what they paid for. A wrong delivery is worse than a
+  // late one: it is a dispute AND the stock is spent. So match on the title
+  // only when it is unambiguous, and otherwise refuse loudly.
+  if (!row) {
+    const byTitle = await MarketplaceListing.find({
+      marketplace: "playerauctions",
+      title: offerTitle,
+    }).limit(2);
+    if (byTitle.length > 1) {
+      return {
+        orderId,
+        skipped:
+          "ambiguous listing title -- " +
+          byTitle.length +
+          "+ listings share " +
+          JSON.stringify(offerTitle) +
+          " and the order carried no offer id, so the right stock cannot be identified",
+      };
+    }
+    row = byTitle[0];
+  }
   if (!row) return { orderId, skipped: "no listing row for " + JSON.stringify(offerTitle) };
 
   // Already fully delivered.
@@ -821,7 +844,7 @@ async function deliverPendingOrders() {
       // reads like a routine skip. The four hand-made offers on this account
       // have no listing row at all, so this is exactly what a sale on one of
       // them looks like. Tell the operator once, while there is still time.
-      if (r.skipped && /no listing row|manual-delivery listing/.test(r.skipped)) {
+      if (r.skipped && alertsOperator(r.skipped)) {
         await alertUnfulfillable(order, r.skipped);
       }
       if (r.error) console.error("playerauctions deliver " + id + ":", r.error);
@@ -846,6 +869,18 @@ async function deliverPendingOrders() {
 // One alert per order, not one per 60s tick. Resets on restart, which at worst
 // costs a single duplicate for an order that is still stuck.
 const alertedOrders = new Set();
+
+// Which "skipped" reasons mean a PAID order will never ship without a human?
+// Those are the ones worth waking the operator for; the routine skips (already
+// delivered, nothing in stock yet) are not. Kept as a named predicate so the
+// list is one thing to read and one thing to test -- an alert that silently
+// stopped matching would be indistinguishable from no problem at all.
+const ALERT_SKIPS =
+  /no listing row|manual-delivery listing|ambiguous listing title/;
+
+function alertsOperator(skipReason) {
+  return ALERT_SKIPS.test(String(skipReason || ""));
+}
 
 async function alertUnfulfillable(order, why) {
   const id = String(order.orderId || order.id || "");
@@ -915,6 +950,7 @@ module.exports = {
   paItemCount,
   sharersOfUnclaimedGame,
   alertUnfulfillable,
+  alertsOperator,
   alertedOrders,
   unitsForOrder,
   credentialsForUnits,

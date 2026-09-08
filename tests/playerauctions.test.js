@@ -556,6 +556,23 @@ test("PlayerAuctions titles fold accents rather than dropping the letter", () =>
   assert.ok(!/[^\x20-\x7E]/.test(mp.paSanitizeTitle("caf\u00e9 \u2014 na\u00efve \u65e5\u672c")));
 });
 
+test("a paid order that cannot ship wakes the operator; a routine skip does not", () => {
+  const ff = require("../utils/playerauctionsFulfiller");
+  // Two events routinely render the SAME bundle title (game + item count +
+  // the first item names, truncated), and six such pairs are live right now.
+  // If an order arrives without a recoverable offer id, guessing between them
+  // ships an account that does not hold what the buyer paid for -- a dispute
+  // AND spent stock. Refusing is correct, but only if it is LOUD.
+  assert.ok(ff.alertsOperator('ambiguous listing title -- 2+ listings share "Halo"'));
+  assert.ok(ff.alertsOperator('no listing row for "Overwatch Twitch Drops"'));
+  assert.ok(ff.alertsOperator("manual-delivery listing"));
+  // Routine, self-resolving states must stay quiet or the alert is worthless.
+  assert.ok(!ff.alertsOperator("already delivered"));
+  assert.ok(!ff.alertsOperator("no stock"));
+  assert.ok(!ff.alertsOperator(""));
+  assert.ok(!ff.alertsOperator(undefined));
+});
+
 /* --------------------------- proof of delivery -------------------------- */
 
 const proof = require("../utils/playerauctionsProof");
