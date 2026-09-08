@@ -25,6 +25,11 @@ const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
 const ZX_CLAIM_TAG = "zeusx";
 const ELD_CLAIM_TAG = "eldorado";
 const PA_CLAIM_TAG = "playerauctions";
+const { G2G_CLAIM_TAG } = require("./g2gFulfiller");
+// G2G files an offer under the GAME's own brand, and a miss returns null
+// rather than a nearest match — nine Rainbow Six bundles already sit under
+// "Rainbow Six Mobile" because someone approximated once.
+const { brandForGame } = require("./g2gGames");
 const {
   reserveSetOnAccount,
   releaseSetForAccounts,
@@ -241,8 +246,8 @@ function buildTitle({ game, items, campaignName }) {
 // The closing support line names the marketplace the buyer is actually on —
 // "message me here on Gameflip" must never appear on a GGSel or Digiseller
 // product, and vice versa. marketplace is one of "gameflip", "digiseller",
-// "ggsel", "zeusx", "eldorado", "playerauctions" (or anything else → a neutral
-// line with no site name).
+// "ggsel", "zeusx", "eldorado", "playerauctions", "g2g" (or anything else → a
+// neutral line with no site name).
 function buildDescription({
   game,
   items,
@@ -258,6 +263,7 @@ function buildDescription({
     zeusx: "message me here on ZeusX",
     eldorado: "message me here on Eldorado",
     playerauctions: "message me here on PlayerAuctions",
+    g2g: "message me here on G2G",
   };
   const supportLine =
     "Any issue or question — " +
@@ -924,6 +930,91 @@ async function publishEldoradoShare({
   });
 }
 
+// G2G share. Same multi-stock shape as Eldorado — ONE Game Items offer whose
+// actual_qty is the number of reserved accounts, with the accounts riding
+// along as the row's `units` for utils/g2gFulfiller.js to hand out.
+//
+// The one structural difference is the brand. G2G files an offer under a
+// (service, brand) pair where the brand IS the game, and there is no universal
+// "Twitch Drops" bucket to fall back to the way Eldorado has one. A game
+// without a hand-checked brand is skipped rather than approximated: the
+// account is already paying for one such guess, with nine Rainbow Six Siege
+// bundles filed under "Rainbow Six Mobile" where no drops buyer will ever see
+// them.
+async function publishG2gShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  // Same rule as Eldorado/PlayerAuctions: a claimed drop is worthless to the
+  // buyer for these games, so the auto-farm's archive can never back the
+  // listing.
+  if (isNoClaimGame(game)) {
+    throw new Error(
+      game + " is a no-claim game — sellable only from the unclaimed farm, " +
+        "not the auto-farm's claimed archive",
+    );
+  }
+  const brand = brandForGame(game);
+  if (!brand) throw new Error("no G2G brand for " + game);
+  accounts = await reserveAccountsForPublish(accounts, set, G2G_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  // g2gPublish REJECTS a sub-floor price outright, so the floor is applied
+  // here and carried onto the row — the same thing publishPlayerAuctionsShare
+  // does, and the reason the stored price must match what was really published.
+  const priceUsd = Math.max(mp.G2G_MIN_PRICE, price);
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.g2gPublish({
+      serviceId: mp.G2G_ITEMS_SERVICE,
+      brandId: brand.brandId,
+      title,
+      description,
+      priceUsd,
+      qty: accounts.length,
+      minQty: 1,
+      // Left to g2gPublish: the legal delivery methods are per (service,
+      // brand), so it reads the product settings and takes the first one G2G
+      // itself offers rather than us pinning an id that another game rejects.
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "g2g",
+      externalId: r.externalId,
+      url: r.url || "",
+      title,
+      description,
+      price: priceUsd,
+      status: "active",
+      origin: "auto",
+      note:
+        "auto-farm: " + accounts.length + " account(s), chat auto-delivery",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      units: accounts.map((a) => ({
+        contentId: "",
+        accountId: String(a.accountId),
+        login: a.login,
+        addedAt: new Date(),
+        // G2G's hand-over is several calls (start_deliver, then the chat
+        // message, then delivered_qty), so `messagedAt` marks the point past
+        // which a retry must re-confirm rather than re-send credentials.
+        messagedAt: null,
+        deliveredAt: null,
+        orderId: "",
+      })),
+    });
+    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
+  });
+}
+
 // PlayerAuctions publisher.
 //
 // Unlike Eldorado — whose Twitch Drops category takes every game, with the
@@ -1033,7 +1124,13 @@ async function retryMissingSecondaries(task) {
   // again (24 live tasks were in exactly that state, most with no error to
   // explain it). It retries on the same terms as the other secondaries.
   const zeusxMissing = !(L.zeusx && L.zeusx.externalId);
-  if (!platiMissing && !ggselMissing && !zeusxMissing) return null;
+  // G2G joins on the same terms, for the same reason: a session that had
+  // expired at publish time, or a flag switched on mid-campaign, would
+  // otherwise cost the market for the whole campaign.
+  const g2gMissing = !(L.g2g && L.g2g.externalId);
+  if (!platiMissing && !ggselMissing && !zeusxMissing && !g2gMissing) {
+    return null;
+  }
 
   const gfRow = await MarketplaceListing.findOne({
     marketplace: "gameflip",
@@ -1066,6 +1163,7 @@ async function retryMissingSecondaries(task) {
       !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
     if (mapped) targets.push("zeusx");
   }
+  if (g2gMissing && af.g2gAuto && brandForGame(task.game)) targets.push("g2g");
   if (!targets.length) return null;
 
   const shares = {};
@@ -1120,6 +1218,23 @@ async function retryMissingSecondaries(task) {
           retried.push("zeusx");
         } catch (err) {
           task.listing.zeusx = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
+      } else if (t === "g2g") {
+        try {
+          const r = await publishG2gShare({
+            ...base,
+            accounts,
+            game: task.game,
+          });
+          task.listing.g2g = { ...r, error: "" };
+          retried.push("g2g");
+        } catch (err) {
+          task.listing.g2g = {
             externalId: "",
             url: "",
             qty: 0,
@@ -1503,6 +1618,13 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       postEvent: false,
       marketplace: "playerauctions",
     }),
+    g2g: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "g2g",
+    }),
   };
   const description = descriptions.gameflip;
 
@@ -1559,12 +1681,18 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // are account-only there).
   const paEnabled =
     !!af.playerauctionsAuto && (await playerauctionsGameEnabled(task.game));
+  // G2G is gated like PlayerAuctions, not like Eldorado: an offer is filed
+  // under the game's own brand and there is no catch-all bucket, so a game
+  // with no hand-checked brand must never take a share of the accounts —
+  // it would burn them on a publish that is guaranteed to throw.
+  const g2gEnabled = !!af.g2gAuto && !!brandForGame(task.game);
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
   if (zeusxEnabled) marketOrder.push("zeusx");
   if (eldoradoEnabled) marketOrder.push("eldorado");
   if (paEnabled) marketOrder.push("playerauctions");
+  if (g2gEnabled) marketOrder.push("g2g");
   const shares = {
     gameflip: [],
     plati: [],
@@ -1572,6 +1700,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     zeusx: [],
     eldorado: [],
     playerauctions: [],
+    g2g: [],
   };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
@@ -1624,6 +1753,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const zeusx = { externalId: "", url: "", qty: 0, error: "" };
   const eldorado = { externalId: "", url: "", qty: 0, error: "" };
   const playerauctions = { externalId: "", url: "", qty: 0, error: "" };
+  const g2g = { externalId: "", url: "", qty: 0, error: "" };
   try {
     // reserve → publish → (on throw) release the gameflip unit AND delete the
     // now-empty set (mirrors the no-deliver path above) so a failed publish
@@ -1780,6 +1910,31 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     } else {
       playerauctions.error = "no spare account for this market yet";
     }
+
+    if (g2gEnabled && shares.g2g.length) {
+      try {
+        const r = await publishG2gShare({
+          set,
+          title,
+          description: descriptions.g2g,
+          price,
+          img,
+          accounts: shares.g2g,
+          game: task.game,
+        });
+        g2g.externalId = r.externalId;
+        g2g.url = r.url;
+        g2g.qty = r.qty;
+      } catch (err) {
+        g2g.error = err.message;
+      }
+    } else if (!af.g2gAuto) {
+      g2g.error = "G2G auto-listing is switched off";
+    } else if (!g2gEnabled) {
+      g2g.error = "no G2G brand for " + task.game;
+    } else {
+      g2g.error = "no spare account for this market yet";
+    }
   } finally {
     if (img) await fsp.unlink(img).catch(() => {});
   }
@@ -1816,6 +1971,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     zeusx,
     eldorado,
     playerauctions,
+    g2g,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,
@@ -2923,6 +3079,7 @@ module.exports = {
   // auto-farm task through the lister.
   publishEldoradoShare,
   publishPlayerAuctionsShare,
+  publishG2gShare,
   listActivatedTask,
   listStackedBundle,
   listEventBundle,

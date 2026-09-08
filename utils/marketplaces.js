@@ -20,7 +20,14 @@ const { encrypt, decrypt } = require("./secretBox");
 const FIELDS = {
   gameflip: ["apiKey", "apiSecret"],
   digiseller: ["sellerId", "apiKey"],
-  g2g: ["userId", "apiKey", "apiSecret"],
+  // G2G's Open API only accepts pushes for the *account* section, not the Game
+  // Items category where every Twitch Drops offer lives, and the account has no
+  // API key any more. So G2G is driven through its own internal seller API at
+  // sls.g2g.com, exactly like ZeusX: the operator pastes the session token trio
+  // once (DevTools -> Application -> Local Storage -> www.g2g.com) and the
+  // server mints fresh access tokens from it forever via /user/refresh_access.
+  // See g2gRefreshAccess + utils/g2gSessionRefresher.
+  g2g: ["userId", "accessToken", "refreshToken", "activeDeviceToken"],
   ggsel: ["apiKey"],
   // FunPay has no API — the single credential is the account's session token.
   funpay: ["golden_key"],
@@ -50,16 +57,29 @@ const FIELDS = {
   z2u: ["cookie"],
 };
 
+// Credentials a marketplace will USE if present but must not be blocked on.
+// `requireKeys` ignores these; `getKeys`/`setKeys` still round-trip them, so an
+// operator can supply one without it becoming a hard precondition.
+const OPTIONAL_FIELDS = {
+  // G2G sends long_lived_token on /user/refresh_access, but a session that has
+  // never been "remember me"-d does not have one and refreshes fine without it.
+  g2g: ["longLivedToken"],
+};
+
 const MARKETPLACES = Object.keys(FIELDS);
 
 // ------------------------------------------------------------------
 // Key storage
 // ------------------------------------------------------------------
+function allFields(marketplace) {
+  return (FIELDS[marketplace] || []).concat(OPTIONAL_FIELDS[marketplace] || []);
+}
+
 function getKeys(marketplace) {
   const s = loadSettings();
   const stored = (s.marketplaces || {})[marketplace] || {};
   const out = {};
-  for (const f of FIELDS[marketplace] || []) {
+  for (const f of allFields(marketplace)) {
     out[f] = stored[f] ? decrypt(stored[f]) : "";
   }
   return out;
@@ -70,7 +90,7 @@ async function setKeys(marketplace, values) {
   const s = loadSettings();
   s.marketplaces = s.marketplaces || {};
   const cur = s.marketplaces[marketplace] || {};
-  for (const f of FIELDS[marketplace]) {
+  for (const f of allFields(marketplace)) {
     const v = values[f];
     if (typeof v !== "string") continue;
     const trimmed = v.trim();
@@ -2300,9 +2320,671 @@ async function ggselDelist(offerId) {
 }
 
 // ------------------------------------------------------------------
-// G2G Open API
+// G2G (g2g.com)
+//
+// Two different APIs live under this heading; do not confuse them.
+//
+// 1. The **internal seller API** at sls.g2g.com — the one the g2g.com web app
+//    itself talks to, and the ONLY one that can touch our listings. Every
+//    Twitch-Drops offer we sell sits in `Digital Products > Gaming > Game
+//    Items > <game>` (service 0765978e-…439e), which the public Open API
+//    cannot serve. (Careful: the "Support Gift Card & Top Up Only" heading in
+//    G2G's docs is only an Apidog FOLDER label, not a documented restriction —
+//    it appears in no description anywhere. The real blockers are structural:
+//    `delivery_method_code` is an enum of exactly {instant_inventory,
+//    direct_top_up}; `POST /v2/orders/{id}/delivery` needs a `delivery_id` that
+//    only ever arrives in an `order.api_delivery` WEBHOOK, and this server
+//    exposes no webhook receiver; deliver-code `content` is validated against
+//    the offer's `code_label` columns, so a multi-line credential is rejected;
+//    no screenshot-upload endpoint exists anywhere in the API, and Game Items
+//    loses disputes without one; and PATCH cannot change title, description or
+//    status, so there is no API delist at all.) So the auto-lister and the
+//    fulfiller both run on this API, the same way Z2U / Eldorado /
+//    PlayerAuctions do.
+//
+//    Auth is G2G's own token trio, NOT a cookie and NOT Firebase (Firebase is
+//    only the realtime/chat layer). Every request carries
+//
+//        authorization: <access_token>          <-- RAW. No "Bearer " prefix.
+//
+//    Sending "Bearer <token>" answers 401 {"message":"Unauthorized"}; the bare
+//    token answers 200. That one detail is the whole gate — it cost a probe to
+//    find, so it is asserted in tests/g2g.test.js.
+//
+//    The access_token is short-lived, so the durable credential is the refresh
+//    trio, pasted once from a signed-in browser (DevTools -> Application ->
+//    Local Storage -> www.g2g.com: `refresh_token`, `active_device_token`,
+//    optionally `long_lived_token`), plus the numeric seller id. The server
+//    mints fresh access tokens forever via POST /user/refresh_access — the same
+//    never-re-paste shape as zeusxRefreshAccessToken.
+//
+// 2. The **Open API** at open-api.g2g.com — HMAC-signed, key-based. Kept below
+//    only for the catalog pickers and the xlsx bulk-file generator that already
+//    use it (g2gServices/g2gBrands/g2gProducts/g2gAttributes + utils/g2gBulk).
+//    NOTE the account currently has NO API key at all (the table at
+//    g2g.com/offers/api is empty), so every one of those calls answers
+//    401 40100001 until the operator generates one. That is pre-existing and
+//    deliberate — nothing in the automation path depends on it.
 // ------------------------------------------------------------------
+const G2G_SLS = "https://sls.g2g.com";
+const G2G_WEB = "https://www.g2g.com";
+const G2G_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+
+// "Digital Products > Gaming > Game Items" — the service every Twitch Drops
+// offer of ours belongs to. The per-game brand id comes from the public catalog
+// (assets.g2g.com/offer/categories.json); see utils/g2gGames.js.
+const G2G_ITEMS_SERVICE = "0765978e-3fdf-48b4-bed3-184823aa439e";
+
+// G2G's floor for a Game Items offer. Mirrored in utils/pricing.js
+// MARKETPLACE_FLOORS.g2g — tests/pricing.test.js asserts the two agree.
+const G2G_MIN_PRICE = 0.5;
+
+// Offer statuses seen on live rows. "live" and "delisted" are the two we set.
+const G2G_STATUS = { LIVE: "live", DELISTED: "delisted" };
+
+function g2gError(what, e) {
+  const status = e && e.response && e.response.status;
+  const body = e && e.response && e.response.data;
+  let detail = "";
+  if (body && typeof body === "object") {
+    const msgs = Array.isArray(body.messages) ? body.messages : [];
+    detail =
+      msgs
+        .map((m) => (m && (m.text || m.message)) || "")
+        .filter(Boolean)
+        .join("; ") ||
+      body.message ||
+      JSON.stringify(body).slice(0, 300);
+  } else if (typeof body === "string") {
+    detail = body.slice(0, 300);
+  }
+  const err = new Error(
+    what + " failed" + (status ? " (HTTP " + status + ")" : "") +
+      (detail ? ": " + detail : ": " + (e && e.message)),
+  );
+  err.__g2g = true;
+  err.status = status;
+  throw err;
+}
+
+// Milliseconds until a JWT expires; Infinity when it carries no exp we can read
+// (so an unparseable token is never mistaken for an expired one).
+function g2gTokenMsLeft(token) {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(String(token).split(".")[1], "base64").toString("utf8"),
+    );
+    if (!payload.exp) return Infinity;
+    return payload.exp * 1000 - Date.now();
+  } catch {
+    return Infinity;
+  }
+}
+
+// Exchange the stored refresh trio for a fresh access token and save whatever
+// came back. G2G MAY rotate the refresh token on each call, so every value the
+// response carries is written back — that is safe whether it rotates or not.
+async function g2gRefreshAccess() {
+  const keys = getKeys("g2g");
+  if (!keys.refreshToken || !keys.userId) {
+    throw new Error(
+      "G2G refresh: no session stored — paste a G2G session once " +
+        "(Marketplace keys -> G2G) to enable auto-refresh",
+    );
+  }
+  let body;
+  try {
+    const r = await axios.post(
+      G2G_SLS + "/user/refresh_access",
+      {
+        user_id: String(keys.userId),
+        refresh_token: keys.refreshToken,
+        active_device_token: keys.activeDeviceToken || "",
+        long_lived_token: keys.longLivedToken || "",
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Origin: G2G_WEB,
+          Referer: G2G_WEB + "/",
+          "User-Agent": G2G_UA,
+        },
+        timeout: 20000,
+      },
+    );
+    body = r.data || {};
+  } catch (e) {
+    g2gError("G2G refresh", e);
+  }
+  const d = body.payload || body.data || body;
+  const access = d.access_token || d.accessToken;
+  if (!access) {
+    throw new Error(
+      "G2G refresh: no access_token in response: " +
+        JSON.stringify(body).slice(0, 200),
+    );
+  }
+  const next = { accessToken: access };
+  if (d.refresh_token) next.refreshToken = d.refresh_token;
+  if (d.active_device_token) next.activeDeviceToken = d.active_device_token;
+  if (d.long_lived_token) next.longLivedToken = d.long_lived_token;
+  await setKeys("g2g", next);
+  return access;
+}
+
+// Refresh proactively when the access token is within `withinMs` of expiry.
+// Returns true if it actually refreshed. Cheap to call often.
+async function g2gEnsureFreshToken(withinMs) {
+  const keys = getKeys("g2g");
+  if (!keys.refreshToken) return false;
+  const margin = Number(withinMs) || 10 * 60 * 1000; // default 10 minutes
+  if (keys.accessToken && g2gTokenMsLeft(keys.accessToken) > margin) {
+    return false;
+  }
+  await g2gRefreshAccess();
+  return true;
+}
+
+// One seller-API call. Refreshes-and-retries ONCE on 401: G2G's access token is
+// short-lived, so any call can 401 at any moment, and a pre-flight liveness
+// probe races that and loses (the same lesson eldRequest learned).
+async function g2gRequest(method, path, opts = {}) {
+  const keys = requireKeys("g2g");
+  const send = async (token) => {
+    return axios({
+      method,
+      url: G2G_SLS + path,
+      params: opts.params,
+      data: opts.body,
+      headers: {
+        // RAW token — a "Bearer " prefix here is a guaranteed 401.
+        authorization: token,
+        "Content-Type": "application/json",
+        Origin: G2G_WEB,
+        Referer: G2G_WEB + "/",
+        "User-Agent": G2G_UA,
+      },
+      timeout: opts.timeout || 30000,
+    });
+  };
+  let token = keys.accessToken;
+  if (!token) token = await g2gRefreshAccess();
+  let r;
+  try {
+    r = await send(token);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    if (status === 401 && !opts.__retried) {
+      let fresh;
+      try {
+        fresh = await g2gRefreshAccess();
+      } catch {
+        g2gError(opts.what || "G2G", e);
+      }
+      try {
+        r = await send(fresh);
+      } catch (e2) {
+        g2gError(opts.what || "G2G", e2);
+      }
+    } else {
+      g2gError(opts.what || "G2G", e);
+    }
+  }
+  const body = r.data || {};
+  // G2G answers 200 with an in-band error code for some failures.
+  if (body && body.code && Number(body.code) >= 4000) {
+    const msgs = Array.isArray(body.messages) ? body.messages : [];
+    throw new Error(
+      (opts.what || "G2G") +
+        " failed: " +
+        (msgs.map((m) => m && m.text).filter(Boolean).join("; ") ||
+          "code " + body.code),
+    );
+  }
+  return body.payload !== undefined ? body.payload : body;
+}
+
+// The seller id is part of nearly every path/param, so read it once.
+function g2gSellerId() {
+  const keys = requireKeys("g2g");
+  return String(keys.userId);
+}
+
+function g2gOfferUrl(offerId) {
+  return G2G_WEB + "/offer/" + encodeURIComponent(String(offerId || ""));
+}
+
+async function g2gTest() {
+  const seller = g2gSellerId();
+  const p = await g2gRequest("get", "/order/count-my-orders", {
+    params: { seller_id: seller },
+    what: "G2G test",
+  });
+  const counts = p || {};
+  const parts = [];
+  if (counts.preparing != null) parts.push(counts.preparing + " to deliver");
+  if (counts.delivering != null) parts.push(counts.delivering + " delivering");
+  return {
+    ok: true,
+    detail:
+      "Connected as seller " + seller +
+      (parts.length ? " — " + parts.join(", ") : ""),
+    data: counts,
+  };
+}
+
+// ---- offers -------------------------------------------------------
+
+// Every offer on the account. Paged; G2G caps limit at 100.
+async function g2gListOffers({ pageSize = 100, maxPages = 30, status } = {}) {
+  const seller = g2gSellerId();
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const params = { page, limit: pageSize };
+    if (status) params.status = status;
+    const p = await g2gRequest(
+      "get",
+      "/v3/offer/seller/" + encodeURIComponent(seller) + "/my_offers",
+      { params, what: "G2G list offers" },
+    );
+    const rows = (p && (p.results || p.offers)) || [];
+    for (const o of rows) {
+      out.push({
+        offerId: o.offer_id,
+        title: o.title,
+        status: o.status,
+        currency: o.offer_currency || o.currency,
+        unitPrice: o.unit_price,
+        // available_qty is actual_qty minus what checkout is holding, so the
+        // number to write back when syncing stock is actual_qty.
+        availableQty: o.available_qty,
+        actualQty: o.actual_qty,
+        reservedQty: o.reserved_qty,
+        minQty: o.min_qty,
+        serviceId: o.service_id,
+        brandId: o.brand_id,
+        relationId: o.relation_id,
+        url: g2gOfferUrl(o.offer_id),
+      });
+    }
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
+async function g2gGetOffer(offerId) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  return g2gRequest("get", "/offer/" + encodeURIComponent(offerId), {
+    what: "G2G get offer",
+  });
+}
+
+// Partial update. G2G's PUT /offer/{id} wants the fields it is changing; send
+// only what the caller asked for so an unrelated field is never clobbered.
+async function g2gUpdateOffer(offerId, fields) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  const f = fields || {};
+  const body = {};
+  if (f.unitPrice != null && f.unitPrice !== "") {
+    const price = Number(f.unitPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error("G2G needs a price above 0");
+    }
+    if (price < G2G_MIN_PRICE) {
+      throw new Error("G2G's minimum price is " + G2G_MIN_PRICE.toFixed(2));
+    }
+    body.unit_price = price;
+  }
+  // Stock on a Game Items offer is actual_qty; available_qty is derived
+  // (actual minus whatever checkout is holding) and is not settable.
+  if (f.stock != null && f.stock !== "") {
+    const qty = Number(f.stock);
+    if (!Number.isFinite(qty) || qty < 0) {
+      throw new Error("G2G needs a stock of 0 or more");
+    }
+    body.actual_qty = Math.round(qty);
+  }
+  if (f.title != null) body.title = String(f.title).slice(0, 128);
+  if (f.description != null) {
+    body.description = String(f.description).slice(0, 5000);
+  }
+  if (f.status != null) body.status = String(f.status);
+  if (f.minQty != null) body.min_qty = Math.max(1, Number(f.minQty) || 1);
+  if (!Object.keys(body).length) {
+    throw new Error("G2G update: nothing to change");
+  }
+  body.seller_id = g2gSellerId();
+  const p = await g2gRequest("put", "/offer/" + encodeURIComponent(offerId), {
+    body,
+    what: "G2G update offer",
+  });
+  return { externalId: String((p && (p.offer_id || p.id)) || offerId) };
+}
+
+function g2gReprice(offerId, priceUsd) {
+  return g2gUpdateOffer(offerId, { unitPrice: priceUsd });
+}
+
+function g2gSetQuantity(offerId, qty) {
+  return g2gUpdateOffer(offerId, { stock: qty });
+}
+
+// Take an offer off sale. This is a STATUS change, never a delete: G2G keeps
+// the offer's history and sales count, and a deleted offer cannot be brought
+// back. g2gRelist is its exact inverse.
+async function g2gDelist(offerId) {
+  await g2gUpdateOffer(offerId, { status: G2G_STATUS.DELISTED });
+}
+
+async function g2gRelist(offerId) {
+  await g2gUpdateOffer(offerId, { status: G2G_STATUS.LIVE });
+}
+
+// The delivery methods and buyer purchase-form a (service, brand) pair allows.
+// Read this before publishing — the allowed set differs per game (Albion offers
+// Face to face trade / Island / Auction House) and G2G rejects an offer whose
+// delivery_method_ids are not in it.
+async function g2gProductSettings(serviceId, brandId) {
+  const p = await g2gRequest(
+    "get",
+    "/offer/product_settings/service/" +
+      encodeURIComponent(serviceId) +
+      "/brand/" +
+      encodeURIComponent(brandId) +
+      "/product_settings",
+    { what: "G2G product settings" },
+  );
+  const groups = (p && p.results) || [];
+  const byType = {};
+  for (const g of groups) byType[g.product_settings_type] = g.results || [];
+  const delivery = (byType.delivery_method || []).map((d) => ({
+    id: d.product_settings_id,
+    code: (d.product_settings && d.product_settings.code) || "",
+    label:
+      (d.product_settings &&
+        d.product_settings.label &&
+        d.product_settings.label.en) ||
+      "",
+  }));
+  return { delivery, purchaseForm: byType.purchase_form || [], raw: p };
+}
+
+// Create a Game Items offer. `serviceId`/`brandId` identify the game; the
+// legacy `productId` argument is accepted as the relation id so the existing
+// publish route keeps working.
+async function g2gPublish({
+  serviceId,
+  brandId,
+  relationId,
+  productId,
+  title,
+  description,
+  priceUsd,
+  qty,
+  minQty,
+  currency,
+  offerAttributes,
+  deliveryMethodIds,
+  collectionTree,
+  lowStockQty,
+}) {
+  const price = Number(priceUsd);
+  const service = String(serviceId || G2G_ITEMS_SERVICE);
+  const brand = String(brandId || "");
+  if (!brand) throw new Error("G2G brand_id is required (the game)");
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("G2G needs a price above 0");
+  }
+  if (price < G2G_MIN_PRICE) {
+    throw new Error("G2G's minimum price is " + G2G_MIN_PRICE.toFixed(2));
+  }
+  const stock = Math.max(1, Number(qty) || 1);
+
+  let dmIds = deliveryMethodIds;
+  if (!Array.isArray(dmIds) || !dmIds.length) {
+    // The product dictates which delivery methods are legal; take the first
+    // one it offers rather than guessing an id that will be rejected.
+    const settings = await g2gProductSettings(service, brand);
+    dmIds = settings.delivery.slice(0, 1).map((d) => d.id);
+    if (!dmIds.length) {
+      throw new Error(
+        "G2G: no delivery method available for this game — cannot publish",
+      );
+    }
+  }
+
+  const body = {
+    seller_id: g2gSellerId(),
+    service_id: service,
+    brand_id: brand,
+    relation_id: String(relationId || productId || ""),
+    offer_type: "public",
+    title: String(title || "").slice(0, 128),
+    description: String(description || title || "").slice(0, 5000),
+    offer_currency: currency || "USD",
+    unit_price: price,
+    min_qty: Math.max(1, Number(minQty) || 1),
+    actual_qty: stock,
+    low_stock_alert_qty: Number(lowStockQty) || 0,
+    delivery_method_ids: dmIds,
+    status: G2G_STATUS.LIVE,
+  };
+  if (Array.isArray(offerAttributes) && offerAttributes.length) {
+    body.offer_attributes = offerAttributes;
+  }
+  if (Array.isArray(collectionTree) && collectionTree.length) {
+    body.offer_title_collection_tree = collectionTree;
+  }
+
+  const p = await g2gRequest("post", "/offer", {
+    body,
+    what: "G2G create offer",
+  });
+  const offerId = p && (p.offer_id || p.id);
+  if (!offerId) {
+    throw new Error(
+      "G2G create: no offer id in response: " +
+        JSON.stringify(p).slice(0, 300),
+    );
+  }
+  return { externalId: String(offerId), url: g2gOfferUrl(offerId) };
+}
+
+// ---- orders -------------------------------------------------------
+
+// The cheap poll: one small call that says whether anything needs doing.
+// `preparing` is the count of paid orders awaiting delivery.
+async function g2gOrderCounts() {
+  return g2gRequest("get", "/order/count-my-orders", {
+    params: { seller_id: g2gSellerId() },
+    what: "G2G order counts",
+  });
+}
+
+// Seller-side orders. NOTE the seller_id param is mandatory — omit it and G2G
+// answers 4001 "Missing mandatory parameter: buyer_id", which reads like a bug
+// report but just means "you didn't say which side you are".
+async function g2gOrders({ page = 1, pageSize = 30, status } = {}) {
+  const params = { seller_id: g2gSellerId(), page, limit: pageSize };
+  if (status) params.status = status;
+  const p = await g2gRequest("get", "/order/list_my_order", {
+    params,
+    what: "G2G orders",
+  });
+  const rows = (p && (p.results || p.orders)) || [];
+  return rows.map(g2gNormalizeOrder);
+}
+
+function g2gNormalizeOrder(o) {
+  return {
+    orderId: o.order_id,
+    orderItemId: o.order_item_id,
+    offerId: o.offer_id,
+    title: o.offer_title,
+    buyerId: o.buyer_id,
+    status: o.order_item_status,
+    sellerStatus: o.seller_sub_status,
+    purchasedQty: Number(o.purchased_qty) || 0,
+    deliveredQty: Number(o.delivered_qty) || 0,
+    refundedQty: Number(o.refunded_qty) || 0,
+    unitPrice: Number(o.unit_price) || 0,
+    amount: Number(o.amount) || 0,
+    currency: o.offer_currency || o.checkout_currency || "USD",
+    serviceId: o.service_id,
+    raw: o,
+  };
+}
+
+// Paid orders that still need delivering. `seller_sub_status: "to_deliver"` is
+// the signal the seller UI itself uses for its "Preparing" tab.
+async function g2gPendingOrders({ maxPages = 5, pageSize = 30 } = {}) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await g2gOrders({ page, pageSize });
+    for (const o of rows) {
+      if (
+        o.status === "preparing" ||
+        o.sellerStatus === "to_deliver" ||
+        (o.deliveredQty < o.purchasedQty && o.status === "delivering")
+      ) {
+        out.push(o);
+      }
+    }
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
+async function g2gOrder(orderItemId) {
+  if (!orderItemId) throw new Error("G2G order_item_id is required");
+  const p = await g2gRequest(
+    "get",
+    "/order/item/" + encodeURIComponent(orderItemId),
+    { params: { seller_id: g2gSellerId() }, what: "G2G order" },
+  );
+  return p;
+}
+
+// ---- delivery -----------------------------------------------------
+//
+// The lifecycle, read off a real completed order:
+//   start_deliver      "You have viewed the delivery details."
+//   mark_as_delivering "Delivery in progress."
+//   delivered_qty      "You delivered N quantity."
+//   (buyer confirms)   "Receipt of the item has been confirmed."  -> Completed
+//
+// delivered_qty is a COUNTER, not a hand-over channel — the delivery record
+// carries no content. The credential itself travels through G2G chat, which is
+// a Firebase Realtime Database and has no REST endpoint in the app's API map,
+// so the hand-over stays operator-assisted for now (see utils/g2gFulfiller.js).
+
+async function g2gStartDeliver(orderItemId) {
+  return g2gRequest(
+    "put",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/start_deliver",
+    { body: { seller_id: g2gSellerId() }, what: "G2G start deliver" },
+  );
+}
+
+async function g2gMarkDelivering(orderItemId) {
+  return g2gRequest(
+    "put",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/mark_as_delivering",
+    { body: { seller_id: g2gSellerId() }, what: "G2G mark delivering" },
+  );
+}
+
+async function g2gSetDeliveredQty(orderItemId, qty) {
+  const n = Math.max(1, Number(qty) || 1);
+  return g2gRequest(
+    "put",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/delivered_qty",
+    {
+      body: { seller_id: g2gSellerId(), delivery_qty: n },
+      what: "G2G delivered qty",
+    },
+  );
+}
+
+async function g2gDeliveries(orderItemId) {
+  const p = await g2gRequest(
+    "get",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/deliveries",
+    { params: { seller_id: g2gSellerId() }, what: "G2G deliveries" },
+  );
+  return (p && p.results) || [];
+}
+
+// Proof of delivery. G2G only holds payment when a buyer does NOT confirm or
+// opens a case — a confirmed order completes with no proof at all (verified on
+// a real completed order, whose delivery_proofs is a 404). So this is a dispute
+// safety net, not a per-sale step.
+async function g2gDeliveryProofs(orderItemId) {
+  try {
+    const p = await g2gRequest(
+      "get",
+      "/order/item/" + encodeURIComponent(orderItemId) + "/delivery_proofs",
+      { params: { seller_id: g2gSellerId() }, what: "G2G delivery proofs" },
+    );
+    return (p && (p.results || p)) || [];
+  } catch (e) {
+    // "Could not find any uploaded delivery proof" is the normal answer for an
+    // order nobody disputed — a buyer-confirmed order completes with no proof
+    // at all. Match on the HTTP status, not on wording: g2gError renders G2G's
+    // message text and drops the 4041 code, and the text says "could not find",
+    // which a /not found/ regex silently misses.
+    if (e.status === 404 || /not\s*found|could not find/i.test(e.message)) {
+      return [];
+    }
+    throw e;
+  }
+}
+
+// ---- chat ---------------------------------------------------------
+
+// Create-or-fetch our own SendBird chat profile. The POST (unlike the GET at
+// the same path) is what returns `session_tokens`, which is how a server-side
+// sender authenticates to SendBird without a second stored credential.
+// See utils/g2gChat.js for why the token alone is not enough for SendBird REST.
+async function g2gChatProfile(userId) {
+  const id = String(userId || g2gSellerId());
+  return g2gRequest("post", "/chat/user", {
+    body: { user_id: id },
+    what: "G2G chat profile",
+  });
+}
+
+
+// ---- legacy Open API (catalog pickers + the xlsx bulk-file generator) ------
+//
+// HMAC-signed, key-based, and scoped by G2G to Gift Card & Top Up products. It
+// cannot create or manage a Game Items offer, so nothing in the automation path
+// uses it — these four calls only feed the manual catalog dropdowns in
+// public/listings.html and utils/g2gBulk.js. They read their key bag directly
+// rather than through requireKeys("g2g"), because FIELDS.g2g now holds the
+// seller-session credential instead. With no API key on the account they answer
+// 401 40100001; that is expected and harmless.
 const G2G_API = "https://open-api.g2g.com";
+
+function g2gOpenApiKeys() {
+  const stored = (loadSettings().marketplaces || {}).g2g || {};
+  const read = (f) => (stored[f] ? decrypt(stored[f]) : "");
+  const keys = {
+    userId: read("userId"),
+    apiKey: read("apiKey"),
+    apiSecret: read("apiSecret"),
+  };
+  if (!keys.apiKey || !keys.apiSecret) {
+    throw new Error(
+      "G2G's Open API has no key on this account — generate one at " +
+        "g2g.com/offers/api if you need the catalog pickers. The listing and " +
+        "delivery automation does not use it.",
+    );
+  }
+  return keys;
+}
 
 function g2gHeaders(keys, urlPath) {
   const timestamp = String(Date.now());
@@ -2323,8 +3005,8 @@ function g2gHeaders(keys, urlPath) {
   };
 }
 
-async function g2gRequest(method, urlPath, body) {
-  const keys = requireKeys("g2g");
+async function g2gOpenRequest(method, urlPath, body) {
+  const keys = g2gOpenApiKeys();
   try {
     const r = await axios({
       method,
@@ -2339,21 +3021,17 @@ async function g2gRequest(method, urlPath, body) {
   }
 }
 
-async function g2gTest() {
-  const d = await g2gRequest("get", "/v2/store");
-  return { ok: true, detail: "Connected — store settings fetched", data: d };
+function g2gServices() {
+  return g2gOpenRequest("get", "/v2/services");
 }
 
-// Catalog browsing so the UI can walk service -> brand -> product -> attributes.
-function g2gServices() {
-  return g2gRequest("get", "/v2/services");
-}
 function g2gBrands(serviceId) {
-  return g2gRequest(
+  return g2gOpenRequest(
     "get",
     "/v2/services/" + encodeURIComponent(serviceId) + "/brands",
   );
 }
+
 async function g2gProducts(serviceId, brandId, categoryId) {
   // G2G treats category_id as mutually exclusive with service_id/brand_id
   // ("... is not required when category_id is exists"), and a category-only
@@ -2363,7 +3041,7 @@ async function g2gProducts(serviceId, brandId, categoryId) {
   const qs = new URLSearchParams();
   qs.set("service_id", serviceId);
   qs.set("brand_id", brandId);
-  const d = await g2gRequest("get", "/v2/products?" + qs.toString());
+  const d = await g2gOpenRequest("get", "/v2/products?" + qs.toString());
   if (categoryId) {
     const payload = d.payload || d.data || d;
     for (const key of Object.keys(payload)) {
@@ -2382,176 +3060,12 @@ async function g2gProducts(serviceId, brandId, categoryId) {
   }
   return d;
 }
+
 function g2gAttributes(productId) {
-  return g2gRequest(
+  return g2gOpenRequest(
     "get",
     "/v2/products/" + encodeURIComponent(productId) + "/attributes",
   );
-}
-
-// Create an offer. G2G offers hang off a catalog product, so the caller must
-// supply productId (+ any required attributes picked from g2gAttributes).
-async function g2gPublish({
-  productId,
-  title,
-  description,
-  priceUsd,
-  qty,
-  minQty,
-  currency,
-  offerAttributes,
-  deliveryMethodIds,
-}) {
-  const price = Number(priceUsd);
-  if (!productId) throw new Error("G2G product_id is required");
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("G2G needs a price above 0");
-  }
-  const body = {
-    product_id: String(productId),
-    title: String(title || "").slice(0, 128),
-    description: String(description || title || ""),
-    currency: currency || "USD",
-    unit_price: price,
-    min_qty: Number(minQty) || 1,
-    api_qty: Number(qty) || 1,
-    available_qty: Number(qty) || 1,
-    low_stock_alert_qty: 0,
-  };
-  if (Array.isArray(offerAttributes) && offerAttributes.length) {
-    body.offer_attributes = offerAttributes;
-  }
-  let dmIds = deliveryMethodIds;
-  if (!Array.isArray(dmIds) || !dmIds.length) {
-    // The catalog product dictates the allowed delivery methods; send them
-    // all so G2G doesn't reject the offer for missing delivery info.
-    try {
-      const a = await g2gAttributes(productId);
-      const p = a.payload || a.data || a;
-      dmIds = (p.delivery_method_list || [])
-        .map((m) => m.delivery_method_id)
-        .filter(Boolean);
-    } catch {
-      dmIds = [];
-    }
-  }
-  if (Array.isArray(dmIds) && dmIds.length) {
-    body.delivery_method_ids = dmIds;
-  }
-  let d;
-  try {
-    d = await g2gRequest("post", "/v2/offers", body);
-  } catch (err) {
-    if (/delivery_speed/i.test(err.message)) {
-      throw new Error(
-        "G2G's API only accepts instant-delivery offers (gift cards / top-ups " +
-          "or API-delivered stock). This product uses manual/gifting delivery, " +
-          "which G2G does not allow to be created through the API — create the " +
-          "offer once on g2g.com, after which price/stock can be managed here.",
-      );
-    }
-    throw err;
-  }
-  const payload = d.payload || d.data || d;
-  const offerId = payload.offer_id || payload.id;
-  if (!offerId) {
-    throw new Error(
-      "G2G create: no offer id in response: " + JSON.stringify(d).slice(0, 300),
-    );
-  }
-  return {
-    externalId: String(offerId),
-    url: "https://www.g2g.com/offer/" + offerId,
-  };
-}
-
-async function g2gDelist(offerId) {
-  await g2gRequest("delete", "/v2/offers/" + encodeURIComponent(offerId));
-}
-
-// Update mutable fields (price / stock / status) of an offer that already
-// exists on G2G. Unlike creating, updating an existing offer is allowed even
-// for delivery types the API won't let you *create* — so this is the supported
-// way to manage price and stock of offers listed on g2g.com from here.
-//
-// Verified against G2G's Open API (2026-07-21): PATCH /v2/offers/{id} with a
-// partial body — only the fields you send are changed. Price updates work on
-// any offer. `stock` maps to api_qty (the API-managed stock); note that
-// manual/gifting offers keep api_qty=0 and manage their real stock
-// (available_qty, which the API rejects as "no attributes to be updated") on
-// g2g.com — so stock updates here only apply to API-delivery offers.
-async function g2gUpdateOffer(offerId, fields) {
-  if (!offerId) throw new Error("G2G offer_id is required");
-  const f = fields || {};
-  const body = {};
-  if (f.unitPrice != null && f.unitPrice !== "") {
-    const price = Number(f.unitPrice);
-    if (!Number.isFinite(price) || price <= 0) {
-      throw new Error("G2G needs a price above 0");
-    }
-    body.unit_price = price;
-  }
-  if (f.stock != null && f.stock !== "") {
-    const qty = Number(f.stock);
-    if (!Number.isFinite(qty) || qty < 0) {
-      throw new Error("G2G needs a stock of 0 or more");
-    }
-    body.api_qty = Math.round(qty);
-  }
-  if (f.title != null) body.title = String(f.title).slice(0, 128);
-  if (f.description != null) body.description = String(f.description);
-  if (f.status != null) body.offer_status = String(f.status);
-  if (!Object.keys(body).length) {
-    throw new Error("G2G update: nothing to change");
-  }
-  const d = await g2gRequest(
-    "patch",
-    "/v2/offers/" + encodeURIComponent(offerId),
-    body,
-  );
-  const payload = d.payload || d.data || d;
-  return { externalId: String(payload.offer_id || payload.id || offerId) };
-}
-
-// Fetch one existing offer (current price/stock/status/etc.). Used by the bulk
-// updater to show what's live before changing it, and to safely diff after.
-async function g2gGetOffer(offerId) {
-  if (!offerId) throw new Error("G2G offer_id is required");
-  const d = await g2gRequest(
-    "get",
-    "/v2/offers/" + encodeURIComponent(offerId),
-  );
-  return d.payload || d.data || d;
-}
-
-// List the seller's own offers so the price updater can show them grouped by
-// game. G2G exposes this only as a POST search (there is no GET /v2/offers
-// list), so page through and return them all. brandId/serviceId let the UI
-// group per game; there's no working server-side product filter.
-async function g2gListOffers({ pageSize = 100, maxPages = 30 } = {}) {
-  const out = [];
-  for (let page = 1; page <= maxPages; page++) {
-    const d = await g2gRequest("post", "/v2/offers/search", {
-      page,
-      page_size: pageSize,
-    });
-    const p = d.payload || d.data || d;
-    const rows = p.results || p.offers || [];
-    for (const o of rows) {
-      out.push({
-        offerId: o.offer_id,
-        title: o.title,
-        status: o.status,
-        currency: o.currency,
-        unitPrice: o.unit_price,
-        availableQty: o.available_qty,
-        serviceId: o.service_id,
-        brandId: o.brand_id,
-      });
-    }
-    if (rows.length < pageSize) break;
-  }
-  return out;
 }
 
 // ------------------------------------------------------------------
@@ -6486,16 +7000,41 @@ module.exports = {
   digisellerProductStockDetailed,
   digisellerProductVisible,
   digisellerDelist,
+  // G2G — the seller-session connector (sls.g2g.com). See the block comment
+  // above G2G_SLS for why the Open API is not used for listing or delivery.
+  G2G_MIN_PRICE,
+  G2G_ITEMS_SERVICE,
+  G2G_STATUS,
+  g2gRefreshAccess,
+  g2gEnsureFreshToken,
+  g2gTokenMsLeft,
   g2gTest,
+  g2gOfferUrl,
+  g2gListOffers,
+  g2gGetOffer,
+  g2gPublish,
+  g2gUpdateOffer,
+  g2gReprice,
+  g2gSetQuantity,
+  g2gDelist,
+  g2gRelist,
+  g2gProductSettings,
+  g2gOrderCounts,
+  g2gOrders,
+  g2gPendingOrders,
+  g2gOrder,
+  g2gStartDeliver,
+  g2gMarkDelivering,
+  g2gSetDeliveredQty,
+  g2gDeliveries,
+  g2gDeliveryProofs,
+  g2gSellerId,
+  g2gChatProfile,
+  // G2G legacy Open API — catalog pickers + utils/g2gBulk only.
   g2gServices,
   g2gBrands,
   g2gProducts,
   g2gAttributes,
-  g2gPublish,
-  g2gUpdateOffer,
-  g2gGetOffer,
-  g2gListOffers,
-  g2gDelist,
   ggselTest,
   ggselCategories,
   ggselPublish,

@@ -73,6 +73,8 @@ const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
 const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
 const z2uFulfiller = require("./utils/z2uFulfiller");
+const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
+const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
@@ -793,6 +795,15 @@ mongoose
     // credential on a waiting order. Self-guards on autoFarm.z2uAuto /
     // z2uAutoDeliver, and both halves ship in dry-run.
     z2uFulfiller.start();
+    // G2G. Every Twitch-Drops offer we sell there sits in Game Items, a
+    // MANUAL-delivery category with no code vault, so this drives G2G's own
+    // view-details -> delivering -> delivered-quantity state machine and hands
+    // the credential over in chat. The refresher keeps the pasted seller
+    // session alive (G2G access tokens are short-lived and mint from a stored
+    // refresh trio). Both self-guard on autoFarm.g2gAuto / g2gAutoDeliver and
+    // ship in dry-run, so this is a no-op until the operator flips them on.
+    g2gSessionRefresher.start();
+    g2gFulfiller.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();

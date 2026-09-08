@@ -3022,7 +3022,17 @@ Reliable Daily Rewards</textarea
       var MP_KEY_LABELS = {
         gameflip: { apiKey: "API key", apiSecret: "API secret (TOTP secret)" },
         digiseller: { sellerId: "Seller ID", apiKey: "API key" },
-        g2g: { userId: "User ID", apiKey: "API key", apiSecret: "API secret" },
+        // G2G's Open API only accepts pushes for the account section, never the
+        // Game Items category the drops live in, so the automation drives the
+        // seller session instead — the same values the g2g.com app keeps in
+        // local storage. The server refreshes them in place from then on.
+        g2g: {
+          userId: "Seller / account ID (numeric)",
+          accessToken: "accessToken (seller session)",
+          refreshToken: "refresh_token",
+          activeDeviceToken: "active_device_token",
+          longLivedToken: "long_lived_token — OPTIONAL, leave blank if absent",
+        },
         ggsel: { apiKey: "API key" },
         funpay: { golden_key: "golden_key (session cookie)" },
         zeusx: { accessToken: "access_token (seller session cookie)" },
@@ -3042,6 +3052,25 @@ Reliable Daily Rewards</textarea
         // www.z2u.com while signed in. There is no Cloudflare challenge on
         // these paths, so the server can use it directly.
         z2u: { cookie: "Cookie header (whole line, from a signed-in session)" },
+      };
+      // Fields the server stores but does not demand (OPTIONAL_FIELDS in
+      // utils/marketplaces.js): blank is a valid answer, so the modal must not
+      // read as if something is missing.
+      var MP_OPTIONAL_KEYS = {
+        g2g: ["longLivedToken"],
+      };
+      // Where to actually find each credential. One line per paragraph, shown
+      // under the marketplace heading in the keys modal.
+      var MP_KEY_NOTES = {
+        g2g: [
+          "Sign in on g2g.com, then DevTools → Application → Local Storage → " +
+            "www.g2g.com and copy accessToken, refresh_token, " +
+            "active_device_token (and long_lived_token if present). The " +
+            "numeric seller id is in the account menu (Account ID).",
+          "Separate from these: “Export G2G bulk file” and the G2G catalog " +
+            "dropdowns still call the legacy G2G Open API, which needs its own " +
+            "API key/secret — this account no longer has one.",
+        ],
       };
       var mpStatus = null;
 
@@ -3066,9 +3095,13 @@ Reliable Daily Rewards</textarea
           })
           .map(function (mp) {
             var st = mpStatus[mp] || { fields: {} };
+            var optional = MP_OPTIONAL_KEYS[mp] || [];
             var fields = Object.keys(MP_KEY_LABELS[mp])
               .map(function (f) {
+                // Only the masked value ever comes back from the server; the
+                // real secret is never rendered into the DOM.
                 var cur = st.fields && st.fields[f];
+                var opt = optional.indexOf(f) !== -1;
                 return (
                   "<label>" +
                   esc(MP_KEY_LABELS[mp][f]) +
@@ -3081,9 +3114,14 @@ Reliable Daily Rewards</textarea
                   '<input type="password" autocomplete="off" data-mpkey="' +
                   attr(mp + "." + f) +
                   '" placeholder="' +
-                  (cur ? "Keep current" : "Not set") +
+                  (cur ? "Keep current" : opt ? "Optional" : "Not set") +
                   '" />'
                 );
+              })
+              .join("");
+            var notes = (MP_KEY_NOTES[mp] || [])
+              .map(function (n) {
+                return '<div class="mp-hint">' + esc(n) + "</div>";
               })
               .join("");
             return (
@@ -3094,6 +3132,7 @@ Reliable Daily Rewards</textarea
                 ? ' <span style="color:#4caf7d;font-size:12px">configured</span>'
                 : ' <span style="color:#e0a34e;font-size:12px">not configured</span>') +
               "</h4>" +
+              notes +
               fields +
               '<div class="mp-actions" style="margin-top:8px">' +
               '<button class="btn" data-mptest="' +

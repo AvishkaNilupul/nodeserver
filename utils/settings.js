@@ -158,6 +158,29 @@ const AUTO_FARM_DEFAULTS = {
   // ship. PlayerAuctions penalises late/failed delivery directly, so overselling
   // is more expensive here than on other marketplaces.
   playerauctionsSyncStock: true,
+
+  // --- G2G (utils/marketplaces.js + utils/g2gFulfiller.js) ---
+  // Publishes farmed bundles into G2G's Game Items category as ONE offer whose
+  // actual_qty is the account count. OFF by default.
+  g2gAuto: false,
+  // Auto-delivery. G2G's credential vault is a Game Accounts feature and is
+  // closed to Game Items, so the fulfiller drives G2G's manual-delivery state
+  // machine itself (start_deliver -> mark_as_delivering -> delivered_qty) and
+  // hands the credential over in buyer chat, which is SendBird. Sending needs
+  // the optional @sendbird/chat SDK; without it the fulfiller pushes the
+  // rendered credential to the operator on Telegram and waits, rather than
+  // telling G2G an order shipped when it has not. INDEPENDENT of g2gAuto — the
+  // 78 offers already on the account were made by hand and still need
+  // delivering.
+  g2gAutoDeliver: false,
+  // Safety valve: when true the fulfiller does everything except touch the
+  // order and hand the credential over, and logs what it WOULD have done. Leave
+  // true until a live order has been watched end to end.
+  g2gDeliverDryRun: true,
+  // Keep each offer's actual_qty in step with stock we can actually ship. G2G
+  // reserves against actual_qty during checkout, so a stale count sells
+  // accounts that are already gone.
+  g2gSyncStock: true,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign

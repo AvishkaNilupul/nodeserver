@@ -60,7 +60,7 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // "gameflip" (live unit or waiting in the relist chain), "digiseller" or
     // "ggsel" (a delivery-code unit on the set's product), "eldorado"/"playerauctions" (handed to
     // a buyer in an Eldorado order chat), "z2u" (handed over in a Z2U order
-    // delivery). "" while deciding.
+    // delivery), "g2g" (handed over on a G2G order). "" while deciding.
     market: {
       type: String,
       enum: [
@@ -71,6 +71,7 @@ const unclaimedAccountSchema = new mongoose.Schema(
         "eldorado",
         "playerauctions",
         "z2u",
+        "g2g",
       ],
       default: "",
       index: true,
