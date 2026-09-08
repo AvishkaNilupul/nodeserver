@@ -579,22 +579,34 @@ async function deliverOrder(order, { dryRun }) {
   // late one: it is a dispute AND the stock is spent. So match on the title
   // only when it is unambiguous, and otherwise refuse loudly.
   if (!row) {
-    const byTitle = await MarketplaceListing.find({
-      marketplace: "playerauctions",
-      title: offerTitle,
-    }).limit(2);
-    if (byTitle.length > 1) {
+    // Compare the FOLDED titles. The stored title is our own copy, em dashes
+    // and all; the order's title comes back from PlayerAuctions, which only
+    // ever accepted the ASCII-folded version -- so an exact string match can
+    // never fire for a folded listing, i.e. this rescue path would be dead
+    // code at the exact moment it is needed. Folding both sides also lines up
+    // the 150-character truncation the API applies.
+    const fold = (t) => mp.paSanitizeTitle(String(t || "")).toLowerCase().trim();
+    const want = fold(offerTitle);
+    const hits = want
+      ? (
+          await MarketplaceListing.find({
+            marketplace: "playerauctions",
+            status: { $ne: "delisted" },
+          })
+        ).filter((r) => fold(r.title) === want)
+      : [];
+    if (hits.length > 1) {
       return {
         orderId,
         skipped:
           "ambiguous listing title -- " +
-          byTitle.length +
-          "+ listings share " +
+          hits.length +
+          " listings share " +
           JSON.stringify(offerTitle) +
           " and the order carried no offer id, so the right stock cannot be identified",
       };
     }
-    row = byTitle[0];
+    row = hits[0];
   }
   if (!row) return { orderId, skipped: "no listing row for " + JSON.stringify(offerTitle) };
 
