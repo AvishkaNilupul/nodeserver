@@ -277,6 +277,9 @@ router.get("/auto-farm/status", requireSuperadmin, async (req, res) => {
       status: "available",
       clientSecret: { $gt: "" },
       lastCheckStatus: { $in: ["", "ok"] },
+      // Mirrors autoFarmer.readyPoolQuery(): a hand-sold account is not supply,
+      // so counting it here would advertise budget the engine cannot spend.
+      manualSold: { $ne: true },
     });
     const farmHost = autoFarmer.resolveFarmHost(af);
     res.json({
@@ -328,96 +331,131 @@ router.get("/auto-farm/tasks", requireSuperadmin, async (req, res) => {
 // READ-ONLY: which of a game's farmed events could be sold as ONE bundle, what
 // each would be titled and priced at, and whether stock actually backs it.
 // Publishes nothing — the stacked-bundle sweep does that
-// (docs/AUTOFARM-BUNDLES-CONTRACT.md). ?game= narrows to one game; ?stock=1
-// adds the verified-holder count, which costs a DropLog aggregation per bundle
-// and so is opt-in.
-const BUNDLE_GAME_LIMIT = 40;
+// (docs/AUTOFARM-BUNDLES-CONTRACT.md).
+//
+// ?game= narrows to one game. ?stock=1 adds the verified-holder count, which
+// costs a DropLog aggregation per bundle and so is opt-in. ?fresh=1 bypasses
+// the cache below.
+//
+// The whole answer is cached briefly, because it is a fleet sweep behind a UI
+// panel: without it every page open re-reads every stock-bearing task. Plans
+// only change when a wave finishes farming or a bundle publishes, so a few
+// minutes stale is invisible — and the operator has a Refresh button.
+const BUNDLES_TTL_MS = 3 * 60 * 1000;
+let bundlesCache = { at: 0, key: "", payload: null };
+
+async function buildBundlesPayload({ only, withStock }) {
+  const byGame = await autoFarmBundles.plansForAllGames();
+  const games = only
+    ? [...byGame.keys()].filter(
+        (g) =>
+          g.toLowerCase() === only.toLowerCase() ||
+          g.toLowerCase().includes(only.toLowerCase()),
+      )
+    : [...byGame.keys()];
+  games.sort();
+
+  const allPlans = games.flatMap((g) => byGame.get(g) || []);
+  const keys = allPlans.map((p) => p.key);
+  // Two reads for every bundle's live row and sold floor, not two per bundle.
+  const [live, soldFloors] = await Promise.all([
+    autoFarmBundles.liveBundlesForEvents(keys),
+    autoFarmBundles.soldFloorsForEvents(keys),
+  ]);
+
+  const out = [];
+  let ready = 0;
+  let liveCount = 0;
+  for (const game of games) {
+    const research = await MarketResearch.findOne({ game }).lean();
+    const rows = [];
+    for (const plan of byGame.get(game) || []) {
+      const soldFloorUsd = soldFloors.get(plan.key) || 0;
+      const liveRow = live.get(plan.key) || null;
+      const priced = await autoFarmBundles.priceBundle({
+        plan,
+        game,
+        marketplace: "gameflip",
+        research,
+        soldFloorUsd,
+      });
+      let readyCount = null;
+      if (withStock) {
+        try {
+          readyCount = (
+            await autoLister.pickDeliveryAccounts(
+              { assignedAccounts: plan.logins },
+              plan.logins.length,
+              plan.items,
+            )
+          ).length;
+        } catch {
+          readyCount = null;
+        }
+      }
+      if (liveRow) liveCount += 1;
+      else if (readyCount > 0) ready += 1;
+      rows.push({
+        key: plan.key,
+        event: plan.eventName,
+        full: plan.full,
+        wavesHeld: plan.wavesHeld,
+        wavesTotal: plan.wavesTotal,
+        wavesUnresolved: plan.wavesUnresolved,
+        waves: plan.labels,
+        campaignIds: plan.campaignIds,
+        items: plan.items.length,
+        totalQty: plan.totalQty,
+        assigned: plan.logins.length,
+        title: autoFarmBundles.bundleTitleFor(plan),
+        price: priced ? priced.price : null,
+        priceBasis: priced ? priced.basis : "",
+        priceClamped: priced ? priced.clamped : "",
+        soldFloorUsd,
+        ready: readyCount,
+        live: liveRow
+          ? {
+              marketplace: liveRow.marketplace,
+              externalId: liveRow.externalId,
+              price: liveRow.price,
+              title: liveRow.title,
+            }
+          : null,
+      });
+    }
+    if (rows.length) out.push({ game, bundles: rows });
+  }
+  return {
+    enabled: settings.getAutoFarm().autoFarmEventBundles !== false,
+    withStock,
+    builtAt: new Date(),
+    totals: {
+      bundles: allPlans.length,
+      games: out.length,
+      ready: withStock ? ready : null,
+      live: liveCount,
+    },
+    games: out,
+  };
+}
+
 router.get("/auto-farm/bundles", requireSuperadmin, async (req, res) => {
   try {
     const only = String(req.query.game || "").trim();
     const withStock = req.query.stock === "1" || req.query.stock === "true";
-    const games = only
-      ? [only]
-      : (
-          await AutoFarmTask.distinct("game", {
-            status: { $in: [...autoFarmBundles.STOCK_STATUSES] },
-          })
-        )
-          .filter(Boolean)
-          .sort()
-          .slice(0, BUNDLE_GAME_LIMIT);
-
-    const out = [];
-    for (const game of games) {
-      let plans = [];
-      try {
-        plans = await autoFarmBundles.plansForGame(game);
-      } catch (err) {
-        out.push({ game, error: err.message, bundles: [] });
-        continue;
-      }
-      if (!plans.length) continue;
-      const research = await MarketResearch.findOne({ game }).lean();
-      const rows = [];
-      for (const plan of plans) {
-        const live = await autoFarmBundles.liveBundleForEvent(plan.key);
-        const soldFloorUsd = await autoFarmBundles.soldFloorForEvent(plan.key);
-        const priced = await autoFarmBundles.priceBundle({
-          plan,
-          game,
-          marketplace: "gameflip",
-          research,
-          soldFloorUsd,
-        });
-        let ready = null;
-        if (withStock) {
-          try {
-            ready = (
-              await autoLister.pickDeliveryAccounts(
-                { assignedAccounts: plan.logins },
-                plan.logins.length,
-                plan.items,
-              )
-            ).length;
-          } catch {
-            ready = null;
-          }
-        }
-        rows.push({
-          key: plan.key,
-          event: plan.eventName,
-          full: plan.full,
-          wavesHeld: plan.wavesHeld,
-          wavesTotal: plan.wavesTotal,
-          wavesUnresolved: plan.wavesUnresolved,
-          waves: plan.labels,
-          campaignIds: plan.campaignIds,
-          items: plan.items.length,
-          totalQty: plan.totalQty,
-          assigned: plan.logins.length,
-          title: autoFarmBundles.bundleTitleFor(plan),
-          price: priced ? priced.price : null,
-          priceBasis: priced ? priced.basis : "",
-          priceClamped: priced ? priced.clamped : "",
-          soldFloorUsd,
-          ready,
-          live: live
-            ? {
-                marketplace: live.marketplace,
-                externalId: live.externalId,
-                price: live.price,
-                title: live.title,
-              }
-            : null,
-        });
-      }
-      out.push({ game, bundles: rows });
+    const fresh = req.query.fresh === "1" || req.query.fresh === "true";
+    const key = only.toLowerCase() + "|" + (withStock ? "stock" : "plan");
+    if (
+      !fresh &&
+      bundlesCache.payload &&
+      bundlesCache.key === key &&
+      Date.now() - bundlesCache.at < BUNDLES_TTL_MS
+    ) {
+      return res.json({ success: true, cached: true, ...bundlesCache.payload });
     }
-    res.json({
-      success: true,
-      enabled: settings.getAutoFarm().autoFarmEventBundles !== false,
-      games: out,
-    });
+    const payload = await buildBundlesPayload({ only, withStock });
+    bundlesCache = { at: Date.now(), key, payload };
+    res.json({ success: true, cached: false, ...payload });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

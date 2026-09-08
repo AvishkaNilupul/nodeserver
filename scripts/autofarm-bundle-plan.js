@@ -29,22 +29,32 @@ function usd(n) {
 
 async function main() {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);
-  const AutoFarmTask = require("../models/AutoFarmTask");
   const MarketResearch = require("../models/MarketResearch");
   const autoLister = require("../utils/autoLister");
 
-  const games = ONLY_GAME
-    ? [ONLY_GAME]
-    : (
-        await AutoFarmTask.distinct("game", {
-          status: { $in: [...bundles.STOCK_STATUSES] },
-        })
-      ).filter(Boolean);
+  // One fleet sweep, not one per game: the per-game loaders are for the
+  // publisher, which only ever asks about a single game.
+  const byGame = await bundles.plansForAllGames();
+  const games = (
+    ONLY_GAME
+      ? [...byGame.keys()].filter(
+          (g) =>
+            g.toLowerCase() === ONLY_GAME.toLowerCase() ||
+            g.toLowerCase().includes(ONLY_GAME.toLowerCase()),
+        )
+      : [...byGame.keys()]
+  ).sort();
+
+  const allPlans = games.flatMap((g) => byGame.get(g) || []);
+  const [live, soldFloors] = await Promise.all([
+    bundles.liveBundlesForEvents(allPlans.map((p) => p.key)),
+    bundles.soldFloorsForEvents(allPlans.map((p) => p.key)),
+  ]);
 
   console.log(
     "Auto-farm event bundles — " +
       games.length +
-      " game(s) with farmed stock\n" +
+      " game(s) with a bundle\n" +
       "=".repeat(72),
   );
 
@@ -52,22 +62,14 @@ async function main() {
   let sellable = 0;
   let alreadyLive = 0;
 
-  for (const game of games.sort()) {
-    let plans = [];
-    try {
-      plans = await bundles.plansForGame(game);
-    } catch (err) {
-      console.log("\n" + game + "\n  ! plan failed: " + err.message);
-      continue;
-    }
-    if (!plans.length) continue;
+  for (const game of games) {
+    const plans = byGame.get(game) || [];
     totalPlans += plans.length;
-
     const research = await MarketResearch.findOne({ game }).lean();
     console.log("\n" + game);
     for (const plan of plans) {
-      const live = await bundles.liveBundleForEvent(plan.key);
-      const soldFloorUsd = await bundles.soldFloorForEvent(plan.key);
+      const liveRow = live.get(plan.key) || null;
+      const soldFloorUsd = soldFloors.get(plan.key) || 0;
       const priced = await bundles.priceBundle({
         plan,
         game,
@@ -93,14 +95,14 @@ async function main() {
         }
       }
 
-      const state = live
-        ? "LIVE (" + live.marketplace + " " + live.externalId + ")"
+      const state = liveRow
+        ? "LIVE (" + liveRow.marketplace + " " + liveRow.externalId + ")"
         : holders === null
           ? "plan only"
           : holders > 0
             ? "READY " + holders + " account(s)"
             : "waiting — no free holder";
-      if (live) alreadyLive += 1;
+      if (liveRow) alreadyLive += 1;
       else if (typeof holders === "number" && holders > 0) sellable += 1;
 
       console.log(

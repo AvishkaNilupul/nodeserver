@@ -668,6 +668,74 @@ async function loadTasksAndSets(game, { AutoFarmTask, DropSet } = {}) {
 }
 
 /**
+ * Every stock-bearing task in the fleet and every DropSet they point at, in
+ * TWO queries.
+ *
+ * The per-game loader below is right for the publisher, which only ever asks
+ * about one game. It is wrong for anything that sweeps the fleet: prod has 82
+ * stock-bearing games, so asking per game is 164 round trips, each dragging
+ * whole `assignedAccounts` arrays (up to 144 logins) across a shared-tier
+ * Atlas that bills bytes returned. Same lesson as fleetEventCatalog.
+ */
+async function loadFleetTasksAndSets() {
+  const AutoFarmTask = require("../models/AutoFarmTask");
+  const DropSet = require("../models/DropSet");
+  const mongoose = require("mongoose");
+  const tasks = await AutoFarmTask.find(
+    { status: { $in: [...STOCK_STATUSES] } },
+    TASK_FIELDS,
+  ).lean();
+  const setIds = [
+    ...new Set(
+      tasks
+        .map((t) => t.listing && text(t.listing.setId))
+        .filter((id) => id && mongoose.isValidObjectId(id)),
+    ),
+  ];
+  const sets = setIds.length
+    ? await DropSet.find({ _id: { $in: setIds } }, { items: 1 }).lean()
+    : [];
+  const byGame = new Map();
+  for (const task of tasks) {
+    const game = text(task.game);
+    if (!game) continue;
+    if (!byGame.has(game)) byGame.set(game, []);
+    byGame.get(game).push(task);
+  }
+  return { byGame, setsById: new Map(sets.map((s) => [String(s._id), s])) };
+}
+
+/**
+ * Bundle plans for the WHOLE fleet, keyed by game — the read path behind the
+ * dry-run script and the /auto-farm/bundles route. Games with no bundle are
+ * omitted. No-claim games are skipped for the reason given in plansForGame.
+ */
+async function plansForAllGames({ now = Date.now(), minWaves = 2 } = {}) {
+  const [catalog, loaded] = await Promise.all([
+    fleetEventCatalog(),
+    loadFleetTasksAndSets(),
+  ]);
+  const out = new Map();
+  for (const [game, tasks] of loaded.byGame) {
+    try {
+      if (settings.isNoClaimGame(game)) continue;
+    } catch {
+      /* a settings read must never decide this by throwing */
+    }
+    const plans = planEventBundles({
+      game,
+      tasks,
+      catalog,
+      setsById: loaded.setsById,
+      now,
+      minWaves,
+    });
+    if (plans.length) out.set(game, plans);
+  }
+  return out;
+}
+
+/**
  * The whole read-only pipeline for one game: catalog → tasks → plans.
  * Used by the publisher, the dry-run script and the read-only route, so all
  * three describe exactly the same bundles.
@@ -738,6 +806,69 @@ async function soldFloorForEvent(eventKey, { days = 30 } = {}) {
   }
 }
 
+// Batched forms of the two lookups above: one DropSet read and one
+// MarketplaceListing read for MANY events, rather than a pair per event. The
+// route and the dry-run script ask about every planned bundle at once, and
+// per-event queries there were the second-largest cost after the task load.
+async function bundleSetsByEvent(eventKeys) {
+  const keys = [...new Set((eventKeys || []).filter(Boolean))];
+  const byEvent = new Map();
+  if (!keys.length) return { byEvent, setIds: [], eventBySet: new Map() };
+  const DropSet = require("../models/DropSet");
+  const sets = await DropSet.find(
+    { sourceType: SOURCE_TYPE, sourceEventKey: { $in: keys } },
+    { sourceEventKey: 1 },
+  ).lean();
+  const eventBySet = new Map();
+  for (const set of sets) {
+    const key = text(set.sourceEventKey);
+    if (!byEvent.has(key)) byEvent.set(key, []);
+    byEvent.get(key).push(set._id);
+    eventBySet.set(String(set._id), key);
+  }
+  return { byEvent, setIds: sets.map((s) => s._id), eventBySet };
+}
+
+async function liveBundlesForEvents(eventKeys) {
+  const out = new Map();
+  const { setIds, eventBySet } = await bundleSetsByEvent(eventKeys);
+  if (!setIds.length) return out;
+  const MarketplaceListing = require("../models/MarketplaceListing");
+  const rows = await MarketplaceListing.find(
+    { set: { $in: setIds }, status: "active", origin: "auto" },
+    { set: 1, externalId: 1, marketplace: 1, price: 1, title: 1 },
+  ).lean();
+  for (const row of rows) {
+    const key = eventBySet.get(String(row.set));
+    if (key && !out.has(key)) out.set(key, row);
+  }
+  return out;
+}
+
+async function soldFloorsForEvents(eventKeys, { days = 30 } = {}) {
+  const out = new Map();
+  const { setIds, eventBySet } = await bundleSetsByEvent(eventKeys);
+  if (!setIds.length) return out;
+  const MarketplaceListing = require("../models/MarketplaceListing");
+  const since = new Date(Date.now() - Math.max(0, days) * 86400000);
+  const rows = await MarketplaceListing.find(
+    {
+      set: { $in: setIds },
+      origin: "auto",
+      status: "sold",
+      updatedAt: { $gte: since },
+    },
+    { set: 1, price: 1 },
+  ).lean();
+  for (const row of rows) {
+    const key = eventBySet.get(String(row.set));
+    if (!key) continue;
+    const v = Number(row.price) || 0;
+    if (v > (out.get(key) || 0)) out.set(key, v);
+  }
+  return out;
+}
+
 // Is this event already being sold as a bundle right now? One live bundle per
 // event: republishing the same event under a second set is the duplicate-set
 // sprawl that made three Halo sets compete over one account pool.
@@ -784,7 +915,11 @@ module.exports = {
   loadCatalogForGames,
   fleetEventCatalog,
   loadTasksAndSets,
+  loadFleetTasksAndSets,
   plansForGame,
+  plansForAllGames,
+  liveBundlesForEvents,
+  soldFloorsForEvents,
   soldFloorForEvent,
   liveBundleForEvent,
 };
