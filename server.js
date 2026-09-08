@@ -105,6 +105,7 @@ const {
   uploadLimiter,
 } = require("./utils/rateLimit");
 const activityRoutes = require("./routes/activityRoutes");
+const systemHealthRoutes = require("./routes/systemHealthRoutes");
 const fleetSnapshot = require("./utils/fleetSnapshot");
 const auditRequest = require("./middleware/auditRequest");
 
@@ -674,6 +675,9 @@ app.use(enforce2fa, spentAccountsRoutes);
 app.use(enforce2fa, autoFarmRoutes);
 app.use(enforce2fa, farm2Routes);
 app.use(enforce2fa, activityRoutes);
+// The health page: one read-only answer to "is everything working?", so nobody
+// has to re-check each marketplace by hand. Same admin cascade as /activity.
+app.use(enforce2fa, systemHealthRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
@@ -882,6 +886,9 @@ mongoose
     // free pool account. Two orders were lost on 2026-09-08 while the pool
     // reported 554 eligible and every stack was full. This says so in advance.
     rentFarmCapacity.start();
+    // Hourly read-only health run, so the answer to "is everything working?"
+    // is already waiting rather than being computed when someone finally asks.
+    systemHealthRoutes.start();
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();

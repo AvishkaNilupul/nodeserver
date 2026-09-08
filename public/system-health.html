@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>System health | RedeemHub</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);color:#f87171;}
+  html[data-theme="dark"] .pill.s-ok{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .pill.s-warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .pill.s-fail{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .pill.s-unknown{background:rgba(154,163,180,.12);}
+  html[data-theme="dark"] .sev.crit{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .stale{background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.35);color:#fbbf24;}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Inter","Segoe UI",Tahoma,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; overflow:hidden; }
+
+  .nav { width:236px; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; flex-shrink:0; }
+  .nav .brand { display:flex; align-items:center; gap:10px; padding:18px 20px; border-bottom:1px solid var(--line); }
+  .nav .brand .mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent2),var(--accent)); display:grid; place-items:center; box-shadow:0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size:15px; font-weight:700; line-height:1.15; }
+  .nav .brand b span { display:block; font-size:10.5px; color:var(--muted); font-weight:500; }
+  .nav .links { padding:12px; flex:1; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .nav .links a { display:flex; align-items:center; gap:11px; padding:11px 13px; border-radius:10px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:500; }
+  .nav .links a:hover { background:var(--surface-2); }
+  .nav .links a.active { background:#eef2ff; color:var(--accent); font-weight:600; }
+  .nav .me { border-top:1px solid var(--line); padding:14px; display:flex; align-items:center; gap:10px; }
+  .nav .me .av { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#34d399,#10b981); display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+  .nav .me .who { line-height:1.2; min-width:0; }
+  .nav .me .who b { font-size:13.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:84px; }
+  .nav .me .who span { display:block; font-size:11px; color:var(--muted); }
+  .nav .me .actions { margin-left:auto; display:flex; gap:6px; }
+  .nav .me .logout { width:32px; height:32px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; }
+  .nav .me .logout:hover { color:#ef4444; border-color:#fecaca; background:#fef2f2; }
+
+  .page { flex:1; overflow-y:auto; padding:26px 30px 56px; min-width:0; }
+  h1 { font-size:22px; font-weight:800; }
+  .sub { color:var(--muted); font-size:13.5px; margin-top:4px; }
+  .head { display:flex; align-items:flex-start; gap:18px; flex-wrap:wrap; margin:0 0 16px; }
+  .head-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  button { border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:9px 14px; cursor:pointer; font:inherit; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { color:#fff; border-color:var(--accent); background:var(--accent); }
+  button.primary:hover { background:var(--accent2); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.icon { width:36px; height:36px; padding:0; display:grid; place-items:center; }
+
+  /* Verdict bar. Its left edge carries the worst status in the whole run, so
+     the answer to "is anything broken?" is legible before any text is read. */
+  .verdict { background:var(--surface); border:1px solid var(--line); border-left:6px solid var(--line); border-radius:14px; padding:14px 16px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  .verdict.s-ok { border-left-color:var(--green); }
+  .verdict.s-warn { border-left-color:var(--yellow); }
+  .verdict.s-fail { border-left-color:var(--red); }
+  .verdict.s-unknown { border-left-color:var(--muted); border-left-style:dashed; }
+  .verdict .big { font-size:17px; font-weight:800; line-height:1.25; }
+  .verdict .when { font-size:12.5px; color:var(--muted); margin-top:3px; }
+  .verdict .when b { color:var(--ink); font-weight:650; }
+  .counts { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+
+  .pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 10px; font-size:11.5px; font-weight:700; border:1px solid transparent; white-space:nowrap; }
+  .pill.s-ok { color:var(--green); background:#ecfdf5; }
+  .pill.s-warn { color:var(--yellow); background:#fffbeb; }
+  .pill.s-fail { color:var(--red); background:#fef2f2; }
+  /* "unknown" is dashed and grey on purpose: a check that could not run must
+     never be mistaken for a passing one at a glance. That confusion once had a
+     Pi that was simply offline read as a broken marketplace. */
+  .pill.s-unknown { color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); }
+  .pill.sm { font-size:11px; padding:2px 8px; }
+  .sev { font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); border-radius:6px; padding:2px 6px; background:var(--surface-2); }
+  .sev.crit { color:var(--red); background:#fef2f2; }
+
+  .stale { margin-top:12px; border:1px solid #f0c36d; background:#fffbeb; color:#7a2e0b; padding:11px 14px; border-radius:10px; font-size:13px; line-height:1.5; }
+
+  .cards { margin-top:16px; }
+  .card { background:var(--surface); border:1px solid var(--line); border-left:6px solid var(--line); border-radius:14px; margin-bottom:14px; overflow:hidden; }
+  .card.s-ok { border-left-color:var(--green); }
+  .card.s-warn { border-left-color:var(--yellow); }
+  .card.s-fail { border-left-color:var(--red); }
+  .card.s-unknown { border-left-color:var(--muted); border-left-style:dashed; }
+  /* Hatching, not just a grey tint — the one visual cue that survives a phone
+     screen in daylight and any form of colour blindness. */
+  .card.s-unknown .hd { background:repeating-linear-gradient(135deg,transparent,transparent 7px,rgba(107,114,128,.09) 7px,rgba(107,114,128,.09) 14px); }
+  .card .hd { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .card .hd b { font-size:14.5px; }
+  .card .hd .hdmeta { margin-left:auto; font-size:12px; color:var(--muted); }
+
+  .chk { padding:12px 16px; border-top:1px solid var(--line); }
+  .chk:first-of-type { border-top:none; }
+  .chk .t { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .chk .t b { font-size:13.5px; }
+  .chk .cid { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; color:var(--muted); background:var(--surface-2); border-radius:6px; padding:1px 6px; }
+  .chk .age { margin-left:auto; font-size:11.5px; color:var(--muted); white-space:nowrap; }
+  .chk .sum { color:var(--ink); font-size:12.5px; margin-top:5px; line-height:1.5; }
+  .chk .det { color:var(--muted); font-size:12px; margin-top:4px; line-height:1.5; }
+
+  .evrow { display:flex; gap:7px; flex-wrap:wrap; margin-top:8px; }
+  .ev { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:3px 9px; word-break:break-word; }
+  .ev i { font-style:normal; font-family:"Inter","Segoe UI",Tahoma,sans-serif; font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); margin-right:6px; }
+  /* A check that reports no number is a broken check, not a passing one, so it
+     is flagged rather than quietly rendered as a tick. */
+  .ev.none { background:transparent; border-style:dashed; border-color:var(--yellow); color:var(--yellow); font-family:inherit; font-size:11.5px; }
+
+  .items { margin-top:9px; }
+  .itoggle { padding:5px 10px; font-size:12px; border-radius:8px; background:var(--surface-2); }
+  .ilist { margin-top:7px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); overflow:hidden; }
+  .ilist .it { padding:6px 11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; border-bottom:1px solid var(--line); word-break:break-word; }
+  .ilist .it:last-child { border-bottom:none; }
+  .ilist .imore { padding:6px 11px; font-size:11.5px; color:var(--muted); }
+
+  .empty { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:38px 24px; text-align:center; color:var(--muted); font-size:13.5px; line-height:1.6; }
+  .empty b { display:block; color:var(--ink); font-size:15px; margin-bottom:6px; }
+
+  /* ---- Mobile (≤720px). The owner checks this from a phone, usually to
+     answer one question in three seconds; nothing here may need a sideways
+     scroll to read. Desktop is untouched: it all lives in the query. ---- */
+  @media (max-width:720px) {
+    body { overflow-x:hidden; }
+    .page { padding:16px 12px 40px; overflow-x:hidden; }
+    h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .head { gap:10px; margin-bottom:12px; }
+    .head-actions { margin-left:0; width:100%; }
+    .head-actions #refreshBtn { flex:1; }
+    .verdict { padding:12px 13px; gap:10px; }
+    .verdict .big { font-size:16px; }
+    .counts { margin-left:0; width:100%; }
+    .cards { margin-top:12px; }
+    .card { border-radius:12px; margin-bottom:11px; }
+    .card .hd { padding:10px 12px; gap:8px; }
+    .card .hd .hdmeta { margin-left:0; width:100%; }
+    .chk { padding:11px 12px; }
+    /* The age must stay on the title line's own row rather than being pushed
+       off the right edge, or the one number that says "is this current?"
+       disappears exactly where it matters most. */
+    .chk .age { margin-left:0; width:100%; }
+    .ev { font-size:11px; padding:3px 8px; }
+    .ilist .it { font-size:11px; }
+  }
+</style>
+</head>
+
+<body>
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
+    <nav class="links"></nav>
+    <div class="me">
+      <div class="av" id="meAvatar">--</div>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+      <div class="actions">
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+        <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page">
+    <div class="head">
+      <div>
+        <h1>System health</h1>
+        <div class="sub">Every check reports the number it measured and the threshold it was compared against. Read-only — nothing here publishes, delists, reprices or provisions.</div>
+      </div>
+      <div class="head-actions">
+        <button class="primary" id="refreshBtn" title="Runs every check live. Takes longer than a page load because some checks call a marketplace.">Refresh</button>
+      </div>
+    </div>
+
+    <div class="verdict s-unknown" id="verdict" role="status" aria-live="polite">
+      <div>
+        <div class="big" id="verdictText">Loading…</div>
+        <div class="when" id="verdictWhen">Reading the last stored run.</div>
+      </div>
+    </div>
+    <div id="staleBox"></div>
+
+    <div class="cards" id="cards"></div>
+  </main>
+
+  <script src="/theme.js"></script>
+  <script src="/admin-nav.js"></script>
+  <script>
+  (function () {
+    var API = "/api/system-health";
+    // Plain GET re-reads the stored run — it never triggers checks, so polling
+    // it cannot hammer the Pi or a marketplace. Only the Refresh button, which
+    // is the one place a live run is asked for, appends ?run=1.
+    var POLL_MS = 60000;
+    // The ages on screen are re-stamped from their timestamps on this tick, so
+    // a page left open on a phone can never sit there claiming "2 min ago" an
+    // hour later. A stale page that looks live is worse than no page.
+    var TICK_MS = 20000;
+    // The runner is hourly, so 100 min is one missed run plus grace. Anything
+    // older means the scheduler itself stopped and the rows below are history.
+    var STALE_MS = 100 * 60 * 1000;
+    // The API caps items at 20; the page shows 8 before folding the rest into
+    // "+N more" so one noisy check can't push every other card off a phone.
+    var ITEM_CAP = 8;
+
+    var GROUP_LABELS = {
+      connector: "Marketplace connectors",
+      connectors: "Marketplace connectors",
+      orders: "Orders",
+      rentfarm: "Rent-farm delivery",
+      listings: "Live listings",
+      autolist: "Auto-lister",
+      bundles: "Bundles",
+      pool: "Account pool",
+      loops: "Background loops"
+    };
+    var STATUS_RANK = { ok: 0, unknown: 1, warn: 2, fail: 3 };
+    var STATUS_GLYPH = { ok: "✓", warn: "!", fail: "✕", unknown: "?" };
+    var STATUS_WORD = { ok: "ok", warn: "warn", fail: "fail", unknown: "not checked" };
+    var SEV_RANK = { info: 0, warn: 1, critical: 2 };
+
+    var run = null;
+    var loadError = "";
+    var running = false;
+    var pendingForce = false;
+    var expanded = {};
+    var renderKey = "";
+
+    function el(id) { return document.getElementById(id); }
+    function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+    // An unrecognised status is unknown, never ok. If a check ever returns
+    // something this page has not seen, the honest reading is "we could not
+    // establish that this is fine".
+    function normStatus(s) {
+      var v = String(s == null ? "" : s).toLowerCase();
+      if (v === "ok" || v === "warn" || v === "fail" || v === "unknown") return v;
+      if (v === "pass" || v === "good" || v === "healthy") return "ok";
+      if (v === "warning" || v === "degraded") return "warn";
+      if (v === "error" || v === "critical" || v === "down") return "fail";
+      return "unknown";
+    }
+    function normSev(s) {
+      var v = String(s == null ? "" : s).toLowerCase();
+      return v === "critical" || v === "warn" || v === "info" ? v : "info";
+    }
+    function worst(list) {
+      var w = "ok";
+      for (var i = 0; i < list.length; i++) {
+        if (STATUS_RANK[list[i]] > STATUS_RANK[w]) w = list[i];
+      }
+      return w;
+    }
+
+    // Epoch ms or null — never a guess. A timestamp that will not parse renders
+    // as "time unknown" rather than as "just now".
+    function ts(v) {
+      if (v == null) return null;
+      var n = typeof v === "number" ? v : Date.parse(v);
+      return typeof n === "number" && isFinite(n) ? n : null;
+    }
+    function ago(at) {
+      if (at == null) return "time unknown";
+      var d = Date.now() - at;
+      if (d < 0) d = 0; // a server clock a few seconds ahead must not read "in 4s"
+      var s = Math.floor(d / 1000);
+      if (s < 60) return s + "s ago";
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + " min ago";
+      var h = Math.floor(m / 60);
+      if (h < 48) return h + "h " + (m % 60) + "m ago";
+      return Math.floor(h / 24) + " days ago";
+    }
+    function fmtMs(v) {
+      if (typeof v !== "number" || !isFinite(v)) return null;
+      return v < 1000 ? Math.round(v) + " ms" : (v / 1000).toFixed(1) + " s";
+    }
+    function fmtVal(v) {
+      if (v == null || v === "") return null;
+      if (typeof v === "number") return isFinite(v) ? v.toLocaleString() : String(v);
+      if (typeof v === "boolean") return v ? "yes" : "no";
+      if (typeof v === "string") return v;
+      try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+    function title(s) {
+      var v = String(s || "").replace(/[._-]+/g, " ").trim();
+      return v ? v.charAt(0).toUpperCase() + v.slice(1) : "Other";
+    }
+
+    // The offending rows are the check's own shape, so read the usual identity
+    // fields and fall back to JSON rather than dropping a row we can't parse —
+    // an unrenderable offender is still an offender the owner must see.
+    function itemText(it) {
+      if (it == null) return "—";
+      if (typeof it !== "object") return String(it);
+      var keys = ["label", "title", "name", "game", "login", "username", "listingId", "offerId", "orderId", "id"];
+      var used = null, head = "";
+      for (var i = 0; i < keys.length; i++) {
+        var v = it[keys[i]];
+        if (typeof v === "string" || typeof v === "number") { used = keys[i]; head = String(v); break; }
+      }
+      var rest = [];
+      Object.keys(it).forEach(function (k) {
+        if (k === used || rest.length >= 3) return;
+        var v = it[k];
+        if (v == null || typeof v === "object") return;
+        rest.push(k + "=" + v);
+      });
+      var line = head + (rest.length ? (head ? " · " : "") + rest.join(" · ") : "");
+      if (!line) { try { line = JSON.stringify(it); } catch (e) { line = String(it); } }
+      return line.length > 220 ? line.slice(0, 217) + "…" : line;
+    }
+
+    // The API may hand back the run flat or wrapped; a payload with no checks
+    // array is "no run", not an empty healthy run.
+    function unwrap(d) {
+      if (!d || typeof d !== "object") return null;
+      if (Array.isArray(d.checks)) return d;
+      var nested = d.run || d.latest || d.health || d.result || d.data;
+      if (nested && Array.isArray(nested.checks)) return nested;
+      return null;
+    }
+
+    async function fetchRun(force) {
+      var r = await fetch(API + (force ? "?run=1" : ""), {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" }
+      });
+      var d = null;
+      try { d = await r.json(); } catch (e) { d = null; }
+      if (r.status === 401) { location.href = "/admin-login.html"; throw new Error("Unauthorized"); }
+      // A logged-in seller hitting a superadmin route gets told so. Bouncing
+      // them to the login page would just loop them through a session they
+      // already have.
+      if (r.status === 403) throw new Error("Superadmin only — this page needs a superadmin session.");
+      if (!r.ok) throw new Error((d && (d.message || d.error)) || ("Health API returned HTTP " + r.status));
+      return unwrap(d);
+    }
+
+    function checkRows() {
+      return (run && Array.isArray(run.checks) ? run.checks : []).map(function (c) {
+        return {
+          id: String(c && c.id != null ? c.id : ""),
+          title: (c && c.title) || (c && c.id) || "Unnamed check",
+          group: String((c && c.group) || String((c && c.id) || "").split(".")[0] || "other"),
+          status: normStatus(c && c.status),
+          severity: normSev(c && c.severity),
+          summary: (c && c.summary) || "",
+          measured: c ? c.measured : null,
+          threshold: c ? c.threshold : null,
+          detail: (c && c.detail) || "",
+          items: c && Array.isArray(c.items) ? c.items : [],
+          ms: c ? c.ms : null,
+          at: ts(c && c.checkedAt) != null ? ts(c.checkedAt) : ts(run && run.startedAt)
+        };
+      });
+    }
+
+    function renderVerdict(rows) {
+      var box = el("verdict");
+      var startedAt = ts(run && run.startedAt);
+      var counts = { ok: 0, warn: 0, fail: 0, unknown: 0 };
+      rows.forEach(function (c) { counts[c.status]++; });
+      var overall = worst(rows.map(function (c) { return c.status; }));
+      if (!rows.length) overall = "unknown";
+
+      var word, when;
+      if (loadError && !rows.length) {
+        word = "Could not load the health API";
+        when = esc(loadError) + " — this is not a green light; nothing was checked.";
+        overall = "unknown";
+      } else if (loadError) {
+        // The stored run is still worth showing, but a page that cannot reach
+        // the API must never present it as the current state — so the verdict
+        // drops to unknown even when every stored check was green.
+        word = "Could not refresh — showing the last stored run";
+        when = "Stored run started <b data-ts=\"" + startedAt + "\">" + esc(ago(startedAt)) + "</b>" +
+          (startedAt != null ? " · " + new Date(startedAt).toLocaleString() : "");
+        overall = "unknown";
+      } else if (!rows.length) {
+        word = "No run recorded yet";
+        when = "Nothing has been checked. Press Refresh to run every check now.";
+      } else {
+        if (overall === "fail") word = "Something is broken";
+        else if (overall === "warn") word = "Needs attention";
+        else if (overall === "unknown") word = "Nothing failed, but " + counts.unknown + " check" + (counts.unknown === 1 ? "" : "s") + " could not run";
+        else word = "All checks passing";
+        // A run with an unknown in it never reports as a clean bill of health,
+        // even when everything that did run came back ok.
+        if (overall !== "unknown" && counts.unknown) {
+          word += " · " + counts.unknown + " unchecked";
+        }
+        var parts = ["checked <b data-ts=\"" + startedAt + "\">" + esc(ago(startedAt)) + "</b>"];
+        if (startedAt != null) parts.push(new Date(startedAt).toLocaleString());
+        var took = fmtMs(run && run.ms);
+        if (took) parts.push("run took " + took);
+        when = parts.join(" · ");
+      }
+
+      box.className = "verdict s-" + overall;
+      el("verdictText").innerHTML = '<span class="pill s-' + overall + '">' + STATUS_GLYPH[overall] + "</span> " + esc(word);
+      el("verdictWhen").innerHTML = when;
+
+      var chips = "";
+      if (rows.length) {
+        ["fail", "warn", "unknown", "ok"].forEach(function (s) {
+          chips += '<span class="pill s-' + s + '">' + counts[s] + " " + esc(STATUS_WORD[s]) + "</span>";
+        });
+      }
+      var old = box.querySelector(".counts");
+      if (old) old.remove();
+      if (chips) {
+        var wrap = document.createElement("div");
+        wrap.className = "counts";
+        wrap.innerHTML = chips;
+        box.appendChild(wrap);
+      }
+
+      var age = startedAt == null ? null : Date.now() - startedAt;
+      var banner = "";
+      if (loadError && rows.length) {
+        banner = '<div class="stale"><b>The health API could not be read: ' + esc(loadError) + "</b> " +
+          "The checks below are the last stored run (" + esc(ago(startedAt)) + "), not live status.</div>";
+      } else if (rows.length && age != null && age > STALE_MS) {
+        banner = '<div class="stale"><b>The last run was ' + esc(ago(startedAt)) + " and the hourly checker has not reported since.</b> " +
+          "Everything below is history, not live status — press Refresh before trusting it.</div>";
+      }
+      el("staleBox").innerHTML = banner;
+    }
+
+    function renderEvidence(c) {
+      var m = fmtVal(c.measured);
+      var t = fmtVal(c.threshold);
+      var out = "";
+      if (m == null && t == null) {
+        out += '<span class="ev none">no measurement reported — this check is not answering the contract</span>';
+      } else {
+        out += '<span class="ev"><i>measured</i>' + esc(m == null ? "—" : m) + "</span>";
+        out += t == null
+          ? '<span class="ev none">no threshold reported</span>'
+          : '<span class="ev"><i>threshold</i>' + esc(t) + "</span>";
+      }
+      var took = fmtMs(c.ms);
+      if (took) out += '<span class="ev"><i>took</i>' + esc(took) + "</span>";
+      return '<div class="evrow">' + out + "</div>";
+    }
+
+    function renderItems(c) {
+      if (!c.items.length) return "";
+      var key = c.id || c.title;
+      var open = !!expanded[key];
+      var shown = open ? c.items.slice(0, ITEM_CAP) : [];
+      var body = "";
+      if (open) {
+        body = '<div class="ilist">' +
+          shown.map(function (it) { return '<div class="it">' + esc(itemText(it)) + "</div>"; }).join("") +
+          (c.items.length > ITEM_CAP ? '<div class="imore">+' + (c.items.length - ITEM_CAP) + " more not shown</div>" : "") +
+          "</div>";
+      }
+      return '<div class="items"><button class="itoggle" data-toggle="' + esc(key) + '">' +
+        (open ? "Hide" : "Show") + " " + c.items.length + " affected row" + (c.items.length === 1 ? "" : "s") +
+        "</button>" + body + "</div>";
+    }
+
+    function renderCards(rows) {
+      var box = el("cards");
+      if (loadError && !rows.length) {
+        box.innerHTML = '<div class="empty"><b>The health API could not be read</b>' + esc(loadError) +
+          "<br>Treat this as “unknown”: no check ran, so nothing here says the system is fine.</div>";
+        return;
+      }
+      if (!rows.length) {
+        box.innerHTML = '<div class="empty"><b>No run recorded yet</b>Nothing has been stored by the hourly checker. ' +
+          "Press Refresh to run every check now — that is the only way this page makes live calls.</div>";
+        return;
+      }
+
+      var groups = {};
+      var order = [];
+      rows.forEach(function (c) {
+        if (!groups[c.group]) { groups[c.group] = []; order.push(c.group); }
+        groups[c.group].push(c);
+      });
+
+      // Worst card first: on a phone the answer has to be above the fold, and
+      // "everything green" is exactly the case nobody needs to scroll for.
+      order.sort(function (a, b) {
+        var d = STATUS_RANK[worst(groups[b].map(function (c) { return c.status; }))] -
+                STATUS_RANK[worst(groups[a].map(function (c) { return c.status; }))];
+        return d !== 0 ? d : order.indexOf(a) - order.indexOf(b);
+      });
+
+      box.innerHTML = order.map(function (g) {
+        var list = groups[g].slice().sort(function (a, b) {
+          return (STATUS_RANK[b.status] - STATUS_RANK[a.status]) ||
+                 (SEV_RANK[b.severity] - SEV_RANK[a.severity]) ||
+                 String(a.title).localeCompare(String(b.title));
+        });
+        var w = worst(list.map(function (c) { return c.status; }));
+        var bad = list.filter(function (c) { return c.status !== "ok"; }).length;
+        var meta = list.length + " check" + (list.length === 1 ? "" : "s") +
+          (bad ? " · " + bad + " needing a look" : " · all clear");
+
+        var body = list.map(function (c) {
+          return '<div class="chk">' +
+            '<div class="t">' +
+              '<span class="pill sm s-' + c.status + '">' + STATUS_GLYPH[c.status] + " " + esc(STATUS_WORD[c.status]) + "</span>" +
+              "<b>" + esc(c.title) + "</b>" +
+              (c.id ? '<span class="cid">' + esc(c.id) + "</span>" : "") +
+              (c.severity === "critical" && c.status !== "ok" ? '<span class="sev crit">critical</span>' : "") +
+              '<span class="age" data-ts="' + c.at + '">' + esc(ago(c.at)) + "</span>" +
+            "</div>" +
+            (c.summary ? '<div class="sum">' + esc(c.summary) + "</div>" : "") +
+            renderEvidence(c) +
+            (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") +
+            renderItems(c) +
+            "</div>";
+        }).join("");
+
+        return '<section class="card s-' + w + '">' +
+          '<div class="hd"><b>' + esc(GROUP_LABELS[g] || title(g)) + "</b>" +
+          '<span class="pill s-' + w + '">' + STATUS_GLYPH[w] + " " + esc(STATUS_WORD[w]) + "</span>" +
+          '<span class="hdmeta">' + esc(meta) + "</span></div>" +
+          body + "</section>";
+      }).join("");
+    }
+
+    function render() {
+      var rows = checkRows();
+      // Re-rendering identical content on every poll would fight the owner's
+      // scroll position, so the DOM is rebuilt only when the run really moved.
+      var key = loadError + "|" + (run ? run.startedAt : "") + "|" +
+        rows.map(function (c) { return c.id + c.status + c.measured + (c.items ? c.items.length : 0); }).join(",") + "|" +
+        Object.keys(expanded).sort().join(",");
+      renderVerdict(rows);
+      if (key === renderKey) return;
+      renderKey = key;
+      renderCards(rows);
+    }
+
+    // Ages come from their own timestamps, so they stay true between polls
+    // instead of freezing at whatever they said when the HTML was written.
+    function tickAges() {
+      var nodes = document.querySelectorAll("[data-ts]");
+      for (var i = 0; i < nodes.length; i++) {
+        var raw = nodes[i].getAttribute("data-ts");
+        var at = raw === "null" || raw === "" ? null : Number(raw);
+        nodes[i].textContent = ago(at != null && isFinite(at) ? at : null);
+      }
+    }
+
+    async function load(force) {
+      // A Refresh pressed while a background poll is in flight is remembered
+      // rather than dropped — a button that silently does nothing is how you
+      // end up trusting a page you never actually refreshed.
+      if (running) {
+        if (force) pendingForce = true;
+        return;
+      }
+      running = true;
+      var btn = el("refreshBtn");
+      var label = btn.textContent;
+      var started = Date.now();
+      var timer = null;
+      if (force) {
+        btn.disabled = true;
+        timer = setInterval(function () {
+          btn.textContent = "Running… " + Math.round((Date.now() - started) / 1000) + "s";
+        }, 1000);
+        btn.textContent = "Running… 0s";
+      }
+      try {
+        var fresh = await fetchRun(force);
+        run = fresh;
+        loadError = "";
+      } catch (e) {
+        // A failed load leaves the previous run on screen but says plainly that
+        // the page could not refresh it — silently showing old rows as current
+        // is the exact failure this page exists to prevent.
+        loadError = (e && e.message) || "request failed";
+      } finally {
+        if (timer) clearInterval(timer);
+        btn.disabled = false;
+        btn.textContent = label;
+        running = false;
+        renderKey = "";
+        render();
+        if (pendingForce) { pendingForce = false; load(true); }
+      }
+    }
+
+    el("refreshBtn").addEventListener("click", function () { load(true); });
+    el("cards").addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-toggle]");
+      if (!btn) return;
+      var key = btn.getAttribute("data-toggle");
+      expanded[key] = !expanded[key];
+      renderKey = "";
+      render();
+    });
+    el("logoutBtn").addEventListener("click", async function () {
+      try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+      location.href = "/admin-login.html";
+    });
+
+    setInterval(tickAges, TICK_MS);
+    // Only poll a visible tab: a phone in a pocket has no reason to keep
+    // waking the server, and the visibility handler already refreshes the
+    // moment the owner looks at it again.
+    setInterval(function () { if (document.visibilityState === "visible") load(false); }, POLL_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") load(false);
+    });
+
+    load(false);
+  })();
+  </script>
+</body>
+</html>

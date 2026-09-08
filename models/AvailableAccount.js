@@ -91,7 +91,7 @@ const availableAccountSchema = new mongoose.Schema(
     // tokens clear that gate — re-running the account through device-auth with
     // its stored password is the fix, which is why these are surfaced by
     // /account-pool/export-needs-auth alongside dead tokens.
-    lastCheckAt: { type: Date, default: null },
+    lastCheckAt: { type: Date, default: null, index: true },
     //
     // "suspended" is the one verdict that is final: Twitch no longer has the
     // account at all (utils/twitchAccountState.js). Unlike a dead token or a

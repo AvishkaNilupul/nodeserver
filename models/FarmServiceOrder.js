@@ -48,7 +48,13 @@ const farmServiceOrderSchema = new mongoose.Schema(
 
     state: {
       type: String,
-      enum: ["claimed", "provisioned", "sent", "delivered", "failed"],
+      // "cancelled" is the buyer walking away, and it is NOT the same as
+      // "failed". A failed order is still owed and must keep alerting; a
+      // cancelled one is closed and must stop, or the health check cries wolf
+      // forever over an order nobody is waiting for. Eldorado order e69b19d3
+      // (Black Desert, 1 Year) was the first: it failed 25 times on a full
+      // rental stack and the buyer cancelled before the fix landed.
+      enum: ["claimed", "provisioned", "sent", "delivered", "failed", "cancelled"],
       default: "claimed",
       index: true,
     },
