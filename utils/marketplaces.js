@@ -2711,6 +2711,111 @@ async function g2gProductSettings(serviceId, brandId) {
   return { delivery, purchaseForm: byType.purchase_form || [], raw: p };
 }
 
+// The per-(service, brand) product this offer hangs off. Every live offer
+// carries one and G2G rejects a create without it.
+async function g2gRelationId(serviceId, brandId) {
+  const p = await g2gRequest("get", "/offer/keyword_relation/search", {
+    params: { service_id: serviceId, brand_id: brandId },
+    what: "G2G relation",
+  });
+  const first = ((p && p.results) || [])[0];
+  return (first && first.relation_id) || "";
+}
+
+// The attribute collections a product demands — "Server", "Item Type",
+// "Platform" and so on. Each is a dropdown with an enumerated child list, and
+// `is_required` ones must all be answered or the create is rejected.
+async function g2gCollections(relationId) {
+  const p = await g2gRequest("get", "/offer/keyword_relation/collection/", {
+    params: { relation_id: relationId },
+    what: "G2G collections",
+  });
+  return ((p && p.results) || []).map((c) => ({
+    collectionId: c.collection_id,
+    label: (c.label && c.label.en) || c.collection_id,
+    required: !!c.is_required,
+    multiselect: !!c.is_multiselect,
+    sortOrder: c.sort_order,
+    values: (c.children || []).map((v) => ({
+      datasetId: v.dataset_id,
+      value: v.value || (v.label && v.label.en) || "",
+    })),
+  }));
+}
+
+// What attributes did WE last use for this game? The operator picked those by
+// hand on g2g.com, so they are the only trustworthy answer: the dropdowns are
+// per-game and their first entry is routinely wrong for us (Albion's first
+// server is "Albion Americas" while every offer we run is "Albion Asia").
+// Guessing files an offer under the wrong server, which is how the account
+// ended up with a Rainbow Six Siege bundle sitting in Rainbow Six Mobile.
+async function g2gAttributesFromOwnOffers(brandId, { limit = 60 } = {}) {
+  const mine = await g2gListOffers({ pageSize: limit, maxPages: 3 });
+  const match = mine.filter((o) => String(o.brandId) === String(brandId));
+  for (const row of match) {
+    let full;
+    try {
+      full = await g2gGetOffer(row.offerId);
+    } catch {
+      continue;
+    }
+    const attrs = (full && full.offer_attributes) || [];
+    if (attrs.length) {
+      return {
+        attributes: attrs,
+        collectionTree: full.offer_title_collection_tree || [],
+        relationId: full.relation_id || "",
+        fromOffer: row.offerId,
+      };
+    }
+  }
+  return null;
+}
+
+// Everything a create needs beyond title/price/stock, resolved from the live
+// catalog plus our own history. Throws with a precise, actionable message
+// rather than publishing something mis-filed.
+async function g2gResolveOfferShape({ serviceId, brandId }) {
+  const service = String(serviceId || G2G_ITEMS_SERVICE);
+  const brand = String(brandId || "");
+  const learned = await g2gAttributesFromOwnOffers(brand);
+  const relationId =
+    (learned && learned.relationId) || (await g2gRelationId(service, brand));
+  if (!relationId) {
+    throw new Error(
+      "G2G: no product (relation_id) for brand " + brand +
+        " under Game Items — this game cannot be listed there",
+    );
+  }
+  const collections = await g2gCollections(relationId);
+  const required = collections.filter((c) => c.required);
+  const attributes = (learned && learned.attributes) || [];
+  const answered = new Set(attributes.map((a) => a.collection_id));
+  const missing = required.filter((c) => !answered.has(c.collectionId));
+  if (missing.length) {
+    throw new Error(
+      "G2G needs " + missing.map((m) => m.label).join(" + ") +
+        " for this game and we have no offer of our own to copy it from. " +
+        "List one " + brand + " offer by hand on g2g.com first (choose " +
+        missing
+          .map(
+            (m) =>
+              m.label + ": one of " +
+              m.values.slice(0, 6).map((v) => v.value).join(" / ") +
+              (m.values.length > 6 ? " …" : ""),
+          )
+          .join("; ") +
+        "), and every later publish will copy it.",
+    );
+  }
+  return {
+    relationId,
+    attributes,
+    collectionTree: (learned && learned.collectionTree) || [],
+    learnedFrom: learned && learned.fromOffer,
+  };
+}
+
 // Create a Game Items offer. `serviceId`/`brandId` identify the game; the
 // legacy `productId` argument is accepted as the relation id so the existing
 // publish route keeps working.
@@ -2742,6 +2847,19 @@ async function g2gPublish({
   }
   const stock = Math.max(1, Number(qty) || 1);
 
+  // A create without relation_id + the product's required attributes is
+  // rejected, and one with the WRONG attributes is worse: it goes live filed
+  // under another server or platform. Resolve both when the caller has not.
+  let relation = relationId || productId || "";
+  let attrs = offerAttributes;
+  let tree = collectionTree;
+  if (!relation || !Array.isArray(attrs) || !attrs.length) {
+    const shape = await g2gResolveOfferShape({ serviceId: service, brandId: brand });
+    relation = relation || shape.relationId;
+    if (!Array.isArray(attrs) || !attrs.length) attrs = shape.attributes;
+    if (!Array.isArray(tree) || !tree.length) tree = shape.collectionTree;
+  }
+
   let dmIds = deliveryMethodIds;
   if (!Array.isArray(dmIds) || !dmIds.length) {
     // The product dictates which delivery methods are legal; take the first
@@ -2759,7 +2877,7 @@ async function g2gPublish({
     seller_id: g2gSellerId(),
     service_id: service,
     brand_id: brand,
-    relation_id: String(relationId || productId || ""),
+    relation_id: String(relation),
     offer_type: "public",
     title: String(title || "").slice(0, 128),
     description: String(description || title || "").slice(0, 5000),
@@ -2771,11 +2889,9 @@ async function g2gPublish({
     delivery_method_ids: dmIds,
     status: G2G_STATUS.LIVE,
   };
-  if (Array.isArray(offerAttributes) && offerAttributes.length) {
-    body.offer_attributes = offerAttributes;
-  }
-  if (Array.isArray(collectionTree) && collectionTree.length) {
-    body.offer_title_collection_tree = collectionTree;
+  if (Array.isArray(attrs) && attrs.length) body.offer_attributes = attrs;
+  if (Array.isArray(tree) && tree.length) {
+    body.offer_title_collection_tree = tree;
   }
 
   const p = await g2gRequest("post", "/offer", {
@@ -7019,6 +7135,10 @@ module.exports = {
   g2gDelist,
   g2gRelist,
   g2gProductSettings,
+  g2gRelationId,
+  g2gCollections,
+  g2gAttributesFromOwnOffers,
+  g2gResolveOfferShape,
   g2gOrderCounts,
   g2gOrders,
   g2gPendingOrders,

@@ -579,6 +579,21 @@ absent from this checkout and lives only on prod).
 - **`POST /offer` has never been executed.** Every other verb was verified live; create was not,
   because it would put a real offer on the account. The payload is built from a live offer's own
   read-back, so the field names are right, but the first publish should be a single cheap canary.
-- One live offer is **mis-filed under the wrong game** ("Rainbow Six Siege bundle" under *Rainbow
-  Six Mobile*). `utils/g2gGames.js` maps Siege correctly; the existing offer needs fixing by hand.
+- **Creating an offer needs more than a brand.** Every live offer carries a per-game
+  `relation_id` plus 1-2 REQUIRED dropdown attributes (Server / Item Type / Platform).
+  `GET /offer/keyword_relation/search?service_id&brand_id` gives the relation;
+  `GET /offer/keyword_relation/collection/?relation_id` gives the required collections and their
+  allowed values. `g2gPublish` resolves both, and takes the attribute VALUES from one of our own
+  existing offers for that game — never from the dropdown's first entry, which is routinely wrong
+  (Albion's first server is "Albion Americas"; every offer we run is "Albion Asia"). For a game we
+  have never listed, it refuses with a message naming the field and its options, so the operator
+  lists one by hand and every later publish copies it. Marvel Rivals' Item Type even has a literal
+  "Twitch Drops" value.
+- **10 of the 89 mapped games have no creatable Game Items product** and are in
+  `NOT_LISTABLE`: Overwatch, Rainbow Six Siege, Borderlands 4, Star Citizen, VALORANT,
+  EA Sports FC 26, Apex Legends, Hearthstone, GTA V, League of Legends. Verified by probing all 86
+  brands live — the public catalog lists more than a seller may actually use, so this cannot be
+  derived from categories.json.
+- **The Rainbow Six Siege bundles under "Rainbow Six Mobile" are NOT a mis-filing.** Siege has no
+  Game Items product at all, so Mobile was the only shelf. Do not "fix" them.
 - The delivery-proof screenshot is never uploaded automatically, by the operator's decision.

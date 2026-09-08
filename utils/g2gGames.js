@@ -15,12 +15,13 @@
 // G2G listing.
 //
 // WHY A MISS RETURNS null AND NEVER THE NEAREST BRAND
-// brand_id decides which game's page the offer shows up on, and the account is
-// already paying for one such mistake: nine Rainbow Six Siege bundles sit under
-// "Tom Clancy's Rainbow Six Mobile" (lgc_game_30876) — a different game with a
-// different audience — even though the right brand exists
-// (tom-clancys-rainbow-six-siege-item, lgc_game_24713). So nothing here is
-// approximated. A game either matches a brand exactly, or it matches a
+// brand_id decides which game's page the offer shows up on, so nothing here is
+// approximated. (An earlier draft of this comment called the account's nine
+// Rainbow Six Siege bundles under "Tom Clancy's Rainbow Six Mobile" a mistake.
+// They are not: probing the live catalog on 2026-09-08 showed Siege has NO
+// creatable Game Items product — `keyword_relation/search` returns nothing for
+// lgc_game_24713 — so Mobile was the only shelf available. It is in
+// NOT_LISTABLE below for that reason. Do not "fix" those offers.) A game either matches a brand exactly, or it matches a
 // hand-checked alias, or brandForGame returns null and the auto-lister skips
 // that game on G2G. Games whose nearest brand is a DIFFERENT title are absent
 // on purpose: Escape from Tarkov: Arena, Halo: The Master Chief Collection,
@@ -544,23 +545,55 @@ Object.freeze(GAME_ALIASES);
 
 // The G2G coordinates for a game, or null when we have no verified brand for
 // it. null means "skip this game on G2G" — never "publish it somewhere close".
+// Brands that appear in the public catalog under Game Items but have NO
+// creatable product behind them: `GET /offer/keyword_relation/search` returns
+// an empty result for the pair, so an offer cannot be filed there at all.
+// Established by probing all 86 mapped brands live on 2026-09-08 — the public
+// categories.json is a browsing catalog and lists more than a seller may
+// actually use, so this cannot be derived from it.
+//
+// Two of these are worth knowing about specifically. **Rainbow Six Siege is
+// not listable under Game Items**, which is why the account's Siege bundle sits
+// under "Rainbow Six Mobile" — that was the only option, not a mistake.
+// **Overwatch** is likewise unavailable, though it is a no-claim game and its
+// bundles are refused before this point anyway.
+const NOT_LISTABLE = new Set([
+  "lgc_game_21555", // Overwatch
+  "lgc_game_24713", // Rainbow Six Siege
+  "lgc_game_35224", // Borderlands 4
+  "lgc_game_19789", // Star Citizen
+  "lgc_game_27301", // VALORANT
+  "lgc_game_37599", // EA Sports FC 26
+  "lgc_game_25694", // Apex Legends
+  "lgc_game_20740", // Hearthstone
+  "lgc_game_24309", // Grand Theft Auto V
+  "lgc_game_22666", // League of Legends
+]);
+
 function brandForGame(game) {
   const n = normGame(game);
   if (!n) return null;
   const alias = ALIAS_BY_NORM.get(n);
   const key = (alias && BY_NORM.get(normGame(alias))) || BY_NORM.get(n);
-  return key ? GAME_BRANDS[key] : null;
+  const hit = key ? GAME_BRANDS[key] : null;
+  // A brand with no creatable product is the same answer as no brand at all:
+  // null, so the auto-lister skips the game instead of failing at publish.
+  if (!hit || NOT_LISTABLE.has(hit.brandId)) return null;
+  return hit;
 }
 
-// The farm game names that do map, busiest first.
+// The farm game names that can actually carry an offer, busiest first.
 function gamesWithG2gBrand() {
-  return Object.keys(GAME_BRANDS);
+  return Object.keys(GAME_BRANDS).filter(
+    (k) => !NOT_LISTABLE.has(GAME_BRANDS[k].brandId),
+  );
 }
 
 module.exports = {
   G2G_ITEMS_SERVICE,
   GAME_BRANDS,
   GAME_ALIASES,
+  NOT_LISTABLE,
   normGame,
   brandForGame,
   gamesWithG2gBrand,
