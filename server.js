@@ -57,6 +57,7 @@ const { requireReseller } = require("./middleware/resellerAuth");
 const resellerRoutes = require("./routes/resellerRoutes");
 const resellerAdminRoutes = require("./routes/resellerAdminRoutes");
 const renterExpiry = require("./utils/renterExpiry");
+const rentFarmCapacity = require("./utils/rentFarmCapacity");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
@@ -876,6 +877,11 @@ mongoose
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
     renterExpiry.start();
+    // Rent-farm slots are the constraint that actually runs out — a paid
+    // "Automatic Farming" order needs a free slot in a bot config, not just a
+    // free pool account. Two orders were lost on 2026-09-08 while the pool
+    // reported 554 eligible and every stack was full. This says so in advance.
+    rentFarmCapacity.start();
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();

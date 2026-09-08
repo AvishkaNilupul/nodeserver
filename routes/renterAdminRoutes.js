@@ -2656,3 +2656,14 @@ module.exports = router;
 module.exports.gatherPoolEligibility = gatherPoolEligibility;
 module.exports.movePoolAccountToRenter = movePoolAccountToRenter;
 module.exports.availableRentalStack = availableRentalStack;
+// The live per-stack occupancy view, and a picker that insists on room for N
+// accounts rather than merely "not completely full". operatorFarm re-checks the
+// holder's stack on EVERY provision with these: a stack chosen once, when it had
+// room, is not a stack that still has room a hundred sales later.
+module.exports.rentalStackOptions = rentalStackOptions;
+module.exports.chooseStackWithRoom = (bots, needed) =>
+  chooseAvailableStack(
+    (Array.isArray(bots) ? bots : []).filter(
+      (b) => Number(b.remaining) >= Math.max(1, Math.floor(Number(needed) || 1)),
+    ),
+  );
