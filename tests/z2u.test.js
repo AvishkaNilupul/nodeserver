@@ -330,3 +330,53 @@ test("the createToken body is not a token source", () => {
   assert.ok(/^https?:\/\//.test(body.url), "url is a URL, not a token");
   assert.strictEqual(body.data, "", "the body carries no token at all");
 });
+
+// --- per-game template enums ------------------------------------------------
+// Z2U's accepted values differ per GAME, which an earlier attempt at this
+// integration missed by hard-coding one game's lists. Measured live 2026-09-08:
+// Halo Infinite accepts ONLY "Order Delivery", while Overwatch does not offer
+// it at all ("Put into my account, Send Code, Gift Giving"). Publishing a
+// Twitch-drops account under the wrong one misdescribes how the buyer receives
+// it, so the picker has to say whether it got what it asked for.
+const tmpl = require("../utils/z2uTemplate");
+
+test("a validation list is read from a literal or a column reference", () => {
+  assert.deepStrictEqual(
+    tmpl.resolveList('"Order Delivery,Send Code,Redeem By Seller"', new Map()),
+    ["Order Delivery", "Send Code", "Redeem By Seller"],
+  );
+  // Z2U points some columns at a hidden range instead of listing values inline.
+  const cells = new Map([
+    ["AQ1", "Battle.net"],
+    ["AQ2", "Steam"],
+    ["AQ4", "Nintendo"], // gaps are skipped, not turned into blanks
+  ]);
+  assert.deepStrictEqual(
+    tmpl.resolveList("HEADER_CREATE_NEW_LISTING!AQ1:AQ86", cells),
+    ["Battle.net", "Steam", "Nintendo"],
+  );
+  assert.deepStrictEqual(tmpl.resolveList("", new Map()), []);
+});
+
+test("pickOption reports whether the game really allows what we wanted", () => {
+  const halo = ["Order Delivery"];
+  const ow = ["Put into my account", "Send Code", "Gift Giving"];
+  // Exact match available.
+  const a = tmpl.pickOption(halo, ["Order Delivery"]);
+  assert.strictEqual(a.value, "Order Delivery");
+  assert.strictEqual(a.exact, true);
+  // Preference order matters: the second choice wins when the first is absent.
+  const b = tmpl.pickOption(ow, ["Order Delivery", "Send Code"]);
+  assert.strictEqual(b.value, "Send Code");
+  assert.strictEqual(b.exact, true);
+  // Nothing we asked for: it still returns something usable, but flags that the
+  // choice was NOT what we wanted so a caller can refuse instead of publishing
+  // a misleading delivery mode.
+  const c = tmpl.pickOption(ow, ["Order Delivery"]);
+  assert.strictEqual(c.exact, false);
+  assert.strictEqual(c.value, "Put into my account");
+  // Empty list: no value, and never a crash.
+  assert.deepStrictEqual(tmpl.pickOption([], ["Order Delivery"]), {
+    value: "", exact: false, options: [],
+  });
+});
