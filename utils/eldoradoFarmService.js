@@ -23,6 +23,10 @@ const AvailableAccount = require("../models/AvailableAccount");
 const { decrypt } = require("./secretBox");
 const operatorFarm = require("./operatorFarm");
 const mp = require("./marketplaces");
+const farmAlert = require("./farmServiceAlert");
+
+// Which marketplace this service speaks for, used in failure alerts.
+const MARKET = "eldorado";
 
 // Our own naming convention, so this parse is a contract with ourselves:
 //   "<Game> Twitch Drops Automatic Farming 120 Days"
@@ -249,14 +253,25 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
           poolId: a.poolId,
           farmUntil: null,
         }));
+        // Keep WHY. farmFreshAccounts hands back skipped:[{username, reason}]
+        // with the real error behind each rejected account; recording only the
+        // count is what made order 4b20765f undiagnosable.
+        const alert = farmAlert.shouldAlert(row);
         row.state = "failed";
-        row.lastError =
-          "only " +
-          added.length +
-          " of " +
-          qty +
-          " pristine pool accounts could be provisioned";
+        row.lastError = farmAlert.shortfallMessage(res, qty);
         await row.save();
+        if (alert) {
+          await farmAlert.alertFarmFailure({
+            market: MARKET,
+            orderId,
+            offerTitle: row.offerTitle || parsed.title || "",
+            game: parsed.game,
+            days: parsed.days,
+            qty,
+            buyerUsername: row.buyerUsername || "",
+            reason: row.lastError,
+          });
+        }
         return { orderId, farm: true, error: row.lastError };
       }
       row.accounts = added.map((a) => ({
@@ -274,9 +289,22 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       const creds = await credentialsFor(row.accounts);
       const missing = creds.filter((c) => !c.login || !c.password);
       if (missing.length) {
+        const alertPw = farmAlert.shouldAlert(row);
         row.state = "failed";
         row.lastError = "a provisioned account has no readable password";
         await row.save();
+        if (alertPw) {
+          await farmAlert.alertFarmFailure({
+            market: MARKET,
+            orderId,
+            offerTitle: row.offerTitle || parsed.title || "",
+            game: parsed.game,
+            days: parsed.days,
+            qty,
+            buyerUsername: row.buyerUsername || "",
+            reason: row.lastError,
+          });
+        }
         return { orderId, farm: true, error: row.lastError };
       }
       await mp.eldoradoSendOrderMessage(
@@ -306,9 +334,22 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         row.accounts.map((a) => a.login).join(", "),
     };
   } catch (e) {
+    const alertErr = farmAlert.shouldAlert(row);
     row.state = "failed";
     row.lastError = String(e.message || e).slice(0, 400);
     await row.save().catch(() => {});
+    if (alertErr) {
+      await farmAlert.alertFarmFailure({
+        market: MARKET,
+        orderId,
+        offerTitle: row.offerTitle || (parsed && parsed.title) || "",
+        game: (parsed && parsed.game) || row.game || "",
+        days: (parsed && parsed.days) || row.days || 0,
+        qty,
+        buyerUsername: row.buyerUsername || "",
+        reason: row.lastError,
+      });
+    }
     return { orderId, farm: true, error: row.lastError };
   }
 }

@@ -50,7 +50,23 @@ const availableAccountSchema = new mongoose.Schema(
           at: { type: Date, default: Date.now },
           event: {
             type: String,
-            enum: ["claimed", "released", "recycled", "rented", "returned", "sold", "deleted"],
+            // "spent" is written by the no-claim side (utils/unclaimedAutoList
+            // and routes/noclaimFarmRoutes) when a farmed account's drops have
+            // been handed over and it is done. It was missing here: the $push
+            // that records it skips validation, so the value landed in the DB
+            // fine — and then every later doc.save() on that account threw,
+            // which is why accountPoolChecker could not persist a result for
+            // any of the 172 accounts that had ever been marked spent.
+            enum: [
+              "claimed",
+              "released",
+              "recycled",
+              "rented",
+              "returned",
+              "sold",
+              "spent",
+              "deleted",
+            ],
           },
           game: { type: String, default: "" },
           campaignId: { type: String, default: "" },

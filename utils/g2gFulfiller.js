@@ -409,8 +409,21 @@ async function deliverPendingOrders() {
       r = { orderId: order.orderItemId, error: e.message };
     }
     results.push(r);
-    if ((r.error || alertsOperator(r.skipped)) && !dryRun) {
-      await alertUnshippable(order, r.error || r.skipped);
+    // `pending` is a PAID order parked for the operator to hand over in G2G
+    // chat. It is a deliberate outcome, not a failure — but it was also silent,
+    // and a paid order nobody is told about is indistinguishable from a lost
+    // one. Order 1788892037419NTQU (Rocket League, $2.18) sat reserved-but-
+    // unsent with no error, no log line and no alert; the fulfiller re-parked
+    // it every 60 seconds, perfectly happily, while the buyer waited.
+    const needsAHuman = r.error || alertsOperator(r.skipped) || r.pending;
+    if (needsAHuman && !dryRun) {
+      await alertUnshippable(
+        order,
+        r.error ||
+          r.skipped ||
+          (r.detail || "reserved, but the credential has not reached the buyer"),
+        { pending: !r.error && !r.skipped && !!r.pending },
+      );
     }
   }
   return { checked: orders.length, results };
@@ -425,19 +438,31 @@ function alertsOperator(skipReason) {
   return ALERT_SKIPS.test(String(skipReason || ""));
 }
 
-async function alertUnshippable(order, why) {
+async function alertUnshippable(order, why, { pending = false } = {}) {
   const id = String(order.orderItemId || "");
   if (!id || alerted.has(id)) return;
   alerted.add(id);
+  // The two cases need different words, because they need different actions.
+  // "Parked" means the stock is already picked and set aside — the operator
+  // only has to paste the credential into chat. "Cannot ship" means the bot has
+  // no idea what backs the offer and someone must work that out first.
+  const head = pending
+    ? "G2G order " + id + " is PAID and waiting for YOU to hand it over in chat.\n\n"
+    : "G2G order " + id + " is PAID and the bot cannot ship it.\n\n";
+  const tail = pending
+    ? "The account is already reserved against this order — nothing else will " +
+      "pick it. Paste its credential into the G2G chat for this order, and the " +
+      "next sweep will confirm the delivery automatically."
+    : "This one needs delivering by hand. Most of the offers on the account were " +
+      "created directly on g2g.com and have no listing row here, so the bot does " +
+      "not know what stock backs them.";
   await notify(
-    "G2G order " + id + " is PAID and the bot cannot ship it.\n\n" +
+    head +
       String(order.title || "").slice(0, 120) + "\n" +
       "Buyer id: " + order.buyerId + "   " +
       order.currency + " " + order.amount + "\n\n" +
       "Reason: " + why + "\n\n" +
-      "This one needs delivering by hand. Most of the 78 offers on the account " +
-      "were created directly on g2g.com and have no listing row here, so the " +
-      "bot does not know what stock backs them.",
+      tail,
   );
 }
 

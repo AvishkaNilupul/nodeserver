@@ -535,6 +535,12 @@ function getNoClaimGate() {
 // v3 has none of these keys). Frozen shape: docs/UNCLAIMED-BUNDLES-CONTRACT.md.
 const UNCLAIMED_PRICING_DEFAULTS = {
   floorUsd: 0.75,
+  // The highest price this business has EVER realised, across 217 sales, every
+  // marketplace and every bundle size (min $0.75, median $1.25, max $4.50).
+  // Above it a listing is not ambitious, it is unsold — a $11.75 Rainbow Six row
+  // went live on 2026-09-08 because the bundle pricer had a floor and no
+  // ceiling. Raise it only when a real sale proves a higher price.
+  ceilingUsd: 4.5,
   gameFloors: {},
   itemStepPct: 15,
   itemCapMult: 2.5,
@@ -557,6 +563,7 @@ function getUnclaimedPricing() {
   const D = UNCLAIMED_PRICING_DEFAULTS;
   return {
     floorUsd: Math.max(0, num(af.unclaimedPriceFloorUsd, D.floorUsd)),
+    ceilingUsd: Math.max(0, num(af.unclaimedPriceCeilingUsd, D.ceilingUsd)),
     gameFloors:
       af.unclaimedGameFloors && typeof af.unclaimedGameFloors === "object"
         ? af.unclaimedGameFloors

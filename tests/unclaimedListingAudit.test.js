@@ -259,3 +259,136 @@ test("a sampled read never yields a count-based SHORT verdict", () => {
   });
   assert.strictEqual(none.verdict, "stale");
 });
+
+/* ------------------------- taking the offer down -------------------------- */
+// The audit judged these four Gameflip rows "stale" correctly for days and
+// still nothing came down, because applyStock returned early on every
+// marketplace without a QUANTITY api — and the only two that have one,
+// Eldorado and PlayerAuctions, are not even in settings.UNCLAIMED_MARKETS
+// (["gameflip","digiseller","ggsel"]). Pausing and re-quantifying are separate
+// capabilities and must be gated separately.
+const staleEntry = (marketplace, extra = {}) => ({
+  listing: { _id: "x", externalId: "ext-1", marketplace, unclaimedGame: "Overwatch", ...extra },
+  covering: 0,
+  verdict: "stale",
+});
+
+test("a stale listing is paused on every marketplace that can be delisted", async () => {
+  for (const m of ["gameflip", "digiseller", "ggsel", "zeusx", "g2g", "eldorado", "playerauctions"]) {
+    const actions = await audit.applyStock(staleEntry(m), { dryRun: true });
+    assert.ok(
+      actions.some((a) => typeof a === "string" && a.startsWith("pause (stale")),
+      m + " did not plan a pause: " + JSON.stringify(actions),
+    );
+  }
+});
+
+test("a marketplace with no delist api asks for the operator instead of going quiet", async () => {
+  // epicnpc has no offer api at all. The old code returned "no stock API for
+  // epicnpc" for EVERY market and that read as "nothing to do" — which is how
+  // an unsellable listing stays on sale. It has to be loud.
+  const actions = await audit.applyStock(staleEntry("epicnpc"), { dryRun: true });
+  assert.match(JSON.stringify(actions), /MANUAL/);
+  assert.match(JSON.stringify(actions), /ext-1/);
+});
+
+test("FunPay can only be delisted when the category node was captured", async () => {
+  // funpayDelist re-saves the offer's editor form, so without externalNode
+  // there is nothing to post back to.
+  assert.match(
+    JSON.stringify(await audit.applyStock(staleEntry("funpay"), { dryRun: true })),
+    /MANUAL/,
+  );
+  assert.ok(
+    (await audit.applyStock(staleEntry("funpay", { externalNode: "1234" }), { dryRun: true }))
+      .some((a) => typeof a === "string" && a.startsWith("pause (stale")),
+  );
+});
+
+test("an 'empty' verdict comes down too, but a healthy one is left alone", async () => {
+  const empty = { ...staleEntry("gameflip"), verdict: "empty" };
+  assert.ok(
+    (await audit.applyStock(empty, { dryRun: true }))
+      .some((a) => typeof a === "string" && a.startsWith("pause (empty")),
+  );
+  // covering > 0 must never reach the pause branch, whatever the verdict says.
+  const stocked = { ...staleEntry("gameflip"), covering: 3, verdict: "short" };
+  const actions = await audit.applyStock(stocked, { dryRun: true });
+  assert.match(JSON.stringify(actions), /no quantity API for gameflip/);
+});
+
+/* ------------- pausing must also let go of the accounts ------------------- */
+// Six stale rows were paused on 2026-09-08 at 17:52 and all six were live again
+// by 17:58 — same sets, same prices, new listing ids. repairGameflipChains
+// republishes any set whose ledger rows still say "listed" but which has no
+// active row, straight from the SET and with no coverage check. So a pause that
+// leaves the ledger alone is not a fix; it is a five-minute pause.
+test("REGRESSION: pausing a stale listing releases its ledger accounts", async () => {
+  const Module = require("node:module");
+  const realLoad = Module._load;
+  const calls = { listing: [], ledger: [], paused: [] };
+  Module._load = function (request, parent, isMain) {
+    const fromAudit = parent && /unclaimedListingAudit\.js$/.test(parent.filename || "");
+    if (fromAudit && request === "../models/UnclaimedAccount") {
+      return { updateMany: async (q, u) => { calls.ledger.push({ q, u }); return { modifiedCount: 2 }; } };
+    }
+    if (fromAudit && request === "../models/MarketplaceListing") {
+      return { updateOne: async (q, u) => { calls.listing.push({ q, u }); return { modifiedCount: 1 }; },
+               countDocuments: async () => 1 };
+    }
+    if (fromAudit && request === "./marketplaces") {
+      return { gameflipDelist: async (id) => { calls.paused.push(id); } };
+    }
+    return realLoad.call(this, request, parent, isMain);
+  };
+  // applyStock does `require("./marketplaces")` INSIDE the function, so the
+  // interception has to stay installed across the call, not just the load.
+  let actions;
+  try {
+    const p = require.resolve("../utils/unclaimedListingAudit");
+    delete require.cache[p];
+    const fresh = require("../utils/unclaimedListingAudit");
+    delete require.cache[p];
+    actions = await fresh.applyStock(
+      {
+        listing: {
+          _id: "listing-1",
+          set: "set-9281abec",
+          externalId: "2820d683",
+          marketplace: "gameflip",
+          unclaimedGame: "Overwatch",
+        },
+        covering: 0,
+        verdict: "stale",
+      },
+      { dryRun: false },
+    );
+  } finally {
+    Module._load = realLoad;
+  }
+
+  assert.deepStrictEqual(calls.paused, ["2820d683"], "the offer must actually come down");
+  assert.strictEqual(calls.ledger.length, 1, "the ledger must be released");
+  const { q, u } = calls.ledger[0];
+  assert.strictEqual(q.set, "set-9281abec");
+  assert.strictEqual(q.market, "gameflip");
+  assert.strictEqual(q.status, "listed", "only rows the chain repair would act on");
+  assert.strictEqual(
+    u.$set.status,
+    "released",
+    "released, not removed: the accounts are good stock, just not for THIS set",
+  );
+  assert.ok(
+    actions.some((a) => typeof a === "string" && /released 2 ledger account/.test(a)),
+    "the release must be reported: " + JSON.stringify(actions),
+  );
+});
+
+test("a healthy listing never releases anything", async () => {
+  // covering > 0 must not reach the pause branch at all.
+  const actions = await audit.applyStock(
+    { listing: { _id: "l", set: "s", externalId: "e", marketplace: "gameflip" }, covering: 4, verdict: "ok" },
+    { dryRun: true },
+  );
+  assert.match(JSON.stringify(actions), /no quantity API for gameflip/);
+});

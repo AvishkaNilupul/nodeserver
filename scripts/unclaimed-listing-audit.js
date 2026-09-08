@@ -25,11 +25,15 @@
 //       record what a listing advertises WITHOUT touching its live text, so the
 //       delivery gate and this audit have a contract to check against.
 //
-//   node scripts/unclaimed-listing-audit.js --shop [--max 10] [--marketplace ggsel]
+//   node scripts/unclaimed-listing-audit.js --shop [--max 10] [--marketplace ggsel] [--apply]
 //       audit EVERY active listing that sells no-claim-game drops, whichever
 //       pool it draws on — the no-claim ledger (by game or by set) and the Drop
-//       Archive alike. Reads only; it never touches listing text or quantity.
-//       --max caps how many candidate accounts are live-read per DropSet.
+//       Archive alike. --max caps how many candidate accounts are live-read per
+//       DropSet.
+//       Reporting only, UNLESS --apply, which takes the `stale` and `empty` rows
+//       off sale — the ones no account can fill, whatever price they carry. It
+//       never rewrites a listing's text or reprices anything: that changes what
+//       the shop promises and stays the operator's call.
 //
 //   node scripts/unclaimed-listing-audit.js --listing <id> --retitle [--qty N] [--apply]
 //       rewrite ONE listing down to the set its stock actually holds: declares
@@ -285,9 +289,45 @@ async function shopReport() {
       }
     }
   }
+  // --- taking the unsellable ones down ------------------------------------
+  // Rewriting a listing's TEXT stays the operator's call: it changes what the
+  // shop promises. But a `stale` or `empty` row is not a pricing question — no
+  // account on the planet can fill it, so every minute it stays on sale is a
+  // sale we will have to refund or apologise for. That is what happened: four
+  // Overwatch rows kept selling expired CAH drops for days, the dearest at
+  // $6.25, because --shop could only ever print.
+  const unsellable = [...(byVerdict.get("stale") || []), ...(byVerdict.get("empty") || [])]
+    .filter((r) => !r.listing.autoPaused);
+  if (!unsellable.length) {
+    console.log("\n\nNothing is unsellable — no listing needs taking down.");
+  } else if (!has("apply")) {
+    console.log(
+      "\n\n" + unsellable.length + " listing(s) advertise items nothing can supply. " +
+        "Re-run with --apply to take exactly these off sale:",
+    );
+    for (const r of unsellable) {
+      console.log(
+        "  " + r.listing.marketplace + " " + r.listing.externalId + "  $" +
+          (r.listing.price || 0) + "  " + String(r.listing.title || "").slice(0, 66),
+      );
+    }
+  } else {
+    console.log("\n\nTAKING " + unsellable.length + " UNSELLABLE LISTING(S) OFF SALE\n");
+    for (const r of unsellable) {
+      const actions = await audit.applyStock(r, { dryRun: false });
+      console.log(
+        "  " + r.listing.marketplace + " " + r.listing.externalId + "  $" +
+          (r.listing.price || 0) + "  " + String(r.listing.title || "").slice(0, 60),
+      );
+      for (const a of actions) {
+        console.log("      " + (typeof a === "string" ? a : a.note || JSON.stringify(a)));
+      }
+    }
+  }
+
   console.log(
-    "\n\nNOTHING WAS CHANGED. Fixing a listing's text is a pricing/marketing " +
-      "decision, so choose per row:\n" +
+    "\nListing TEXT was not changed — that is a pricing/marketing decision, so " +
+      "choose per row:\n" +
       "  --listing <id> --declare \"<items>\"        record what it advertises (no live edit)\n" +
       "  --listing <id> --retitle [--qty N] --apply  rewrite it to what its stock holds\n",
   );

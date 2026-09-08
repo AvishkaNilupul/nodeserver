@@ -215,22 +215,32 @@ async function gameflipOwnerId() {
   try {
     const keys = requireKeys("gameflip");
     const pick = (r) => String((((r || {}).data || {}).data || {}).owner || "");
-    let owner = pick(
-      await axios.get(GF_API + "/account/me", {
-        headers: gfHeaders(keys),
-        timeout: 20000,
-      }),
-    );
-    // /account/me/profile is the endpoint the rest of this file already reads
-    // `owner` from (gameflipTest, gameflipListingIdsByStatus); use it when the
-    // account document does not carry the id.
-    if (!owner) {
-      owner = pick(
-        await axios.get(GF_API + "/account/me/profile", {
-          headers: gfHeaders(keys),
-          timeout: 20000,
-        }),
-      );
+    // Each endpoint gets its OWN try. The fallback used to sit inside the same
+    // one, so when /account/me threw — which it does, live — the whole function
+    // fell to the outer catch and returned "" without ever asking
+    // /account/me/profile, the endpoint the rest of this file reads `owner` from
+    // perfectly happily (gameflipTest, gameflipListingIdsByStatus).
+    //
+    // The cost of that was not an error anywhere; it was silent and expensive.
+    // With no owner id, marketResearch cannot drop OUR rows from "the lowest
+    // live price", so `lowestOther` collapsed onto `lowest` on nearly every game
+    // — measured 2026-09-08, identical on 6 of 8 sampled games. Every pricer
+    // anchored on the cheapest rival was therefore anchoring on OUR OWN listing
+    // and undercutting it, one scan after another. That is the self-undercut
+    // spiral this function exists to stop.
+    let owner = "";
+    for (const path of ["/account/me/profile", "/account/me"]) {
+      try {
+        owner = pick(
+          await axios.get(GF_API + path, {
+            headers: gfHeaders(keys),
+            timeout: 20000,
+          }),
+        );
+      } catch {
+        owner = "";
+      }
+      if (owner) break;
     }
     if (owner) gfOwnerCache = { id: owner, until: now + 60 * 60 * 1000 };
     return owner;

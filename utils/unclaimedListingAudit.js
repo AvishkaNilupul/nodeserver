@@ -645,17 +645,49 @@ async function applyStock(entry, { dryRun = true } = {}) {
   const setQty = {
     eldorado: (n) => mp.eldoradoSetQuantity(id, n),
     playerauctions: (n) => mp.playerauctionsSetQuantity(id, n),
+    g2g: (n) => mp.g2gSetQuantity(id, n),
   }[listing.marketplace];
+  // Taking an unsellable offer DOWN is possible on every marketplace this
+  // engine publishes to, and it is the half that matters: a listing whose
+  // advertised items no longer exist is a promise we cannot keep, whatever its
+  // quantity says. Only Eldorado and PlayerAuctions carry a quantity API — and
+  // neither is in settings.UNCLAIMED_MARKETS — so gating the whole function on
+  // `setQty` below meant the three markets that DO carry unclaimed stock
+  // (gameflip, digiseller, ggsel) could never be paused. Four Overwatch
+  // listings sat on sale for days advertising drops that had expired off every
+  // account, the dearest at $6.25 against an all-time realised max of $4.50.
+  // Every entry here is reversible: draft on Gameflip, pause on GGSel/Eldorado,
+  // hidden on ZeusX/PlayerAuctions, delisted (not deleted) on G2G.
   const pause = {
     eldorado: () => mp.eldoradoDelist(id),
     playerauctions: () => mp.playerauctionsHide(id),
+    gameflip: () => mp.gameflipDelist(id),
+    digiseller: () => mp.digisellerDelist(id),
+    ggsel: () => mp.ggselDelist(id),
+    zeusx: () => mp.zeusxDelist(id),
+    g2g: () => mp.g2gDelist(id),
+    // FunPay re-saves the offer's editor form, so it needs the category node
+    // captured at publish time; without one there is nothing to post back to.
+    funpay: listing.externalNode
+      ? () => mp.funpayDelist(id, listing.externalNode)
+      : undefined,
   }[listing.marketplace];
 
-  if (!setQty) return [{ note: "no stock API for " + listing.marketplace }];
-
   if (covering <= 0 && (verdict === "stale" || verdict === "empty")) {
+    if (!pause) {
+      // Say so out loud. Silently returning "nothing to do" here is how the
+      // Gameflip rows stayed up: a listing that cannot be paused automatically
+      // still has to reach the operator, because it is still selling.
+      return [
+        {
+          note:
+            "MANUAL: no delist API for " + listing.marketplace + " — " +
+            verdict + ", take it down by hand (" + id + ")",
+        },
+      ];
+    }
     actions.push("pause (" + verdict + ": nothing on sale is still claimable)");
-    if (!dryRun && pause) {
+    if (!dryRun) {
       await pause().catch((e) => actions.push("pause failed: " + e.message));
       await MarketplaceListing.updateOne(
         { _id: listing._id },
@@ -667,9 +699,48 @@ async function applyStock(entry, { dryRun = true } = {}) {
           },
         },
       ).catch(() => {});
+      // ...and let go of the accounts, or the engine puts the listing straight
+      // back. `repairGameflipChains` republishes any set that has ledger rows
+      // marked "listed" but no active row — from the SET, with no coverage
+      // check at all. Measured 2026-09-08: six stale Overwatch/CoD/R6 rows were
+      // paused at 17:52 and all six were live again by 17:58, same sets, same
+      // prices, new listing ids. Pausing alone is not a fix, it is a five-minute
+      // pause.
+      //
+      // "released" rather than "removed": these accounts are still perfectly
+      // good stock, they simply do not hold what THIS listing promised. It is in
+      // SELLABLE_STATUSES, so the scan pass re-reads them live and re-lists them
+      // under the signature of what they ACTUALLY hold — which is how the honest
+      // 6-item Finals bundle came to exist alongside the stale 10-item one.
+      const freed = await UnclaimedAccount.updateMany(
+        {
+          set: listing.set,
+          market: listing.marketplace,
+          status: "listed",
+        },
+        {
+          $set: {
+            status: "released",
+            note:
+              "released by the listing audit: the set's items are no longer " +
+              "claimable, so this account is re-listed under what it really holds",
+          },
+        },
+      ).catch(() => null);
+      const n = freed ? freed.modifiedCount || freed.nModified || 0 : 0;
+      if (n) {
+        actions.push(
+          "released " + n + " ledger account(s) so the chain repair cannot " +
+            "republish this set",
+        );
+      }
     }
     return actions;
   }
+  // Only the quantity half needs a quantity API. Reaching this guard AFTER the
+  // pause branch is the whole point: an unsellable Gameflip row must come down
+  // even though Gameflip has no per-offer quantity to correct.
+  if (!setQty) return [{ note: "no quantity API for " + listing.marketplace }];
   if (covering > 0) {
     const sharers = await sharersForGame(listing.unclaimedGame);
     const share = sharers > 1 ? Math.floor(covering / sharers) : covering;

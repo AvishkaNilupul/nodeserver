@@ -737,8 +737,42 @@ function bundleDescriptionLines({
 /* -------------------------------- pricing ------------------------------- */
 
 const MIN_SOLD_SAMPLES = 3;
-const MAX_ANCHOR_USD = 10;
+// An anchor is a RIVAL's number, and rivals sell things we do not. The Gameflink
+// search for "Rainbow Six Siege Twitch Drops" returns "SI 2026 Doc Bundle Code |
+// 5 Items" at $9.99 and a 15-item Dokkaebi bundle at $29.99 — those are redeem
+// CODES, not farmed accounts, and they dragged `gameflip.avgSoldPrice` to $8.08.
+// Under the old $10 cap that sailed through, the item multiplier turned it into
+// an $11.75 live listing (2026-09-08) in a business whose highest realised sale
+// EVER is $4.50.
+//
+// So the cap is set from what we have actually been paid, not from what someone
+// else is asking. See PRICE_CEILING_USD below for the measured distribution.
+//
+// It is deliberately NOT set to the $4.50 ceiling. An anchor is the base price
+// of ONE account before the item multiplier, and capping it at the all-time
+// MAXIMUM turns the cap into a target: every game whose rival average is
+// polluted anchors at the ceiling and then gets multiplied. Measured 2026-09-08,
+// that would have RAISED three healthy sets (Marvel Rivals $0.75 -> $4.50).
+//
+// $2.50 is the honest bound for a base price: comfortably above every measured
+// median we sell at (own realised — gameflip $1.25, digiseller $1.28, ggsel
+// $0.75) while still letting a genuinely large full-event bundle reach the
+// ceiling through the multipliers (2.50 x 2.5 x 1.25 = $7.81, clamped to $4.50).
+const MAX_ANCHOR_USD = 2.5;
 const DEFAULT_ANCHOR_USD = 1.0;
+
+// The hard ceiling on a bundle price.
+//
+// Measured across 209 realised prices (120 priced SaleSignals + 89 sold
+// listings, prod 2026-09-07) and re-confirmed 2026-09-08 over 217:
+//   min $0.75   median $1.25   max $4.50
+// Nothing in this business has ever sold above $4.50, on any marketplace, at any
+// bundle size. A price above it is not ambition, it is a listing nobody buys —
+// and, worse, one the owner then has to explain.
+//
+// The ONE thing allowed through is `soldFloorUsd`: if this exact set really did
+// sell for more, that is evidence and it wins. Everything else is clamped.
+const PRICE_CEILING_USD = 4.5;
 
 function round25(x) {
   return Math.round(Number(x) * 4) / 4;
@@ -831,6 +865,14 @@ function bundlePrice({
   let price = anchor * Math.min(capMult, 1 + (stepPct / 100) * (total - 1));
   if (full) price *= 1 + bonusPct / 100;
   price = round25(price);
+  // Ceiling BEFORE the floors, so a proven sold price can still lift a bundle
+  // above it but a rival's asking price never can.
+  let ceilingHit = false;
+  const ceiling = pos(p.ceilingUsd) || PRICE_CEILING_USD;
+  if (price > ceiling) {
+    price = round25(ceiling);
+    ceilingHit = true;
+  }
   if (price < floor) price = ceil25(floor);
   if (price < soldFloor) price = ceil25(soldFloor);
 
@@ -838,6 +880,8 @@ function bundlePrice({
     price: Math.round(price * 100) / 100,
     anchor: Math.round(anchor * 100) / 100,
     anchorSource,
+    ceiling: Math.round(ceiling * 100) / 100,
+    ceilingHit,
     floor: Math.round(floor * 100) / 100,
     soldFloor: Math.round(soldFloor * 100) / 100,
     totalQty: total,

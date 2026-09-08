@@ -708,14 +708,21 @@ test("bundlePrice: anchor selection order", () => {
   assert.equal(sold.anchor, 2.35);
   assert.equal(sold.price, 2.25);
 
+  // The anchor cap came DOWN from $10 to $2.50 on 2026-09-08, and a separate
+  // $4.50 ceiling was added over the final price. $10 was set from what rivals
+  // ask; $2.50 sits just above every median we are actually PAID (gameflip
+  // $1.25, digiseller $1.28, ggsel $0.75). The old cap let a $8.08 anchor —
+  // averaged over rival "SI 2026 Bundle CODE" rows, a different product
+  // entirely — become a live $11.75 listing.
   const capped = bundlePrice({
     research: research({ soldRecent: 3, avgSoldPrice: 40 }),
     game: OW,
     items: ONE,
     pricing: PRICING,
   });
-  assert.equal(capped.anchor, 10);
-  assert.equal(capped.price, 10);
+  assert.equal(capped.anchor, 2.5);
+  assert.equal(capped.price, 2.5);
+  assert.equal(capped.ceilingHit, false, "the anchor cap bound first, not the ceiling");
 
   const other = bundlePrice({
     research: research({ soldRecent: 2, avgSoldPrice: 9, lowestOther: 1.9, median: 3 }),
@@ -733,7 +740,9 @@ test("bundlePrice: anchor selection order", () => {
     pricing: PRICING,
   });
   assert.equal(median.anchorSource, "gameflip.median");
-  assert.equal(median.price, 3);
+  // $3.10 is above the $2.50 anchor cap, so it is capped before the multiplier.
+  assert.equal(median.anchor, 2.5);
+  assert.equal(median.price, 2.5);
 
   const ru = bundlePrice({
     research: research({}, { ggsel: { median: 1.6 }, plati: { median: 1.3 } }),
@@ -762,14 +771,19 @@ test("bundlePrice: per-item step, cap, full-event bonus and rounding", () => {
   });
   assert.equal(three.totalQty, 3);
   assert.equal(three.price, 2.5);
-  // 20 items → multiplier 1 + 0.15*19 = 3.85, capped at 2.5 → 5.00
+  // 20 items → multiplier 1 + 0.15*19 = 3.85, capped at 2.5 → 5.00, and then
+  // clamped to the $4.50 ceiling. Nothing has ever sold above $4.50 here, and
+  // the measured evidence is that big bundles sell for LESS than small ones
+  // (ggsel: <=5 items median $0.75, >=10 items $0.595), so a 20-item bundle is
+  // the last thing that should be carrying the top price in the shop.
   const many = bundlePrice({
     research: r,
     game: OW,
     items: [{ name: "a", qty: 20 }],
     pricing: PRICING,
   });
-  assert.equal(many.price, 5);
+  assert.equal(many.price, 4.5);
+  assert.equal(many.ceilingHit, true);
   // full bundle: 3 items 2.6 * 1.25 = 3.25
   const full = bundlePrice({
     research: r,
