@@ -81,6 +81,8 @@ const campaignWatcher = require("./utils/campaignWatcher");
 const streamScout = require("./utils/streamScout");
 const noclaimWatcher = require("./utils/noclaimWatcher");
 const autoFarmer = require("./utils/autoFarmer");
+// Publishes the auto-farm's listings; started below for its event-bundle sweep.
+const autoLister = require("./utils/autoLister");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
 const epicClaimer = require("./utils/epicClaimer");
@@ -823,6 +825,12 @@ mongoose
     // host (or dry-run plans) - fully gated by the superadmin settings
     // switch, so starting it here is a no-op until it's enabled.
     autoFarmer.start();
+    // Event bundles: a game's farmed WAVES sold as ONE bundle
+    // (docs/AUTOFARM-BUNDLES-CONTRACT.md). It needs its own trigger because
+    // the auto-farmer's stacked-bundle sweep reads ACTIVE tasks only, while an
+    // event is worth bundling precisely once its waves have COMPLETED. Inert
+    // until autoFarm.enabled is on, and gated by autoFarm.autoFarmEventBundles.
+    autoLister.startEventBundleSweep();
     autoFarmSnapshot.start();
     // Lane engine (utils/farm2/*): the reorganised farm + list pipeline — one
     // isolated lane per game, a shared budget arbiter, and durable job rows

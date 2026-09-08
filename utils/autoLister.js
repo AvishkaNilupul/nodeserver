@@ -39,6 +39,7 @@ const autoFarmBundles = require("./autoFarmBundles");
 const paCopy = require("./playerauctionsCopy");
 const { isNoClaimGame } = require("./settings");
 const { decrypt } = require("./secretBox");
+const { sendTelegram } = require("./telegram");
 const { buildSetGridImage } = require("./setImage");
 // The stock side (twitchInventory.buildDrops) keys every earned drop through
 // itemKeyFor. Reuse the SAME function here so the campaign side's itemKeys are
@@ -2399,6 +2400,158 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   });
 }
 
+/* --------------------- event-bundle sweep (its own trigger) -------------- */
+
+// The stacked-bundle sweep in utils/autoFarmer.js reads ACTIVE tasks only, and
+// an event's waves are almost always COMPLETED by the time the whole event is
+// worth selling as one bundle. Measured on prod 2026-09-08: all 12 games with a
+// bundle were backed ENTIRELY by completed tasks, and only one of them had any
+// stackable active task at all — so riding on that sweep, the bundler would
+// essentially never fire. This is the bundler's own trigger, and the only
+// thing here that reaches completed work.
+//
+// Deliberately conservative: it publishes at most a few bundles per pass, only
+// ones no live row already sells, only where an account provably holds the
+// whole bundle, and never while the auto-farm is disabled or in dry run.
+const EVENT_BUNDLE_TICK_MS = 20 * 60 * 1000;
+const EVENT_BUNDLE_FIRST_TICK_MS = 5 * 60 * 1000;
+const EVENT_BUNDLE_MAX_PER_PASS = 3;
+let eventBundleStarted = false;
+
+// The task a bundle is recorded on. Any of the event's own tasks is truthful —
+// they all farmed a wave of it — so prefer one still active, then the most
+// recently touched. A task already carrying a stackListing is skipped rather
+// than overwritten: that field is the record of a listing it already published.
+async function ownerTaskForPlan(plan) {
+  const tasks = await AutoFarmTask.find({ _id: { $in: plan.taskIds } });
+  const free = tasks.filter(
+    (t) => !(t.stackListing && t.stackListing.externalId),
+  );
+  if (!free.length) return null;
+  free.sort(
+    (a, b) =>
+      (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) ||
+      new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0),
+  );
+  return free[0];
+}
+
+async function publishReadyEventBundles({
+  apply = true,
+  max = EVENT_BUNDLE_MAX_PER_PASS,
+} = {}) {
+  const af = settings.getAutoFarm();
+  if (!af.enabled) return { skipped: "auto-farm disabled", published: [] };
+  if (af.autoFarmEventBundles === false) {
+    return { skipped: "event bundles turned off", published: [] };
+  }
+  // The auto-farm's global dry run means "decide, but change nothing".
+  if (af.dryRun) apply = false;
+
+  const byGame = await autoFarmBundles.plansForAllGames();
+  const plans = [...byGame.values()].flat();
+  const out = {
+    plans: plans.length,
+    published: [],
+    skipped: [],
+    dryRun: !apply,
+  };
+  if (!plans.length) return out;
+
+  // Complete events first: they are the ones that carry the full-event price.
+  plans.sort(
+    (a, b) =>
+      Number(b.full) - Number(a.full) || b.items.length - a.items.length,
+  );
+  const live = await autoFarmBundles.liveBundlesForEvents(
+    plans.map((p) => p.key),
+  );
+
+  for (const plan of plans) {
+    if (out.published.length >= max) break;
+    if (live.has(plan.key)) {
+      out.skipped.push({ event: plan.eventName, why: "already selling" });
+      continue;
+    }
+    const task = await ownerTaskForPlan(plan);
+    if (!task) {
+      out.skipped.push({
+        event: plan.eventName,
+        why: "every task of this event already carries a bundle listing",
+      });
+      continue;
+    }
+    let r;
+    try {
+      r = await listEventBundle(task, { dryRun: !apply });
+    } catch (e) {
+      console.error("event bundle " + plan.eventName + " failed:", e.message);
+      out.skipped.push({ event: plan.eventName, why: "failed: " + e.message });
+      continue;
+    }
+    if (r && r.listed) {
+      out.published.push({
+        game: task.game,
+        event: plan.eventName,
+        ...r.listed,
+      });
+      sendTelegram(
+        "📦 Auto-listed EVENT bundle — " +
+          task.game +
+          "\n" +
+          r.listed.title +
+          "\n$" +
+          r.listed.price +
+          " · qty " +
+          r.listed.qty +
+          "\n" +
+          (r.listed.url || ""),
+      ).catch(() => {});
+    } else if (r && r.wouldList) {
+      out.published.push({
+        game: task.game,
+        event: plan.eventName,
+        dryRun: true,
+        ...r.wouldList,
+      });
+    } else {
+      out.skipped.push({
+        event: plan.eventName,
+        why: (r && r.skipped) || "not part of a multi-wave event",
+      });
+    }
+  }
+  return out;
+}
+
+// Same shape as unclaimedAutoList.start(): re-arms in `finally`, so a thrown
+// pass never kills the loop, and unref'd so it can never hold the process open.
+function startEventBundleSweep() {
+  if (eventBundleStarted) return;
+  eventBundleStarted = true;
+  const tick = async () => {
+    try {
+      const r = await publishReadyEventBundles({});
+      if (r && r.published && r.published.length) {
+        console.log(
+          "event bundles: published " +
+            r.published.length +
+            " (" +
+            r.published.map((p) => p.event).join(", ") +
+            ")",
+        );
+      }
+    } catch (e) {
+      console.error("event bundle sweep error:", e.message);
+    } finally {
+      const t = setTimeout(tick, EVENT_BUNDLE_TICK_MS);
+      if (t.unref) t.unref();
+    }
+  };
+  const t = setTimeout(tick, EVENT_BUNDLE_FIRST_TICK_MS);
+  if (t.unref) t.unref();
+}
+
 /* --------------------------- campaign end flow --------------------------- */
 
 // Once the drop event ends the items can no longer be earned — supply is fixed.
@@ -2712,6 +2865,9 @@ module.exports = {
   listActivatedTask,
   listStackedBundle,
   listEventBundle,
+  publishReadyEventBundles,
+  startEventBundleSweep,
+  ownerTaskForPlan,
   eventBundlePlans,
   publishStackedListing,
   stackedBundlePrice,
