@@ -341,19 +341,29 @@ router.get("/auto-farm/tasks", requireSuperadmin, async (req, res) => {
 // panel: without it every page open re-reads every stock-bearing task. Plans
 // only change when a wave finishes farming or a bundle publishes, so a few
 // minutes stale is invisible — and the operator has a Refresh button.
-const BUNDLES_TTL_MS = 3 * 60 * 1000;
+const BUNDLES_TTL_MS = 5 * 60 * 1000;
 let bundlesCache = { at: 0, key: "", payload: null };
 
 async function buildBundlesPayload({ only, withStock }) {
-  const byGame = await autoFarmBundles.plansForAllGames();
-  const games = only
-    ? [...byGame.keys()].filter(
-        (g) =>
-          g.toLowerCase() === only.toLowerCase() ||
-          g.toLowerCase().includes(only.toLowerCase()),
-      )
-    : [...byGame.keys()];
-  games.sort();
+  // One game is answered by the single-game path: it reuses the cached fleet
+  // catalog and reads only that game's tasks. Going through the fleet sweep
+  // just to filter it down cost a full 82-game load — 21s measured on prod —
+  // every time the panel's per-card "Check stock" button was pressed.
+  let byGame;
+  if (only) {
+    const exact = await autoFarmBundles.plansForGame(only);
+    byGame = exact.length ? new Map([[only, exact]]) : new Map();
+    // A partial name (or a different casing) still works, at the fleet cost.
+    if (!byGame.size) {
+      const all = await autoFarmBundles.plansForAllGames();
+      byGame = new Map(
+        [...all].filter(([g]) => g.toLowerCase().includes(only.toLowerCase())),
+      );
+    }
+  } else {
+    byGame = await autoFarmBundles.plansForAllGames();
+  }
+  const games = [...byGame.keys()].sort();
 
   const allPlans = games.flatMap((g) => byGame.get(g) || []);
   const keys = allPlans.map((p) => p.key);
@@ -363,11 +373,17 @@ async function buildBundlesPayload({ only, withStock }) {
     autoFarmBundles.soldFloorsForEvents(keys),
   ]);
 
+  // One research read for every game, not one per game.
+  const researchRows = games.length
+    ? await MarketResearch.find({ game: { $in: games } }).lean()
+    : [];
+  const researchByGame = new Map(researchRows.map((r) => [r.game, r]));
+
   const out = [];
   let ready = 0;
   let liveCount = 0;
   for (const game of games) {
-    const research = await MarketResearch.findOne({ game }).lean();
+    const research = researchByGame.get(game) || null;
     const rows = [];
     for (const plan of byGame.get(game) || []) {
       const soldFloorUsd = soldFloors.get(plan.key) || 0;
