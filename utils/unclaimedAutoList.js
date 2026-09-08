@@ -1015,6 +1015,53 @@ function capForGame(game) {
   return n > 0 ? n : GAME_CAP;
 }
 
+// The order a scan pass reads candidate inventories in.
+//
+// A pass can only afford SCAN_LIMIT inventory reads, so WHICH candidates get
+// those reads decides what ever gets listed — and the plain bot order the
+// caller hands us starves a game. Bot ids cluster by game (a bot watches one
+// game's streams) and the order is deterministic, so the games on the
+// low-numbered bots take every slot of every pass and a game parked on a high
+// bot is never read at all: Rainbow Six sat on bots 17-18 behind 215 Overwatch
+// accounts with 91 ready accounts, a cap of 83 and not one listing.
+//
+// So interleave the games round-robin, and put games already at their cap last
+// — a capped game cannot take a new listing, so spending the pass's reads on it
+// lists nothing. Capped games are NOT dropped: a bot watches every
+// FavouriteGame, so an account filed under a capped game may hold drops for an
+// uncapped one, and it still gets scanned once the ready games have had their
+// share. Every candidate is returned exactly once, in bot order within a game.
+function orderScanCandidates(work, gameListed) {
+  const listed = gameListed || new Map();
+  const lanes = new Map(); // game cap key -> that game's candidates, bot order
+  for (const c of work) {
+    const k = gameCapKey(c.game) || String((c && c.game) || "");
+    if (!lanes.has(k)) lanes.set(k, []);
+    lanes.get(k).push(c);
+  }
+  const all = [...lanes.entries()].map(([key, list]) => ({
+    key,
+    list,
+    capped: (listed.get(key) || 0) >= capForGame(key),
+  }));
+  all.sort((a, b) => {
+    const ca = a.capped ? 1 : 0;
+    const cb = b.capped ? 1 : 0;
+    if (ca !== cb) return ca - cb; // games that can still list go first
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+  const ordered = [];
+  const interleave = (ls) => {
+    const depth = ls.reduce((m, l) => Math.max(m, l.list.length), 0);
+    for (let i = 0; i < depth; i++) {
+      for (const l of ls) if (i < l.list.length) ordered.push(l.list[i]);
+    }
+  };
+  interleave(all.filter((l) => !l.capped));
+  interleave(all.filter((l) => l.capped));
+  return ordered;
+}
+
 // Sorted [itemKey, qty] pairs of a stored set (missing qty = 1, like the
 // pre-v3 rows), for the exact match against a signature's pairs.
 function setPairs(set) {
@@ -3305,7 +3352,7 @@ async function scanAndListPass() {
     const kb = padBot(b.botId);
     return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
-  const batch = work.slice(0, SCAN_LIMIT);
+  const batch = orderScanCandidates(work, gameListed).slice(0, SCAN_LIMIT);
 
   let listed = 0;
   const skipped = [];
@@ -4186,6 +4233,7 @@ module.exports = {
   ORIGIN,
   GAME_CAP,
   capForGame,
+  orderScanCandidates,
   enabledMarketsForGame,
   TICK_MS,
   SCAN_LIMIT,

@@ -24,6 +24,8 @@ const {
   dropsFromSet,
   shouldExpire,
   ledgerCampaignsEnded,
+  orderScanCandidates,
+  capForGame,
 } = require("../utils/unclaimedAutoList");
 
 test("no-claim inventory: only 100%-unclaimed drops are sellable", () => {
@@ -532,4 +534,80 @@ test("filterManualSoldLedgers: drops ledgers whose owner is manual-sold", () => 
   assert.strictEqual(filterManualSoldLedgers(ledgers, null).length, 4);
   assert.strictEqual(filterManualSoldLedgers(ledgers, new Set()).length, 4);
   assert.deepStrictEqual(filterManualSoldLedgers(null, marked), []);
+});
+
+// --- scan order: a pass must never spend all its reads on one game ----------
+// The bug this covers: candidates arrived sorted by bot id, bot ids cluster by
+// game, and the batch was the first SCAN_LIMIT of that list — so Rainbow Six on
+// bots 17-18 sat behind 215 Overwatch accounts and was never read at all.
+const botOrder = (spec) => {
+  // spec: [[botId, game, count], ...] flattened in bot order, like the caller
+  // hands to orderScanCandidates.
+  const out = [];
+  for (const [botId, game, count] of spec) {
+    for (let i = 0; i < count; i++) out.push({ botId: String(botId), game, login: game[0] + botId + "-" + i });
+  }
+  return out;
+};
+
+test("scan order: a game on a high bot still gets read in the first batch", () => {
+  const work = botOrder([
+    [3, "Overwatch", 5],
+    [13, "Overwatch", 50],
+    [14, "Overwatch", 50],
+    [15, "Overwatch", 50],
+    [16, "Overwatch", 60],
+    [17, "Rainbow Six Siege", 43],
+    [18, "Rainbow Six Siege", 48],
+  ]);
+  // Nothing is at cap, so both games interleave.
+  const ordered = orderScanCandidates(work, new Map());
+  const batch = ordered.slice(0, 60);
+  const r6 = batch.filter((c) => c.game === "Rainbow Six Siege").length;
+  assert.ok(r6 > 0, "Rainbow Six must be scanned, not starved behind Overwatch");
+  assert.strictEqual(r6, 30, "two uncapped games split the batch evenly");
+  // Every candidate is still there exactly once.
+  assert.strictEqual(ordered.length, work.length);
+  assert.strictEqual(new Set(ordered.map((c) => c.login)).size, work.length);
+});
+
+test("scan order: a game at its cap yields the batch to one that can still list", () => {
+  const work = botOrder([
+    [3, "Overwatch", 215],
+    [17, "Rainbow Six Siege", 91],
+  ]);
+  // Overwatch is at its cap; Rainbow Six is not.
+  const listed = new Map([[gameCapKey("Overwatch"), capForGame("Overwatch")]]);
+  const ordered = orderScanCandidates(work, listed);
+  const batch = ordered.slice(0, 60);
+  assert.ok(
+    batch.every((c) => c.game === "Rainbow Six Siege"),
+    "a capped game cannot list, so it must not eat the pass's reads",
+  );
+  // ...but the capped game is only deferred, never dropped: an account filed
+  // under it may hold drops for another game.
+  assert.strictEqual(ordered.length, work.length);
+  assert.strictEqual(
+    ordered.filter((c) => c.game === "Overwatch").length,
+    215,
+    "capped-game candidates are still queued, just last",
+  );
+});
+
+test("scan order: within a game the caller's bot order is preserved", () => {
+  const work = botOrder([
+    [3, "Overwatch", 2],
+    [13, "Overwatch", 2],
+  ]);
+  const ordered = orderScanCandidates(work, new Map());
+  assert.deepStrictEqual(
+    ordered.map((c) => c.login),
+    work.map((c) => c.login),
+  );
+});
+
+test("scan order: empty work and a single game are unchanged", () => {
+  assert.deepStrictEqual(orderScanCandidates([], new Map()), []);
+  const one = botOrder([[5, "Overwatch", 3]]);
+  assert.deepStrictEqual(orderScanCandidates(one, new Map()), one);
 });
