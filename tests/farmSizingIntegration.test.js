@@ -306,9 +306,17 @@ test("the arbiter mirrors autoFarmer's SALES_CAP_MULT_MAX", () => {
   assert.equal(m2[1], m[1]);
 });
 
-test("the allocator ships inert: auto-sizing off by default", () => {
-  const s = allocator.status();
-  assert.equal(s.autoSize, false);
+test("both sizing switches ship OFF", () => {
+  // Asserted against the SHIPPED DEFAULT, not the live settings file. The first
+  // version of this test read allocator.status(), which reflects whatever the
+  // operator has configured — so it passed locally and failed the moment the
+  // feature was enabled on prod. A test must not depend on operator config.
+  const shipped = settings.getFarmSizing({});
+  assert.equal(shipped.enabled, false, "coverageSizing must ship off");
+  assert.equal(shipped.autoSize, false, "noclaimAutoSize must ship off");
+  // And the defaults are still the ones the contract documents.
+  assert.equal(shipped.coverageDays, 28);
+  assert.equal(shipped.safetyStock, 6);
 });
 
 // ---------------------------------------------------------------------------
