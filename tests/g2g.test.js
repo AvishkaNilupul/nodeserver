@@ -591,3 +591,59 @@ test("a missing REQUIRED credential still stops the call", async () => {
     assert.strictEqual(calls.length, 0);
   }
 });
+
+/* ------------------------- rent-farm order parsing ------------------------ */
+
+// The rent-farm offer TITLE is a data channel, not just copy: the publisher
+// writes the game and the term into it, and g2gFarmService reads them back out
+// to decide what to provision. The two halves live in different files, so
+// nothing but a test keeps them honest — and when this exact contract drifted
+// on PlayerAuctions, six live offers resolved to no game at all and would have
+// taken money and provisioned nothing.
+test("a rent-farm title round-trips back to its game and term", async () => {
+  const farm = require("../utils/g2gFarmService");
+  const known = ["Rust", "Sea of Thieves", "Pokémon GO"];
+
+  const parse = async (t) => {
+    const p = await farm.parseFarmOrder({ title: t });
+    if (!p) return null;
+    // Resolve against a fixed catalogue so the test does not need the DB.
+    const pa = require("../utils/playerauctionsFarmService");
+    return { ...p, game: await pa.canonicalGame(p.rawGame, known) };
+  };
+
+  const a = await parse("Rust Twitch Drops Automatic Farming 120 Days");
+  assert.strictEqual(a.game, "Rust");
+  assert.strictEqual(a.days, 120);
+
+  const b = await parse("Sea of Thieves Twitch Drops Automatic Farming 1 Year");
+  assert.strictEqual(b.game, "Sea of Thieves");
+  assert.strictEqual(b.days, 365);
+
+  // Legacy lower-case casing is live on the account right now.
+  const c = await parse("Rust Twitch Drops Automatic farming 180 days");
+  assert.strictEqual(c.game, "Rust");
+  assert.strictEqual(c.days, 180);
+
+  // An accented game can never be advertised under its real name if a
+  // marketplace folds titles, so the folded spelling must still resolve.
+  const d = await parse("Pokemon GO Twitch Drops Automatic Farming 120 Days");
+  assert.strictEqual(d.game, "Pokémon GO");
+
+  // A BUNDLE order must return null so the caller falls through to the bundle
+  // path instead of trying to provision a farm for it.
+  assert.strictEqual(
+    await farm.parseFarmOrder({ title: "Rust Twitch Drops (12 Items) — Barrel" }),
+    null,
+  );
+});
+
+test("farm order ids are namespaced away from the other marketplaces", () => {
+  const farm = require("../utils/g2gFarmService");
+  const pa = require("../utils/playerauctionsFarmService");
+  // All three fulfillers share the FarmServiceOrder collection, whose orderId
+  // is globally unique. G2G ids are timestamps and PlayerAuctions' are plain
+  // integers, so without namespacing they could collide.
+  assert.strictEqual(farm.farmOrderKey("1788804161980Y02Q-1"), "g2g:1788804161980Y02Q-1");
+  assert.notStrictEqual(farm.farmOrderKey("123"), pa.farmOrderKey("123"));
+});

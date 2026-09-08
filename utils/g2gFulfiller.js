@@ -31,6 +31,7 @@ const { getAutoFarm } = require("./settings");
 const mp = require("./marketplaces");
 const chat = require("./g2gChat");
 const eld = require("./eldoradoFulfiller");
+const farmService = require("./g2gFarmService");
 
 // Distinct from every other platform's tag so one account can never be handed
 // out twice across marketplaces. Must be listed in utils/marketClaimTags.js.
@@ -395,7 +396,15 @@ async function deliverPendingOrders() {
   for (const order of orders) {
     let r;
     try {
-      r = await deliverOrder(order, { dryRun });
+      // Two products share this queue. A rent-farm order sells a WINDOW of
+      // farming and is fulfilled by provisioning a pool account, not by
+      // handing over archive stock — it has no stock source at all, so the
+      // bundle path would park it as "manual-delivery listing" forever.
+      // deliverFarmOrder returns null for anything that is not a rent-farm
+      // order, which is what routes the rest to the bundle path.
+      r =
+        (await farmService.deliverFarmOrder(order, { dryRun })) ||
+        (await deliverOrder(order, { dryRun }));
     } catch (e) {
       r = { orderId: order.orderItemId, error: e.message };
     }
