@@ -139,3 +139,46 @@ test("a farm-spent account that is still on sale is never recyclable", () => {
   assert.equal(onSale.recyclable, false);
   assert.equal(onSale.reason, "on an active marketplace listing");
 });
+
+// ---------------------------------------------------------------------------
+// Guards added 2026-09-08 after a prod audit found two accounts offered as
+// recyclable while they were still sitting in noclaim-bot-6's config on the Pi.
+// ---------------------------------------------------------------------------
+test("an account whose pool row still reads 'deployed to …' is never recyclable", () => {
+  // `deployed` comes from BotAccount.configFile, which is EMPTY for accounts
+  // that live in a standalone no-claim container — so the bot-row signal alone
+  // says "not deployed" for exactly the fleet this tab feeds on. The pool row's
+  // own note is the second signal: a farm engine rewrites it to "spent — …"
+  // when it hands the account over, so a surviving "deployed to" note means the
+  // account was never handed over and is still in a live config.
+  const row = { ...ok(), claimedNote: "deployed to twitchbotx20 [local]", deployed: false };
+  const result = spentAccountEligibility(row);
+  assert.equal(result.recyclable, false);
+  assert.match(result.reason, /still in a bot config/);
+  // The note is not a farm handoff either, so the farmSpent bypass can't reach it.
+  assert.equal(isFarmSpentNote(row.claimedNote), false);
+});
+
+test("a hand-sold account is never recyclable, on either path", () => {
+  // manualSold means the operator gave a buyer the login AND password. Farming
+  // it again re-sells an account someone already owns outright, and soldGames
+  // cannot help: the buyer can sign in and take whatever the next campaign
+  // farms. noclaimFarmRoutes.readyPoolQuery has always excluded these.
+  const archive = spentAccountEligibility({ ...ok(), manualSold: true });
+  assert.equal(archive.recyclable, false);
+  assert.equal(archive.reason, "manually sold — the buyer holds the password");
+
+  // The farm-spent bypass skips the stock and cooldown gates — it must not skip
+  // this one.
+  const farmSpent = spentAccountEligibility({
+    ...ok(),
+    claimedNote: "spent — no-claim removed Overwatch",
+    farmSpent: true,
+    manualSold: true,
+  });
+  assert.equal(farmSpent.recyclable, false);
+  assert.equal(farmSpent.reason, "manually sold — the buyer holds the password");
+
+  // …and an ordinary spent account is still recyclable.
+  assert.equal(spentAccountEligibility({ ...ok(), manualSold: false }).recyclable, true);
+});

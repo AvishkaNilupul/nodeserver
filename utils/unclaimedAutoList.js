@@ -2435,7 +2435,6 @@ async function spendAccount(ledger, reason, opts = {}) {
           const victim = users.find(
             (u) => String(u.Login || "").toLowerCase() === String(ledger.login || "").toLowerCase(),
           );
-          if (victim && victim.ClientSecret) secrets.push(victim.ClientSecret);
           const kept = victim
             ? users.filter((u) => u.ClientSecret !== victim.ClientSecret)
             : users;
@@ -2453,6 +2452,15 @@ async function spendAccount(ledger, reason, opts = {}) {
               timeout: 25000,
             });
           }
+          // Collect the secret ONLY once the account is really out of the bot:
+          // the config is written and the container has picked it up (a bot
+          // reads its config at startup only, so the restart is the step that
+          // ends the farming). Collecting it earlier — before the write, with a
+          // catch that swallows a Pi failure — stamped the pool row "spent" for
+          // an account still farming in a live container, which then reads as
+          // recyclable and can be deployed a second time. Fail closed instead:
+          // no stamp, the row stays claimed, the sweep can retry.
+          if (victim && victim.ClientSecret) secrets.push(victim.ClientSecret);
         }
       } catch (e) {
         // Config surgery must never block the sale bookkeeping.

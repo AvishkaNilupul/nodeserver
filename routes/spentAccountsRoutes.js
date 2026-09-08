@@ -182,6 +182,9 @@ const POOL_FIELDS = {
   soldGames: 1,
   lastCheckStatus: 1,
   listed: 1,
+  // A hand-sold account (buyer holds login AND password) must never go back to
+  // the farm; the eligibility rule rejects it and the row surfaces it as a chip.
+  manualSold: 1,
 };
 
 // Pass `logins` to gather just those accounts — the recycle paths do, so a
@@ -254,7 +257,7 @@ async function gatherSpentAccounts(options = {}) {
     ...botRows
       .filter((bot) => !poolKeys.has(String(bot.login || "").toLowerCase()))
       .filter((bot, index, rows) => rows.findIndex((other) => String(other.login || "").toLowerCase() === String(bot.login || "").toLowerCase()) === index)
-      .map((bot) => ({ username: bot.login, usernameLower: String(bot.login || "").toLowerCase(), status: "needs_pool_import", claimedNote: "", soldGames: [], lastCheckStatus: bot.lastScanStatus || "", listed: false, _id: null })),
+      .map((bot) => ({ username: bot.login, usernameLower: String(bot.login || "").toLowerCase(), status: "needs_pool_import", claimedNote: "", soldGames: [], lastCheckStatus: bot.lastScanStatus || "", listed: false, manualSold: false, _id: null })),
   ];
   const cooldownDays = Number(settings.getAutoFarm().recycleCooldownDays) || 14;
   const now = Date.now();
@@ -300,6 +303,7 @@ async function gatherSpentAccounts(options = {}) {
       soldUnconnectedDrops: soldUnconnectedCount,
       onActiveListing: onSale,
       deployed,
+      manualSold: account.manualSold === true,
       newestDeliveredAt,
       cooldownDays,
       now,
@@ -342,6 +346,8 @@ async function gatherSpentAccounts(options = {}) {
       deployed,
       listed: onSale,
       rented: /^rented to/i.test(String(account.claimedNote || "")),
+      manualSold: account.manualSold === true,
+      inBotConfig: /^deployed to /i.test(String(account.claimedNote || "")),
       lastCheckStatus: (bot && bot.lastScanStatus) || account.lastCheckStatus || "",
       lastScanAt: (bot && bot.lastScanAt) || null,
       botId: bot ? bot._id : null,

@@ -82,7 +82,25 @@ const INTERNAL_SALE_WEIGHT = 18;
 // twenty at $0.30, and the account cost of farming them is identical. The
 // factor is clamped hard in both directions — price is a tilt on demand, never
 // a substitute for the evidence that anyone is buying at all.
-const REFERENCE_SALE_USD = 2.5;
+//
+// RECALIBRATED 2026-09-07: was 2.5, which was never measured against reality.
+// The actual median realised sale across every priced row on record is $1.25
+// (n=209; see the calibration table in utils/pricing.js), so a $2.50 reference
+// declared the TYPICAL sale to be half-price and handed almost every game the
+// 0.6 floor. Measured on prod: 19 of the 49 games with own-sales evidence were
+// already pinned at the floor, and the other 24 read neutral only because
+// their price was never recorded — an accident, not a judgement.
+//
+// That accident was about to end. Manual mark-sold now captures price (it was
+// 71% of all sales and recorded none), so those 24 games were about to acquire
+// real prices of $0.75-$1.42 and drop to 0.6 as well — quietly cutting demand
+// ~40% across the fleet, and pushing games under DEMAND_HALF, at exactly the
+// moment the operator is scaling intake up. A constant meant as a gentle tilt
+// had become a near-universal penalty.
+//
+// At $1.25 the tilt does what it says again: $1.25 is neutral, $0.75 is
+// genuinely below normal, $2.50+ genuinely above.
+const REFERENCE_SALE_USD = 1.25;
 const PRICE_FACTOR_MIN = 0.6;
 const PRICE_FACTOR_MAX = 2;
 
@@ -228,6 +246,13 @@ function readyPoolQuery() {
     status: "available",
     clientSecret: { $gt: "" },
     lastCheckStatus: { $in: ["", "ok"] },
+    // An account the operator handed to a buyer by hand is NOT supply: the buyer
+    // holds the login AND password, so farming it again just re-sells an account
+    // somebody already owns outright (the soldGames block can't help — the buyer
+    // can sign in and take whatever the next campaign farms). The no-claim claim
+    // path has always excluded these; this keeps the auto-farmer, farm2 (which
+    // composes this query) and the recycler on one definition of "ready".
+    manualSold: { $ne: true },
   };
 }
 

@@ -611,6 +611,10 @@ async function loadPool(af) {
     status: "available",
     clientSecret: { $gt: "" },
     lastCheckStatus: { $in: ["", "ok"] },
+    // Mirrors autoFarmer.readyPoolQuery(). This count drives the pool floor
+    // (spendable = ready - reserve), so an inflated one lets the engine start a
+    // campaign against supply that no claim can actually reach.
+    manualSold: { $ne: true },
   });
   return {
     ready,

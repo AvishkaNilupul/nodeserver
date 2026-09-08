@@ -130,6 +130,9 @@ loudly rather than posting a payload Z2U would quietly drop.
   advertised stock disagrees with claimable stock, what the shelf keeper would
   do (`--plan`), and what is waiting for delivery.
 - `scripts/z2u-adopt.js` — links live offers to their stock source.
+- `scripts/z2u-shelf.js` — runs the shelf keeper by hand, once, and prints what
+  it actually did (`--apply`, `--revive`, `--limit=N`). This is how to do it the
+  first time: the background tick does the same work on a 30-minute clock.
 - `tests/z2u.test.js` — the HTML contract and the shelf-keeper policy.
 
 ### Flags (all default OFF / dry-run)
@@ -207,6 +210,27 @@ The consequences are the point:
   (`reported success but the offer did not change`);
 - the `autoPaused` flag is only written once the change is confirmed real, so
   the database never claims to have paused an offer that is still on sale.
+
+## Two kinds of "off sale", and why only one is fixed automatically
+
+Z2U says an offer is off sale but not who took it off.
+
+- **Status 5** — Z2U pulled it for running out its duration. Unambiguous, so the
+  keeper always extends and relists it.
+- **Status 4** — a *person* paused it, and "paused because it was empty" cannot
+  be told apart from "paused on purpose". A background job must never quietly
+  undo a human decision, so reviving these is **opt-in**
+  (`z2u-shelf.js --revive`, or `resumeSellerPaused`).
+
+On the shelf as found, that distinction is where most of the money was: the
+seller-paused offers included Hunt: Showdown with **128** accounts in stock,
+Delta Force 95, Brawlhalla 59, Dead by Daylight 56, Dark and Darker 39.
+
+The advertised stock is corrected only on an offer that is visible, or that the
+same pass is about to make visible. Fixing the number on an offer that stays
+dark changes nothing a buyer can see, and a stock change re-submits the whole
+editor form — doing that for ~30 dark offers every sweep would hammer a
+shared-hosting PHP site forever to no effect.
 
 ## Traps
 

@@ -48,6 +48,29 @@ function spentAccountEligibility(facts = {}) {
   const farmSpent = !!facts.farmSpent;
   if (/^rented to/i.test(note)) return reject("rented to a renter");
   if (/^recycled/i.test(note)) return reject("already recycled");
+  // `deployed` is computed from BotAccount.configFile, which is EMPTY for every
+  // account that lives in a standalone no-claim container (those are tracked by
+  // BotAccount.container instead) — so an account still inside a live bot config
+  // reads as "not deployed" and gets offered for recycle. Two accounts were
+  // sitting in noclaim-bot-6's config on the Pi while the tab listed them.
+  // The pool row's own claim note is the reliable second signal: a row still
+  // stamped "deployed to <container>" has not been handed over by any farm
+  // engine (a handover rewrites the note to "spent — …"), so it is still in a
+  // bot. Recycling it lets the auto-farmer deploy the same account a second
+  // time — one account, two containers, which is exactly what dupeGuard exists
+  // to prevent. Note that BotAccount.container is NOT usable here: it stays
+  // stamped after the account is removed from the config, so it would block
+  // every legitimate farm-spent row.
+  if (/^deployed to /i.test(note)) {
+    return reject("still in a bot config (pool row reads \"" + note + "\")");
+  }
+  // A hand-sold account: the operator gave a buyer the login AND password, not
+  // just the Twitch token. Re-farming one means re-selling an account somebody
+  // already owns outright, and the sold-game block does not help — the buyer can
+  // sign in and take whatever the next campaign farms. The no-claim claim path
+  // (noclaimFarmRoutes.readyPoolQuery) has always treated manualSold as
+  // never-supply; this is the same rule at the other end of the pipe.
+  if (facts.manualSold) return reject("manually sold — the buyer holds the password");
   if ((Number(facts.availableDrops) || 0) > 0 && !farmSpent) {
     return reject("still has " + Number(facts.availableDrops) + " drop(s) left to sell");
   }

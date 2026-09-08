@@ -259,3 +259,28 @@ test("every action states what the offer should look like afterwards", () => {
   assert.deepStrictEqual(ful.expectedAfter("extend"), { notExpired: true });
   assert.deepStrictEqual(ful.expectedAfter("nonsense"), {});
 });
+
+test("reviving a seller-paused offer is opt-in, never automatic", () => {
+  const paused = entry(
+    { ...LIVE, online: false, status: "paused", stock: 4 },
+    { autoPaused: false },
+    40,
+    20,
+  );
+  // Default: a human's pause is left alone.
+  assert.deepStrictEqual(ful.planForOffer(paused).actions.map((a) => a.action), []);
+  // Opt-in: relist it, and correct the stock while we are there.
+  const revived = ful.planForOffer(paused, { resumeSellerPaused: true });
+  assert.deepStrictEqual(revived.actions.map((a) => a.action), ["on_line", "stock"]);
+  // Still gated on stock: an empty offer is never revived.
+  const empty = entry(
+    { ...LIVE, online: false, status: "paused", stock: 4 },
+    { autoPaused: false },
+    0,
+    20,
+  );
+  assert.deepStrictEqual(
+    ful.planForOffer(empty, { resumeSellerPaused: true }).actions,
+    [],
+  );
+});

@@ -192,18 +192,25 @@ router.get("/renters", requireSuperadmin, async (req, res) => {
   }
 });
 
-// Lightweight full roster for the Quick-farm renter picker: id + username only,
-// no pending/used aggregates. Keeps the datalist complete now that the overview
-// list is paginated. Registered before /renters/:id so "options" is never
-// swallowed by the :id param.
+// Lightweight full roster for the Quick-farm renter picker: id + username +
+// lease state only, no pending/used aggregates. Keeps the picker complete now
+// that the overview list is paginated. Registered before /renters/:id so
+// "options" is never swallowed by the :id param.
 router.get("/renters/options", requireSuperadmin, async (req, res) => {
   try {
-    const rows = await Renter.find({}, { username: 1 })
+    const rows = await Renter.find({}, { username: 1, status: 1, accessEnd: 1 })
       .sort({ createdAt: -1 })
       .lean();
     res.json({
       success: true,
-      renters: rows.map((r) => ({ id: String(r._id), username: r.username })),
+      renters: rows.map((r) => ({
+        id: String(r._id),
+        username: r.username,
+        status: r.status,
+        // The picker labels suspended/expired renters, so options must carry
+        // the same lease state the list rows show.
+        expired: !!(r.accessEnd && new Date(r.accessEnd) <= new Date()),
+      })),
     });
   } catch (err) {
     console.error("renter options error:", err.message);
@@ -2302,6 +2309,12 @@ async function gatherPoolEligibility() {
     lastCheckStatus: "ok",
     hasPassword: true,
     clientSecret: { $nin: ["", null] },
+    // "Pristine" cannot include an account the operator already sold by hand:
+    // the buyer holds its login AND password, so handing it to a renter or to
+    // the coworker self-farm sells the same credentials twice. The BotAccount
+    // sold/deployed traces below cannot see this — a hand-sold no-claim account
+    // often has no BotAccount row at all.
+    manualSold: { $ne: true },
   }).lean();
   if (!candidates.length) return { candidates: [], eligible: [] };
 
@@ -2392,7 +2405,14 @@ async function gatherPoolEligibility() {
 
 // Move ONE pool account into a renter. Assumes it was found eligible; still
 // claims atomically (status guard) so a concurrent claim can't double-allocate.
-async function movePoolAccountToRenter(renter, host, doc) {
+// `opts` is optional and defaults to the historical behaviour:
+//   opts.games     — pin this account to specific games instead of the renter's
+//                    defaults (used by the operator self-farm path, which asks
+//                    for one named game rather than whatever the bot farms).
+//   opts.farmUntil — a per-account farming window (Date), stamped on the
+//                    RenterAccount row after it is safely placed.
+// Omitting `opts` reproduces the previous signature exactly.
+async function movePoolAccountToRenter(renter, host, doc, opts = {}) {
   const token = doc.clientSecret;
   const username = String(doc.username || "").trim();
   const lower = username.toLowerCase();
@@ -2400,7 +2420,12 @@ async function movePoolAccountToRenter(renter, host, doc) {
   // Build the config entry BEFORE claiming: renterDefaultGames reads the config
   // off the host and can fail, and a failure here must not leave a claimed-but-
   // unplaced account behind.
-  const games = await renterDefaultGames(renter, host);
+  const requestedGames = Array.isArray(opts.games)
+    ? opts.games.filter(Boolean)
+    : [];
+  const games = requestedGames.length
+    ? requestedGames
+    : await renterDefaultGames(renter, host);
   const acct = {
     ClientSecret: token,
     UniqueId: doc.uniqueId || crypto.randomBytes(16).toString("hex"),
@@ -2442,6 +2467,17 @@ async function movePoolAccountToRenter(renter, host, doc) {
       await recordPoolUsage(doc._id, { event: "returned", actor: "renter-admin" });
     }
     throw e;
+  }
+
+  // Stamp the per-account farming window, if one was asked for. Done AFTER the
+  // config write so a failed placement never leaves a window on an account that
+  // is not actually farming. addRenterAccountsToConfig has upserted the
+  // RenterAccount row by now, so this updates an existing row.
+  if (opts.farmUntil) {
+    await RenterAccount.updateOne(
+      { clientSecret: token },
+      { $set: { farmUntil: opts.farmUntil } },
+    ).catch(() => {});
   }
 
   // Defensive auto-farm guards on any stray BotAccount trace. Eligibility
@@ -2612,3 +2648,11 @@ router.post(
 );
 
 module.exports = router;
+// Reusable helpers for the operator self-farm service (utils/operatorFarm.js),
+// which provisions a pristine pool account onto a game for a fixed window. They
+// are ATTACHED to the exported router function object rather than moved, so
+// `app.use(enforce2fa, renterAdminRoutes)` and every existing import keep
+// working byte-for-byte — no refactor of this file's tested logic.
+module.exports.gatherPoolEligibility = gatherPoolEligibility;
+module.exports.movePoolAccountToRenter = movePoolAccountToRenter;
+module.exports.availableRentalStack = availableRentalStack;

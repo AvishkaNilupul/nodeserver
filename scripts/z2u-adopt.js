@@ -116,6 +116,13 @@ async function main() {
 
   // What each plan entry could actually ship today, counted the way the
   // delivery path counts it.
+  //
+  // The set of logins already on a live listing is read ONCE. It is a full scan
+  // of every active listing on every marketplace, and asking for it inside the
+  // loop made this script re-run that scan for each of ~36 offers against a
+  // shared-tier Atlas that serialises queries — minutes of waiting for an
+  // answer that cannot change mid-run.
+  const listedElsewhere = await require("../utils/listedLogins").loginsOnActiveListings();
   for (const p of plan) {
     p.stock = await ful
       .realStockFor(
@@ -124,7 +131,7 @@ async function main() {
           set: p.set ? p.set._id : null,
           externalId: p.offer.pk,
         },
-        await require("../utils/listedLogins").loginsOnActiveListings(),
+        listedElsewhere,
       )
       .catch(() => null);
   }

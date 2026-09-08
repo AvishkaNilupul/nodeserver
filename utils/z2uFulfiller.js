@@ -117,7 +117,10 @@ async function shelf({ withStock = true } = {}) {
 //  * an expired offer must be extended before it is relisted, or Z2U drops it
 //    straight back off;
 //  * stock is corrected last, once the offer is in the right state.
-function planForOffer(entry, { now = Date.now(), extendWithin = EXTEND_WITHIN_DAYS } = {}) {
+function planForOffer(
+  entry,
+  { now = Date.now(), extendWithin = EXTEND_WITHIN_DAYS, resumeSellerPaused = false } = {},
+) {
   const { offer, row, realStock } = entry;
   const actions = [];
   if (!row) {
@@ -140,6 +143,15 @@ function planForOffer(entry, { now = Date.now(), extendWithin = EXTEND_WITHIN_DA
     // silently undo a decision someone made on purpose.
     if (row.autoPaused) {
       actions.push({ action: "on_line", why: "back in stock" });
+    } else if (resumeSellerPaused) {
+      // Opt-in only. An offer at status 4 was paused by a person, and there is
+      // no way to tell "paused because it was out of stock" from "paused on
+      // purpose" — so reviving it is a decision an operator makes explicitly,
+      // never something a background tick does on its own.
+      actions.push({
+        action: "on_line",
+        why: "revive: seller-paused with " + realStock + " in stock",
+      });
     }
   } else if (daysLeft != null && daysLeft <= extendWithin) {
     actions.push({
@@ -147,7 +159,16 @@ function planForOffer(entry, { now = Date.now(), extendWithin = EXTEND_WITHIN_DA
       why: "expires in " + daysLeft + "d",
     });
   }
-  if (known && realStock > 0 && offer.stock !== realStock) {
+  // Correct the advertised number only on an offer that will actually be
+  // VISIBLE — either it is on sale now, or this plan is about to put it back.
+  // Fixing the stock on an offer that stays dark changes nothing a buyer can
+  // see, and it is not free: a stock change re-submits the whole editor form,
+  // so doing it for ~30 dark offers every sweep would hammer a shared-hosting
+  // PHP site forever to no effect. When such an offer is later revived, the
+  // same pass corrects it in the same breath.
+  const willBeVisible =
+    offer.online || actions.some((a) => a.action === "on_line");
+  if (known && realStock > 0 && offer.stock !== realStock && willBeVisible) {
     actions.push({
       action: "stock",
       value: realStock,
@@ -179,7 +200,7 @@ function expectedAfter(action, value) {
 //
 // Re-reading per group rather than per offer is what keeps that affordable —
 // a group page is ~500KB, and one re-read covers every action in it.
-async function keepShelfAlive({ dryRun = true, limit = 0 } = {}) {
+async function keepShelfAlive({ dryRun = true, limit = 0, resumeSellerPaused = false } = {}) {
   const entries = await shelf();
   const done = [];
   let acted = 0;
@@ -187,7 +208,7 @@ async function keepShelfAlive({ dryRun = true, limit = 0 } = {}) {
   // Plan everything first, so the work can be grouped by the page it lives on.
   const work = [];
   for (const entry of entries) {
-    const { actions, note } = planForOffer(entry);
+    const { actions, note } = planForOffer(entry, { resumeSellerPaused });
     if (!actions.length) {
       if (note) done.push({ pk: entry.offer.pk, title: entry.offer.title, skipped: note });
       continue;
