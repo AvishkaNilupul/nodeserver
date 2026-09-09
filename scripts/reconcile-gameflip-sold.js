@@ -65,15 +65,33 @@ async function liveStatus(externalId) {
 
   const sold = [];
   const other = {};
+  let unread = 0;
   for (const row of rows) {
     const status = await liveStatus(row.externalId);
     if (status === "sold") sold.push(row);
-    else other[status] = (other[status] || 0) + 1;
+    else {
+      // "rate-limited" and "error" are NOT "not sold". Counting them as clean
+      // is how this script reported a confident "0 sold" while the health check,
+      // reading the same listings, still found three — the exact false negative
+      // this codebase keeps getting bitten by. A read that did not happen is
+      // unknown, and the script has to say so rather than imply a clean sweep.
+      if (status === "rate-limited" || String(status).startsWith("error:")) unread += 1;
+      other[status] = (other[status] || 0) + 1;
+    }
     await sleep(GAP_MS);
   }
 
   console.log("SOLD but still active in our DB: " + sold.length);
-  console.log("everything else: " + JSON.stringify(other) + "\n");
+  console.log("everything else: " + JSON.stringify(other));
+  if (unread) {
+    console.log(
+      "\n  !! " + unread + " listing(s) could NOT be read (rate limit / error).\n" +
+        "     This run did not clear them, and a count of " + sold.length +
+        " sold is a FLOOR, not a total.\n" +
+        "     Gameflip throttles hard after a burst; wait and re-run.",
+    );
+  }
+  console.log("");
 
   let value = 0;
   for (const row of sold) {
