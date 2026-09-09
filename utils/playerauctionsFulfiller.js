@@ -549,8 +549,11 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
 // Deliver one paid order. Returns a short result the tick can log directly.
 async function deliverOrder(order, { dryRun }) {
   const orderId = String(order.orderId || order.id || "");
-  const qty = paQuantity(order);
   const offerTitle = String(order.orderTitle || "");
+  // `qty` is deliberately NOT computed here. Deriving units honestly needs the
+  // price of ONE unit, which lives on the listing row resolved below — and the
+  // only other source, the order's own "11 Ship Skins", is an item count that
+  // once shipped eleven accounts for a five dollar sale.
 
   // The seller orders LIST carries no offerId, so the id has to be recovered
   // from the offer link on the order detail; the title is the last resort
@@ -609,6 +612,10 @@ async function deliverOrder(order, { dryRun }) {
     row = hits[0];
   }
   if (!row) return { orderId, skipped: "no listing row for " + JSON.stringify(offerTitle) };
+
+  // Now that the listing is known, its unit price can turn what the buyer paid
+  // into a unit count. Anything that does not divide cleanly is one unit.
+  const qty = paQuantity(order, row.price);
 
   // Already fully delivered.
   const mine = unitsForOrder(row, orderId);
@@ -792,13 +799,40 @@ async function deliverOrder(order, { dryRun }) {
 // from the order's price against the offer where possible and fall back to 1 —
 // over-delivering because a display string was parsed as a unit count would
 // hand out free accounts.
-function paQuantity(order) {
+function paQuantity(order, listingPriceUsd) {
   const n = parseInt(order && order.purchaseQuantity, 10);
   if (Number.isFinite(n) && n > 0) return n;
-  const d = order && order.detail && order.detail.orderInfo &&
-    order.detail.orderInfo.purchased;
-  if (d && Number.isFinite(d.amount) && d.amount > 0) return Math.round(d.amount);
+
+  // `orderInfo.purchased.amount` is the SAME ITEM COUNT the comment above warns
+  // about, in structured form — and reading it as a unit count is exactly the
+  // mistake that comment exists to prevent. Order 16474028 was "Sea of Thieves
+  // Twitch Drops (11 Items)" at $5.00 total, and PlayerAuctions reported
+  // `purchased: {amount: 11, suffix: "Ship Skins"}`. Eleven SHIP SKINS — one
+  // account holding eleven drops. It shipped ELEVEN ACCOUNTS for $5, giving away
+  // ten of them. The suffix is the giveaway: it names the offer's unit, and that
+  // unit is never "accounts".
+  //
+  // The only honest way to a unit count is money: what the buyer paid against
+  // what one unit costs. Anything that does not divide cleanly is not evidence
+  // of a bulk purchase, so it falls back to one.
+  const paid = money(
+    order && order.detail && order.detail.orderInfo && order.detail.orderInfo.price,
+  );
+  const unit = money(listingPriceUsd);
+  if (paid > 0 && unit > 0) {
+    const units = paid / unit;
+    const rounded = Math.round(units);
+    // Within a cent per unit of a whole multiple, and at least two of them.
+    if (rounded >= 2 && Math.abs(units - rounded) * unit < 0.01) return rounded;
+  }
   return 1;
+}
+
+// PlayerAuctions reports prices as strings ("5.00"). Anything unparseable is 0,
+// which makes the caller fall back to a single unit rather than guess.
+function money(v) {
+  const n = Number(String(v == null ? "" : v).replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 // One pass over every settled-but-undelivered PlayerAuctions order.
