@@ -1431,7 +1431,17 @@ async function bufferState() {
       at: lastPass.at,
       stopped: lastPass.stopped,
       // An empty reason map is not "no problems" — it is "nothing has run".
+      // `ran` is corrected below from DURABLE evidence: this counter is
+      // module-level memory, so any process that did not itself run a pass sees
+      // null here — including a health run or a console request served by a
+      // different process from the scheduler. Reading it raw made the check
+      // announce "no top-up pass has run yet" while 55 offers were demonstrably
+      // published, which is the same class of mistake as a verdict drawn from a
+      // join that never loaded.
       ran: !!lastPass.at,
+      // Whether the answer came from this process's own memory or from the rows
+      // on disk, so a reader can tell how much the timestamp is worth.
+      source: lastPass.at ? "this process" : "unknown",
     },
     notes: [],
   };
@@ -1448,11 +1458,27 @@ async function bufferState() {
         "succeed, so live counts here are DB state, not Gameflip's.",
     );
   }
+  // DURABLE PROOF A PASS HAS RUN. A published buffered row could only have been
+  // written by topUpBuffer, so the newest one dates the last successful pass
+  // even in a process that has never run one itself.
   if (!lastPass.at) {
-    state.notes.push(
-      "No top-up pass has run since the last restart, so per-slot failure " +
-        "reasons below are the structural ones only.",
-    );
+    const newest = await MarketplaceListing.findOne(
+      { marketplace: MARKET, rentFarm: true },
+      { createdAt: 1 },
+    )
+      .sort({ createdAt: -1 })
+      .lean()
+      .catch(() => null);
+    if (newest && newest.createdAt) {
+      state.lastPass.at = newest.createdAt;
+      state.lastPass.ran = true;
+      state.lastPass.source = "newest published offer";
+    } else {
+      state.notes.push(
+        "No top-up pass has run and no buffered offer exists, so per-slot " +
+          "failure reasons below are the structural ones only.",
+      );
+    }
   }
 
   const [cat, liveRows] = await Promise.all([
