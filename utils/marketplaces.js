@@ -3064,11 +3064,22 @@ async function g2gOrder(orderItemId) {
 // a Firebase Realtime Database and has no REST endpoint in the app's API map,
 // so the hand-over stays operator-assisted for now (see utils/g2gFulfiller.js).
 
+// EVERY order-item PUT wants seller_id in the QUERY STRING. A body-only call is
+// rejected with HTTP 400 "Missing mandatory parameter: seller_id" — verified
+// live on all three of these on 2026-09-09. Both callers wrapped these two in
+// `.catch(() => {})`, so the delivery state machine never advanced past
+// `preparing` and nobody saw a thing; the failure only surfaced downstream as a
+// 500 from delivered_qty, which is a valid response to "confirm an order that
+// was never marked as delivering".
 async function g2gStartDeliver(orderItemId) {
   return g2gRequest(
     "put",
     "/order/item/" + encodeURIComponent(orderItemId) + "/start_deliver",
-    { body: { seller_id: g2gSellerId() }, what: "G2G start deliver" },
+    {
+      params: { seller_id: g2gSellerId() },
+      body: { seller_id: g2gSellerId() },
+      what: "G2G start deliver",
+    },
   );
 }
 
@@ -3076,16 +3087,27 @@ async function g2gMarkDelivering(orderItemId) {
   return g2gRequest(
     "put",
     "/order/item/" + encodeURIComponent(orderItemId) + "/mark_as_delivering",
-    { body: { seller_id: g2gSellerId() }, what: "G2G mark delivering" },
+    {
+      params: { seller_id: g2gSellerId() },
+      body: { seller_id: g2gSellerId() },
+      what: "G2G mark delivering",
+    },
   );
 }
 
 async function g2gSetDeliveredQty(orderItemId, qty) {
   const n = Math.max(1, Number(qty) || 1);
+  // seller_id goes in the QUERY as well as the body. Its siblings
+  // (start_deliver, mark_as_delivering) accept it in the body alone, but this
+  // endpoint answers HTTP 400 "Missing mandatory parameter: seller_id" to a
+  // body-only PUT — so the counter that tells G2G an order shipped was the one
+  // call in the chain that could never succeed. Sending it both ways satisfies
+  // whichever the endpoint actually reads and costs nothing if it ignores one.
   return g2gRequest(
     "put",
     "/order/item/" + encodeURIComponent(orderItemId) + "/delivered_qty",
     {
+      params: { seller_id: g2gSellerId() },
       body: { seller_id: g2gSellerId(), delivery_qty: n },
       what: "G2G delivered qty",
     },

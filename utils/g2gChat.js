@@ -28,6 +28,31 @@ const mp = require("./marketplaces");
 
 const G2G_SENDBIRD_APP_ID = "34201740-152E-401E-AD8F-5C72EEABA386";
 
+// The SendBird SDK is a BROWSER library: it opens its realtime connection with
+// a bare `new WebSocket(...)` off the global. Node only exposes a global
+// WebSocket from v22, and prod runs v20 — so `connect()` died with
+// "WebSocket is not defined" on every single delivery.
+//
+// That error is not the `__g2gChatUnavailable` case the fulfiller treats as
+// "no SDK, hand it to the operator". It fell through to the generic branch and
+// returned `chat send failed: WebSocket is not defined`, which is why G2G order
+// 1788892037419NTQU (Rocket League, $2.18) sat reserved-but-unsent while the
+// SDK sat installed and working. Automatic G2G delivery had therefore never
+// worked once on this host.
+//
+// `ws` is already a dependency, so the fix is to hand the SDK the global it
+// expects. Assigned only when missing, so a future Node upgrade that provides a
+// native one silently takes over.
+function ensureWebSocket() {
+  if (typeof globalThis.WebSocket !== "undefined") return true;
+  try {
+    globalThis.WebSocket = require("ws");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Mint a SendBird session token for our own seller account.
 async function chatSessionToken() {
   const sellerId = String(mp.g2gSellerId());
@@ -71,6 +96,21 @@ async function sendToBuyer(buyerId, text, { dryRun } = {}) {
     const e = new Error(
       "G2G chat: @sendbird/chat is not installed, so the credential cannot be " +
         "sent automatically. Run `npm i @sendbird/chat` to enable it.",
+    );
+    e.__g2gChatUnavailable = true;
+    throw e;
+  }
+
+  // Without a global WebSocket the SDK's connect() throws "WebSocket is not
+  // defined" — a failure that reads like a network fault but is a missing
+  // browser global. Flag it as unavailable so the fulfiller hands the credential
+  // to the operator instead of recording a mystery send failure.
+  if (!ensureWebSocket()) {
+    const e = new Error(
+      "G2G chat: no WebSocket implementation available (Node " +
+        process.version +
+        " has no global WebSocket and the `ws` package is missing), so the " +
+        "SendBird SDK cannot connect. Run `npm i ws` to enable it.",
     );
     e.__g2gChatUnavailable = true;
     throw e;
@@ -120,5 +160,9 @@ module.exports = {
   G2G_SENDBIRD_APP_ID,
   chatSessionToken,
   sdkAvailable,
+  ensureWebSocket,
+  // "Can we actually send?" is the SDK *and* a WebSocket to run it over. The
+  // SDK alone was true on this host while every send failed.
+  canSend: () => sdkAvailable() && ensureWebSocket(),
   sendToBuyer,
 };

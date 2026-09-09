@@ -202,8 +202,57 @@ async function deliverOrder(order, { dryRun }) {
       await listing.save();
       return { orderId, delivered: mine.length, source: "confirm-only" };
     }
-    // Reserved, but nothing has reached the buyer: this order is parked waiting
-    // for the operator to paste the credential into G2G chat. Do NOT confirm —
+    // Reserved, but nothing has reached the buyer. The send lives further down,
+    // in the stock-picking path — which this early return skips — so an order
+    // whose FIRST send failed could never try again. It parked here forever.
+    //
+    // That is what happened to order 1788892037419NTQU: the SendBird SDK threw
+    // "WebSocket is not defined" (Node 20 has no global WebSocket; see
+    // utils/g2gChat.ensureWebSocket), the units were already reserved, and every
+    // later tick took this branch and re-parked it. Automatic G2G delivery had
+    // never once completed on this host.
+    //
+    // So: if chat can actually send now, RETRY with the already-reserved units.
+    // Re-reading credentials rather than trusting the cached copy is the same
+    // rule the first attempt follows — a password can have been rotated since.
+    if (!dryRun && chat.canSend && chat.canSend()) {
+      const retryCreds = await credentialsFor(
+        mine.map((u) => ({ login: u.login, accountId: u.accountId, ledgerId: u.contentId })),
+      );
+      const unreadableRetry = retryCreds.filter((c) => !c.password);
+      if (unreadableRetry.length) {
+        return {
+          orderId,
+          error:
+            unreadableRetry.length + " reserved account(s) have no readable " +
+            "password — cannot re-send, needs a human",
+        };
+      }
+      const retryMessage = buildMessage(
+        order,
+        retryCreds.map((c) => g2gDeliveryCode(c.login, c.password)),
+      );
+      try {
+        await mp.g2gStartDeliver(orderId).catch(() => {});
+        await mp.g2gMarkDelivering(orderId).catch(() => {});
+        await chat.sendToBuyer(order.buyerId, retryMessage);
+        const sentAt = new Date();
+        for (const u of mine) u.messagedAt = sentAt;
+        listing.markModified("units");
+        await listing.save();
+        await mp.g2gSetDeliveredQty(orderId, mine.length);
+        const doneAt = new Date();
+        for (const u of mine) u.deliveredAt = doneAt;
+        listing.markModified("units");
+        await listing.save();
+        return { orderId, delivered: mine.length, source: "retry-send" };
+      } catch (e) {
+        // Units stay reserved to THIS order, so the next retry goes to the same
+        // buyer rather than spending fresh stock.
+        return { orderId, error: "chat re-send failed: " + e.message };
+      }
+    }
+    // Chat genuinely cannot send: park for the operator. Do NOT confirm —
     // saying "delivered" when the buyer has received nothing is how a dispute
     // starts — and do NOT pick fresh stock, which would give a second account
     // away for free.
@@ -354,14 +403,42 @@ async function credentialsFor(picked) {
       continue;
     }
     let password = "";
+    // The sellable password is `credPassword` — the credential the operator
+    // supplied and matched to the account by login. `password` is a different,
+    // usually-empty field, and reading it is why a re-send reported "no readable
+    // password" for an account that had one: BotAccount marolkapong carried
+    // credPassword and nothing else. Every other fulfiller here already reads
+    // credPassword (gameflip:195, eldorado:88 and :470, digiseller:75); this was
+    // the odd one out, and the bug only surfaced once anything actually used
+    // this fallback, because the happy path arrives with a password already
+    // resolved by claimAccountsForSet.
     if (p.accountId) {
       const acc = await BotAccount.findById(p.accountId, {
         login: 1,
         password: 1,
+        credPassword: 1,
       }).lean();
-      if (acc && acc.password) {
+      const stored = (acc && (acc.credPassword || acc.password)) || "";
+      if (stored) {
         try {
-          password = decrypt(acc.password);
+          password = decrypt(stored);
+        } catch {
+          password = "";
+        }
+      }
+    }
+    // A unit's accountId is NOT one thing: a BotAccount id on archive stock, but
+    // the POOL account id on a no-claim one. Falling back to the login covers
+    // both without the caller having to know which kind it holds.
+    if (!password && p.login) {
+      const acc = await BotAccount.findOne(
+        { login: p.login },
+        { credPassword: 1, password: 1 },
+      ).lean();
+      const stored = (acc && (acc.credPassword || acc.password)) || "";
+      if (stored) {
+        try {
+          password = decrypt(stored);
         } catch {
           password = "";
         }
