@@ -305,6 +305,8 @@
       // accounts are claimed and parked BEFORE anyone buys; this tab is the
       // shelf, not the sales.
       rentfarm: "Rent-farm buffer",
+      // GGSel: what we ASK here against what this venue has actually PAID.
+      pricing: "Pricing",
     };
     function tabsFor(market) {
       var t = summary && summary.tabs && summary.tabs[market];
@@ -616,10 +618,52 @@
       return rentfarmLive(r);
     }
 
+    // The header this tab renders above its rows: the venue's realised prices,
+    // which is the only number that makes any of the rows meaningful. Asking
+    // "$2.18" says nothing until you know GGSel's median is $0.75.
+    function pricingHeader(d) {
+      var v = (d && d.venue) || {};
+      if (!v.n) {
+        return '<div class="row"><div class="r1"><span class="t">No realised sales here yet</span></div>' +
+          '<div class="r2"><span>Prices on this marketplace rest entirely on other venues.</span></div></div>';
+      }
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">What this venue actually pays</span>' +
+        '<span class="amt">' + money(v.p50) + " median</span></div>" +
+        '<div class="r2">' +
+          '<span class="pill s-ok">' + v.n + " sale(s)</span>" +
+          "<span>min " + money(v.min) + "</span>" +
+          "<span>p75 " + money(v.p75) + "</span>" +
+          "<span>max " + money(v.max) + "</span>" +
+        "</div>" +
+        '<div class="r2">' +
+          "<span>venue factor &times;" + (d.venueFactor === undefined ? "?" : d.venueFactor) + "</span>" +
+          "<span>cross-market cap " + money(d.venueCap) + "</span>" +
+        "</div></div>";
+    }
+
+    function rowPricing(r) {
+      var flag = r.kind === "farm"
+        ? '<span class="pill s-unknown">rent-farm · priced by hand</span>'
+        : r.aboveVenueMax
+          ? '<span class="pill s-fail">above anything this venue has paid</span>'
+          : r.aboveVenueP75
+            ? '<span class="pill s-warn">above this venue&rsquo;s p75</span>'
+            : '<span class="pill s-ok">within the venue&rsquo;s range</span>';
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.title || r.externalId) + "</span>" +
+        '<span class="amt">' + money(r.price) + "</span></div>" +
+        '<div class="r2">' + flag + "</div>" +
+        '<div class="r2"><span class="mono">' + esc(r.externalId || "") + "</span>" +
+        "<span>" + esc(r.origin || "") + "</span>" +
+        (r.unitsSold ? "<span>" + r.unitsSold + " sold</span>" : "") +
+        "<span>" + esc(when(r.createdAt)) + "</span></div></div>";
+    }
+
     var RENDER = {
       sales: rowSales, deliveries: rowDeliveries, listings: rowListings,
       orders: rowOrders, errors: rowErrors, events: rowEvents,
-      attached: rowAttached, rentfarm: rowRentfarm,
+      attached: rowAttached, rentfarm: rowRentfarm, pricing: rowPricing,
     };
 
     var EMPTY = {
@@ -643,6 +687,8 @@
       // tracker, not a healthy buffer, and it must not read as reassurance.
       rentfarm: "The buffer tracker returned no rows at all, not even its summary. " +
         "That is the tracker failing, NOT the buffer being fine — check the server log.",
+      pricing: "No live listings to price. The venue summary above still shows what " +
+        "this marketplace has paid historically.",
     };
 
     async function loadMore(reset) {
@@ -667,11 +713,23 @@
         var bb = document.getElementById("basisbar");
         if (bb && j.basis) bb.textContent = j.basis;
         var html = j.items.map(RENDER[state.tab]).join("");
+        // The Pricing tab's venue summary leads the FIRST page only — it is a
+        // property of the marketplace, not of the page, and repeating it on
+        // every "load 25 more" would read as a second, different venue.
+        if (reset && state.tab === "pricing") {
+          html = pricingHeader(j) + html;
+        }
         list.insertAdjacentHTML("beforeend", html);
         state.count += j.items.length;
         state.cursor = j.nextCursor;
         state.hasMore = j.hasMore;
-        if (!state.count) list.innerHTML = '<div class="empty">' + esc(EMPTY[state.tab]) + "</div>";
+        // On the Pricing tab an empty list still has a venue summary worth
+        // keeping, so the empty note is APPENDED rather than replacing the body.
+        if (!state.count) {
+          var note = '<div class="empty">' + esc(EMPTY[state.tab]) + "</div>";
+          if (state.tab === "pricing") list.insertAdjacentHTML("beforeend", note);
+          else list.innerHTML = note;
+        }
         if (moreBtn) {
           moreBtn.style.display = j.hasMore ? "block" : "none";
           moreBtn.textContent = "Load 25 more";

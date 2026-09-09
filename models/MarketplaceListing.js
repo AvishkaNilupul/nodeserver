@@ -60,6 +60,26 @@ const marketplaceListingSchema = new mongoose.Schema(
     // Kept so a sold auto-delivery listing can be relisted identically.
     description: { type: String, default: "" },
     price: { type: Number, default: 0 },
+    // The lowest price this listing is KNOWN to hold on this marketplace —
+    // learned from a refusal, not configured.
+    //
+    // It is an upper bound on the platform's true minimum, not the minimum
+    // itself: all a rejection proves is that the price we asked for was too low
+    // and the one the offer already carries is not. That is the useful bound
+    // anyway, since the point is to stop asking for something impossible.
+    //
+    // GGSel enforces a per-CATEGORY minimum price and publishes it nowhere: it
+    // is absent from the offers payload and from /categories (whose fields are
+    // id, title, content_type, fee, payment_fee, tree, has_children — checked
+    // live 2026-09-09). The only way to find it is to be told no, as a
+    // FAILED_TO_SAVE / "Cannot set price less than the category minimum price"
+    // on the write. Recording it here stops the next price sweep re-attempting a
+    // price the platform has already rejected, and — more importantly — stops a
+    // healthy listing carrying a permanent lastError, which is how a real error
+    // ends up buried among fake ones.
+    //
+    // 0 means "nothing has been refused yet", not "no minimum exists".
+    venueMinPriceUsd: { type: Number, default: 0 },
     currency: { type: String, default: "USD" },
     status: {
       type: String,

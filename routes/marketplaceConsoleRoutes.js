@@ -83,6 +83,7 @@ const CATEGORIES = new Set([
   // Per-market extras. A marketplace's tabs do NOT have to match the others':
   // what is worth looking at depends on how that platform actually delivers.
   "attached",
+  "pricing",
   "rentfarm",
 ]);
 
@@ -104,10 +105,19 @@ const CATEGORIES = new Set([
 // sell. GGSel needs the same thing eventually and deliberately does not get it
 // here — nothing is built for it yet, and a tab that renders an empty buffer for
 // a market with no buffer service would read as "starved" rather than "absent".
+// `pricing` is GGSel's, for now. GGSel is the cheapest venue we sell on and the
+// one where a price is hardest to check by eye: it bills in ROUBLES, its rivals
+// are mostly Russian-language rows, and our asks are USD numbers that were
+// derived from Gameflip's order book and published here unchanged. That went
+// unnoticed until 2026-09-09, when the live GGSel median was $1.55 against a
+// realised median of $0.75 — twice what this venue has ever actually paid us,
+// with 62 of 64 rows queued for a RAISE. Nothing on any screen compared the two
+// numbers, so this tab does only that. Any market with realised sales can be
+// given it by adding it to EXTRA_TABS; the handler is not GGSel-specific.
 const COMMON_TABS = ["sales", "deliveries", "listings", "orders", "errors", "events"];
 const EXTRA_TABS = {
   gameflip: ["attached", "rentfarm"],
-  ggsel: ["attached"],
+  ggsel: ["attached", "pricing"],
 };
 function tabsFor(market) {
   return COMMON_TABS.concat(EXTRA_TABS[market] || []);
@@ -692,6 +702,102 @@ router.get(
             "The last error recorded ON a listing row, live and historical. Rows " +
             "that are not `active` are past problems kept for context — the " +
             "card's error count on the previous screen counts ACTIVE rows only.",
+        });
+      }
+
+      if (category === "pricing") {
+        // GGSel is the cheapest venue we sell on and the one where a price is
+        // hardest to sanity-check: it bills in roubles, its rivals are mostly
+        // Russian-language rows, and our own asks are USD numbers derived from
+        // Gameflip. On 2026-09-09 that combination had put the live GGSel median
+        // at $1.55 against a realised median of $0.75 — we had been asking twice
+        // what this venue has ever paid us, and nothing on any screen said so.
+        //
+        // So this tab answers one question: what do we ASK here, and what do we
+        // actually GET here? Everything else is context for that comparison.
+        const pricingEngine = require("../utils/pricing");
+        const pricingEvidenceMod = require("../utils/pricingEvidence");
+
+        let ev = null;
+        try {
+          ev = await pricingEvidenceMod.evidenceFor({ game: "", marketplace: market });
+        } catch {
+          ev = null;
+        }
+        const realised = ev
+          ? (ev.platform || []).map(Number).filter((n) => n > 0).sort((a, b) => a - b)
+          : [];
+        const at = (f) =>
+          realised.length
+            ? realised[Math.min(realised.length - 1, Math.floor(f * realised.length))]
+            : 0;
+        const venue = realised.length
+          ? {
+              n: realised.length,
+              min: realised[0],
+              p50: at(0.5),
+              p75: at(0.75),
+              max: realised[realised.length - 1],
+            }
+          : { n: 0 };
+        const factor = ev ? pricingEngine.venueFactor(ev) : 1;
+        const cap = ev ? pricingEngine.venueCap(ev) : 0;
+
+        const rows = await MarketplaceListing.find(
+          {
+            marketplace: market,
+            status: "active",
+            ...olderThan("createdAt", cur),
+          },
+          { title: 1, externalId: 1, price: 1, origin: 1, unitsSold: 1, createdAt: 1 },
+        )
+          .sort({ createdAt: -1, _id: -1 })
+          .limit(limit + 1)
+          .lean();
+        const out = paginate(rows, limit, "createdAt");
+        const { classifyKind } = require("../utils/marketPricing");
+        out.items = out.items.map((r) => {
+          const price = Number(r.price) || 0;
+          const kind = classifyKind(r.title);
+          return {
+            _id: r._id,
+            title: r.title,
+            externalId: r.externalId,
+            price,
+            origin: r.origin,
+            kind,
+            unitsSold: r.unitsSold || 0,
+            createdAt: r.createdAt,
+            // A farm row is a different product and is deliberately exempt from
+            // every comparison on this tab — flagging it as "over p75" would be
+            // comparing a farming window against drop-bundle money.
+            aboveVenueP75:
+              kind === "farm" ? null : venue.n > 0 ? price > venue.p75 : null,
+            aboveVenueMax:
+              kind === "farm" ? null : venue.n > 0 ? price > venue.max : null,
+          };
+        });
+        return res.json({
+          success: true,
+          ...out,
+          venue,
+          venueFactor: Math.round(factor * 1000) / 1000,
+          venueCap: cap,
+          basis:
+            venue.n > 0
+              ? "`venue` is what buyers have ACTUALLY paid us on " + market +
+                " (" + venue.n + " priced sale(s) — SaleSignal plus sold listing " +
+                "rows), not what we ask and not what rivals ask. `venueFactor` is " +
+                "that median over the business-wide median: cross-market price " +
+                "evidence is multiplied by it before it may price a listing here. " +
+                "`venueCap` is this venue's p75, the most a price earned on OTHER " +
+                "venues may claim here. Rows flagged aboveVenueP75 are asking more " +
+                "than three quarters of everything this venue has ever paid. " +
+                "Rent-farm rows are exempt — a farming window is a different " +
+                "product and its price is set by hand."
+              : "No priced sale has ever been recorded on " + market + ", so there " +
+                "is no venue evidence: prices here rest entirely on other venues " +
+                "and the venue factor is 1 (no adjustment).",
         });
       }
 

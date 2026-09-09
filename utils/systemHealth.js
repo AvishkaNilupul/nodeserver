@@ -67,6 +67,7 @@ const REAL_DEPS = {
   eldoradoFarmService: () => require("./eldoradoFarmService"),
   gameflipFarmService: () => require("./gameflipFarmService"),
   settings: () => require("./settings"),
+  pricingEvidence: () => require("./pricingEvidence"),
   // routes/renterAdminRoutes requires half the app, so like utils/operatorFarm
   // this is pulled in only at call time — a module-level require here would be
   // a load-order cycle.
@@ -941,6 +942,130 @@ const CHECKS = [
               origin: r.origin,
               url: r.url,
             })),
+        ),
+      };
+    },
+  },
+
+  {
+    id: "listings.venuePrice",
+    title: "Asking more than a marketplace has ever paid",
+    group: "listings",
+    severity: "warn",
+    // `listings.overpriced` above measures every marketplace against ONE
+    // business-wide ceiling ($4.50, the best price any sale ever fetched). That
+    // ceiling is Gameflip's, and it is blind by construction to the venue that
+    // matters: GGSel's highest realised sale is $3.00 and its median is $0.75,
+    // so 204 live GGSel rows at a median of $1.55 — twice what the venue has
+    // ever paid us — sat under a $4.50 bar and read as fine for months.
+    //
+    // A venue can only be judged against its own takings, so this check builds
+    // one ceiling per marketplace out of that marketplace's realised sales and
+    // measures its own rows against it. A venue with fewer than MIN_VENUE_SALES
+    // priced sales has no opinion worth acting on and is skipped rather than
+    // guessed at — being unmeasured must not read as being wrong.
+    async run(ctx) {
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const pricingEvidence = ctx.dep("pricingEvidence");
+      const MIN_VENUE_SALES = 5;
+
+      let snap = null;
+      try {
+        snap = await pricingEvidence.snapshot();
+      } catch (e) {
+        // The join failed. That is not evidence that prices are fine, and it
+        // must never render as ok — the whole point of this check is that a
+        // silent "no offenders" is how the GGSel drift survived.
+        return {
+          status: "unknown",
+          threshold: "each venue's own highest realised sale",
+          summary: "Could not read the realised-price evidence: " + e.message,
+          detail:
+            "Without the sales snapshot there is no per-venue ceiling to " +
+            "compare against. This is a failure to MEASURE, not a finding " +
+            "that every listing is priced correctly.",
+        };
+      }
+
+      const ceilings = new Map();
+      for (const [venue, prices] of snap.platform.entries()) {
+        const p = (prices || []).map(Number).filter((n) => n > 0);
+        if (p.length < MIN_VENUE_SALES) continue;
+        ceilings.set(String(venue).toLowerCase(), Math.max(...p));
+      }
+      if (!ceilings.size) {
+        return {
+          status: "unknown",
+          measured: 0,
+          threshold: "each venue's own highest realised sale",
+          summary:
+            "No marketplace has " + MIN_VENUE_SALES + " priced sales yet — no venue ceiling can be built",
+          detail:
+            "This check compares a venue's live asks against that venue's own " +
+            "realised sales. Until a venue has sold enough to have a price " +
+            "level, it has no ceiling and is not judged.",
+        };
+      }
+
+      const rows = await MarketplaceListing.find(
+        {
+          status: "active",
+          autoPaused: { $ne: true },
+          marketplace: { $in: [...ceilings.keys()] },
+        },
+        { title: 1, marketplace: 1, externalId: 1, url: 1, price: 1, origin: 1 },
+      )
+        .sort({ _id: 1 })
+        .lean();
+
+      const offenders = [];
+      for (const r of rows) {
+        // A farming window is a different product from a drop bundle, sold to a
+        // different buyer at a different price level. Its ceiling is not built
+        // from drop-bundle money and this check has nothing to say about it.
+        if (isRentFarmTitle(r.title)) continue;
+        const ceiling = ceilings.get(String(r.marketplace).toLowerCase());
+        const price = Number(r.price) || 0;
+        if (!(ceiling > 0) || price <= ceiling) continue;
+        offenders.push({
+          marketplace: r.marketplace,
+          externalId: r.externalId,
+          title: String(r.title || "").slice(0, 120),
+          price,
+          venueMax: ceiling,
+          origin: r.origin,
+          url: r.url,
+        });
+      }
+
+      const byVenue = {};
+      for (const o of offenders) byVenue[o.marketplace] = (byVenue[o.marketplace] || 0) + 1;
+      const venueList = Object.entries(byVenue)
+        .sort((a, b) => b[1] - a[1])
+        .map(([m, n]) => m + " " + n)
+        .join(", ");
+
+      return {
+        status: offenders.length ? "warn" : "ok",
+        measured: offenders.length,
+        threshold: "each venue's own highest realised sale",
+        summary: offenders.length
+          ? offenders.length +
+            " active listing(s) priced above what their own marketplace has ever paid (" +
+            venueList +
+            ")"
+          : "Every active listing sits within what its own marketplace has actually paid",
+        detail:
+          "Ceilings, one per venue, from that venue's realised sales (" +
+          [...ceilings.entries()]
+            .sort()
+            .map(([m, c]) => m + " $" + c.toFixed(2))
+            .join(", ") +
+          "). Venues with fewer than " +
+          MIN_VENUE_SALES +
+          " priced sales are skipped, and rent-farm offers are excluded.",
+        items: capItems(
+          offenders.sort((a, b) => b.price - a.price),
         ),
       };
     },

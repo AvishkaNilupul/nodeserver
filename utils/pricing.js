@@ -273,6 +273,77 @@ function resolveAnchor(evidence, opts) {
   };
 }
 
+/* ------------------------------ the venue -------------------------------- */
+
+// How far a cross-market price has to move to be a price for THIS venue.
+//
+// The anchor ladder falls through `platformGame` (this venue, this game) to
+// `game` (this game, ANY venue) long before it reaches `platform` (this venue,
+// any game). For a thin market that fallthrough is not an edge case, it is the
+// normal path: measured on prod 2026-09-09, 0 of GGSel's 10 game-buckets hold
+// the 3 samples the top rung needs, so EVERY GGSel row is priced off evidence
+// earned somewhere else. The venues are not interchangeable — our realised
+// medians are Gameflip $1.25 (n=172), Digiseller $1.28 (n=62), GGSel $0.75
+// (n=13) — so "what this game fetches across the business" systematically
+// overprices the cheap venue. That is how 62 of 64 live GGSel rows came to be
+// slated for a RAISE on a market where we have never once been paid the median
+// we were already asking.
+//
+// So: keep the cross-market bucket for SHAPE (which game is worth more than
+// another — the venue alone can never tell us that with 13 sales) and rescale
+// it to the venue's own price LEVEL. The factor is the ratio of medians, which
+// is exactly the quantity being corrected for, and it needs no new inputs.
+//
+// Guards, because 13 samples is not many:
+//   * the venue needs `minSamples` realised sales, or there is nothing to
+//     measure and the factor is 1 (no adjustment, current behaviour);
+//   * the factor is clamped to [0.4, 1.5]. A thin sample that says "this venue
+//     pays a fifth of everywhere else" is far likelier to be a quiet run of
+//     floor-priced sales than a real fifth, and a price cut that deep should be
+//     a human's decision, not a median's.
+const VENUE_FACTOR_MIN = 0.4;
+const VENUE_FACTOR_MAX = 1.5;
+
+function venueFactor(evidence, opts) {
+  const { minSamples } = cfg(opts);
+  const ev = evidence && typeof evidence === "object" ? evidence : {};
+  const here = positives(ev.platform);
+  const everywhere = positives(ev.global);
+  if (here.length < minSamples || everywhere.length < minSamples) return 1;
+  const mine = median(here);
+  const all = median(everywhere);
+  if (!(mine > 0) || !(all > 0)) return 1;
+  const raw = mine / all;
+  return Math.min(VENUE_FACTOR_MAX, Math.max(VENUE_FACTOR_MIN, raw));
+}
+
+// Which anchor bases describe a price earned somewhere OTHER than this venue,
+// and therefore need rescaling to it. `platformGame` and `platform` are already
+// this venue's own money. `rival` and `research` can only be reached when
+// pricing Gameflip (utils/pricingEvidence.js supplies them for no other venue),
+// so they are this venue's evidence too, by construction.
+const CROSS_MARKET_BASES = new Set(["game", "global"]);
+
+// Rescaling fixes the LEVEL but not the TAIL. GGSel's 13 realised sales are
+// $0.75 x7, $1.00 x2, $1.50, $1.75 x2, $3.00 — a p75 of $1.50 and one lucky
+// $3.00. A cross-market anchor for a dear game still landed at $2.20 after
+// scaling, which asks GGSel buyers for a price GGSel has reached once in
+// thirteen sales, on the strength of what the game fetches on Gameflip.
+//
+// So a price earned somewhere else may not claim this venue's top quartile.
+// Below p75 the game's own shape still comes through (a dearer game is still
+// dearer than a cheap one); above it, the claim rests entirely on other
+// venues' money and the cap binds. The venue's OWN evidence — `platformGame`
+// and `platform` — is never capped: if GGSel really does pay $3.00 for a game,
+// that is GGSel's own answer and it stands.
+function venueCap(evidence, opts) {
+  const { minSamples } = cfg(opts);
+  const ev = evidence && typeof evidence === "object" ? evidence : {};
+  const here = positives(ev.platform).sort((a, b) => a - b);
+  if (here.length < minSamples) return 0;
+  return here[Math.min(here.length - 1, Math.floor(0.75 * here.length))];
+}
+
 /* ------------------------------- the ceiling ----------------------------- */
 
 /**
@@ -281,16 +352,26 @@ function resolveAnchor(evidence, opts) {
  * widens by itself as real sales come in and never on arithmetic alone.
  */
 function priceBand(evidence, opts) {
-  const { floorUsd, maxAbsoluteUsd, ceilingHeadroom } = cfg(opts);
+  const { floorUsd, maxAbsoluteUsd, ceilingHeadroom, minSamples } = cfg(opts);
   const ev = evidence && typeof evidence === "object" ? evidence : {};
   const floor = Math.max(0, num(floorUsd), num(ev.floorUsd));
-  const observedMax = Math.max(
+  // The ceiling is the most we have ever actually been paid, plus headroom.
+  // Taken across ALL venues it is the most we have been paid ANYWHERE, which on
+  // the cheap venues is not a ceiling at all: GGSel's own maximum is $3.00, the
+  // business-wide maximum is $5.00, so a $10.00 GGSel price cleared a ceiling
+  // built out of Gameflip money. When this venue has enough realised sales to
+  // speak for itself, its own maximum binds; otherwise fall back to everything,
+  // which is all an unproven venue has.
+  const venueMax = Math.max(0, ...positives(ev.platformGame), ...positives(ev.platform));
+  const anywhereMax = Math.max(
     0,
     ...positives(ev.platformGame),
     ...positives(ev.platform),
     ...positives(ev.game),
     ...positives(ev.global),
   );
+  const venueSpeaks = positives(ev.platform).length >= minSamples;
+  const observedMax = venueSpeaks && venueMax > 0 ? venueMax : anywhereMax;
   const absolute = Math.max(0, num(maxAbsoluteUsd));
   const evidenceCeiling = observedMax > 0 ? observedMax * Math.max(1, num(ceilingHeadroom)) : 0;
   // With no realised sale anywhere, there is nothing to scale from. Use the
@@ -334,7 +415,34 @@ function priceListing({
   opts = {},
 } = {}) {
   const conf = cfg(opts);
-  const { anchor, basis, samples, reason } = resolveAnchor(evidence, conf);
+  const resolved = resolveAnchor(evidence, conf);
+  const { basis, samples } = resolved;
+  let { anchor, reason } = resolved;
+  // Rescale a price earned on other venues to the level of THIS one. See
+  // venueFactor: without it a thin market is priced entirely on the strength of
+  // a rich one, which is the whole reason GGSel drifted to double its own
+  // realised median.
+  const crossMarket = CROSS_MARKET_BASES.has(basis);
+  const vf = crossMarket ? venueFactor(evidence, conf) : 1;
+  if (vf !== 1 && anchor > 0) {
+    anchor = anchor * vf;
+    reason +=
+      " (scaled x" +
+      (Math.round(vf * 100) / 100) +
+      " to " +
+      (evidence.marketplace || "this venue") +
+      "'s own price level)";
+  }
+  const cap = crossMarket ? venueCap(evidence, conf) : 0;
+  if (cap > 0 && anchor > cap) {
+    anchor = cap;
+    reason +=
+      ", capped at the p75 of what " +
+      (evidence.marketplace || "this venue") +
+      " has actually paid ($" +
+      cents(cap) +
+      ")";
+  }
   // The marketplace's own minimum is folded in as a floor before the band is
   // computed, so a platform whose floor sits ABOVE the evidence ceiling (as
   // PlayerAuctions' $5 does against a $4.50 observed max) still yields a legal
@@ -380,6 +488,7 @@ function priceListing({
     samples,
     reason,
     multiplier: Math.round(multiplier * 1000) / 1000,
+    venueFactor: Math.round(vf * 1000) / 1000,
     fullEvent: !!fullEvent,
     floor: cents(floor),
     marketFloor: cents(marketFloor),
@@ -404,6 +513,10 @@ function shouldReprice(currentUsd, targetUsd, driftPct = 20) {
 }
 
 module.exports = {
+  venueFactor,
+  venueCap,
+  VENUE_FACTOR_MIN,
+  VENUE_FACTOR_MAX,
   DEFAULTS,
   MARKETPLACE_FLOORS,
   bundleMultiplier,

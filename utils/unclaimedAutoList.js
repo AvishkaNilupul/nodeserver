@@ -43,6 +43,9 @@ const fsp = require("fs/promises");
 const mongoose = require("mongoose");
 const hosts = require("./botHosts");
 const settings = require("./settings");
+const pricingEngine = require("./pricing");
+const pricingEvidenceMod = require("./pricingEvidence");
+const { classifyKind } = require("./marketPricing");
 const twitchInventory = require("./twitchInventory");
 const mp = require("./marketplaces");
 const { decrypt } = require("./secretBox");
@@ -1604,6 +1607,25 @@ async function repriceUnclaimedRows({ apply = false } = {}) {
       }),
     );
   }
+  // One price per SET was being applied to every marketplace that set is listed
+  // on. The venues do not pay the same: our realised medians are Gameflip $1.25,
+  // Digiseller $1.28, GGSel $0.75 (prod 2026-09-09). So the set price — which is
+  // anchored on cross-market analytics — is translated to each venue's own price
+  // level, exactly as utils/autoLister.js venuePrice does for a fresh publish.
+  // Gameflip is the reference and never moves; a venue with too few realised
+  // sales gets a factor of 1 and is left alone.
+  const venueFactors = new Map();
+  for (const m of new Set(rows.map((r) => String(r.marketplace || "").toLowerCase()))) {
+    if (!m || m === "gameflip") continue;
+    try {
+      const ev = await pricingEvidenceMod.evidenceFor({ game: "", marketplace: m });
+      const f = pricingEngine.venueFactor(ev);
+      if (f > 0 && f !== 1) venueFactors.set(m, f);
+    } catch {
+      /* evidence is a nicety; without it the set price stands */
+    }
+  }
+
   let rubRate = 0;
   const needRub = rows.some((r) => r.marketplace === "ggsel");
   if (apply && needRub) {
@@ -1625,7 +1647,20 @@ async function repriceUnclaimedRows({ apply = false } = {}) {
       continue;
     }
     const current = Number(row.price) || 0;
-    const target = Number(p.price) || 0;
+    // The owner's rule, 2026-09-09: rent-farm ("Automatic Farming") listings
+    // keep their price. A farming window is a different product and its price
+    // is set by hand, never by a drop-bundle anchor.
+    const venue = String(row.marketplace || "").toLowerCase();
+    const vf =
+      classifyKind(row.title) === "farm" ? 1 : venueFactors.get(venue) || 1;
+    const marketFloor = pricingEngine.floorForMarketplace(venue);
+    const target =
+      vf === 1
+        ? Number(p.price) || 0
+        : Math.max(
+            marketFloor,
+            Math.round((Number(p.price) || 0) * vf * 100) / 100,
+          );
     const driftPct = current > 0 ? ((target - current) / current) * 100 : target > 0 ? 100 : 0;
     const entry = {
       rowId: String(row._id),
@@ -1639,6 +1674,7 @@ async function repriceUnclaimedRows({ apply = false } = {}) {
       floor: p.floor,
       soldFloor: Number(p.soldFloor) || 0,
       anchorSource: p.anchorSource || "",
+      venueFactor: Math.round(vf * 1000) / 1000,
       driftPct: Math.round(driftPct * 10) / 10,
       apply: false,
       applied: false,

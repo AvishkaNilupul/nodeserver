@@ -20,6 +20,9 @@ const {
   DS_CLAIM_TAG,
 } = require("./digisellerFulfiller");
 const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
+const pricingEngine = require("./pricing");
+const pricingEvidenceMod = require("./pricingEvidence");
+const { classifyKind } = require("./marketPricing");
 // ZeusX sells the same accounts, so its reservations need their own tag or a
 // release on one market would free stock another market is selling.
 const ZX_CLAIM_TAG = "zeusx";
@@ -438,6 +441,53 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
   return Math.min(MAX_ANCHOR_USD, Math.max(0.75, priced));
 }
 
+// `derivePrice` prices GAMEFLIP — it anchors on Gameflip's order book and on
+// Gameflip's realised sales, by design and with good reason (see the comment
+// above about a ruble floor setting a USD listing's price). But its answer was
+// then published verbatim to GGSel, Digiseller and ZeusX, which is the same
+// mistake pointing the other way: one number, six venues, and only one of them
+// was measured.
+//
+// The venues are not interchangeable. Our realised medians, prod 2026-09-09:
+// Gameflip $1.25 (n=172), Digiseller $1.28 (n=62), GGSel $0.75 (n=13). GGSel's
+// live rows had drifted to a median of $1.55 — more than twice what GGSel has
+// ever actually paid us, on a market whose rival median is $0.69. The owner's
+// reading of it, and the reason this exists: "ggsell market is so cheap so we
+// have to be as well."
+//
+// So translate the Gameflip price into the venue's own price level with the
+// shared engine's venue factor (utils/pricing.js), which is the ratio of the two
+// medians and needs no per-game lookup — only the venue's own realised sales.
+// A venue with fewer than `minSamples` sales returns a factor of exactly 1, so
+// the unproven venues (ZeusX, Eldorado, G2G, PlayerAuctions) are unaffected
+// until they have earned an opinion.
+//
+// TWO THINGS ARE NEVER TOUCHED:
+//   * Gameflip, because the base price is already its own.
+//   * Rent-farm listings. The owner's rule, same day: "renter listings are same
+//     price." A farming window is a different product at a different price
+//     level ($4.99-$6.00 against sub-$1 drop bundles), and the venue factor is
+//     computed from drop-bundle money that has no bearing on it.
+async function venuePrice(marketplace, basePriceUsd, { title = "" } = {}) {
+  const base = Number(basePriceUsd) || 0;
+  const venue = String(marketplace || "").toLowerCase();
+  if (!(base > 0) || !venue || venue === "gameflip") return base;
+  if (classifyKind(title) === "farm") return base;
+  try {
+    // No game is passed: the venue factor reads only the `platform` and
+    // `global` buckets, so the per-game lookup would be dead weight.
+    const ev = await pricingEvidenceMod.evidenceFor({ game: "", marketplace: venue });
+    const factor = pricingEngine.venueFactor(ev);
+    if (!(factor > 0) || factor === 1) return base;
+    const floor = pricingEngine.floorForMarketplace(venue);
+    return Math.max(floor, Math.round(base * factor * 100) / 100);
+  } catch {
+    // Evidence is a nicety, not a precondition for selling. An Atlas hiccup
+    // must not stop a publish, and the Gameflip price is a defensible fallback.
+    return base;
+  }
+}
+
 /* ------------------------------- publishing ------------------------------ */
 
 // Pick a delivery account from the task's assigned pool accounts: needs a
@@ -728,6 +778,11 @@ async function publishGgselShare({
   accounts,
   categoryId,
 }) {
+  // Price this for GGSel, not for Gameflip. Done here rather than at the three
+  // call sites so a fourth cannot forget: the adapted number is what gets
+  // published AND what the row records, which is the only way the two stay in
+  // agreement.
+  price = await venuePrice("ggsel", price, { title });
   accounts = await reserveAccountsForPublish(accounts, set, GG_CLAIM_TAG);
   if (!accounts.length) {
     throw new Error(
@@ -3163,6 +3218,7 @@ module.exports = {
   buildTitle,
   buildDescription,
   derivePrice,
+  venuePrice,
   stackItems,
   chooseStackItems,
   postEventPrice,

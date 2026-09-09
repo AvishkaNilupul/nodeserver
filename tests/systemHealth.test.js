@@ -308,6 +308,20 @@ function healthyDeps(over = {}) {
     settings: {
       getAutoFarm: () => ({ unclaimedAutoList: true, unclaimedAutoListPaused: false }),
     },
+    // listings.venuePrice builds one ceiling per marketplace from realised
+    // sales. Gameflip's fixture rows sit under a $5.00 max, so the healthy
+    // fixture must not trip it; ggsel is present but under MIN_VENUE_SALES, to
+    // pin the rule that an unmeasured venue is skipped rather than judged.
+    pricingEvidence: {
+      async snapshot() {
+        return {
+          platform: new Map([
+            ["gameflip", [0.75, 1.25, 1.25, 1.5, 2.0, 5.0]],
+            ["ggsel", [0.75, 0.75]],
+          ]),
+        };
+      },
+    },
     gatherPoolEligibility: async () => ({
       eligible: Array.from({ length: 364 }, (_, i) => ({ username: "p" + i })),
     }),
