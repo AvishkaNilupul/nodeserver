@@ -74,7 +74,27 @@ const CATEGORIES = new Set([
   "orders",
   "errors",
   "events",
+  // Per-market extras. A marketplace's tabs do NOT have to match the others':
+  // what is worth looking at depends on how that platform actually delivers.
+  "attached",
 ]);
+
+// The tabs each market shows, in order. The first six are common; anything after
+// them answers a question that only makes sense for that platform.
+//
+// `attached` is the Gameflip/GGSel question and it is the whole ballgame there:
+// both attach the account to the listing BEFORE the sale, so "which account is
+// behind this offer, and is it still good?" decides whether a buyer gets
+// anything. On Eldorado or PlayerAuctions the stock is picked at delivery time
+// and the same tab would be meaningless, so they do not get it.
+const COMMON_TABS = ["sales", "deliveries", "listings", "orders", "errors", "events"];
+const EXTRA_TABS = {
+  gameflip: ["attached"],
+  ggsel: ["attached"],
+};
+function tabsFor(market) {
+  return COMMON_TABS.concat(EXTRA_TABS[market] || []);
+}
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -171,6 +191,7 @@ async function rollup() {
       listings: 0,
       active: 0,
       errors: 0,
+      errorsHistorical: 0,
       deliveredUnits: 0,
       deliveredRevenueUsd: 0,
       unitsSold: 0,
@@ -191,7 +212,14 @@ async function rollup() {
     if (!p) continue;
     p.listings += 1;
     if (r.status === "active") p.active += 1;
-    if (r.lastError) p.errors += 1;
+    // ACTIVE rows only. Counting every row's lastError made the cards read
+    // "82 with errors" for Gameflip when the true number of live, actionable
+    // errors was ZERO — the 82 were historical notes on delisted, sold and
+    // removed rows, including the reconciliation notes this console's own
+    // tooling writes. A number that sends the operator hunting a problem that
+    // does not exist is worse than no number.
+    if (r.lastError && r.status === "active") p.errors += 1;
+    if (r.lastError) p.errorsHistorical += 1;
     p.unitsSold += Number(r.unitsSold) || 0;
     const price = Number(r.price) || 0;
     for (const u of r.units || []) {
@@ -294,7 +322,13 @@ router.get(
           : "";
         if (m && MARKET_SET.has(m)) health[m] = { status: c.status, summary: c.summary };
       }
-      res.json({ success: true, ...data, health, healthAt: (run && run.at) || null });
+      res.json({
+        success: true,
+        ...data,
+        health,
+        healthAt: (run && run.at) || null,
+        tabs: Object.fromEntries(MARKETS.map((m) => [m, tabsFor(m)])),
+      });
     } catch (e) {
       res.status(500).json({ success: false, message: e.message });
     }
@@ -319,6 +353,12 @@ router.get(
       }
       if (!CATEGORIES.has(category)) {
         return res.status(400).json({ success: false, message: "unknown category" });
+      }
+      if (!tabsFor(market).includes(category)) {
+        return res.status(400).json({
+          success: false,
+          message: category + " is not a category " + market + " has",
+        });
       }
       const limit = clampLimit(req.query.limit);
       const cur = parseCursor(req.query.cursor);
@@ -445,6 +485,10 @@ router.get(
       }
 
       if (category === "errors") {
+        // The TAB keeps the history — a delisted row's last error is often
+        // exactly what explains why it was delisted — but each row carries its
+        // status so a dead one cannot be mistaken for a live problem. The CARD
+        // count above deliberately counts only active rows.
         const rows = await MarketplaceListing.find(
           {
             marketplace: market,
@@ -460,8 +504,100 @@ router.get(
           success: true,
           ...paginate(rows, limit, "updatedAt"),
           basis:
-            "The last error recorded ON a listing row. A cleared error leaves no " +
-            "trace here, so this is current state rather than a history.",
+            "The last error recorded ON a listing row, live and historical. Rows " +
+            "that are not `active` are past problems kept for context — the " +
+            "card's error count on the previous screen counts ACTIVE rows only.",
+        });
+      }
+
+      if (category === "attached") {
+        // Gameflip and GGSel hand over content that was attached BEFORE the
+        // sale, so a live listing is only as good as the account behind it. This
+        // answers the question that actually decides a delivery there: which
+        // account backs this offer, and is that account still ours to sell?
+        const rows = await MarketplaceListing.find(
+          {
+            marketplace: market,
+            status: "active",
+            ...olderThan("createdAt", cur),
+          },
+          {
+            title: 1,
+            externalId: 1,
+            price: 1,
+            accountId: 1,
+            accountLogin: 1,
+            autoDeliver: 1,
+            unitsSold: 1,
+            createdAt: 1,
+            origin: 1,
+          },
+        )
+          .sort({ createdAt: -1, _id: -1 })
+          .limit(limit + 1)
+          .lean();
+        const out = paginate(rows, limit, "createdAt");
+
+        // Resolve each backing account's CURRENT state in one query, not one per
+        // row: this list is paged and a per-row lookup would be 25 round trips a
+        // page on a bytes-bound tier.
+        const logins = [
+          ...new Set(
+            out.items
+              .flatMap((r) => String(r.accountLogin || "").split(/[,\s]+/))
+              .map((x) => String(x).trim().toLowerCase())
+              .filter(Boolean),
+          ),
+        ];
+        const BotAccount = require("../models/BotAccount");
+        const accounts = logins.length
+          ? await BotAccount.find(
+              { login: { $in: logins } },
+              { login: 1, soldAt: 1, soldToUsername: 1, suspendedAt: 1, dropCount: 1 },
+            )
+              .limit(200)
+              .lean()
+          : [];
+        const byLogin = new Map(accounts.map((a) => [String(a.login).toLowerCase(), a]));
+
+        out.items = out.items.map((r) => {
+          const names = String(r.accountLogin || "")
+            .split(/[,\s]+/)
+            .map((x) => x.trim())
+            .filter(Boolean);
+          return {
+            _id: r._id,
+            title: r.title,
+            externalId: r.externalId,
+            price: r.price,
+            origin: r.origin,
+            autoDeliver: !!r.autoDeliver,
+            unitsSold: r.unitsSold || 0,
+            createdAt: r.createdAt,
+            // No account named at all is the state worth seeing first: an
+            // auto-deliver listing with nothing behind it takes money for
+            // nothing.
+            attached: names.map((n) => {
+              const a = byLogin.get(n.toLowerCase());
+              return {
+                login: n,
+                known: !!a,
+                drops: a ? a.dropCount || 0 : null,
+                soldElsewhere: !!(a && a.soldAt),
+                soldTo: (a && a.soldToUsername) || "",
+                suspended: !!(a && a.suspendedAt),
+              };
+            }),
+          };
+        });
+        return res.json({
+          success: true,
+          ...out,
+          basis:
+            "The account attached to each live listing, with that account's " +
+            "current state. " + market + " hands over content attached BEFORE " +
+            "the sale, so a listing with no usable account behind it takes " +
+            "money and delivers nothing.",
         });
       }
 
@@ -599,3 +735,5 @@ module.exports.parseCursor = parseCursor;
 module.exports.makeCursor = makeCursor;
 module.exports.clampLimit = clampLimit;
 module.exports.paginate = paginate;
+module.exports.tabsFor = tabsFor;
+module.exports.COMMON_TABS = COMMON_TABS;

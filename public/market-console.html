@@ -224,7 +224,10 @@
             '<div class="stat"><b>' + m.active + "</b><span>live</span></div>" +
           "</div>" +
           '<div class="basis">' + esc(m.basis) +
-            (m.errors ? ' · <b style="color:var(--red)">' + m.errors + " with errors</b>" : "") +
+            (m.errors ? ' · <b style="color:var(--red)">' + m.errors + " live error" + (m.errors === 1 ? "" : "s") + "</b>" : "") +
+            (!m.errors && m.errorsHistorical
+              ? ' · <span style="opacity:.75">' + m.errorsHistorical + " past</span>"
+              : "") +
             " · " + esc(ago(m.lastActivityAt)) +
           "</div>" +
         "</button>"
@@ -278,14 +281,25 @@
 
     /* ------------------------------ detail ------------------------------ */
 
-    var TABS = [
-      ["sales", "Sold"],
-      ["deliveries", "Delivered"],
-      ["listings", "Listings"],
-      ["orders", "Rent-farm"],
-      ["errors", "Errors"],
-      ["events", "Activity"],
-    ];
+    // Labels for every category. Which of them a market actually shows comes
+    // from the server (summary.tabs), because the answer differs per platform:
+    // "Attached" is the whole question on Gameflip and GGSel, where the account
+    // is bound to the listing before the sale, and meaningless on Eldorado,
+    // where stock is picked at delivery time.
+    var TAB_LABEL = {
+      sales: "Sold",
+      deliveries: "Delivered",
+      listings: "Listings",
+      orders: "Rent-farm",
+      errors: "Errors",
+      events: "Activity",
+      attached: "Attached",
+    };
+    function tabsFor(market) {
+      var t = summary && summary.tabs && summary.tabs[market];
+      var ids = t && t.length ? t : Object.keys(TAB_LABEL);
+      return ids.map(function (id) { return [id, TAB_LABEL[id] || id]; });
+    }
 
     var state = { market: "", tab: "sales", cursor: null, hasMore: false, loading: false, count: 0 };
 
@@ -341,12 +355,17 @@
     }
 
     function rowErrors(r) {
+      // A dead row's error is history, not a job. Say which is which rather than
+      // letting a delisted row look like something to go and fix.
+      var live = r.status === "active";
       return '<div class="row"><div class="r1">' +
         '<span class="t">' + esc(r.title || r.externalId) + "</span>" +
         '<span class="amt">' + money(r.price) + "</span></div>" +
-        '<div class="r2"><span class="mono">' + esc(r.externalId || "") + "</span>" +
-        "<span>" + esc(r.status) + "</span><span>" + esc(when(r.updatedAt)) + "</span></div>" +
-        '<div class="err">' + esc(r.lastError) + "</div></div>";
+        '<div class="r2"><span class="pill ' + (live ? "s-fail" : "s-unknown") + '">' +
+        (live ? "live" : esc(r.status)) + "</span>" +
+        '<span class="mono">' + esc(r.externalId || "") + "</span>" +
+        "<span>" + esc(when(r.updatedAt)) + "</span></div>" +
+        '<div class="err"' + (live ? "" : ' style="opacity:.7"') + ">" + esc(r.lastError) + "</div></div>";
     }
 
     function rowEvents(r) {
@@ -361,9 +380,36 @@
         "</div>";
     }
 
+    function rowAttached(r) {
+      var att = r.attached || [];
+      // No account at all on an auto-deliver listing is the worst state and is
+      // called out first, because it is the one that takes money for nothing.
+      var head = !att.length
+        ? '<span class="pill ' + (r.autoDeliver ? "s-fail" : "s-unknown") + '">' +
+          (r.autoDeliver ? "auto-deliver, NO account" : "no account") + "</span>"
+        : att.map(function (a) {
+            var bad = a.soldElsewhere || a.suspended || !a.known;
+            var why = !a.known ? "unknown account"
+              : a.suspended ? "suspended"
+              : a.soldElsewhere ? "sold to " + (a.soldTo || "someone")
+              : (a.drops === null ? "" : a.drops + " drops");
+            return '<span class="pill ' + (bad ? "s-fail" : "s-ok") + '">' +
+              esc(a.login) + (why ? " · " + esc(why) : "") + "</span>";
+          }).join(" ");
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.title || r.externalId) + "</span>" +
+        '<span class="amt">' + money(r.price) + "</span></div>" +
+        '<div class="r2">' + head + "</div>" +
+        '<div class="r2"><span class="mono">' + esc(r.externalId || "") + "</span>" +
+        "<span>" + esc(r.origin || "") + "</span>" +
+        (r.unitsSold ? "<span>" + r.unitsSold + " sold</span>" : "") +
+        "<span>" + esc(when(r.createdAt)) + "</span></div></div>";
+    }
+
     var RENDER = {
       sales: rowSales, deliveries: rowDeliveries, listings: rowListings,
       orders: rowOrders, errors: rowErrors, events: rowEvents,
+      attached: rowAttached,
     };
 
     var EMPTY = {
@@ -376,6 +422,9 @@
       errors: "No listing is currently carrying an error. This is current state, not history.",
       events: "No audit rows mention this marketplace. The delivery paths write very " +
         "few of these today — that gap is exactly why this console exists.",
+      attached: "No live listings to show. On this marketplace the account is bound to " +
+        "the listing before the sale, so this is where you check a listing can " +
+        "actually deliver.",
     };
 
     async function loadMore(reset) {
@@ -419,8 +468,12 @@
     }
 
     async function renderMarket(market) {
-      state = { market: market, tab: state.tab || "sales", cursor: null, hasMore: false, loading: false, count: 0 };
       if (!summary) { try { summary = await api("/api/market-console/summary"); } catch (e) { /* still render */ } }
+      // Carrying a tab across markets would ask for a category the new market
+      // does not have, which the API rejects with a 400 — so fall back.
+      var allowed = tabsFor(market).map(function (t) { return t[0]; });
+      var tab = allowed.indexOf(state.tab) >= 0 ? state.tab : allowed[0];
+      state = { market: market, tab: tab, cursor: null, hasMore: false, loading: false, count: 0 };
       var m = summary && summary.markets.filter(function (x) { return x.market === market; })[0];
 
       page.innerHTML =
@@ -435,7 +488,7 @@
           '<div class="kpi"><b>' + m.sales7d + "</b><span>sales, 7 days</span></div>" +
           '<div class="kpi"><b style="color:' + (m.errors ? "var(--red)" : "inherit") + '">' + m.errors + "</b><span>listings with errors</span></div>" +
         "</div>" : "") +
-        '<div class="tabs">' + TABS.map(function (t) {
+        '<div class="tabs">' + tabsFor(market).map(function (t) {
           return '<button class="tab' + (t[0] === state.tab ? " on" : "") + '" data-tab="' + t[0] + '">' + t[1] + "</button>";
         }).join("") + "</div>" +
         '<div class="basisbar" id="basisbar">Loading…</div>' +
