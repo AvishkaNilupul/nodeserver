@@ -2212,6 +2212,45 @@ async function ggselFindOfferInList(keys, offerId) {
 
 // Returns { stock, reason } — see digisellerProductStockDetailed for the
 // contract. ggselOfferStock keeps the number-or-null shape callers expect.
+// Every offer on the GGSel account, all pages, whatever its state.
+//
+// The seller API's offer list is the only way to see an offer we did not create
+// — and on 2026-09-09 that mattered: 16 offers our database recorded as
+// `delisted` were still ACTIVE on GGSel with 145 sellable units behind them,
+// and 7 more (4 of them the owner's hand-made rent listings) had no row at all.
+// Nothing could have found either, because every reconcile we had started from
+// OUR rows and asked GGSel about each one. A row that does not exist is not a
+// row you can ask about.
+//
+// Returns the raw offer objects. `status` is GGSel's own word — "active",
+// "paused" or "draft" — and is the field to trust; `is_active` does not exist
+// on this payload, and code that tested for it silently classified every offer
+// as not-active.
+const GG_ALL_OFFERS_MAX_PAGES = 40;
+async function ggselAllOffers({ pageSize = 100, paceMs = 250 } = {}) {
+  const keys = requireKeys("ggsel");
+  const out = new Map();
+  for (let page = 1; page <= GG_ALL_OFFERS_MAX_PAGES; page++) {
+    let r;
+    try {
+      r = await axios.get(
+        GG_API + "/offers?page=" + page + "&limit=" + pageSize,
+        { headers: ggHeaders(keys), timeout: 30000 },
+      );
+    } catch (e) {
+      throw apiError("GGSel offer list", e);
+    }
+    const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
+    for (const o of rows) if (o && o.id != null) out.set(String(o.id), o);
+    const pg = (r.data && r.data.pagination) || {};
+    const more =
+      pg.has_next_page === undefined ? rows.length === pageSize : !!pg.has_next_page;
+    if (!more) break;
+    if (paceMs) await new Promise((z) => setTimeout(z, paceMs));
+  }
+  return [...out.values()];
+}
+
 async function ggselOfferStockDetailed(offerId) {
   const keys = requireKeys("ggsel");
   const errText = (e) =>
@@ -7475,6 +7514,7 @@ module.exports = {
   usdToRub,
   ggselAddProducts,
   ggselOfferStock,
+  ggselAllOffers,
   ggselOfferStockDetailed,
   ggselOfferStatus,
   ggselOfferPrice,

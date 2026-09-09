@@ -1072,6 +1072,99 @@ const CHECKS = [
   },
 
   {
+    id: "listings.untracked",
+    title: "Live GGSel offers the system cannot see",
+    group: "listings",
+    severity: "critical",
+    // Every other listing check starts from OUR rows and asks the marketplace
+    // about each one. That can only ever find "we say live, they say dead" —
+    // the harmless direction. It is structurally incapable of finding an offer
+    // selling on GGSel that we have no active row for, and on 2026-09-09 there
+    // were 23 of them: 16 rows we had recorded as `delisted` that GGSel was
+    // still selling (145 units, 24 of the accounts behind them ALREADY SOLD to
+    // someone else), plus 7 offers with no row at all.
+    //
+    // GGSel is the only marketplace whose full offer list we can enumerate, so
+    // it is the only one this can be honest about. It reports two populations
+    // separately because they need different actions: an offer we call delisted
+    // is a FAILED delist and money at risk; an offer with no row is usually one
+    // the owner made by hand on the dashboard, which is fine, but it is invisible
+    // to pricing, tracking and delivery until someone knows it exists.
+    async run(ctx) {
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const mp = ctx.dep("marketplaces");
+
+      let offers = null;
+      try {
+        offers = await mp.ggselAllOffers();
+      } catch (e) {
+        return {
+          status: "unknown",
+          threshold: "every offer GGSel calls active has an active row",
+          summary: "Could not read GGSel's offer list: " + e.message,
+          detail:
+            "This check compares GGSel's OWN list of live offers against our " +
+            "rows. Without the list there is nothing to compare, and that is a " +
+            "failure to measure — not a finding that every live offer is tracked.",
+        };
+      }
+
+      const liveActive = offers.filter((o) => String(o && o.status) === "active");
+      const rows = await MarketplaceListing.find(
+        { marketplace: "ggsel" },
+        { externalId: 1, status: 1, title: 1 },
+      ).lean();
+      const byId = new Map(rows.map((r) => [String(r.externalId), r]));
+
+      const failedDelist = [];
+      const noRow = [];
+      for (const o of liveActive) {
+        const row = byId.get(String(o.id));
+        const title = String((o && (o.title_en || o.title_ru)) || "").slice(0, 120);
+        if (!row) {
+          noRow.push({ marketplace: "ggsel", externalId: String(o.id), title, price: o.price });
+        } else if (row.status !== "active") {
+          failedDelist.push({
+            marketplace: "ggsel",
+            externalId: String(o.id),
+            title: title || String(row.title || "").slice(0, 120),
+            ourStatus: row.status,
+            price: o.price,
+          });
+        }
+      }
+
+      const total = failedDelist.length + noRow.length;
+      const parts = [];
+      if (failedDelist.length)
+        parts.push(failedDelist.length + " still selling after we recorded them delisted");
+      if (noRow.length) parts.push(noRow.length + " with no row at all");
+
+      return {
+        // A failed delist is money at risk — the account behind it is usually one
+        // we removed for a reason. An untracked hand-made offer is not.
+        status: failedDelist.length ? "fail" : noRow.length ? "warn" : "ok",
+        measured: total,
+        threshold: "every offer GGSel calls active has an active row",
+        summary: total
+          ? "GGSel is selling " + total + " offer(s) the system does not track: " + parts.join(", ")
+          : "All " + liveActive.length + " live GGSel offer(s) have a matching active row",
+        detail:
+          "Read from GGSel's own offer list (" +
+          offers.length +
+          " offers, " +
+          liveActive.length +
+          " active) and compared against our rows. An offer we call delisted but " +
+          "GGSel still sells is the dangerous case: our delist failed silently, " +
+          "and the stock behind it is usually accounts we withdrew as sold or " +
+          "suspended. Offers with no row are typically made by hand on the GGSel " +
+          "dashboard — not wrong, but invisible to pricing and tracking.",
+        items: capItems(failedDelist.concat(noRow)),
+      };
+    },
+  },
+
+  {
     id: "listings.ghost",
     title: "Active rows the marketplace has already sold",
     group: "listings",

@@ -24,6 +24,26 @@
 //
 // Read-only until --apply. Never publishes, relists, prices or deletes anything;
 // the only field written is `status` (plus an appended note).
+//
+// WHAT THIS CANNOT SEE, and it is the half that costs money.
+// The query below is `{ marketplace, status: "active" }`: it starts from OUR
+// rows and asks the marketplace about each one. So it can only ever find "we
+// say live, they say dead" — the harmless direction. It is structurally
+// incapable of finding an offer the marketplace is still SELLING that we have
+// no active row for, because a row that does not exist is not a row you can ask
+// about.
+//
+// That is not hypothetical. On 2026-09-09 this script reported "204 agree, 0
+// drifted" on GGSel while GGSel had 227 offers live: 16 our rows recorded as
+// `delisted` and were still selling (145 units, and 24 of the accounts behind
+// the two biggest had ALREADY been sold to another buyer), plus 7 with no row
+// at all. The report was true about what it measured and useless as
+// reassurance.
+//
+// The reverse direction now lives in the hourly `listings.untracked` health
+// check, which starts from the MARKETPLACE's list (utils/marketplaces
+// ggselAllOffers) instead of from ours. Do not read a clean run here as "GGSel
+// and we agree" — read it as "every row we call active is really active".
 require("dotenv").config();
 const mongoose = require("mongoose");
 const MarketplaceListing = require("../models/MarketplaceListing");

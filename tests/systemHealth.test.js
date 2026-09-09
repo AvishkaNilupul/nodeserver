@@ -304,6 +304,12 @@ function healthyDeps(over = {}) {
       async gameflipListingStatus() {
         return "onsale";
       },
+      // listings.untracked reads GGSel's OWN offer list. The healthy fixture
+      // has no live GGSel offer beyond what the rows cover, so an empty list is
+      // the honest "nothing untracked" — not a stand-in for an unread API.
+      async ggselAllOffers() {
+        return [];
+      },
     },
     settings: {
       getAutoFarm: () => ({ unclaimedAutoList: true, unclaimedAutoListPaused: false }),
@@ -1116,4 +1122,87 @@ test("the health engine cannot write anything, anywhere", async () => {
   const ctx = health.makeCtx({ deps: {}, now });
   assert.throws(() => ctx.dep("MarketplaceListing2"), /unknown dependency/);
   assert.strictEqual(ctx.now().getTime(), NOW.getTime());
+});
+
+
+/* ------------------------------------------------------------------ *
+ * listings.untracked — the direction every other check was blind to
+ * ------------------------------------------------------------------ */
+
+test("REGRESSION: an offer we recorded as delisted that GGSel still sells FAILS", async () => {
+  // The 2026-09-09 finding. 16 rows read `delisted` while GGSel had them live
+  // with 145 sellable units, and 24 of the accounts behind the two largest had
+  // already been sold to someone else. Nothing could see it: every other check
+  // starts from OUR rows and asks the marketplace about each one, which can only
+  // find "we say live, they say dead".
+  const check = health.CHECKS.find((c) => c.id === "listings.untracked");
+  const out = await check.run(
+    health.__ctxForTest
+      ? health.__ctxForTest({ deps: {} })
+      : {
+          dep: (n) =>
+            n === "marketplaces"
+              ? {
+                  async ggselAllOffers() {
+                    return [
+                      { id: "z1", status: "active", title_en: "Zombie" },
+                      { id: "ok1", status: "active", title_en: "Fine" },
+                    ];
+                  },
+                }
+              : {
+                  find: () => ({
+                    lean: async () => [
+                      { externalId: "z1", status: "delisted", title: "Zombie" },
+                      { externalId: "ok1", status: "active", title: "Fine" },
+                    ],
+                  }),
+                },
+        },
+  );
+  assert.strictEqual(out.status, "fail", "a failed delist is money at risk, not a warning");
+  assert.strictEqual(out.measured, 1);
+  assert.match(out.summary, /still selling after we recorded them delisted/);
+});
+
+test("an offer with no row at all warns, but does not cry failure", async () => {
+  // The owner's hand-made rent listings live here. They are not a fault — they
+  // are simply invisible until something says they exist.
+  const check = health.CHECKS.find((c) => c.id === "listings.untracked");
+  const out = await check.run({
+    dep: (n) =>
+      n === "marketplaces"
+        ? { async ggselAllOffers() { return [{ id: "hand1", status: "active", title_en: "Automatic farming 180 days" }]; } }
+        : { find: () => ({ lean: async () => [] }) },
+  });
+  assert.strictEqual(out.status, "warn");
+  assert.match(out.summary, /no row at all/);
+});
+
+test("a paused GGSel offer is not untracked — only `status: active` counts", async () => {
+  // `is_active` is NOT a field on this payload. Code that tested for it read
+  // undefined and classified every offer as not-active; the mirror mistake would
+  // flag all 318 paused offers as live. GGSel's own word is `status`.
+  const check = health.CHECKS.find((c) => c.id === "listings.untracked");
+  const out = await check.run({
+    dep: (n) =>
+      n === "marketplaces"
+        ? { async ggselAllOffers() { return [{ id: "p1", status: "paused" }, { id: "d1", status: "draft" }]; } }
+        : { find: () => ({ lean: async () => [] }) },
+  });
+  assert.strictEqual(out.status, "ok");
+  assert.strictEqual(out.measured, 0);
+});
+
+test("an unreadable offer list is unknown, never ok", async () => {
+  const check = health.CHECKS.find((c) => c.id === "listings.untracked");
+  const out = await check.run({
+    dep: (n) =>
+      n === "marketplaces"
+        ? { async ggselAllOffers() { throw new Error("HTTP 502"); } }
+        : { find: () => ({ lean: async () => [] }) },
+  });
+  assert.strictEqual(out.status, "unknown");
+  assert.ok(out.threshold && out.threshold.length, "even an unknown states its threshold");
+  assert.match(out.detail, /failure to measure/);
 });
