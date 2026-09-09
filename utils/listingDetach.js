@@ -162,12 +162,54 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       // The live Gameflip listing carries this account's credentials in its
       // delivery code — it must come down, then the chain optionally continues
       // with a fresh account if one exists.
-      await mp.gameflipDelist(row.externalId).catch(() => {});
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        { $set: { status: "delisted", note: "account " + reason + " — delisted" } },
-      );
-      detached.push(label + " (delisted)");
+      //
+      // THE FAILURE MUST NOT BE SWALLOWED. This used to be
+      // `.catch(() => {})` followed by an unconditional `status: "delisted"`.
+      // gameflipDelist throws on any error — and a 429 from Gameflip's silent
+      // rate limiter is the documented common case — so a delist that failed
+      // left the offer LIVE on Gameflip, still selling the credentials of an
+      // account we had just banned, suspended or sold elsewhere, while our side
+      // recorded it as down. Nothing retries a row that is already "delisted",
+      // so it stayed live until somebody noticed by hand.
+      //
+      // Now: only a delist that actually succeeded is recorded as one. A failed
+      // one leaves the row ACTIVE and stamps the reason, so the watcher keeps
+      // seeing it, the health page counts it, and the next pass tries again.
+      let delisted = true;
+      let delistErr = "";
+      try {
+        await mp.gameflipDelist(row.externalId);
+      } catch (e) {
+        delisted = false;
+        delistErr = String((e && e.message) || e).slice(0, 200);
+      }
+      if (delisted) {
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          { $set: { status: "delisted", note: "account " + reason + " — delisted" } },
+        );
+        detached.push(label + " (delisted)");
+      } else {
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          {
+            $set: {
+              lastError:
+                "STILL LIVE — delist failed for an account that is " + reason +
+                ": " + delistErr,
+            },
+          },
+        );
+        warnings.push(
+          label +
+            " — COULD NOT DELIST. The Gameflip listing is STILL LIVE and still " +
+            "carries this account's credentials: " + delistErr,
+        );
+        // Return rather than fall through: republishing a replacement while the
+        // original is still up would put TWO live listings on the same set, one
+        // of them still selling the credentials of the account we are removing.
+        return { detached, warnings };
+      }
       const set = row.set ? await DropSet.findById(row.set).lean() : null;
       if (set && republish) {
         let img = "";

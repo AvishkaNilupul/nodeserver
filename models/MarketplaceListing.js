@@ -63,7 +63,13 @@ const marketplaceListingSchema = new mongoose.Schema(
     currency: { type: String, default: "USD" },
     status: {
       type: String,
-      enum: ["active", "sold", "delisted", "error"],
+      // "removed" is written by utils/gameflipFulfiller's retire path when a
+      // listing is gone from the marketplace for good (404 / expired /
+      // cancelled). It was missing here: findOneAndUpdate skips validation so
+      // the value landed in the DB fine — 33 rows carry it — and then every
+      // later doc.save() on one of those rows threw. Exactly the shape of the
+      // AvailableAccount "spent" enum bug, which made 172 accounts unsaveable.
+      enum: ["active", "sold", "delisted", "error", "removed"],
       default: "active",
       index: true,
     },

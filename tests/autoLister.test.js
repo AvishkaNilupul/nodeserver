@@ -140,10 +140,21 @@ test("auto-delivery does not by itself make a listing repriceable", () => {
   );
 });
 
+// NOTE ON THE FIXTURES BELOW: they set `lowestOther` as well as `lowest`.
+// `gf.lowest` is the cheapest live Gameflip row INCLUDING OUR OWN; `lowestOther`
+// excludes our owner id and is what "a rival" means. derivePrice used to read
+// `lowest`, so it undercut our own listing by 5% every cycle — our row became
+// the new cheapest, the next publish anchored on that, and the price ratcheted
+// to the $0.75 floor no matter what buyers paid. marketResearch.js:252 names the
+// bug, pricingEvidence.js:141 states the rule ("ONLY lowestOther may act as a
+// rival"), and derivePrice was the last reader of the wrong field.
+//
+// The two are equal whenever our owner id is unknown, so mirroring the value
+// keeps every test below meaning exactly what it did before.
 test("price anchors on sold prices and undercuts live competition", () => {
   const research = {
     markets: {
-      gameflip: { soldRecent: 5, avgSoldPrice: 4.0, lowest: 3.0 },
+      gameflip: { soldRecent: 5, avgSoldPrice: 4.0, lowest: 3.0, lowestOther: 3.0 },
       ggsel: { lowest: 5.0 },
       plati: { lowest: 6.0 },
     },
@@ -162,7 +173,7 @@ test("price anchors on sold prices and undercuts live competition", () => {
 test("a cheap ruble-market floor never drags down a Gameflip price", () => {
   const rocketLeague = {
     markets: {
-      gameflip: { soldRecent: 20, avgSoldPrice: 7.93, lowest: 1.2 },
+      gameflip: { soldRecent: 20, avgSoldPrice: 7.93, lowest: 1.2, lowestOther: 1.2 },
       ggsel: { lowest: 0.38 },
       plati: { lowest: 1.28 },
     },
@@ -178,7 +189,9 @@ test("a cheap ruble-market floor never drags down a Gameflip price", () => {
 test("the price always lands strictly below a live rival", () => {
   for (const rival of [1.2, 1.5, 2.0, 3.1, 4.99]) {
     const p = derivePrice({
-      markets: { gameflip: { soldRecent: 10, avgSoldPrice: 9, lowest: rival } },
+      markets: {
+        gameflip: { soldRecent: 10, avgSoldPrice: 9, lowest: rival, lowestOther: rival },
+      },
     });
     assert.ok(p < rival, `priced ${p} is not below rival ${rival}`);
     assert.ok(p >= 0.75, `priced ${p} is below the platform floor`);
@@ -190,20 +203,26 @@ test("the price always lands strictly below a live rival", () => {
 // listing is $0.75. The anchor must not run away with that.
 test("a thin or outlier sold-price sample never inflates the price", () => {
   const thin = {
-    markets: { gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0 } },
+    markets: {
+      gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0, lowestOther: 2.0 },
+    },
   };
   // 2 sales is below MIN_SOLD_SAMPLES, so the anchor is ignored entirely and
   // the live $2.00 rival prices it — landing at the quarter below.
   assert.strictEqual(derivePrice(thin), 1.75);
 
   const outlier = {
-    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75 } },
+    markets: {
+      gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75, lowestOther: 0.75 },
+    },
   };
   // Enough samples, but the live rival is cheaper, so we still undercut it.
   assert.strictEqual(derivePrice(outlier), 0.75);
 
   const noRival = {
-    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0 } },
+    markets: {
+      gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0, lowestOther: 0 },
+    },
   };
   // No competition at all: the anchor stands, but capped at MAX_ANCHOR_USD.
   assert.strictEqual(derivePrice(noRival), 10);
@@ -218,13 +237,15 @@ test("price falls back to cheapest competitor when nothing sold", () => {
 
 test("unknown market probes at $1 and floor is $0.75", () => {
   assert.strictEqual(derivePrice(null), 1.0);
-  const cheap = { markets: { gameflip: { avgSoldPrice: 0.3, lowest: 0.2 } } };
+  const cheap = {
+    markets: { gameflip: { avgSoldPrice: 0.3, lowest: 0.2, lowestOther: 0.2 } },
+  };
   assert.strictEqual(derivePrice(cheap), 0.75);
 });
 
 test("post-event multiplier applies the scarcity markup", () => {
   const research = {
-    markets: { gameflip: { avgSoldPrice: 2.0, lowest: 2.0 } },
+    markets: { gameflip: { avgSoldPrice: 2.0, lowest: 2.0, lowestOther: 2.0 } },
   };
   assert.ok(
     derivePrice(research, { postEventMultiplier: 1.5 }) > derivePrice(research),

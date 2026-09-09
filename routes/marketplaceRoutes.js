@@ -1244,7 +1244,10 @@ router.delete(
         } else if (row.marketplace === "funpay") {
           await fpFulfiller.releaseAccounts(row.accountId.split(","));
         } else {
-          await gfFulfiller.releaseAccount(row.accountId);
+          // Scoped to THIS row's set: a tag-wide Gameflip release frees every
+          // "gameflip"-reserved drop on the account, including a different
+          // set a buyer has already paid for.
+          await gfFulfiller.releaseAccount(row.accountId, row.set);
         }
       }
       res.json({ success: true });

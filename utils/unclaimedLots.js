@@ -46,6 +46,11 @@ const UnclaimedAccount = require("../models/UnclaimedAccount");
 
 const ORIGIN = "unclaimed";
 const MARKET = "gameflip";
+
+// How old a lotId reservation must be before the orphan sweep may clear it.
+// Must comfortably exceed the reserve -> publish -> create-row window, which is
+// a few seconds even when Gameflip is slow.
+const ORPHAN_GRACE_MS = 10 * 60 * 1000;
 const LOT_SEPARATOR = "\n\n=====\n\n";
 const GF_TITLE_MAX = 120; // marketplaces.gameflipPublish slices name to 120
 const LOT_NOTE = "unclaimed auto-list — lot";
@@ -472,9 +477,29 @@ async function checkLots(opts = {}) {
 
   // Orphans: listed ledgers stamped with a lotId no active/sold lot row owns
   // (hand-delisted row, or a crash between reserve and publish).
+  //
+  // ⚠ THE GRACE WINDOW IS LOAD-BEARING, NOT TIDINESS. publishLotIfReady stamps
+  // the lotId on the ledger, THEN publishes to Gameflip, and only THEN creates
+  // the MarketplaceListing row. For those few seconds the ledger rows carry a
+  // lotId that no row owns — which is precisely this sweep's definition of an
+  // orphan. Running in that window cleared the lotId on accounts whose
+  // credentials were, by then, already inside a LIVE Gameflip listing's delivery
+  // code. Freed, they went back into the sellable pool and could be sold again:
+  // one account, two buyers, and the second one gets drops the first already
+  // connected.
+  //
+  // A real orphan is minutes-to-days old, so ignoring anything touched in the
+  // last ORPHAN_GRACE_MS costs nothing and closes the race. `updatedAt` is
+  // written by the $set that stamps the lotId (UnclaimedAccount has
+  // timestamps: true), so it is exactly the reservation's age.
   try {
+    const orphanCutoff = new Date(Date.now() - ORPHAN_GRACE_MS);
     const stamped = await UnclaimedAccount.find(
-      { status: "listed", lotId: { $nin: ["", null] } },
+      {
+        status: "listed",
+        lotId: { $nin: ["", null] },
+        updatedAt: { $lt: orphanCutoff },
+      },
       { lotId: 1 },
     ).lean();
     const orphanIds = [...new Set(stamped.map((s) => s.lotId))].filter(
@@ -482,7 +507,14 @@ async function checkLots(opts = {}) {
     );
     if (orphanIds.length) {
       const r = await UnclaimedAccount.updateMany(
-        { status: "listed", lotId: { $in: orphanIds } },
+        {
+          status: "listed",
+          lotId: { $in: orphanIds },
+          // Re-applied on the WRITE as well as the read: a lot published
+          // between the two would otherwise be swept by an id that was an
+          // orphan a moment ago and is not one now.
+          updatedAt: { $lt: orphanCutoff },
+        },
         { $set: { lotId: "", note: "" } },
       );
       out.orphansCleared = Number(r && (r.modifiedCount ?? r.nModified)) || 0;

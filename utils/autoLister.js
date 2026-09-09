@@ -381,7 +381,20 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
   const sold = soldEnough
     ? Math.min(Number(gf.avgSoldPrice) || 0, MAX_ANCHOR_USD)
     : 0;
-  const rival = Number(gf.lowest) > 0 ? Number(gf.lowest) : 0;
+  // `lowestOther`, NOT `lowest`. `gf.lowest` is the cheapest live Gameflip row
+  // INCLUDING OUR OWN, so undercutting it by 5% every cycle undercuts
+  // ourselves: our listing becomes the new cheapest, the next publish anchors on
+  // that, and the price ratchets down to the $0.75 clamp regardless of what
+  // buyers actually pay. utils/marketResearch.js:252 was written for exactly
+  // this ("for OW/R6/MR the lowest live row was our own $0.75 listing — so it
+  // undercut itself to the floor forever"), utils/pricingEvidence.js:141 states
+  // the rule outright ("ONLY lowestOther may act as a rival"), and
+  // unclaimedBundles already obeys it. derivePrice was the one place left
+  // reading the wrong field.
+  //
+  // lowestOther is deliberately 0 when every live row is ours — which is "no
+  // rival", not "free" — and the branches below already treat 0 that way.
+  const rival = Number(gf.lowestOther) > 0 ? Number(gf.lowestOther) : 0;
 
   let base;
   if (rival > 0 && sold > 0) {
@@ -414,7 +427,15 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
   if (postEventMultiplier === 1 && rival > 0 && priced >= rival) {
     priced = Math.floor((rival - 0.01) * 4) / 4;
   }
-  return Math.max(0.75, priced);
+  // A FLOOR AND A CEILING. This used to clamp only the bottom, so the anchor cap
+  // was the sole bound on the way out — and it does not bind the rival branch
+  // (`rival * 0.95`) or survive the post-event multiplier, which multiplies
+  // AFTER it. A rival-polluted average could therefore publish a single-account
+  // bundle in double figures. Measured reality on this marketplace: 119 realised
+  // sales, median $1.25, highest ever $5.00. MAX_ANCHOR_USD already encodes the
+  // reason ("anything above this is a multi-account bundle, not our
+  // single-account product"); the output is held to the same bound.
+  return Math.min(MAX_ANCHOR_USD, Math.max(0.75, priced));
 }
 
 /* ------------------------------- publishing ------------------------------ */

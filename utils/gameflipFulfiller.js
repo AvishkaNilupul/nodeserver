@@ -23,6 +23,7 @@ const { sendTelegram } = require("./telegram");
 const {
   reserveSetOnAccount,
   releaseAccountsForTag,
+  releaseSetForAccounts,
 } = require("./dropReservation");
 
 const GF_CLAIM_TAG = "gameflip";
@@ -72,11 +73,41 @@ async function claimAccountForSet(set) {
   return null;
 }
 
-// Put a reserved set's drops back in the sellable pool (only ones still
-// reserved for Gameflip — never touches drops sold through the Shop).
-async function releaseAccount(accountId) {
+// Put THIS SET's reserved drops back in the sellable pool.
+//
+// Keyed on the SET, not merely on the market tag. The old version called
+// `releaseAccountsForTag([accountId], "gameflip")`, which clears EVERY DropLog
+// row on that account whose soldToUsername is "gameflip" — and one account can
+// legitimately hold two Gameflip reservations at once: an Overwatch bundle
+// already delivered to a buyer, and a Rainbow Six bundle just claimed for a
+// relist. The account is eligible for the second because the first row is
+// "sold", so it has dropped out of loginsOnActiveListings.
+//
+// Then gameflipPublish throws — a 429 from Gameflip's silent rate limiter is the
+// documented common case — and the release wiped BOTH sets. The Overwatch drops
+// a buyer had already paid for went back into the sellable pool, and the next
+// claim sold them to a second buyer. First to click Connect wins; the other gets
+// an account whose items are gone.
+//
+// utils/autoLister.releaseReservedForSet has always done this correctly, with a
+// comment naming this exact hazard ("can never overreach into another set the
+// same account may be reserved for under the same tag"). This path simply never
+// adopted it.
+async function releaseAccount(accountId, setId) {
   if (!accountId) return;
-  await releaseAccountsForTag([accountId], GF_CLAIM_TAG);
+  if (!setId) {
+    // Nothing to scope the release to. A tag-wide release could free drops a
+    // buyer already owns, so refuse: a leaked reservation costs a sale and is
+    // fixable by hand, a double-sold account is neither.
+    console.error(
+      "gameflip releaseAccount: refusing to release account " +
+        accountId +
+        " with no set id — a tag-wide release can free drops a buyer already " +
+        "paid for. The reservation is left in place for manual review.",
+    );
+    return;
+  }
+  await releaseSetForAccounts([String(accountId)], String(setId), GF_CLAIM_TAG);
 }
 
 function gameflipDeliveryCode(login, password) {
@@ -194,7 +225,7 @@ async function publishAutoDelivery({
   const login = account.login || account.credUsername || "";
   const password = decrypt(account.credPassword);
   if (!password) {
-    await releaseAccount(account._id);
+    await releaseAccount(account._id, set && set._id);
     throw new Error(
       "Account " + login + " has no readable password — cannot auto-deliver",
     );
@@ -215,7 +246,7 @@ async function publishAutoDelivery({
       autoDeliverCode: gameflipDeliveryCode(login, password),
     });
   } catch (e) {
-    await releaseAccount(account._id);
+    await releaseAccount(account._id, set && set._id);
     throw e;
   }
   return MarketplaceListing.create({
@@ -393,7 +424,7 @@ async function syncOnce() {
           },
         ).catch(() => null);
         if (retired && row.accountId) {
-          await releaseAccount(row.accountId).catch(() => {});
+          await releaseAccount(row.accountId, row.set).catch(() => {});
         }
         if (retired) {
           console.error(
@@ -404,6 +435,65 @@ async function syncOnce() {
               " unit(s) were still owed",
           );
         }
+      }
+      continue;
+    }
+    // "sold" is not the only terminal state, and treating it as the only one is
+    // how a row lives forever.
+    //
+    // Every Gameflip listing is created with expire_in_days: 30
+    // (utils/marketplaces.js), and an expired listing answers GET /listing with
+    // 200 + status "expired" — no 404, so the retire path above never fires. It
+    // appears in neither bulk sweep either, so it costs one individual status
+    // call into the rate limiter every 60 seconds, forever, and the answer is
+    // never "sold" so nothing ever changes. Meanwhile the row stays "active":
+    // its account's drops stay reserved out of the sellable pool, its owed units
+    // are never relisted, and every consumer that counts active rows as live
+    // stock keeps counting it. With continuously published stock on a 30-day
+    // expiry, this accumulates on a fixed schedule.
+    //
+    // utils/autoLister.js already treats "expired" as gone (`if (status &&
+    // status !== "expired")`); this watcher simply never learned it.
+    if (status === "expired" || status === "cancelled") {
+      const retired = await MarketplaceListing.findOneAndUpdate(
+        { _id: row._id, status: "active" },
+        {
+          $set: {
+            status: "removed",
+            lastError:
+              "gameflip reports \"" + status + "\" — retired by the watcher",
+          },
+        },
+      ).catch(() => null);
+      if (retired && row.accountId) {
+        await releaseAccount(row.accountId, row.set).catch(() => {});
+      }
+      if (retired) {
+        console.error(
+          "gameflip listing " + row.externalId + " is " + status + " — retired, " +
+            (Number(row.qtyRemaining) || 0) + " unit(s) were still owed",
+        );
+      }
+      continue;
+    }
+    // "ready" and "draft" are RECOVERABLE, not dead: the listing exists and is
+    // public but not purchasable, usually because a status patch was answered
+    // 200 by a rate-limited API and silently not applied. Retiring it would
+    // throw away a listing that one patch would revive, and releasing its
+    // account would put stock back that the listing still names. So record it
+    // where a human and the health page can see it, and leave the row alone.
+    if (status === "ready" || status === "draft") {
+      if (!/not purchasable/.test(String(row.lastError || ""))) {
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          {
+            $set: {
+              lastError:
+                "gameflip reports \"" + status + "\" — public but NOT purchasable; " +
+                "needs its status patched back to onsale",
+            },
+          },
+        ).catch(() => {});
       }
       continue;
     }
