@@ -90,6 +90,11 @@
   .row .r1 .amt { margin-left:auto; font-weight:750; font-size:14px; white-space:nowrap; }
   .row .r2 { margin-top:5px; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
   .row .err { margin-top:7px; font-size:12px; color:var(--red); background:rgba(220,38,38,.06); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  /* A reason, not a fault. "Missing because the reserve floor was reached" is
+     the buffer working as designed, and painting it red like .err would teach
+     the operator to ignore the rows that ARE faults. */
+  .row .why { margin-top:7px; font-size:12px; color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  .row .kpis { margin:10px 0 2px; }
   .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
   .oid { color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
   .empty { text-align:center; color:var(--muted); font-size:13.5px; padding:34px 16px; background:var(--surface); border:1px dashed var(--line); border-radius:12px; line-height:1.5; }
@@ -294,6 +299,12 @@
       errors: "Errors",
       events: "Activity",
       attached: "Attached",
+      // Gameflip only, and NOT a duplicate of "Rent-farm" above. That tab lists
+      // FarmServiceOrder rows — a paid order arrived and an account was
+      // provisioned into it. Gameflip has no order API to do that with, so its
+      // accounts are claimed and parked BEFORE anyone buys; this tab is the
+      // shelf, not the sales.
+      rentfarm: "Rent-farm buffer",
     };
     function tabsFor(market) {
       var t = summary && summary.tabs && summary.tabs[market];
@@ -406,10 +417,209 @@
         "<span>" + esc(when(r.createdAt)) + "</span></div></div>";
     }
 
+    /* -------------------- the gameflip rent-farm buffer ------------------- */
+
+    // Everything here goes through esc(), numbers included. "It is a number on
+    // the server" is not a property this page can verify, and the values beside
+    // them are game names, host labels and marketplace error text.
+    function num(v) {
+      return esc(v === null || v === undefined ? "—" : v);
+    }
+
+    // Only ever https, and only ever as an href. A listing url is a string out
+    // of our database that came from a marketplace, and esc() alone would stop
+    // it breaking OUT of the attribute while still leaving a `javascript:` href
+    // perfectly clickable in a superadmin page.
+    function safeLink(url, label) {
+      var u = String(url || "");
+      if (u.slice(0, 8) !== "https://") return "";
+      return '<a class="plain" target="_blank" rel="noopener noreferrer" href="' +
+        esc(u) + '">' + esc(label) + "</a>";
+    }
+
+    // Always the first row of page one, and the reason this tab cannot lie by
+    // omission. Every other tab is a list of things that happened, so an empty
+    // one honestly means nothing happened. A STARVED buffer also renders no
+    // live offers — and that is the emergency, not the calm, because Gameflip
+    // hands the account over the instant a buyer pays and an empty buffer is a
+    // shop that will fail the next sale it takes. So the accounting is drawn
+    // first and "nothing here" is impossible.
+    function rentfarmSummary(r) {
+      var slotsUnknown = r.freeSlots === null || r.freeSlots === undefined;
+      var slotsBad = slotsUnknown || r.belowReserve;
+      var slotPill = '<span class="pill ' + (slotsBad ? "s-fail" : "s-ok") + '">' +
+        (slotsUnknown
+          ? "free slots UNKNOWN"
+          : num(r.freeSlots) + " free slots · " + num(r.reserve) + " reserved") +
+        "</span>";
+
+      // The pills are the glance and the notes below are the sentence; where
+      // they overlap it is on purpose, because the note names the setting to
+      // change and the pill does not.
+      var pills =
+        (r.enabled
+          ? '<span class="pill s-ok">buffer on</span>'
+          : '<span class="pill s-fail">buffer OFF</span>') +
+        (r.configured ? "" : '<span class="pill s-fail">no Gameflip API keys</span>') +
+        (r.lastPassRan
+          ? '<span class="pill s-unknown">last top-up ' + esc(ago(r.lastPassAt)) + "</span>"
+          : '<span class="pill s-warn">no top-up pass since restart</span>') +
+        (r.lastPassStopped
+          ? '<span class="pill s-warn">stopped: ' + esc(r.lastPassStopped) + "</span>"
+          : "");
+
+      function kpi(v, label, bad) {
+        return '<div class="kpi"><b' + (bad ? ' style="color:var(--red)"' : "") + ">" +
+          num(v) + "</b><span>" + esc(label) + "</span></div>";
+      }
+      var kpis = '<div class="kpis">' +
+        kpi(r.live + " / " + r.target, "live offers, of target", r.live === 0) +
+        kpi(r.missing, "wanted but NOT published", r.missing > 0) +
+        kpi(slotsUnknown ? "?" : r.freeSlots, "free rental slots", slotsBad) +
+        kpi(r.spendable === null || r.spendable === undefined ? "?" : r.spendable,
+            "publishable above the reserve of " + r.reserve, r.spendable === 0) +
+        kpi(r.unhealthy, "live offers on a dead account", r.unhealthy > 0) +
+        kpi(r.stranded, "accounts stuck on dead offers", r.stranded > 0) +
+        kpi(r.sold, "sold" + (r.soldUnstarted ? " · " + r.soldUnstarted + " with NO window" : ""),
+            r.soldUnstarted > 0) +
+        "</div>";
+
+      // The pool line is not among the server's notes, and it is the difference
+      // between "the buffer chose not to publish" and "there was nothing left
+      // to publish with".
+      var pool = r.pool || {};
+      var why = [];
+      // The server normally says this in a note as well, and this repeats it
+      // only if it did not. A "?" where a free-slot count belongs, with no
+      // reason beside it, is indistinguishable from a number nobody measured —
+      // which is the one thing this page must never let happen.
+      if (r.capacityError &&
+          !(r.notes || []).some(function (t) { return String(t).indexOf(r.capacityError) >= 0; })) {
+        why.push("Free slots could not be read: " + r.capacityError +
+          ". The buffer refuses to publish rather than guess.");
+      }
+      if (pool.error) {
+        why.push("Pool availability could not be read: " + pool.error);
+      } else if (pool.eligibleTotal !== undefined && pool.eligibleTotal !== null) {
+        why.push(
+          pool.eligibleTotal + " eligible pristine account(s) in the pool; " +
+          (pool.willAdd
+            ? "one can be claimed right now."
+            : "NONE can be claimed right now" +
+              (pool.blockedBy ? " (" + pool.blockedBy + ")." : ".")));
+      }
+      (r.notes || []).forEach(function (t) { why.push(t); });
+
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">Buffer readiness</span>' +
+        '<span class="amt">' + slotPill + "</span></div>" +
+        '<div class="r2">' + pills + "</div>" +
+        kpis +
+        why.map(function (t) { return '<div class="why">' + esc(t) + "</div>"; }).join("") +
+        (r.headline ? '<div class="r2"><span>' + esc(r.headline) + "</span></div>" : "") +
+        "</div>";
+    }
+
+    function rentfarmLive(r) {
+      var ok = r.healthy;
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.game || r.title || "(no game)") + " · " + num(r.days) + "d</span>" +
+        '<span class="amt">' + money(r.price) + "</span></div>" +
+        '<div class="r2">' +
+          '<span class="pill ' + (ok ? "s-ok" : "s-fail") + '">' +
+            (ok ? "account healthy" : "sells a DEAD account") + "</span>" +
+          (r.login
+            ? '<span class="mono">' + esc(r.login) + "</span>"
+            : '<span class="pill s-fail">no account named</span>') +
+          (r.externalId ? '<span class="mono">' + esc(r.externalId) + "</span>" : "") +
+          "<span>listed " + esc(when(r.publishedAt)) + "</span>" +
+          // NOT the buyer's term, and never labelled as one. A buffered account
+          // farms on a long placeholder window only because the provisioner
+          // refuses a zero one; the term a buyer pays for is stamped at the
+          // SALE, which for a 120-day offer moves this date DOWN. Calling it
+          // "farming until" would read as an entitlement nobody has bought.
+          (r.placeholderUntil
+            ? "<span>placeholder window to " + esc(when(r.placeholderUntil)) + "</span>"
+            : "") +
+          safeLink(r.url, "open on Gameflip") +
+        "</div>" +
+        (r.problem ? '<div class="err">' + esc(r.problem) + "</div>" : "") +
+        (r.lastError ? '<div class="why">' + esc(r.lastError) + "</div>" : "") +
+        "</div>";
+    }
+
+    function rentfarmMissing(r) {
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.game || "(no game)") + " · " +
+          (r.label ? esc(r.label) : num(r.days) + " days") + "</span>" +
+        '<span class="amt">' + money(r.priceUsd) + "</span></div>" +
+        '<div class="r2"><span class="pill s-warn">wanted, not published</span>' +
+        "<span>would hold one rental slot</span></div>" +
+        '<div class="why">' + esc(r.reason || "no reason recorded — treat that as unknown, not as fine") +
+        "</div></div>";
+    }
+
+    function rentfarmStranded(r) {
+      // A pristine account still pinned to an offer that is dead on Gameflip.
+      // It costs twice: the account cannot be sold or re-listed, and it is
+      // holding a rental slot a PAID on-demand order elsewhere cannot have —
+      // the shortage that lost order 4b20765f.
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.game || r.title || "(no game)") + " · " + num(r.days) + "d</span>" +
+        '<span class="amt"><span class="pill s-fail">account still held</span></span></div>' +
+        '<div class="r2">' +
+          (r.login
+            ? '<span class="mono">' + esc(r.login) + "</span>"
+            : '<span class="pill s-unknown">no login recorded</span>') +
+          '<span class="pill s-unknown">' + esc(r.status || "gone") + "</span>" +
+          (r.externalId ? '<span class="mono">' + esc(r.externalId) + "</span>" : "") +
+          "<span>since " + esc(when(r.since)) + "</span>" +
+        "</div>" +
+        '<div class="why">The offer is gone from Gameflip but still names this pool ' +
+        "account, so nothing revisits it on its own — the watcher only looks at live " +
+        "rows. Until it is handed back it is both an unsellable account and a rental " +
+        "slot a paid order cannot use.</div></div>";
+    }
+
+    function rentfarmSold(r) {
+      var ok = r.windowStarted;
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.game || r.title || "(no game)") + " · " + num(r.days) + "d</span>" +
+        '<span class="amt">' + money(r.price) + "</span></div>" +
+        '<div class="r2">' +
+          '<span class="pill ' + (ok ? "s-ok" : "s-fail") + '">' +
+            (ok ? "farming until " + esc(when(r.farmUntil)) : "NO farming window") + "</span>" +
+          (r.login ? '<span class="mono">' + esc(r.login) + "</span>" : "") +
+          (r.orderId
+            ? '<span class="mono oid" data-order="' + esc(r.orderId) + '">' + esc(r.orderId) + "</span>"
+            : '<span class="pill s-warn">no order row recorded</span>') +
+          "<span>sold " + esc(when(r.soldAt)) + "</span>" +
+        "</div>" +
+        (ok
+          ? ""
+          : '<div class="err">This buyer paid for ' + num(r.days) +
+            " days and no window was ever stamped. The window starts at the SALE, " +
+            "not at publish — with none recorded, nothing is farming for them.</div>") +
+        (r.lastError ? '<div class="why">' + esc(r.lastError) + "</div>" : "") +
+        "</div>";
+    }
+
+    // One renderer per tab, so this dispatches on the row's own kind. An
+    // unrecognised kind falls through to the live shape rather than rendering
+    // nothing: a row the server sent and the page silently dropped is the exact
+    // failure this tab is here to prevent.
+    function rowRentfarm(r) {
+      if (r.kind === "summary") return rentfarmSummary(r);
+      if (r.kind === "missing") return rentfarmMissing(r);
+      if (r.kind === "stranded") return rentfarmStranded(r);
+      if (r.kind === "sold") return rentfarmSold(r);
+      return rentfarmLive(r);
+    }
+
     var RENDER = {
       sales: rowSales, deliveries: rowDeliveries, listings: rowListings,
       orders: rowOrders, errors: rowErrors, events: rowEvents,
-      attached: rowAttached,
+      attached: rowAttached, rentfarm: rowRentfarm,
     };
 
     var EMPTY = {
@@ -418,13 +628,21 @@
       deliveries: "No delivered units. Quantity platforms (Gameflip, Digiseller, GGSel) " +
         "attach content before the sale and never stamp one — their sales show under Sold.",
       listings: "No listings recorded for this marketplace.",
-      orders: "No rent-farm orders. Only Eldorado, PlayerAuctions and G2G can take them.",
+      orders: "No rent-farm orders. Only Eldorado, PlayerAuctions and G2G take them " +
+        "through an order API; a Gameflip buffered sale is recorded here after the " +
+        "fact, and whether there is anything ready to sell is the Rent-farm buffer tab.",
       errors: "No listing is currently carrying an error. This is current state, not history.",
       events: "No audit rows mention this marketplace. The delivery paths write very " +
         "few of these today — that gap is exactly why this console exists.",
       attached: "No live listings to show. On this marketplace the account is bound to " +
         "the listing before the sale, so this is where you check a listing can " +
         "actually deliver.",
+      // This one should be unreachable: the buffer tab always emits its summary
+      // row first, precisely so a starved buffer cannot render as an empty list.
+      // If it ever shows, the API returned nothing at all — which is a broken
+      // tracker, not a healthy buffer, and it must not read as reassurance.
+      rentfarm: "The buffer tracker returned no rows at all, not even its summary. " +
+        "That is the tracker failing, NOT the buffer being fine — check the server log.",
     };
 
     async function loadMore(reset) {
@@ -433,12 +651,19 @@
       var list = document.getElementById("rows");
       var moreBtn = document.getElementById("more");
       if (moreBtn) moreBtn.textContent = "Loading…";
+      // Clear BEFORE the request, not after it succeeds. Clearing afterwards
+      // meant a failed load left the PREVIOUS tab's rows sitting under the new
+      // tab's heading — switching to "Rent-farm buffer" while the API was down
+      // showed the Sold rows, labelled as the buffer. Wrong data under a
+      // confident heading is worse than no data.
+      if (reset && list) list.innerHTML = '<div class="empty">Loading…</div>';
       try {
         var url = "/api/market-console/" + encodeURIComponent(state.market) + "/" +
           encodeURIComponent(state.tab) + "?limit=25" +
           (state.cursor ? "&cursor=" + encodeURIComponent(state.cursor) : "");
         var j = await api(url);
-        if (reset) { list.innerHTML = ""; state.count = 0; }
+        // Already cleared before the fetch on a reset — see below.
+        if (reset) { state.count = 0; }
         var bb = document.getElementById("basisbar");
         if (bb && j.basis) bb.textContent = j.basis;
         var html = j.items.map(RENDER[state.tab]).join("");
@@ -453,7 +678,21 @@
         }
         bindOrderLinks();
       } catch (e) {
-        if (moreBtn) moreBtn.textContent = "Failed: " + e.message;
+        // Say it IN THE LIST. The button is display:none whenever there is no
+        // next page, so putting the only failure signal on it hid the error
+        // exactly when the list was empty — which reads as "nothing here",
+        // the one thing a monitoring page must never say by accident.
+        if (list && !state.count) {
+          list.innerHTML =
+            '<div class="empty" style="color:var(--red)">Could not load this tab: ' +
+            esc(e.message) +
+            "<br><br>This is a failure to READ, not a statement that there is " +
+            "nothing here.</div>";
+        }
+        if (moreBtn) {
+          moreBtn.style.display = "block";
+          moreBtn.textContent = "Failed: " + e.message + " — retry";
+        }
       } finally {
         state.loading = false;
       }

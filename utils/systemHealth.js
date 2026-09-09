@@ -65,6 +65,7 @@ const REAL_DEPS = {
   marketplaces: () => require("./marketplaces"),
   connectors: () => require("./systemHealthConnectors"),
   eldoradoFarmService: () => require("./eldoradoFarmService"),
+  gameflipFarmService: () => require("./gameflipFarmService"),
   settings: () => require("./settings"),
   // routes/renterAdminRoutes requires half the app, so like utils/operatorFarm
   // this is pulled in only at call time — a module-level require here would be
@@ -1053,6 +1054,289 @@ const CHECKS = [
           (notReached ? ", " + notReached + " left for the next run" : "") +
           ". Absence from the id list is never treated as proof.",
         items: capItems(ghosts),
+      };
+    },
+  },
+
+  {
+    id: "gameflip.rentfarm",
+    title: "Gameflip buffered offers can be honoured",
+    // "rentfarm", not "listings": the board groups by subsystem, and the two
+    // existing rent-farm checks (capacity and coverage) are what an operator
+    // reads this one beside. Filed under "listings" it sat among the auto-list
+    // checks, which answer a different question.
+    group: "rentfarm",
+    severity: "critical",
+    // Gameflip has no post-sale hook: the listing carries one account as an
+    // auto-delivered code and Gameflip hands it over the instant the buyer pays
+    // (PART A of docs/SYSTEM-HEALTH-CONTRACT.md). So the account is claimed
+    // BEFORE the sale and waits inside the offer — and that moves the whole risk
+    // into the days between publish and sale. On the three markets with an order
+    // API a broken offer fails LOUDLY at sale time and a buyer waits; a broken
+    // BUFFERED offer fails silently, because there is nothing left to run: the
+    // buyer already has the credentials to an account that was banned, sold by
+    // hand or handed back to the pool while the offer sat there. That is the one
+    // condition here worth waking someone for, and nothing else looks for it —
+    // listings.ghost asks whether the offer is still on sale, never whether what
+    // it delivers is still ours.
+    //
+    // Read entirely through gameflipFarmService.bufferState(), which is also
+    // what the tracker renders. "Unhealthy" is DEFINED there (pool row gone,
+    // sold by hand, back in the pool, no RenterAccount, on no bot config, window
+    // already ended, disabled on the bot, token no longer scans) and it joins
+    // listing -> pool -> RenterAccount by clientSecret rather than by login,
+    // because duplicate logins are a known population and a login join attaches
+    // a namesake's farming state to the offer. A second implementation here
+    // would be a second answer to one question, which is exactly what let the
+    // 10/10 stack pass unnoticed while every other dial read fine.
+    //
+    // No marketplace call at all. The cost is bounded, projected DB reads plus
+    // the rental-stack read rentfarm.capacity already makes; hourly and
+    // sequential, so paying for it twice is affordable.
+    //
+    // An offline Pi costs ~63s a read and this pass makes two, so the default
+    // 60s budget would report `unknown` on a slow-but-working link.
+    timeoutMs: 3 * 60 * 1000,
+    async run(ctx) {
+      const gf = ctx.dep("gameflipFarmService");
+      const state = await gf.bufferState();
+      // bufferState keeps rendering for the tracker even when one of its joins
+      // fails, so "not a state object" is not the only unreadable shape.
+      if (!state || typeof state !== "object") {
+        return {
+          status: "unknown",
+          measured: null,
+          threshold: "the buffer state is readable",
+          summary: "The Gameflip rent-farm buffer state could not be read",
+          detail: "Not evidence of a problem — only that this check could not run.",
+        };
+      }
+
+      // A FAILED JOIN IS NOT A MEASUREMENT.
+      //
+      // bufferState reports which of its joins could not be read. Drawing a
+      // verdict from the empty array a failed join leaves behind is how this
+      // check would have announced a critical failure over data it had never
+      // seen: if the AvailableAccount read rejects — an ordinary transient on a
+      // bytes-bound Atlas shared tier — every live offer gets "the pool account
+      // row is gone", and the check would report "N live buffered offer(s)
+      // would hand over a dead account the moment someone pays". Nothing was
+      // measured. The same shape via the renter join makes every offer look
+      // un-farmed, and via the sale-record join makes every sold offer look like
+      // its window never started.
+      //
+      // The contract's rule cuts both ways: a check that could not run is
+      // `unknown`, never `ok` — and never `fail` either.
+      const unreadable = Array.isArray(state.unreadable) ? state.unreadable : [];
+      if (unreadable.length) {
+        return {
+          status: "unknown",
+          measured: null,
+          threshold: "every join the verdict depends on is readable",
+          summary:
+            "Could not read " + unreadable.length + " part(s) of the buffer " +
+            "state, so no verdict is possible: " + unreadable.join("; ").slice(0, 200),
+          detail:
+            "A join that failed leaves an empty array behind, and a verdict " +
+            "drawn from it would report a critical failure over data nobody " +
+            "measured. Not evidence of a problem — only that this check could " +
+            "not run.",
+          items: capItems(unreadable.map((u) => ({ unreadable: u }))),
+        };
+      }
+
+      const live = Array.isArray(state.live) ? state.live : [];
+      const sold = Array.isArray(state.sold) ? state.sold : [];
+      const missing = Array.isArray(state.missing) ? state.missing : [];
+      const stranded = Array.isArray(state.stranded) ? state.stranded : [];
+      const cap = state.capacity || {};
+      const target = Number(state.target) || 0;
+      const reserve = Number(state.reserve) || 0;
+      const freeText = cap.ok ? String(cap.totalFree) : "UNKNOWN";
+
+      // `problem` is bufferState's own verdict on each live offer; filtering the
+      // live rows rather than reading its `problems` array keeps this to ONE
+      // field, so a projection or a rename can never leave this check reading a
+      // list that is always empty.
+      const dead = live.filter((o) => o && o.problem);
+      // A sold offer whose window never started. `windowStarted` is false only
+      // when the FarmServiceOrder written at sale carries no farmUntil — the
+      // buyer paid for N days from purchase and is on nothing.
+      const unstarted = sold.filter((s) => s && !s.windowStarted);
+
+      // A short buffer is only a finding when we can say WHY, and only two
+      // reasons are the owner's to act on. If the buffer is off, or Gameflip is
+      // not configured, "below target" is the expected state of a subsystem that
+      // is not running — flagging it every hour is how a board gets ignored.
+      // (Whether Gameflip still authenticates is connector.gameflip's question.)
+      const shouldBeFilling = !!state.enabled && !!state.configured;
+      // The floor really is holding the buffer down even when hosts are offline:
+      // topUpBuffer decides on this same understated free count and has already
+      // stopped publishing. That is the opposite of the rentfarm.capacity
+      // downgrade — there an unread host could only mean MORE slots than we
+      // reported, here it is the number the service itself acted on — so the
+      // verdict stands and `detail` names the hosts instead.
+      const floorHit =
+        shouldBeFilling && missing.length > 0 && cap.ok === true && !!cap.belowReserve;
+      // Short, and free slots unreadable: topUpBuffer refuses to guess there is
+      // room, so the buffer has stopped — but the floor cannot be named as the
+      // reason off a read that did not happen.
+      const shortUnexplained =
+        shouldBeFilling && missing.length > 0 && cap.ok === false;
+
+      // SHORT FOR A REASON THE CHECK DID NOT ASK ABOUT.
+      //
+      // `floorHit` and `shortUnexplained` were the only short-buffer findings,
+      // so every OTHER reason a shelf stays empty was invisible here while the
+      // tracker showed it in red two clicks away. With the buffer switched on
+      // and Gameflip configured, this check answered
+      //   ok — "0 live buffered offer(s) of 100 target … every backing account
+      //         is still farming"
+      // which is vacuously true and reads as reassurance.
+      //
+      // The reasons that were missing, all of which the service already records:
+      //   * dryRun — publishes nothing, by design, and says so nowhere else;
+      //   * lastPass.ran false — nothing has ever run;
+      //   * lastPass.stopped — the service's own recorded stop reason;
+      //   * pool.error / pool.willAdd === 0 — no pristine account to claim;
+      //   * stranded — offers whose account is already gone.
+      const pool = state.pool || {};
+      const lastPass = state.lastPass || {};
+      const idleReasons = [];
+      if (shouldBeFilling && missing.length > 0) {
+        if (state.dryRun) idleReasons.push("the buffer is in DRY RUN (autoFarm.gfBufferDryRun)");
+        if (lastPass.ran === false) idleReasons.push("no top-up pass has run yet");
+        if (lastPass.stopped) idleReasons.push("last pass stopped: " + lastPass.stopped);
+        if (pool.error) idleReasons.push("pool unreadable: " + pool.error);
+        else if (Number(pool.willAdd) === 0)
+          idleReasons.push("no pristine pool account can be claimed right now");
+      }
+      const idleUnexplained =
+        shouldBeFilling && missing.length > 0 && idleReasons.length > 0;
+
+      const status = dead.length
+        ? "fail"
+        : unstarted.length || floorHit || idleUnexplained || stranded.length
+          ? "warn"
+          : shortUnexplained
+            ? "unknown"
+            : "ok";
+
+      const parts = [];
+      if (dead.length)
+        parts.push(
+          dead.length +
+            " live buffered offer(s) would hand over a dead account the moment " +
+            "someone pays",
+        );
+      if (idleReasons.length)
+        parts.push(
+          missing.length + " offer(s) short and nothing is filling them — " +
+            idleReasons.join("; "),
+        );
+      if (stranded.length)
+        parts.push(
+          stranded.length + " stranded buffered account(s) with no live offer",
+        );
+      if (unstarted.length)
+        parts.push(
+          unstarted.length +
+            " sold offer(s) have no farming window — those buyers paid for a " +
+            "term that never started",
+        );
+      if (floorHit)
+        parts.push(
+          "buffer short by " +
+            missing.length +
+            " offer(s): the reserve floor is holding it down (" +
+            cap.totalFree +
+            " free slot(s), " +
+            reserve +
+            " reserved for paid on-demand orders)",
+        );
+      if (shortUnexplained)
+        parts.push(
+          "buffer short by " +
+            missing.length +
+            " offer(s) and free slots could not be read, so the reason is unmeasured",
+        );
+
+      return {
+        status,
+        measured: dead.length + unstarted.length,
+        threshold:
+          "0 offers we cannot honour of " +
+          live.length +
+          " live buffered offer(s) (target " +
+          target +
+          "), " +
+          freeText +
+          " free slot(s) with " +
+          reserve +
+          " reserved",
+        summary: parts.length
+          ? parts.join("; ")
+          : live.length +
+            " live buffered offer(s) of " +
+            target +
+            " target, " +
+            freeText +
+            " free slot(s) — every backing account is still farming",
+        detail:
+          (state.summary ? state.summary + ". " : "") +
+          "The farming window is stamped at SALE, never at publish, so an " +
+          "unsold offer sitting on the 365-day placeholder is farming a bonus, " +
+          "not running a shortfall — a SOLD one with no window is the shortfall." +
+          (state.enabled
+            ? ""
+            : " The buffer is OFF (autoFarm.gameflipRentFarm), so a short " +
+              "buffer is expected and is not judged here; anything live above " +
+              "is left over and still judged.") +
+          (state.configured
+            ? ""
+            : " Gameflip keys are not configured, which is connector.gameflip's " +
+              "question rather than this one's.") +
+          (cap.ok && (cap.offlineHosts || []).length
+            ? " Host(s) offline and NOT counted in free slots: " +
+              cap.offlineHosts.join(", ") +
+              " — the real figure is higher, but it is the counted one the " +
+              "buffer stopped on."
+            : "") +
+          (stranded.length
+            ? " " +
+              stranded.length +
+              " account(s) still held by dead offers; the next top-up pass " +
+              "reclaims those."
+            : ""),
+        items: capItems([
+          ...dead.map((o) => ({
+            kind: "backing account cannot be delivered",
+            externalId: o.externalId,
+            title: String(o.title || "").slice(0, 120),
+            game: o.game,
+            days: o.days,
+            price: o.price,
+            login: o.login,
+            poolId: o.poolId,
+            why: o.problem,
+            url: o.url,
+          })),
+          ...unstarted.map((s) => ({
+            kind: "sold, but the buyer's window never started",
+            externalId: s.externalId,
+            title: String(s.title || "").slice(0, 120),
+            game: s.game,
+            days: s.days,
+            price: s.price,
+            login: s.login,
+            soldAt: s.soldAt,
+            // A sale with no FarmServiceOrder row at all is a different failure
+            // from one whose order recorded no window, and they are fixed
+            // differently: the first never reached onBufferedSale.
+            recorded: s.recorded,
+            lastError: String(s.lastError || "").slice(0, 160),
+          })),
+        ]),
       };
     },
   },

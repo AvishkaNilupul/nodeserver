@@ -16,6 +16,15 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const { loginsOnActiveListings, notListed } = require("./listedLogins");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const mp = require("./marketplaces");
+// Module-level, not lazy: gameflipFarmService's own top-level closure is 23
+// modules (models, marketplaces, operatorFarm, rentFarmCapacity, setImage,
+// botHosts …) and gameflipFulfiller is in none of them — its only reference to
+// this file is in comments, and the one path that reaches back here
+// (operatorFarm -> routes/renterAdminRoutes -> listingDetach) is a lazy require
+// inside a function, so it never runs at load time. That is checked, not
+// assumed: the lazy `require("./autoLister")` further down exists because
+// autoLister DOES require this file at module level, and that cycle is real.
+const gfFarm = require("./gameflipFarmService");
 const { decrypt } = require("./secretBox");
 const { buildSetGridImage } = require("./setImage");
 const { recordListingSale } = require("./saleLearning");
@@ -108,6 +117,44 @@ async function releaseAccount(accountId, setId) {
     return;
   }
   await releaseSetForAccounts([String(accountId)], String(setId), GF_CLAIM_TAG);
+}
+
+// The rent-farm sibling of the release above, for a BUFFERED offer.
+//
+// A buffered row is not stock: it carries ONE pristine pool account and no
+// DropSet at all (utils/gameflipFarmService creates it with `set` unset and
+// `accountId` unset — only `rentFarmPoolId`). So the DropSet-scoped release
+// would hit its own `if (!setId)` refusal and log instead of releasing, and the
+// `row.accountId` guard on both retire paths means it would not even be
+// reached. Either way the account is LEAKED: nothing revisits a retired row —
+// the watcher reads `status: "active"` only — so it stays out of the pool AND
+// holds a rental slot, farming for nobody. That leak is what lost the slots
+// behind order 4b20765f, and it is non-negotiable 5 of the contract.
+//
+// Best-effort, matching the release calls it sits beside: the row is already
+// terminal by the time this runs, and a hand-back that fails puts the pool id
+// back on the row for gameflipFarmService's stranded-row sweep to retry.
+async function releaseBufferedRow(row, reason) {
+  try {
+    const r = await gfFarm.releaseBuffered(row, { reason });
+    if (!r || !r.released) {
+      // A refusal here is not noise. "Nothing happened" with no reason is how a
+      // leaked pristine account stays invisible for weeks.
+      console.error(
+        "gameflip rent-farm release did not fire for listing " +
+          (row.externalId || row._id) +
+          ": " +
+          ((r && (r.skipped || r.error)) || "no answer"),
+      );
+    }
+  } catch (e) {
+    console.error(
+      "gameflip rent-farm release threw for listing " +
+        (row.externalId || row._id) +
+        ":",
+      e.message,
+    );
+  }
 }
 
 function gameflipDeliveryCode(login, password) {
@@ -449,7 +496,14 @@ async function syncOnce() {
             },
           },
         ).catch(() => null);
-        if (retired && row.accountId) {
+        // A rent-farm row takes the buffered lane: it has a pool account, not a
+        // set. Retire FIRST, release second — the order both branches already
+        // use, and the one releaseBuffered enforces on its own side by refusing
+        // to act while the row still says "active", because an offer that is
+        // still purchasable sells credentials we have just handed back.
+        if (retired && row.rentFarm) {
+          await releaseBufferedRow(row, "listing 404 on Gameflip");
+        } else if (retired && row.accountId) {
           await releaseAccount(row.accountId, row.set).catch(() => {});
         }
         if (retired) {
@@ -491,7 +545,10 @@ async function syncOnce() {
           },
         },
       ).catch(() => null);
-      if (retired && row.accountId) {
+      // Same split as the 404 branch: a rent-farm row has no set.
+      if (retired && row.rentFarm) {
+        await releaseBufferedRow(row, "gameflip reports \"" + status + "\"");
+      } else if (retired && row.accountId) {
         await releaseAccount(row.accountId, row.set).catch(() => {});
       }
       if (retired) {
@@ -563,6 +620,51 @@ async function syncOnce() {
           : "Last unit — nothing left to relist.") +
         (row.url ? "\n\n" + row.url : ""),
     ).catch((e) => console.error("gameflip sale notify error:", e.message));
+    // A rent-farm row is a BUFFERED offer, and this is where its buyer's clock
+    // starts. It sells a farming WINDOW, not stock: one pool account already
+    // provisioned before the sale, no DropSet, and Gameflip released the
+    // credentials the instant the buyer paid. So it must be routed away from
+    // the auto-delivery lane below, which asks for an unsold account holding a
+    // whole bundle and answers "Out of stock — no unsold account holds this
+    // whole bundle" for a row that has no bundle at all. That is the failure
+    // that took the five original Gameflip rent-farm offers down: the buyer
+    // pays, waits for a delivery nothing can produce, and cancels.
+    //
+    // ABOVE the autoDeliver guard, deliberately. A buffered offer IS an
+    // auto-delivery listing (gameflipFarmService writes autoDeliver: true), so
+    // that guard would wave it straight through to the relist lane.
+    //
+    // Reconciling and learning from the sale above still applies to it; only
+    // relisting does not. onBufferedSale takes its own atomic claim (on
+    // rentFarmPoolId, not on status — this lane has already flipped status to
+    // "sold" by now), so routing here twice cannot start two windows.
+    if (row.rentFarm) {
+      try {
+        const r = await gfFarm.onBufferedSale(row);
+        // onBufferedSale alerts the owner itself on every failure it can name,
+        // because a paid order that cannot be honoured is not a log line. Echo
+        // it to the console too so a pass reads straight.
+        if (r && (r.error || r.skipped)) {
+          console.error(
+            "gameflip rent-farm sale " +
+              row.externalId +
+              ": " +
+              (r.error || r.skipped),
+          );
+        }
+      } catch (e) {
+        // The money is taken and the credentials are already with the buyer, so
+        // there is nothing here to roll back — only something to shout about.
+        // Swallowing it keeps the rest of the fleet's sales being reconciled
+        // this pass; letting it out of syncOnce would abandon every row after
+        // this one, which is how one bad sale hides ten good ones.
+        console.error(
+          "gameflip rent-farm sale " + row.externalId + " threw:",
+          e.message,
+        );
+      }
+      continue;
+    }
     // Reconciling and learning from a sale is for EVERY row; relisting is only
     // ever for the auto-delivery chain. A hand-made listing must never be
     // republished on the owner's behalf — that is their stock and their
@@ -610,6 +712,16 @@ async function syncOnce() {
   const stalled = await MarketplaceListing.find({
     marketplace: "gameflip",
     status: "sold",
+    // Never a rent-farm row. Its replacement comes from topUpBuffer, which
+    // publishes a NEW offer against a freshly provisioned account; republishing
+    // the sold row would advertise the buyer's own credentials a second time.
+    // Filtered in the QUERY rather than skipped in the loop below, because this
+    // lane is capped at five and rows are taken oldest-deadline-first: a
+    // buffered row can never succeed here (no set to rebuild the listing from),
+    // so it would sit at the head of the window forever and starve exactly the
+    // transient failures the retry exists for — the same starvation this file
+    // already documents twice.
+    rentFarm: { $ne: true },
     qtyRemaining: { $gt: 0 },
     lastError: /^auto-relist failed/,
     $or: [
@@ -696,6 +808,22 @@ async function syncOnce() {
 const TICK_MS = 60 * 1000;
 let started = false;
 
+// The rent-farm buffer tops up on its own, slower, clock.
+//
+// It has to be CALLED by something or the shelf never fills — and until this
+// existed nothing in the repo called topUpBuffer at all, so the service was
+// inert while the health check happily reported "0 live of 100 target" as ok.
+//
+// Its own pass is bounded (perPass, default 5) and every publish is a
+// rate-limited Gameflip create, so it runs on a much slower clock than the
+// 60-second sale watcher: sale detection is time-critical for a buyer who has
+// already paid, restocking a shelf is not, and both share one rate limiter.
+//
+// It self-guards on autoFarm.gameflipRentFarm (OFF by default) and on
+// gfBufferDryRun (dry run by default), so starting it unconditionally is safe:
+// nothing publishes until both are deliberately set.
+const BUFFER_TICK_MS = 15 * 60 * 1000;
+
 function start() {
   if (started) return;
   started = true;
@@ -710,6 +838,26 @@ function start() {
   };
   const t = setTimeout(tick, TICK_MS);
   if (t.unref) t.unref();
+
+  const bufferTick = async () => {
+    try {
+      const r = await gfFarm.topUpBuffer();
+      if (r && (r.published || r.stopped)) {
+        console.log(
+          "gameflip rent-farm buffer: published " + (r.published || 0) +
+            (r.stopped ? " — stopped: " + r.stopped : ""),
+        );
+      }
+    } catch (e) {
+      console.error("gameflip rent-farm buffer error:", e.message);
+    }
+    const b = setTimeout(bufferTick, BUFFER_TICK_MS);
+    if (b.unref) b.unref();
+  };
+  // First pass one tick in, not at boot: let the sale watcher and the session
+  // refreshers settle before adding publishes to the same rate limiter.
+  const b = setTimeout(bufferTick, BUFFER_TICK_MS);
+  if (b.unref) b.unref();
 }
 
 module.exports = {

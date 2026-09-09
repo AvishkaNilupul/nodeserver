@@ -183,6 +183,62 @@ const marketplaceListingSchema = new mongoose.Schema(
     // normal single-unit / quantity row.
     lotSize: { type: Number, default: 0 },
     lotId: { type: String, default: "", index: true },
+    // Gameflip rent-farm buffer: this row is a pre-provisioned "Automatic
+    // Farming" offer. It sells a rental WINDOW, not stock — it has no DropSet
+    // to claim against and must never reach the ordinary stock fulfiller.
+    //
+    // Gameflip has no post-sale hook: the account is baked into the listing as
+    // an auto-delivered digital code and handed over the instant the buyer pays,
+    // so unlike Eldorado / PlayerAuctions / G2G there is nothing to provision
+    // INTO at sale time. The account is claimed and attached BEFORE the sale and
+    // waits in the buffer; the window is stamped when the buyer PAYS, never at
+    // publish, so an offer that sat unsold for six days still delivers its full
+    // term (docs/GAMEFLIP-RENT-FARM-CONTRACT.md).
+    //
+    // WHY THIS IS AN EXPLICIT FLAG AND NOT A TITLE REGEX
+    // The other three rent-farm services match on the title (FARM_TITLE,
+    // /\bAutomatic\s+Farming\b/i, in utils/eldoradoFarmService.js) because they
+    // are reading an ORDER off a marketplace and the title is genuinely all they
+    // are given — they then need a GAME_ALIASES table to undo the storefront's
+    // spelling. Here we CREATE the row ourselves, so we can record what it is
+    // instead of inferring it back out of a string we wrote.
+    //
+    // It also has to be a flag because it is a routing decision, and a regex is
+    // wrong in both directions. A false positive: the owner hand-makes a listing
+    // named "… Automatic Farming …" and an ordinary bundle sale is diverted into
+    // the buffered-sale lane, which would re-stamp a rental window on an account
+    // nobody rented — the same class of mistake as repricing a manual listing,
+    // which is why `origin` exists a few fields up. A false negative: a rent-farm
+    // sale falls through to publishAutoDelivery, which demands one account
+    // holding a whole DropSet and fails "Out of stock — no unsold account holds
+    // this whole bundle". That is exactly how the five original Gameflip
+    // rent-farm offers became unsellable and had to be taken down.
+    rentFarm: { type: Boolean, default: false, index: true },
+    // The single game the buffered account is pinned to, and the term the buyer
+    // is BUYING, in days (120 / 180 / 365). The term is stored because it cannot
+    // be recovered at sale time from the account: a buffered account is
+    // provisioned with a deliberately long placeholder window (365d) purely so
+    // renterExpiry never tears it down while its offer is live, and on sale
+    // farmUntil is re-stamped to now + rentFarmDays — DOWN, for every term
+    // shorter than the placeholder. The buyer paid for N days from purchase, not
+    // for whatever was left of our placeholder.
+    rentFarmGame: { type: String, default: "" },
+    rentFarmDays: { type: Number, default: 0 },
+    // The pool account (AvailableAccount _id) parked behind this offer, so an
+    // unsold offer that is delisted, expires or 404s hands back exactly THAT
+    // account and nothing else. Releasing by anything broader — the set, the
+    // game, a tag — is how this codebase once freed drops a buyer had already
+    // paid for; a release must name its account. Empty on any row that is not a
+    // buffered offer.
+    rentFarmPoolId: { type: String, default: "" },
+    // Sale-handling lease. The sale claim used to be taken by CLEARING
+    // rentFarmPoolId — which destroyed the only pointer to the account before
+    // any of the work had happened, so a transient Atlas rejection mid-sale left
+    // farmUntil at publish+365 (a straight shortfall on the term the buyer
+    // bought) with no way to retry and nothing naming the account. The claim is
+    // now a lease that keeps the pointer; the pointer is cleared only once the
+    // window is actually stamped.
+    rentFarmSaleClaimedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

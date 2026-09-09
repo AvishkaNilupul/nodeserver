@@ -12,6 +12,12 @@
 // every number comes from our own database, so opening the page cannot disturb a
 // live market (feedback_live_market_safety).
 //
+// ONE exception to "our own database", and it is a read: the Gameflip rent-farm
+// buffer tab reads the rental stack configs off the bot hosts, because how many
+// free slots are left exists nowhere else. Still read-only, still not a
+// marketplace call — but it is a host read, so it is cached for a minute rather
+// than repeated per page (see bufferSnapshot).
+//
 // ── The honesty problem, and how this file handles it ──────────────────────
 //
 // Sales evidence is UNEVEN across platforms, measured on prod 2026-09-09:
@@ -77,6 +83,7 @@ const CATEGORIES = new Set([
   // Per-market extras. A marketplace's tabs do NOT have to match the others':
   // what is worth looking at depends on how that platform actually delivers.
   "attached",
+  "rentfarm",
 ]);
 
 // The tabs each market shows, in order. The first six are common; anything after
@@ -87,9 +94,19 @@ const CATEGORIES = new Set([
 // behind this offer, and is it still good?" decides whether a buyer gets
 // anything. On Eldorado or PlayerAuctions the stock is picked at delivery time
 // and the same tab would be meaningless, so they do not get it.
+//
+// `rentfarm` is Gameflip ALONE, and it is not a second copy of `orders`. That
+// tab lists FarmServiceOrder rows — a paid order arrived and we provisioned an
+// account into it, which is what the three order-API platforms do. Gameflip has
+// no order API and no post-sale hook at all (docs/SYSTEM-HEALTH-CONTRACT.md
+// PART A), so its accounts must be claimed and parked BEFORE anyone buys. This
+// tab is that buffer: not what was sold, but whether there is anything ready to
+// sell. GGSel needs the same thing eventually and deliberately does not get it
+// here — nothing is built for it yet, and a tab that renders an empty buffer for
+// a market with no buffer service would read as "starved" rather than "absent".
 const COMMON_TABS = ["sales", "deliveries", "listings", "orders", "errors", "events"];
 const EXTRA_TABS = {
-  gameflip: ["attached"],
+  gameflip: ["attached", "rentfarm"],
   ggsel: ["attached"],
 };
 function tabsFor(market) {
@@ -158,6 +175,10 @@ const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // refreshing the page must not repeat it.
 let rollupCache = { at: 0, data: null };
 const ROLLUP_TTL_MS = 60 * 1000;
+// How many listing rows the rollup will read. Prod is ~1,800, so this is
+// headroom rather than a real bound — but it is REPORTED when reached, because
+// a truncated total that looks complete is worse than no total.
+const ROLLUP_ROW_CAP = 5000;
 
 async function rollup() {
   if (rollupCache.data && Date.now() - rollupCache.at < ROLLUP_TTL_MS) {
@@ -181,8 +202,17 @@ async function rollup() {
       "units.deliveredAt": 1,
     },
   )
-    .limit(5000)
+    // Sorted, and the cap is reported. An UNSORTED .limit() drops rows in
+    // natural order — the same silent-truncation shape that hid 35 Gameflip
+    // listings owing 171 units — and a rollup that quietly omits rows renders
+    // revenue and sale counts that are simply wrong, with nothing saying so.
+    // Newest first, so if the cap is ever reached it is the oldest history that
+    // is missing rather than an arbitrary slice.
+    .sort({ updatedAt: -1 })
+    .limit(ROLLUP_ROW_CAP + 1)
     .lean();
+  const rollupTruncated = rows.length > ROLLUP_ROW_CAP;
+  if (rollupTruncated) rows.length = ROLLUP_ROW_CAP;
 
   const per = {};
   for (const m of MARKETS) {
@@ -292,13 +322,168 @@ async function rollup() {
   const data = {
     markets: MARKETS.map((m) => per[m]),
     generatedAt: new Date(),
+    truncated: rollupTruncated,
     note:
       "Revenue is evidence, not accounting: order-API platforms report a real " +
       "delivered unit, quantity platforms only report stock going down. Each " +
-      "card says which it used.",
+      "card says which it used." +
+      (rollupTruncated
+        ? " ⚠ Only the newest " + ROLLUP_ROW_CAP + " listing rows were read, so " +
+          "these totals are INCOMPLETE."
+        : ""),
   };
   rollupCache = { at: Date.now(), data };
   return { ...data, cached: false };
+}
+
+/* --------------------- the gameflip rent-farm buffer ---------------------- */
+
+// This is the one tab whose EMPTY state would be a lie.
+//
+// Every other tab here is a list of things that happened: nothing to show means
+// nothing happened, and that is fine. A starved rent-farm buffer also shows no
+// live offers — and that is the emergency, not the calm. The whole reason the
+// buffer exists is that Gameflip hands the account over the instant the buyer
+// pays, so an empty buffer is a shop that will fail the next sale it takes.
+//
+// So the accounting is emitted as the FIRST row of the first page and this tab
+// can never render "no rows" while the shelf is bare. Everything after it is
+// ordered by what costs money soonest, not by recency.
+let bufferCache = { at: 0, stamp: "", rows: null };
+
+// A minute, matching the rollup above, and for a stronger reason than caching a
+// big read. bufferState() is not only a database read: it reaches
+// rentFarmCapacity.snapshot(), which reads the rental stack configs off every
+// bot host, and the Pi's link is seconds of round trip
+// ([[reference_pi_link_timeouts]]). Paging a few hundred buffered rows at 25 a
+// page would otherwise re-read every host once per scroll.
+const BUFFER_TTL_MS = 60 * 1000;
+
+// The cursor for this tab is "<snapshot stamp>|<offset>", not the "<date>|<_id>"
+// keyset every other tab uses, and the difference is deliberate rather than
+// lazy. Those tabs page a Mongo query, where skip() walks everything it skips
+// and equal timestamps have no tiebreak. This one pages ONE computed snapshot
+// already sitting in memory, where an offset is exact and costs nothing. The
+// stamp travels with it so a cursor minted against an older snapshot is
+// REPORTED instead of being silently stitched onto a newer one: serving page 2
+// of a different list is how a row vanishes with nobody noticing, and showing
+// what is missing is this tab's entire job.
+function parseOffsetCursor(raw) {
+  if (!raw) return null;
+  const s = String(raw);
+  const bar = s.lastIndexOf("|");
+  if (bar < 1) return null;
+  const n = parseInt(s.slice(bar + 1), 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return { stamp: s.slice(0, bar), from: Math.min(n, 10000) };
+}
+
+function makeOffsetCursor(stamp, n) {
+  return String(stamp) + "|" + String(n);
+}
+
+// Flatten one bufferState() into the row list the page renders.
+//
+// Nothing is recomputed here and nothing is inferred: the service already
+// decided what is healthy, what is missing and why, and a console that
+// second-guessed it would be a second opinion nobody asked for and nobody would
+// keep in step.
+function bufferRows(state) {
+  const cap = state.capacity || {};
+  const live = state.live || [];
+  const sold = state.sold || [];
+  // Split off the service's own `healthy` verdict rather than reading its
+  // `problems` array as well: one source, so the two lists cannot disagree
+  // about a row and show it twice.
+  const healthy = live.filter((r) => r.healthy);
+  const unhealthy = live.filter((r) => !r.healthy);
+  const unstarted = sold.filter((s) => !s.windowStarted);
+  const started = sold.filter((s) => s.windowStarted);
+  const catTotal = Number(state.catalogue && state.catalogue.total) || 0;
+  const target = Number(state.target) || 0;
+  // What the service will actually try to publish: the catalogue capped by the
+  // target. Saying "12 of 87 wanted" when the target is 100 and the catalogue
+  // holds 87 is the honest denominator; the catalogue size alone would report a
+  // shortfall the buffer is not even trying to fill.
+  const wanted = catTotal && target ? Math.min(catTotal, target) : catTotal;
+
+  // The FarmServiceOrder id a buffered sale is recorded under is
+  // "gf:<externalId>" (gameflipFarmService.onBufferedSale). It is only offered
+  // as a clickable trail when the service's own join actually FOUND that order
+  // row — a link that always lands on "nothing recorded for this order" trains
+  // the operator to stop clicking the one that matters.
+  const soldRow = (s) => ({
+    kind: "sold",
+    ...s,
+    orderId: s.recorded && s.externalId ? "gf:" + String(s.externalId) : "",
+  });
+
+  const rows = [
+    {
+      kind: "summary",
+      headline: state.summary || "",
+      enabled: !!state.enabled,
+      configured: !!state.configured,
+      target,
+      reserve: Number(state.reserve) || 0,
+      perPass: Number(state.perPass) || 0,
+      windowDays: Number(state.windowDays) || 0,
+      catalogueTotal: catTotal,
+      catalogueTruncated: !!(state.catalogue && state.catalogue.truncated),
+      wanted,
+      live: live.length,
+      healthy: healthy.length,
+      unhealthy: unhealthy.length,
+      missing: (state.missing || []).length,
+      stranded: (state.stranded || []).length,
+      sold: sold.length,
+      soldUnstarted: unstarted.length,
+      // null, never 0. An unreadable host is not evidence of a full stack — the
+      // one lesson that cost a wrong diagnosis already — so the page prints "?"
+      // rather than a number nobody measured.
+      freeSlots: cap.ok ? cap.totalFree : null,
+      totalCapacity: cap.ok ? cap.totalCapacity : null,
+      spendable: cap.ok ? cap.spendable : null,
+      belowReserve: cap.ok ? !!cap.belowReserve : null,
+      capacityError: cap.ok ? "" : String(cap.error || "capacity unreadable"),
+      offlineHosts: cap.offlineHosts || [],
+      pool: state.pool || null,
+      lastPassAt: (state.lastPass && state.lastPass.at) || null,
+      lastPassRan: !!(state.lastPass && state.lastPass.ran),
+      lastPassStopped: (state.lastPass && state.lastPass.stopped) || "",
+      notes: (state.notes || []).slice(0, 12),
+    },
+  ];
+
+  // Ordered by what costs money soonest. A live offer whose account is dead
+  // sells a dead account to the very next buyer. A stranded account is a
+  // pristine account AND a rental slot that a paid on-demand order elsewhere
+  // cannot have — the shortage that lost 4b20765f. A sold offer with no farming
+  // window is a buyer already short-changed. Missing offers are revenue not
+  // taken, which is the cheapest of the four. Only then the ordinary inventory.
+  for (const r of unhealthy) rows.push({ kind: "live", ...r });
+  for (const r of state.stranded || []) rows.push({ kind: "stranded", ...r });
+  for (const s of unstarted) rows.push(soldRow(s));
+  for (const m of state.missing || []) rows.push({ kind: "missing", ...m });
+  for (const r of healthy) rows.push({ kind: "live", ...r });
+  for (const s of started) rows.push(soldRow(s));
+  return rows;
+}
+
+async function bufferSnapshot() {
+  if (bufferCache.rows && Date.now() - bufferCache.at < BUFFER_TTL_MS) {
+    return { ...bufferCache, cached: true };
+  }
+  // Required here, not at the top of the file. gameflipFarmService reaches back
+  // into two routers (botConfigRoutes, renterAdminRoutes) exactly as
+  // operatorFarm does, and this file is itself a router that server.js mounts —
+  // a lazy require keeps module load order irrelevant, which is the same reason
+  // the service takes its own dependencies that way.
+  const gfFarm = require("../utils/gameflipFarmService");
+  const state = await gfFarm.bufferState();
+  const stamp = new Date(state.at || Date.now()).toISOString();
+  bufferCache = { at: Date.now(), stamp, rows: bufferRows(state) };
+  return { ...bufferCache, cached: false };
 }
 
 /* -------------------------------- routes --------------------------------- */
@@ -601,6 +786,46 @@ router.get(
         });
       }
 
+      if (category === "rentfarm") {
+        // Gameflip-only; tabsFor() has already refused it for every other
+        // market. One snapshot, paged in memory — see bufferSnapshot above for
+        // why this tab is not a query.
+        const snap = await bufferSnapshot();
+        const off = parseOffsetCursor(req.query.cursor);
+        const from = off ? off.from : 0;
+        const items = snap.rows.slice(from, from + limit);
+        const end = from + items.length;
+        const hasMore = end < snap.rows.length;
+        // A cursor from an older snapshot means the rows shifted underneath the
+        // paging. Say so; do not quietly serve offset 25 of a different list.
+        const resnapped = !!(off && off.stamp !== snap.stamp);
+        return res.json({
+          success: true,
+          items,
+          hasMore,
+          nextCursor: hasMore ? makeOffsetCursor(snap.stamp, end) : null,
+          total: snap.rows.length,
+          snapshotAt: snap.stamp,
+          cached: !!snap.cached,
+          resnapped,
+          basis:
+            "One snapshot of the pre-provisioned buffer, summary row first, so " +
+            "an empty buffer still says WHY instead of rendering an empty " +
+            "list. Live and sold counts are OUR database's view — nothing here " +
+            "calls Gameflip, so a listing Gameflip has since pulled still reads " +
+            "as live until the watcher retires it. Free slots ARE read live " +
+            "from the bot configs and exclude offline hosts, so that figure can " +
+            "only be higher than shown, never lower. Per-slot 'missing' reasons " +
+            "from the last top-up pass are held in memory and lost on restart; " +
+            "the row says which reason it is giving." +
+            (snap.cached ? " Snapshot up to 60s old." : "") +
+            (resnapped
+              ? " The snapshot was rebuilt while you were paging — reopen the " +
+                "tab for a consistent list."
+              : ""),
+        });
+      }
+
       // events — the audit trail, filtered to anything naming this market.
       const rx = new RegExp(market, "i");
       const rows = await SystemEvent.find(
@@ -737,3 +962,9 @@ module.exports.clampLimit = clampLimit;
 module.exports.paginate = paginate;
 module.exports.tabsFor = tabsFor;
 module.exports.COMMON_TABS = COMMON_TABS;
+// Pure, and exported so the rent-farm tab's ordering can be asserted without a
+// database: "the summary row is always first" and "a dead account outranks a
+// missing offer" are the two properties that make the tab worth having.
+module.exports.parseOffsetCursor = parseOffsetCursor;
+module.exports.makeOffsetCursor = makeOffsetCursor;
+module.exports.bufferRows = bufferRows;
