@@ -106,11 +106,17 @@ test("all three farm services alert on every way an order can fail", () => {
     const src = fs.readFileSync(require("node:path").join(__dirname, "..", f), "utf8");
     const failures = (src.match(/row\.state = "failed"/g) || []).length;
     const alerts = (src.match(/alertFarmFailure\(/g) || []).length;
-    assert.strictEqual(
-      alerts,
-      failures,
-      f + ": " + failures + " failure branches but " + alerts + " alerts — a paid " +
-        "order must never fail silently",
+    // AT LEAST one alert per failure branch. Equality was the original
+    // assertion and it held only by coincidence: an alert is not required to be
+    // a failure. playerauctionsFarmService now also pages when a multi-unit
+    // order cannot be PROVED — it delivers one account and asks a human to
+    // check the count — which is a warning on a SUCCESSFUL delivery, not a
+    // fourth way to fail. The property that actually matters is that no failure
+    // branch is silent.
+    assert.ok(
+      alerts >= failures,
+      f + ": " + failures + " failure branches but only " + alerts + " alerts — a " +
+        "paid order must never fail silently",
     );
     assert.match(src, /const MARKET = "/, f + " has no MARKET constant for its alerts");
   }

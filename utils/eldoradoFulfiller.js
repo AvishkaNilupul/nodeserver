@@ -151,6 +151,50 @@ async function claimUnclaimedForGame(
   } = require("./unclaimedAutoList");
 
   const n = Math.max(1, parseInt(want, 10) || 1);
+
+  // RESUME WHATEVER A PREVIOUS ATTEMPT ALREADY TOOK FOR THIS ORDER.
+  //
+  // The claim further down is atomic and PERMANENT: it flips the ledger row to
+  // status "sold" and stamps this order's id into `note`. But the record that
+  // links those accounts back to the order lives in MarketplaceListing.units,
+  // and that is written only AFTER the credential has been sent. So a send that
+  // throws — a TalkJS 5xx, a timeout, an order row with no conversation id —
+  // left the accounts sold, no unit row, and nothing at all tying the two
+  // together. The caller's "already handled" guard asks
+  // `listing.units.some(u => u.orderId === orderId)`, finds nothing, and the
+  // next 60-second tick claims a BRAND NEW set. Eldorado order e69b19d3 retried
+  // 25 times; every failing attempt spent more of the no-claim ledger and
+  // orphaned what it spent, because nothing can find a sold row whose order was
+  // never recorded anywhere else.
+  //
+  // The note was always the anchor — it simply was never read back. Reading it
+  // makes the claim idempotent per order, so a retry re-sends to the same buyer
+  // with the SAME accounts instead of burning the ledger again.
+  const resumed = [];
+  if (orderId && !dryRun) {
+    const prior = await UnclaimedAccount.find({
+      status: "sold",
+      market,
+      note: market + " order " + String(orderId),
+    })
+      .limit(n)
+      .lean();
+    for (const row of prior) {
+      const cred = await credentialForLedger(row);
+      // An account we cannot read a password for is no use to the buyer, but it
+      // is still spent — leaving it out here would make the top-up below claim a
+      // replacement, which is the very double-spend this block exists to stop.
+      // Report the shortfall instead.
+      if (!cred.login || !cred.password) continue;
+      resumed.push({
+        ledgerId: String(row._id),
+        login: cred.login,
+        password: cred.password,
+      });
+    }
+    if (resumed.length >= n) return resumed.slice(0, n);
+  }
+
   const required = coverage.requiredCounts(requiredDrops);
   // With a coverage gate most candidates are rejected on their drops alone, so
   // read a deeper slice of the ledger — otherwise a listing whose stock is rare
@@ -187,7 +231,9 @@ async function claimUnclaimedForGame(
   // safe direction to be wrong.
   let liveChecks = 0;
 
-  const out = [];
+  // Seeded with anything a previous attempt already claimed for this order, so
+  // the walk below only ever tops up the difference.
+  const out = resumed.slice();
   for (const row of usable) {
     if (out.length >= n) break;
     // Never ship an account that is live on another marketplace's listing.

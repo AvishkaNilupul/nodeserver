@@ -408,6 +408,39 @@ async function deliverOrder(order, { dryRun }) {
   return { orderId, delivered: qty, source: stock.source };
 }
 
+// The shape every caller of credentialsFor consumes: exactly the four fields
+// pickStock documents at the top of this file, as a PLAIN object.
+//
+// Building this by hand rather than spreading `p` is the whole point. On the
+// pre-reserved path `picked` holds Mongoose SUB-DOCUMENTS, and a sub-document's
+// schema paths live on the PROTOTYPE — a spread copies only own enumerable
+// properties, so `{ ...unit }` evaluates to
+//   { __parentArray, __index, $__parent, $__, _doc }
+// and login, accountId and contentId are all silently gone. Measured, not
+// guessed: `{ ...listing.units[0] }.login === undefined`.
+//
+// What that did: `g2gDeliveryCode(c.login, c.password)` rendered
+// "Username: undefined" beside the buyer's real password, the send SUCCEEDED, so
+// g2gSetDeliveredQty ran and every unit was stamped delivered. A paid order
+// recorded as fully delivered with an unusable credential and the stock burned.
+//
+// It hid for as long as G2G chat itself was broken: every real order failed its
+// first send on the missing WebSocket and came back through the retry path,
+// which hand-builds plain objects and is therefore correct. Fixing the chat is
+// what armed this.
+//
+// `contentId` is what a unit row calls its ledger id, and the retry path already
+// passes it as `ledgerId`, so accept either spelling rather than making callers
+// agree.
+function unit(p, password) {
+  return {
+    login: p.login || "",
+    accountId: p.accountId ? String(p.accountId) : "",
+    ledgerId: p.ledgerId || p.contentId || "",
+    password: password || "",
+  };
+}
+
 // Re-read each account's password at delivery time.
 async function credentialsFor(picked) {
   const BotAccount = require("../models/BotAccount");
@@ -415,7 +448,7 @@ async function credentialsFor(picked) {
   const out = [];
   for (const p of picked) {
     if (p.password) {
-      out.push(p);
+      out.push(unit(p, p.password));
       continue;
     }
     let password = "";
@@ -460,7 +493,7 @@ async function credentialsFor(picked) {
         }
       }
     }
-    out.push({ ...p, password });
+    out.push(unit(p, password));
   }
   return out;
 }

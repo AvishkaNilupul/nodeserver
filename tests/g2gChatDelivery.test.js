@@ -189,14 +189,25 @@ test("credentialsFor falls back to the login when the id does not resolve", () =
   );
 });
 
-test("an already-resolved password is passed straight through", () => {
+test("an already-resolved password is not re-read from the database", () => {
   // The happy path arrives with one from claimAccountsForSet; re-reading it
   // would be a pointless query per unit on every delivery.
+  //
+  // It used to `out.push(p)` — the raw input — which returned two different
+  // SHAPES from one function depending on which branch ran. That is now
+  // normalised through unit(), because the other branch's `{ ...p }` shipped
+  // "Username: undefined" to a real buyer (tests/g2gCredentialShape.test.js).
+  // The guard that matters here is the early `continue`, not the object.
   const fn = FULFILLER.slice(
     FULFILLER.indexOf("async function credentialsFor("),
     FULFILLER.indexOf("async function deliverPendingOrders("),
   );
-  assert.match(fn, /if \(p\.password\) \{\s*\n\s*out\.push\(p\);\s*\n\s*continue;/);
+  assert.match(fn, /if \(p\.password\) \{\s*\n\s*out\.push\(unit\(p, p\.password\)\);\s*\n\s*continue;/);
+  // And it must still short-circuit before any BotAccount lookup.
+  assert.ok(
+    fn.indexOf("continue;") < fn.indexOf("BotAccount.findById"),
+    "the resolved-password branch must return before querying",
+  );
 });
 
 /* ------------ a send that resolves is not a send that arrived ------------ */

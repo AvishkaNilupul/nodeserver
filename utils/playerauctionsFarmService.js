@@ -179,6 +179,122 @@ async function credentialsFor(added) {
   return out;
 }
 
+// --- How many ACCOUNTS does this order actually owe? ----------------------
+//
+// PlayerAuctions does NOT send a unit count. Measured against the live API on
+// 2026-09-09: `purchaseQuantity` is absent from every order, in the list AND in
+// the detail, so `parseInt(undefined, 10) || 1` made this ALWAYS 1.
+//
+// Always-1 is safe against over-provisioning and wrong the other way. Order
+// 16418573 — "Overwatch Twitch Drops Automatic farming", $16.00 paid, quantity
+// "200 Other Skins" — is TWO units of an $8 offer. It was hand-delivered before
+// this path existed; under auto-delivery that buyer would have paid for two
+// farming accounts and been handed one.
+//
+// The unit count lives on the OFFER, which the order links to:
+//   order.detail.orderInfo.offerInfo.link  ".../<offerId>i!<slug>/"
+//   offer.totalPrice       "$ 8.00"   price of ONE unit
+//   offer.currencyPerUnit   100       ITEMS in one unit
+// and the order carries both halves of the comparison:
+//   orderInfo.price             "16.00"  total paid
+//   orderInfo.purchased.amount   200     total items
+//
+// TWO INDEPENDENT DERIVATIONS THAT MUST AGREE before we provision more than one
+// pristine account. Money alone can be fooled by a coupon or a fee; items alone
+// by an offer whose currencyPerUnit was edited after the sale. Requiring both to
+// land on the same integer means a wrong answer needs two independent failures.
+// Anything else is one account plus an alert — never a guess, because each extra
+// account is a pristine pool account spent for nothing.
+function money(v) {
+  const n = parseFloat(String(v == null ? "" : v).replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+// ".../overwatch-items/294684983i!overwatch-twitch-drops-26-items/" -> "294684983"
+function offerIdFromLink(link) {
+  const m = String(link || "").match(/\/(\d+)i!/);
+  return m ? m[1] : "";
+}
+
+// Our own live offers by id. A rent-farm order arrives a few times a day at
+// most, and this is one page-walk for all of them, so a short cache keeps the
+// hot path free of API calls without ever serving a stale price for long.
+let offerCache = { at: 0, byId: new Map() };
+const OFFER_CACHE_MS = 5 * 60e3;
+const OFFER_PAGE = 50;
+const OFFER_MAX_PAGES = 6;
+async function liveOffersById() {
+  if (offerCache.byId.size && Date.now() - offerCache.at < OFFER_CACHE_MS) {
+    return offerCache.byId;
+  }
+  const byId = new Map();
+  for (let page = 1; page <= OFFER_MAX_PAGES; page += 1) {
+    const r = await mp.playerauctionsMyListings(page, OFFER_PAGE).catch(() => null);
+    const items = (r && r.items) || [];
+    for (const o of items) byId.set(String(o.offerId), o);
+    if (items.length < OFFER_PAGE) break;
+  }
+  // Only cache a result that read something; caching an empty page-walk after a
+  // transient API failure would pin every later order to qty 1 for five minutes.
+  if (byId.size) offerCache = { at: Date.now(), byId };
+  return byId;
+}
+
+// Returns { qty, why, suspect }. `suspect` means the evidence points ABOVE one
+// but could not be proved — the operator is told rather than the pool spent.
+async function farmQuantity(order) {
+  const explicit = parseInt(order && order.purchaseQuantity, 10);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return { qty: explicit, why: "the order stated purchaseQuantity=" + explicit };
+  }
+
+  const oi = (order && order.detail && order.detail.orderInfo) || {};
+  const paid = money(oi.price);
+  const items = Number((oi.purchased || {}).amount) || 0;
+  const offerId = offerIdFromLink(oi.offerInfo && oi.offerInfo.link);
+  if (!offerId) {
+    return { qty: 1, why: "the order carries no offer link, so no unit price to divide by" };
+  }
+
+  const offer = (await liveOffersById()).get(String(offerId));
+  if (!offer) {
+    // PlayerAuctions implements an update as cancel + create, so the offer a
+    // paid order points at can genuinely be gone. Not a reason to guess.
+    return {
+      qty: 1,
+      suspect: items > 1,
+      why: "offer " + offerId + " is no longer among our live offers, so its unit price could not be read",
+    };
+  }
+
+  const unit = money(offer.totalPrice);
+  const perUnit = Number(offer.currencyPerUnit) || 0;
+  const byMoney = unit > 0 && paid > 0 ? paid / unit : 0;
+  const byItems = perUnit > 0 && items > 0 ? items / perUnit : 0;
+  const nMoney = Math.round(byMoney);
+  // Within a cent per unit of a whole multiple; item counts are integers so they
+  // must divide exactly.
+  const moneyOk = byMoney > 0 && Math.abs(byMoney - nMoney) * unit < 0.01;
+  const itemsOk = byItems > 0 && Number.isInteger(byItems);
+  const evidence =
+    "$" + paid.toFixed(2) + " / $" + unit.toFixed(2) + " = " +
+    (byMoney ? byMoney.toFixed(3) : "?") + ", " + items + " items / " + perUnit +
+    " per unit = " + (byItems ? byItems.toFixed(3) : "?");
+
+  if (moneyOk && itemsOk && nMoney === byItems) {
+    if (nMoney >= 2) return { qty: nMoney, why: "both agree on " + nMoney + " units (" + evidence + ")" };
+    return { qty: 1, why: "both agree on a single unit (" + evidence + ")" };
+  }
+  if (nMoney >= 2 || byItems >= 2) {
+    return {
+      qty: 1,
+      suspect: true,
+      why: "this looks like more than one unit but the two measures disagree (" + evidence + ")",
+    };
+  }
+  return { qty: 1, why: "single unit (" + evidence + ")" };
+}
+
 // Fulfil one rent-farm order. Returns null when the order is not a rent-farm
 // order at all, so the caller can fall through to the bundle path.
 async function deliverFarmOrder(order, { dryRun } = {}) {
@@ -188,7 +304,8 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   const rawOrderId = String((order && (order.orderId || order.id)) || "");
   const orderId = rawOrderId;
   const key = farmOrderKey(rawOrderId);
-  const qty = Math.max(1, parseInt(order && order.purchaseQuantity, 10) || 1);
+  const units = await farmQuantity(order);
+  const qty = units.qty;
 
   if (!parsed.days) {
     return {
@@ -246,6 +363,26 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     }
   }
   row.attempts += 1;
+
+  // A multi-unit order we could not PROVE is delivered as one account, because
+  // spending a pristine account on a guess is the expensive mistake. But it must
+  // never be silent: the buyer paid for something we are not shipping, and only a
+  // human can settle it. Fired once, on the first attempt, not on every retry.
+  if (units.suspect && row.attempts === 1) {
+    await farmAlert
+      .alertFarmFailure({
+        market: MARKET,
+        orderId,
+        offerTitle: parsed.title,
+        game: parsed.game,
+        days: parsed.days,
+        qty: 1,
+        buyerUsername: (order && order.name) || "",
+        reason:
+          "CHECK THE UNIT COUNT BY HAND — delivering 1 account. " + units.why,
+      })
+      .catch(() => {});
+  }
 
   try {
     // 1. Provision, unless a previous attempt already did.
@@ -387,4 +524,9 @@ module.exports = {
   parseFarmOrder,
   credentialsFor,
   deliverFarmOrder,
+  // Exported for tests: the unit-count derivation is the part that decides how
+  // many pristine pool accounts an order spends.
+  farmQuantity,
+  offerIdFromLink,
+  money,
 };

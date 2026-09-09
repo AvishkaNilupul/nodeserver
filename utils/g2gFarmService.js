@@ -254,19 +254,45 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       try {
         await chat.sendToBuyer(order.buyerId, message);
       } catch (e) {
-        if (!e.__g2gChatUnavailable) throw e;
-        // No SendBird SDK. The accounts ARE provisioned and farming, so the
-        // sale is half-honoured; what is missing is a human paste. Say exactly
-        // that and do NOT mark the order delivered — messageSentAt stays null
-        // so the next tick re-offers it rather than claiming it shipped.
-        await require("./telegram").sendTelegram(
-          "G2G rent-farm order " + orderId + " is provisioned and FARMING, " +
-            "but the credential still needs pasting into the buyer chat.\n\n" +
-            parsed.game + " / " + parsed.days + " days\n" +
-            "Buyer id: " + (order.buyerId || "?") + "\n\n" + message,
-        ).catch(() => {});
+        // TWO failures need the same remedy, and only one used to be caught.
+        //
+        // `__g2gChatUnavailable` is "no SDK / no WebSocket". `__g2gChatDropped`
+        // is G2G accepting a credential-shaped message and silently binning it —
+        // its own moderation, which its on-screen banner warns buyers about.
+        // Rethrowing the second one sent it to the generic handler, which marked
+        // the order FAILED and paged the operator with a reason string but never
+        // with the text to paste. Both mean exactly one thing: a human has to
+        // hand this over.
+        if (!e.__g2gChatUnavailable && !e.__g2gChatDropped) throw e;
+        // The accounts ARE provisioned and farming, so the sale is half-honoured;
+        // what is missing is a human paste. Say exactly that and do NOT mark the
+        // order delivered — messageSentAt stays null so the next tick re-offers
+        // it rather than claiming it shipped.
+        //
+        // BUT that same null is why this used to re-page every 60 seconds
+        // forever, and the page carries the buyer's PASSWORD. An alert nobody
+        // can silence is an alert everybody learns to ignore, and repeating a
+        // credential into a chat history hundreds of times a day is its own
+        // small leak. So: first time, then every REALERT_EVERY-th attempt —
+        // the same cadence utils/farmServiceAlert already uses for a stuck
+        // order. `lastError` is the durable marker of "already asked".
+        const WAITING = "waiting for the operator to paste the credential";
+        const attempts = Number(row.attempts) || 0;
+        const firstAsk = row.lastError !== WAITING;
+        if (firstAsk || (attempts > 0 && attempts % farmAlert.REALERT_EVERY === 0)) {
+          await require("./telegram").sendTelegram(
+            "G2G rent-farm order " + orderId + " is provisioned and FARMING, " +
+              "but the credential still needs pasting into the buyer chat.\n\n" +
+              (e.__g2gChatDropped
+                ? "G2G MODERATED the automatic message away — it must go through " +
+                  "the order page.\n\n"
+                : "") +
+              parsed.game + " / " + parsed.days + " days\n" +
+              "Buyer id: " + (order.buyerId || "?") + "\n\n" + message,
+          ).catch(() => {});
+        }
         row.state = "provisioned";
-        row.lastError = "waiting for the operator to paste the credential";
+        row.lastError = WAITING;
         await row.save();
         return {
           orderId,
