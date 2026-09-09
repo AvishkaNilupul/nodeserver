@@ -64,6 +64,7 @@ const REAL_DEPS = {
   unclaimedAutoList: () => require("./unclaimedAutoList"),
   marketplaces: () => require("./marketplaces"),
   connectors: () => require("./systemHealthConnectors"),
+  eldoradoFarmService: () => require("./eldoradoFarmService"),
   settings: () => require("./settings"),
   // routes/renterAdminRoutes requires half the app, so like utils/operatorFarm
   // this is pulled in only at call time — a module-level require here would be
@@ -317,6 +318,148 @@ const AUTOLIST_STALE_TICKS = 6;
 // ---------------------------------------------------------------------------
 
 const CHECKS = [
+  {
+    id: "eldorado.offers",
+    title: "Eldorado offers match what we can deliver",
+    group: "listings",
+    severity: "critical",
+    // Three questions the hourly run could not answer before, all from ONE
+    // paginated read of Eldorado's own offer list (~4 calls for 158 offers) —
+    // cheap enough for an hourly check, unlike one API call per listing.
+    //
+    // Every one of them was found by hand on 2026-09-09, which is the argument
+    // for the check existing at all:
+    //
+    //  1. DRIFT. Three rows read `status: "active"` here while Eldorado had
+    //     them Paused. Nothing reconciles Eldorado status: the only sweep that
+    //     reads it back (unclaimedAutoList.reconcileRowsPass) is scoped to
+    //     `origin: "unclaimed"`, and 23 of the 24 Eldorado rows are `manual`.
+    //     Harmless to a buyer, but it makes every count we render a lie.
+    //
+    //  2. UNTRACKED SELLABLE OFFERS. Eldorado had 106 active offers against 24
+    //     rows. That is not automatically wrong — 87 of them are rent-farm
+    //     offers, which the fulfiller matches by TITLE and not by listing row —
+    //     but an active BUNDLE offer with no row cannot be auto-delivered at
+    //     all: deliverOrder returns "no listing row for offer <id>" and the
+    //     buyer waits out the delivery guarantee.
+    //
+    //  3. UNRESOLVABLE RENT-FARM TITLES. A rent-farm order is filled by parsing
+    //     its offer title into a game and a term. All 87 live offers resolve
+    //     today, across 29 games — but publishing one for a game the farm does
+    //     not know creates an offer that takes money and can never be filled,
+    //     and nothing else would notice until a buyer paid.
+    async run(ctx) {
+      const mp = ctx.dep("marketplaces");
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const farm = ctx.dep("eldoradoFarmService");
+
+      // Page the account's own offers. Bounded: a runaway page count would turn
+      // an hourly check into a crawl of the marketplace.
+      const offers = [];
+      let page = 1;
+      let pages = 1;
+      try {
+        do {
+          const r = await mp.eldoradoMyListings(page, 50);
+          if (!r) break;
+          pages = Math.min(Number(r.totalPages) || 1, 10);
+          for (const o of r.results || []) offers.push(o);
+          page += 1;
+        } while (page <= pages);
+      } catch (e) {
+        // A marketplace we could not read is `unknown`, never `fail` — the
+        // contract's rule, and the one that stops a session hiccup reading as a
+        // broken marketplace.
+        return {
+          status: "unknown",
+          measured: null,
+          threshold: "Eldorado's offer list is readable",
+          summary: "Could not read Eldorado's offers: " + String(e.message || e).slice(0, 120),
+          detail: "Not evidence of a problem — only that this check could not run.",
+        };
+      }
+      if (!offers.length) {
+        return {
+          status: "unknown",
+          measured: 0,
+          threshold: "Eldorado's offer list is readable",
+          summary: "Eldorado returned no offers at all, which is not a state we can act on",
+          detail: "An empty list reads the same as a failed read, so it is reported as unknown.",
+        };
+      }
+
+      const live = offers.filter((o) => String(o.offerState || "") === "Active");
+      const liveIds = new Set(live.map((o) => String(o.id)));
+      const rows = await MarketplaceListing.find(
+        { marketplace: "eldorado", status: "active" },
+        { externalId: 1, title: 1, price: 1 },
+      )
+        .limit(2000)
+        .lean();
+      const rowIds = new Set(rows.map((r) => String(r.externalId)));
+
+      const problems = [];
+
+      for (const r of rows) {
+        if (!liveIds.has(String(r.externalId))) {
+          problems.push({
+            kind: "we say active, Eldorado does not",
+            offer: r.externalId,
+            title: String(r.title || "").slice(0, 70),
+          });
+        }
+      }
+
+      for (const o of live) {
+        const title = String(o.offerTitle || "");
+        const isFarm = /\bAutomatic\s+Farming\b/i.test(title);
+        if (isFarm) {
+          // Ask the REAL resolver, in the shape a real order carries.
+          const parsed = await farm
+            .parseFarmOrder({ orderOfferDetails: { offerTitle: title } })
+            .catch(() => null);
+          if (!parsed || !parsed.days || !parsed.game) {
+            problems.push({
+              kind: "rent-farm offer the farm cannot fill",
+              offer: String(o.id),
+              title: title.slice(0, 70),
+              why: !parsed
+                ? "title does not parse"
+                : !parsed.days
+                  ? "no farming term in the title"
+                  : 'game "' + parsed.rawGame + '" is unknown to the farm',
+            });
+          }
+          continue;
+        }
+        if (!rowIds.has(String(o.id))) {
+          problems.push({
+            kind: "sellable bundle offer with no listing row",
+            offer: String(o.id),
+            title: title.slice(0, 70),
+          });
+        }
+      }
+
+      const n = problems.length;
+      return {
+        status: n ? "fail" : "ok",
+        measured: n,
+        threshold:
+          "0 mismatches between Eldorado's " + live.length +
+          " live offer(s) and what we can deliver",
+        summary: n
+          ? n + " Eldorado offer(s) do not line up with our stock: " +
+            [...new Set(problems.map((p) => p.kind))].join("; ")
+          : "All " + live.length + " live Eldorado offers are tracked and fillable",
+        detail:
+          "Read from Eldorado's own offer list. A rent-farm offer is matched by " +
+          "TITLE rather than by a listing row, so it is checked against the real " +
+          "resolver instead of being counted as untracked.",
+        items: capItems(problems),
+      };
+    },
+  },
   {
     id: "orders.undelivered",
     title: "Paid orders awaiting delivery",

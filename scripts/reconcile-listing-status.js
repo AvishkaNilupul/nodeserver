@@ -34,6 +34,12 @@ const { logEvent } = require("../utils/systemLog");
 // offer's state, lowercased, or "" when it could not be read.
 const READERS = {
   ggsel: async (row) => String(await mp.ggselOfferStatus(row.externalId) || "").toLowerCase(),
+  // Eldorado puts the state on the offer itself. "Active" is the only value a
+  // buyer can purchase from; Paused / Deleted / Expired are all off sale.
+  eldorado: async (row) => {
+    const offer = await mp.eldoradoOffer(row.externalId);
+    return String((offer && offer.offerState) || "").toLowerCase();
+  },
 };
 
 // Which live words mean "a buyer can purchase this right now".

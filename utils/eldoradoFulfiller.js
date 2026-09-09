@@ -675,7 +675,16 @@ async function alertUnfulfillable(order, why) {
   await require("./telegram")
     .sendTelegram(
       "⚠️ Eldorado order " + id + " is PAID and the bot cannot ship it.\n\n" +
-        String((order && (order.offerTitle || order.title)) || "").slice(0, 120) + "\n" +
+        // An Eldorado order carries its title at orderOfferDetails.offerTitle —
+        // the same place eldoradoFarmService.parseFarmOrder reads it. Reading a
+        // bare `offerTitle` produced an alert with no title on it at all.
+        String(
+          (order &&
+            ((order.orderOfferDetails && order.orderOfferDetails.offerTitle) ||
+              order.offerTitle ||
+              order.title)) ||
+            "(title unknown)",
+        ).slice(0, 120) + "\n" +
         "Buyer: " + ((order && (order.buyerName || order.buyer)) || "?") + "\n\n" +
         "Reason: " + String(why || "").slice(0, 300) + "\n\n" +
         "This one needs delivering by hand, and the delivery guarantee is running.",
