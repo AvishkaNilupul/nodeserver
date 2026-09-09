@@ -96,6 +96,11 @@
   .chk .t b { font-size:13.5px; }
   .chk .cid { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; color:var(--muted); background:var(--surface-2); border-radius:6px; padding:1px 6px; }
   .chk .age { margin-left:auto; font-size:11.5px; color:var(--muted); white-space:nowrap; }
+  /* A connector row opens that marketplace's console. Made obvious rather than
+     discoverable: the operator's first instinct here is to tap the platform. */
+  .chk.linked { cursor:pointer; }
+  .chk.linked:hover { background:var(--surface-2); }
+  .chk .goto { font-size:11.5px; font-weight:700; color:var(--accent); white-space:nowrap; }
   .chk .sum { color:var(--ink); font-size:12.5px; margin-top:5px; line-height:1.5; }
   .chk .det { color:var(--muted); font-size:12px; margin-top:4px; line-height:1.5; }
 
@@ -169,6 +174,7 @@
         <div class="sub">Every check reports the number it measured and the threshold it was compared against. Read-only — nothing here publishes, delists, reprices or provisions.</div>
       </div>
       <div class="head-actions">
+        <button id="consoleBtn" title="Per-marketplace sold / delivered / revenue / errors, and the trail for any order id.">Marketplace console</button>
         <button class="primary" id="refreshBtn" title="Runs every check live. Takes longer than a page load because some checks call a marketplace.">Refresh</button>
       </div>
     </div>
@@ -503,10 +509,17 @@
           (bad ? " · " + bad + " needing a look" : " · all clear");
 
         var body = list.map(function (c) {
-          return '<div class="chk">' +
+          // A connector check names one marketplace, and the natural thing to do
+          // when looking at it is to open that marketplace. Z2U is excluded from
+          // the console, so it stays a plain row.
+          var mk = /^connector\.([a-z0-9]+)$/.exec(String(c.id || ""));
+          var market = mk && mk[1] !== "all" && mk[1] !== "z2u" ? mk[1] : "";
+          return '<div class="chk' + (market ? " linked" : "") + '"' +
+            (market ? ' data-market="' + esc(market) + '" role="link" tabindex="0"' : "") + ">" +
             '<div class="t">' +
               '<span class="pill sm s-' + c.status + '">' + STATUS_GLYPH[c.status] + " " + esc(STATUS_WORD[c.status]) + "</span>" +
               "<b>" + esc(c.title) + "</b>" +
+              (market ? '<span class="goto">open ›</span>' : "") +
               (c.id ? '<span class="cid">' + esc(c.id) + "</span>" : "") +
               (c.severity === "critical" && c.status !== "ok" ? '<span class="sev crit">critical</span>' : "") +
               '<span class="age" data-ts="' + c.at + '">' + esc(ago(c.at)) + "</span>" +
@@ -591,6 +604,25 @@
     }
 
     el("refreshBtn").addEventListener("click", function () { load(true); });
+    el("consoleBtn").addEventListener("click", function () {
+      location.href = "/market-console.html";
+    });
+
+    // Connector rows open that marketplace's console. Delegated from the cards
+    // container because the rows are re-rendered on every refresh, so a handler
+    // bound to the row itself would be lost the first time the page updated.
+    el("cards").addEventListener("click", function (e) {
+      var row = e.target.closest ? e.target.closest(".chk.linked") : null;
+      if (!row) return;
+      location.href = "/market-console.html#/" + row.getAttribute("data-market");
+    });
+    el("cards").addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      var row = e.target.closest ? e.target.closest(".chk.linked") : null;
+      if (!row) return;
+      e.preventDefault();
+      location.href = "/market-console.html#/" + row.getAttribute("data-market");
+    });
     el("cards").addEventListener("click", function (e) {
       var btn = e.target.closest("[data-toggle]");
       if (!btn) return;
