@@ -257,6 +257,15 @@
       icon: ICONS.admins,
       items: [
         {
+          href: "/system-health.html",
+          label: "System health",
+          // A heartbeat, matching the activity log's pulse line beside it —
+          // these two are the pair you open when something feels wrong.
+          icon:
+            '<path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>',
+          superOnly: true,
+        },
+        {
           href: "/activity.html",
           label: "Activity log",
           icon: '<path d="M3 12h4l3 8 4-16 3 8h4"></path>',
