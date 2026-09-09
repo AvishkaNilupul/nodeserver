@@ -106,6 +106,7 @@ const {
 } = require("./utils/rateLimit");
 const activityRoutes = require("./routes/activityRoutes");
 const systemHealthRoutes = require("./routes/systemHealthRoutes");
+const marketplaceConsoleRoutes = require("./routes/marketplaceConsoleRoutes");
 const fleetSnapshot = require("./utils/fleetSnapshot");
 const auditRequest = require("./middleware/auditRequest");
 
@@ -678,6 +679,7 @@ app.use(enforce2fa, activityRoutes);
 // The health page: one read-only answer to "is everything working?", so nobody
 // has to re-check each marketplace by hand. Same admin cascade as /activity.
 app.use(enforce2fa, systemHealthRoutes);
+app.use(enforce2fa, marketplaceConsoleRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);

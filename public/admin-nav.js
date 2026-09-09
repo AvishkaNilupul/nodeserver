@@ -266,6 +266,18 @@
           superOnly: true,
         },
         {
+          href: "/market-console.html",
+          label: "Marketplace console",
+          // Sits between health and the activity log on purpose: health says
+          // whether something is wrong, this says what a marketplace actually
+          // sold, sent and made, and the activity log is the raw feed.
+          icon:
+            '<path d="M3 3h18l-2 5H5L3 3z"></path>' +
+            '<path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"></path>' +
+            '<path d="M9 13h6"></path>',
+          superOnly: true,
+        },
+        {
           href: "/activity.html",
           label: "Activity log",
           icon: '<path d="M3 12h4l3 8 4-16 3 8h4"></path>',
@@ -370,14 +382,20 @@
       icon(ICONS.chevron) +
       "</span>";
 
+    // The menu is a 0fr/1fr grid so opening and closing can animate; the
+    // links live in an inner track so the group's padding and rule line
+    // collapse with it instead of leaving a sliver behind when closed.
     var menu = document.createElement("div");
     menu.className = "nav-group-menu";
+    var inner = document.createElement("div");
+    inner.className = "nav-group-menu-inner";
+    menu.appendChild(inner);
 
     var hasActive = false;
     items.forEach(function (it) {
       var a = buildLink(it);
       if (a.className === "active") hasActive = true;
-      menu.appendChild(a);
+      inner.appendChild(a);
     });
 
     if (hasActive) {
@@ -443,6 +461,16 @@
       var label = isSuper ? "Super Admin" : "Seller";
       roleEl.innerText = label + (admin && admin.id ? " · " + admin.id : "");
     }
+
+    // The group holding the current page is expanded above, so settle the
+    // sidebar in its final shape first, then let later toggles animate.
+    revealActiveLink();
+    var nav = links.closest(".nav");
+    if (nav) {
+      requestAnimationFrame(function () {
+        nav.classList.add("nav-anim");
+      });
+    }
   }
 
   // Mobile navigation: on small screens the left sidebar becomes an
@@ -496,13 +524,20 @@
     function open() {
       nav.classList.add("open");
       backdrop.classList.add("show");
+      // Lock the page underneath, or a flick that runs past the end of the
+      // menu carries on scrolling the content behind the drawer.
+      document.documentElement.classList.add("nav-drawer-open");
     }
     function close() {
       nav.classList.remove("open");
       backdrop.classList.remove("show");
+      document.documentElement.classList.remove("nav-drawer-open");
     }
     bar.querySelector(".hamburger").addEventListener("click", open);
     backdrop.addEventListener("click", close);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && nav.classList.contains("open")) close();
+    });
     // Delegated (not per-link) so links added dynamically by apply() —
     // including everything inside the dropdown groups — are covered without
     // needing their own listener. A group's toggle button is intentionally
@@ -530,18 +565,113 @@
       ".nav-group-toggle .chev svg{width:14px;height:14px;}" +
       ".nav-group.open>.nav-group-toggle .chev{transform:rotate(90deg);}" +
       ".nav-group.has-active>.nav-group-toggle{color:var(--accent);font-weight:600;}" +
-      ".nav-group-menu{display:none;flex-direction:column;gap:2px;" +
-      "padding:2px 0 4px 21px;border-left:1px solid var(--line);margin-left:24px;}" +
-      ".nav-group.open>.nav-group-menu{display:flex;}" +
+      ".nav-group-menu{display:grid;grid-template-rows:0fr;overflow:hidden;}" +
+      ".nav-group.open>.nav-group-menu{grid-template-rows:1fr;}" +
+      // Vertical padding only while open — a 0fr track can't shrink below its
+      // item's padding, so leaving it on would keep every closed group a few
+      // pixels tall and leave a stub of the rule line behind.
+      ".nav-group-menu-inner{min-height:0;overflow:hidden;display:flex;" +
+      "flex-direction:column;gap:2px;padding:0 0 0 21px;" +
+      "border-left:1px solid var(--line);margin-left:24px;}" +
+      ".nav-group.open>.nav-group-menu>.nav-group-menu-inner{padding-top:2px;" +
+      "padding-bottom:4px;}" +
       ".nav-group-menu a{font-size:13.5px;padding:8px 10px;}" +
-      ".nav-group-menu a svg{width:15px;height:15px;flex-shrink:0;}";
+      ".nav-group-menu a svg{width:15px;height:15px;flex-shrink:0;}" +
+      // Only animate once the sidebar has painted, so the group holding the
+      // current page doesn't slide open every single navigation.
+      ".nav.nav-anim .nav-group-menu{transition:grid-template-rows .18s ease;}" +
+      ".nav.nav-anim .nav-group-menu-inner{transition:padding .18s ease;}" +
+      "@media (prefers-reduced-motion:reduce){" +
+      ".nav.nav-anim .nav-group-menu,.nav.nav-anim .nav-group-menu-inner{" +
+      "transition:none;}" +
+      ".nav-group-toggle .chev{transition:none;}}" +
+      navScrollCss();
     var style = document.createElement("style");
     style.id = "nav-group-style";
     style.textContent = css;
     document.head.appendChild(style);
   }
 
+  // Sidebar scrolling.
+  //
+  // Every page writes its own ".nav" styles, and almost all of them left the
+  // link list with no scroll container of its own. Once the dropdown groups
+  // are expanded the list is far taller than the sidebar — on a 1280x800
+  // screen roughly 650-960px of it lands past the bottom edge — and because
+  // the pages that pin the sidebar to the viewport also lock the document
+  // (body{height:100vh;overflow:hidden}) or pin it with position:sticky,
+  // there is no scroll anywhere in the chain that can bring those links back.
+  // The wheel does nothing, touch does nothing: the bottom of the menu is
+  // simply unreachable.
+  //
+  // These rules give the list its own scroll region on every page and pin the
+  // sidebars the page left in normal flow so they stop sliding away with the
+  // main column. They are qualified by class so they outrank each page's own
+  // ".nav .links" rules no matter which stylesheet came first.
+  function navScrollCss() {
+    return (
+      ".nav.nav-scroll{overflow:hidden;}" +
+      ".nav.nav-scroll>.brand,.nav.nav-scroll>.me{flex-shrink:0;}" +
+      ".nav.nav-scroll>.links{flex:1 1 auto;min-height:0;overflow-y:auto;" +
+      "overflow-x:hidden;overscroll-behavior:contain;" +
+      "-webkit-overflow-scrolling:touch;scrollbar-width:thin;" +
+      "scrollbar-color:var(--line) transparent;}" +
+      ".nav.nav-scroll>.links::-webkit-scrollbar{width:8px;}" +
+      ".nav.nav-scroll>.links::-webkit-scrollbar-track{background:transparent;}" +
+      ".nav.nav-scroll>.links::-webkit-scrollbar-thumb{border-radius:8px;" +
+      "background:var(--line);border:2px solid transparent;background-clip:content-box;}" +
+      ".nav.nav-scroll>.links:hover::-webkit-scrollbar-thumb{background:var(--muted);" +
+      "background-clip:content-box;}" +
+      // Desktop only: mobile turns .nav into a fixed off-canvas drawer, which
+      // already spans the viewport and must not be re-positioned here.
+      "@media (min-width:769px){" +
+      ".nav.nav-scroll{max-height:100vh;max-height:100dvh;}" +
+      ".nav.nav-pin{position:sticky;top:0;align-self:flex-start;" +
+      "height:100vh;height:100dvh;}}" +
+      // Holding the drawer open shouldn't let the page behind it scroll.
+      "@media (max-width:768px){" +
+      "html.nav-drawer-open,html.nav-drawer-open body{overflow:hidden;}}"
+    );
+  }
+
+  // Give the sidebar its scroll region, and pin it if the page left it in
+  // normal flow. Read the position before any of our own CSS is injected:
+  // the mobile drawer rules below make every .nav position:fixed, which would
+  // otherwise hide whether the page itself wanted a flow-positioned sidebar.
+  function markNavScroll() {
+    var nav = document.querySelector(".nav");
+    if (!nav) return;
+    var pos = window.getComputedStyle(nav).position;
+    nav.classList.add("nav-scroll");
+    if (pos === "static" || pos === "relative") {
+      nav.classList.add("nav-pin");
+    }
+  }
+
+  // Bring the current page's link into view when it sits below the fold of a
+  // scrolled sidebar — scrolling the list itself (never the page), and only
+  // as far as it takes, so the top of the menu stays put whenever it already
+  // fits.
+  function revealActiveLink() {
+    var links = document.querySelector(".nav .links");
+    if (!links) return;
+    var active = links.querySelector("a.active");
+    if (!active || links.scrollHeight <= links.clientHeight + 1) return;
+
+    var pad = 12; // don't leave the link flush against the edge
+    var top = active.offsetTop - links.offsetTop;
+    var bottom = top + active.offsetHeight;
+    if (bottom + pad > links.scrollTop + links.clientHeight) {
+      links.scrollTop = bottom + pad - links.clientHeight;
+    } else if (top - pad < links.scrollTop) {
+      links.scrollTop = Math.max(0, top - pad);
+    }
+  }
+
   function run() {
+    // Before anything of ours is injected, so the sidebar's own position is
+    // still what the page's stylesheet says it is.
+    markNavScroll();
     injectGroupCss();
     setupMobileNav();
     fetch("/whoami", { credentials: "same-origin" })

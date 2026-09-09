@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Marketplace console | RedeemHub</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .pill.s-ok{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .pill.s-warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .pill.s-fail{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .pill.s-unknown{background:rgba(154,163,180,.12);}
+  html[data-theme="dark"] .tab.on{background:rgba(99,102,241,.20);}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Inter","Segoe UI",Tahoma,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; overflow:hidden; }
+
+  .nav { width:236px; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; flex-shrink:0; }
+  .nav .brand { display:flex; align-items:center; gap:10px; padding:18px 20px; border-bottom:1px solid var(--line); }
+  .nav .brand .mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent2),var(--accent)); display:grid; place-items:center; box-shadow:0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size:15px; font-weight:700; line-height:1.15; }
+  .nav .brand b span { display:block; font-size:10.5px; color:var(--muted); font-weight:500; }
+  .nav .links { padding:12px; flex:1; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .nav .links a { display:flex; align-items:center; gap:11px; padding:11px 13px; border-radius:10px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:500; }
+  .nav .links a:hover { background:var(--surface-2); }
+  .nav .links a.active { background:#eef2ff; color:var(--accent); font-weight:600; }
+  .nav .me { border-top:1px solid var(--line); padding:14px; display:flex; align-items:center; gap:10px; }
+  .nav .me .av { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#34d399,#10b981); display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+  .nav .me .who { line-height:1.2; min-width:0; }
+  .nav .me .who b { font-size:13.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:84px; }
+  .nav .me .who span { display:block; font-size:11px; color:var(--muted); }
+  .nav .me .actions { margin-left:auto; display:flex; gap:6px; }
+  .nav .me .logout { width:32px; height:32px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; }
+
+  .page { flex:1; overflow-y:auto; padding:26px 30px 64px; min-width:0; -webkit-overflow-scrolling:touch; }
+  h1 { font-size:22px; font-weight:800; }
+  .sub { color:var(--muted); font-size:13.5px; margin-top:4px; line-height:1.45; }
+  .head { display:flex; align-items:flex-start; gap:18px; flex-wrap:wrap; margin:0 0 18px; }
+  .head-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  button { border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:9px 14px; cursor:pointer; font:inherit; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { color:#fff; border-color:var(--accent); background:var(--accent); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  a.plain { color:var(--accent); text-decoration:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:700; border:1px solid transparent; white-space:nowrap; }
+  .pill.s-ok { color:var(--green); background:#ecfdf5; }
+  .pill.s-warn { color:var(--yellow); background:#fffbeb; }
+  .pill.s-fail { color:var(--red); background:#fef2f2; }
+  .pill.s-unknown { color:var(--muted); background:#f3f4f6; border-style:dashed; border-color:var(--line); }
+
+  /* ---------------------------- market cards ---------------------------- */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(268px,1fr)); gap:14px; }
+  .mcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:15px 16px; cursor:pointer; display:flex; flex-direction:column; gap:11px; text-align:left; width:100%; }
+  .mcard:hover { border-color:var(--accent); }
+  .mcard .top { display:flex; align-items:center; gap:9px; }
+  .mcard .nm { font-size:15.5px; font-weight:750; text-transform:capitalize; }
+  .mcard .chev { margin-left:auto; color:var(--muted); flex-shrink:0; }
+  .mcard .money { font-size:24px; font-weight:800; letter-spacing:-.4px; line-height:1; }
+  .mcard .money small { font-size:12px; font-weight:600; color:var(--muted); margin-left:5px; letter-spacing:0; }
+  .mcard .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .mcard .stat { background:var(--surface-2); border-radius:9px; padding:7px 9px; }
+  .mcard .stat b { display:block; font-size:15px; font-weight:750; line-height:1.2; }
+  .mcard .stat span { font-size:10.5px; color:var(--muted); }
+  .mcard .basis { font-size:11px; color:var(--muted); line-height:1.4; }
+
+  /* ------------------------------ detail -------------------------------- */
+  .back { display:inline-flex; align-items:center; gap:7px; color:var(--muted); background:none; border:none; padding:8px 0; font-size:13.5px; cursor:pointer; }
+  .back:hover { color:var(--accent); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin:14px 0 16px; }
+  .kpi { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 13px; }
+  .kpi b { display:block; font-size:19px; font-weight:800; line-height:1.2; }
+  .kpi span { font-size:11.5px; color:var(--muted); }
+
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; margin-bottom:12px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { flex:0 0 auto; border:1px solid var(--line); background:var(--surface); border-radius:999px; padding:8px 15px; font-size:13px; font-weight:600; color:var(--muted); cursor:pointer; white-space:nowrap; }
+  .tab.on { background:#eef2ff; color:var(--accent); border-color:var(--accent); }
+
+  .basisbar { font-size:12px; color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); border-radius:10px; padding:9px 12px; margin-bottom:12px; line-height:1.45; }
+
+  .rows { display:flex; flex-direction:column; gap:8px; }
+  .row { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .row .r1 { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .row .r1 .t { font-weight:650; font-size:14px; line-height:1.35; word-break:break-word; }
+  .row .r1 .amt { margin-left:auto; font-weight:750; font-size:14px; white-space:nowrap; }
+  .row .r2 { margin-top:5px; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row .err { margin-top:7px; font-size:12px; color:var(--red); background:rgba(220,38,38,.06); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  .oid { color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
+  .empty { text-align:center; color:var(--muted); font-size:13.5px; padding:34px 16px; background:var(--surface); border:1px dashed var(--line); border-radius:12px; line-height:1.5; }
+  .more { width:100%; margin-top:10px; padding:12px; }
+  .sentinel { height:1px; }
+
+  /* --------------------------- order trail ------------------------------ */
+  .sheet { position:fixed; inset:0; background:rgba(15,23,42,.55); display:none; z-index:80; align-items:flex-end; justify-content:center; }
+  .sheet.on { display:flex; }
+  .sheet .inner { background:var(--surface); width:100%; max-width:620px; max-height:86vh; border-radius:16px 16px 0 0; display:flex; flex-direction:column; }
+  .sheet .sh { padding:15px 17px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .sheet .sh b { font-size:15px; font-weight:750; }
+  .sheet .sb { padding:15px 17px calc(24px + env(safe-area-inset-bottom)); overflow-y:auto; }
+  .tl { position:relative; padding-left:20px; }
+  .tl::before { content:""; position:absolute; left:5px; top:5px; bottom:5px; width:2px; background:var(--line); }
+  .tl .ev { position:relative; padding-bottom:15px; }
+  .tl .ev::before { content:""; position:absolute; left:-19px; top:4px; width:10px; height:10px; border-radius:50%; background:var(--accent); border:2px solid var(--surface); }
+  .tl .ev.bad::before { background:var(--red); }
+  .tl .ev .k { font-weight:700; font-size:13px; }
+  .tl .ev .w { font-size:11.5px; color:var(--muted); }
+  .tl .ev .d { font-size:12.5px; margin-top:3px; line-height:1.45; word-break:break-word; }
+
+  @media (max-width:768px) {
+    .page { padding:14px 14px calc(72px + env(safe-area-inset-bottom)); }
+    h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .grid { grid-template-columns:1fr; gap:11px; }
+    .kpis { grid-template-columns:repeat(2,1fr); }
+    /* Tap targets, not mouse targets. */
+    .tab { padding:10px 16px; font-size:13.5px; }
+    .mcard { padding:14px; }
+    .row { padding:13px 14px; }
+    .head-actions { width:100%; }
+    .head-actions button { flex:1; padding:11px 14px; }
+  }
+</style>
+</head>
+
+<body>
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
+    <nav class="links"></nav>
+    <div class="me">
+      <div class="av" id="meAvatar">--</div>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+      <div class="actions">
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+        <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page" id="page"></main>
+
+  <div class="sheet" id="sheet"><div class="inner">
+    <div class="sh"><b id="sheetTitle">Order</b><button style="margin-left:auto" id="sheetClose">Close</button></div>
+    <div class="sb" id="sheetBody"></div>
+  </div></div>
+
+  <script src="/theme.js"></script>
+  <script src="/admin-nav.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    // Everything rendered here comes from buyer-supplied or marketplace-supplied
+    // text — offer titles, error strings, buyer names. One unescaped value is an
+    // XSS hole in a superadmin page, so nothing reaches innerHTML without this.
+    function esc(v) {
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+    function money(n) {
+      var v = Number(n) || 0;
+      return "$" + v.toFixed(2);
+    }
+    function ago(d) {
+      if (!d) return "never";
+      var s = Math.max(0, (Date.now() - new Date(d).getTime()) / 1000);
+      if (s < 60) return Math.round(s) + "s ago";
+      if (s < 3600) return Math.round(s / 60) + " min ago";
+      if (s < 86400) return Math.round(s / 3600) + "h ago";
+      return Math.round(s / 86400) + "d ago";
+    }
+    function when(d) {
+      if (!d) return "—";
+      try { return new Date(d).toLocaleString(); } catch (e) { return String(d); }
+    }
+
+    async function api(path) {
+      var r = await fetch(path, { credentials: "same-origin" });
+      if (r.status === 401 || r.status === 403) {
+        location.href = "/login.html";
+        throw new Error("unauthorised");
+      }
+      var j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || j.success === false) {
+        throw new Error((j && j.message) || ("HTTP " + r.status));
+      }
+      return j;
+    }
+
+    var page = document.getElementById("page");
+    var summary = null;
+
+    /* ----------------------------- landing ----------------------------- */
+
+    function statusPill(h) {
+      if (!h) return '<span class="pill s-unknown">no check</span>';
+      var cls = h.status === "ok" ? "s-ok" : h.status === "fail" ? "s-fail"
+        : h.status === "warn" ? "s-warn" : "s-unknown";
+      return '<span class="pill ' + cls + '">' + esc(h.status) + "</span>";
+    }
+
+    function marketCard(m, health) {
+      return (
+        '<button class="mcard" data-market="' + esc(m.market) + '">' +
+          '<div class="top">' +
+            '<span class="nm">' + esc(m.market) + "</span>" +
+            statusPill(health) +
+            '<span class="chev">›</span>' +
+          "</div>" +
+          '<div class="money">' + money(m.revenueUsd) +
+            "<small>made</small></div>" +
+          '<div class="stats">' +
+            '<div class="stat"><b>' + m.soldTotal + "</b><span>sold</span></div>" +
+            '<div class="stat"><b>' + m.deliveredUnits + "</b><span>delivered</span></div>" +
+            '<div class="stat"><b>' + m.active + "</b><span>live</span></div>" +
+          "</div>" +
+          '<div class="basis">' + esc(m.basis) +
+            (m.errors ? ' · <b style="color:var(--red)">' + m.errors + " with errors</b>" : "") +
+            " · " + esc(ago(m.lastActivityAt)) +
+          "</div>" +
+        "</button>"
+      );
+    }
+
+    async function renderLanding() {
+      page.innerHTML =
+        '<div class="head"><div><h1>Marketplace console</h1>' +
+        '<div class="sub">Tap a marketplace to see what sold, what was delivered, ' +
+        "what it made and what went wrong. Read-only — nothing here publishes, " +
+        "delists, reprices or delivers, and it never calls a marketplace.</div></div>" +
+        '<div class="head-actions"><button id="refresh">Refresh</button>' +
+        '<button onclick="location.href=\'/system-health.html\'">Health</button></div></div>' +
+        '<div class="empty">Loading…</div>';
+      document.getElementById("refresh").onclick = function () {
+        summary = null;
+        renderLanding();
+      };
+      try {
+        summary = await api("/api/market-console/summary");
+      } catch (e) {
+        page.querySelector(".empty").textContent = "Could not load: " + e.message;
+        return;
+      }
+      var live = summary.markets.filter(function (m) { return m.listings > 0; });
+      var idle = summary.markets.filter(function (m) { return m.listings === 0; });
+      var total = summary.markets.reduce(function (a, m) { return a + m.revenueUsd; }, 0);
+      var sold = summary.markets.reduce(function (a, m) { return a + m.soldTotal; }, 0);
+
+      page.querySelector(".empty").outerHTML =
+        '<div class="kpis">' +
+          '<div class="kpi"><b>' + money(total) + "</b><span>recorded across all markets</span></div>" +
+          '<div class="kpi"><b>' + sold + "</b><span>sales with evidence</span></div>" +
+          '<div class="kpi"><b>' + live.length + "</b><span>markets with listings</span></div>" +
+        "</div>" +
+        '<div class="basisbar">' + esc(summary.note) + "</div>" +
+        '<div class="grid">' +
+          live.map(function (m) { return marketCard(m, summary.health[m.market]); }).join("") +
+        "</div>" +
+        (idle.length
+          ? '<div class="sub" style="margin-top:16px">No listings recorded: ' +
+            esc(idle.map(function (m) { return m.market; }).join(", ")) +
+            ". Z2U is excluded from this console by design.</div>"
+          : "");
+
+      Array.prototype.forEach.call(page.querySelectorAll(".mcard"), function (el) {
+        el.onclick = function () { location.hash = "#/" + el.getAttribute("data-market"); };
+      });
+    }
+
+    /* ------------------------------ detail ------------------------------ */
+
+    var TABS = [
+      ["sales", "Sold"],
+      ["deliveries", "Delivered"],
+      ["listings", "Listings"],
+      ["orders", "Rent-farm"],
+      ["errors", "Errors"],
+      ["events", "Activity"],
+    ];
+
+    var state = { market: "", tab: "sales", cursor: null, hasMore: false, loading: false, count: 0 };
+
+    function rowSales(r) {
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.name || r.game || "(unnamed)") + "</span>" +
+        '<span class="amt">' + (r.priceUsd ? money(r.priceUsd) : '<span style="color:var(--muted);font-weight:600">no price</span>') + "</span>" +
+        '</div><div class="r2"><span>' + esc(r.game || "") + "</span>" +
+        (r.login ? '<span class="mono">' + esc(r.login) + "</span>" : "") +
+        "<span>" + esc(when(r.at)) + "</span></div></div>";
+    }
+
+    function rowDeliveries(r) {
+      var ds = (r.deliveries || []).map(function (d) {
+        return '<div class="r2" style="margin-top:6px">' +
+          '<span class="mono">' + esc(d.login) + "</span>" +
+          (d.orderId ? '<span class="mono oid" data-order="' + esc(d.orderId) + '">' + esc(d.orderId) + "</span>" : "") +
+          "<span>" + esc(when(d.deliveredAt)) + "</span>" +
+          (d.messagedAt ? "" : '<span style="color:var(--yellow)">no message stamp</span>') +
+          "</div>";
+      }).join("");
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.title || r.externalId) + "</span>" +
+        '<span class="amt">' + money(r.priceUsd) + "</span></div>" + ds + "</div>";
+    }
+
+    function rowListings(r) {
+      var cls = r.status === "active" ? "s-ok" : r.status === "sold" ? "s-warn" : "s-unknown";
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.title || "(untitled)") + "</span>" +
+        '<span class="amt">' + money(r.price) + "</span></div>" +
+        '<div class="r2"><span class="pill ' + cls + '">' + esc(r.status) + "</span>" +
+        '<span class="mono">' + esc(r.externalId || "") + "</span>" +
+        "<span>" + esc(r.origin || "") + "</span>" +
+        (r.unitsSold ? "<span>" + r.unitsSold + " sold</span>" : "") +
+        "<span>" + esc(when(r.createdAt)) + "</span></div>" +
+        (r.lastError ? '<div class="err">' + esc(r.lastError) + "</div>" : "") +
+        "</div>";
+    }
+
+    function rowOrders(r) {
+      var bad = r.state === "failed" || r.state === "cancelled";
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.offerTitle || r.game || r.orderId) + "</span>" +
+        '<span class="amt"><span class="pill ' + (bad ? "s-fail" : r.state === "delivered" ? "s-ok" : "s-warn") + '">' + esc(r.state) + "</span></span></div>" +
+        '<div class="r2"><span class="mono oid" data-order="' + esc(r.orderId) + '">' + esc(r.orderId) + "</span>" +
+        "<span>" + esc(r.game || "") + " · " + (r.days || 0) + "d · qty " + (r.quantity || 1) + "</span>" +
+        "<span>" + ((r.accounts || []).length) + " account(s)</span>" +
+        (r.attempts > 1 ? "<span>" + r.attempts + " tries</span>" : "") +
+        "<span>" + esc(when(r.createdAt)) + "</span></div>" +
+        (r.lastError ? '<div class="err">' + esc(r.lastError) + "</div>" : "") +
+        "</div>";
+    }
+
+    function rowErrors(r) {
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.title || r.externalId) + "</span>" +
+        '<span class="amt">' + money(r.price) + "</span></div>" +
+        '<div class="r2"><span class="mono">' + esc(r.externalId || "") + "</span>" +
+        "<span>" + esc(r.status) + "</span><span>" + esc(when(r.updatedAt)) + "</span></div>" +
+        '<div class="err">' + esc(r.lastError) + "</div></div>";
+    }
+
+    function rowEvents(r) {
+      var cls = r.severity === "error" ? "s-fail" : r.severity === "warn" ? "s-warn" : "s-ok";
+      return '<div class="row"><div class="r1">' +
+        '<span class="t">' + esc(r.action || r.category) + "</span>" +
+        '<span class="amt"><span class="pill ' + cls + '">' + esc(r.severity || "info") + "</span></span></div>" +
+        '<div class="r2"><span>' + esc(r.actor || "") + "</span>" +
+        (r.subject ? '<span class="mono">' + esc(r.subject) + "</span>" : "") +
+        "<span>" + esc(when(r.at)) + "</span></div>" +
+        (r.detail ? '<div class="r2" style="color:var(--ink)">' + esc(r.detail) + "</div>" : "") +
+        "</div>";
+    }
+
+    var RENDER = {
+      sales: rowSales, deliveries: rowDeliveries, listings: rowListings,
+      orders: rowOrders, errors: rowErrors, events: rowEvents,
+    };
+
+    var EMPTY = {
+      sales: "No recorded sales for this marketplace. Order-API platforms " +
+        "(Eldorado, PlayerAuctions, G2G) record a delivery instead — check the Delivered tab.",
+      deliveries: "No delivered units. Quantity platforms (Gameflip, Digiseller, GGSel) " +
+        "attach content before the sale and never stamp one — their sales show under Sold.",
+      listings: "No listings recorded for this marketplace.",
+      orders: "No rent-farm orders. Only Eldorado, PlayerAuctions and G2G can take them.",
+      errors: "No listing is currently carrying an error. This is current state, not history.",
+      events: "No audit rows mention this marketplace. The delivery paths write very " +
+        "few of these today — that gap is exactly why this console exists.",
+    };
+
+    async function loadMore(reset) {
+      if (state.loading) return;
+      state.loading = true;
+      var list = document.getElementById("rows");
+      var moreBtn = document.getElementById("more");
+      if (moreBtn) moreBtn.textContent = "Loading…";
+      try {
+        var url = "/api/market-console/" + encodeURIComponent(state.market) + "/" +
+          encodeURIComponent(state.tab) + "?limit=25" +
+          (state.cursor ? "&cursor=" + encodeURIComponent(state.cursor) : "");
+        var j = await api(url);
+        if (reset) { list.innerHTML = ""; state.count = 0; }
+        var bb = document.getElementById("basisbar");
+        if (bb && j.basis) bb.textContent = j.basis;
+        var html = j.items.map(RENDER[state.tab]).join("");
+        list.insertAdjacentHTML("beforeend", html);
+        state.count += j.items.length;
+        state.cursor = j.nextCursor;
+        state.hasMore = j.hasMore;
+        if (!state.count) list.innerHTML = '<div class="empty">' + esc(EMPTY[state.tab]) + "</div>";
+        if (moreBtn) {
+          moreBtn.style.display = j.hasMore ? "block" : "none";
+          moreBtn.textContent = "Load 25 more";
+        }
+        bindOrderLinks();
+      } catch (e) {
+        if (moreBtn) moreBtn.textContent = "Failed: " + e.message;
+      } finally {
+        state.loading = false;
+      }
+    }
+
+    function bindOrderLinks() {
+      Array.prototype.forEach.call(document.querySelectorAll(".oid"), function (el) {
+        if (el.__bound) return;
+        el.__bound = true;
+        el.onclick = function () { openTrail(el.getAttribute("data-order")); };
+      });
+    }
+
+    async function renderMarket(market) {
+      state = { market: market, tab: state.tab || "sales", cursor: null, hasMore: false, loading: false, count: 0 };
+      if (!summary) { try { summary = await api("/api/market-console/summary"); } catch (e) { /* still render */ } }
+      var m = summary && summary.markets.filter(function (x) { return x.market === market; })[0];
+
+      page.innerHTML =
+        '<button class="back" id="back">‹ All marketplaces</button>' +
+        '<div class="head"><div><h1 style="text-transform:capitalize">' + esc(market) + "</h1>" +
+        '<div class="sub">' + esc(m ? m.basis : "") + "</div></div></div>" +
+        (m ? '<div class="kpis">' +
+          '<div class="kpi"><b>' + money(m.revenueUsd) + "</b><span>recorded revenue</span></div>" +
+          '<div class="kpi"><b>' + m.soldTotal + "</b><span>sold</span></div>" +
+          '<div class="kpi"><b>' + m.deliveredUnits + "</b><span>delivered units</span></div>" +
+          '<div class="kpi"><b>' + m.active + "/" + m.listings + "</b><span>live listings</span></div>" +
+          '<div class="kpi"><b>' + m.sales7d + "</b><span>sales, 7 days</span></div>" +
+          '<div class="kpi"><b style="color:' + (m.errors ? "var(--red)" : "inherit") + '">' + m.errors + "</b><span>listings with errors</span></div>" +
+        "</div>" : "") +
+        '<div class="tabs">' + TABS.map(function (t) {
+          return '<button class="tab' + (t[0] === state.tab ? " on" : "") + '" data-tab="' + t[0] + '">' + t[1] + "</button>";
+        }).join("") + "</div>" +
+        '<div class="basisbar" id="basisbar">Loading…</div>' +
+        '<div class="rows" id="rows"></div>' +
+        '<button class="more" id="more" style="display:none">Load 25 more</button>' +
+        '<div class="sentinel" id="sentinel"></div>';
+
+      document.getElementById("back").onclick = function () { location.hash = ""; };
+      document.getElementById("more").onclick = function () { loadMore(false); };
+      Array.prototype.forEach.call(page.querySelectorAll(".tab"), function (el) {
+        el.onclick = function () {
+          Array.prototype.forEach.call(page.querySelectorAll(".tab"), function (x) { x.classList.remove("on"); });
+          el.classList.add("on");
+          state.tab = el.getAttribute("data-tab");
+          state.cursor = null;
+          loadMore(true);
+        };
+      });
+
+      // Auto-load on scroll as well as the explicit button. The button is the
+      // one that must always work — an observer that silently stops leaves the
+      // operator thinking they have seen everything.
+      var sent = document.getElementById("sentinel");
+      if ("IntersectionObserver" in window) {
+        var io = new IntersectionObserver(function (entries) {
+          if (entries[0].isIntersecting && state.hasMore && !state.loading) loadMore(false);
+        }, { root: page, rootMargin: "220px" });
+        io.observe(sent);
+      }
+      loadMore(true);
+    }
+
+    /* ---------------------------- order trail --------------------------- */
+
+    var sheet = document.getElementById("sheet");
+    document.getElementById("sheetClose").onclick = function () { sheet.classList.remove("on"); };
+    sheet.onclick = function (e) { if (e.target === sheet) sheet.classList.remove("on"); };
+
+    async function openTrail(orderId) {
+      document.getElementById("sheetTitle").textContent = "Order " + orderId;
+      document.getElementById("sheetBody").innerHTML = '<div class="empty">Loading…</div>';
+      sheet.classList.add("on");
+      try {
+        var j = await api("/api/market-console/order/" + encodeURIComponent(orderId));
+        var body = "";
+        if (j.listings.length) {
+          body += '<div class="sub" style="margin-bottom:12px">' +
+            j.listings.map(function (l) {
+              return esc(l.marketplace) + " · " + esc(l.title || l.externalId) + " · " + money(l.priceUsd);
+            }).join("<br>") + "</div>";
+        }
+        if (!j.trail.length) {
+          body += '<div class="empty">Nothing recorded for this order. That is itself ' +
+            "the finding — the delivery paths write almost no audit rows today.</div>";
+        } else {
+          body += '<div class="tl">' + j.trail.map(function (e) {
+            var bad = e.severity === "error" || e.kind === "failed" || e.kind === "cancelled";
+            return '<div class="ev' + (bad ? " bad" : "") + '">' +
+              '<div class="k">' + esc(e.kind) + "</div>" +
+              '<div class="w">' + esc(when(e.at)) + (e.actor ? " · " + esc(e.actor) : "") + "</div>" +
+              (e.detail ? '<div class="d">' + esc(e.detail) + "</div>" : "") +
+              "</div>";
+          }).join("") + "</div>";
+        }
+        document.getElementById("sheetBody").innerHTML = body;
+      } catch (e) {
+        document.getElementById("sheetBody").innerHTML =
+          '<div class="empty">Could not load: ' + esc(e.message) + "</div>";
+      }
+    }
+
+    /* ------------------------------ routing ----------------------------- */
+
+    function route() {
+      var h = (location.hash || "").replace(/^#\/?/, "").trim();
+      if (h) renderMarket(h.toLowerCase());
+      else renderLanding();
+    }
+    window.addEventListener("hashchange", route);
+    route();
+  })();
+  </script>
+</body>
+</html>
