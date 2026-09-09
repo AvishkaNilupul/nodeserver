@@ -141,10 +141,80 @@ async function sendToBuyer(buyerId, text, { dryRun } = {}) {
       );
     }
     const sent = await channel.sendUserMessage({ message: body });
+
+    // sendUserMessage RESOLVING IS NOT PROOF THE BUYER GOT IT.
+    //
+    // On order 1788892037419NTQU it resolved cleanly and the message never
+    // appeared in the channel — read back afterwards, the last four messages
+    // were all from the buyer. G2G moderates this chat (its own banner says
+    // "only deliver account or product information through the order page using
+    // our secure system. Do not share sensitive details in chat"), so a
+    // credential-shaped message can be accepted by the SDK and dropped server
+    // side. The caller stamped `messagedAt` on that resolve and recorded a
+    // delivery that had not happened, while the buyer sat asking "when its gonna
+    // be done?".
+    //
+    // So: read the channel back and require OUR message to actually be in it.
+    // A send we cannot see is reported as a failure, because for the buyer it is.
+    const messageId = sent && sent.messageId;
+    // The read-back MUST use a fresh connection. Querying the channel on the
+    // instance that just sent returns the SDK's own optimistic echo, so the
+    // check passed while the channel genuinely contained nothing from us — it
+    // was verifying our own hopefulness. Measured twice on order
+    // 1788892037419NTQU: confirmed=true, and a separate session still showed
+    // "messages FROM US: 0".
+    let confirmed = false;
+    try {
+      const verifier = SendbirdChat.init({
+        appId: G2G_SENDBIRD_APP_ID,
+        modules: [new GroupChannelModule()],
+        localCacheEnabled: false,
+      });
+      try {
+        const fresh = await chatSessionToken();
+        await verifier.connect(fresh.sellerId, fresh.token);
+        const vq = verifier.groupChannel.createMyGroupChannelListQuery({
+          userIdsFilter: { userIds: [buyer], includeMode: true, queryType: "OR" },
+          limit: 5,
+        });
+        const vchans = await vq.next();
+        const vchannel = (vchans || []).find((c) => c.url === channel.url) || (vchans || [])[0];
+        if (vchannel) {
+          const check = vchannel.createPreviousMessageListQuery({ limit: 10, reverse: true });
+          const recent = await check.load();
+          confirmed = (recent || []).some(
+            (m) =>
+              String((m.sender && m.sender.userId) || "") === String(sellerId) &&
+              String(m.message || "") === body,
+          );
+        }
+      } finally {
+        try {
+          await verifier.disconnect();
+        } catch {
+          /* the verdict is already decided */
+        }
+      }
+    } catch {
+      // Could not read back: not proof of failure, but not proof of delivery
+      // either, and only one of those is safe to assume.
+      confirmed = false;
+    }
+    if (!confirmed) {
+      const e = new Error(
+        "G2G chat: the message was accepted by the SDK but is NOT in the " +
+          "channel on read-back — G2G moderates credential-shaped messages in " +
+          "chat. The buyer has NOT received it; hand this order over through " +
+          "the G2G order page.",
+      );
+      e.__g2gChatDropped = true;
+      throw e;
+    }
     return {
       buyerId: buyer,
       channelUrl: channel.url,
-      messageId: sent && sent.messageId,
+      messageId,
+      confirmed: true,
       chars: body.length,
     };
   } finally {

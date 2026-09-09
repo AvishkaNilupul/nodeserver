@@ -198,3 +198,59 @@ test("an already-resolved password is passed straight through", () => {
   );
   assert.match(fn, /if \(p\.password\) \{\s*\n\s*out\.push\(p\);\s*\n\s*continue;/);
 });
+
+/* ------------ a send that resolves is not a send that arrived ------------ */
+
+test("REGRESSION: the send is verified by reading the channel back", () => {
+  // On order 1788892037419NTQU, sendUserMessage RESOLVED and the message never
+  // appeared. Read back afterwards, the last four messages in the channel were
+  // all from the buyer — who was meanwhile asking "when its gonna be done?".
+  // The caller stamped messagedAt on that resolve and recorded a delivery that
+  // had not happened. G2G moderates this chat: its own banner tells buyers
+  // "only deliver account or product information through the order page using
+  // our secure system. Do not share sensitive details in chat."
+  assert.match(CHAT, /createPreviousMessageListQuery/, "must read the channel back");
+  assert.match(CHAT, /__g2gChatDropped = true/);
+  assert.match(
+    CHAT,
+    /confirmed: true/,
+    "a verified send should say so, so callers can tell the two apart",
+  );
+});
+
+test("an unreadable read-back counts as NOT delivered", () => {
+  // Only one of "could not verify" and "delivered" is safe to assume.
+  const block = CHAT.slice(CHAT.indexOf("const messageId = sent && sent.messageId;"));
+  const guard = block.slice(0, block.indexOf("if (!confirmed)"));
+  assert.match(guard, /catch\s*\{[\s\S]*confirmed = false;/, "a failed read-back must not pass");
+});
+
+test("a dropped message is handed to the operator, not retried forever", () => {
+  // Retrying a moderated message fails identically every time. What it needs is
+  // a human on the G2G order page.
+  assert.match(
+    FULFILLER,
+    /!e\.__g2gChatUnavailable && !e\.__g2gChatDropped/,
+    "a dropped message must take the operator hand-over path",
+  );
+  const retry = FULFILLER.slice(
+    FULFILLER.indexOf("// Reserved, but nothing has reached the buyer"),
+    FULFILLER.indexOf("const stock = await pickStock"),
+  );
+  assert.match(retry, /e\.__g2gChatDropped \|\| e\.__g2gChatUnavailable/);
+  assert.match(retry, /pending: mine\.length/, "report it as pending, not as an error");
+});
+
+test("messagedAt is only stamped after a verified send", () => {
+  // The stamp is what tells every later tick "the buyer has it". Stamping on an
+  // unverified send is how a paid order looked served while the buyer had
+  // nothing.
+  const retry = FULFILLER.slice(
+    FULFILLER.indexOf("// Reserved, but nothing has reached the buyer"),
+    FULFILLER.indexOf("const stock = await pickStock"),
+  );
+  const sendAt = retry.indexOf("chat.sendToBuyer(");
+  const stampAt = retry.indexOf("u.messagedAt = sentAt");
+  assert.ok(sendAt > 0 && stampAt > 0, "both should be present");
+  assert.ok(sendAt < stampAt, "the send (which throws unless verified) must come first");
+});

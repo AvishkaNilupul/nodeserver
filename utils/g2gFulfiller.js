@@ -235,6 +235,8 @@ async function deliverOrder(order, { dryRun }) {
       try {
         await mp.g2gStartDeliver(orderId).catch(() => {});
         await mp.g2gMarkDelivering(orderId).catch(() => {});
+        // Throws unless the message is verifiably IN the channel, so the stamp
+        // below can only ever follow a delivery that really happened.
         await chat.sendToBuyer(order.buyerId, retryMessage);
         const sentAt = new Date();
         for (const u of mine) u.messagedAt = sentAt;
@@ -248,7 +250,17 @@ async function deliverOrder(order, { dryRun }) {
         return { orderId, delivered: mine.length, source: "retry-send" };
       } catch (e) {
         // Units stay reserved to THIS order, so the next retry goes to the same
-        // buyer rather than spending fresh stock.
+        // buyer rather than spending fresh stock. A moderated-away message is
+        // reported as `pending` rather than an error: retrying it will fail
+        // identically forever, and what it actually needs is a human on the
+        // G2G order page.
+        if (e.__g2gChatDropped || e.__g2gChatUnavailable) {
+          return {
+            orderId,
+            pending: mine.length,
+            detail: e.message,
+          };
+        }
         return { orderId, error: "chat re-send failed: " + e.message };
       }
     }
@@ -339,7 +351,11 @@ async function deliverOrder(order, { dryRun }) {
   try {
     await chat.sendToBuyer(order.buyerId, message);
   } catch (e) {
-    if (!e.__g2gChatUnavailable) {
+    // `__g2gChatDropped` means the SDK accepted the message and G2G silently
+    // binned it — its moderation blocks credential-shaped text in chat, which is
+    // what its own on-screen banner tells buyers. That is not a transport error
+    // to retry forever; it is a hand-over that has to go through the order page.
+    if (!e.__g2gChatUnavailable && !e.__g2gChatDropped) {
       // A real send failure. The units stay reserved to this order so a retry
       // re-sends to the same buyer rather than spending fresh stock.
       return {
