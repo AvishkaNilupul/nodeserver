@@ -188,3 +188,93 @@ test("a real rival is still undercut", () => {
   const p = price(research({ lowestOther: 1.5, soldRecent: 5, avgSoldPrice: 4 }));
   assert.ok(p < 1.5, "should be cheaper than the rival, got " + p);
 });
+
+/* ============ 5. a 200 from a rate-limited API is not a live listing ===== */
+//
+// Under its rate limiter Gameflip answers 200 to a status patch and leaves the
+// listing in "ready" — complete, public, NOT purchasable. Every status restore
+// in utils/marketplaces.js already refuses to trust that 200 and reads back.
+// gameflipPublish was the one path that did not, so a rate-limited publish
+// returned success, the caller wrote an "active" row with an account attached,
+// the chain counted a unit discharged, and nobody could buy it.
+
+const MP = read("utils/marketplaces.js");
+
+test("REGRESSION: publish verifies the onsale patch by reading it back", () => {
+  const fn = MP.slice(
+    MP.indexOf("async function gameflipPublish("),
+    MP.indexOf("// Current status of a listing"),
+  );
+  assert.match(fn, /gameflipListingStatus\(listingId\)\) === "onsale"/,
+    "must confirm the listing is really on sale");
+  assert.match(fn, /status settled on "ready" instead of "onsale"/);
+});
+
+test("publish backs off in TENS OF SECONDS, not milliseconds", () => {
+  // The limiter's window is minutes wide (429 "Too many attempts"), so a
+  // millisecond retry just burns the budget it is waiting on.
+  const fn = MP.slice(
+    MP.indexOf("async function gameflipPublish("),
+    MP.indexOf("// Current status of a listing"),
+  );
+  assert.match(fn, /for \(const w of \[0, 20000, 60000\]\)/);
+});
+
+test("a publish that never goes on sale discards the draft", () => {
+  // The credentials are already attached, so leaving it behind is invisible
+  // stock AND makes the next attempt fail with "code for digital goods already
+  // exists" — the same reason the digital-goods failure path bins its draft.
+  const fn = MP.slice(
+    MP.indexOf("async function gameflipPublish("),
+    MP.indexOf("// Current status of a listing"),
+  );
+  const at = fn.indexOf("if (!onsale)");
+  assert.ok(at > 0, "the failure branch should exist");
+  assert.match(fn.slice(at, at + 700), /\.delete\(GF_API \+ "\/listing\/" \+ listingId/);
+  assert.match(fn.slice(at, at + 900), /draft discarded/);
+});
+
+/* ============ 6. "ready" is a stuck state, not a parked one ============= */
+
+test("REGRESSION: the reprice fast path puts a READY listing back on sale", () => {
+  const fn = MP.slice(
+    MP.indexOf('const live = await gfReadStatusOrThrow(listingId, "Gameflip reprice");'),
+    MP.indexOf('await gfTakeOffSale(listingId, setStatus, "Gameflip reprice");'),
+  );
+  assert.match(fn, /if \(live === "ready"\)/, "ready must be restored");
+  assert.match(fn, /gameflipListingStatus\(listingId\)\) === "onsale"/, "and verified");
+  assert.match(fn, /NOT purchasable/);
+});
+
+test("a DRAFT listing is still left alone", () => {
+  // Somebody parked it deliberately. Putting it on sale would override them —
+  // the opposite mistake to the one above, and just as bad.
+  const fn = MP.slice(
+    MP.indexOf('const live = await gfReadStatusOrThrow(listingId, "Gameflip reprice");'),
+    MP.indexOf('await gfTakeOffSale(listingId, setStatus, "Gameflip reprice");'),
+  );
+  assert.doesNotMatch(fn, /if \(live === "draft"\)[\s\S]{0,200}setStatus\("onsale"\)/);
+  assert.match(fn, /deliberately parked/);
+});
+
+/* ============ 7. the post-event markup is not lost mid-relist =========== */
+
+test("REGRESSION: postEvent waits while a relist is genuinely pending", () => {
+  const at = LISTER.indexOf("let relistPending = false;");
+  assert.ok(at > 0, "the deferral should exist");
+  const block = LISTER.slice(at, at + 900);
+  assert.match(block, /status: "sold"/);
+  assert.match(block, /qtyRemaining: \{ \$gt: 0 \}/, "a chain still owing units");
+  assert.match(block, /POST_EVENT_RELIST_GRACE_MS/, "bounded, so the queue still drains");
+  assert.match(LISTER, /task\.listing\.postEvent = !relistPending;/);
+});
+
+test("the deferral is bounded, so a dead chain cannot hold the queue", () => {
+  // autoFarmer.repriceEndedTasks filters on this flag and its own comment says
+  // the unconditional set exists "so this queue always drains rather than
+  // spinning on dead listings". The recency bound is what keeps that true.
+  assert.match(LISTER, /const POST_EVENT_RELIST_GRACE_MS = 24 \* 60 \* 60 \* 1000;/);
+  const farmer = read("utils/autoFarmer.js");
+  assert.match(farmer, /"listing\.postEvent": \{ \$ne: true \}/,
+    "the queue still filters on the flag this protects");
+});

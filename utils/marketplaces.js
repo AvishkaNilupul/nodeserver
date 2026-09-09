@@ -364,10 +364,23 @@ async function gameflipPublish({
       );
     }
   }
-  try {
+  // PUTTING IT ON SALE MUST NOT BE TRUSTED BLINDLY.
+  //
+  // Under its rate limiter Gameflip answers 200 to this status patch and leaves
+  // the listing in "ready" — complete, public, and NOT purchasable. Every other
+  // status restore in this file already refuses to trust that 200 and reads the
+  // status back (gameflipReprice's restore, gfTakeOffSale, the cover swap, the
+  // photo prune). The create path was the one that did not, so a rate-limited
+  // publish returned success, the caller wrote an "active" row with the account
+  // attached, the chain counted a unit discharged — and nobody could buy it. The
+  // account's drops stayed reserved out of the sellable pool with nothing ever
+  // retiring the row.
+  //
+  // The limiter's window is minutes wide, so back off in tens of seconds.
+  const setStatus = async (value) => {
     await axios.patch(
       GF_API + "/listing/" + listingId,
-      [{ op: "replace", path: "/status", value: "onsale" }],
+      [{ op: "replace", path: "/status", value }],
       {
         headers: {
           ...gfHeaders(keys),
@@ -376,11 +389,47 @@ async function gameflipPublish({
         timeout: 20000,
       },
     );
-  } catch (e) {
-    // Listing exists but stayed a draft (e.g. no photo). Surface a hint.
+  };
+  let onsale = false;
+  let onsaleErr = null;
+  for (const w of [0, 20000, 60000]) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("onsale");
+    } catch (e) {
+      onsaleErr = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) === "onsale") {
+        onsale = true;
+        onsaleErr = null;
+        break;
+      }
+      onsaleErr = new Error(
+        'status settled on "ready" instead of "onsale" (rate-limited)',
+      );
+    } catch (e) {
+      onsaleErr = e;
+    }
+  }
+  if (!onsale) {
+    // Bin the draft, for the same reason the digital-goods failure above bins
+    // it: the credentials are already attached, so leaving it behind is
+    // invisible stock AND makes Gameflip reject the next attempt with "code for
+    // digital goods already exists". Discarding it also lets the caller's error
+    // path hand the account straight back to the pool.
+    await axios
+      .delete(GF_API + "/listing/" + listingId, {
+        headers: gfHeaders(keys),
+        timeout: 20000,
+      })
+      .catch(() => {});
     throw apiError(
-      "Gameflip created draft " + listingId + " but could not put it on sale",
-      e,
+      "Gameflip created " +
+        listingId +
+        " but could not put it on sale (draft discarded)",
+      onsaleErr || new Error("unknown error"),
     );
   }
   return {
@@ -583,6 +632,51 @@ async function gameflipReprice(
         await swapCover();
       } catch (e) {
         throw apiError("Gameflip cover", e);
+      }
+    }
+    // "draft" and "ready" are NOT the same thing, and returning on both is why
+    // an unbuyable listing could be repriced and reported as fine.
+    //
+    //   draft — deliberately parked. Putting it on sale would override whoever
+    //           parked it, so leave it exactly as it is.
+    //   ready — complete, public, and NOT purchasable. Nobody parks a listing
+    //           in "ready"; it is where a previous onsale patch LANDED when the
+    //           rate limiter answered 200 and did nothing. Returning quietly
+    //           left it unbuyable forever, and onCampaignEnded then recorded the
+    //           reprice as a success and marked the post-event markup done.
+    //
+    // So a "ready" listing is put back, verified the same way every other
+    // restore in this file verifies, and a failure is raised rather than hidden.
+    if (live === "ready") {
+      let back = false;
+      let backErr = null;
+      for (const w of [0, 20000, 60000]) {
+        if (w) await new Promise((r) => setTimeout(r, w));
+        try {
+          await setStatus("onsale");
+        } catch (e) {
+          backErr = e;
+          continue;
+        }
+        try {
+          if ((await gameflipListingStatus(listingId)) === "onsale") {
+            back = true;
+            backErr = null;
+            break;
+          }
+          backErr = new Error('status stayed "ready" (rate-limited)');
+        } catch (e) {
+          backErr = e;
+        }
+      }
+      if (!back) {
+        throw new Error(
+          "Gameflip listing " +
+            listingId +
+            ' was found in "ready" (public but NOT purchasable) and could not be' +
+            " put back on sale — the reprice was applied but nobody can buy it. " +
+            ((backErr && backErr.message) || "unknown error"),
+        );
       }
     }
     return;

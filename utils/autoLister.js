@@ -2872,6 +2872,12 @@ function chooseStackItems(current, stacked, holderCount) {
 // compound, and cannot outrun the bundle. Items still stack — the bundle really
 // does grow — only its price stays tied to what the listing was actually
 // selling for.
+// How long a Gameflip relist may still be "pending" before the post-event markup
+// stops waiting for it. Long enough for a chain to republish (the fulfiller
+// retries on a 60s tick with backoff), short enough that a chain which never
+// relists cannot hold a task in the retry queue indefinitely.
+const POST_EVENT_RELIST_GRACE_MS = 24 * 60 * 60 * 1000;
+
 function postEventPrice(basePrice, { markup = POST_EVENT_MARKUP } = {}) {
   const base = Number(basePrice) > 0 ? Number(basePrice) : 1.0;
   return Math.max(0.75, round25(base * markup));
@@ -3075,7 +3081,44 @@ async function onCampaignEnded(taskId) {
   task.listing.title = title;
   task.listing.price = price;
   task.listing.repricedAt = new Date();
-  task.listing.postEvent = true;
+  // MARK IT DONE — unless a relist is genuinely about to produce a row.
+  //
+  // Setting this even when no live row remains is DELIBERATE and must stay:
+  // autoFarmer.repriceEndedTasks filters on exactly this flag, and the comment
+  // there ("so this queue always drains rather than spinning on dead listings")
+  // is the reason. Removing it would put the queue back to grinding on listings
+  // that will never exist again.
+  //
+  // But "no ACTIVE row at this instant" is not the same as "no row will ever
+  // exist". A Gameflip chain mid-relist has a `sold` row still owing units, and
+  // a fresh listing lands moments later — marking the markup done in that window
+  // loses the whole +50% scarcity price permanently, because the retry queue
+  // will never look at the task again.
+  //
+  // So defer ONLY while a relist is genuinely pending, and only while it is
+  // RECENT. The recency bound is what preserves the drain: a chain that never
+  // relists stops qualifying after POST_EVENT_RELIST_GRACE_MS and the task
+  // leaves the queue exactly as it does today.
+  let relistPending = false;
+  if (!row) {
+    const owed = await MarketplaceListing.findOne(
+      {
+        set: mySet._id,
+        marketplace: "gameflip",
+        origin: "auto",
+        status: "sold",
+        qtyRemaining: { $gt: 0 },
+        updatedAt: {
+          $gte: new Date(Date.now() - POST_EVENT_RELIST_GRACE_MS),
+        },
+      },
+      { _id: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    relistPending = !!owed;
+  }
+  task.listing.postEvent = !relistPending;
   if (row && heldBack > 0) {
     task.listing.qty = (Number(task.listing.qty) || 0) + heldBack;
     task.listing.heldBack = 0;
