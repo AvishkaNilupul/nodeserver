@@ -30,6 +30,24 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const mp = require("../utils/marketplaces");
 const { logEvent } = require("../utils/systemLog");
 
+// Optional per-market warm-up, run once before the row loop. Gameflip needs one:
+// asking it 238 times in a row earns HTTP 429 "Too many attempts", and a 429
+// reads exactly like "this listing is gone" unless something distinguishes them.
+// So the bulk state comes from ONE paged query and only the leftovers are asked
+// about individually.
+const PREPARE = {
+  gameflip: async () => {
+    const onsale = await mp.gameflipListingIdsByStatus("onsale");
+    const sold = await mp.gameflipListingIdsByStatus("sold");
+    return { onsale, sold };
+  },
+};
+
+// Per-market pacing. Gameflip's rate limiter is silent and unforgiving: at 180ms
+// between calls it returned 429 for 25 of 55 rows; at 1200ms, 4 of 55. Measured,
+// not guessed.
+const PACE_MS = { gameflip: 1200, eldorado: 250, ggsel: 250 };
+
 // One reader per marketplace. Each returns the marketplace's own word for the
 // offer's state, lowercased, or "" when it could not be read.
 const READERS = {
@@ -39,6 +57,15 @@ const READERS = {
   eldorado: async (row) => {
     const offer = await mp.eldoradoOffer(row.externalId);
     return String((offer && offer.offerState) || "").toLowerCase();
+  },
+  // The paged search is NOT authoritative: it omitted 48 of 244 genuinely
+  // onsale listings when measured. So a row it does not list is a SUSPECT, not
+  // a corpse — it gets one direct read, and only that answer counts.
+  gameflip: async (row, ready) => {
+    const id = String(row.externalId);
+    if (ready && ready.onsale && ready.onsale.has(id)) return "onsale";
+    if (ready && ready.sold && ready.sold.has(id)) return "sold";
+    return String((await mp.gameflipListingStatus(id)) || "").toLowerCase();
   },
 };
 
@@ -66,6 +93,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // Only rows we believe are live. A row we already call delisted needs no
   // check, and re-reading every historical row would be a lot of API calls for
   // nothing.
+  const ready = PREPARE[market] ? await PREPARE[market]() : null;
+  const pace = PACE_MS[market] || 250;
+
   const rows = await MarketplaceListing.find(
     { marketplace: market, status: "active" },
     { externalId: 1, title: 1, price: 1, status: 1, origin: 1, lastError: 1 },
@@ -77,13 +107,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (const row of rows) {
     let live = "";
     try {
-      live = await read(row);
+      live = await read(row, ready);
     } catch (e) {
       unreadable.push({ row, why: e.message });
       console.log("  ? " + String(row.externalId).padEnd(12) + " could not read: " + e.message);
       continue;
     }
-    await sleep(250);
+    await sleep(pace);
     const ok = LIVE.has(live);
     console.log(
       (ok ? "  = " : "  ! ") + String(row.externalId).padEnd(12) +
@@ -113,18 +143,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const note =
       "status reconciled " + new Date().toISOString().slice(0, 10) +
       ": " + market + " reports \"" + (live || "unknown") + "\"";
+    // "sold" is a real terminal state and is recorded as such — writing it as
+    // `delisted` would lose the fact that it earned money.
+    const nextStatus = live === "sold" ? "sold" : "delisted";
     const res = await MarketplaceListing.updateOne(
       { _id: row._id, status: "active" },
       {
         $set: {
-          status: "delisted",
+          status: nextStatus,
           lastError: row.lastError ? row.lastError + " | " + note : note,
         },
       },
     ).catch(() => null);
     if (res && (res.modifiedCount || res.nModified)) fixed += 1;
   }
-  console.log("\nmarked " + fixed + " row(s) delisted to match " + market);
+  console.log("\nmarked " + fixed + " row(s) to match " + market);
 
   await logEvent({
     category: "marketplace",
