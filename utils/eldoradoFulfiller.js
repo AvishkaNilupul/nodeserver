@@ -647,6 +647,42 @@ async function syncBundleStock({ dryRun = false } = {}) {
 }
 
 // One pass over every paid-but-undelivered Eldorado order.
+// A paid order the bot cannot ship is the WORST silent state: money is taken,
+// the buyer is waiting, and the log line reads like a routine skip.
+//
+// PlayerAuctions and G2G both page the operator here. Eldorado did not — a
+// `grep -c sendTelegram` over this file returned 0 — so an Eldorado BUNDLE order
+// that could not ship produced one console.error per 60-second tick and nothing
+// else. It is invisible to the health page too: `orders.undelivered` counts
+// FarmServiceOrder rows, and a bundle sale never creates one. Eldorado is the
+// marketplace where a rent-farm order was already lost exactly this way
+// (4b20765f); the bundle half had the same hole.
+//
+// One page per order per process, like the PlayerAuctions version: a stuck order
+// re-reads every tick and an unthrottled alert would be a message a minute.
+const ALERT_REASONS =
+  /out of stock|no listing row|no unsold account|ambiguous|cannot be identified|no sellable|free in the no-claim farm/i;
+const alertedOrders = new Set();
+
+function alertsOperator(reason) {
+  return ALERT_REASONS.test(String(reason || ""));
+}
+
+async function alertUnfulfillable(order, why) {
+  const id = String((order && (order.id || order.orderId)) || "");
+  if (!id || alertedOrders.has(id)) return;
+  alertedOrders.add(id);
+  await require("./telegram")
+    .sendTelegram(
+      "⚠️ Eldorado order " + id + " is PAID and the bot cannot ship it.\n\n" +
+        String((order && (order.offerTitle || order.title)) || "").slice(0, 120) + "\n" +
+        "Buyer: " + ((order && (order.buyerName || order.buyer)) || "?") + "\n\n" +
+        "Reason: " + String(why || "").slice(0, 300) + "\n\n" +
+        "This one needs delivering by hand, and the delivery guarantee is running.",
+    )
+    .catch(() => {});
+}
+
 async function deliverPaidOrders() {
   const af = getAutoFarm() || {};
   if (!af.eldoradoAutoDeliver) return { skipped: "eldoradoAutoDeliver off" };
@@ -693,6 +729,10 @@ async function deliverPaidOrders() {
         (await farmService.deliverFarmOrder(order, { dryRun })) ||
         (await deliverOrder(order, { dryRun }));
       results.push(r);
+      // Money is already taken on any of these; a human has to hear about it.
+      if ((r.error && alertsOperator(r.error)) || (r.skipped && alertsOperator(r.skipped))) {
+        await alertUnfulfillable(order, r.error || r.skipped);
+      }
       if (r.error)
         console.error("eldorado deliver " + r.orderId + ":", r.error);
       else if (r.dryRun)

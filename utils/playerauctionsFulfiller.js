@@ -615,12 +615,40 @@ async function deliverOrder(order, { dryRun }) {
 
   // Now that the listing is known, its unit price can turn what the buyer paid
   // into a unit count. Anything that does not divide cleanly is one unit.
-  const qty = paQuantity(order, row.price);
+  const units = paUnits(order, row.price);
+  const qty = units.qty;
 
   // Already fully delivered.
   const mine = unitsForOrder(row, orderId);
   if (mine.length && mine.every((u) => u.deliveredAt)) {
     return { orderId, skipped: "already delivered" };
+  }
+
+  // A unit count we could not PROVE, on an order we are about to fill for the
+  // first time.
+  //
+  // Falling back to one account is the safe half and stays. The unsafe half was
+  // the silence: the hand-over then calls playerauctionsMarkDelivered for the
+  // WHOLE order, so a buyer who paid $12.50 against a $5 unit received one
+  // account and an order stamped complete, with nothing anywhere recording that
+  // we had guessed. Deliver the one, mark it, and page a human who can top the
+  // order up while the buyer is still waiting rather than disputing.
+  //
+  // Gated on `!mine.length` so it fires once, when the order is first handled,
+  // not on every 60-second retry of a half-finished hand-over.
+  if (units.suspect && !mine.length && !dryRun) {
+    await require("./farmServiceAlert")
+      .alertFarmFailure({
+        market: "playerauctions",
+        orderId,
+        offerTitle,
+        game: row.unclaimedGame || "",
+        days: 0,
+        qty: 1,
+        buyerUsername: (order && order.name) || "",
+        reason: "CHECK THE UNIT COUNT BY HAND — " + units.why,
+      })
+      .catch(() => {});
   }
 
   // RESUME: a previous attempt reserved stock but did not finish. Reuse it.
@@ -799,9 +827,9 @@ async function deliverOrder(order, { dryRun }) {
 // from the order's price against the offer where possible and fall back to 1 —
 // over-delivering because a display string was parsed as a unit count would
 // hand out free accounts.
-function paQuantity(order, listingPriceUsd) {
+function paUnits(order, listingPriceUsd) {
   const n = parseInt(order && order.purchaseQuantity, 10);
-  if (Number.isFinite(n) && n > 0) return n;
+  if (Number.isFinite(n) && n > 0) return { qty: n, why: "the order stated purchaseQuantity=" + n };
 
   // `orderInfo.purchased.amount` is the SAME ITEM COUNT the comment above warns
   // about, in structured form — and reading it as a unit count is exactly the
@@ -822,10 +850,32 @@ function paQuantity(order, listingPriceUsd) {
   if (paid > 0 && unit > 0) {
     const units = paid / unit;
     const rounded = Math.round(units);
+    const evidence = "$" + paid.toFixed(2) + " paid / $" + unit.toFixed(2) + " a unit";
     // Within a cent per unit of a whole multiple, and at least two of them.
-    if (rounded >= 2 && Math.abs(units - rounded) * unit < 0.01) return rounded;
+    if (rounded >= 2 && Math.abs(units - rounded) * unit < 0.01) {
+      return { qty: rounded, why: evidence + " = " + rounded + " units" };
+    }
+    // Falling back to one is the SAFE half — but it used to be the silent half
+    // too, and the order was then marked delivered in full. A buyer who paid
+    // $12.50 against a $5 unit got one account and an order stamped complete,
+    // with nothing anywhere saying so. `suspect` is how the operator finds out
+    // while there is still time to top the order up by hand.
+    if (units >= 1.5) {
+      return {
+        qty: 1,
+        suspect: true,
+        why:
+          evidence + " = " + units.toFixed(3) +
+          " units, which does not divide cleanly — delivering ONE account",
+      };
+    }
   }
-  return 1;
+  return { qty: 1, why: "single unit" };
+}
+
+// The number on its own, for callers that only need the count.
+function paQuantity(order, listingPriceUsd) {
+  return paUnits(order, listingPriceUsd).qty;
 }
 
 // PlayerAuctions reports prices as strings ("5.00"). Anything unparseable is 0,
@@ -1007,6 +1057,10 @@ module.exports = {
   syncStock,
   syncUnclaimedStock,
   handOver,
+  // Exported so the unit-count derivation is tested against the REAL function
+  // rather than a regex-extracted copy of its source — the G2G credential bug
+  // slipped past source-shape tests in exactly that way.
+  paUnits,
   paQuantity,
   deliverOrder,
   deliverPendingOrders,

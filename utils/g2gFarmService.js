@@ -25,6 +25,7 @@ const { decrypt } = require("./secretBox");
 const mp = require("./marketplaces");
 const operatorFarm = require("./operatorFarm");
 const farmAlert = require("./farmServiceAlert");
+const provisioning = require("./farmProvisioning");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "g2g";
@@ -119,25 +120,25 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   const key = farmOrderKey(orderId);
   const qty = Math.max(1, parseInt(order && order.purchasedQty, 10) || 1);
 
-  if (!parsed.days) {
-    return {
-      orderId,
-      farm: true,
-      error: 'could not read a farming term from "' + parsed.title + '"',
-    };
-  }
-  if (!parsed.game) {
-    return {
-      orderId,
-      farm: true,
-      error:
-        'the farm does not know a game called "' + parsed.rawGame + '" — ' +
-        "add an alias in utils/playerauctionsFarmService before this can " +
-        "auto-deliver",
-    };
-  }
+  // A title we cannot read is still a PAID order.
+  //
+  // These two checks used to return here, ABOVE the FarmServiceOrder claim — so
+  // an unreadable order created no row, and with no row there was no
+  // farmServiceAlert, nothing for the `orders.undelivered` health check to
+  // count, and nothing in the audit log: one console.error per tick in pm2
+  // stdout while the buyer waited.
+  //
+  // (The alias hint also named playerauctionsFarmService — a copy-paste that
+  // would have sent whoever hit this to the wrong file.)
+  const unreadable = !parsed.days
+    ? 'could not read a farming term from "' + parsed.title + '"'
+    : !parsed.game
+      ? 'the farm does not know a game called "' + parsed.rawGame + '" — ' +
+        "add an alias in utils/g2gFarmService before this can auto-deliver"
+      : "";
 
   if (dryRun) {
+    if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };
     const avail = await operatorFarm.previewFreshAccounts({ count: qty });
     return {
       orderId,
@@ -175,30 +176,61 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   }
   row.attempts += 1;
 
+  // The unreadable-title refusal, now that there is a row to hang it on.
+  if (unreadable) {
+    const alert = farmAlert.shouldAlert(row);
+    row.state = "failed";
+    row.lastError = unreadable;
+    await row.save();
+    if (alert) {
+      await farmAlert
+        .alertFarmFailure({
+          market: MARKET,
+          orderId,
+          offerTitle: row.offerTitle || parsed.title || "",
+          game: parsed.game || parsed.rawGame || "",
+          days: parsed.days || 0,
+          qty,
+          buyerUsername: row.buyerUsername || "",
+          reason: unreadable,
+        })
+        .catch(() => {});
+    }
+    return { orderId, farm: true, error: unreadable };
+  }
+
   try {
     // 1. Provision, unless a previous attempt already did.
     if (!row.provisionedAt) {
-      const res = await operatorFarm.farmFreshAccounts({
-        game: parsed.game,
-        days: parsed.days,
-        count: qty,
-        actor: "g2g-order:" + orderId,
-      });
+      // Ask ONLY for what this order is still missing, and APPEND the result.
+      // Asking for `qty` again and overwriting row.accounts is what stranded the
+      // accounts a previous attempt had already pinned to a bot — see
+      // utils/farmProvisioning for the whole failure.
+      const need = provisioning.stillNeeded(row, qty);
+      const res = need
+        ? await operatorFarm.farmFreshAccounts({
+            game: parsed.game,
+            days: parsed.days,
+            count: need,
+            actor: "g2g-order:" + orderId,
+          })
+        : { added: [] };
       const added = (res && res.added) || [];
-      if (added.length < qty) {
-        // Whatever was taken stays attached to the order rather than being
-        // stranded; the next tick tops it up.
-        row.accounts = added.map((a) => ({
-          login: a.login,
-          poolId: a.poolId,
-          farmUntil: null,
-        }));
+      row.accounts = provisioning.mergeProvisioned(
+        row.accounts,
+        added,
+        res && res.farmUntil,
+      );
+      if (row.accounts.length < qty) {
         // Keep WHY. farmFreshAccounts hands back skipped:[{username, reason}]
         // with the real error behind each rejected account; recording only the
         // count is what made order 4b20765f undiagnosable.
         const alert = farmAlert.shouldAlert(row);
         row.state = "failed";
-        row.lastError = farmAlert.shortfallMessage(res, qty);
+        row.lastError = farmAlert.shortfallMessage(
+          { added: row.accounts, skipped: (res && res.skipped) || [] },
+          qty,
+        );
         await row.save();
         if (alert) {
           await farmAlert.alertFarmFailure({
@@ -214,11 +246,9 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         }
         return { orderId, farm: true, error: row.lastError };
       }
-      row.accounts = added.map((a) => ({
-        login: a.login,
-        poolId: a.poolId,
-        farmUntil: new Date(Date.now() + parsed.days * 86400000),
-      }));
+      // row.accounts was already merged above — deliberately NOT rebuilt here.
+      // Rebuilding it from `added` is exactly the overwrite that stranded a
+      // previous attempt's accounts.
       row.provisionedAt = new Date();
       row.state = "provisioned";
       await row.save();
