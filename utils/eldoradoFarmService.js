@@ -221,6 +221,14 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     try {
       row = await FarmServiceOrder.create({
         orderId,
+        // Written explicitly, as g2gFarmService, gameflipFarmService and
+        // playerauctionsFarmService all do. This was the one service relying on
+        // the schema default, and a row created before that default existed
+        // carries no `market` at all — invisible in every per-market view,
+        // because a Mongoose default applies at creation from the schema of the
+        // day, never retroactively. One live row (Escape from Tarkov, delivered
+        // 2026-09-06) was in exactly that state.
+        market: MARKET,
         offerId: String(order.offerId || ""),
         offerTitle: parsed.title,
         buyerUsername: order.buyerUsername || "",
