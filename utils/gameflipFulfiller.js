@@ -332,6 +332,14 @@ async function noteRelistFailure(row, err) {
 // unavailable. Only ever applies to that fallback: the normal path reads the
 // whole fleet in two calls and must never be capped.
 const FALLBACK_POLL_LIMIT = 100;
+// Where the degraded pass resumes. Module scope on purpose: it has to
+// survive between ticks, which is the whole point of rotating.
+let fallbackCursor = 0;
+
+// How long a stalled-relist row is held while its republish runs.
+// publishAutoDelivery can spend minutes inside gameflipPublish's rate-limit
+// backoff, so the lease must comfortably outlast that on a 60s tick.
+const RELIST_LEASE_MS = 10 * 60 * 1000;
 
 // One watcher pass: mark sold listings sold and relist the next unit of any
 // chain that still has quantity left.
@@ -383,7 +391,25 @@ async function syncOnce() {
   // rather than firing the whole fleet into Gameflip's rate limiter (which
   // stalls sale detection for everyone). Only this path is capped — never the
   // bulk one above, which is what starved the tail before.
-  const due = soldIds && liveIds ? rows : rows.slice(0, FALLBACK_POLL_LIMIT);
+  // ROTATED, not sliced from the front. `rows` comes from an unsorted find, so
+  // natural order is stable across passes — taking the first N every time is
+  // exactly the `.limit(100)` bug the comment above spent a paragraph on, just
+  // moved into the degraded lane. While the bulk sweep is down (a 429 anywhere
+  // in its paging aborts it, and the unclaimed engine shares the same endpoint)
+  // the tail beyond N was never polled AT ALL — not this pass, not any pass —
+  // so sales there went unseen for the whole outage.
+  //
+  // A cursor that advances by the window each pass covers the whole fleet in
+  // ceil(rows/N) passes instead of never.
+  let due = rows;
+  if (!(soldIds && liveIds) && rows.length > FALLBACK_POLL_LIMIT) {
+    const start = fallbackCursor % rows.length;
+    due = rows.slice(start, start + FALLBACK_POLL_LIMIT);
+    if (due.length < FALLBACK_POLL_LIMIT) {
+      due = due.concat(rows.slice(0, FALLBACK_POLL_LIMIT - due.length));
+    }
+    fallbackCursor = (start + FALLBACK_POLL_LIMIT) % rows.length;
+  }
   if (due.length < rows.length) {
     console.error(
       "gameflip bulk sweep unavailable — polling " +
@@ -596,6 +622,33 @@ async function syncOnce() {
     .limit(5)
     .lean();
   for (const row of stalled) {
+    // CLAIM IT FIRST. The sold-row lane above takes its row with a conditional
+    // findOneAndUpdate and says why ("so two overlapping passes can't both
+    // relist"); this lane read with .lean(), published, and only THEN cleared
+    // qtyRemaining. A pass that overlapped the previous one — trivial here,
+    // because publishAutoDelivery can spend minutes inside gameflipPublish's
+    // rate-limit backoff on a 60-second tick — read the same still-owing row and
+    // published the same units a second time. Two live listings, one debt, and
+    // the second one's account is spent for nothing.
+    //
+    // Pushing relistRetryAt into the future IS the claim: it is exactly the
+    // field the `stalled` query filters on, so a concurrent pass stops seeing
+    // the row. A crash mid-publish costs one lease of delay, not a lost chain,
+    // and both exits below overwrite it anyway (success clears it,
+    // noteRelistFailure sets its own backoff).
+    const claimed = await MarketplaceListing.findOneAndUpdate(
+      {
+        _id: row._id,
+        qtyRemaining: { $gt: 0 },
+        $or: [
+          { relistRetryAt: null },
+          { relistRetryAt: { $exists: false } },
+          { relistRetryAt: { $lte: new Date() } },
+        ],
+      },
+      { $set: { relistRetryAt: new Date(Date.now() + RELIST_LEASE_MS) } },
+    ).catch(() => null);
+    if (!claimed) continue;
     let img = "";
     try {
       const set = await DropSet.findById(row.set).lean();

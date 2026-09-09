@@ -278,3 +278,62 @@ test("the deferral is bounded, so a dead chain cannot hold the queue", () => {
   assert.match(farmer, /"listing\.postEvent": \{ \$ne: true \}/,
     "the queue still filters on the flag this protects");
 });
+
+/* ============ 8. the degraded lane must not starve the same tail ======== */
+
+test("REGRESSION: the fallback window rotates instead of always taking the front", () => {
+  // `rows` is an unsorted find, so natural order is stable — slicing the first N
+  // every pass means the tail beyond N is polled on NO pass at all, for as long
+  // as the bulk sweep is down. That is the same `.limit(100)` bug the file
+  // documents at length for the bulk path, moved into the degraded one.
+  assert.match(FULFILLER, /let fallbackCursor = 0;/);
+  assert.match(FULFILLER, /fallbackCursor = \(start \+ FALLBACK_POLL_LIMIT\) % rows\.length;/);
+  const block = FULFILLER.slice(FULFILLER.indexOf("let due = rows;"));
+  assert.match(block.slice(0, 700), /rows\.slice\(start, start \+ FALLBACK_POLL_LIMIT\)/);
+  assert.doesNotMatch(
+    block.slice(0, 700),
+    /rows\.slice\(0, FALLBACK_POLL_LIMIT\)(?!\s*-)/,
+    "must not slice from the front",
+  );
+});
+
+test("the rotating window covers the whole fleet, with no gaps or repeats", () => {
+  // Executed, not read: the wrap-around is the part that is easy to get wrong.
+  const LIMIT = 100;
+  const rows = Array.from({ length: 238 }, (_, i) => i);
+  let cursor = 0;
+  const seen = new Set();
+  for (let pass = 0; pass < 3; pass += 1) {
+    const start = cursor % rows.length;
+    let due = rows.slice(start, start + LIMIT);
+    if (due.length < LIMIT) due = due.concat(rows.slice(0, LIMIT - due.length));
+    assert.strictEqual(due.length, LIMIT, "every pass polls a full window");
+    for (const r of due) seen.add(r);
+    cursor = (start + LIMIT) % rows.length;
+  }
+  assert.strictEqual(seen.size, rows.length, "3 passes of 100 should cover all 238");
+});
+
+/* ============ 9. one debt must not be relisted twice =================== */
+
+test("REGRESSION: the stalled-relist lane claims its row atomically", () => {
+  const lane = FULFILLER.slice(FULFILLER.indexOf("const stalled = await MarketplaceListing.find("));
+  assert.match(lane, /const claimed = await MarketplaceListing\.findOneAndUpdate\(/);
+  assert.match(lane, /if \(!claimed\) continue;/);
+  // The claim must be on the very field the `stalled` query filters on, or a
+  // concurrent pass would still see the row.
+  assert.match(lane, /relistRetryAt: new Date\(Date\.now\(\) \+ RELIST_LEASE_MS\)/);
+});
+
+test("the claim comes BEFORE the publish, not after", () => {
+  const lane = FULFILLER.slice(FULFILLER.indexOf("const stalled = await MarketplaceListing.find("));
+  const claim = lane.indexOf("const claimed = await MarketplaceListing.findOneAndUpdate(");
+  const publish = lane.indexOf("await publishAutoDelivery({");
+  assert.ok(claim > 0 && publish > 0, "both should be present");
+  assert.ok(claim < publish, "claiming after publishing protects nothing");
+});
+
+test("the lease outlasts a rate-limited publish", () => {
+  // gameflipPublish now backs off 0/20s/60s before giving up, on a 60s tick.
+  assert.match(FULFILLER, /const RELIST_LEASE_MS = 10 \* 60 \* 1000;/);
+});
