@@ -774,3 +774,100 @@ test("FunPay matches on the normalised name, and only exactly", async () => {
   const near = await resolveCategory("funpay", "Rainbow Six", { deps });
   assert.strictEqual(near.ok, false, "a prefix must not be treated as a match");
 });
+
+// ---------------------------------------------------------------------------
+// A timed-out lookup must not be reported — or remembered — as "no such
+// category". Measured on PROD 2026-09-10, which is why this exists:
+//
+//   ggselResolveCategoryId("Rocket League"), cold ....... 54,055ms  -> "121685"
+//   the very next resolveCategory call ..................    711ms  -> "121685"
+//
+// The shipped bound is 8s, so the FIRST resolve after every restart always
+// loses the race. Before this fix that produced ok:false with the reason
+// 'GGSel has no Twitch Drops category for "Rocket League"' — a statement that
+// is simply false — cached for the full 5-minute miss TTL. So for five minutes
+// after each deploy the owner was told to go and pick a category by hand for a
+// game that resolves fine a second later, which is the exact chore this whole
+// feature exists to delete.
+//
+// The abandoned lookup keeps running and warms the marketplace module's own
+// cache, so the right answer is seconds away — hence a third, much shorter TTL.
+test("a timed-out GGSel lookup is a DEGRADED miss, not 'this game has none'", async () => {
+  clearCache();
+  const slow = {
+    marketplaces: {
+      ggselResolveCategoryId: () => new Promise(() => {}), // never settles
+    },
+    settings: { getAutoFarm: () => ({ ggselCategoryId: "" }) },
+  };
+  const r = await resolveCategory("ggsel", "Rocket League", {
+    deps: slow,
+    timeoutMs: 20,
+  });
+
+  assert.equal(r.ok, false);
+  assert.equal(r.degraded, true, "a timeout is degraded, not a plain miss");
+  // The reason must not assert a fact we never established.
+  assert.ok(
+    !/has no Twitch Drops category/i.test(r.reason),
+    "must not claim the category does not exist: " + r.reason,
+  );
+  assert.match(r.reason, /did not answer in time/i);
+});
+
+test("GGSel genuinely having no category is NOT degraded", async () => {
+  clearCache();
+  const empty = {
+    marketplaces: { ggselResolveCategoryId: async () => "" },
+    settings: { getAutoFarm: () => ({ ggselCategoryId: "" }) },
+  };
+  const r = await resolveCategory("ggsel", "Some Unknown Game", {
+    deps: empty,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.degraded, false, "a real 'no' is a stable fact");
+  assert.match(r.reason, /has no Twitch Drops category/i);
+});
+
+test("the degraded miss expires in seconds so the warm answer wins", async () => {
+  clearCache();
+  let calls = 0;
+  // First call never settles (cold crawl); afterwards the underlying cache is
+  // warm and it answers instantly — exactly the prod behaviour above.
+  const warming = {
+    marketplaces: {
+      ggselResolveCategoryId: () => {
+        calls += 1;
+        return calls === 1 ? new Promise(() => {}) : Promise.resolve("121685");
+      },
+    },
+    settings: { getAutoFarm: () => ({ ggselCategoryId: "" }) },
+  };
+
+  const first = await resolveCategory("ggsel", "Rocket League", {
+    deps: warming,
+    timeoutMs: 20,
+  });
+  assert.equal(first.ok, false);
+  assert.equal(first.degraded, true);
+
+  const { DEGRADED_TTL_MS } = require("../utils/listingCategory");
+  assert.ok(
+    DEGRADED_TTL_MS < MISS_TTL_MS,
+    "a degraded answer must expire sooner than a real miss",
+  );
+  assert.ok(DEGRADED_TTL_MS <= 30000, "seconds, not minutes");
+
+  // Same key inside the degraded window: served from cache, resolver untouched.
+  await resolveCategory("ggsel", "Rocket League", { deps: warming });
+  assert.equal(calls, 1, "the degraded window stops a re-open stampede");
+
+  // Past the window, the now-warm lookup is asked again and answers.
+  clearCache();
+  const second = await resolveCategory("ggsel", "Rocket League", {
+    deps: warming,
+  });
+  assert.equal(second.ok, true);
+  assert.equal(second.value.categoryId, "121685");
+  assert.equal(second.degraded, false);
+});

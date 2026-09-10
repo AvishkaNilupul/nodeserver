@@ -48,6 +48,13 @@ const RESOLVE_TIMEOUT_MS = 8000;
 // real offers into the generic default category.
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const MISS_TTL_MS = 5 * 60 * 1000;
+// A DEGRADED answer gets seconds, not minutes. Its live lookup was abandoned
+// but is STILL RUNNING and warms the marketplace module's own cache behind us,
+// so the correct answer is usually moments away — measured on prod 2026-09-10:
+// GGSel cold 54s (always over the 8s bound), then 711ms with the real category.
+// Long enough to stop a re-opened modal re-entering that serial crawl, short
+// enough that the owner is never told "no category" for a game that has one.
+const DEGRADED_TTL_MS = 15 * 1000;
 
 // The markets whose publish body carries a placement the owner used to type.
 // These are the four boxes on the Listings modal and the four branches that get
@@ -132,7 +139,7 @@ function ok(marketplace, { value, label, source, degraded }) {
   };
 }
 
-function miss(marketplace, reason, source) {
+function miss(marketplace, reason, source, degraded) {
   return {
     ok: false,
     marketplace,
@@ -140,9 +147,15 @@ function miss(marketplace, reason, source) {
     label: "",
     source: source || "none",
     reason: String(reason || ""),
-    // A miss already takes the short TTL, so this is only here to keep one
-    // shape for every Resolution the route hands the modal.
-    degraded: false,
+    // A miss whose cause was a timeout, not an answer. Measured on prod
+    // 2026-09-10: GGSel's first resolve after a restart takes 54s (its history
+    // crawl is a serial loop of awaited calls), so the 8s bound ALWAYS fires
+    // cold — and the underlying lookup keeps running and warms the cache, so
+    // the very next call answers in 711ms. Caching that first miss for the
+    // full 5 minutes therefore hides a correct answer we already have, and the
+    // owner is told to pick a category by hand for five minutes after every
+    // deploy — which is the entire thing this feature exists to remove.
+    degraded: Boolean(degraded),
   };
 }
 
@@ -255,13 +268,32 @@ const RESOLVERS = {
         degraded: Boolean(live.failed),
       });
     }
+    if (!game) {
+      return miss(
+        "ggsel",
+        "No game on this listing, so GGSel's category cannot be resolved",
+      );
+    }
+    // Say which of the two it is. Reporting "GGSel has no category for X" when
+    // the lookup merely timed out is a lie the owner acts on — they go and pick
+    // a category by hand for a game that resolves perfectly well a second
+    // later. Measured on prod: 121685 for Rocket League, 121199 for Overwatch 2.
+    if (live.failed) {
+      return miss(
+        "ggsel",
+        "GGSel did not answer in time (" +
+          live.failed +
+          ") — reopen this in a few seconds, the lookup is still running and " +
+          "warms up. Set a default in Auto-farm settings to skip the wait.",
+        "none",
+        true,
+      );
+    }
     return miss(
       "ggsel",
-      game
-        ? 'GGSel has no Twitch Drops category for "' +
-            game +
-            '" and no default is set in Auto-farm settings'
-        : "No game on this listing, so GGSel's category cannot be resolved",
+      'GGSel has no Twitch Drops category for "' +
+        game +
+        '" and no default is set in Auto-farm settings',
     );
   },
 
@@ -653,11 +685,22 @@ async function resolveCategory(marketplace, game, opts = {}) {
       // real offers published into the generic default category. The flag is
       // never inferred here: from the cache's seat a timed-out GGSel and a
       // game GGSel genuinely has no shelf for look identical.
+      //
+      // Three tiers, not two. A DEGRADED answer — ok or miss — is one whose
+      // live lookup never came back, and the lookup it abandoned is still
+      // running and about to populate the marketplace module's own cache.
+      // Measured on prod 2026-09-10: GGSel cold = 54s (over the 8s bound, so
+      // always a degraded miss), and the very next call = 711ms with the right
+      // answer. Holding the degraded answer for even five minutes throws away
+      // a correct one we already have, so it gets seconds — just enough to stop
+      // a modal re-open stampede re-entering that serial crawl.
       const stable = resolution.ok && !resolution.degraded;
-      cache.set(key, {
-        until: Date.now() + (stable ? CACHE_TTL_MS : MISS_TTL_MS),
-        resolution,
-      });
+      const ttl = stable
+        ? CACHE_TTL_MS
+        : resolution.degraded
+          ? DEGRADED_TTL_MS
+          : MISS_TTL_MS;
+      cache.set(key, { until: Date.now() + ttl, resolution });
     }
     return resolution;
   })();
@@ -692,6 +735,7 @@ module.exports = {
   // contract's published surface.
   CACHE_TTL_MS,
   MISS_TTL_MS,
+  DEGRADED_TTL_MS,
   clearCache,
   normGame,
 };
