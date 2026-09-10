@@ -2005,7 +2005,7 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
                 $map: {
                   input: { $slice: [{ $ifNull: ["$items", []] }, 4] },
                   as: "i",
-                  in: { $ifNull: ["$i.image", ""] },
+                  in: { $ifNull: ["$$i.image", ""] },
                 },
               },
             },
