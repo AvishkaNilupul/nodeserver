@@ -1,3 +1,4 @@
+/* global fetch */
 // The failure this file exists to prevent: S5 of
 // docs/ACCOUNT-LISTINGS-FIXES-3.md — THE PLAYERAUCTIONS BRANCH PUBLISHED A LIVE
 // OFFER WITH NO STOCK BEHIND IT.

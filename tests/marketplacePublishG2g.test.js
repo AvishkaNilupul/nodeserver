@@ -1,3 +1,4 @@
+/* global fetch */
 // The failure this file exists to prevent: a live G2G offer assembled from TWO
 // different games (F4 of docs/ACCOUNT-LISTINGS-FIXES.md).
 //

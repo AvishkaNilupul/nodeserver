@@ -942,9 +942,27 @@ async function releaseClaim(ledgerIds, opts = {}) {
   const ids = idList(ledgerIds);
   if (!ids.length) return 0;
   const SuppliedAccount = dep("SuppliedAccount", deps);
+  // Which states may be handed back. Default is both, for a fulfiller undoing
+  // its own failed claim.
+  //
+  // A DELIST passes ["fed"] instead, and the difference is load-bearing. "fed"
+  // means the credential is parked in a marketplace's own vault, and that copy
+  // dies with the offer — so it is always safe to return. "sold" means it is
+  // committed to a buyer's order, which a delist does not cancel. Asking the
+  // LEDGER which of the two it is, rather than reading the unit's orderId, is
+  // what this fixes: gameflipFulfiller stamps a SYNTHETIC orderId on its unit
+  // at publish time (":384", unique per attempt so the resume path cannot hand
+  // unit 2 the account unit 1 is selling), and the delist release skipped any
+  // unit carrying an orderId on the assumption it meant a live sale. Measured
+  // on prod 2026-09-10: a Gameflip test listing delisted with returned=0 and
+  // left its account stranded at "fed" — exactly the S1 bug the delist branch
+  // was written to fix, reintroduced through a different door.
+  const statuses = Array.isArray(opts.statuses) && opts.statuses.length
+    ? opts.statuses
+    : ["sold", "fed"];
   const filter = {
     _id: { $in: ids },
-    status: { $in: ["sold", "fed"] },
+    status: { $in: statuses },
     deliveredAt: null,
   };
   const orderId = str(opts.orderId);

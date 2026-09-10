@@ -1,3 +1,4 @@
+/* global fetch */
 // The failure this file exists to prevent: S1 of
 // docs/ACCOUNT-LISTINGS-FIXES-3.md — DELISTING AN ACCOUNT LISTING DESTROYED ITS
 // STOCK.
@@ -251,4 +252,94 @@ test("an ordinary DropSet-backed delist is untouched", async () => {
   assert.deepEqual(calls.released, [["acct-1", "acct-2"]]);
   const after = await MarketplaceListing.findById(row._id).lean();
   assert.equal(after.status, "delisted");
+});
+
+// Delisting must hand back an account parked in a marketplace's VAULT even when
+// its unit carries an orderId — because Gameflip's is synthetic.
+//
+// gameflipFulfiller stamps "gameflip-publish:<offer>:<ms>:<rand>" on the unit at
+// publish (utils/gameflipFulfiller.js:384), unique per attempt so suppliedStock's
+// resume path cannot hand unit 2 of a relist chain the account unit 1 is still
+// selling. The delist release originally skipped any unit with an orderId,
+// reading it as "a live sale owns this" — so on prod 2026-09-10 a real Gameflip
+// test listing delisted with returned=0 and left its account stranded at "fed",
+// which is exactly the S1 bug the branch exists to prevent.
+//
+// The ledger status is the authority: "fed" = parked in a vault that dies with
+// the offer (return it), "sold" = committed to a buyer (leave it alone).
+test("delist returns a vault-parked account whose unit carries a publish orderId", async () => {
+  const offer = await offerWithStock(2);
+  const pubOrder = "gameflip-publish:" + offer._id + ":1757500000000:ab12cd";
+
+  const claimed = await supplied.claimForListing(String(offer._id), 1, {
+    orderId: pubOrder,
+    market: "gameflip",
+  });
+  assert.equal(claimed.length, 1);
+  await supplied.markFed(
+    claimed.map((c) => c.ledgerId),
+    { market: "gameflip" },
+  );
+
+  const row = await MarketplaceListing.create({
+    accountOffer: offer._id,
+    // ggsel because it is the marketplace this file stubs; the delist release
+    // branch is marketplace-agnostic and the orderId SHAPE is what matters.
+    marketplace: "ggsel",
+    externalId: "gf-synthetic-order-test",
+    origin: "manual",
+    status: "active",
+    autoDeliver: true,
+    units: [
+      {
+        contentId: String(claimed[0].ledgerId),
+        accountId: "",
+        login: claimed[0].login,
+        orderId: pubOrder,
+        deliveredAt: null,
+      },
+    ],
+  });
+
+  assert.equal((await statuses(offer)).fed, 1, "parked in Gameflip's vault");
+
+  const body = await delist(String(row._id));
+  assert.equal(body.success, true);
+  assert.equal(body.returned, 1, "the vault-parked account must come back");
+
+  const after = await statuses(offer);
+  assert.equal(after.fed, undefined, "nothing left stranded at fed");
+  assert.equal(after.available, 2, "the whole shelf is sellable again");
+});
+
+test("delist does NOT take back an account already committed to a buyer", async () => {
+  const offer = await offerWithStock(1);
+
+  // A claim-at-sale market mid-order: status "sold", a REAL order id, not yet
+  // delivered. Delisting the offer does not cancel the order behind it.
+  const claimed = await supplied.claimForListing(String(offer._id), 1, {
+    orderId: "ELD-real-order-771",
+    market: "eldorado",
+  });
+  const row = await MarketplaceListing.create({
+    accountOffer: offer._id,
+    marketplace: "ggsel",
+    externalId: "eld-committed-test",
+    origin: "manual",
+    status: "active",
+    units: [
+      {
+        contentId: String(claimed[0].ledgerId),
+        accountId: "",
+        login: claimed[0].login,
+        orderId: "ELD-real-order-771",
+        deliveredAt: null,
+      },
+    ],
+  });
+
+  const body = await delist(String(row._id));
+  assert.equal(body.success, true);
+  assert.equal(body.returned, 0, "a sale in flight keeps its account");
+  assert.equal((await statuses(offer)).sold, 1, "still committed to the buyer");
 });

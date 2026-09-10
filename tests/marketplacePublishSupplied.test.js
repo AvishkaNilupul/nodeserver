@@ -1,3 +1,4 @@
+/* global fetch */
 // The two failures this file exists to prevent, both in the account-listing
 // half of POST /marketplaces/publish (G1 and G7 of
 // docs/ACCOUNT-LISTINGS-FIXES-2.md).

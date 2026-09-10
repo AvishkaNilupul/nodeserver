@@ -1,3 +1,4 @@
+/* global fetch */
 // Route-level tests for the account-listings API (Feature B of
 // docs/ACCOUNT-LISTINGS-CONTRACT.md), run against mongodb-memory-server with a
 // hand-seeded superadmin session.

@@ -1802,11 +1802,23 @@ router.delete(
       if (row.accountOffer) {
         const ledgerIds = [];
         for (const u of row.units || []) {
-          if (!u || !u.contentId || u.deliveredAt || u.orderId) continue;
+          // Delivered units are gone for good; everything else is a candidate
+          // and the LEDGER decides. This used to also skip any unit carrying an
+          // orderId, reading that as "a sale owns this" — but gameflipFulfiller
+          // stamps a synthetic publish-attempt orderId on its unit, so a
+          // vault-parked Gameflip account was skipped and stranded at "fed"
+          // forever (seen live on prod 2026-09-10: delist returned=0). The real
+          // question is the ledger status, which releaseClaim now asks below.
+          if (!u || !u.contentId || u.deliveredAt) continue;
           ledgerIds.push(String(u.contentId));
         }
         try {
-          returned = await suppliedStock.releaseClaim(ledgerIds);
+          // "fed" only: a credential parked in a marketplace vault dies with
+          // the offer and comes home. One committed to a buyer's order does
+          // NOT — delisting an offer does not cancel a sale someone paid for.
+          returned = await suppliedStock.releaseClaim(ledgerIds, {
+            statuses: ["fed"],
+          });
         } catch (err) {
           // The listing IS delisted by now; a failed hand-back must not turn
           // that into a 500 the owner retries against a marketplace that no
