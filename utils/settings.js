@@ -374,7 +374,25 @@ const AUTO_FARM_DEFAULTS = {
   catalogPreorderSyncMinutes: 10,
 };
 
-const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
+// ---------------------------------------------------------------------------
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md §B8)
+// ---------------------------------------------------------------------------
+// TOP LEVEL, deliberately NOT inside autoFarm: an account listing's stock is an
+// explicit list of accounts the owner pasted in, not farmed stock, so it must
+// not be reachable from the Auto-farm tab's patch surface — a setAutoFarm write
+// must never be able to switch owner-supplied delivery on or off as a side
+// effect. Read through getAccountListingSettings().
+const ACCOUNT_LISTING_DEFAULTS = {
+  enabled: true, // the tab + routes
+  autoDeliver: true, // global kill switch over every offer's own toggle
+  lowStockWarnAt: 2, // Telegram warning when an offer drops to this
+};
+
+const DEFAULTS = {
+  require2fa: false,
+  autoFarm: AUTO_FARM_DEFAULTS,
+  accountListings: ACCOUNT_LISTING_DEFAULTS,
+};
 
 function loadSettings() {
   try {
@@ -779,6 +797,36 @@ function getCoworkerAutonomy() {
   return { enabled: !!getAutoFarm().coworkerAutonomy };
 }
 
+// Account-listing switches (docs/ACCOUNT-LISTINGS-CONTRACT.md §B8), read fresh
+// each call so the owner can stop every account-listing delivery with one live
+// settings edit, without a restart and without touching any other market
+// (the getAutoFarm/maxAutoBots pattern).
+//
+// The merge is load-bearing, not decoration: loadSettings merges DEFAULTS only
+// SHALLOWLY, so a settings.json carrying a partial block — the shape a
+// hand-edit or a future single-key write produces — replaces the whole default
+// object and every unwritten key would come back undefined. `enabled` and
+// `autoDeliver` are the gates on a paid buyer's delivery, and undefined reads
+// as OFF, so a one-key edit could silently stop delivering. Defaults go under
+// the live values, and each value is clamped the getUnclaimedPricing way so a
+// hand-typed string degrades to the default instead of poisoning the gate.
+function getAccountListingSettings() {
+  const s = loadSettings();
+  const cur =
+    s.accountListings && typeof s.accountListings === "object"
+      ? s.accountListings
+      : {};
+  const D = ACCOUNT_LISTING_DEFAULTS;
+  return {
+    enabled: cur.enabled == null ? D.enabled : !!cur.enabled,
+    autoDeliver: cur.autoDeliver == null ? D.autoDeliver : !!cur.autoDeliver,
+    lowStockWarnAt: Math.max(
+      0,
+      Math.floor(num(cur.lowStockWarnAt, D.lowStockWarnAt)),
+    ),
+  };
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -803,6 +851,8 @@ module.exports = {
   gameAccountCapFor,
   getCatalogConfig,
   setCatalogConfig,
+  getAccountListingSettings,
   UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
+  ACCOUNT_LISTING_DEFAULTS,
 };

@@ -5,6 +5,7 @@ const path = require("path");
 const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
+const AccountOffer = require("../models/AccountOffer");
 const AuditFinding = require("../models/AuditFinding");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
@@ -19,6 +20,15 @@ const guardianFixes = require("../utils/guardianFixes");
 const marketResearch = require("../utils/marketResearch");
 const mp = require("../utils/marketplaces");
 const epicnpc = require("../utils/epicnpcCatalog");
+const paCopy = require("../utils/playerauctionsCopy");
+const suppliedStock = require("../utils/suppliedStock");
+const { isNoClaimGame } = require("../utils/settings");
+const { listingGame } = require("../utils/listingGame");
+const { logEvent } = require("../utils/systemLog");
+const {
+  resolveCategory,
+  MARKETS_NEEDING_CATEGORY,
+} = require("../utils/listingCategory");
 const { buildG2gBulkFile } = require("../utils/g2gBulk");
 const { competitorPrices } = require("../utils/priceScout");
 const { recordListingSale } = require("../utils/saleLearning");
@@ -543,10 +553,220 @@ router.post(
   },
 );
 
+// ------------------------------------------------------------------
+// Account listings + auto-picked categories
+// (docs/ACCOUNT-LISTINGS-CONTRACT.md)
+// ------------------------------------------------------------------
+
+// A publish is either DropSet-backed or AccountOffer-backed, and everything
+// past the id lookup (title, description, cover, all nine market branches) is
+// shared. Rather than fork the route, an offer is handed to it in the shape the
+// body already reads off a set — with no items and no _id, because an account
+// listing has no Drop Archive rows behind it at all.
+function setLikeFromOffer(offer) {
+  return {
+    _id: null,
+    name: offer.title || "",
+    note: offer.description || "",
+    price: Number(offer.priceUsd) || 0,
+    minPriceUsd: Number(offer.minPriceUsd) || 0,
+    items: [],
+    coverStyle: offer.coverStyle || "promo",
+    coverServiceText: offer.coverServiceText || "",
+    coverBullets: Array.isArray(offer.coverBullets) ? offer.coverBullets : [],
+    coverImages: Array.isArray(offer.coverImages) ? offer.coverImages : [],
+    coverGame: offer.game || "",
+  };
+}
+
+// The fields that mark a MarketplaceListing as backed by owner-supplied stock.
+// `origin` is passed EXPLICITLY rather than leaning on the schema default, so
+// no later default change can enrol the owner's own pasted accounts into the
+// auto-farmer's post-event repricing. `accountId`/`accountLogin` stay empty on
+// purpose: marketplaceGuardian.runChecks indexes duplicates off exactly those
+// two fields and would raise one on every pass. `units[].contentId` is the
+// SuppliedAccount id (the ledger row IS the unit here) and `units[].login` is
+// what utils/listedLogins.js reads to stop one login being sold twice.
+function offerRowFields(offer, accounts) {
+  return {
+    set: null,
+    accountOffer: offer._id,
+    origin: "manual",
+    accountId: "",
+    accountLogin: "",
+    units: (accounts || []).map((a) => ({
+      contentId: String(a.ledgerId || ""),
+      accountId: "",
+      login: a.login || "",
+      addedAt: new Date(),
+      deliveredAt: null,
+      orderId: "",
+    })),
+  };
+}
+
+// G7: why did the claim come back empty? suppliedStock.claimForListing answers
+// [] for two very different reasons — an empty shelf, and account-listing
+// delivery being switched off (F1d moved that gate inside the claim layer).
+// These three publish sites reported "Out of stock" for both, so a PAUSED offer
+// with a full shelf sent the owner hunting for accounts they had already added.
+// A dryRun claim is exempt from the kill switch precisely so it can tell the
+// two apart, and it writes nothing.
+async function suppliedClaimRefusal(offer, want, market) {
+  let onShelf = 0;
+  try {
+    const probe = await suppliedStock.claimForListing(offer._id, want, {
+      market,
+      dryRun: true,
+    });
+    onShelf = probe.length;
+  } catch (err) {
+    // A failed probe must not invent a diagnosis. Fall through to the
+    // stock-shaped message, which is exactly what this site said before.
+    console.error("supplied dry claim (" + market + "):", err.message);
+  }
+  if (onShelf) {
+    return (
+      "Auto-delivery is switched off for this account listing, so nothing " +
+      "could be claimed — at least " +
+      onShelf +
+      " account(s) are still on the shelf. Turn delivery back on for the " +
+      "offer (or globally in Settings) and publish again."
+    );
+  }
+  return (
+    "Out of stock — this account listing has no available accounts left to " +
+    "hand over"
+  );
+}
+
+// G1: render the hand-over text BEFORE anything goes live, and refuse the
+// publish when any unit renders empty.
+//
+// The implementation is utils/marketplaceGuardian.suppliedUnitsOrRefuse, not a
+// copy of it. The guardian's GGSel/Plati top-up needs the identical check on
+// the identical shape, and this codebase has already paid for the alternative:
+// utils/marketClaimTags.js exists because the same list was pasted into every
+// consumer and each copy drifted, so a merely-listed drop read as a real sale.
+// One implementation, two callers.
+//
+// (Why it has to exist at all: the owner's deliveryTemplate can be all
+// placeholders the pasted accounts have none of, and both vault helpers
+// .filter(Boolean) the unit list — utils/marketplaces.js:1401 for Digiseller,
+// :1793/:1864 for GGSel. By then claimForListing has taken the accounts and
+// markFed has moved them out of sellable stock.)
+const suppliedUnitsOrRefuse = guardian.suppliedUnitsOrRefuse;
+
+// Did the owner pick this market's category by hand? A body-supplied category
+// always wins — that is what the modal's "Change" link produces — and only its
+// absence triggers the server-side resolution.
+//
+// G2G is the odd one out. Its picker used to send only `productId`, so this
+// answered false for every hand-picked G2G placement: the auto-resolved brand
+// overrode the owner's choice while their product still supplied relation_id
+// and the offer attributes, and the offer went live assembled from two
+// different games (F4). The picker now sends the serviceId + brandId it
+// drilled through, and on G2G the brand IS the game — so brandId present means
+// "the owner picked this one". It is also the field g2gPublish refuses to work
+// without ("G2G brand_id is required (the game)",
+// utils/marketplaces.js:3004), which is why a body carrying no brandId must
+// still be resolved; serviceId alone is not a pick, because g2gPublish
+// defaults the service to Game Items (utils/marketplaces.js:3002) and a
+// service without a game is not a placement.
+function bodyCategoryGiven(name, body) {
+  if (name === "ggsel") return !!(body.ggsel && body.ggsel.categoryId);
+  if (name === "digiseller") {
+    const cats = (body.digiseller || {}).categories;
+    return Array.isArray(cats) && cats.length > 0;
+  }
+  if (name === "funpay") return !!(body.funpay && body.funpay.nodeId);
+  if (name === "g2g") return !!(body.g2g && body.g2g.brandId);
+  return true;
+}
+
+// Feature A: the category picks itself. We only sell Twitch drops, so the modal
+// asks here (on open, and again after the light set row hydrates its items) and
+// only falls back to the old drill-down picker when a market genuinely has
+// nowhere to file the game.
+//
+// A resolver miss is a 200 with ok:false, never a 500 — a blocked modal is
+// worse than an unmapped market. Every resolver is individually bounded inside
+// utils/listingCategory (GGSel's category history is a serial axios loop that
+// would otherwise hold this request open for minutes), so resolving in
+// parallel costs the slowest market's latency and no more.
+router.get(
+  "/marketplaces/suggest-category",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const q = req.query || {};
+      const asked = String(q.marketplaces || "")
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      // De-duplicated and capped: this is a superadmin route, but a repeated
+      // name would fan out the same bounded resolver several times over.
+      const targets = [
+        ...new Set(asked.length ? asked : MARKETS_NEEDING_CATEGORY),
+      ].slice(0, 12);
+      let set = null;
+      let offer = null;
+      if (q.setId) set = await DropSet.findById(String(q.setId)).lean();
+      if (q.offerId) {
+        offer = await AccountOffer.findById(String(q.offerId)).lean();
+      }
+      const game = listingGame({ game: q.game, set, offer });
+      const entries = await Promise.all(
+        targets.map(async (name) => {
+          try {
+            return [name, await resolveCategory(name, game)];
+          } catch (err) {
+            // resolveCategory documents that it never throws; if it ever does,
+            // one broken market must still not take the modal down.
+            return [
+              name,
+              {
+                ok: false,
+                marketplace: name,
+                value: {},
+                label: "",
+                source: "none",
+                reason: err.message,
+              },
+            ];
+          }
+        }),
+      );
+      const results = {};
+      for (const [name, r] of entries) results[name] = r;
+      res.json({ success: true, game, results });
+    } catch (err) {
+      console.error("suggest-category error:", err.message);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  },
+);
+
 router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
   try {
     const body = req.body || {};
-    const set = await DropSet.findById(body.setId).lean();
+    // Feature B: an account listing is backed by an AccountOffer and an
+    // explicit, owner-pasted list of accounts instead of a DropSet, so exactly
+    // one of the two ids says what is being sold. When `offerId` is absent
+    // every line below behaves exactly as it did before.
+    const offerId = String(body.offerId || "").trim();
+    let offer = null;
+    if (offerId) {
+      offer = await AccountOffer.findById(offerId).lean();
+      if (!offer) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Account listing not found" });
+      }
+    }
+    const set = offer
+      ? setLikeFromOffer(offer)
+      : await DropSet.findById(body.setId).lean();
     if (!set) {
       return res.status(404).json({ success: false, message: "Set not found" });
     }
@@ -557,8 +777,22 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
         .json({ success: false, message: "Pick at least one marketplace" });
     }
     const title = String(body.title || set.name).trim();
-    const description = String(body.description || buildDescription(set));
-    const priceUsd = Number(body.price != null ? body.price : set.price);
+    // An account listing has no items, so buildDescription's "Includes:" list
+    // would be an empty heading — the owner's own text is the whole contract.
+    const description = String(
+      body.description ||
+        (offer ? offer.description || "" : buildDescription(set)),
+    );
+    let priceUsd = Number(body.price != null ? body.price : set.price);
+    // The offer's floor is the ONLY floor an account listing has (there is no
+    // DropSet behind it for the usual minPriceUsd guard to read).
+    if (offer && Number(offer.minPriceUsd) > 0) {
+      priceUsd = Math.max(priceUsd, Number(offer.minPriceUsd));
+    }
+    // The canonical game for this publish. `set.game` does not exist on
+    // DropSet, so the four spellings scattered through the branches below all
+    // funnel through utils/listingGame instead.
+    const pubGame = listingGame({ set, offer, game: body.game });
     // A numbered grid collage of every item in the set makes a much better
     // cover photo than a single item's icon; fall back to the first item.
     // Custom listings use the promo-template cover instead (game drop images
@@ -614,6 +848,26 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     const results = {};
     for (const name of targets) {
       try {
+        // Feature A's load-bearing half: when the body omits this market's
+        // category, resolve one server-side instead of refusing the publish.
+        // A failure is scoped to this market — the loop is per-market and the
+        // others still publish.
+        let auto = null;
+        if (MARKETS_NEEDING_CATEGORY.includes(name)) {
+          if (!bodyCategoryGiven(name, body)) {
+            auto = await resolveCategory(name, pubGame);
+            if (!auto.ok) {
+              results[name] = {
+                success: false,
+                message:
+                  auto.reason ||
+                  "No " + name + " category could be resolved for this listing",
+              };
+              continue;
+            }
+          }
+        }
+        const cat = (auto && auto.value) || {};
         let r;
         if (name === "gameflip") {
           const gfOpts = body.gameflip || {};
@@ -623,6 +877,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             const qty = Math.max(1, parseInt(gfOpts.qty, 10) || 1);
             const doc = await gfFulfiller.publishAutoDelivery({
               set,
+              // Null for a Drop Archive publish; an account listing hands the
+              // fulfiller the offer so it takes one supplied account per unit
+              // instead of claiming from the archive.
+              offer,
               title,
               description,
               priceUsd,
@@ -657,31 +915,52 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             // Digiseller/Plati fulfils sales itself. The manual "Add stock"
             // flow still works for accounts not tracked on the server.
             const qtyWanted = Math.max(1, parseInt(ds.quantity, 10) || 1);
-            const claimed = await dsFulfiller.claimAccountsForSet(
-              set,
-              qtyWanted,
-            );
+            // Offer-backed rows take their stock from the owner's pasted list
+            // through the one shared claim layer — reserveSetOnAccount cannot
+            // represent an account that has no DropLog rows, so the archive
+            // path could never claim one of these.
+            const claimed = offer
+              ? await suppliedStock.claimForListing(
+                  String(offer._id),
+                  qtyWanted,
+                  { market: "digiseller" },
+                )
+              : await dsFulfiller.claimAccountsForSet(set, qtyWanted);
             if (!claimed.length) {
               results[name] = {
                 success: false,
-                message:
-                  "Out of stock — no unsold account holds this whole " +
-                  "bundle, so there is nothing to auto-deliver",
+                message: offer
+                  ? await suppliedClaimRefusal(offer, qtyWanted, "digiseller")
+                  : "Out of stock — no unsold account holds this whole " +
+                    "bundle, so there is nothing to auto-deliver",
               };
               continue;
             }
+            // G1. Rendered here rather than inline at the add-content call so
+            // an empty template costs neither a claim nor a junk Plati product.
+            let dsUnits = claimed.map((c) => c.code);
+            if (offer) {
+              const rendered = await suppliedUnitsOrRefuse(offer, claimed);
+              if (rendered.message) {
+                results[name] = { success: false, message: rendered.message };
+                continue;
+              }
+              dsUnits = rendered.units;
+            }
+            let dsContentIds = [];
             try {
               r = await mp.digisellerPublish({
                 title,
                 description,
                 priceUsd,
-                categories: ds.categories,
+                categories: ds.categories || cat.categories,
               });
               try {
-                await mp.digisellerAddContent(
+                const added = await mp.digisellerAddContent(
                   r.externalId,
-                  claimed.map((c) => c.code),
+                  dsUnits,
                 );
+                dsContentIds = (added && added.contentIds) || [];
               } catch (err) {
                 // The product exists but got no delivery content — disable it
                 // so an empty listing doesn't sit live on Plati.
@@ -689,9 +968,15 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
                 throw err;
               }
             } catch (err) {
-              await dsFulfiller.releaseAccounts(
-                claimed.map((c) => c.accountId),
-              );
+              if (offer) {
+                await suppliedStock.releaseClaim(
+                  claimed.map((c) => c.ledgerId),
+                );
+              } else {
+                await dsFulfiller.releaseAccounts(
+                  claimed.map((c) => c.accountId),
+                );
+              }
               throw err;
             }
             let dsNote = "auto-delivery: " + claimed.length + " account(s)";
@@ -719,7 +1004,28 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               accountId: claimed.map((c) => c.accountId).join(","),
               accountLogin: claimed.map((c) => c.login).join(", "),
               qtyTarget: qtyWanted,
+              ...(offer ? offerRowFields(offer, claimed) : {}),
             });
+            if (offer) {
+              // The credentials now sit inside Plati's own vault, so the ledger
+              // rows must leave "sold" for "fed": a later release would
+              // otherwise put an account a buyer can already be handed back on
+              // the shelf. Digiseller has no endpoint that lists a product's
+              // content, so the content ids it answered with are recorded here
+              // or lost forever.
+              try {
+                await suppliedStock.markFed(
+                  claimed.map((c) => c.ledgerId),
+                  {
+                    listing: doc._id,
+                    market: "digiseller",
+                    contentIds: dsContentIds,
+                  },
+                );
+              } catch (e) {
+                console.error("supplied markFed (digiseller):", e.message);
+              }
+            }
             results[name] = {
               success: true,
               id: String(doc._id),
@@ -733,7 +1039,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             title,
             description,
             priceUsd,
-            categories: ds.categories,
+            categories: ds.categories || cat.categories,
           });
           if (dsCover && fs.existsSync(dsCover)) {
             try {
@@ -748,16 +1054,41 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           }
         } else if (name === "g2g") {
           const g = body.g2g || {};
+          // A G2G placement is ONE unit: service, brand, product and the
+          // product's attributes all have to describe the same game. Merging
+          // them field by field (`g.brandId || cat.brandId`) did not — the
+          // owner's product supplied relation_id and offer_attributes while
+          // the brand came from the auto resolution, so the offer went live
+          // filed under one game carrying another game's product (F4). So it
+          // is all of the owner's pick or none of it.
+          const picked = bodyCategoryGiven("g2g", body);
           r = await mp.g2gPublish({
-            productId: g.productId,
+            // The manual G2G path forwarded only productId, so every publish
+            // from this page died on "G2G brand_id is required (the game)"
+            // (utils/marketplaces.js:3004). The brand IS the game, which is
+            // exactly what the resolver answers — and what the owner's own
+            // pick overrides, since drilling to a product by hand is the only
+            // way to publish a game brandForGame() calls NOT_LISTABLE.
+            serviceId: picked ? g.serviceId : cat.serviceId,
+            brandId: picked ? g.brandId : cat.brandId,
+            // With no pick, a leftover productId belongs to whatever the modal
+            // last drilled to, not to the resolved brand, so it is dropped
+            // together with its attributes: g2gPublish resolves the relation
+            // and the required attributes from the brand itself
+            // (utils/marketplaces.js:3019-3024), which is the same path an
+            // auto-resolved publish already takes.
+            productId: picked ? g.productId : undefined,
             title,
             description,
             priceUsd,
             qty: g.qty,
             minQty: g.minQty,
             currency: g.currency,
-            offerAttributes: g.offerAttributes,
-            deliveryMethodIds: g.deliveryMethodIds,
+            offerAttributes: picked ? g.offerAttributes : undefined,
+            // Same reason: the product dictates which delivery methods are
+            // legal, and keeping another game's ids would stop g2gPublish
+            // asking the resolved brand for its own (marketplaces.js:3027).
+            deliveryMethodIds: picked ? g.deliveryMethodIds : undefined,
           });
         } else if (name === "ggsel") {
           const gg = body.ggsel || {};
@@ -767,18 +1098,36 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             // accounts that hold the whole bundle, attach each as an
             // auto-delivered product, and let GGSel fulfil sales itself.
             const qtyWanted = Math.max(1, parseInt(gg.quantity, 10) || 1);
-            const claimed = await ggFulfiller.claimAccountsForSet(
-              set,
-              qtyWanted,
-            );
+            // Same split as Digiseller: an offer-backed row's stock is the
+            // owner's pasted list, claimed through the shared ledger layer.
+            const claimed = offer
+              ? await suppliedStock.claimForListing(
+                  String(offer._id),
+                  qtyWanted,
+                  { market: "ggsel" },
+                )
+              : await ggFulfiller.claimAccountsForSet(set, qtyWanted);
             if (!claimed.length) {
               results[name] = {
                 success: false,
-                message:
-                  "Out of stock — no unsold account holds this whole " +
-                  "bundle, so there is nothing to auto-deliver",
+                message: offer
+                  ? await suppliedClaimRefusal(offer, qtyWanted, "ggsel")
+                  : "Out of stock — no unsold account holds this whole " +
+                    "bundle, so there is nothing to auto-deliver",
               };
               continue;
+            }
+            // G1, and it bites hardest here: with every unit empty GGSel still
+            // creates the offer, silently with autoselling OFF and the asked-for
+            // quantity live.
+            let ggUnits = claimed.map((c) => c.code);
+            if (offer) {
+              const rendered = await suppliedUnitsOrRefuse(offer, claimed);
+              if (rendered.message) {
+                results[name] = { success: false, message: rendered.message };
+                continue;
+              }
+              ggUnits = rendered.units;
             }
             try {
               r = await mp.ggselPublish({
@@ -786,16 +1135,22 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
                 description,
                 priceUsd,
                 priceRub: gg.priceRub,
-                categoryId: gg.categoryId,
+                categoryId: gg.categoryId || cat.categoryId,
                 delivery: "auto",
                 instructions: gg.instructions,
                 coverImagePath: ggCover,
-                products: claimed.map((c) => c.code),
+                products: ggUnits,
               });
             } catch (err) {
-              await ggFulfiller.releaseAccounts(
-                claimed.map((c) => c.accountId),
-              );
+              if (offer) {
+                await suppliedStock.releaseClaim(
+                  claimed.map((c) => c.ledgerId),
+                );
+              } else {
+                await ggFulfiller.releaseAccounts(
+                  claimed.map((c) => c.accountId),
+                );
+              }
               throw err;
             }
             const doc = await MarketplaceListing.create({
@@ -816,7 +1171,19 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               accountId: claimed.map((c) => c.accountId).join(","),
               accountLogin: claimed.map((c) => c.login).join(", "),
               qtyTarget: qtyWanted,
+              ...(offer ? offerRowFields(offer, claimed) : {}),
             });
+            if (offer) {
+              // Inside GGSel's own vault now — see the Digiseller note above.
+              try {
+                await suppliedStock.markFed(
+                  claimed.map((c) => c.ledgerId),
+                  { listing: doc._id, market: "ggsel" },
+                );
+              } catch (e) {
+                console.error("supplied markFed (ggsel):", e.message);
+              }
+            }
             results[name] = {
               success: true,
               id: String(doc._id),
@@ -831,7 +1198,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             description,
             priceUsd,
             priceRub: gg.priceRub,
-            categoryId: gg.categoryId,
+            categoryId: gg.categoryId || cat.categoryId,
             quantity: gg.quantity,
             delivery: gg.delivery,
             instructions: gg.instructions,
@@ -839,7 +1206,11 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           });
         } else if (name === "funpay") {
           const fp = body.funpay || {};
-          if (!fp.nodeId) {
+          // FunPay's picker is a bare numeric box typed from memory, so the
+          // resolved node from the settings map is usually the better answer;
+          // a typed one still wins.
+          const fpNode = fp.nodeId || cat.node || cat.nodeId || "";
+          if (!fpNode) {
             results[name] = {
               success: false,
               message: "Pick a FunPay category (node id) first",
@@ -852,22 +1223,29 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             // (login:password), and let FunPay hand one to each buyer. The
             // connect guide is sent as the offer's after-payment message.
             const qtyWanted = Math.max(1, parseInt(fp.amount, 10) || 1);
-            const claimed = await fpFulfiller.claimAccountsForSet(
-              set,
-              qtyWanted,
-            );
+            const claimed = offer
+              ? await suppliedStock.claimForListing(
+                  String(offer._id),
+                  qtyWanted,
+                  { market: "funpay" },
+                )
+              : await fpFulfiller.claimAccountsForSet(set, qtyWanted);
             if (!claimed.length) {
               results[name] = {
                 success: false,
-                message:
-                  "Out of stock — no unsold account holds this whole " +
-                  "bundle, so there is nothing to auto-deliver",
+                message: offer
+                  ? await suppliedClaimRefusal(offer, qtyWanted, "funpay")
+                  : "Out of stock — no unsold account holds this whole " +
+                    "bundle, so there is nothing to auto-deliver",
               };
               continue;
             }
+            // No G1 guard here on purpose: FunPay is fed funpayDeliveryLine(),
+            // not the offer's template (a multi-line render would be split into
+            // several bogus secrets), and that line always carries the login.
             try {
               r = await mp.funpayPublish({
-                nodeId: fp.nodeId,
+                nodeId: fpNode,
                 title,
                 description,
                 priceUsd,
@@ -876,13 +1254,28 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
                 amount: claimed.length,
                 active: fp.active !== false,
                 autoDelivery: true,
-                secrets: claimed.map((c) => c.line),
+                // FunPay joins its secrets with "\n" and hands ONE LINE to
+                // each buyer (utils/marketplaces.js:3786), so a supplied
+                // account is fed as the same login:password line the archive
+                // path uses — the offer's multi-line delivery template would
+                // be split into several bogus secrets.
+                secrets: offer
+                  ? claimed.map((c) =>
+                      fpFulfiller.funpayDeliveryLine(c.login, c.password),
+                    )
+                  : claimed.map((c) => c.line),
                 paymentMsg: fpFulfiller.funpayPaymentGuide(),
               });
             } catch (err) {
-              await fpFulfiller.releaseAccounts(
-                claimed.map((c) => c.accountId),
-              );
+              if (offer) {
+                await suppliedStock.releaseClaim(
+                  claimed.map((c) => c.ledgerId),
+                );
+              } else {
+                await fpFulfiller.releaseAccounts(
+                  claimed.map((c) => c.accountId),
+                );
+              }
               throw err;
             }
             const doc = await MarketplaceListing.create({
@@ -903,7 +1296,20 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
               autoDeliver: true,
               accountId: claimed.map((c) => c.accountId).join(","),
               accountLogin: claimed.map((c) => c.login).join(", "),
+              ...(offer ? offerRowFields(offer, claimed) : {}),
             });
+            if (offer) {
+              // The lines are inside FunPay's secret pool now — see the
+              // Digiseller note above.
+              try {
+                await suppliedStock.markFed(
+                  claimed.map((c) => c.ledgerId),
+                  { listing: doc._id, market: "funpay" },
+                );
+              } catch (e) {
+                console.error("supplied markFed (funpay):", e.message);
+              }
+            }
             results[name] = {
               success: true,
               id: String(doc._id),
@@ -914,7 +1320,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             continue;
           }
           r = await mp.funpayPublish({
-            nodeId: fp.nodeId,
+            nodeId: fpNode,
             title,
             description,
             priceUsd,
@@ -932,11 +1338,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             description,
             priceUsd,
             quantity: zx.quantity,
-            game:
-              zx.game ||
-              set.game ||
-              set.coverGame ||
-              ((set.items || []).find((i) => i.game) || {}).game,
+            // `set.game` never existed on DropSet, so this used to fall
+            // through to coverGame by accident; listingGame is the canonical
+            // answer now.
+            game: zx.game || pubGame,
             serviceCategoryId: zx.serviceCategoryId,
             serviceCategoryBaseId: zx.serviceCategoryBaseId,
             attributes: zx.attributes,
@@ -953,15 +1358,135 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             priceUsd,
             quantity: el.quantity,
             minQuantity: el.minQuantity,
-            game:
-              el.game ||
-              set.game ||
-              set.coverGame ||
-              ((set.items || []).find((i) => i.game) || {}).game,
+            game: el.game || pubGame,
             coverImagePath: gridImage || coverImagePath(set),
             deliveryTime: el.deliveryTime,
             volumeDiscounts: el.volumeDiscounts,
           });
+        } else if (name === "playerauctions") {
+          const pa = body.playerauctions || {};
+          const paGame = pa.game || pubGame;
+          // utils/autoLister.js:1118-1126, verbatim in intent: Overwatch /
+          // Rainbow Six / Call of Duty drops have to reach the buyer
+          // UNCLAIMED, and every account the Drop Archive can offer was
+          // claimed as it was farmed — such a listing could never be honoured.
+          // An account listing is exempt: its stock is the owner's own, and
+          // whatever state those accounts are in is what the owner advertised.
+          if (!offer && isNoClaimGame(paGame)) {
+            results[name] = {
+              success: false,
+              message:
+                paGame +
+                " is a no-claim game — sellable only from the unclaimed " +
+                "farm, not the auto-farm's claimed archive",
+            };
+            continue;
+          }
+          // S5 (docs/ACCOUNT-LISTINGS-FIXES-3.md): this branch used to write a
+          // DropSet-backed row with no units[] and no autoClaimSet — neither of
+          // the two stock modes utils/playerauctionsFulfiller understands for
+          // an archive-backed row (:935) — so every PAID order against it was
+          // skipped as a "manual-delivery listing" while the offer stayed live
+          // at full quantity. An archive bundle sells here the way the bundle
+          // rows in scripts/g2g-bundle-listings.js:260 do: claim the accounts
+          // at delivery time, and advertise only what the archive can really
+          // hand over. Offer-backed publishing is untouched — its stock is the
+          // ledger, and autoClaimSet must stay false there (contract B5).
+          //
+          // Required lazily: utils/playerauctionsFulfiller pulls in
+          // routes/shopRoutes, the proof renderer and the farm service at load,
+          // and only this one branch needs any of it.
+          let paQty = Math.max(1, parseInt(pa.quantity, 10) || 1);
+          if (!offer) {
+            const paFulfiller = require("../utils/playerauctionsFulfiller");
+            // The very number the stock sync and the delivery claim will use
+            // (stockFor's autoClaimSet branch, :519): accounts still holding
+            // the whole set, unclaimed, and not already on another live
+            // listing. Zero is a refusal, not a live offer — nothing behind it
+            // means the first buyer pays for something we cannot ship.
+            const paStock = await paFulfiller.stockFor({
+              autoClaimSet: true,
+              set: set._id,
+            });
+            if (!paStock) {
+              results[name] = {
+                success: false,
+                message:
+                  "Out of stock — no unsold account still holds this whole " +
+                  "bundle unclaimed, so a PlayerAuctions order could not be " +
+                  "filled",
+              };
+              continue;
+            }
+            paQty = Math.min(paQty, paStock);
+          }
+          r = await mp.playerauctionsPublish({
+            game: paGame,
+            title,
+            description,
+            // PlayerAuctions caps an order message at 300 characters, so the
+            // long claim guide goes in the offer's instruction field instead
+            // (utils/playerauctionsCopy explains the split).
+            instruction: pa.instruction || paCopy.bundleInstruction(),
+            priceUsd: Math.max(mp.PA_MIN_PRICE, priceUsd),
+            itemsPerUnit: (set.items || []).length || 1,
+            totalUnit: paQty,
+            minUnitPerOrder: 1,
+            deliveryGuarantee: mp.PA_DELIVERY.min20,
+            coverImagePath: gridImage || coverImagePath(set),
+          });
+          // playerauctionsPublish answers { offerId, id, url, raw } — NOT
+          // { externalId }. externalId is required:true, so the generic tail
+          // below would throw a ValidationError AFTER a live offer exists with
+          // nothing on our side recording it. utils/autoLister.js:1148 writes
+          // r.offerId for exactly this reason.
+          const doc = await MarketplaceListing.create({
+            set: set._id,
+            marketplace: "playerauctions",
+            externalId: r.offerId,
+            url: r.url || "",
+            title,
+            description,
+            price: Math.max(mp.PA_MIN_PRICE, priceUsd),
+            status: "active",
+            note: r.note || "",
+            qtyTarget: paQty,
+            // S5: the stock mode. An archive-backed row claims its accounts
+            // when the order lands; an offer-backed one claims from the
+            // supplied ledger instead, so this stays false there.
+            autoClaimSet: !offer,
+            ...(offer ? offerRowFields(offer, []) : {}),
+          });
+          results[name] = {
+            success: true,
+            id: String(doc._id),
+            externalId: r.offerId,
+            url: r.url || "",
+            note: r.note || "",
+          };
+          continue;
+        } else if (name === "z2u") {
+          // z2uBulkPublish answers { reply, rows, gameName } with NO offer id,
+          // and externalId is what every later sale poll, stock sync and
+          // delist joins on. A row with an empty externalId is worse than no
+          // row: it can never be reconciled and can never be delisted, so it
+          // would sit "active" forever over stock nothing is holding.
+          results[name] = {
+            success: false,
+            message:
+              "Z2U publishing has no offer id to record — use the Z2U shelf " +
+              "keeper",
+          };
+          logEvent({
+            category: "marketplace",
+            action: "z2u-publish-refused",
+            severity: "warn",
+            subject: title,
+            detail:
+              "manual publish to Z2U refused: z2uBulkPublish returns no " +
+              "offer id to store as externalId",
+          });
+          continue;
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -977,6 +1502,11 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           price: r.price || priceUsd,
           status: "active",
           note: r.note || "",
+          // An offer-backed row carries no set, so without this the schema's
+          // widened `set` requirement would refuse it. The claim-at-sale
+          // markets (Eldorado, PlayerAuctions, G2G, Z2U) take their supplied
+          // account when the order arrives, so units[] is empty here.
+          ...(offer ? offerRowFields(offer, []) : {}),
         });
         results[name] = {
           success: true,
@@ -1123,6 +1653,8 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
   try {
     const q = {};
     if (req.query.setId) q.set = String(req.query.setId);
+    // Account listings are addressed by their offer instead of a set.
+    if (req.query.offerId) q.accountOffer = String(req.query.offerId);
     const rows = await MarketplaceListing.find(q)
       .sort({ createdAt: -1 })
       .limit(500)
@@ -1131,7 +1663,10 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
       success: true,
       listings: rows.map((r) => ({
         id: String(r._id),
-        setId: String(r.set),
+        // A set-less row (an account listing) used to serialise the literal
+        // string "undefined" here, which the page then sent back as a set id.
+        setId: r.set ? String(r.set) : "",
+        offerId: r.accountOffer ? String(r.accountOffer) : "",
         marketplace: r.marketplace,
         externalId: r.externalId,
         url: r.url,
@@ -1250,7 +1785,57 @@ router.delete(
           await gfFulfiller.releaseAccount(row.accountId, row.set);
         }
       }
-      res.json({ success: true });
+      // S1 (docs/ACCOUNT-LISTINGS-FIXES-3.md): the release above can never
+      // reach owner-supplied stock. An account-listing row leaves `accountId`
+      // empty on purpose (contract B5), so that gate is unreachable for it, and
+      // the accounts fed to a GGSel/Plati/FunPay vault at publish time stay
+      // "fed" forever: excluded from stockFor, with no UI control to bring them
+      // back and no other path that ever would. Twenty accounts published to
+      // GGSel and then delisted were silently destroyed.
+      //
+      // F1e widened releaseClaim to accept "fed" rows for exactly this. It
+      // still refuses anything with `deliveredAt` set, so a credential that has
+      // reached a buyer is never resold — and units carrying an orderId are
+      // skipped here too: those belong to a PAID order still mid-delivery, and
+      // the fulfillers' resume path claims them back by that id.
+      let returned = 0;
+      if (row.accountOffer) {
+        const ledgerIds = [];
+        for (const u of row.units || []) {
+          if (!u || !u.contentId || u.deliveredAt || u.orderId) continue;
+          ledgerIds.push(String(u.contentId));
+        }
+        try {
+          returned = await suppliedStock.releaseClaim(ledgerIds);
+        } catch (err) {
+          // The listing IS delisted by now; a failed hand-back must not turn
+          // that into a 500 the owner retries against a marketplace that no
+          // longer has the offer. The count then answers 0, which is the
+          // honest number, and the log line below records the miss.
+          console.error("supplied releaseClaim (delist):", err.message);
+        }
+        logEvent({
+          category: "account-listings",
+          action: "delist-release",
+          subject: String(row.accountOffer),
+          count: returned,
+          detail:
+            returned +
+            " supplied account(s) returned to the shelf after delisting " +
+            row.marketplace,
+        });
+      }
+      res.json({
+        success: true,
+        // How many went back on the shelf — the owner's only signal that the
+        // stock behind a delisted account listing survived.
+        ...(row.accountOffer
+          ? {
+              returned,
+              message: returned + " account(s) returned to this shelf",
+            }
+          : {}),
+      });
     } catch (err) {
       console.error("marketplace delist error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });

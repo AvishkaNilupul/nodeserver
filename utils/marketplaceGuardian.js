@@ -300,7 +300,21 @@ async function autoResolveStale(seenKeys) {
 // ------------------------------------------------------------------
 // Integrity checks
 // ------------------------------------------------------------------
-async function runChecks(rows, seenKeys) {
+async function runChecks(allRows, seenKeys) {
+  // Account listings are skipped WHOLE, not check by check
+  // (docs/ACCOUNT-LISTINGS-CONTRACT.md §B5). Every check below is ultimately a
+  // question about DropLog reservations, and an offer-backed row has none: its
+  // stock is a list of accounts the owner pasted in, held in
+  // models/SuppliedAccount, and double-selling is prevented by that ledger's
+  // atomic status transition instead of a reservation. Run against one of these
+  // rows the checks do not merely find nothing — they find EVERYTHING: no set
+  // means no items, so every attached account reads as holding no reservation
+  // for this game, which is a high-severity claim-mismatch per account per
+  // pass, and guardianAutoHeal would then set about "repairing" it by reserving
+  // drops that do not exist on accounts that were never in the archive.
+  // Skipping at the door rather than inside each check means a check added
+  // later cannot start flagging them by accident.
+  const rows = allRows.filter((r) => !r.accountOffer);
   let found = 0;
   const flag = async (f) => {
     seenKeys.add(f.dedupeKey);
@@ -704,9 +718,228 @@ async function clearReactivateLoopFinding(row) {
   );
 }
 
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md §B5): the shelf behind an
+// offer-backed row. Required lazily and only on the offer-backed path, so this
+// module loads and every existing listing feeds exactly as it did even if the
+// account-listing layer is missing or broken on a host — a guardian that cannot
+// load is a guardian that stops feeding 159 live listings.
+function suppliedStock() {
+  return require("./suppliedStock");
+}
+
+// S2/G1: render an offer-backed hand-over and REFUSE when any unit comes out
+// empty. Exported so there is exactly one copy of this rule — round 2 wrote it
+// at the two publish sites in routes/marketplaceRoutes.js (:660) and the top-up
+// below needed the same thing; a third copy of a load-bearing rule is how
+// utils/marketClaimTags.js drifted into four divergent lists. That route module
+// already requires this one (routes/marketplaceRoutes.js:18, as `guardian`), so
+// it can call this instead of its local `suppliedUnitsOrRefuse` with no other
+// change — same arguments, same { units } / { message } answer.
+//
+// The owner's deliveryTemplate can be all placeholders the pasted accounts have
+// none of ("{token}" against a login:password paste), and both vault APIs
+// .filter(Boolean) the list they are handed (utils/marketplaces.js:1401 for
+// Digiseller, :1793/:1864 for GGSel). By then claimForListing has taken the
+// accounts and markFed moves them out of sellable stock, so the offer keeps
+// advertising N units with fewer — or zero — behind them and the accounts are
+// burned. On GGSel an all-empty add is worse still: `autoselling` goes false
+// (marketplaces.js:1868) while the row still says autoDeliver:true, so a plain
+// manual offer sits live where an auto-delivery one was intended.
+//
+// Puts the claim back and lets the caller report it. Archive-backed rows never
+// reach here — their `code` is a farmed credential blob that cannot render
+// empty — so an ordinary DropSet feed is untouched.
+async function suppliedUnitsOrRefuse(offer, claimed) {
+  const units = claimed.map((c) => suppliedStock().deliveryText(c, offer));
+  if (units.every((t) => String(t || "").trim())) return { units };
+  const empty = units.filter((t) => !String(t || "").trim()).length;
+  await suppliedStock()
+    .releaseClaim(claimed.map((c) => c.ledgerId))
+    .catch((err) => {
+      console.error("supplied releaseClaim (empty render):", err.message);
+    });
+  return {
+    empty,
+    total: units.length,
+    message:
+      "Delivery text rendered empty for " +
+      empty +
+      " of " +
+      units.length +
+      " account(s) — nothing was published and the accounts are back on " +
+      "the shelf. Check this listing's delivery template against the " +
+      "fields the pasted accounts actually carry.",
+  };
+}
+
+// Claim an offer-backed row's top-up out of the owner's pasted account list.
+// Returns null when there is nothing to feed (having already reported why), or
+// units in the same shape the archive fulfillers return so the feed below stays
+// one code path: `code` is the text the platform's vault hands the buyer (the
+// supplied equivalent of a farmed account's credential blob) and `ledgerId` is
+// the SuppliedAccount row to put back if the add throws.
+async function claimSupplied(row, need, target, seenKeys) {
+  const store = suppliedStock();
+  const offer = await store.offerFor(row);
+  const key = "restock-empty:" + row._id;
+  // The empty-render finding (S2) is a different condition from an empty shelf
+  // and gets its own key, but keeps the "restock-empty:" prefix on purpose:
+  // autoResolveStale (:271) only sweeps restock-failed findings whose key
+  // starts with that, so a key outside the prefix would stay open forever once
+  // the owner fixed the template.
+  const renderKey = "restock-empty:render:" + row._id;
+  if (!offer) {
+    seenKeys.add(key);
+    await upsertFinding({
+      type: "restock-failed",
+      severity: "high",
+      marketplace: row.marketplace,
+      listing: row._id,
+      dedupeKey: key,
+      message:
+        row.marketplace +
+        " listing " +
+        row.externalId +
+        " is backed by an account listing that no longer exists, so its " +
+        "stock can never be topped up — delist it or recreate the offer.",
+    });
+    return null;
+  }
+  // The kill switch is a delivery gate, and on these two markets the FEED *is*
+  // the delivery: the credential leaves our custody into the platform's own
+  // vault and is handed over without us in the loop. An owner who switches
+  // account listings off must stop this too, not only the claim-at-sale
+  // markets, or the switch would be a lie on exactly the two markets that
+  // deliver fastest.
+  if (!store.deliveryEnabled(offer)) {
+    // S6: pausing delivery is not evidence that anything cleared. Returning
+    // here without seeding this row's keys let autoResolveStale close an
+    // already-open restock-failed finding as "auto-resolved: condition no
+    // longer detected" — while the shelf is just as empty, the template just as
+    // broken, and the GGSel/Plati offer just as short as it was. Seed both keys
+    // so a standing warning survives the pause and clears only on a pass that
+    // actually re-checked the condition.
+    seenKeys.add(key);
+    seenKeys.add(renderKey);
+    return null;
+  }
+  // No orderId: a vault feed is not an order, so there is nothing to resume
+  // against. The claim is still atomic per row, which is what stops the same
+  // account reaching two platforms.
+  const claimed = await store.claimForListing(row, need, {
+    market: row.marketplace,
+  });
+  if (!claimed.length) {
+    seenKeys.add(key);
+    await upsertFinding({
+      type: "restock-failed",
+      severity: "medium",
+      marketplace: row.marketplace,
+      listing: row._id,
+      dedupeKey: key,
+      message:
+        row.marketplace +
+        " listing " +
+        row.externalId +
+        " is " +
+        need +
+        " unit(s) below its target of " +
+        target +
+        " but its account listing has no accounts left on the shelf — paste " +
+        "more into the offer, or the offer will simply run dry.",
+    });
+    return null;
+  }
+  // S2: render BEFORE anything is fed. Everything below this point is spent
+  // stock — the add call drops empty strings without complaint, so an empty
+  // render is accounts burned for units the platform never received.
+  const rendered = await suppliedUnitsOrRefuse(offer, claimed);
+  if (!rendered.units) {
+    seenKeys.add(renderKey);
+    await upsertFinding({
+      type: "restock-failed",
+      severity: "high",
+      marketplace: row.marketplace,
+      listing: row._id,
+      dedupeKey: renderKey,
+      message:
+        row.marketplace +
+        " listing " +
+        row.externalId +
+        " could not be topped up: its account listing's delivery template " +
+        "rendered empty for " +
+        rendered.empty +
+        " of " +
+        rendered.total +
+        " claimed account(s), so nothing was fed and they are back on the " +
+        "shelf. Check the template against the fields the pasted accounts " +
+        "actually carry.",
+    });
+    return null;
+  }
+  return {
+    offer,
+    claimed: claimed.map((a, i) => ({
+      ledgerId: String(a.ledgerId || ""),
+      // Left empty on purpose — see the units bookkeeping below.
+      accountId: "",
+      login: a.login || "",
+      // The text suppliedUnitsOrRefuse already checked, not a second render:
+      // rendering twice is what lets a checked value and a fed value diverge.
+      code: rendered.units[i],
+    })),
+  };
+}
+
+// Bookkeeping for a feed that came off the owner's list. Both writes are
+// best-effort in exactly the way the digiseller content_id write already is: a
+// bookkeeping failure must not undo a feed the platform has already accepted.
+//
+// The unit's `contentId` carries the SuppliedAccount id, matching what every
+// other ledger-backed fulfiller writes there (eldorado, g2g and z2u all put
+// their `ledgerId` in this field). The platform's own content id goes onto the
+// ledger row instead, which is the only place a supplied unit is looked up
+// from. `accountId` stays empty because it is one of the two fields runChecks
+// indexes duplicates off, while `login` is written because utils/listedLogins.js
+// reads units[].login — that is what stops a supplied login also being sold by
+// an archive-backed listing.
+async function recordSuppliedFeed(row, claimed, contentIds) {
+  const ids = [];
+  const platformIds = [];
+  const units = [];
+  claimed.forEach((c, i) => {
+    if (!c.ledgerId) return;
+    ids.push(String(c.ledgerId));
+    platformIds.push(String((contentIds && contentIds[i]) || ""));
+    units.push({
+      contentId: String(c.ledgerId),
+      accountId: "",
+      login: c.login || "",
+      addedAt: new Date(),
+    });
+  });
+  if (!ids.length) return;
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    { $push: { units: { $each: units } } },
+  ).catch((e) => console.error("guardian supplied units error:", e.message));
+  await suppliedStock()
+    .markFed(ids, {
+      listing: row._id,
+      market: row.marketplace,
+      contentIds: platformIds,
+    })
+    .catch((e) => console.error("guardian markFed error:", e.message));
+}
+
 async function feedListing(row, seenKeys, refusals) {
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
+  // Account listings: this row's stock is an explicit list of accounts the
+  // owner pasted in, not the Drop Archive. Every branch below is guarded on
+  // this, so a row without the field takes byte-identical the path it always
+  // took.
+  const supplied = !!row.accountOffer;
   let read;
   if (row.marketplace === "ggsel") {
     read = await mp.ggselOfferStockDetailed(row.externalId);
@@ -752,7 +985,11 @@ async function feedListing(row, seenKeys, refusals) {
   // qtyTarget was lowered still reports its sales.
   const soldUnits = unitsSoldSince(row.lastStock, remaining);
   if (soldUnits > 0) {
-    const soldSet = await DropSet.findById(row.set).lean();
+    // Sale learning is keyed on the DropSet, and an offer-backed row has none —
+    // its stock is the owner's own list — so there is nothing to learn against
+    // and DropSet.findById(null) would be a pointless round trip. The sale is
+    // still worth saying out loud, hence the log below covering both.
+    const soldSet = supplied ? null : await DropSet.findById(row.set).lean();
     if (soldSet) {
       await recordListingSale({
         listing: row,
@@ -760,6 +997,8 @@ async function feedListing(row, seenKeys, refusals) {
         units: soldUnits,
         priceUsd: Number(row.price) || 0,
       });
+    }
+    if (soldSet || supplied) {
       console.log(
         "guardian: " +
           row.marketplace +
@@ -871,36 +1110,44 @@ async function feedListing(row, seenKeys, refusals) {
     }
     return 0;
   }
-  const set = await DropSet.findById(row.set).lean();
-  if (!set) return 0;
-  const fulfiller = row.marketplace === "ggsel" ? ggFulfiller : dsFulfiller;
-  const claimed = await fulfiller.claimAccountsForSet(set, need);
-  if (!claimed.length) {
-    const key = "restock-empty:" + row._id;
-    seenKeys.add(key);
-    // Say WHICH kind of empty. Reporting "no unsold account holds this
-    // bundle" when 15 accounts hold it and are merely suspended sends the
-    // owner off to farm drops they already have.
-    const reason = nothingToFeedReason(await censusForSet(set));
-    await upsertFinding({
-      type: "restock-failed",
-      severity: "medium",
-      marketplace: row.marketplace,
-      listing: row._id,
-      dedupeKey: key,
-      message:
-        row.marketplace +
-        " listing " +
-        row.externalId +
-        " is " +
-        need +
-        " unit(s) below its target of " +
-        target +
-        (reason
-          ? " — " + reason + "."
-          : " but no unsold account holds this bundle — nothing to feed."),
-    });
-    return 0;
+  let claimed;
+  let fulfiller = null;
+  if (supplied) {
+    const picked = await claimSupplied(row, need, target, seenKeys);
+    if (!picked) return 0;
+    claimed = picked.claimed;
+  } else {
+    const set = await DropSet.findById(row.set).lean();
+    if (!set) return 0;
+    fulfiller = row.marketplace === "ggsel" ? ggFulfiller : dsFulfiller;
+    claimed = await fulfiller.claimAccountsForSet(set, need);
+    if (!claimed.length) {
+      const key = "restock-empty:" + row._id;
+      seenKeys.add(key);
+      // Say WHICH kind of empty. Reporting "no unsold account holds this
+      // bundle" when 15 accounts hold it and are merely suspended sends the
+      // owner off to farm drops they already have.
+      const reason = nothingToFeedReason(await censusForSet(set));
+      await upsertFinding({
+        type: "restock-failed",
+        severity: "medium",
+        marketplace: row.marketplace,
+        listing: row._id,
+        dedupeKey: key,
+        message:
+          row.marketplace +
+          " listing " +
+          row.externalId +
+          " is " +
+          need +
+          " unit(s) below its target of " +
+          target +
+          (reason
+            ? " — " + reason + "."
+            : " but no unsold account holds this bundle — nothing to feed."),
+      });
+      return 0;
+    }
   }
   try {
     if (row.marketplace === "ggsel") {
@@ -912,6 +1159,9 @@ async function feedListing(row, seenKeys, refusals) {
         row.externalId,
         claimed.map((c) => c.code),
       );
+      // GGSel hands back no per-product id, so the ledger rows are marked fed
+      // with none — the listing link is what makes them findable again.
+      if (supplied) await recordSuppliedFeed(row, claimed, []);
     } else {
       const res = await mp.digisellerAddContent(
         row.externalId,
@@ -923,7 +1173,9 @@ async function feedListing(row, seenKeys, refusals) {
       // on models/MarketplaceListing.js. Best-effort: a bookkeeping failure
       // must not undo a feed that the platform already accepted.
       const ids = (res && res.contentIds) || [];
-      if (ids.length) {
+      if (supplied) {
+        await recordSuppliedFeed(row, claimed, ids);
+      } else if (ids.length) {
         const units = claimed
           .map((c, i) => ({
             contentId: ids[i] || "",
@@ -959,7 +1211,19 @@ async function feedListing(row, seenKeys, refusals) {
     }
     const partial = stockAfter !== null && stockAfter > remaining;
     if (!partial) {
-      await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
+      if (supplied) {
+        // Same reasoning, different shelf: only the rows this call claimed go
+        // back, and only when the platform is provably still at the stock we
+        // read, or a second buyer could be handed a credential that is already
+        // sitting in the vault.
+        await suppliedStock()
+          .releaseClaim(claimed.map((c) => c.ledgerId))
+          .catch((e) =>
+            console.error("guardian supplied release error:", e.message),
+          );
+      } else {
+        await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
+      }
     }
     // An offer archived on the platform's side can never accept products
     // again, but our row stayed "active" — so every pass re-tried the feed and
@@ -1060,23 +1324,30 @@ async function feedListing(row, seenKeys, refusals) {
       });
     }
   }
-  await MarketplaceListing.updateOne(
-    { _id: row._id },
-    {
-      $set: {
-        accountId: accountIdsOf(row)
-          .concat(claimed.map((c) => c.accountId))
-          .join(","),
-        accountLogin: [
-          ...String(row.accountLogin || "")
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-          ...claimed.map((c) => c.login),
-        ].join(", "),
+  // An offer-backed row keeps `accountId` / `accountLogin` EMPTY on purpose:
+  // those two are exactly what runChecks indexes duplicates off, and all of one
+  // offer's accounts sell under the one listing, so filling them would raise a
+  // duplicate-account finding on every pass forever. Its logins live in units[]
+  // instead, which is where utils/listedLogins.js reads them.
+  if (!supplied) {
+    await MarketplaceListing.updateOne(
+      { _id: row._id },
+      {
+        $set: {
+          accountId: accountIdsOf(row)
+            .concat(claimed.map((c) => c.accountId))
+            .join(","),
+          accountLogin: [
+            ...String(row.accountLogin || "")
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean),
+            ...claimed.map((c) => c.login),
+          ].join(", "),
+        },
       },
-    },
-  );
+    );
+  }
   freshFeeds.push({
     marketplace: row.marketplace,
     externalId: row.externalId,
@@ -1363,5 +1634,8 @@ module.exports = {
   summarizeDrops,
   nothingToFeedReason,
   platformRefusedRead,
+  // Shared with the publish route so the empty-render refusal has one copy
+  // (S2). See the comment on the function.
+  suppliedUnitsOrRefuse,
   CLAIM_TAGS,
 };

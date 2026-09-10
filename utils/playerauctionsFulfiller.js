@@ -30,7 +30,7 @@ const {
   reserveSetOnAccount,
   releaseAccountsForTag,
 } = require("./dropReservation");
-const { getAutoFarm } = require("./settings");
+const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const coverage = require("./unclaimedCoverage");
@@ -275,6 +275,63 @@ async function claimUnclaimedForGame(
   return out;
 }
 
+// --- Stock source 3: an owner-supplied account list ----------------------
+// docs/ACCOUNT-LISTINGS-CONTRACT.md B5. The stock behind an account listing is
+// a list of accounts the owner pasted in (models/SuppliedAccount): no DropSet,
+// no DropLog rows, no reservation — so neither claimer above can see it, and
+// every read and write goes through utils/suppliedStock.
+//
+// The predicate is a bare field test on purpose, and utils/suppliedStock is
+// required lazily inside the branches (the way ./unclaimedAutoList is): a row
+// with no accountOffer must never load the account-listing layer at all, so a
+// fault in code that is brand new cannot stop an ordinary delivery.
+function isSuppliedRow(row) {
+  return !!(row && row.accountOffer);
+}
+
+// Injectable — the trailing-callable idiom stockFor already uses for its
+// claimer — so the supplied branches can be tested without Mongo.
+function suppliedDeps() {
+  return {
+    stock: require("./suppliedStock"),
+    AccountOffer: require("../models/AccountOffer"),
+  };
+}
+
+// Why this hand-over must NOT happen, or "" when it may. Three switches, all of
+// which must be on (contract B8): the feature, the global kill switch, and the
+// offer's own toggle. The owner can stop every account-listing delivery with
+// one settings edit without touching any other market, so the reason has to say
+// which switch did it — a bare "skipped" reads like a bug at 3am.
+function suppliedDeliveryBlockedBy(offer) {
+  const s = getAccountListingSettings();
+  if (!s.enabled) return "account listings are disabled in settings";
+  if (!s.autoDeliver) return "account-listing auto-delivery is off in settings";
+  if (offer && offer.autoDeliver === false) {
+    return "auto-delivery is off on this account listing";
+  }
+  return "";
+}
+
+// The buyer-facing messages for a supplied hand-over.
+//
+// The offer's own deliveryTemplate is used only when EVERY rendered message
+// fits PlayerAuctions' hard 300-character cap. PlayerAuctions is the one market
+// with a budget that tight (utils/playerauctionsCopy), and a template that
+// cannot be sent would strand a paid buyer, so anything that does not fit falls
+// back to the house copy, which chunks credentials by construction.
+function suppliedMessages(stock, accounts, offer) {
+  try {
+    const parts = accounts.map((a) => stock.deliveryText(a, offer));
+    if (parts.length && parts.every((t) => t && t.length <= copy.LIMIT)) {
+      return parts;
+    }
+  } catch (e) {
+    console.error("playerauctions supplied delivery text:", e.message);
+  }
+  return copy.deliveryMessages(accounts, { kind: "bundle" });
+}
+
 // --- The hand-over ------------------------------------------------------
 // Send every message, then confirm delivery with a proof image. Order is
 // load-bearing: the credential must actually reach the buyer before the order
@@ -285,9 +342,15 @@ async function claimUnclaimedForGame(
 // the confirm started working.
 async function handOver({
   orderId, accounts, kind, days, game, offerTitle, itemCount,
-  alreadyMessaged = false, onMessaged,
+  alreadyMessaged = false, onMessaged, messages: preset,
 }) {
-  const messages = copy.deliveryMessages(accounts, { kind, days, game });
+  // `preset` is the account-listing path handing in the offer's own rendered
+  // template. Absent — which is every existing caller — the house copy is built
+  // exactly as before.
+  const messages =
+    preset && preset.length
+      ? preset
+      : copy.deliveryMessages(accounts, { kind, days, game });
   if (!alreadyMessaged) {
     for (const m of messages) {
       await mp.playerauctionsSendOrderMessage(orderId, m);
@@ -418,7 +481,24 @@ async function sharersOfUnclaimedGame(listing) {
   }
 }
 
-async function stockFor(listing, claim) {
+// The account-listing split used to live here too, as sharersOfAccountOffer:
+// it counted the ACTIVE PlayerAuctions rows on the offer and divided. S4 moved
+// that job into utils/suppliedStock.stockFor, which counts the active rows on
+// EVERY market — the shelf does not care which marketplace empties it, and a
+// per-market count was the hole itself (one 50-account offer published to four
+// markets advertised 200). Dividing here as well would divide the shelf twice
+// and take a healthy offer off sale. Deleted rather than left unused: an
+// unwired copy of a stock rule is the next thing to drift back in.
+async function stockFor(listing, claim, supplied = suppliedDeps) {
+  // An account listing's stock is the offer's ledger. NOT its units: on a
+  // supplied row every unit records a hand-over that already happened, so
+  // counting them would report 0 the instant the first order lands and
+  // syncUnclaimedStock would hide an offer with a full shelf behind it — the
+  // same trap the unclaimed branch below exists to avoid.
+  if (isSuppliedRow(listing)) {
+    // Already this listing's SHARE of the shelf (S4), not the whole shelf.
+    return supplied().stock.stockFor(listing);
+  }
   // Drop-Archive-backed bundles hold NO units — they claim at delivery time —
   // so counting units would report 0 and the reconciler would hide a listing
   // that is actually in stock. Count what a delivery would really find: the
@@ -448,10 +528,13 @@ async function stockFor(listing, claim) {
   return share > 1 ? Math.floor(free.length / share) : free.length;
 }
 
-async function syncStock(listing) {
+// `supplied` is threaded through to stockFor only so an account-listing test
+// can drive a whole delivery — including this post-delivery resync — without a
+// live Mongo. Every existing caller passes nothing and gets the real layer.
+async function syncStock(listing, supplied = suppliedDeps) {
   const af = getAutoFarm() || {};
   if (af.playerauctionsSyncStock === false) return null;
-  const left = await stockFor(listing);
+  const left = await stockFor(listing, undefined, supplied);
   try {
     const r = await mp.playerauctionsSetQuantity(listing.externalId, left);
     if (r && r.replaced && r.offerId) {
@@ -488,7 +571,16 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
   const rows = await MarketplaceListing.find({
     marketplace: "playerauctions",
     status: "active",
-    $or: [{ unclaimedGame: { $nin: ["", null] } }, { autoClaimSet: true }],
+    $or: [
+      { unclaimedGame: { $nin: ["", null] } },
+      { autoClaimSet: true },
+      // Account listings drift too: the owner removes rows by hand, and an
+      // offer also published on another market has its ledger drained from
+      // there. `$ne: null` rather than the `$nin: ["", null]` above because
+      // accountOffer is an ObjectId — casting "" throws a CastError that would
+      // take the whole sweep down.
+      { accountOffer: { $ne: null } },
+    ],
   });
   const changes = [];
   for (const row of rows) {
@@ -520,7 +612,9 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
           row.autoPaused = true;
           row.lastError = row.unclaimedGame
             ? "hidden: no sellable " + row.unclaimedGame + " stock in the no-claim farm"
-            : "hidden: no account still holds this set unclaimed in the Drop Archive";
+            : isSuppliedRow(row)
+              ? "hidden: this account listing has no accounts left — add more"
+              : "hidden: no account still holds this set unclaimed in the Drop Archive";
           await row.save();
         }
       }
@@ -547,7 +641,7 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
 }
 
 // Deliver one paid order. Returns a short result the tick can log directly.
-async function deliverOrder(order, { dryRun }) {
+async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
   const orderId = String(order.orderId || order.id || "");
   const offerTitle = String(order.orderTitle || "");
   // `qty` is deliberately NOT computed here. Deriving units honestly needs the
@@ -649,6 +743,96 @@ async function deliverOrder(order, { dryRun }) {
         reason: "CHECK THE UNIT COUNT BY HAND — " + units.why,
       })
       .catch(() => {});
+  }
+
+  // --- Account listings: the owner's own pasted stock ----------------------
+  // Deliberately ABOVE the shared RESUME block, not down beside the
+  // manual-delivery skip. credentialsForUnits resolves a unit's contentId
+  // against UnclaimedAccount, and on a supplied row contentId is a
+  // SuppliedAccount id — so the generic resume would throw "has no readable
+  // credential" on every retry of a half-finished hand-over, which is the one
+  // moment this file's reserve-then-resume design exists for. Resuming is
+  // suppliedStock's own job: rows already stamped with this orderId come back
+  // before any new row is claimed, so a failed send never burns a second
+  // account.
+  if (isSuppliedRow(row)) {
+    const deps = supplied();
+    const offer = await deps.AccountOffer.findById(row.accountOffer);
+    if (!offer) return { orderId, error: "listing's AccountOffer is missing" };
+    const blocked = suppliedDeliveryBlockedBy(offer);
+    if (blocked) return { orderId, skipped: blocked };
+
+    const picked = await deps.stock.claimForListing(row, qty, {
+      orderId,
+      market: "playerauctions",
+      dryRun,
+    });
+    if (picked.length < qty) {
+      // A short claim is not a success. Put back only what this call took: the
+      // buyer waiting is recoverable, a half-filled order is a dispute AND the
+      // stock is spent. This is the ONLY release path — once the hand-over has
+      // started, a failure must resume onto the same rows, never release them,
+      // or one order ships two different accounts.
+      if (!dryRun && picked.length) {
+        await deps.stock
+          .releaseClaim(picked.map((p) => p.ledgerId), { orderId })
+          .catch(() => {});
+      }
+      return {
+        orderId,
+        error:
+          "only " + picked.length + " of " + qty + " account(s) left in " +
+          JSON.stringify(String(offer.title || "")) +
+          " — add more accounts to the listing",
+      };
+    }
+
+    const msgs = suppliedMessages(deps.stock, picked, offer);
+    if (dryRun) {
+      return {
+        orderId,
+        dryRun: true,
+        source: "supplied:" + String(offer.title || ""),
+        wouldSend:
+          qty + " account(s) [" + picked.map((p) => p.login).join(", ") +
+          "] in " + msgs.length + " message(s)",
+        preview: msgs.join("\n---\n"),
+      };
+    }
+
+    // Rows the resume handed back are already on the listing; re-adding them
+    // would double the units, and every count read off units[] with them.
+    const seen = new Set(mine.map((u) => String(u.contentId || "")));
+    const fresh = picked.filter((p) => !seen.has(String(p.ledgerId)));
+    if (fresh.length) await reserveOnListing(row, orderId, fresh);
+
+    const sent = await handOver({
+      orderId,
+      accounts: picked,
+      kind: "bundle",
+      offerTitle,
+      itemCount: paItemCount(row),
+      messages: msgs,
+      // Skip the send only when nothing new was claimed AND every unit already
+      // went out — otherwise a freshly claimed account would never reach the
+      // buyer while the order was marked delivered.
+      alreadyMessaged:
+        !fresh.length && mine.length > 0 && mine.every((u) => u.messagedAt),
+      onMessaged: () => markUnitsMessaged(row, orderId),
+    });
+    await markUnitsDelivered(row, orderId);
+    await deps.stock.markDelivered(picked.map((p) => p.ledgerId), {
+      orderId,
+      market: "playerauctions",
+    });
+    await syncStock(row, supplied);
+    return {
+      orderId,
+      delivered: picked.length,
+      messages: sent,
+      source: "supplied:" + String(offer.title || ""),
+      resumed: mine.length > 0,
+    };
   }
 
   // RESUME: a previous attempt reserved stock but did not finish. Reuse it.
@@ -941,7 +1125,19 @@ async function deliverPendingOrders() {
       // have no listing row at all, so this is exactly what a sale on one of
       // them looks like. Tell the operator once, while there is still time.
       if (r.skipped && alertsOperator(r.skipped)) {
-        await alertUnfulfillable(order, r.skipped);
+        // F7: the reason was computed and then thrown away. The chain below
+        // prints only errors, dry runs and deliveries, so a paid order parked
+        // by one of the account-listing kill switches left NOTHING behind --
+        // no log line, no alert -- and the only way to learn why the buyer
+        // never got their account was to read this file. Log it beside the
+        // alert, and only on the tick that actually alerts: a switch can stay
+        // off for days, and one line per order beats one line every 60s tick.
+        const alerted = await alertUnfulfillable(order, r.skipped);
+        if (alerted) {
+          console.error(
+            "playerauctions deliver " + id + " NOT delivered: " + r.skipped,
+          );
+        }
       }
       if (r.error) console.error("playerauctions deliver " + id + ":", r.error);
       else if (r.dryRun)
@@ -971,16 +1167,29 @@ const alertedOrders = new Set();
 // delivered, nothing in stock yet) are not. Kept as a named predicate so the
 // list is one thing to read and one thing to test -- an alert that silently
 // stopped matching would be indistinguishable from no problem at all.
-const ALERT_SKIPS =
-  /no listing row|manual-delivery listing|ambiguous listing title/;
+//
+// F7 added the account-listing kill switches (suppliedDeliveryBlockedBy,
+// contract B8). A switch the owner flipped is not a routine skip: the order is
+// PAID and it will sit there until a human flips it back or ships by hand, and
+// that refusal was the one nobody could see. Matched on the wording the three
+// reasons share rather than listed one by one, and tests/suppliedFulfilment
+// asserts every real return of suppliedDeliveryBlockedBy against this
+// predicate, so a reworded reason cannot fall out of the alert quietly.
+const SWITCHED_OFF_SKIPS = /disabled in settings|auto-delivery is off/;
+const ALERT_SKIPS = new RegExp(
+  "no listing row|manual-delivery listing|ambiguous listing title|" +
+    SWITCHED_OFF_SKIPS.source,
+);
 
 function alertsOperator(skipReason) {
   return ALERT_SKIPS.test(String(skipReason || ""));
 }
 
+// Returns true only on the tick that actually alerted, so the tick's log line
+// (F7) rides the same once-per-order gate instead of inventing a second one.
 async function alertUnfulfillable(order, why) {
   const id = String(order.orderId || order.id || "");
-  if (!id || alertedOrders.has(id)) return;
+  if (!id || alertedOrders.has(id)) return false;
   alertedOrders.add(id);
   const notify = (t) => require("./telegram").sendTelegram(t);
   await notify(
@@ -988,10 +1197,19 @@ async function alertUnfulfillable(order, why) {
       String(order.orderTitle || "").slice(0, 120) + "\n" +
       "Buyer: " + (order.name || "?") + "   " + (order.price || "") + "\n\n" +
       "Reason: " + why + "\n\n" +
-      "This one needs delivering by hand, and the delivery guarantee is running. " +
-      "Offers made directly on PlayerAuctions have no listing row here, so the " +
-      "bot does not know what stock backs them.",
+      // A kill-switch refusal (F7) has a different remedy from a missing row:
+      // the accounts are on the shelf and one toggle ships them, so the
+      // standing postscript would send the owner hunting for stock that is not
+      // missing. The guarantee is running either way.
+      (SWITCHED_OFF_SKIPS.test(String(why || ""))
+        ? "The accounts are on the shelf. Turn account-listing delivery back " +
+          "on (Settings, or this listing's own toggle) and the next tick ships " +
+          "it — the delivery guarantee is running."
+        : "This one needs delivering by hand, and the delivery guarantee is " +
+          "running. Offers made directly on PlayerAuctions have no listing row " +
+          "here, so the bot does not know what stock backs them."),
   ).catch(() => {});
+  return true;
 }
 
 let started = false;
@@ -1045,6 +1263,11 @@ module.exports = {
   undeliveredUnits,
   paItemCount,
   sharersOfUnclaimedGame,
+  // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md B5).
+  isSuppliedRow,
+  suppliedDeps,
+  suppliedDeliveryBlockedBy,
+  suppliedMessages,
   alertUnfulfillable,
   alertsOperator,
   alertedOrders,

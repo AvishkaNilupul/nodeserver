@@ -538,6 +538,18 @@
       .mkt-chip.err .dot {
         background: var(--red);
       }
+      /* S8: a stock sync can PAUSE / hide an offer on the platform while the
+         row here still says status:"active". Rendering that as a green live
+         chip is the worst possible answer — the owner reads the page and sees
+         a market that is quietly selling nothing. Amber and dashed, with the
+         reason in the tooltip. */
+      .mkt-chip.paused {
+        color: var(--muted);
+        border-style: dashed;
+      }
+      .mkt-chip.paused .dot {
+        background: var(--yellow, #e0a83b);
+      }
       a.mkt-chip:hover {
         border-color: var(--muted);
       }
@@ -882,6 +894,7 @@
       <div class="tabbar">
         <button class="btn tbtn active" id="tabBtnShop">Shop listings</button>
         <button class="btn tbtn" id="tabBtnCustom">Custom listings</button>
+        <button class="btn tbtn" id="tabBtnAccounts">Account listings</button>
       </div>
 
       <div id="tabShop">
@@ -1147,6 +1160,162 @@ Reliable Daily Rewards</textarea
           <div id="cListings"><div class="empty">Loading…</div></div>
         </section>
       </div>
+
+      <!-- Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md B7): a product
+           the owner defines by hand and backs with an explicit, pasted list of
+           accounts (models/AccountOffer + models/SuppliedAccount). Those exact
+           accounts are the stock and one sale hands over one of them. It is
+           deliberately NOT a DropSet — no items, no DropLog rows, no
+           reservation — so nothing here can reach the Shop tab, the public
+           catalog or the Drop Archive. -->
+      <div id="tabAccounts" style="display: none">
+        <div class="grid">
+          <section class="card">
+            <h2 id="alFormTitle">Create an account listing</h2>
+            <div class="field">
+              <label for="alTitle">Title</label>
+              <input
+                type="text"
+                id="alTitle"
+                maxlength="200"
+                placeholder="e.g. Rust Twitch Drops account — 12 items"
+              />
+            </div>
+            <div class="row2 field">
+              <div>
+                <label for="alGame">Game</label>
+                <input
+                  type="text"
+                  id="alGame"
+                  maxlength="120"
+                  placeholder="e.g. Rust"
+                />
+              </div>
+              <div>
+                <label for="alPrice">Price (USD)</label>
+                <input
+                  type="number"
+                  id="alPrice"
+                  min="0"
+                  step="0.01"
+                  value="0"
+                />
+              </div>
+            </div>
+            <div class="field">
+              <label for="alDesc">Description</label>
+              <textarea
+                id="alDesc"
+                maxlength="8000"
+                placeholder="What the buyer gets. There are no drop records behind an account listing, so this text is the contract."
+              ></textarea>
+            </div>
+            <div class="row2 field">
+              <div>
+                <label for="alMinPrice">Never publish below (USD)</label>
+                <input
+                  type="number"
+                  id="alMinPrice"
+                  min="0"
+                  step="0.01"
+                  value="0"
+                />
+              </div>
+              <div style="display: flex; align-items: flex-end">
+                <label class="mp-check" for="alAuto">
+                  <input type="checkbox" id="alAuto" checked />
+                  Auto-deliver this listing
+                </label>
+              </div>
+            </div>
+            <div class="field">
+              <label for="alTemplate">Delivery template</label>
+              <textarea
+                id="alTemplate"
+                rows="4"
+                maxlength="4000"
+                placeholder="Login: {login}&#10;Password: {password}"
+              ></textarea>
+              <div class="mp-hint">
+                Placeholders: {login} {password} {token} {email} {extra} {line}
+                {title} {game}. Leave it empty to send the default
+                Login / Password text.
+              </div>
+            </div>
+            <div class="row2 field">
+              <div>
+                <label for="alService">Cover subtitle</label>
+                <input
+                  type="text"
+                  id="alService"
+                  maxlength="60"
+                  placeholder="180 Days Service"
+                />
+              </div>
+              <div>
+                <label for="alBullets"
+                  >Cover bullet lines (one per line, max 4)</label
+                >
+                <textarea id="alBullets" rows="3"></textarea>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="btn primary" id="alSaveBtn">Save</button>
+              <button class="btn" id="alDraftBtn">Save as draft</button>
+              <button class="btn ghost" id="alCancelBtn" style="display: none">
+                Cancel edit
+              </button>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 id="alStockTitle">Accounts in this listing</h2>
+            <div class="sub" style="margin: 0 0 10px">
+              These exact accounts are the stock — one per sale, and the offer
+              pauses itself when the list runs dry. One per line:
+              <b>login:password</b>, plus an optional token and/or email.
+            </div>
+            <div class="field">
+              <textarea
+                id="alPaste"
+                rows="6"
+                placeholder="login:password&#10;login:password:token&#10;login:password:token:email"
+              ></textarea>
+            </div>
+            <div class="pickbar">
+              <input type="file" id="alFile" accept=".txt,text/plain" />
+              <button class="btn primary" id="alAddBtn">Add accounts</button>
+            </div>
+            <div class="mp-hint" id="alAddResult"></div>
+            <label>Stock (<span id="alStockCount">0</span>)</label>
+            <div class="sel" id="alStock">
+              <div class="empty">Pick an account listing below.</div>
+            </div>
+          </section>
+        </div>
+
+        <section class="card" style="margin-top: 22px">
+          <h2 style="margin: 0">Account listings</h2>
+          <div class="mp-hint" style="margin-top: 4px">
+            <b>Accounts</b> loads a listing's stock into the panel above.
+            <b>Sell on…</b> publishes through the same marketplace modal the
+            other tabs use, with the offer standing in for a set.
+          </div>
+          <div class="list-toolbar">
+            <input
+              type="search"
+              id="alSearch"
+              placeholder="Search account listings…"
+              aria-label="Search account listings"
+            />
+            <button class="fchip on" data-alf="all">All</button>
+            <button class="fchip" data-alf="active">Active</button>
+            <button class="fchip" data-alf="draft">Draft</button>
+            <span class="count" id="alCount"></span>
+          </div>
+          <div id="alListings"><div class="empty">Loading…</div></div>
+        </section>
+      </div>
     </main>
 
     <!-- Marketplace modals -->
@@ -1215,6 +1384,36 @@ Reliable Daily Rewards</textarea
         font-size: 12px;
         opacity: 0.7;
         margin-top: 4px;
+      }
+      /* The auto-picked category line that stands in for a drill-down picker
+         (docs/ACCOUNT-LISTINGS-CONTRACT.md A5). `.bad` is the warning style:
+         the market had nowhere to file this game, so the picker below it is
+         open and the owner is never blocked. */
+      .mp-auto {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        font-size: 13px;
+        margin: 8px 0;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+      }
+      .mp-auto.bad {
+        border-color: var(--yellow);
+        color: var(--yellow);
+      }
+      .mp-auto-label {
+        flex: 1;
+        min-width: 0;
+      }
+      .mp-auto-change {
+        color: var(--accent2);
+        font-size: 12px;
+        white-space: nowrap;
+        text-decoration: underline;
       }
       .mp-ext {
         border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -1582,19 +1781,29 @@ Reliable Daily Rewards</textarea
               Pick which marketplace catalog category the product goes in (e.g.
               Digital Goods → Game Accounts → Twitch drops Accounts).
             </div>
-            <label>Catalog category</label>
-            <div class="mp-hint" id="mpDsPath" style="margin-bottom: 4px"></div>
-            <input
-              type="text"
-              id="mpDsCatFilter"
-              placeholder="Type to search this level…"
-              autocomplete="off"
-              style="margin-bottom: 6px"
-            />
-            <select id="mpDsCategory">
-              <option value="">Loading…</option>
-            </select>
-            <div id="mpDsAttrs"></div>
+            <div class="mp-auto" id="mpDsAuto" style="display: none">
+              <span class="mp-auto-label" id="mpDsAutoLabel"></span>
+              <a href="#" class="mp-auto-change" id="mpDsAutoChange">Change</a>
+            </div>
+            <div id="mpDsPicker">
+              <label>Catalog category</label>
+              <div
+                class="mp-hint"
+                id="mpDsPath"
+                style="margin-bottom: 4px"
+              ></div>
+              <input
+                type="text"
+                id="mpDsCatFilter"
+                placeholder="Type to search this level…"
+                autocomplete="off"
+                style="margin-bottom: 6px"
+              />
+              <select id="mpDsCategory">
+                <option value="">Loading…</option>
+              </select>
+              <div id="mpDsAttrs"></div>
+            </div>
             <div class="mp-row" style="margin-top: 8px">
               <div style="flex: 1">
                 <label style="margin-top: 0">Quantity</label>
@@ -1640,30 +1849,36 @@ Reliable Daily Rewards</textarea
             >
               Use G2G bulk auto-attach for this listing
             </button>
-            <label>Service</label>
-            <select id="mpG2gService">
-              <option value="">Loading…</option>
-            </select>
-            <label>Category</label>
-            <select id="mpG2gCategory">
-              <option value="">Pick a service first</option>
-            </select>
-            <label>Brand / game</label>
-            <input
-              type="text"
-              id="mpG2gBrandFilter"
-              placeholder="Type to search games…"
-              autocomplete="off"
-              style="margin-bottom: 6px"
-            />
-            <select id="mpG2gBrand">
-              <option value="">Pick a service first</option>
-            </select>
-            <label>Product</label>
-            <select id="mpG2gProduct">
-              <option value="">Pick a brand first</option>
-            </select>
-            <div id="mpG2gAttrs"></div>
+            <div class="mp-auto" id="mpG2gAuto" style="display: none">
+              <span class="mp-auto-label" id="mpG2gAutoLabel"></span>
+              <a href="#" class="mp-auto-change" id="mpG2gAutoChange">Change</a>
+            </div>
+            <div id="mpG2gPicker">
+              <label>Service</label>
+              <select id="mpG2gService">
+                <option value="">Loading…</option>
+              </select>
+              <label>Category</label>
+              <select id="mpG2gCategory">
+                <option value="">Pick a service first</option>
+              </select>
+              <label>Brand / game</label>
+              <input
+                type="text"
+                id="mpG2gBrandFilter"
+                placeholder="Type to search games…"
+                autocomplete="off"
+                style="margin-bottom: 6px"
+              />
+              <select id="mpG2gBrand">
+                <option value="">Pick a service first</option>
+              </select>
+              <label>Product</label>
+              <select id="mpG2gProduct">
+                <option value="">Pick a brand first</option>
+              </select>
+              <div id="mpG2gAttrs"></div>
+            </div>
             <div class="mp-row" style="margin-top: 8px">
               <div style="flex: 1">
                 <label style="margin-top: 0">Qty</label>
@@ -1687,18 +1902,28 @@ Reliable Daily Rewards</textarea
               Drops). The offer is created and activated so it goes live; leave
               stock/delivery managed on GGSel as you do today.
             </div>
-            <label>Catalog category</label>
-            <div class="mp-hint" id="mpGgPath" style="margin-bottom: 4px"></div>
-            <input
-              type="text"
-              id="mpGgCatFilter"
-              placeholder="Type to search this level…"
-              autocomplete="off"
-              style="margin-bottom: 6px"
-            />
-            <select id="mpGgCategory">
-              <option value="">Loading…</option>
-            </select>
+            <div class="mp-auto" id="mpGgAuto" style="display: none">
+              <span class="mp-auto-label" id="mpGgAutoLabel"></span>
+              <a href="#" class="mp-auto-change" id="mpGgAutoChange">Change</a>
+            </div>
+            <div id="mpGgPicker">
+              <label>Catalog category</label>
+              <div
+                class="mp-hint"
+                id="mpGgPath"
+                style="margin-bottom: 4px"
+              ></div>
+              <input
+                type="text"
+                id="mpGgCatFilter"
+                placeholder="Type to search this level…"
+                autocomplete="off"
+                style="margin-bottom: 6px"
+              />
+              <select id="mpGgCategory">
+                <option value="">Loading…</option>
+              </select>
+            </div>
             <div class="mp-row" style="margin-top: 8px">
               <div style="flex: 1">
                 <label style="margin-top: 0">Quantity</label>
@@ -1791,14 +2016,20 @@ Reliable Daily Rewards</textarea
               category URL, e.g. funpay.com/en/lots/<b>2430</b>/ for “Overwatch
               2 Twitch Drops”.
             </div>
-            <label>Category node id</label>
-            <input
-              type="text"
-              id="mpFpNode"
-              inputmode="numeric"
-              placeholder="e.g. 2430"
-              autocomplete="off"
-            />
+            <div class="mp-auto" id="mpFpAuto" style="display: none">
+              <span class="mp-auto-label" id="mpFpAutoLabel"></span>
+              <a href="#" class="mp-auto-change" id="mpFpAutoChange">Change</a>
+            </div>
+            <div id="mpFpPicker">
+              <label>Category node id</label>
+              <input
+                type="text"
+                id="mpFpNode"
+                inputmode="numeric"
+                placeholder="e.g. 2430"
+                autocomplete="off"
+              />
+            </div>
             <div class="mp-row" style="margin-top: 8px">
               <div style="flex: 1">
                 <label style="margin-top: 0">Amount (stock)</label>
@@ -1999,9 +2230,29 @@ Reliable Daily Rewards</textarea
           opts.body = JSON.stringify(opts.body);
         }
         return fetch(url, opts).then(function (r) {
-          return r.json().then(function (j) {
+          // Read the body as TEXT and parse defensively (G5). Not every error
+          // reply is JSON: express answers an over-size body with an HTML 413
+          // and a proxy can answer with its own page, and r.json() then threw a
+          // SyntaxError — so the owner saw "Unexpected token <" instead of
+          // being told the paste was too big. A non-JSON body must always
+          // produce a message that says what happened.
+          return r.text().then(function (t) {
+            var j = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch (_) {
+              j = null;
+            }
             if (!r.ok || (j && j.success === false)) {
-              throw new Error((j && j.message) || "Request failed");
+              throw new Error(
+                (j && j.message) ||
+                  (r.status === 413
+                    ? "That is too large to send in one go — split it up"
+                    : "Request failed (" + r.status + ")"),
+              );
+            }
+            if (!j) {
+              throw new Error("Unreadable reply from the server (" + r.status + ")");
             }
             return j;
           });
@@ -3218,6 +3469,11 @@ Reliable Daily Rewards</textarea
 
       // -- publish modal --
       var mpSet = null;
+      // Feature B reuses this modal instead of cloning it: an account listing
+      // is addressed by `offerId` where a DropSet is addressed by `setId`
+      // (routes/marketplaceRoutes.js:695-706). This stays null for every
+      // set-backed open, so every guard below behaves exactly as it did.
+      var mpOffer = null;
 
       function mpBuildDescription(set) {
         var lines = [set.note || "", "", "Includes:"];
@@ -3257,7 +3513,13 @@ Reliable Daily Rewards</textarea
       }
 
       function loadExtListings(setId) {
-        api("/marketplaces/listings?setId=" + encodeURIComponent(setId))
+        // An account listing has no set, so its rows are addressed by the
+        // offer. `mpOffer` is null on every set-backed open — that path sends
+        // the query it has always sent.
+        var qs = mpOffer
+          ? "offerId=" + encodeURIComponent(mpOffer.id)
+          : "setId=" + encodeURIComponent(setId);
+        api("/marketplaces/listings?" + qs)
           .then(function (j) {
             var rows = (j.listings || []).filter(function (r) {
               return r.status !== "delisted";
@@ -3322,8 +3584,11 @@ Reliable Daily Rewards</textarea
           .catch(function () {});
       }
 
-      function openPublishModal(set) {
+      function openPublishModal(set, offer) {
         mpSet = set;
+        // Second argument only ever comes from the Account listings tab; every
+        // existing call site passes one argument and lands on null.
+        mpOffer = offer || null;
         $("mpPubTitle").innerText = 'Sell "' + set.name + '" on marketplaces';
         $("mpPubName").value = set.name || "";
         // The "Includes:" list and the price-term game come from the full item
@@ -3346,6 +3611,16 @@ Reliable Daily Rewards</textarea
         $("mpFpBox").style.display = "none";
         $("mpDsAttrs").innerHTML = "";
         $("mpG2gAttrs").innerHTML = "";
+        // Every auto-picked category belongs to the listing that was open, not
+        // to this one — including a "Change" the owner clicked on it.
+        mpAuto = {};
+        mpAutoRevealed = {};
+        // So does every hand-made pick still sitting in the pickers — see
+        // mpResetPickerSelections for the listing that went live in the
+        // previous listing's category (F3).
+        mpResetPickerSelections();
+        MP_AUTO_MARKETS.forEach(renderMpAuto);
+        loadMpAutoCategories(set, pcGame);
         $("mpExtList").innerHTML = '<div class="empty">Loading…</div>';
         $("mpPubOverlay").classList.add("open");
         var p = mpStatus ? Promise.resolve(mpStatus) : loadMpStatus();
@@ -3369,13 +3644,24 @@ Reliable Daily Rewards</textarea
             if (mpSet !== set) return; // modal was closed or moved to another set
             if ($("mpPubDesc").value === descBefore)
               $("mpPubDesc").value = mpBuildDescription(full);
+            var hydratedGame =
+              full.coverGame ||
+              (full.items && full.items[0] && full.items[0].game) ||
+              "";
             if ($("mpPriceTerm").value === termBefore) {
-              var g =
-                full.coverGame ||
-                (full.items && full.items[0] && full.items[0].game) ||
-                "";
-              $("mpPriceTerm").value = g ? g + " twitch" : full.name || "";
+              $("mpPriceTerm").value = hydratedGame
+                ? hydratedGame + " twitch"
+                : full.name || "";
             }
+            // MANDATORY re-fire, unconditional: on a light row set.items is
+            // undefined, so the open-time suggest saw only coverGame — often
+            // "" — and a set whose game name lives ONLY in items[] would file
+            // nowhere. loadMpAutoCategories' sequence number makes this later
+            // answer the winning one even if the open-time call is still in
+            // flight. The epicGameForSet/updateEpicNote pair below still has
+            // exactly this bug: its note can read "(no game on this set)" for
+            // a set that has one.
+            loadMpAutoCategories(set, hydratedGame);
           });
         }
       }
@@ -3522,6 +3808,197 @@ Reliable Daily Rewards</textarea
           if (ep.checked) updateEpicNote();
         }
       });
+
+      // ---- the category picks itself ------------------------------------
+      // We only sell Twitch drops, so the four markets that used to make the
+      // owner drill a catalog tree by hand ask the server where this game
+      // files instead (GET /marketplaces/suggest-category, Feature A of
+      // docs/ACCOUNT-LISTINGS-CONTRACT.md). The drill-down pickers stay in the
+      // page untouched: they are what "Change" reveals, and what an unmapped
+      // game falls back to, so nothing here can leave a publish blocked.
+      var MP_AUTO_BOXES = {
+        digiseller: {
+          box: "mpDsAuto",
+          label: "mpDsAutoLabel",
+          change: "mpDsAutoChange",
+          picker: "mpDsPicker",
+        },
+        ggsel: {
+          box: "mpGgAuto",
+          label: "mpGgAutoLabel",
+          change: "mpGgAutoChange",
+          picker: "mpGgPicker",
+        },
+        funpay: {
+          box: "mpFpAuto",
+          label: "mpFpAutoLabel",
+          change: "mpFpAutoChange",
+          picker: "mpFpPicker",
+        },
+        g2g: {
+          box: "mpG2gAuto",
+          label: "mpG2gAutoLabel",
+          change: "mpG2gAutoChange",
+          picker: "mpG2gPicker",
+        },
+      };
+      var MP_AUTO_MARKETS = Object.keys(MP_AUTO_BOXES);
+      var mpAuto = {}; // market -> Resolution, or null when we have no answer
+      var mpAutoRevealed = {}; // market -> the owner clicked "Change"
+      // Bumped on every request so a slow open-time reply can never overwrite
+      // the hydrated one that was fired after it (see loadMpAutoCategories).
+      var mpAutoSeq = 0;
+
+      function mpAutoOk(name) {
+        var r = mpAuto[name];
+        return !!(r && r.ok);
+      }
+
+      // Does this market's picker get a say? Its selection (dsSelected /
+      // ggSelected, the FunPay node box, the G2G product select) is
+      // module-level and OUTLIVES the modal, so while the picker is hidden
+      // behind a resolved auto line a leftover pick from the listing published
+      // before this one must not reach the body — that would file this game in
+      // the last game's category. Only a picker the owner revealed counts.
+      function mpPickWins(name) {
+        return !mpAutoOk(name) || !!mpAutoRevealed[name];
+      }
+
+      // …and mpPickWins alone is not enough, because *revealing* a picker is
+      // not *picking* one: publish listing A to GGSel having drilled to
+      // "Games > Rocket League > Twitch Drops", open listing B (Overwatch),
+      // click "Change" to look at the tree and pick nothing, and B went live
+      // in Rocket League's category off A's leftover ggSelected. So every
+      // selection is wiped when the modal opens (F3). The loaded category
+      // TREES are deliberately left in place — re-fetching GGSel's
+      // 24k-child top level on every open is not acceptable, and a tree
+      // cannot mis-file a listing on its own; only a selection can.
+      function mpResetPickerSelections() {
+        dsSelected = null;
+        ggSelected = null;
+        // Put the two drill-down dropdowns back on their placeholder as well,
+        // so the picker can never show the last listing's leaf as if it were
+        // still the pick. The options themselves (the loaded level) stay.
+        $("mpGgCategory").value = "";
+        $("mpDsCategory").value = "";
+        ggRenderPath();
+        dsRenderPath();
+        // FunPay's node id is a plain text box and G2G's product is a select;
+        // both keep their last value across opens exactly like the two above.
+        $("mpFpNode").value = "";
+        $("mpG2gProduct").value = "";
+        // …and so does the rest of the G2G chain (G3). F4 made brandId the
+        // field that decides whether the owner's pick beats the auto
+        // resolution (bodyCategoryGiven("g2g") is !!(body.g2g.brandId)), so a
+        // service/brand left over from the previous open is now exactly the
+        // F3 incident again, in the fields that now decide it. The filter box
+        // goes too: it narrows the brand list and auto-selects a single match,
+        // so a stale filter can pick a brand on its own. Only the VALUES are
+        // cleared — the loaded service/brand option lists stay, because
+        // re-fetching them on every modal open is what F3 ruled out.
+        $("mpG2gService").value = "";
+        $("mpG2gBrand").value = "";
+        $("mpG2gBrandFilter").value = "";
+        // The category select is the same drill-down chain: its options belong
+        // to the service just cleared, and it scopes the product lookup.
+        $("mpG2gCategory").value = "";
+      }
+
+      function renderMpAuto(name) {
+        var ids = MP_AUTO_BOXES[name];
+        if (!ids) return;
+        var box = $(ids.box);
+        var picker = $(ids.picker);
+        var r = mpAuto[name];
+        if (!r) {
+          // No answer yet (or the lookup failed): the box looks exactly as it
+          // did before this feature existed.
+          box.style.display = "none";
+          if (picker) picker.style.display = "";
+          return;
+        }
+        box.style.display = "flex";
+        var hide = r.ok && !mpAutoRevealed[name];
+        if (r.ok) {
+          box.classList.remove("bad");
+          $(ids.label).innerHTML =
+            "Category: <b>" +
+            esc(r.label || "picked automatically") +
+            "</b>" +
+            (mpAutoRevealed[name]
+              ? ' <span class="mp-hint">(pick one below to override)</span>'
+              : "");
+        } else {
+          box.classList.add("bad");
+          $(ids.label).textContent =
+            r.reason || "No category could be resolved — pick one below.";
+        }
+        $(ids.change).style.display = hide ? "" : "none";
+        if (picker) picker.style.display = hide ? "none" : "";
+      }
+
+      // A pick is a pick whenever it happens (G4). Every picker stays VISIBLE
+      // until a suggest-category reply lands (renderMpAuto's `if (!r)` branch),
+      // so the owner can drill all the way to a leaf in that window — and
+      // because only the "Change" click used to set mpAutoRevealed, an ok:true
+      // reply arriving afterwards hid the picker and mpPickWins went false:
+      // the deliberate pick was silently thrown away and the auto category
+      // published instead. Marking the market here means the pick survives the
+      // reply, and renderMpAuto keeps the picker open for it.
+      function mpMarkPicked(name) {
+        if (mpAutoRevealed[name]) return;
+        mpAutoRevealed[name] = true;
+        renderMpAuto(name);
+      }
+
+      MP_AUTO_MARKETS.forEach(function (name) {
+        var a = $(MP_AUTO_BOXES[name].change);
+        if (!a) return;
+        a.addEventListener("click", function (e) {
+          e.preventDefault();
+          mpMarkPicked(name);
+        });
+      });
+
+      // FunPay's placement is a bare node id typed into a box, so typing one is
+      // the pick (G4). It fires on `input` because the owner can type the
+      // number and hit Publish without the box ever losing focus.
+      $("mpFpNode").addEventListener("input", function () {
+        if (this.value.trim()) mpMarkPicked("funpay");
+      });
+
+      // `set` may be a light list row whose items have not hydrated yet, which
+      // is why this is called twice — once on open and once from inside the
+      // ensureSetItems callback. setId is sent as well so the server can read
+      // the full set itself, but the second call is what makes a set whose only
+      // game name lives in items[] resolve at all.
+      function loadMpAutoCategories(set, game) {
+        var seq = ++mpAutoSeq;
+        var qs = "marketplaces=" + MP_AUTO_MARKETS.join(",");
+        // An offer id must never be sent as `setId`: the server would look it
+        // up as a DropSet, find nothing, and silently resolve against "".
+        if (mpOffer) qs += "&offerId=" + encodeURIComponent(mpOffer.id);
+        else if (set && set.id) qs += "&setId=" + encodeURIComponent(set.id);
+        if (game) qs += "&game=" + encodeURIComponent(game);
+        return api("/marketplaces/suggest-category?" + qs)
+          .then(function (j) {
+            if (seq !== mpAutoSeq || mpSet !== set) return;
+            var res = j.results || {};
+            MP_AUTO_MARKETS.forEach(function (name) {
+              mpAuto[name] = res[name] || null;
+              renderMpAuto(name);
+            });
+          })
+          .catch(function () {
+            // A failed suggest must never block a publish: drop back to the
+            // hand-drilled pickers, which is what this modal did before.
+            if (seq !== mpAutoSeq || mpSet !== set) return;
+            MP_AUTO_MARKETS.forEach(function (name) {
+              mpAuto[name] = null;
+              renderMpAuto(name);
+            });
+          });
+      }
 
       // Show which EpicNPC forum this set's game maps to. The authoritative
       // node lookup happens server-side on publish; this is just a heads-up so
@@ -3682,6 +4159,9 @@ Reliable Daily Rewards</textarea
         }
         ggSelected = row;
         ggRenderPath();
+        // Drilling to a leaf IS the pick (G4) — mark it even if the suggest
+        // reply has not landed yet, or it is discarded when it does.
+        mpMarkPicked("ggsel");
       });
 
       // Digiseller cataloguer drill-down: one level per request; picking a
@@ -3812,6 +4292,8 @@ Reliable Daily Rewards</textarea
         }
         dsSelected = row;
         dsRenderPath();
+        // Same as GGSel above (G4): the leaf is the pick, not the "Change".
+        mpMarkPicked("digiseller");
         loadDsAttributes(row.id);
       });
       // Some categories require attributes (platform, region…) — show pickers.
@@ -4019,6 +4501,10 @@ Reliable Daily Rewards</textarea
         var pid = this.value;
         $("mpG2gAttrs").innerHTML = "";
         if (!pid) return;
+        // Choosing a product is choosing G2G's placement (G4): it is what
+        // carries serviceId/brandId into the body, so it must count as the
+        // owner's pick even when the suggest reply has yet to arrive.
+        mpMarkPicked("g2g");
         api("/marketplaces/g2g/attributes?productId=" + encodeURIComponent(pid))
           .then(function (j) {
             if (!j.success) throw new Error(j.message || "G2G error");
@@ -4085,7 +4571,6 @@ Reliable Daily Rewards</textarea
         // rides a separate path and is kept out of the /publish body.
         var epicWanted = targets.indexOf("epicnpc") !== -1;
         var body = {
-          setId: mpSet.id,
           marketplaces: targets.filter(function (t) {
             return t !== "epicnpc";
           }),
@@ -4093,6 +4578,11 @@ Reliable Daily Rewards</textarea
           description: $("mpPubDesc").value,
           price: parseFloat($("mpPubPrice").value),
         };
+        // Exactly one of the two ids, never both: the route branches on
+        // `offerId` first, and a row carrying a set as well would let a
+        // fulfiller claim off the Drop Archive instead of the pasted list.
+        if (mpOffer) body.offerId = mpOffer.id;
+        else body.setId = mpSet.id;
         if (!body.title) {
           toast("Enter a title");
           return;
@@ -4107,68 +4597,93 @@ Reliable Daily Rewards</textarea
           body.gameflip = { autoDeliver: $("mpGfAuto").checked, qty: gfQty };
         }
         if (targets.indexOf("digiseller") !== -1) {
-          if (!dsSelected) {
+          // An auto-picked category is left OUT of the body on purpose: the
+          // publish route resolves it again server-side, so what goes live and
+          // what the modal showed can never drift apart. The old guard now
+          // only fires when auto-resolution failed AND nothing was drilled.
+          var dsPick = mpPickWins("digiseller") ? dsSelected : null;
+          if (!dsPick && !mpAutoOk("digiseller")) {
             toast("Drill down to a Plati catalog category first");
             return;
           }
-          var dsAttrs = [];
-          var dsMissing = false;
-          document.querySelectorAll("[data-dsattr]").forEach(function (sel) {
-            if (sel.value) {
-              dsAttrs.push({
-                attributeId: sel.dataset.dsattr,
-                attributeValueId: sel.value,
-              });
-            } else if (sel.dataset.dsrequired) {
-              dsMissing = true;
-            }
-          });
-          if (dsMissing) {
-            toast("Fill the required (*) Plati category attributes");
-            return;
-          }
           body.digiseller = {
-            categories: [
-              { owner: 1, categoryId: dsSelected.id, attributes: dsAttrs },
-            ],
             delivery: $("mpDsDelivery").value,
             quantity: parseInt($("mpDsQty").value, 10) || 1,
           };
+          if (dsPick) {
+            var dsAttrs = [];
+            var dsMissing = false;
+            document.querySelectorAll("[data-dsattr]").forEach(function (sel) {
+              if (sel.value) {
+                dsAttrs.push({
+                  attributeId: sel.dataset.dsattr,
+                  attributeValueId: sel.value,
+                });
+              } else if (sel.dataset.dsrequired) {
+                dsMissing = true;
+              }
+            });
+            if (dsMissing) {
+              toast("Fill the required (*) Plati category attributes");
+              return;
+            }
+            body.digiseller.categories = [
+              { owner: 1, categoryId: dsPick.id, attributes: dsAttrs },
+            ];
+          }
         }
         if (targets.indexOf("g2g") !== -1) {
-          var pid = $("mpG2gProduct").value;
-          if (!pid) {
+          // On G2G the brand IS the game, and g2gPublish fills in the relation
+          // and the required attributes itself from the brand — so an
+          // auto-resolved offer needs no product pick at all.
+          var pid = mpPickWins("g2g") ? $("mpG2gProduct").value : "";
+          if (!pid && !mpAutoOk("g2g")) {
             toast("Pick a G2G product first");
             return;
           }
           var attrs = [];
-          document.querySelectorAll("[data-g2gattr]").forEach(function (sel) {
-            if (sel.value) {
-              attrs.push({
-                attribute_group_id: sel.dataset.g2gattr,
-                attribute_id: sel.value,
-              });
-            }
-          });
+          if (pid) {
+            document.querySelectorAll("[data-g2gattr]").forEach(function (sel) {
+              if (sel.value) {
+                attrs.push({
+                  attribute_group_id: sel.dataset.g2gattr,
+                  attribute_id: sel.value,
+                });
+              }
+            });
+          }
           body.g2g = {
-            productId: pid,
             qty: parseInt($("mpG2gQty").value, 10) || 1,
             minQty: parseInt($("mpG2gMinQty").value, 10) || 1,
             offerAttributes: attrs,
           };
+          if (pid) {
+            body.g2g.productId = pid;
+            // The product is not the whole category: the publish route only
+            // treats G2G as owner-picked when the body names a service/brand,
+            // so a hand-drilled product used to supply relation_id and the
+            // attributes while the AUTO-resolved brand still won — one offer
+            // assembled from two different games (F4). Send what the owner
+            // actually drilled to, and nothing at all when nothing was picked.
+            var g2gSid = $("mpG2gService").value;
+            var g2gBid = $("mpG2gBrand").value;
+            if (g2gSid) body.g2g.serviceId = g2gSid;
+            if (g2gBid) body.g2g.brandId = g2gBid;
+          }
         }
         if (targets.indexOf("ggsel") !== -1) {
-          if (!ggSelected) {
+          var ggPick = mpPickWins("ggsel") ? ggSelected : null;
+          if (!ggPick && !mpAutoOk("ggsel")) {
             toast("Drill down to a GGSel catalog category first");
             return;
           }
           var ggRub = parseFloat($("mpGgPriceRub").value);
           body.ggsel = {
-            categoryId: ggSelected.id,
             quantity: parseInt($("mpGgQty").value, 10) || 1,
             delivery: $("mpGgDelivery").value,
             priceRub: ggRub > 0 ? ggRub : undefined,
           };
+          if (ggPick) body.ggsel.categoryId = ggPick.id;
         }
         if (targets.indexOf("zeusx") !== -1) {
           body.zeusx = {
@@ -4183,20 +4698,28 @@ Reliable Daily Rewards</textarea
           };
         }
         if (targets.indexOf("funpay") !== -1) {
-          var fpNode = $("mpFpNode").value.trim();
-          if (!/^\d+$/.test(fpNode)) {
+          // The node box is a plain input that keeps its last value across
+          // modal opens, so while a resolved auto line stands in for it the
+          // box is ignored — a leftover 2430 would list this game in the last
+          // game's FunPay section.
+          var fpNode = mpPickWins("funpay") ? $("mpFpNode").value.trim() : "";
+          if (!fpNode && !mpAutoOk("funpay")) {
+            toast("Enter the FunPay category node id (a number, e.g. 2430)");
+            return;
+          }
+          if (fpNode && !/^\d+$/.test(fpNode)) {
             toast("Enter the FunPay category node id (a number, e.g. 2430)");
             return;
           }
           var fpOverride = parseFloat($("mpFpPrice").value);
           body.funpay = {
-            nodeId: fpNode,
             amount: parseInt($("mpFpAmount").value, 10) || 1,
             delivery: $("mpFpDelivery").value,
             currency: $("mpFpCurrency").value,
             priceOverride: fpOverride > 0 ? fpOverride : undefined,
             active: $("mpFpActive").checked,
           };
+          if (fpNode) body.funpay.nodeId = fpNode;
         }
         var btn = $("mpPubGo");
         btn.disabled = true;
@@ -4238,6 +4761,13 @@ Reliable Daily Rewards</textarea
       // send the pre-opened tab there. The seller clicks the one-time "EpicNPC
       // Filler" bookmarklet on that tab to fill the form, reviews, and posts.
       function openEpicBridge(body) {
+        // /marketplaces/epicnpc/prepare resolves a DropSet by setId; an
+        // account listing has none, so it is refused here rather than opening
+        // a browser tab that lands on a 404.
+        if (mpOffer) {
+          toast("EpicNPC isn't available for account listings");
+          return;
+        }
         var g = epicGameForSet();
         var win = window.open("about:blank", "_blank");
         api("/marketplaces/epicnpc/prepare", {
@@ -4376,18 +4906,26 @@ Reliable Daily Rewards</textarea
       var cSets = []; // cached custom sets for the list below
       var cTitleEdited = false;
 
+      // Three panes now, so the old shop/not-shop boolean became a lookup: with
+      // it, "custom" was simply "not shop" and a third name would have shown
+      // the Custom pane.
+      var TABS = {
+        shop: { pane: "tabShop", btn: "tabBtnShop" },
+        custom: { pane: "tabCustom", btn: "tabBtnCustom" },
+        accounts: { pane: "tabAccounts", btn: "tabBtnAccounts" },
+      };
       function switchTab(which) {
-        var shop = which === "shop";
-        $("tabShop").style.display = shop ? "" : "none";
-        $("tabCustom").style.display = shop ? "none" : "";
-        $("tabBtnShop").classList.toggle("active", shop);
-        $("tabBtnCustom").classList.toggle("active", !shop);
+        var name = TABS[which] ? which : "shop";
+        Object.keys(TABS).forEach(function (k) {
+          var on = k === name;
+          $(TABS[k].pane).style.display = on ? "" : "none";
+          $(TABS[k].btn).classList.toggle("active", on);
+        });
       }
-      $("tabBtnShop").addEventListener("click", function () {
-        switchTab("shop");
-      });
-      $("tabBtnCustom").addEventListener("click", function () {
-        switchTab("custom");
+      Object.keys(TABS).forEach(function (k) {
+        $(TABS[k].btn).addEventListener("click", function () {
+          switchTab(k);
+        });
       });
 
       function cLoadGames() {
@@ -5606,6 +6144,705 @@ Reliable Daily Rewards</textarea
           : [];
       }
 
+      // ================= Account listings =================
+      // routes/accountListingRoutes.js. An offer is a product; its stock is the
+      // owner's pasted list of accounts, held one row per account in
+      // SuppliedAccount. Nothing on this tab creates a DropSet, so no state
+      // below is shared with the Shop or Custom tabs.
+      var alOffers = [];
+      var alEditId = ""; // "" = the form is creating, not editing
+      var alFilter = "all";
+      var alStockId = ""; // which offer's stock the right-hand card shows
+
+      // addAccounts reports duplicates/conflicts/bad lines as free-form entries
+      // and the shape is the ingest layer's to choose; print something readable
+      // either way rather than "[object Object]".
+      function alReported(x) {
+        if (x && typeof x === "object") {
+          var s = String(x.login || x.line || x.raw || x.text || "");
+          return x.reason ? s + " (" + x.reason + ")" : s;
+        }
+        return String(x == null ? "" : x);
+      }
+      function alCountOf(v) {
+        return Array.isArray(v) ? v.length : 0;
+      }
+
+      // What the claim layer will actually hand over (G2). NOT stats.available:
+      // offerStats groups by status, so `available` counts every row on the
+      // shelf — including the conflict:"in-archive" rows claimForListing
+      // refuses because the Drop Archive can still sell that same login. An
+      // offer whose whole shelf was held back therefore read as fully stocked
+      // and published with no warning at all.
+      //
+      // `claimable` / `heldBack` are used when the server sends them
+      // (suppliedStock.offerStats does not today). The fallback is `conflicts`,
+      // which counts conflicted rows in EVERY status — including ones the
+      // owner has since removed — so capping it at `available` can only
+      // UNDER-state what is claimable. That errs towards warning about stock
+      // that is really there, never towards publishing on stock that isn't.
+      function alClaimable(stats) {
+        var st = stats || {};
+        var available = Math.max(0, Number(st.available) || 0);
+        var held;
+        if (st.heldBack != null) held = Math.max(0, Number(st.heldBack) || 0);
+        else if (st.claimable != null)
+          held = available - Math.max(0, Number(st.claimable) || 0);
+        else held = Math.max(0, Number(st.conflicts) || 0);
+        held = Math.min(available, Math.max(0, held));
+        var claimable =
+          st.claimable != null
+            ? Math.min(available, Math.max(0, Number(st.claimable) || 0))
+            : available - held;
+        return { claimable: claimable, heldBack: held };
+      }
+
+      function alStatusBadge(s) {
+        var cls =
+          s === "available"
+            ? "live"
+            : s === "fed"
+              ? "auto"
+              : s === "removed"
+                ? "out"
+                : "draft";
+        return '<span class="badge ' + cls + '">' + esc(s || "?") + "</span>";
+      }
+
+      // ---- the create / edit form ----
+      function alFormBody(status) {
+        var b = {
+          title: $("alTitle").value.trim(),
+          game: $("alGame").value.trim(),
+          description: $("alDesc").value,
+          priceUsd: parseFloat($("alPrice").value) || 0,
+          minPriceUsd: parseFloat($("alMinPrice").value) || 0,
+          deliveryTemplate: $("alTemplate").value,
+          autoDeliver: $("alAuto").checked,
+          coverServiceText: $("alService").value.trim(),
+          coverBullets: $("alBullets")
+            .value.split("\n")
+            .map(function (s) {
+              return s.trim();
+            })
+            .filter(Boolean)
+            .slice(0, 4),
+        };
+        if (status) b.status = status;
+        return b;
+      }
+
+      function alResetForm() {
+        alEditId = "";
+        $("alFormTitle").textContent = "Create an account listing";
+        $("alTitle").value = "";
+        $("alGame").value = "";
+        $("alDesc").value = "";
+        $("alPrice").value = "0";
+        $("alMinPrice").value = "0";
+        $("alTemplate").value = "";
+        $("alAuto").checked = true;
+        $("alService").value = "";
+        $("alBullets").value = "";
+        $("alCancelBtn").style.display = "none";
+        $("alSaveBtn").textContent = "Save";
+      }
+
+      function alEdit(o) {
+        alEditId = o.id;
+        $("alFormTitle").textContent = "Edit account listing";
+        $("alTitle").value = o.title || "";
+        $("alGame").value = o.game || "";
+        $("alDesc").value = o.description || "";
+        $("alPrice").value = Number(o.priceUsd) || 0;
+        $("alMinPrice").value = Number(o.minPriceUsd) || 0;
+        $("alTemplate").value = o.deliveryTemplate || "";
+        $("alAuto").checked = o.autoDeliver !== false;
+        $("alService").value = o.coverServiceText || "";
+        $("alBullets").value = (o.coverBullets || []).join("\n");
+        $("alCancelBtn").style.display = "";
+        $("alSaveBtn").textContent = "Save changes";
+        alSelectStock(o.id);
+        $("alFormTitle").scrollIntoView({ block: "center" });
+      }
+
+      function alSave(status) {
+        var body = alFormBody(status);
+        if (!body.title) {
+          toast("Title required");
+          return;
+        }
+        var editing = alEditId;
+        var btns = [$("alSaveBtn"), $("alDraftBtn")];
+        btns.forEach(function (b) {
+          b.disabled = true;
+        });
+        api(editing ? "/account-listings/" + editing : "/account-listings", {
+          method: editing ? "PUT" : "POST",
+          body: body,
+        })
+          .then(function (j) {
+            toast(editing ? "Saved" : "Account listing created");
+            var id = (j.offer && j.offer.id) || editing;
+            alResetForm();
+            // A brand-new offer has no stock, so the right-hand card jumps to
+            // it: pasting the accounts is the only thing left to do.
+            if (id) alSelectStock(id);
+            return alLoad();
+          })
+          .catch(function (e) {
+            toast(e.message || "Save failed");
+          })
+          .finally(function () {
+            btns.forEach(function (b) {
+              b.disabled = false;
+            });
+          });
+      }
+      $("alSaveBtn").addEventListener("click", function () {
+        alSave("active");
+      });
+      $("alDraftBtn").addEventListener("click", function () {
+        alSave("draft");
+      });
+      $("alCancelBtn").addEventListener("click", alResetForm);
+
+      // ---- the stock card ----
+      function alStockTitle() {
+        var o = alStockId
+          ? alOffers.find(function (x) {
+              return x.id === alStockId;
+            })
+          : null;
+        $("alStockTitle").textContent = o
+          ? "Accounts in " + o.title
+          : "Accounts in this listing";
+      }
+
+      function alSelectStock(id) {
+        alStockId = id || "";
+        $("alAddResult").innerHTML = "";
+        alStockTitle();
+        return alLoadStock();
+      }
+
+      function alRenderStock(rows) {
+        $("alStockCount").textContent = rows.length;
+        if (!rows.length) {
+          $("alStock").innerHTML =
+            '<div class="empty">No accounts yet — paste them above.</div>';
+          return;
+        }
+        $("alStock").innerHTML = rows
+          .map(function (a) {
+            // A conflict row is held OUT of claimable stock: the same login is
+            // also in the Drop Archive, where the archive path could sell it a
+            // second time. Clearing it is the owner taking that risk knowingly,
+            // so it says so rather than showing a bare button.
+            var bad = !!a.conflict;
+            return (
+              '<div class="row' +
+              (bad ? " mp-auto bad" : "") +
+              '">' +
+              '<span class="nm" title="' +
+              attr(a.login) +
+              '">' +
+              esc(a.login) +
+              "</span>" +
+              alStatusBadge(a.status) +
+              (a.market
+                ? '<span class="gm">' +
+                  esc(MP_LABELS[a.market] || a.market) +
+                  "</span>"
+                : "") +
+              (a.orderId
+                ? '<span class="gm">#' + esc(a.orderId) + "</span>"
+                : "") +
+              (bad
+                ? '<span class="gm">Also in the Drop Archive — held back so ' +
+                  "it can't be sold twice.</span>" +
+                  '<button class="btn" data-alallow="' +
+                  attr(a.id) +
+                  '">Allow anyway</button>'
+                : "") +
+              (a.status === "available"
+                ? '<button class="x" title="Remove from this listing" ' +
+                  'data-alrm="' +
+                  attr(a.id) +
+                  '">×</button>'
+                : "") +
+              "</div>"
+            );
+          })
+          .join("");
+      }
+
+      function alLoadStock() {
+        if (!alStockId) {
+          $("alStockCount").textContent = "0";
+          $("alStock").innerHTML =
+            '<div class="empty">Pick an account listing below.</div>';
+          return Promise.resolve();
+        }
+        var want = alStockId;
+        return api(
+          "/account-listings/" + encodeURIComponent(want) + "/accounts",
+        )
+          .then(function (j) {
+            if (want !== alStockId) return; // the owner moved on mid-fetch
+            alRenderStock(j.accounts || []);
+          })
+          .catch(function (e) {
+            if (want !== alStockId) return;
+            $("alStock").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+
+      // A .txt drops into the same textarea rather than a separate upload
+      // endpoint, so the owner sees exactly what is about to be sent.
+      $("alFile").addEventListener("change", function () {
+        var f = this.files && this.files[0];
+        var input = this;
+        if (!f) return;
+        var r = new FileReader();
+        r.onload = function () {
+          var cur = $("alPaste").value;
+          $("alPaste").value =
+            (cur && !/\n$/.test(cur) ? cur + "\n" : cur) +
+            String(r.result || "");
+          toast("Loaded " + f.name);
+        };
+        r.onerror = function () {
+          toast("Could not read " + f.name);
+        };
+        r.readAsText(f);
+        input.value = "";
+      });
+
+      $("alAddBtn").addEventListener("click", function () {
+        if (!alStockId) {
+          toast("Save or pick an account listing first");
+          return;
+        }
+        var text = $("alPaste").value;
+        if (!text.trim()) {
+          toast("Paste at least one login:password line");
+          return;
+        }
+        var btn = $("alAddBtn");
+        btn.disabled = true;
+        btn.textContent = "Adding…";
+        api(
+          "/account-listings/" + encodeURIComponent(alStockId) + "/accounts",
+          {
+            method: "POST",
+            // The paste goes up as RAW text/plain (G5). As JSON it hit the
+            // app-wide express.json({ limit: "100kb" }) (server.js:184), so
+            // anything past roughly 2,000 accounts was refused with an HTML
+            // 413 — and nothing was added. routes/accountListingRoutes.js
+            // mounts express.text at 5mb on this route for exactly this, and
+            // as a bonus a non-JSON body never reaches the audit middleware's
+            // body summary, which is where the credentials leaked (F6).
+            headers: { "Content-Type": "text/plain; charset=utf-8" },
+            body: text,
+          },
+        )
+          .then(function (j) {
+            $("alPaste").value = "";
+            var bad = Array.isArray(j.badLines) ? j.badLines : [];
+            // A line that could not be split is REPORTED, never guessed at, so
+            // the ones that were dropped are named here.
+            $("alAddResult").innerHTML =
+              esc(
+                (Number(j.added) || 0) +
+                  " added · " +
+                  alCountOf(j.duplicates) +
+                  " duplicate · " +
+                  alCountOf(j.conflicts) +
+                  " already in the archive · " +
+                  bad.length +
+                  " unreadable",
+              ) +
+              (bad.length
+                ? "<div>Not added: " +
+                  esc(bad.slice(0, 5).map(alReported).join(" | ")) +
+                  (bad.length > 5 ? " …" : "") +
+                  "</div>"
+                : "");
+            toast("Added " + (Number(j.added) || 0) + " account(s)");
+            return Promise.all([alLoadStock(), alLoad()]);
+          })
+          .catch(function (e) {
+            toast(e.message || "Add failed");
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = "Add accounts";
+          });
+      });
+
+      $("alStock").addEventListener("click", function (e) {
+        var allow = e.target.closest("[data-alallow]");
+        var rm = e.target.closest("[data-alrm]");
+        var base = "/account-listings/" + encodeURIComponent(alStockId);
+        if (allow) {
+          if (
+            !confirm(
+              "This login is also in the Drop Archive. Allowing it here means " +
+                "both paths could sell the same account. Continue?",
+            )
+          )
+            return;
+          allow.disabled = true;
+          api(
+            base +
+              "/accounts/" +
+              encodeURIComponent(allow.dataset.alallow) +
+              "/allow",
+            { method: "POST" },
+          )
+            .then(function () {
+              toast("Allowed — it is claimable now");
+              return Promise.all([alLoadStock(), alLoad()]);
+            })
+            .catch(function (err) {
+              toast(err.message || "Failed");
+              allow.disabled = false;
+            });
+        } else if (rm) {
+          rm.disabled = true;
+          api(base + "/accounts/" + encodeURIComponent(rm.dataset.alrm), {
+            method: "DELETE",
+          })
+            .then(function () {
+              return Promise.all([alLoadStock(), alLoad()]);
+            })
+            .catch(function (err) {
+              toast(err.message || "Remove failed");
+              rm.disabled = false;
+            });
+        }
+      });
+
+      // ---- the offers list ----
+      function alActiveListings(o) {
+        return (o.listings || []).filter(function (r) {
+          return r.status === "active";
+        });
+      }
+
+      // Same chip vocabulary as the Custom tab: live rows link out, a sold or
+      // errored market shows muted so "why isn't this on Plati?" is one hover
+      // away.
+      function alMarketChips(o) {
+        return (o.listings || [])
+          .filter(function (r) {
+            return r.status !== "delisted";
+          })
+          .map(function (r) {
+            var label = MP_LABELS[r.marketplace] || r.marketplace;
+            // S8: `status` alone lies. Both stock syncs pause / hide an
+            // offer-backed row when its share of the shelf runs out and leave
+            // status:"active" behind, so a chip keyed only on status shows a
+            // market the offer is DOWN on as live. autoPaused is the flag to
+            // trust; lastError is why.
+            var paused = r.status === "active" && r.autoPaused;
+            var cls =
+              r.status === "sold"
+                ? "sold"
+                : paused
+                  ? "paused"
+                  : r.status === "active"
+                    ? "live"
+                    : "err";
+            var body =
+              '<span class="dot"></span>' +
+              esc(label) +
+              (r.status === "sold"
+                ? " · sold"
+                : paused
+                  ? " · paused"
+                  : r.status !== "active"
+                    ? " · " + esc(r.status)
+                    : "");
+            // The reason never left the server before this. Put it on the chip
+            // so the owner can find out why a market went quiet by hovering it.
+            var why = paused
+              ? "Paused on " +
+                label +
+                " — no claimable accounts were left for this listing's share " +
+                "of the shelf. Add accounts and it resumes on the next sync."
+              : "";
+            if (r.lastError) why += (why ? "\n\n" : "") + r.lastError;
+            if (why) body = '<span title="' + attr(why) + '">' + body + "</span>";
+            if (r.url) {
+              return (
+                '<a class="mkt-chip ' +
+                cls +
+                '" href="' +
+                attr(r.url) +
+                '" target="_blank" rel="noopener">' +
+                body +
+                "</a>"
+              );
+            }
+            return '<span class="mkt-chip ' + cls + '">' + body + "</span>";
+          })
+          .join("");
+      }
+
+      function alRow(o) {
+        var st = o.stats || {};
+        var cl = alClaimable(st);
+        return (
+          '<div class="listing" data-id="' +
+          attr(o.id) +
+          '">' +
+          '<div class="info">' +
+          '<div class="t">' +
+          esc(o.title) +
+          "</div>" +
+          (o.description
+            ? '<div class="d" title="' +
+              attr(o.description) +
+              '">' +
+              esc(o.description) +
+              "</div>"
+            : "") +
+          '<div class="meta">' +
+          (o.status === "active"
+            ? '<span class="badge live">Active</span>'
+            : o.status === "archived"
+              ? '<span class="badge out">Archived</span>'
+              : '<span class="badge draft">Draft</span>') +
+          (o.game ? "<span>" + esc(o.game) + "</span>" : "") +
+          // "N available" is the CLAIMABLE count, and the held-back rows are
+          // named beside it rather than folded into it (G2) — stock that
+          // exists but cannot be sold has to be visible, or the shelf just
+          // looks emptier than it is with no explanation.
+          '<span title="Available = what auto-delivery can actually claim. ' +
+          "Held back = also in the Drop Archive, so it can't be sold twice " +
+          'until you allow it">' +
+          cl.claimable +
+          " available" +
+          (cl.heldBack ? " · " + cl.heldBack + " held back" : "") +
+          " · " +
+          (Number(st.fed) || 0) +
+          " fed · " +
+          (Number(st.sold) || 0) +
+          " sold</span>" +
+          (cl.heldBack
+            ? '<span class="badge out" title="Also in the Drop Archive — not ' +
+              'claimable until you allow them">Held back</span>'
+            : "") +
+          (o.autoDeliver === false
+            ? '<span class="badge draft">Auto-deliver off</span>'
+            : "") +
+          alMarketChips(o) +
+          "</div></div>" +
+          '<div class="price">' +
+          (Number(o.priceUsd) || 0) +
+          "</div>" +
+          '<div class="ops">' +
+          '<button class="btn" data-aledit="' +
+          attr(o.id) +
+          '">Edit</button>' +
+          '<button class="btn" data-alstock="' +
+          attr(o.id) +
+          '">Accounts</button>' +
+          '<button class="btn" data-almp="' +
+          attr(o.id) +
+          '">Sell on…</button>' +
+          (alActiveListings(o).length
+            ? '<button class="btn danger" data-aldelist="' +
+              attr(o.id) +
+              '">Delist</button>'
+            : '<button class="btn danger" data-aldel="' +
+              attr(o.id) +
+              '">Delete</button>') +
+          "</div></div>"
+        );
+      }
+
+      function alRenderOffers() {
+        var q = ($("alSearch").value || "").toLowerCase();
+        var rows = alOffers.filter(function (o) {
+          if (alFilter === "active" && o.status !== "active") return false;
+          if (alFilter === "draft" && o.status !== "draft") return false;
+          if (
+            q &&
+            (o.title + " " + (o.game || "") + " " + (o.description || ""))
+              .toLowerCase()
+              .indexOf(q) < 0
+          )
+            return false;
+          return true;
+        });
+        $("alCount").textContent =
+          rows.length === alOffers.length
+            ? alOffers.length + " listing" + (alOffers.length === 1 ? "" : "s")
+            : rows.length + " of " + alOffers.length;
+        $("alListings").innerHTML = rows.length
+          ? rows.map(alRow).join("")
+          : '<div class="empty">' +
+            (alOffers.length
+              ? "No matches."
+              : "No account listings yet — create one on the left.") +
+            "</div>";
+      }
+
+      function alLoad() {
+        return api("/account-listings")
+          .then(function (j) {
+            alOffers = j.offers || [];
+            alRenderOffers();
+            var gone =
+              alStockId &&
+              !alOffers.some(function (o) {
+                return o.id === alStockId;
+              });
+            if (gone) alSelectStock("");
+            else alStockTitle();
+          })
+          .catch(function (e) {
+            alOffers = [];
+            $("alListings").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+
+      $("alSearch").addEventListener("input", alRenderOffers);
+      document.querySelectorAll("[data-alf]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          alFilter = b.dataset.alf;
+          document.querySelectorAll("[data-alf]").forEach(function (x) {
+            x.classList.toggle("on", x === b);
+          });
+          alRenderOffers();
+        });
+      });
+
+      // openPublishModal was written against a DropSet row. An offer has no
+      // items, so it is handed the same shape with an empty items[]: that keeps
+      // the hydration branch (which only runs when items is not an array) from
+      // firing an ensureSetItems fetch for an id that is not a set.
+      function alSetLike(o) {
+        return {
+          id: o.id,
+          name: o.title || "",
+          note: o.description || "",
+          price: Number(o.priceUsd) || 0,
+          coverGame: o.game || "",
+          items: [],
+        };
+      }
+
+      // Delisting is done one market at a time on purpose. These are live
+      // offers with real buyers; a parallel fan-out across every market is the
+      // one thing that turns a mistake here into several at once.
+      function alDelistAll(o, btn) {
+        var rows = alActiveListings(o);
+        if (!rows.length) return;
+        if (
+          !confirm(
+            "Delist this account listing from " +
+              rows.length +
+              " marketplace(s)?",
+          )
+        )
+          return;
+        btn.disabled = true;
+        var failed = 0;
+        rows
+          .reduce(function (p, r) {
+            return p.then(function () {
+              return api("/marketplaces/listings/" + r.id, {
+                method: "DELETE",
+              }).catch(function () {
+                failed += 1;
+              });
+            });
+          }, Promise.resolve())
+          .then(function () {
+            toast(
+              failed
+                ? failed + " of " + rows.length + " could not be delisted"
+                : "Delisted",
+            );
+            return alLoad();
+          })
+          .finally(function () {
+            btn.disabled = false;
+          });
+      }
+
+      $("alListings").addEventListener("click", function (e) {
+        var ed = e.target.closest("[data-aledit]");
+        var stk = e.target.closest("[data-alstock]");
+        var mp = e.target.closest("[data-almp]");
+        var dl = e.target.closest("[data-aldelist]");
+        var del = e.target.closest("[data-aldel]");
+        function find(id) {
+          return alOffers.find(function (x) {
+            return x.id === id;
+          });
+        }
+        if (ed) {
+          var eo = find(ed.dataset.aledit);
+          if (eo) alEdit(eo);
+        } else if (stk) {
+          alSelectStock(stk.dataset.alstock);
+          $("alStockTitle").scrollIntoView({ block: "center" });
+        } else if (mp) {
+          var o = find(mp.dataset.almp);
+          if (!o) return;
+          // Publishing with nothing claimable creates a live offer that must
+          // pause itself on the first sale. Warn — but never block: a listing
+          // put up before the accounts are pasted is a legitimate order.
+          //
+          // The test is the CLAIMABLE count, not stats.available (G2): a shelf
+          // made entirely of conflict:"in-archive" rows is stock claimForListing
+          // refuses, so it read as fully stocked and published silently. Say
+          // which of the two it is — "held back" is a one-click fix ("Allow
+          // anyway"), "empty" is not.
+          var cl = alClaimable(o.stats);
+          if (
+            !(cl.claimable > 0) &&
+            !confirm(
+              (cl.heldBack
+                ? "This listing has no claimable accounts — all " +
+                  cl.heldBack +
+                  " are held back because they are also in the Drop Archive."
+                : "This listing has no available accounts.") +
+                " Publish it anyway?",
+            )
+          )
+            return;
+          openPublishModal(alSetLike(o), o);
+          // An account listing has no items, so mpBuildDescription would leave
+          // a bare "Includes:" heading under the text. The owner's own
+          // description is the whole contract here.
+          $("mpPubDesc").value = o.description || "";
+        } else if (dl) {
+          var doo = find(dl.dataset.aldelist);
+          if (doo) alDelistAll(doo, dl);
+        } else if (del) {
+          if (!confirm("Archive this account listing?")) return;
+          del.disabled = true;
+          api("/account-listings/" + del.dataset.aldel, { method: "DELETE" })
+            .then(function () {
+              toast("Archived");
+              return alLoad();
+            })
+            .catch(function (err) {
+              // 409 while a row is still on sale — the server names the market.
+              toast(err.message || "Delete failed");
+              del.disabled = false;
+            });
+        }
+      });
+
       // ---- init ----
       resetForm();
       loadMe();
@@ -5614,6 +6851,7 @@ Reliable Daily Rewards</textarea
       loadListings();
       cLoadGames();
       cLoadCustomListings();
+      alLoad();
     </script>
     <script src="/admin-nav.js"></script>
   </body>

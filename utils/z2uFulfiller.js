@@ -31,6 +31,12 @@ const mp = require("./marketplaces");
 // proven against real orders, and a second copy would drift. The only thing
 // Z2U changes is which marketplace the claim is stamped with.
 const eld = require("./eldoradoFulfiller");
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): stock the owner pasted
+// in by hand, held in its own ledger. Z2U had no units[] branch at all, so an
+// offer-backed row reaching the `row.set` claim below would have silently
+// handed over a DIFFERENT account out of the Drop Archive — which is why every
+// supplied branch in this file goes FIRST, before the archive ones.
+const supplied = require("./suppliedStock");
 
 // Distinct from every other platform's tag so one account can never be handed
 // out twice across shops. Already present in utils/marketClaimTags.
@@ -89,6 +95,17 @@ function daysUntilExpiry(offer, now = Date.now()) {
 // alone, the second is taken off sale.
 async function realStockFor(row, listedElsewhere) {
   if (!row) return null;
+  // Owner-supplied stock is counted from its own ledger and never from the
+  // archive. Without this branch the row reads as "unknown" forever — it
+  // carries no unclaimedGame and no set — so the keeper would never correct
+  // its advertised quantity and never take it off sale once the pasted list
+  // ran dry, which is exactly the oversold-offer dispute this file exists to
+  // avoid. A ledger read that fails still returns null: "we do not know" must
+  // not be mistaken for "there is none".
+  if (supplied.isSuppliedRow(row)) {
+    const n = await supplied.stockFor(row).catch(() => null);
+    return Number.isFinite(n) ? Math.min(n, STOCK_MAX) : null;
+  }
   if (row.unclaimedGame) {
     const picked = await eld
       .claimUnclaimedForGame(row.unclaimedGame, STOCK_MAX, {
@@ -397,8 +414,16 @@ async function keepShelfAlive({
 //
 // Guarded on our own claim tag both ways: a row claimed by another marketplace
 // is never touched, however the delivery failed.
-async function releaseClaim(row, acct) {
+async function releaseClaim(row, acct, { orderId = "" } = {}) {
   try {
+    // Supplied stock first. An offer-backed account carries a ledgerId but no
+    // accountId, so without this it falls past both branches below and returns
+    // false — the ledger row stays claimed for a hand-over that never happened
+    // and no later pass ever offers that account again.
+    if (supplied.isSuppliedRow(row) && acct.ledgerId) {
+      await supplied.releaseClaim([acct.ledgerId], { orderId });
+      return true;
+    }
     if (row.unclaimedGame && acct.ledgerId) {
       await UnclaimedAccount.findOneAndUpdate(
         { _id: acct.ledgerId, market: Z2U_CLAIM_TAG },
@@ -488,8 +513,33 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
       }
     }
     let picked = [];
+    // Non-null only on an offer-backed row; it is also what selects the
+    // supplied delivery text and the supplied unit shape further down.
+    let offer = null;
     try {
-      if (row.unclaimedGame) {
+      if (supplied.isSuppliedRow(row)) {
+        // ABOVE the `row.set` branch on purpose (contract ground truth #8):
+        // a row that carried BOTH an accountOffer and a set would otherwise
+        // claim and ship a completely different account out of the Drop
+        // Archive, with nothing in the supplied ledger recording that the sale
+        // ever happened.
+        offer = await supplied.offerFor(row);
+        if (!offer) {
+          skipped.push([order.orderId, "listing points at an account offer that is gone"]);
+          continue;
+        }
+        // The kill switch is checked BEFORE claiming: an account claimed for an
+        // order we then refuse to deliver is stock spent on nothing.
+        if (!supplied.deliveryEnabled(offer)) {
+          skipped.push([order.orderId, "account-listing auto-delivery is off"]);
+          continue;
+        }
+        picked = await supplied.claimForListing(row, 1, {
+          orderId: order.orderId,
+          market: Z2U_CLAIM_TAG,
+          dryRun,
+        });
+      } else if (row.unclaimedGame) {
         picked = await eld.claimUnclaimedForGame(row.unclaimedGame, 1, {
           orderId: order.orderId,
           offerId: row.externalId,
@@ -522,7 +572,12 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
       continue;
     }
     const acct = picked[0];
-    const message = eld.eldoradoDeliveryCode(acct.login, acct.password);
+    // The owner's own template decides what a supplied account's buyer reads —
+    // there is no DropSet behind it to describe, and the typed description IS
+    // the contract with the buyer.
+    const message = offer
+      ? supplied.deliveryText(acct, offer)
+      : eld.eldoradoDeliveryCode(acct.login, acct.password);
     if (dryRun) {
       delivered.push({
         orderId: order.orderId,
@@ -538,7 +593,7 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
     } catch (e) {
       // The account was claimed a moment ago and nobody got it — give it back
       // before moving on, or it is spent for nothing.
-      const back = await releaseClaim(row, acct);
+      const back = await releaseClaim(row, acct, { orderId: order.orderId });
       skipped.push([
         order.orderId,
         "deliver failed: " +
@@ -548,13 +603,47 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
       continue;
     }
     row.units = row.units || [];
-    row.units.push({
-      accountId: String(acct.accountId || acct.ledgerId || ""),
-      login: acct.login,
-      orderId: order.orderId,
-      deliveredAt: new Date(),
-    });
+    if (offer) {
+      // accountId stays EMPTY on an offer-backed unit on purpose: a ledger id
+      // is not a BotAccount id, and marketplaceGuardian.runChecks indexes its
+      // duplicate findings off exactly that field. The login is what matters —
+      // utils/listedLogins reads units[].login, and that is what stops this
+      // same login also being sold by an archive-backed listing.
+      row.units.push({
+        contentId: String(acct.ledgerId || ""),
+        accountId: "",
+        login: acct.login,
+        orderId: order.orderId,
+        deliveredAt: new Date(),
+      });
+    } else {
+      row.units.push({
+        accountId: String(acct.accountId || acct.ledgerId || ""),
+        login: acct.login,
+        orderId: order.orderId,
+        deliveredAt: new Date(),
+      });
+    }
+    // The unit row is the redelivery guard, so it is written BEFORE the ledger
+    // is stamped. A markDelivered that fails leaves the row claimed to this
+    // order, which the resume path in claimForListing already understands —
+    // it must never throw the whole pass and strand the orders behind it.
     await row.save();
+    if (offer) {
+      await supplied
+        .markDelivered([acct.ledgerId], {
+          orderId: order.orderId,
+          market: Z2U_CLAIM_TAG,
+        })
+        .catch((e) => {
+          console.error(
+            "z2u fulfiller: delivered " +
+              order.orderId +
+              " but could not stamp the supplied ledger:",
+            (e && e.message) || e,
+          );
+        });
+    }
     delivered.push({ orderId: order.orderId, title: order.title, login: acct.login });
   }
   return { orders: orders.length, delivered, skipped };
@@ -566,6 +655,45 @@ async function deliverPendingOrders({ dryRun = true } = {}) {
 const DELIVER_TICK_MS = 2 * 60 * 1000;
 const SHELF_TICK_MS = 30 * 60 * 1000;
 let started = false;
+
+// S3: an account listing whose delivery switch is off (contract B8) refuses the
+// hand-over above with a reason that reached one console.log line and nothing
+// else — no Telegram, while a `grep -c sendTelegram` over this file returned 0.
+// Meanwhile the Z2U offer stays on sale at its full stock, so more buyers keep
+// paying for something the fulfiller has already decided not to ship.
+//
+// Deliberately narrow: only the kill-switch refusal is paged. Z2U's other skips
+// ("no listing row matches …", a delivery form that has gone) are matched by
+// TITLE, which is fuzzy here in a way it is nowhere else — widening this is a
+// separate call, and an alert nobody trusts is worth nothing.
+const ALERT_SKIPS = /auto-delivery is off/i;
+
+// One page per order per process, the same gate Eldorado and PlayerAuctions
+// use: the tick re-reads a waiting order every two minutes and a switch can
+// stay off for days. A restart re-pages once, which is the right behaviour.
+const alertedOrders = new Set();
+
+function alertsOperator(skipReason) {
+  return ALERT_SKIPS.test(String(skipReason || ""));
+}
+
+async function alertUnfulfillable(orderId, why) {
+  const id = String(orderId || "");
+  if (!id || alertedOrders.has(id)) return false;
+  alertedOrders.add(id);
+  await require("./telegram")
+    .sendTelegram(
+      "⚠️ Z2U order " + id + " is PAID and the bot cannot ship it.\n\n" +
+        "Reason: " + String(why || "").slice(0, 300) + "\n\n" +
+        // The accounts ARE on the shelf: one toggle ships them. Saying "deliver
+        // this by hand" instead would send the owner hunting for stock that is
+        // not missing. Same words as the Eldorado, G2G and PlayerAuctions pages.
+        "The accounts are on the shelf. Turn account-listing delivery back on " +
+        "(Settings, or this offer's own toggle) and the next tick ships it.",
+    )
+    .catch(() => {});
+  return true;
+}
 
 async function deliverTick() {
   const af = getAutoFarm() || {};
@@ -585,6 +713,9 @@ async function deliverTick() {
     }
     for (const [id, why] of res.skipped || []) {
       console.log("z2u fulfiller: order " + id + " skipped — " + why);
+      // S3. The log line above is per tick by design (it is cheap and it is the
+      // only trace an ordinary skip leaves); the PAGE is once per order.
+      if (alertsOperator(why)) await alertUnfulfillable(id, why);
     }
   } catch (e) {
     console.error("z2u fulfiller (deliver):", (e && e.message) || e);
@@ -659,4 +790,10 @@ module.exports = {
   matchRowForOrder,
   normaliseTitle,
   deliverPendingOrders,
+  // Exported for the S3 regression: the tick is where the refusal becomes
+  // visible, so the test has to drive the tick and not just the pass.
+  deliverTick,
+  alertsOperator,
+  alertUnfulfillable,
+  alertedOrders,
 };

@@ -19,6 +19,15 @@ const SKIP_PREFIXES = ["/auto-farm/tick"];
 // A tiny, redaction-safe summary of the body: top-level keys with scalar sizes,
 // so we know WHAT KIND of action ran without storing payloads. logEvent's own
 // sanitize() still redacts any secret-looking keys before persistence.
+//
+// "Redaction-safe" was NOT true for the 40-character string slice below: the
+// supplied-stock paste arrives as `{ accounts: "login:password:token:email…" }`
+// and that slice is a working credential, kept for the 90-day TTL and rendered
+// by public/activity.html (review finding F6). The fix is deliberately NOT
+// here — utils/systemLog.js's sanitize() now redacts paste-shaped KEYS and
+// login:password-shaped VALUES for every logEvent caller, so a future route
+// cannot reintroduce the leak by summarizing its own body somewhere else. Do
+// not add a second key list to this file; extend PASTE_KEY there.
 function summarizeBody(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
   const keys = Object.keys(body);

@@ -394,7 +394,7 @@ async function retireFromLiveListings({ onProgress } = {}) {
 
   const live = await MarketplaceListing.find(
     { status: "active" },
-    { accountId: 1, accountLogin: 1, units: 1 },
+    { accountId: 1, accountLogin: 1, units: 1, accountOffer: 1 },
   ).lean();
 
   for (const candidate of live) {
@@ -416,6 +416,34 @@ async function retireFromLiveListings({ onProgress } = {}) {
     }
     const unique = [...new Map(bad.map((a) => [String(a._id), a])).values()];
     if (!unique.length) continue;
+
+    // An ACCOUNT LISTING (docs/ACCOUNT-LISTINGS-CONTRACT.md) is not archive
+    // stock and must not be repaired as if it were. This sweep matches on
+    // units[].login, and an offer-backed row's units carry the owner's pasted
+    // logins — so a supplied login that also exists in the archive as a
+    // suspended BotAccount (exactly the conflict:"in-archive" case) would drag
+    // its listing into the detach path with hardRepublish: true. That path
+    // rebuilds the whole product from a DropSet the row does not have and
+    // refills it from archive stock it must never touch, costing a live
+    // product's URL and sales history to fix an account it does not own.
+    //
+    // The two collections merely share a login here; nothing proves the
+    // supplied account is the suspended one. So report it and let the owner
+    // decide in the Account listings tab, where the ledger row can be removed
+    // by hand. Not counted as a repaired listing — nothing was repaired.
+    if (candidate.accountOffer) {
+      const msg =
+        "account listing " +
+        candidate._id +
+        " sells " +
+        unique.map((a) => a.login).join(", ") +
+        " from its own supplied stock, and the same login is suspended in the " +
+        "Drop Archive — check it in the Account listings tab. Left untouched: " +
+        "the archive repair path does not apply to supplied stock.";
+      progress("warning — " + msg);
+      report.warnings.push(msg);
+      continue;
+    }
 
     report.listings++;
     for (const acc of unique) {

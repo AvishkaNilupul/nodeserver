@@ -9,6 +9,12 @@
 // requested count is sold or the pool runs dry.
 const fsp = require("fs/promises");
 
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md). A plain model with no
+// requires of its own, so it is safe beside the others; utils/suppliedStock is
+// required lazily inside the functions that use it instead, because it reaches
+// back into the listing/guardian side of the tree and this file is already the
+// wrong end of one real require cycle (see the autoLister note below).
+const AccountOffer = require("../models/AccountOffer");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
@@ -26,7 +32,7 @@ const mp = require("./marketplaces");
 // autoLister DOES require this file at module level, and that cycle is real.
 const gfFarm = require("./gameflipFarmService");
 const { decrypt } = require("./secretBox");
-const { buildSetGridImage } = require("./setImage");
+const { buildSetGridImage, buildPromoCoverImage } = require("./setImage");
 const { recordListingSale } = require("./saleLearning");
 const { sendTelegram } = require("./telegram");
 const {
@@ -249,6 +255,7 @@ async function accountListingText(
 // model uses, since an unmarked chain must not become repriceable by accident.
 async function publishAutoDelivery({
   set,
+  offer,
   title,
   description,
   priceUsd,
@@ -256,6 +263,19 @@ async function publishAutoDelivery({
   qtyRemaining,
   origin,
 }) {
+  // An account listing carries no DropSet at all, and nothing below applies to
+  // one. Routed out whole rather than branched through, so a row without an
+  // `offer` behaves byte-for-byte as it did before this mode existed.
+  if (offer) {
+    return publishSuppliedAutoDelivery({
+      offer,
+      title,
+      description,
+      priceUsd,
+      imagePath,
+      qtyRemaining,
+    });
+  }
   // A set can carry a price floor the owner set by hand. Relists inherit the
   // price of the row that sold, and the auto-lister derives its own from live
   // competition, so without this a floored bundle drifts back down to the
@@ -314,6 +334,239 @@ async function publishAutoDelivery({
   });
 }
 
+// The account-listing half of publishAutoDelivery
+// (docs/ACCOUNT-LISTINGS-CONTRACT.md): the stock is an explicit list of
+// accounts the owner pasted in, held in models/SuppliedAccount, one account per
+// listing. Its own lane rather than branches through the one above, because
+// almost nothing above applies — there is no DropSet, no DropLog row and so no
+// reservation to take (utils/dropReservation refuses any account without a
+// DropLog row per itemKey, which is the whole reason supplied stock is a
+// separate mode).
+//
+// It also must NOT regenerate the title and description. accountListingText
+// rewrites both from the claimed account's real DropLog contents; a supplied
+// account has none, so at best the rewrite silently falls back and at worst —
+// if a pasted login collides with an archived one — the listing advertises
+// somebody else's drops. Supplied stock is trusted, not verified: the owner's
+// typed text IS the contract.
+async function publishSuppliedAutoDelivery({
+  offer,
+  title,
+  description,
+  priceUsd,
+  imagePath,
+  qtyRemaining,
+}) {
+  const supplied = require("./suppliedStock");
+  const offerId = offer && offer._id ? String(offer._id) : "";
+  if (!offerId) throw new Error("This account listing has no id to sell from");
+  // The owner's per-offer switch and the global one (utils/settings). Gameflip
+  // delivery happens at PUBLISH — the credentials go into the listing's code
+  // and Gameflip hands them over the instant somebody pays — so the kill
+  // switch has to be honoured here or it does not cover Gameflip at all.
+  // Both an explicit `false` and a `{ ok: false }` are read as a refusal;
+  // anything else publishes, so a shape this file guessed wrong can only fail
+  // open on the owner's own click, never gate a live listing by accident.
+  const gate = await supplied.deliveryEnabled(offer);
+  if (gate === false || (gate && gate.ok === false)) {
+    throw new Error(
+      "Account-listing delivery is switched off" +
+        (gate && gate.reason ? " (" + gate.reason + ")" : ""),
+    );
+  }
+  const floor = Number(offer.minPriceUsd) || 0;
+  if (floor > 0 && (Number(priceUsd) || 0) < floor) priceUsd = floor;
+  // Unique per ATTEMPT, never per offer. suppliedStock resumes rows already
+  // carrying the orderId before it claims anything new, so a stable id would
+  // hand the second unit of a relist chain the very account the first unit is
+  // still selling.
+  const orderId =
+    "gameflip-publish:" +
+    offerId +
+    ":" +
+    Date.now() +
+    ":" +
+    Math.random().toString(36).slice(2, 8);
+  const claimed = await supplied.claimForListing({ accountOffer: offerId }, 1, {
+    orderId,
+    market: "gameflip",
+  });
+  // A short claim is not a success: claimForListing returns FEWER than asked
+  // when stock runs out and the caller has to check the length itself.
+  if (!claimed || !claimed.length) {
+    throw new Error(
+      "Out of stock — this account listing has no available account left to " +
+        "auto-deliver",
+    );
+  }
+  const acc = claimed[0];
+  const ledgerIds = claimed.map((c) => c.ledgerId);
+  const login = acc.login || "";
+  // Refuse to sell credentials we cannot read. The archive lane above does the
+  // same with its decrypted password: a listing published with a blank
+  // password is a paid buyer holding half a login.
+  if (!acc.password && !acc.clientSecret) {
+    await supplied.releaseClaim(ledgerIds, { orderId });
+    throw new Error(
+      "Account " + (login || "(no login)") + " has no readable password — " +
+        "cannot auto-deliver",
+    );
+  }
+  // Awaited and stringified deliberately: gameflipPublish decides a listing is
+  // auto-delivery by `typeof autoDeliverCode === "string"`, so handing it a
+  // pending promise (or anything else) would quietly publish a listing with NO
+  // delivery code — an offer that takes money and hands over nothing.
+  const code = String((await supplied.deliveryText(acc, offer)) || "");
+  if (!code.trim()) {
+    await supplied.releaseClaim(ledgerIds, { orderId });
+    throw new Error(
+      "The delivery template rendered nothing for " + (login || "this account"),
+    );
+  }
+  let r;
+  try {
+    r = await mp.gameflipPublish({
+      title,
+      description,
+      priceUsd,
+      imagePath,
+      autoDeliverCode: code,
+    });
+  } catch (e) {
+    // Matching release, exactly as the archive lane releases its reservation:
+    // a publish that threw must not leave the account out of sellable stock.
+    await supplied.releaseClaim(ledgerIds, { orderId });
+    throw e;
+  }
+  const doc = await MarketplaceListing.create({
+    accountOffer: offerId,
+    // Never a set, never an archive claim. Spelled out rather than left to the
+    // schema so a reader of this row can see the mode at a glance.
+    set: null,
+    autoClaimSet: false,
+    unclaimedGame: "",
+    marketplace: "gameflip",
+    externalId: r.externalId,
+    url: r.url || "",
+    title,
+    description: String(description || ""),
+    price: priceUsd,
+    status: "active",
+    // Explicit, never the schema default: owner-supplied stock must stay out of
+    // the auto-farmer's post-event repricing whatever that default becomes.
+    origin: "manual",
+    note: "account listing: " + (login || "account"),
+    autoDeliver: true,
+    // accountId / accountLogin stay EMPTY on purpose — see the accountOffer
+    // comment in models/MarketplaceListing.js. The login belongs in units[],
+    // which is where utils/listedLogins.js reads it, so this supplied login
+    // still cannot also be sold by an archive-backed listing.
+    units: [
+      {
+        contentId: String(acc.ledgerId),
+        accountId: "",
+        login,
+        addedAt: new Date(),
+        deliveredAt: null,
+        orderId,
+      },
+    ],
+    qtyRemaining: Math.max(0, Number(qtyRemaining) || 0),
+  }).catch((e) => {
+    // NO release here, deliberately — unlike every failure above this line.
+    // The Gameflip listing is already live and already carries these
+    // credentials, so handing the account back to the shelf would put it on
+    // sale a second time. What is missing is the row, not the stock.
+    console.error(
+      "gameflip account listing " +
+        r.externalId +
+        " IS LIVE but its row could not be written — " +
+        (login || "the account") +
+        " stays claimed on purpose:",
+      e.message,
+    );
+    throw e;
+  });
+  // Gameflip holds the credentials from this moment. Best-effort and AFTER the
+  // row exists: throwing here would leave a live offer carrying an account no
+  // row points at, which is the worse of the two failures.
+  try {
+    await supplied.markFed(ledgerIds, {
+      listing: doc._id,
+      market: "gameflip",
+    });
+  } catch (e) {
+    console.error(
+      "gameflip account listing " +
+        r.externalId +
+        ": could not mark " +
+        (login || "the supplied account") +
+        " as fed:",
+      e.message,
+    );
+  }
+  return doc;
+}
+
+// Put an offer-backed row's supplied accounts back on the shelf. The archive
+// lane has releaseAccount and the rent-farm lane releaseBufferedRow; without
+// this third one a retired account listing leaves its account stuck at "fed"
+// with no live listing behind it — stock the owner paid for and can no longer
+// sell. Best-effort, like both of its siblings.
+async function releaseSuppliedUnits(row, reason) {
+  const ids = (row.units || [])
+    .map((u) => (u && u.contentId ? String(u.contentId) : ""))
+    .filter(Boolean);
+  if (!ids.length) return;
+  try {
+    const supplied = require("./suppliedStock");
+    await supplied.releaseClaim(ids, {
+      orderId: (row.units[0] && row.units[0].orderId) || "",
+    });
+  } catch (e) {
+    console.error(
+      "gameflip account listing " +
+        (row.externalId || row._id) +
+        " (" +
+        reason +
+        "): could not hand its accounts back:",
+      e.message,
+    );
+  }
+}
+
+// What a relist republishes FROM. A DropSet-backed chain rebuilds its cover
+// from the set's item grid; an account listing has no set at all, so it
+// rebuilds the promo cover from the offer's own text — the same generator the
+// Listings page used to publish the first unit. Throws with a reason when the
+// source is gone, which is what noteRelistFailure records on the row.
+async function relistSource(row) {
+  if (row.accountOffer) {
+    const offer = await AccountOffer.findById(row.accountOffer).lean();
+    if (!offer) throw new Error("the account listing no longer exists");
+    let imagePath = "";
+    try {
+      imagePath = await buildPromoCoverImage({
+        title: offer.title || row.title,
+        serviceText: offer.coverServiceText || "",
+        bullets: Array.isArray(offer.coverBullets) ? offer.coverBullets : [],
+      });
+    } catch {
+      imagePath = "";
+    }
+    return { set: null, offer, imagePath };
+  }
+  const set = await DropSet.findById(row.set).lean();
+  if (!set) throw new Error("the drop set no longer exists");
+  let imagePath = "";
+  try {
+    imagePath = await buildSetGridImage(set);
+  } catch {
+    imagePath = "";
+  }
+  return { set, offer: null, imagePath };
+}
+
 // How long to wait before trying a failed relist again: 5 minutes doubling per
 // consecutive failure, capped at 12 hours. A transient 429 or timeout is back on
 // the market within minutes, while a chain nothing can fulfil settles into two
@@ -368,8 +621,14 @@ async function noteRelistFailure(row, err) {
         (row.title || "(untitled listing)") +
         "\n" +
         (Number(row.qtyRemaining) || 0) +
-        " unit(s) still owed, but no unsold account holds the whole bundle — " +
-        "the chain is paused until the farmer produces one." +
+        " unit(s) still owed, but " +
+        // An account listing is stocked by hand, so "wait for the farmer" would
+        // send the owner to watch a farm that will never fill it.
+        (row.accountOffer
+          ? "this account listing has no supplied account left — paste more " +
+            "into it in the Account listings tab."
+          : "no unsold account holds the whole bundle — the chain is paused " +
+            "until the farmer produces one.") +
         (row.url ? "\n\n" + row.url : ""),
     ).catch(() => {});
   }
@@ -505,6 +764,10 @@ async function syncOnce() {
           await releaseBufferedRow(row, "listing 404 on Gameflip");
         } else if (retired && row.accountId) {
           await releaseAccount(row.accountId, row.set).catch(() => {});
+        } else if (retired && row.accountOffer) {
+          // An account listing carries no accountId (deliberately), so the
+          // branch above can never reach its stock.
+          await releaseSuppliedUnits(row, "listing 404 on Gameflip");
         }
         if (retired) {
           console.error(
@@ -550,6 +813,8 @@ async function syncOnce() {
         await releaseBufferedRow(row, "gameflip reports \"" + status + "\"");
       } else if (retired && row.accountId) {
         await releaseAccount(row.accountId, row.set).catch(() => {});
+      } else if (retired && row.accountOffer) {
+        await releaseSuppliedUnits(row, "gameflip reports \"" + status + "\"");
       }
       if (retired) {
         console.error(
@@ -588,6 +853,34 @@ async function syncOnce() {
     );
     if (!claimed) continue;
     sold++;
+    // An account listing's stock ledger only ever learns about a sale here:
+    // Gameflip released the credentials itself when the buyer paid, and this
+    // poller is the one thing that finds out. Without it the row stays "fed"
+    // forever and the owner's stock table never shows a single sale. Inside
+    // the claimed guard so it can only run once, and best-effort — a ledger
+    // write must never break the relist chain below.
+    if (row.accountOffer) {
+      const unit = (row.units || [])[0];
+      const ledgerIds = (row.units || [])
+        .map((u) => (u && u.contentId ? String(u.contentId) : ""))
+        .filter(Boolean);
+      if (ledgerIds.length) {
+        try {
+          const supplied = require("./suppliedStock");
+          await supplied.markDelivered(ledgerIds, {
+            orderId: (unit && unit.orderId) || "",
+            market: "gameflip",
+          });
+        } catch (e) {
+          console.error(
+            "gameflip account listing " +
+              row.externalId +
+              ": could not mark its account sold:",
+            e.message,
+          );
+        }
+      }
+    }
     // Demand learning: this poller is the only thing that ever learns a
     // Gameflip listing was bought, and for years it kept that to itself. One
     // signal per game in the bundle, carrying the price the buyer actually
@@ -675,15 +968,11 @@ async function syncOnce() {
     if ((Number(row.qtyRemaining) || 0) <= 0) continue;
     let img = "";
     try {
-      const set = await DropSet.findById(row.set).lean();
-      if (!set) throw new Error("the drop set no longer exists");
-      try {
-        img = await buildSetGridImage(set);
-      } catch {
-        img = "";
-      }
+      const src = await relistSource(row);
+      img = src.imagePath;
       await publishAutoDelivery({
-        set,
+        set: src.set,
+        offer: src.offer,
         title: row.title,
         description: row.description,
         priceUsd: row.price,
@@ -763,15 +1052,11 @@ async function syncOnce() {
     if (!claimed) continue;
     let img = "";
     try {
-      const set = await DropSet.findById(row.set).lean();
-      if (!set) throw new Error("the drop set no longer exists");
-      try {
-        img = await buildSetGridImage(set);
-      } catch {
-        img = "";
-      }
+      const src = await relistSource(row);
+      img = src.imagePath;
       await publishAutoDelivery({
-        set,
+        set: src.set,
+        offer: src.offer,
         title: row.title,
         description: row.description,
         priceUsd: row.price,

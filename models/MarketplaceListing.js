@@ -11,8 +11,12 @@ const marketplaceListingSchema = new mongoose.Schema(
       // what gets claimed at delivery. A row backed by the no-claim farm has no
       // DropSet at all: it claims by GAME out of UnclaimedAccount, and pointing
       // it at some near-enough set would just mislabel what the buyer receives.
+      // An account listing (accountOffer, below) has none either, for the same
+      // reason plus a sharper one: z2uFulfiller picks its branch by asking
+      // `row.set` FIRST, so a set left on an offer-backed row would quietly
+      // deliver somebody else's archive account against the owner's stock.
       required: function () {
-        return !this.unclaimedGame;
+        return !this.unclaimedGame && !this.accountOffer;
       },
       index: true,
     },
@@ -152,6 +156,37 @@ const marketplaceListingSchema = new mongoose.Schema(
     // farm: claim accounts holding this row's `set` at delivery time instead of
     // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.
     autoClaimSet: { type: Boolean, default: false, index: true },
+    // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): a fourth stock mode.
+    // This row's stock is not the Drop Archive and not the no-claim farm but an
+    // explicit list of accounts the owner pasted in, held one row per account in
+    // models/SuppliedAccount and claimed one per sale by utils/suppliedStock.
+    // Mutually exclusive with `set`, `unclaimedGame` and `autoClaimSet`.
+    //
+    // Such a row carries no `set` because reserveSetOnAccount cannot represent an
+    // account outside the archive at all — it refuses anything without a DropLog
+    // row for every itemKey (utils/dropReservation.js), so a pasted account can
+    // never be reserved and no existing claim path can reach it. That is the
+    // whole reason this is a mode and not a flag on DropSet.
+    //
+    // It also leaves `accountId` / `accountLogin` empty on purpose. Those two are
+    // exactly the fields marketplaceGuardian.runChecks indexes duplicates off, and
+    // one offer's accounts all sell under one listing, so filling them would raise
+    // a duplicate finding on every single pass — burying the real ones the way the
+    // permanent-lastError problem did a few fields up. The logins live in `units[]`
+    // instead, which is where utils/listedLogins.js reads them, so a supplied login
+    // still cannot also be sold by an archive-backed listing.
+    //
+    // And no `requiredDrops`. That gate checks a picked account against DropLog;
+    // a supplied account has no DropLog rows, so an enabled gate would refuse
+    // every delivery — with a paid buyer waiting — rather than catch anything.
+    // Supplied stock is TRUSTED, not verified: the owner's own description is the
+    // contract, because the owner is also the one who supplied the accounts.
+    accountOffer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AccountOffer",
+      default: null,
+      index: true,
+    },
     // Paused by the stock sync because nothing claimable was left, as opposed to
     // paused deliberately by the operator. Only rows carrying this flag are ever
     // resumed automatically.

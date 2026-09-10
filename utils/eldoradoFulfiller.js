@@ -21,7 +21,7 @@ const {
   reserveSetOnAccount,
   releaseAccountsForTag,
 } = require("./dropReservation");
-const { getAutoFarm } = require("./settings");
+const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const farmService = require("./eldoradoFarmService");
@@ -346,6 +346,128 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, skipped: "already delivered" };
   }
 
+  // ACCOUNT LISTINGS (docs/ACCOUNT-LISTINGS-CONTRACT.md B5). The stock is the
+  // exact list of accounts the owner pasted onto the offer, claimed one ledger
+  // row per unit — no DropSet, no DropLog row, no reservation. The whole branch
+  // is guarded on `accountOffer` and requires the module inside itself, so a row
+  // without the field takes byte-for-byte the paths it took before this existed.
+  //
+  // It sits ABOVE the unclaimedGame branch on purpose: a row that somehow
+  // carried both must hand over the owner's OWN accounts and never a farmed one
+  // off the no-claim ledger. It must also never reach the reserved-units tail
+  // further down, which filters on `u.accountId` — a supplied unit deliberately
+  // has none, so that tail would read this row as having zero stock.
+  if (listing.accountOffer) {
+    const supplied = require("./suppliedStock");
+    const gate = getAccountListingSettings();
+    if (!gate.enabled || !gate.autoDeliver) {
+      return { orderId, skipped: "account-listing auto-delivery is off" };
+    }
+    const AccountOffer = require("../models/AccountOffer");
+    const offer = await AccountOffer.findById(listing.accountOffer).lean();
+    if (!offer) return { orderId, error: "listing's AccountOffer is missing" };
+    if (offer.autoDeliver === false) {
+      return {
+        orderId,
+        skipped: 'auto-delivery is off for offer "' + offer.title + '"',
+      };
+    }
+
+    const picked = await supplied.claimForListing(listing, qty, {
+      orderId,
+      market: "eldorado",
+      dryRun,
+    });
+    if (picked.length < qty) {
+      // Deliberately NOT released. claimForListing resumes by orderId, so what
+      // this attempt took stays held for THIS buyer and the retry re-sends the
+      // same accounts; putting them back would offer them to a second buyer
+      // while a paid order is still short. "out of stock" matches ALERT_REASONS,
+      // so a human hears about it.
+      return {
+        orderId,
+        error:
+          "out of stock: only " + picked.length + " of " + qty +
+          ' account(s) left on offer "' + offer.title + '"',
+      };
+    }
+
+    const blocks = [];
+    for (const p of picked) {
+      blocks.push(await supplied.deliveryText(p, offer));
+    }
+    const message =
+      qty > 1
+        ? blocks
+            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
+            .join("\n\n")
+        : blocks[0];
+    if (!String(message || "").trim()) {
+      // Never send an empty message and then mark the order delivered. This
+      // file already shipped "Username: undefined" to a paying buyer once; an
+      // empty render is the same failure with nothing at all in it.
+      return { orderId, error: "delivery text rendered empty for this offer" };
+    }
+    if (dryRun) {
+      return {
+        orderId,
+        dryRun: true,
+        source: "offer:" + offer.title,
+        wouldSend:
+          qty + " account(s) [" + picked.map((p) => p.login).join(", ") + "], " +
+          message.length + " chars",
+        preview: message,
+      };
+    }
+
+    // Send, mark the order, then burn the ledger. A send that throws leaves the
+    // rows claimed under this order id and the resume inside claimForListing
+    // hands the SAME accounts back next tick instead of spending more stock —
+    // the e69b19d3 lesson, designed in from the start here.
+    await mp.eldoradoSendOrderMessage(order, message);
+    await mp.eldoradoMarkDelivered(orderId);
+    await supplied.markDelivered(
+      picked.map((p) => p.ledgerId),
+      { orderId, market: "eldorado" },
+    );
+    listing.units = (listing.units || []).concat(
+      picked.map((p) => ({
+        contentId: p.ledgerId,
+        accountId: "",
+        login: p.login,
+        addedAt: new Date(),
+        deliveredAt: new Date(),
+        orderId,
+      })),
+    );
+    listing.markModified("units");
+    await listing.save();
+
+    // Push the new count now instead of waiting up to 15 minutes for the stock
+    // sync: an offer still advertising a unit the ledger no longer holds is a
+    // paid order the bot cannot ship. A count we could not READ is left alone —
+    // zero takes the offer off sale, and a failed read is not an empty shelf.
+    let left = null;
+    try {
+      left = await supplied.stockFor(listing);
+    } catch (e) {
+      console.error("eldorado supplied stock recount:", e.message);
+    }
+    if (typeof left === "number" && left > 0) {
+      await mp
+        .eldoradoSetQuantity(offerId, left)
+        .catch((e) => console.error("eldorado post-delivery quantity:", e.message));
+    } else if (left === 0) {
+      await mp
+        .eldoradoDelist(offerId)
+        .catch((e) => console.error("eldorado pause (list empty):", e.message));
+      listing.autoPaused = true;
+      listing.lastError = "paused: the account list is empty";
+      await listing.save();
+    }
+    return { orderId, delivered: qty, source: "offer:" + offer.title };
+  }
+
   // Unclaimed-farm-backed offers resolve their stock at delivery time out of the
   // no-claim ledger rather than from pre-reserved units.
   if (listing.unclaimedGame) {
@@ -588,12 +710,30 @@ async function syncBundleStock({ dryRun = false } = {}) {
     $or: [
       { autoClaimSet: true },
       { unclaimedGame: { $nin: ["", null] }, status: "active" },
+      // Account listings. Without this clause an offer-backed row is invisible
+      // here, so its advertised quantity would stay at whatever it was
+      // published with while the owner's list drained underneath it — and the
+      // "pause when dry" half of the feature would simply never happen.
+      { accountOffer: { $ne: null }, status: "active" },
     ],
   });
   const changes = [];
   for (const row of rows) {
     let real;
-    if (row.unclaimedGame) {
+    if (row.accountOffer) {
+      // Ask the ledger exactly what the delivery path will ask it. A read that
+      // FAILS must not answer 0: zero is what pauses a live offer, and a Mongo
+      // hiccup is not an empty shelf. Skip the row and re-count next pass.
+      let n = null;
+      try {
+        n = await require("./suppliedStock").stockFor(row);
+      } catch (e) {
+        console.error("eldorado supplied stock count:", e.message);
+        continue;
+      }
+      if (typeof n !== "number" || !Number.isFinite(n)) continue;
+      real = n;
+    } else if (row.unclaimedGame) {
       // Ask the ledger exactly what the delivery path would ask it.
       real = (
         await claimUnclaimedForGame(row.unclaimedGame, UNCLAIMED_STOCK_MAX, {
@@ -660,17 +800,37 @@ async function syncBundleStock({ dryRun = false } = {}) {
 //
 // One page per order per process, like the PlayerAuctions version: a stuck order
 // re-reads every tick and an unthrottled alert would be a message a minute.
-const ALERT_REASONS =
-  /out of stock|no listing row|no unsold account|ambiguous|cannot be identified|no sellable|free in the no-claim farm/i;
+// The two account-listing phrases are spelled out rather than matched loosely
+// on "account listing".
+//
+// S3: the account-listing kill switches (contract B8) were originally left OUT
+// of this list on the reasoning that a switch the owner flipped on purpose
+// should not page every minute — but `alertedOrders` below already makes it
+// once per ORDER, so the cost of that reasoning was pure silence. The Eldorado
+// offer stays Active at its full quantity while delivery is off, so more buyers
+// keep paying, and the refusal reached nothing at all: no Telegram, no console
+// line, no SystemEvent, no lastError on the row. A PAID order parked by a
+// switch is not a routine skip. Matched on the wording the two reasons share
+// (deliverOrder:364 and :372) rather than listed one by one.
+const SWITCHED_OFF_SKIPS = /auto-delivery is off/i;
+const ALERT_REASONS = new RegExp(
+  "out of stock|no listing row|no unsold account|ambiguous|cannot be " +
+    "identified|no sellable|free in the no-claim farm|AccountOffer is " +
+    "missing|rendered empty|" +
+    SWITCHED_OFF_SKIPS.source,
+  "i",
+);
 const alertedOrders = new Set();
 
 function alertsOperator(reason) {
   return ALERT_REASONS.test(String(reason || ""));
 }
 
+// Returns true only on the tick that actually paged, so the tick's new log line
+// (S3) rides this same once-per-order gate instead of inventing a second one.
 async function alertUnfulfillable(order, why) {
   const id = String((order && (order.id || order.orderId)) || "");
-  if (!id || alertedOrders.has(id)) return;
+  if (!id || alertedOrders.has(id)) return false;
   alertedOrders.add(id);
   await require("./telegram")
     .sendTelegram(
@@ -687,9 +847,18 @@ async function alertUnfulfillable(order, why) {
         ).slice(0, 120) + "\n" +
         "Buyer: " + ((order && (order.buyerName || order.buyer)) || "?") + "\n\n" +
         "Reason: " + String(why || "").slice(0, 300) + "\n\n" +
-        "This one needs delivering by hand, and the delivery guarantee is running.",
+        // S3: a kill-switch refusal has a different remedy from a missing row.
+        // The accounts are on the shelf and one toggle ships them, so the
+        // standing postscript would send the owner hunting for stock that is
+        // not missing. The guarantee is running either way.
+        (SWITCHED_OFF_SKIPS.test(String(why || ""))
+          ? "The accounts are on the shelf. Turn account-listing delivery back " +
+            "on (Settings, or this offer's own toggle) and the next tick ships " +
+            "it — the delivery guarantee is running."
+          : "This one needs delivering by hand, and the delivery guarantee is running."),
     )
     .catch(() => {});
+  return true;
 }
 
 async function deliverPaidOrders() {
@@ -740,7 +909,18 @@ async function deliverPaidOrders() {
       results.push(r);
       // Money is already taken on any of these; a human has to hear about it.
       if ((r.error && alertsOperator(r.error)) || (r.skipped && alertsOperator(r.skipped))) {
-        await alertUnfulfillable(order, r.error || r.skipped);
+        const alerted = await alertUnfulfillable(order, r.error || r.skipped);
+        // S3: the chain below prints only errors, dry runs and deliveries, so a
+        // paid order parked by one of the account-listing kill switches left
+        // NOTHING behind — the only way to learn why the buyer never got their
+        // account was to read this file. Log it beside the page, and only on
+        // the tick that actually paged: a switch can stay off for days, and one
+        // line per order beats one line every 60s tick.
+        if (alerted && r.skipped) {
+          console.error(
+            "eldorado deliver " + r.orderId + " NOT delivered: " + r.skipped,
+          );
+        }
       }
       if (r.error)
         console.error("eldorado deliver " + r.orderId + ":", r.error);
@@ -823,4 +1003,10 @@ module.exports = {
   deliverOrder,
   deliverPaidOrders,
   syncBundleStock,
+  // Exported for the S3 regression: the predicate is what decides whether a
+  // PAID order parked by a kill switch is ever heard about, and a reworded
+  // reason falling out of it would be indistinguishable from no problem.
+  alertsOperator,
+  alertUnfulfillable,
+  alertedOrders,
 };

@@ -27,7 +27,7 @@
 // operator handles, and this file only NOTIFIES when an order looks like it
 // needs one.
 const MarketplaceListing = require("../models/MarketplaceListing");
-const { getAutoFarm } = require("./settings");
+const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const chat = require("./g2gChat");
 const eld = require("./eldoradoFulfiller");
@@ -48,6 +48,12 @@ const STOCK_MAX = 500;
 // operator every minute. Process-local on purpose: a restart re-alerting once
 // is the right behaviour.
 const alerted = new Set();
+
+// Orders whose refusal we have already PRINTED (finding S3). A second set on
+// purpose: a dry run must still leave a line in the log, and it must never
+// claim the paging slot above — an order refused during a rehearsal has to page
+// for real the moment dry run goes off.
+const shouted = new Set();
 
 function notify(text) {
   return require("./telegram")
@@ -73,8 +79,73 @@ function g2gDeliveryCode(login, password) {
   return eld.eldoradoDeliveryCode(login, password);
 }
 
-function releaseAccounts(ids) {
+// The AccountOffer behind an account listing (contract B5), or null for every
+// other stock source — so calling it on an archive-backed row costs a property
+// read and nothing else.
+//
+// It is loaded ONLY to render the hand-over. The per-offer auto-deliver switch
+// stays where pickStock's comment says it is — inside claimForListing, the one
+// claim layer — so this cannot double-report the same refusal (finding F2b).
+async function offerForListing(listing) {
+  if (!listing || !listing.accountOffer) return null;
+  return require("./suppliedStock").offerFor(listing);
+}
+
+// One account's hand-over text.
+//
+// An account listing sells on the OWNER's words: AccountOffer.deliveryTemplate
+// is the description the buyer paid against, and it is the only thing that can
+// name the account's token, e-mail or extra column. G2G was the one fulfiller
+// that never asked for it — every block was built from login + password alone,
+// so a buyer who paid for an offer promising {token}/{email} got the Twitch-
+// drops boilerplate instead, while the order was still confirmed delivered and
+// the ledger row stamped sold: an unrecoverable shortfall (finding F2a).
+// Eldorado (:397), Z2U (:579), PlayerAuctions (:325) and Gameflip (:419) all
+// render through suppliedStock.deliveryText; this now does the same, and every
+// other stock source keeps g2gDeliveryCode byte for byte.
+//
+// `c` is always the plain object unit() builds, never a Mongoose sub-document —
+// which is the whole reason unit() exists; see the note above it.
+function deliveryBlock(c, offer) {
+  if (!offer) return g2gDeliveryCode(c.login, c.password);
+  return require("./suppliedStock").deliveryText(c, offer);
+}
+
+// Put stock back. Archive and no-claim stock is released by BotAccount id
+// through Eldorado's claim-tag store; an account listing's stock is a
+// SuppliedAccount ledger row instead (docs/ACCOUNT-LISTINGS-CONTRACT.md B5),
+// which that store has never heard of — releasing one by the wrong id fails
+// silently and strands the row on a dead order forever. `opts` is absent at
+// every pre-existing call site, so those keep the behaviour they had.
+async function releaseAccounts(ids, opts = {}) {
+  const listing = opts.listing || null;
+  if (listing && listing.accountOffer) {
+    return require("./suppliedStock").releaseClaim(ids, {
+      orderId: opts.orderId || "",
+    });
+  }
   return eld.releaseAccounts(ids, G2G_CLAIM_TAG);
+}
+
+// Stamp the ledger rows behind an offer-backed order as delivered. Best-effort
+// on purpose: by the time this runs the buyer already holds the credential, and
+// a ledger write that throws must never turn a completed hand-over into an
+// error the next tick retries. A no-op on every other kind of row.
+async function markSuppliedDelivered(listing, orderId) {
+  if (!listing || !listing.accountOffer) return;
+  try {
+    const ids = unitsForOrder(listing, orderId)
+      .map((u) => u.contentId)
+      .filter(Boolean);
+    if (!ids.length) return;
+    await require("./suppliedStock").markDelivered(ids, {
+      orderId,
+      market: G2G_CLAIM_TAG,
+    });
+  } catch {
+    // The hand-over stands; the ledger row is already claimed to this order, so
+    // nothing can re-sell it in the meantime.
+  }
 }
 
 // Compose the message for an order. A SendBird channel is shared across all of
@@ -145,6 +216,56 @@ async function pickStock(listing, order, { dryRun }) {
     return { picked: claimed, source: "dropset:" + set.name };
   }
 
+  // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md B5): the stock is an
+  // explicit list of accounts the owner pasted in, held in
+  // models/SuppliedAccount and claimed one row per unit sold. It sits ABOVE the
+  // pre-reserved-units fallback because an offer-backed row grows a units[]
+  // entry per hand-over as well, and those are a receipt, not free stock.
+  if (listing.accountOffer) {
+    const gate = getAccountListingSettings();
+    if (!gate.enabled || !gate.autoDeliver) {
+      // Say WHY. Without this the claim below simply returns nothing and the
+      // operator is told the listing is out of stock, which sends them hunting
+      // for accounts they have already added.
+      return { error: "account-listing delivery is switched off in settings" };
+    }
+    const supplied = require("./suppliedStock");
+    const picked = await supplied.claimForListing(listing, qty, {
+      // The same String() the units carry, so a retry's resume matches on the
+      // order id instead of claiming a second account.
+      orderId: String(order.orderItemId || ""),
+      market: G2G_CLAIM_TAG,
+      dryRun,
+    });
+    if (dryRun) {
+      return {
+        picked,
+        source: "supplied",
+        note: qty + " of " + picked.length + " supplied account(s) available",
+      };
+    }
+    if (picked.length < qty) {
+      // A short claim is never a partial shipment. Hand back what we did take,
+      // so topping the list up can still sell it.
+      await releaseAccounts(
+        picked.map((p) => p.ledgerId),
+        { listing, orderId: String(order.orderItemId || "") },
+      ).catch(() => {});
+      return {
+        error:
+          "only " + picked.length + " of " + qty +
+          " supplied account(s) left in this account listing" +
+          // A claim of zero can also be the offer's OWN auto-deliver switch,
+          // which claimForListing enforces through suppliedStock.deliveryEnabled
+          // and this file cannot see. It is deliberately NOT re-checked here
+          // even though deliverOrder loads the offer a few lines down — one
+          // enforcement point, one refusal (finding F2b).
+          (picked.length ? "" : " (check the offer's own auto-deliver switch)"),
+      };
+    }
+    return { picked, source: "supplied" };
+  }
+
   // Pre-reserved units (the shape publishG2gShare creates).
   const free = undeliveredUnits(listing).filter((u) => !u.orderId);
   if (free.length >= qty) {
@@ -186,6 +307,7 @@ async function deliverOrder(order, { dryRun }) {
       }
       listing.markModified("units");
       await listing.save();
+      await markSuppliedDelivered(listing, orderId);
       return { orderId, delivered: mine.length, source: "confirmed-on-g2g" };
     }
     if (mine.every((u) => u.messagedAt)) {
@@ -200,6 +322,7 @@ async function deliverOrder(order, { dryRun }) {
       for (const u of mine) u.deliveredAt = now;
       listing.markModified("units");
       await listing.save();
+      await markSuppliedDelivered(listing, orderId);
       return { orderId, delivered: mine.length, source: "confirm-only" };
     }
     // Reserved, but nothing has reached the buyer. The send lives further down,
@@ -218,6 +341,7 @@ async function deliverOrder(order, { dryRun }) {
     if (!dryRun && chat.canSend && chat.canSend()) {
       const retryCreds = await credentialsFor(
         mine.map((u) => ({ login: u.login, accountId: u.accountId, ledgerId: u.contentId })),
+        { listing, orderId },
       );
       const unreadableRetry = retryCreds.filter((c) => !c.password);
       if (unreadableRetry.length) {
@@ -228,10 +352,22 @@ async function deliverOrder(order, { dryRun }) {
             "password — cannot re-send, needs a human",
         };
       }
-      const retryMessage = buildMessage(
-        order,
-        retryCreds.map((c) => g2gDeliveryCode(c.login, c.password)),
-      );
+      // Same template rule as the first send (finding F2a). A failure here
+      // leaves the units reserved to THIS order, which is the standing rule for
+      // every failure on the retry path, so restoring the offer is all it takes
+      // to resume — nothing is sent and nothing is confirmed.
+      const retryOffer = await offerForListing(listing).catch(() => null);
+      if (listing.accountOffer && !retryOffer) {
+        return {
+          orderId,
+          error: "the listing's AccountOffer is gone — cannot render the hand-over",
+        };
+      }
+      const retryBlocks = retryCreds.map((c) => deliveryBlock(c, retryOffer));
+      if (retryOffer && retryBlocks.some((b) => !String(b || "").trim())) {
+        return { orderId, error: "delivery text rendered empty for this offer" };
+      }
+      const retryMessage = buildMessage(order, retryBlocks);
       try {
         await mp.g2gStartDeliver(orderId).catch(() => {});
         await mp.g2gMarkDelivering(orderId).catch(() => {});
@@ -247,6 +383,7 @@ async function deliverOrder(order, { dryRun }) {
         for (const u of mine) u.deliveredAt = doneAt;
         listing.markModified("units");
         await listing.save();
+        await markSuppliedDelivered(listing, orderId);
         return { orderId, delivered: mine.length, source: "retry-send" };
       } catch (e) {
         // Units stay reserved to THIS order, so the next retry goes to the same
@@ -302,11 +439,18 @@ async function deliverOrder(order, { dryRun }) {
 
   // Credentials are re-read at delivery time, never trusted from the cached
   // unit copy — a password can have been rotated since the unit was reserved.
-  const creds = await credentialsFor(picked);
+  const creds = await credentialsFor(picked, { listing, orderId });
   const unreadable = creds.filter((c) => !c.password);
   if (unreadable.length) {
+    // An offer-backed row has no accountId at all — contract B5 leaves it empty
+    // on purpose so marketplaceGuardian does not raise a duplicate finding on
+    // every pass — so releasing by that field would put nothing back and strand
+    // the ledger rows on an order that never shipped.
     await releaseAccounts(
-      unreadable.map((c) => c.accountId).filter(Boolean),
+      unreadable
+        .map((c) => (listing.accountOffer ? c.ledgerId : c.accountId))
+        .filter(Boolean),
+      { listing, orderId },
     ).catch(() => {});
     return {
       orderId,
@@ -316,10 +460,37 @@ async function deliverOrder(order, { dryRun }) {
     };
   }
 
-  const message = buildMessage(
-    order,
-    creds.map((c) => g2gDeliveryCode(c.login, c.password)),
-  );
+  // Render the hand-over with the offer's own template on an account listing,
+  // and with the archive copy everywhere else (finding F2a). Loaded here —
+  // after the credential read, before a single G2G call — so a row that cannot
+  // be rendered refuses with its stock handed back rather than shipping
+  // boilerplate against an offer that promised something else.
+  const releaseSupplied = () =>
+    releaseAccounts(
+      creds.map((c) => c.ledgerId).filter(Boolean),
+      { listing, orderId },
+    ).catch(() => {});
+  const offer = await offerForListing(listing).catch(() => null);
+  if (listing.accountOffer && !offer) {
+    await releaseSupplied();
+    return {
+      orderId,
+      error: "the listing's AccountOffer is gone — released, not shipped",
+    };
+  }
+  const blocks = creds.map((c) => deliveryBlock(c, offer));
+  // An empty render followed by a delivered stamp is the "Username: undefined"
+  // incident with nothing at all in it. eldoradoFulfiller refuses the same way
+  // (:403); only offer-backed rows are checked, because g2gDeliveryCode cannot
+  // render empty and an archive row must behave exactly as it did.
+  if (offer && blocks.some((b) => !String(b || "").trim())) {
+    await releaseSupplied();
+    return {
+      orderId,
+      error: "delivery text rendered empty for this offer — released, not shipped",
+    };
+  }
+  const message = buildMessage(order, blocks);
 
   // G2G wants the seller to open the delivery details before delivering; both
   // transitions are idempotent enough to re-run, and both must happen before we
@@ -405,11 +576,13 @@ async function deliverOrder(order, { dryRun }) {
   }
   listing.markModified("units");
   await listing.save();
+  await markSuppliedDelivered(listing, orderId);
   return { orderId, delivered: qty, source: stock.source };
 }
 
-// The shape every caller of credentialsFor consumes: exactly the four fields
-// pickStock documents at the top of this file, as a PLAIN object.
+// The shape every caller of credentialsFor consumes: the four fields pickStock
+// documents at the top of this file plus the three columns only owner-supplied
+// stock has, as a PLAIN object.
 //
 // Building this by hand rather than spreading `p` is the whole point. On the
 // pre-reserved path `picked` holds Mongoose SUB-DOCUMENTS, and a sub-document's
@@ -438,11 +611,89 @@ function unit(p, password) {
     accountId: p.accountId ? String(p.accountId) : "",
     ledgerId: p.ledgerId || p.contentId || "",
     password: password || "",
+    // Owner-supplied stock only (contract B5): these are what {token}, {email}
+    // and {extra} render from, and this normaliser is where they used to be
+    // dropped — the hand-over was built from login + password alone, so an
+    // offer whose template promised a token shipped without one and the order
+    // was confirmed delivered anyway (finding F2a). Empty on every archive and
+    // no-claim pick, which never had them, so those blocks are unchanged.
+    // Field by field for the same reason as everything above it.
+    clientSecret: p.clientSecret || "",
+    email: p.email || "",
+    extra: p.extra || "",
   };
 }
 
+// Credentials for an account listing's stock. They are not in BotAccount at
+// all, so the lookups in credentialsFor cannot resolve them — and worse, a
+// supplied login that happens to collide with real archive stock would resolve
+// SOMEONE ELSE'S password and ship it to a paying buyer.
+//
+// The claim path already arrives holding its password, so this only runs for a
+// retry, which reaches us carrying nothing but the reserved units. It re-reads
+// them through the resume half of claimForListing (contract B4): rows already
+// carrying this order id come back before anything new is claimed.
+async function suppliedCredentialsFor(listing, picked, orderId) {
+  // No order id means resume cannot identify anything, and a bare claim would
+  // spend a SECOND account on an order that already reserved one. Park instead.
+  if (!orderId) return picked.map((p) => unit(p, ""));
+  const supplied = require("./suppliedStock");
+  const reserved = new Set(
+    picked.map((p) => String(p.ledgerId || p.contentId || "")).filter(Boolean),
+  );
+  const rows = await supplied.claimForListing(listing, picked.length, {
+    orderId,
+    market: G2G_CLAIM_TAG,
+  });
+  // Resume is meant to hand back exactly the rows this order already holds.
+  // Anything else means the reserved row has gone, and quietly shipping a FRESH
+  // account against an order that already reserved one gives the buyer two for
+  // the price of one — put the stranger straight back.
+  const byId = new Map();
+  const strays = [];
+  for (const r of rows) {
+    const id = String(r.ledgerId || "");
+    if (reserved.has(id)) byId.set(id, r);
+    else strays.push(r.ledgerId);
+  }
+  if (strays.length) {
+    await supplied.releaseClaim(strays, { orderId }).catch(() => {});
+  }
+  // A pick with no match keeps an empty password on purpose: that is what makes
+  // the caller's "no readable password" gate park the order for a human rather
+  // than render half a credential.
+  return picked.map((p) => {
+    const row = byId.get(String(p.ledgerId || p.contentId || ""));
+    if (!row) return unit(p, "");
+    // A reserved unit carries login/accountId/contentId and nothing else; the
+    // sellable columns live on the ledger row the resume just handed back, and
+    // the template needs them (finding F2a). Merged one field at a time — `p`
+    // can be a Mongoose sub-document, and a spread of one is what shipped
+    // "Username: undefined" to a paying buyer.
+    return unit(
+      {
+        login: p.login,
+        accountId: p.accountId,
+        ledgerId: p.ledgerId || p.contentId,
+        clientSecret: row.clientSecret,
+        email: row.email,
+        extra: row.extra,
+      },
+      row.password,
+    );
+  });
+}
+
 // Re-read each account's password at delivery time.
-async function credentialsFor(picked) {
+async function credentialsFor(picked, opts = {}) {
+  // Account listings (contract B5) resolve somewhere else entirely; see
+  // suppliedCredentialsFor. Anything already carrying a password — which is
+  // every pick off the claim path — still falls through to the branch below
+  // untouched, so this costs an offer-backed happy path nothing.
+  const listing = opts.listing || null;
+  if (listing && listing.accountOffer && picked.some((p) => !p.password)) {
+    return suppliedCredentialsFor(listing, picked, String(opts.orderId || ""));
+  }
   const BotAccount = require("../models/BotAccount");
   const { decrypt } = require("./secretBox");
   const out = [];
@@ -542,14 +793,28 @@ async function deliverPendingOrders() {
     // unsent with no error, no log line and no alert; the fulfiller re-parked
     // it every 60 seconds, perfectly happily, while the buyer waited.
     const needsAHuman = r.error || alertsOperator(r.skipped) || r.pending;
+    const why =
+      r.error ||
+      r.skipped ||
+      (r.detail || "reserved, but the credential has not reached the buyer");
+    // S3: the Telegram page was the ONLY thing this tick ever said about a paid
+    // order it could not ship, and it is skipped entirely in dry run — so an
+    // account listing whose delivery switch is off (contract B8) parked in
+    // total silence while the G2G offer stayed live at full quantity and more
+    // buyers kept paying. Print it beside the page, once per order: this tick
+    // re-reads the same order every 60s, and one line a minute is how a real
+    // problem gets scrolled past.
+    if (needsAHuman) {
+      const shoutId = String(order.orderItemId || "");
+      if (shoutId && !shouted.has(shoutId)) {
+        shouted.add(shoutId);
+        console.error("g2g deliver " + shoutId + " NOT delivered: " + why);
+      }
+    }
     if (needsAHuman && !dryRun) {
-      await alertUnshippable(
-        order,
-        r.error ||
-          r.skipped ||
-          (r.detail || "reserved, but the credential has not reached the buyer"),
-        { pending: !r.error && !r.skipped && !!r.pending },
-      );
+      await alertUnshippable(order, why, {
+        pending: !r.error && !r.skipped && !!r.pending,
+      });
     }
   }
   return { checked: orders.length, results };
@@ -575,13 +840,25 @@ async function alertUnshippable(order, why, { pending = false } = {}) {
   const head = pending
     ? "G2G order " + id + " is PAID and waiting for YOU to hand it over in chat.\n\n"
     : "G2G order " + id + " is PAID and the bot cannot ship it.\n\n";
-  const tail = pending
+  let tail = pending
     ? "The account is already reserved against this order — nothing else will " +
       "pick it. Paste its credential into the G2G chat for this order, and the " +
       "next sweep will confirm the delivery automatically."
     : "This one needs delivering by hand. Most of the offers on the account were " +
       "created directly on g2g.com and have no listing row here, so the bot does " +
       "not know what stock backs them.";
+  // S3: a kill-switch refusal needs different words again. The accounts ARE on
+  // the shelf and one toggle ships them, so the standing tail would send the
+  // owner hunting for stock that is not missing. Only the settings-level
+  // refusal is matched: the offer's own switch surfaces through
+  // suppliedStock.claimForListing as an empty claim (finding F2b, one
+  // enforcement point), which reads identically to a genuinely empty shelf —
+  // and promising "it is on the shelf" for an empty one is the worse mistake.
+  if (!pending && /switched off in settings/.test(String(why || ""))) {
+    tail =
+      "The accounts are on the shelf. Turn account-listing delivery back on " +
+      "(Settings, or this offer's own toggle) and the next tick ships it.";
+  }
   await notify(
     head +
       String(order.title || "").slice(0, 120) + "\n" +
@@ -603,6 +880,12 @@ async function alertUnshippable(order, why, { pending = false } = {}) {
 // stock depend on Z2U's claim tag.
 async function realStockFor(row, listedElsewhere) {
   if (!row) return null;
+  // Account listings (contract B5) come first: an offer-backed row also carries
+  // a units[] receipt per hand-over, and the units branch at the bottom would
+  // read those as "nothing free" and delist a listing that still has stock.
+  if (row.accountOffer) {
+    return require("./suppliedStock").stockFor(row);
+  }
   if (row.unclaimedGame) {
     const picked = await eld
       .claimUnclaimedForGame(row.unclaimedGame, STOCK_MAX, {
@@ -642,10 +925,15 @@ async function syncStock() {
   if (af.g2gSyncStock === false) return { skipped: "g2gSyncStock is off" };
   const dryRun = af.g2gDeliverDryRun !== false;
 
+  // Offer-backed rows carry origin:"manual" on purpose (contract B5, so that no
+  // future repricer can touch owner-supplied stock), but pausing themselves when
+  // the pasted list runs dry is the whole point of the mode — and the $ne filter
+  // alone hides them from the only pass that can do it. The $or only ADDS those
+  // rows; which other rows are selected is unchanged.
   const rows = await MarketplaceListing.find({
     marketplace: "g2g",
     status: "active",
-    origin: { $ne: "manual" },
+    $or: [{ origin: { $ne: "manual" } }, { accountOffer: { $ne: null } }],
   }).limit(200);
 
   const { loginsOnActiveListings } = require("./listedLogins");

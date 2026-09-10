@@ -44,6 +44,7 @@ const autoFarmRoutes = require("./routes/autoFarmRoutes");
 const farm2Routes = require("./routes/farm2Routes");
 const farm2 = require("./utils/farm2");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
+const accountListingRoutes = require("./routes/accountListingRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
@@ -681,6 +682,10 @@ app.use(enforce2fa, activityRoutes);
 app.use(enforce2fa, systemHealthRoutes);
 app.use(enforce2fa, marketplaceConsoleRoutes);
 app.use(enforce2fa, marketplaceRoutes);
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): owner-supplied account
+// stock. Mounted after marketplaceRoutes because it shares that tab's publish
+// modal, and every route inside is superadmin-only.
+app.use(enforce2fa, accountListingRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);

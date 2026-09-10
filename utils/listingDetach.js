@@ -84,6 +84,56 @@ async function detachAccountFromRow(listing, accountId, login) {
   );
 }
 
+// Settle an ACCOUNT LISTING's stock ledger for one account, and drop the
+// matching units[] entries from the listing row. Returns how many ledger rows
+// were marked removed.
+//
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md) are the fourth stock
+// mode: the accounts are an explicit list the owner pasted in, held in
+// models/SuppliedAccount and keyed from `units[].contentId`. Such a row keeps
+// `accountId` / `accountLogin` EMPTY on purpose, so every branch below can only
+// reach the platform side of the detach — nothing there would ever stop the
+// account being claimed by the next publish, and the same login would go on
+// sale again the moment stock was topped up.
+//
+// This writes models/SuppliedAccount directly, which utils/suppliedStock
+// otherwise owns, because the shared claim layer has no "remove": its
+// releaseClaim puts a row BACK on the shelf, which is the exact opposite of
+// what a detach means — the account has just been sold, suspended or reclaimed.
+// Scoped to this offer, and never to a row already marked sold, so it cannot
+// rewrite sale evidence.
+async function removeSuppliedUnits(row, accId, login) {
+  const SuppliedAccount = require("../models/SuppliedAccount");
+  const lower = String(login || "").trim().toLowerCase();
+  const ids = [];
+  for (const u of row.units || []) {
+    if (!u || !u.contentId) continue;
+    const byLogin = lower && String(u.login || "").toLowerCase() === lower;
+    const byId = accId && String(u.contentId) === accId;
+    if (byLogin || byId) ids.push(String(u.contentId));
+  }
+  if (!ids.length) return { matched: 0, removed: 0 };
+  const r = await SuppliedAccount.updateMany(
+    {
+      _id: { $in: ids },
+      offer: row.accountOffer,
+      status: { $in: ["available", "fed"] },
+    },
+    { $set: { status: "removed" } },
+  );
+  // Pull the units whatever the ledger said: an already-sold row is not stock
+  // either, and utils/listedLogins.js reads units[].login to decide whether a
+  // login is still on sale somewhere.
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    { $pull: { units: { contentId: { $in: ids } } } },
+  );
+  return {
+    matched: ids.length,
+    removed: Number(r && (r.modifiedCount || r.nModified)) || 0,
+  };
+}
+
 // Detach `acc` ({ _id, login }) from a single active listing `row`.
 // Options:
 //   reason    — short phrase stamped into the row's note ("sold manually",
@@ -109,6 +159,43 @@ async function detachAccountFromListing(row, acc, opts = {}) {
   const accId = acc && acc._id ? String(acc._id) : "";
 
   try {
+    // The ledger first, before any marketplace branch and whatever the
+    // marketplace is — it is the only half of an account listing's detach that
+    // is the same everywhere, and the only one that stops the account being
+    // sold a second time. The platform side still runs below: delisting a
+    // Gameflip/ZeusX offer whose code carries these credentials, or pulling a
+    // FunPay pool line, is right for a supplied account too.
+    if (row.accountOffer) {
+      try {
+        const res = await removeSuppliedUnits(row, accId, login);
+        if (res.matched) {
+          detached.push(
+            label +
+              " (account listing: " +
+              (login || "the account") +
+              (res.removed
+                ? " marked removed — it can no longer be claimed)"
+                : " was already sold — its unit was dropped)"),
+          );
+        } else {
+          warnings.push(
+            label +
+              ": nothing in this account listing's stock references " +
+              (login || "that account") +
+              " — its ledger was left alone.",
+          );
+        }
+      } catch (e) {
+        warnings.push(
+          label +
+            ": could not update the account listing's stock ledger (" +
+            (e.message || e) +
+            ") — " +
+            (login || "the account") +
+            " may still be claimable, check the Account listings tab.",
+        );
+      }
+    }
     if (row.marketplace === "funpay") {
       // Pull only this account's line out of the undelivered pool. FunPay has no
       // update API, so this reloads the editor and re-saves every field with the
@@ -244,6 +331,10 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       }
     } else if (
       row.marketplace === "digiseller" &&
+      // Never an account listing: its units[].contentId is a SuppliedAccount
+      // id, not a Digiseller content_id (the real one lives on the ledger row),
+      // so this would ask Digiseller to delete content that does not exist.
+      !row.accountOffer &&
       (row.units || []).some(
         (u) => u && String(u.accountId) === accId && u.contentId,
       )
@@ -279,7 +370,12 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       row.marketplace === "ggsel"
     ) {
       await detachAccountFromRow(row, accId, login);
-      if (opts.hardRepublish) {
+      // republishQtyListing rebuilds the product from the row's DropSet and
+      // refills it from ARCHIVE stock. An account listing has neither, so a
+      // hard republish would trade a live product's URL and sales history for a
+      // replacement it cannot fill. The ledger surgery above is the whole
+      // detach here; the fed unit is reported below instead.
+      if (opts.hardRepublish && !row.accountOffer) {
         const res = await republishQtyListing(row, { reason });
         for (const w of res.warnings) warnings.push(w);
         if (res.delisted) {
@@ -361,7 +457,12 @@ async function detachAccountFromListing(row, acc, opts = {}) {
         );
         detached.push(label + " (quantity now " + keptLogins.length + ")");
       }
-    } else {
+    } else if (!row.accountOffer) {
+      // Not for an account listing on a claim-at-sale market (Eldorado,
+      // PlayerAuctions, G2G, Z2U): the offer there is a bare quantity, the
+      // credentials never left our side, and the ledger row is "removed" by
+      // now, so no delivery can pick it. This warning would send the owner
+      // hunting on the platform for something that is not there.
       warnings.push(
         label + " still references this account — remove it there manually",
       );
