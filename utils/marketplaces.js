@@ -3295,6 +3295,30 @@ async function g2gChatProfile(userId) {
   });
 }
 
+// Open the private DM between our seller account and `otherId`, returning its
+// SendBird channel url. Same endpoint and body G2G's own chat client sends
+// (createDmChannel in www.g2g.com/chat/js/app.*.js) when the seller clicks Chat
+// on an order. G2G's client also calls it to recover a failed send, so it is
+// safe on a DM that already exists.
+async function g2gOpenDmChannel(otherId) {
+  const me = g2gSellerId();
+  const other = String(otherId || "");
+  if (!other) throw new Error("G2G open chat: no buyer id");
+  const p = await g2gRequest("post", "/chat/channel", {
+    body: {
+      channel_id: me + "_" + other,
+      channel_name: "Direct Message Channel Between " + me + " and " + other,
+      inviter_id: me,
+      user_ids: [me, other],
+      channel_type: "dm",
+    },
+    what: "G2G open chat",
+  });
+  const url = p && p.channel_details && p.channel_details.channel_url;
+  if (!url) throw new Error("G2G open chat: no channel_url in the response");
+  return String(url);
+}
+
 
 // ---- legacy Open API (catalog pickers + the xlsx bulk-file generator) ------
 //
@@ -7494,6 +7518,7 @@ module.exports = {
   g2gDeliveryProofs,
   g2gSellerId,
   g2gChatProfile,
+  g2gOpenDmChannel,
   // G2G legacy Open API — catalog pickers + utils/g2gBulk only.
   g2gServices,
   g2gBrands,
