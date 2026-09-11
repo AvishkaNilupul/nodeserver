@@ -110,6 +110,74 @@ function farmMessage(creds, { game, days }) {
   );
 }
 
+// Tell G2G the order shipped. Runs only once messageSentAt is stamped, i.e. the
+// credential is verifiably in the buyer's chat.
+//
+// delivered_qty still answers HTTP 500 to this client, and the owner confirms
+// G2G orders by hand on the order page. So a refused count leaves the row
+// "sent", not "failed": thrown into the catch below, it paged "rent-farm order
+// FAILED" about a buyer who already had the account.
+async function confirmFarmOnG2g(row, orderId, qty) {
+  try {
+    await mp.g2gSetDeliveredQty(orderId, qty);
+  } catch (e) {
+    row.state = "sent";
+    row.lastError = (
+      "in the buyer's chat; G2G refused the delivered count (" + e.message +
+      ") — confirm it on the G2G order page"
+    ).slice(0, 400);
+    await row.save();
+    return { confirmed: false, reason: e.message };
+  }
+  row.deliveredAt = new Date();
+  row.state = "delivered";
+  row.lastError = "";
+  await row.save();
+  return { confirmed: true };
+}
+
+// Close rows the owner confirmed by hand on G2G.
+//
+// A confirmed order leaves g2gPendingOrders, so deliverFarmOrder never sees it
+// again and nothing else would stamp it. The row would sit undelivered forever
+// and keep the `orders.undelivered` health check red over a buyer who was
+// served. Only rows whose credential was already sent qualify ("failed" too,
+// for any that failed on the count before it was handled above), and only
+// when G2G itself reports the full quantity delivered.
+async function closeConfirmedFarmOrders({ limit = 20 } = {}) {
+  const rows = await FarmServiceOrder.find(
+    {
+      market: MARKET,
+      state: { $in: ["sent", "failed"] },
+      messageSentAt: { $ne: null },
+      deliveredAt: null,
+    },
+    null,
+    { sort: { updatedAt: 1 }, limit },
+  );
+  let closed = 0;
+  for (const row of rows || []) {
+    const id = String(row.orderId || "").replace(/^g2g:/, "");
+    if (!id) continue;
+    let o;
+    try {
+      o = await mp.g2gOrder(id);
+    } catch {
+      continue; // unreadable this pass; the next one retries
+    }
+    const purchased = Number(o && o.purchased_qty) || 0;
+    const delivered = Number(o && o.delivered_qty) || 0;
+    if (purchased > 0 && delivered >= purchased) {
+      row.deliveredAt = new Date();
+      row.state = "delivered";
+      row.lastError = "";
+      await row.save();
+      closed += 1;
+    }
+  }
+  return { checked: (rows || []).length, closed };
+}
+
 // Fulfil one rent-farm order. Returns null when the order is not a rent-farm
 // order at all, so the caller falls through to the bundle path.
 async function deliverFarmOrder(order, { dryRun } = {}) {
@@ -336,12 +404,20 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       await row.save();
     }
 
-    // 3. Only now is the order delivered.
-    await mp.g2gSetDeliveredQty(orderId, qty);
-    row.deliveredAt = new Date();
-    row.state = "delivered";
-    row.lastError = "";
-    await row.save();
+    // 3. Only now is the order delivered — if G2G will take the count.
+    const confirm = await confirmFarmOnG2g(row, orderId, qty);
+    if (!confirm.confirmed) {
+      return {
+        orderId,
+        farm: true,
+        sent: qty,
+        awaitingConfirm: true,
+        detail:
+          parsed.game + " / " + parsed.days + "d — the account IS in the " +
+          "buyer's chat, but G2G refused the delivered count (" +
+          confirm.reason + ")",
+      };
+    }
     return {
       orderId,
       farm: true,
@@ -377,5 +453,7 @@ module.exports = {
   parseFarmOrder,
   credentialsFor,
   farmMessage,
+  confirmFarmOnG2g,
+  closeConfirmedFarmOrders,
   deliverFarmOrder,
 };

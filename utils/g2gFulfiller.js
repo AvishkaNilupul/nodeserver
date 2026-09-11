@@ -39,6 +39,7 @@ const G2G_CLAIM_TAG = "g2g";
 
 const DELIVER_TICK_MS = 60 * 1000;
 const STOCK_TICK_MS = 15 * 60 * 1000;
+const CONFIRM_SWEEP_MS = 5 * 60 * 1000;
 
 // Ceiling on a dry-run stock count, so a huge ledger never walks the whole
 // collection just to size one offer.
@@ -1045,6 +1046,16 @@ function start() {
   // unconditionally is a no-op until the operator flips them on.
   loop(deliverPendingOrders, DELIVER_TICK_MS, 75 * 1000, "fulfiller");
   loop(syncStock, STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
+  loop(sweepConfirmedFarmOrders, CONFIRM_SWEEP_MS, 4 * 60 * 1000, "farm confirm sweep");
+}
+
+// Rent-farm orders the owner confirmed by hand on G2G leave the pending queue,
+// so this is the only thing that closes their rows (see
+// g2gFarmService.closeConfirmedFarmOrders).
+async function sweepConfirmedFarmOrders() {
+  const af = getAutoFarm() || {};
+  if (!af.g2gAutoDeliver) return { skipped: "g2gAutoDeliver is off" };
+  return farmService.closeConfirmedFarmOrders();
 }
 
 module.exports = {
