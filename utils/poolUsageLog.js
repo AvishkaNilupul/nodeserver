@@ -2,6 +2,9 @@ const AvailableAccount = require("../models/AvailableAccount");
 const PoolUsageEvent = require("../models/PoolUsageEvent");
 const { logEvent } = require("./systemLog");
 
+// Pool events that put an account back into the available pool.
+const RECHECK_EVENTS = new Set(["released", "returned", "recycled"]);
+
 // Best-effort audit trail: never make the pool transition that this records
 // fail just because the history write was unavailable.
 async function recordPoolUsage(idOrIds, entry) {
@@ -53,6 +56,21 @@ async function recordPoolUsage(idOrIds, entry) {
     );
   } catch (e) {
     console.error("recordPoolUsage event log failed:", e.message);
+  }
+
+  // An account going BACK into the pool gets its Twitch inventory re-read right
+  // away. Every release path (auto-farm, no-claim, renters, the Gameflip buffer,
+  // the recyclers) logs through here, and an account that comes back holding
+  // farmed-but-unclaimed drops must be held before a claiming bot can take it
+  // and claim them (utils/poolStock.js). The checker's own "stock expired"
+  // release is skipped — it has just looked. Only active inside the server
+  // (enqueueIfStarted), so tests and scripts never trigger live Twitch reads.
+  if (RECHECK_EVENTS.has(doc.event) && doc.actor !== "pool-check") {
+    try {
+      require("./accountPoolChecker").enqueueIfStarted(ids);
+    } catch (e) {
+      console.error("recordPoolUsage re-check enqueue failed:", e.message);
+    }
   }
 
   // Mirror ONE summary row into the unified audit log (not one per account, to

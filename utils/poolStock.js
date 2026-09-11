@@ -133,6 +133,47 @@ async function holdForStock(id, h, { actor = "pool-check" } = {}) {
   return held;
 }
 
+// The hold must not outlive the stock, or every held account sits idle forever.
+// When a re-check finds NO unclaimed drops left, what happened to them decides:
+//   * they VANISHED (claimed count unchanged) — the campaign's claim window
+//     closed. Nothing is left to sell or protect: back to the pool.
+//   * they were CLAIMED (claimed count rose) — somebody redeemed them, which on
+//     a held account almost always means it was sold by hand. Kept out of the
+//     pool with a note saying so; handing a sold login to a new buyer or bot is
+//     worse than an idle account.
+// Pure: which of the two, given the counts before and after.
+function heldStockOutcome({ prevClaimed, holdings }) {
+  if (!holdings || holdings.unclaimed > 0) return "still-held";
+  return Number(holdings.claimed) > Number(prevClaimed || 0) ? "claimed" : "expired";
+}
+
+const CLAIMED_STOCK_NOTE =
+  "unclaimed stock was claimed — probably sold by hand; check before reusing";
+
+async function releaseHold(id, { actor = "pool-check" } = {}) {
+  const r = await AvailableAccount.updateOne(
+    { _id: id, status: "claimed", claimedNote: { $regex: "^" + STOCK_NOTE_PREFIX } },
+    { $set: { status: "available", claimedAt: null, claimedNote: "" } },
+  );
+  const released = !!(r && (r.modifiedCount || r.nModified));
+  if (released) {
+    await recordPoolUsage(id, {
+      event: "released",
+      actor,
+      note: "unclaimed stock expired — back in the pool",
+    });
+  }
+  return released;
+}
+
+async function markStockClaimed(id) {
+  const r = await AvailableAccount.updateOne(
+    { _id: id, status: "claimed", claimedNote: { $regex: "^" + STOCK_NOTE_PREFIX } },
+    { $set: { claimedNote: CLAIMED_STOCK_NOTE } },
+  );
+  return !!(r && (r.modifiedCount || r.nModified));
+}
+
 function saveCounts(id, h) {
   return AvailableAccount.updateOne(
     { _id: id },
@@ -265,11 +306,15 @@ async function placeFirstFresh(
 
 module.exports = {
   STOCK_NOTE_PREFIX,
+  CLAIMED_STOCK_NOTE,
   inventoryHoldings,
   freshnessVerdict,
   stockNote,
   isStockNote,
   holdForStock,
+  heldStockOutcome,
+  releaseHold,
+  markStockClaimed,
   verifyFreshLive,
   placeFirstFresh,
 };

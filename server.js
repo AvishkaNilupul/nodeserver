@@ -59,6 +59,7 @@ const resellerRoutes = require("./routes/resellerRoutes");
 const resellerAdminRoutes = require("./routes/resellerAdminRoutes");
 const renterExpiry = require("./utils/renterExpiry");
 const rentFarmCapacity = require("./utils/rentFarmCapacity");
+const hostWatchdog = require("./utils/hostWatchdog");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
@@ -893,6 +894,11 @@ mongoose
     // free pool account. Two orders were lost on 2026-09-08 while the pool
     // reported 554 eligible and every stack was full. This says so in advance.
     rentFarmCapacity.start();
+    // The bot hosts themselves: unreachable host, damaged container runtime
+    // (restored from the host's apt cache), and bots that died and Docker did
+    // not bring back. The Pi lost power on 2026-09-11 and nothing came back for
+    // five hours, silently, because every other monitor watches running bots.
+    hostWatchdog.start();
     // Hourly read-only health run, so the answer to "is everything working?"
     // is already waiting rather than being computed when someone finally asks.
     systemHealthRoutes.start();

@@ -30,6 +30,8 @@ const botHosts = require("./botHosts");
 const { fetchInventory, fetchDropCampaigns } = require("./twitchInventory");
 const accountState = require("./twitchAccountState");
 const poolStock = require("./poolStock");
+const { sendTelegram } = require("./telegram");
+const { logEvent } = require("./systemLog");
 
 const CHECK_DELAY_MS = Number(process.env.ACCOUNT_POOL_CHECK_DELAY_MS) || 1200;
 
@@ -168,6 +170,9 @@ async function checkOne(id, host) {
   // dropCount has only ever counted CLAIMED rewards. Farmed-but-unclaimed drops
   // are counted separately; an account holding any is stock, not supply.
   const holdings = poolStock.inventoryHoldings(inv);
+  // Read before it is overwritten: whether held stock that is now gone EXPIRED
+  // or was CLAIMED is told apart by this count going up.
+  const prevClaimed = Number(acc.dropCount) || 0;
   acc.dropCount = holdings.claimed;
   acc.unclaimedDropCount = holdings.unclaimed;
   const integrity = await checkIntegrity(acc.clientSecret, host);
@@ -190,11 +195,67 @@ async function checkOne(id, host) {
   // no claiming bot gets to claim (and so destroy) them and no rent-farm buyer
   // gets them for free. Guarded on status, so a claimed account is untouched.
   if (holdings.unclaimed > 0 && acc.status === "available") {
-    await poolStock
+    const held = await poolStock
       .holdForStock(acc._id, holdings, { actor: "pool-check" })
-      .catch((e) =>
-        console.error("accountPoolChecker: stock hold failed for", id, e.message),
-      );
+      .catch((e) => {
+        console.error("accountPoolChecker: stock hold failed for", id, e.message);
+        return false;
+      });
+    if (held) {
+      drainNews.held++;
+      for (const g of holdings.unclaimedGames) drainNews.games.add(g);
+    }
+  } else if (acc.status === "claimed" && poolStock.isStockNote(acc.claimedNote)) {
+    // A held account whose stock is gone: back to the pool if it expired,
+    // flagged (and kept out) if somebody claimed it — see heldStockOutcome.
+    const outcome = poolStock.heldStockOutcome({ prevClaimed, holdings });
+    if (outcome === "expired") {
+      if (await poolStock.releaseHold(acc._id).catch(() => false)) drainNews.released++;
+    } else if (outcome === "claimed") {
+      if (await poolStock.markStockClaimed(acc._id).catch(() => false)) drainNews.claimed++;
+    }
+  }
+}
+
+// What one drain changed about held stock, told to the operator once at the
+// end of the drain instead of once per account.
+const drainNews = { held: 0, released: 0, claimed: 0, games: new Set() };
+
+async function reportDrainNews() {
+  const n = { ...drainNews, games: [...drainNews.games] };
+  drainNews.held = 0;
+  drainNews.released = 0;
+  drainNews.claimed = 0;
+  drainNews.games = new Set();
+  if (!n.held && !n.released && !n.claimed) return;
+  const parts = [];
+  if (n.held) {
+    parts.push(
+      n.held + " account(s) hold farmed drops nobody has claimed" +
+        (n.games.length ? " (" + n.games.join(", ") + ")" : "") +
+        " — taken out of the pool so no bot claims them and no rent-farm buyer " +
+        "gets them free. Sell them: move them into no-claim bots, or export and " +
+        "sell by hand (note \"unclaimed stock — …\").",
+    );
+  }
+  if (n.released) {
+    parts.push(n.released + " held account(s) went back to the pool — their drops expired.");
+  }
+  if (n.claimed) {
+    parts.push(
+      n.claimed + " held account(s) had their drops CLAIMED by someone — probably " +
+        "sold by hand; kept out of the pool, check them before reuse.",
+    );
+  }
+  logEvent({
+    category: "pool",
+    action: "stock_hold_changes",
+    actor: "pool-check",
+    count: n.held + n.released + n.claimed,
+    detail: parts.join(" ").slice(0, 900),
+  });
+  if (n.held || n.claimed) {
+    await sendTelegram("📦 Account pool check: " + parts.join(" ")).catch(() => {});
   }
 }
 
@@ -269,6 +330,7 @@ async function drain() {
     activeHosts = [];
     state.running = false;
     coordinating = false;
+    await reportDrainNews().catch(() => {});
   }
 }
 
@@ -296,6 +358,14 @@ function enqueue(ids) {
   state.total += fresh.length;
   drain().catch(() => {});
   return fresh.length;
+}
+
+// Queue a re-check for accounts that just went back into the pool — but only
+// inside the server process, where start() has run. Every release path logs
+// through utils/poolUsageLog, which calls this; a unit test or a one-off script
+// that releases an account must not set off live Twitch reads as a side effect.
+function enqueueIfStarted(ids) {
+  return sweepTimer ? enqueue(ids) : 0;
 }
 
 function status() {
@@ -338,6 +408,8 @@ const SWEEP_STALE_MS =
   Number(process.env.ACCOUNT_POOL_SWEEP_STALE_MS) || 7 * 86400000;
 // Most accounts queued per sweep.
 const SWEEP_BATCH = Number(process.env.ACCOUNT_POOL_SWEEP_BATCH) || 600;
+// Held stock ("unclaimed stock — …") is re-checked after a day, not a week.
+const HELD_STALE_MS = 24 * 3600 * 1000;
 // Let the app finish booting (and the drop scanner claim its hosts) first.
 const SWEEP_FIRST_DELAY_MS =
   Number(process.env.ACCOUNT_POOL_SWEEP_FIRST_MS) || 5 * 60 * 1000;
@@ -369,12 +441,28 @@ async function sweepOnce({ dryRun = false } = {}) {
   };
   try {
     const ids = [];
+    // Held stock first, on a DAILY cadence rather than the weekly one: a hold
+    // exists only while its drops do, and an account whose drops expired should
+    // be back in the pool within a day, not sit idle for a week.
+    const held = await AvailableAccount.find(
+      {
+        status: "claimed",
+        claimedNote: { $regex: "^" + poolStock.STOCK_NOTE_PREFIX },
+        clientSecret: { $gt: "" },
+        $or: [{ lastCheckAt: { $lt: new Date(Date.now() - HELD_STALE_MS) } }, { lastCheckAt: null }],
+      },
+      { _id: 1 },
+    )
+      .sort({ lastCheckAt: 1 })
+      .limit(SWEEP_BATCH)
+      .lean();
+    ids.push(...held.map((r) => r._id));
     const available = await AvailableAccount.find(
       { ...stale, status: "available" },
       { _id: 1 },
     )
       .sort({ lastCheckAt: 1 })
-      .limit(SWEEP_BATCH)
+      .limit(Math.max(0, SWEEP_BATCH - ids.length))
       .lean();
     ids.push(...available.map((r) => r._id));
     if (ids.length < SWEEP_BATCH) {
@@ -387,9 +475,12 @@ async function sweepOnce({ dryRun = false } = {}) {
         .lean();
       ids.push(...claimed.map((r) => r._id));
     }
-    if (!ids.length) return 0;
-    if (dryRun) return ids.length;
-    const queuedCount = enqueue(ids);
+    // A held account more than a week stale matches both the held and the
+    // claimed query; count it once.
+    const unique = [...new Map(ids.map((i) => [String(i), i])).values()];
+    if (!unique.length) return 0;
+    if (dryRun) return unique.length;
+    const queuedCount = enqueue(unique);
     state.lastSweepAt = new Date();
     state.lastSweepQueued = queuedCount;
     console.log(
@@ -429,6 +520,7 @@ function stop() {
 
 module.exports = {
   enqueue,
+  enqueueIfStarted,
   status,
   start,
   stop,

@@ -96,6 +96,14 @@ test("freshness: empty only; stock and claimed rewards both refuse, with a reaso
   assert.strictEqual(freshnessVerdict(null).fresh, false, "no reading is never fresh");
 });
 
+test("the 'stock was claimed' flag is not a stock hold, so it can never be auto-released", () => {
+  const { CLAIMED_STOCK_NOTE } = require("../utils/poolStock");
+  assert.equal(isStockNote(CLAIMED_STOCK_NOTE), false);
+  for (const re of [/^spent — /i, /^rented to/i, /^recycled/i, /^deployed to /i, /^sold/i]) {
+    assert.ok(!re.test(CLAIMED_STOCK_NOTE));
+  }
+});
+
 test("the hold note can never be mistaken for another engine's note", () => {
   const note = stockNote(inventoryHoldings(webbotAccount()));
   assert.ok(note.startsWith(STOCK_NOTE_PREFIX));
