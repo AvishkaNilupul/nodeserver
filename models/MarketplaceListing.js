@@ -8,13 +8,17 @@ const marketplaceListingSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "DropSet",
       // Required for every listing whose stock is the Drop Archive — the set IS
-      // what gets claimed at delivery. A row backed by the no-claim farm has no
-      // DropSet at all: it claims by GAME out of UnclaimedAccount, and pointing
-      // it at some near-enough set would just mislabel what the buyer receives.
+      // what gets claimed at delivery. A row backed by the no-claim AUTO-lister
+      // (`unclaimedGame`) has no DropSet at all: it claims by GAME out of
+      // UnclaimedAccount, and pointing it at some near-enough set would just
+      // mislabel what the buyer receives.
       // An account listing (accountOffer, below) has none either, for the same
       // reason plus a sharper one: z2uFulfiller picks its branch by asking
       // `row.set` FIRST, so a set left on an offer-backed row would quietly
       // deliver somebody else's archive account against the owner's stock.
+      // An owner-made no-claim row (`noclaimStock`, below) is the opposite
+      // case: it KEEPS its set (a DropSet with stockSource "noclaim"), so the
+      // set stays required for it.
       required: function () {
         return !this.unclaimedGame && !this.accountOffer;
       },
@@ -156,6 +160,13 @@ const marketplaceListingSchema = new mongoose.Schema(
     // farm: claim accounts holding this row's `set` at delivery time instead of
     // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.
     autoClaimSet: { type: Boolean, default: false, index: true },
+    // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): this
+    // row's stock is the no-claim farm, claimed through utils/noclaimStock.js
+    // (vault markets at publish, claim-at-sale markets when an order lands).
+    // The row keeps `set` (a DropSet with stockSource "noclaim") so the Listings
+    // page and the delete guard still see it, but every consumer checks THIS
+    // flag before `set`, `unclaimedGame` or `autoClaimSet`.
+    noclaimStock: { type: Boolean, default: false, index: true },
     // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): a fourth stock mode.
     // This row's stock is not the Drop Archive and not the no-claim farm but an
     // explicit list of accounts the owner pasted in, held one row per account in

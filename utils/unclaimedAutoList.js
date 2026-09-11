@@ -263,6 +263,8 @@ const ARCHIVE_STATUS_ZERO = {
   released: 0,
   skipped: 0,
   removed: 0,
+  // Committed to an owner's hand-made no-claim listing (not "held" stock).
+  manual: 0,
 };
 
 // Map the archive views' ?status= onto a Mongo filter. Empty/"held" (the
@@ -2491,6 +2493,13 @@ async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
 // recycler sees it, NEVER return it to the pool.
 async function spendAccount(ledger, reason, opts = {}) {
   const at = new Date();
+  // `opts.label` names a seller other than the auto-lister (the owner's no-claim
+  // listings pass "manual no-claim listing") in the pool note, the spent view
+  // and the alert. Without it every string below is exactly the auto-lister's.
+  const label = String(opts.label || "");
+  const spentNote = label
+    ? "spent — " + label + " (" + reason + ")"
+    : "spent — unclaimed auto-listed (" + reason + ")";
   // What this unit sold for. Captured from the listing row that carried it,
   // BEFORE the unit is removed and before any repricer moves the number — the
   // ledger's own record of a sale had no money in it at all, so per-game revenue
@@ -2581,7 +2590,7 @@ async function spendAccount(ledger, reason, opts = {}) {
             filter: { _id: r._id, status: "claimed" },
             update: {
               $set: {
-                claimedNote: "spent — unclaimed auto-listed (" + reason + ")",
+                claimedNote: spentNote,
                 soldGames: [...games],
               },
             },
@@ -2594,7 +2603,7 @@ async function spendAccount(ledger, reason, opts = {}) {
         await recordPoolUsage(stampedIds, {
           event: "spent",
           actor: "unclaimedAutoList",
-          note: "spent — unclaimed auto-listed (" + reason + ")",
+          note: spentNote,
           game: stampGame || "",
         }).catch(() => {});
       }
@@ -2615,7 +2624,7 @@ async function spendAccount(ledger, reason, opts = {}) {
           container: ledger.container || "",
           sold: true,
           connected: false,
-          soldWhy: "unclaimed auto-list: " + reason,
+          soldWhy: label ? label + ": " + reason : "unclaimed auto-list: " + reason,
           tokenStatus: "ok",
           actor: "unclaimedAutoList",
           sweptAt: at,
@@ -2625,8 +2634,9 @@ async function spendAccount(ledger, reason, opts = {}) {
     ).catch(() => {});
   }
 
+  // "manual" = a unit of an owner's no-claim listing; it sells the same way.
   await UnclaimedAccount.updateOne(
-    { _id: ledger._id, status: "listed" },
+    { _id: ledger._id, status: { $in: ["listed", "manual"] } },
     {
       $set: {
         status: "sold",
@@ -2651,7 +2661,7 @@ async function spendAccount(ledger, reason, opts = {}) {
       "sold (" + reason + ") — " + (ledger.source || "") + " account " + (ledger.login || ""),
   });
   sendTelegram(
-    "💰 SOLD (unclaimed auto-list)\n\n" +
+    (label ? "💰 SOLD (" + label + ")\n\n" : "💰 SOLD (unclaimed auto-list)\n\n") +
       (ledger.login || "?") +
       "\nGame: " +
       (ledger.game || "?") +
@@ -2794,9 +2804,10 @@ async function markOwnerListed(cand) {
 async function markOwnerUnlisted(ledger) {
   if (!ledger) return;
   if (ledger.source === "noclaim" && ledger.poolAccountId) {
+    // An owner's no-claim listing ("manual") still holds the account too.
     const still = await UnclaimedAccount.exists({
       poolAccountId: ledger.poolAccountId,
-      status: "listed",
+      status: { $in: ["listed", "manual"] },
     });
     if (still) return;
     await AvailableAccount.updateOne(
@@ -2831,8 +2842,47 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
     });
     return existing;
   }
+  // Somebody else committed this account while this pass was publishing it —
+  // an owner's hand-made no-claim listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md)
+  // or a claim-at-sale order. Never overwrite that commitment, and take back
+  // what this pass just put on sale (a fresh Gameflip unit, or a GGSel/Plati
+  // product line), so the account is never on two listings at once. A waiting
+  // Gameflip unit sits on no row, so there is nothing to take back for it.
+  const refuse = async (why) => {
+    if (row) {
+      await removeUnitFromRow(
+        row,
+        { login, loginLower, source: cand.source },
+        { removeFromProduct: true, log: false },
+      ).catch((e) =>
+        console.error("unclaimedAutoList: undo of a refused attach failed:", e.message),
+      );
+    }
+    logEvent({
+      category: "unclaimed",
+      action: "skip",
+      actor: "unclaimedAutoList",
+      subject: login,
+      detail: why + " — refused auto attach",
+    });
+    return existing;
+  };
+  if (existing && existing.status === "manual") {
+    return refuse("login committed to a manual no-claim listing");
+  }
+  // Sold (a claim-at-sale order took it) or removed (ticked manual-sold) since
+  // this pass's own checks: the scan skips exactly these, so reaching here
+  // means it changed mid-publish — listing it now would sell it twice.
+  if (existing && (existing.status === "sold" || existing.status === "removed")) {
+    return refuse("login " + existing.status + " while this pass was publishing");
+  }
+  // Compare-and-set on the status just read: a claim that lands between the
+  // read above and this write would otherwise be silently overwritten with
+  // "listed". Only a brand-new ledger is upserted.
   const created = await UnclaimedAccount.findOneAndUpdate(
-    { loginLower, source: cand.source },
+    existing
+      ? { _id: existing._id, status: existing.status }
+      : { loginLower, source: cand.source },
     {
       $set: {
         source: cand.source,
@@ -2866,8 +2916,11 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
       },
       ...(repointMarket ? {} : { $setOnInsert: { market } }),
     },
-    { upsert: true, new: true },
+    { upsert: !existing, new: true },
   );
+  if (!created) {
+    return refuse("ledger changed while this pass was publishing");
+  }
   // The account is now attached to a listing — auto-tick its console box.
   await markOwnerListed(cand);
   return created;
@@ -3345,8 +3398,9 @@ async function scanAndListPass() {
 
   // Accounts already listed/sold/removed are skipped (their drops are
   // committed, or they were sold by hand and must never be auto-sold again).
+  // "manual" = committed to an owner's hand-made no-claim listing.
   const ledgered = await UnclaimedAccount.find(
-    { status: { $in: ["listed", "sold", "removed"] } },
+    { status: { $in: ["listed", "sold", "removed", "manual"] } },
     { loginLower: 1, source: 1 },
   ).lean();
   const already = new Set(ledgered.map((l) => l.source + ":" + (l.loginLower || "")));
@@ -3449,7 +3503,11 @@ async function scanAndListPass() {
         source: withLogin.source,
         loginLower: String(login).toLowerCase(),
       }).lean();
-      if (existing && (existing.status === "listed" || existing.status === "sold")) return;
+      if (
+        existing &&
+        (existing.status === "listed" || existing.status === "sold" || existing.status === "manual")
+      )
+        return;
 
       // The account may hold farmed drops for several games (a no-claim bot
       // watches every FavouriteGame). Group by the drops' REAL game and list
@@ -3523,7 +3581,7 @@ async function scanAndListPass() {
           const loginEsc = String(login).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           const dupLedger = await UnclaimedAccount.exists({
             loginLower: String(login).toLowerCase(),
-            status: "listed",
+            status: { $in: ["listed", "manual"] }, // "manual": an owner's no-claim listing
           });
           if (dupLedger) {
             skipped.push({ login, error: "already listed elsewhere — skipped" });
@@ -3789,6 +3847,26 @@ async function removeManualSoldOwner(owner = {}) {
       out.errors.push(e.message);
       console.error("manual-sold removal failed:", e.message);
     }
+  }
+  // The account may also be a unit of an owner's hand-made no-claim listing
+  // ("manual" ledgers, docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md); that layer
+  // takes it off its own rows. Required lazily and only when such a ledger
+  // exists, so a missing or broken sibling can never fail this tick.
+  out.manualUnits = 0;
+  try {
+    const poolAccountId = String(owner.poolAccountId);
+    if (await UnclaimedAccount.exists({ poolAccountId, status: "manual" })) {
+      const r = await require("./noclaimListings").removeForPoolAccount(poolAccountId, {
+        actor: owner.actor || "operator",
+      });
+      out.manualUnits = Number(r && r.units) || 0;
+      for (const e of r && Array.isArray(r.errors) ? r.errors : []) {
+        out.errors.push(String((e && e.message) || e));
+      }
+    }
+  } catch (e) {
+    out.errors.push(String((e && e.message) || e).split("\n")[0]);
+    console.error("manual-sold no-claim listing removal failed:", e && e.message);
   }
   return out;
 }
@@ -4205,6 +4283,7 @@ module.exports = {
   markOwnerUnlisted,
   sellableDropsFromNoClaimInv,
   plainPassword,
+  poolPassword,
   signatureFor,
   dedupeSetItems,
   pickListingGroup,

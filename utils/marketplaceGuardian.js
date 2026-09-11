@@ -314,7 +314,11 @@ async function runChecks(allRows, seenKeys) {
   // drops that do not exist on accounts that were never in the archive.
   // Skipping at the door rather than inside each check means a check added
   // later cannot start flagging them by accident.
-  const rows = allRows.filter((r) => !r.accountOffer);
+  //
+  // No-claim rows (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) are skipped for
+  // the same reason: their units are no-claim farm accounts committed through
+  // utils/noclaimStock's ledger, with no DropLog reservation behind them.
+  const rows = allRows.filter((r) => !r.accountOffer && !r.noclaimStock);
   let found = 0;
   const flag = async (f) => {
     seenKeys.add(f.dedupeKey);
@@ -933,6 +937,10 @@ async function recordSuppliedFeed(row, claimed, contentIds) {
 }
 
 async function feedListing(row, seenKeys, refusals) {
+  // A no-claim row is stocked by its own lifecycle (utils/noclaimListings.js)
+  // from the no-claim farm; feeding it archive accounts would sell claimed
+  // drops under a no-claim product (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6).
+  if (row.noclaimStock) return 0;
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
   // Account listings: this row's stock is an explicit list of accounts the

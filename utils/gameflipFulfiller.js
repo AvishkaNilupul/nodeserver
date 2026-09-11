@@ -262,6 +262,7 @@ async function publishAutoDelivery({
   imagePath,
   qtyRemaining,
   origin,
+  noclaim,
 }) {
   // An account listing carries no DropSet at all, and nothing below applies to
   // one. Routed out whole rather than branched through, so a row without an
@@ -282,6 +283,24 @@ async function publishAutoDelivery({
   // market price on the next unit.
   const floor = Number(set && set.minPriceUsd) || 0;
   if (floor > 0 && (Number(priceUsd) || 0) < floor) priceUsd = floor;
+  // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8a): the
+  // stock is the no-claim farm's UNCLAIMED drops, so this is decided before
+  // claimAccountForSet can run — the Drop Archive holds only claimed drops,
+  // which are worthless to a buyer who was promised unclaimed ones. Either
+  // signal routes it out: the caller's flag (a no-claim row's own
+  // `noclaimStock` on relist) or the set's stockSource, so a set that somehow
+  // lost its flag still can never relist a no-claim chain out of the archive.
+  if (noclaim || (set && set.stockSource === "noclaim")) {
+    return publishNoclaimAutoDelivery({
+      set,
+      title,
+      description,
+      priceUsd,
+      imagePath,
+      qtyRemaining,
+      origin,
+    });
+  }
   const account = await claimAccountForSet(set);
   if (!account) {
     throw new Error(
@@ -535,6 +554,173 @@ async function releaseSuppliedUnits(row, reason) {
   }
 }
 
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8a). Both
+// modules reach back into this file (noclaimListings publishes through
+// publishAutoDelivery), so they are required lazily, inside the functions that
+// use them — the same reason ./autoLister and ./suppliedStock are.
+function noclaimStock() {
+  return require("./noclaimStock");
+}
+function noclaimListings() {
+  return require("./noclaimListings");
+}
+
+// The no-claim half of publishAutoDelivery. The account comes from
+// utils/noclaimStock.claimForSet — the one claim layer for no-claim stock,
+// which re-reads the account's live Twitch inventory before committing it and
+// parks its ledger at "manual" so the no-claim auto-lister can never list it
+// too — and never from the archive.
+//
+// The title and description are the caller's set-built text and are NOT
+// rewritten by accountListingText, for the account-listing lane's reason: that
+// reads the Drop Archive by BotAccount id, and a no-claim account has neither
+// archive rows nor a BotAccount, so at best the rewrite falls back and at
+// worst it advertises somebody else's drops. The bundle is exactly the set.
+async function publishNoclaimAutoDelivery({
+  set,
+  title,
+  description,
+  priceUsd,
+  imagePath,
+  qtyRemaining,
+  origin,
+}) {
+  if (!set || !set._id) {
+    throw new Error("This no-claim listing has no drop set to sell from");
+  }
+  const ncs = noclaimStock();
+  const [acc] = await ncs.claimForSet(set, 1, {
+    market: "gameflip",
+    mode: "fed",
+  });
+  if (!acc) {
+    throw new Error(
+      "Out of stock — no free no-claim account holds this whole bundle",
+    );
+  }
+  const login = acc.login || "";
+  // claimForSet already skips an account whose password it cannot read, but
+  // this is the last line before the credentials go on sale: a listing
+  // published with a blank password is a paid buyer holding half a login.
+  if (!acc.password) {
+    await releaseNoclaimClaim(acc, "no readable password");
+    throw new Error(
+      "Account " + (login || "(no login)") + " has no readable password — " +
+        "cannot auto-deliver",
+    );
+  }
+  let fields;
+  let r;
+  try {
+    // Pure, and built BEFORE the publish on purpose: once Gameflip holds the
+    // credentials nothing may throw between the publish and the row, or the
+    // listing is live with no row naming it.
+    fields = ncs.rowFields(set, "gameflip", [acc]);
+    r = await mp.gameflipPublish({
+      title,
+      description,
+      priceUsd,
+      imagePath,
+      autoDeliverCode: gameflipDeliveryCode(login, acc.password),
+    });
+  } catch (e) {
+    // Matching release, exactly as the other lanes release theirs: a publish
+    // that threw must not leave the account committed to a listing that does
+    // not exist.
+    await releaseNoclaimClaim(acc, "gameflip publish failed");
+    throw e;
+  }
+  const doc = await MarketplaceListing.create({
+    set: set._id,
+    marketplace: "gameflip",
+    externalId: r.externalId,
+    url: r.url || "",
+    title,
+    description: String(description || ""),
+    price: priceUsd,
+    status: "active",
+    origin: origin === "auto" ? "auto" : "manual",
+    note: "no-claim auto-delivery — " + (login || "account"),
+    autoDeliver: true,
+    qtyRemaining: Math.max(0, Number(qtyRemaining) || 0),
+    // LAST, so the no-claim invariants win over anything above: the
+    // `noclaimStock` flag every consumer checks first, origin "manual" (never
+    // repriced), accountId "" and the login in units[] — which is where
+    // utils/listedLogins.js reads it, so no other listing can take it too.
+    ...fields,
+  }).catch((e) => {
+    // NO release here, deliberately, as in the account-listing lane: the
+    // Gameflip listing is already live and carries these credentials, so
+    // handing the account back would put it on sale a second time.
+    console.error(
+      "gameflip no-claim listing " +
+        r.externalId +
+        " IS LIVE but its row could not be written — " +
+        (login || "the account") +
+        " stays claimed on purpose:",
+      e.message,
+    );
+    throw e;
+  });
+  // Best-effort and AFTER the row exists, like the account-listing lane's
+  // markFed: throwing here would report a failed publish for a listing that
+  // is live, and a second click would put a second account on sale.
+  try {
+    await ncs.attachListing([acc.ledgerId], doc._id);
+  } catch (e) {
+    console.error(
+      "gameflip no-claim listing " +
+        r.externalId +
+        ": could not attach " +
+        (login || "its account") +
+        " to the row:",
+      e.message,
+    );
+  }
+  return doc;
+}
+
+// Hand a claimed-but-never-published no-claim account back. A release that
+// fails leaves the account committed ("manual") to a listing that does not
+// exist, so it is loud — and it is never allowed to mask the error that made
+// the publish fail in the first place.
+async function releaseNoclaimClaim(acc, reason) {
+  try {
+    await noclaimStock().releaseClaim([acc.ledgerId], { reason });
+  } catch (e) {
+    console.error(
+      "gameflip no-claim: could not hand " +
+        (acc.login || "the account") +
+        " back after '" +
+        reason +
+        "':",
+      e.message,
+    );
+  }
+}
+
+// The no-claim sibling of the retire-path releases above (archive reservation,
+// rent-farm buffer, supplied units). A no-claim row carries accountId "" by
+// design — its account is a no-claim ledger, not an archive reservation — so
+// none of those can reach its stock, and without this the account would stay
+// committed behind a listing that no longer exists. onGameflipRetired releases
+// only a still-"manual" ledger, so a unit a buyer paid for is never handed
+// back. Best-effort like its siblings: the row is already terminal.
+async function retireNoclaimUnit(row, reason) {
+  try {
+    await noclaimListings().onGameflipRetired(row, { reason });
+  } catch (e) {
+    console.error(
+      "gameflip no-claim listing " +
+        (row.externalId || row._id) +
+        " (" +
+        reason +
+        "): could not hand its account back:",
+      e.message,
+    );
+  }
+}
+
 // What a relist republishes FROM. A DropSet-backed chain rebuilds its cover
 // from the set's item grid; an account listing has no set at all, so it
 // rebuilds the promo cover from the offer's own text — the same generator the
@@ -627,10 +813,82 @@ async function noteRelistFailure(row, err) {
         (row.accountOffer
           ? "this account listing has no supplied account left — paste more " +
             "into it in the Account listings tab."
-          : "no unsold account holds the whole bundle — the chain is paused " +
-            "until the farmer produces one.") +
+          : // A no-claim chain is stocked by the no-claim farm, not the
+            // archive farmer — same reason as above, wrong farm to watch.
+            row.noclaimStock
+            ? "no free no-claim account holds this bundle — the chain is " +
+              "paused until the no-claim farm has one free."
+            : "no unsold account holds the whole bundle — the chain is paused " +
+              "until the farmer produces one.") +
         (row.url ? "\n\n" + row.url : ""),
     ).catch(() => {});
+  }
+}
+
+// Replace the live unit of a no-claim chain after `row` was taken down UNSOLD
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §4 removeUnit: drops expired,
+// manual-sold, conflict). Nobody bought that unit, so the chain still owes
+// exactly what `row` owed — one live unit plus row.qtyRemaining queued: the
+// replacement carries the queue and `row` gives it up, so the same units are
+// never listed twice. The cover is rebuilt exactly as the sold-path relist
+// does (relistSource). Never throws: out of stock just ends the chain (logged,
+// null), and so does any other failure, which the caller logs as well.
+async function relistNoclaimSuccessor(row) {
+  if (!row || !row._id) return null;
+  let img = "";
+  try {
+    // Only ever AFTER the take-down. delistRowVerified leaves a row "active"
+    // when the platform would not confirm the delist, and replacing a unit
+    // that is still on sale puts two units up for one owed.
+    const current = await MarketplaceListing.findById(row._id).lean();
+    if (current && current.status === "active") {
+      console.error(
+        "gameflip no-claim successor for listing " +
+          (row.externalId || row._id) +
+          " not published — that listing is still active, so nothing was " +
+          "taken down to replace",
+      );
+      return null;
+    }
+    const src = await relistSource(row);
+    img = src.imagePath;
+    const doc = await publishAutoDelivery({
+      set: src.set,
+      title: row.title,
+      description: row.description,
+      priceUsd: row.price,
+      imagePath: img,
+      qtyRemaining: row.qtyRemaining || 0,
+      origin: row.origin || "manual",
+      noclaim: true,
+    });
+    await MarketplaceListing.updateOne(
+      { _id: row._id },
+      { $set: { qtyRemaining: 0 } },
+    ).catch((e) => {
+      console.error(
+        "gameflip no-claim listing " +
+          (row.externalId || row._id) +
+          ": replaced by " +
+          doc.externalId +
+          " but its queue could not be cleared:",
+        e.message,
+      );
+    });
+    return doc;
+  } catch (e) {
+    const message = (e && e.message) || String(e);
+    console.error(
+      "gameflip no-claim successor for listing " +
+        (row.externalId || row._id) +
+        (isOutOfStockError(message)
+          ? " not published — out of stock, the chain ends here: "
+          : " failed: ") +
+        message,
+    );
+    return null;
+  } finally {
+    if (img) await fsp.unlink(img).catch(() => {});
   }
 }
 
@@ -769,6 +1027,11 @@ async function syncOnce() {
           // branch above can never reach its stock.
           await releaseSuppliedUnits(row, "listing 404 on Gameflip");
         }
+        // Nor can it reach a no-claim row's (accountId is always ""). Its own
+        // `if` rather than one more `else`, so no branch above can skip it.
+        if (retired && row.noclaimStock) {
+          await retireNoclaimUnit(row, "listing 404 on Gameflip");
+        }
         if (retired) {
           console.error(
             "gameflip listing " +
@@ -815,6 +1078,9 @@ async function syncOnce() {
         await releaseAccount(row.accountId, row.set).catch(() => {});
       } else if (retired && row.accountOffer) {
         await releaseSuppliedUnits(row, "gameflip reports \"" + status + "\"");
+      }
+      if (retired && row.noclaimStock) {
+        await retireNoclaimUnit(row, "gameflip reports \"" + status + "\"");
       }
       if (retired) {
         console.error(
@@ -879,6 +1145,25 @@ async function syncOnce() {
             e.message,
           );
         }
+      }
+    }
+    // The no-claim twin of the block above (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md
+    // §8a): the account's ledger goes "manual" -> "sold" and its unit is
+    // stamped delivered. Same rules — inside the claimed guard so it runs once,
+    // before learning and the relist, and best-effort: a ledger write must
+    // never break the chain. A failure leaves the ledger "manual", which still
+    // keeps the account out of every claim, so the relist below cannot hand
+    // the sold account out again.
+    if (row.noclaimStock) {
+      try {
+        await noclaimListings().onGameflipSold(row, { priceUsd: row.price });
+      } catch (e) {
+        console.error(
+          "gameflip no-claim listing " +
+            row.externalId +
+            ": could not mark its account sold:",
+          e.message,
+        );
       }
     }
     // Demand learning: this poller is the only thing that ever learns a
@@ -979,6 +1264,9 @@ async function syncOnce() {
         imagePath: img,
         qtyRemaining: row.qtyRemaining - 1,
         origin: row.origin,
+        // A no-claim chain relists from the no-claim farm on the row's own
+        // flag as well as its set's, never out of the archive.
+        noclaim: row.noclaimStock === true,
       });
       relisted++;
     } catch (e) {
@@ -1063,6 +1351,7 @@ async function syncOnce() {
         imagePath: img,
         qtyRemaining: row.qtyRemaining - 1,
         origin: row.origin,
+        noclaim: row.noclaimStock === true,
       });
       // The debt now lives on the new row — clear it here so the retry can
       // never double-list the same units.
@@ -1152,6 +1441,7 @@ module.exports = {
   gameflipDeliveryCode,
   accountListingText,
   publishAutoDelivery,
+  relistNoclaimSuccessor,
   syncOnce,
   start,
   // exported for tests

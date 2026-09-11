@@ -45,6 +45,11 @@ const CONFIRM_SWEEP_MS = 5 * 60 * 1000;
 // collection just to size one offer.
 const STOCK_MAX = 500;
 
+// The refusal for a no-claim row whose delivery switch is off
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §0). One spelling for both places
+// that refuse — the first claim and a retry's re-read.
+const NOCLAIM_DELIVERY_OFF = "no-claim listing auto-delivery is off";
+
 // Orders we have already shouted about, so a stuck order does not re-ping the
 // operator every minute. Process-local on purpose: a restart re-alerting once
 // is the right behaviour.
@@ -153,6 +158,40 @@ async function markSuppliedDelivered(listing, orderId) {
   }
 }
 
+// Record a no-claim row's sale once its credential has reached the buyer
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8c). The claim already committed
+// these ledgers to "sold" for this order; this adds what the buyer paid. The
+// reason repeats the claim's own note on purpose: that note is the key a resume
+// of this order finds the ledgers by.
+//
+// Best-effort for the same reason as markSuppliedDelivered, and called once per
+// hand-over — never from the confirm, which G2G still refuses. A no-op on every
+// other kind of row.
+async function markNoclaimSold(listing, order, units) {
+  if (!listing || !listing.noclaimStock) return;
+  try {
+    const ids = (units || []).map((u) => u.contentId).filter(Boolean);
+    if (!ids.length) return;
+    const orderId = String(order.orderItemId || "");
+    const qty = Math.max(1, order.purchasedQty || 1);
+    // The order's own total when G2G states it in dollars, else the row's price.
+    const usd = String(order.currency || "USD").toUpperCase() === "USD";
+    const priceUsd =
+      usd && Number(order.amount) > 0
+        ? Math.round((Number(order.amount) / qty) * 100) / 100
+        : Number(listing.price) || 0;
+    await require("./noclaimStock").markSold(ids, {
+      market: G2G_CLAIM_TAG,
+      priceUsd,
+      orderId,
+      reason: G2G_CLAIM_TAG + " order " + orderId,
+    });
+  } catch {
+    // The hand-over stands, and the claim already holds these ledgers as sold
+    // to this order, so nothing can re-sell them in the meantime.
+  }
+}
+
 // Tell G2G how many units shipped, once the credential is verifiably in the
 // buyer's chat (every caller runs this only after messagedAt is stamped).
 //
@@ -204,6 +243,55 @@ function buildMessage(order, blocks) {
 // account missing half the advertised items is a dispute.
 async function pickStock(listing, order, { dryRun }) {
   const qty = Math.max(1, order.purchasedQty || 1);
+
+  // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8c) come
+  // FIRST. Such a row keeps its `set`, so further down it would fall into the
+  // DropSet branch and ship an account out of the Drop Archive — which holds
+  // only CLAIMED drops, worthless to a no-claim buyer. The claim goes through
+  // the one no-claim claim layer and commits straight to "sold" for this order,
+  // keyed on the order id, so a retry resumes the same ledgers instead of
+  // burning new accounts. It hands back the credentials themselves, and those
+  // are exactly what ships: deliverOrder never sends a no-claim pick through
+  // credentialsFor.
+  if (listing.noclaimStock) {
+    const ncs = require("./noclaimStock");
+    // Say WHY, as the account-listing branch does: an empty claim would
+    // otherwise read as an empty shelf.
+    if (!ncs.deliveryEnabled()) return { error: NOCLAIM_DELIVERY_OFF };
+    const DropSet = require("../models/DropSet");
+    const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
+    if (!set) return { error: "listing's DropSet is missing" };
+    const picked = await ncs.claimForSet(set, qty, {
+      market: G2G_CLAIM_TAG,
+      listingId: String(listing._id),
+      orderId: String(order.orderItemId || ""),
+      mode: "sold",
+      dryRun,
+    });
+    const source = "noclaim-set:" + String(listing.set);
+    if (dryRun) {
+      // No note on a full pick, so the rehearsal names the accounts it would send.
+      const note =
+        picked.length < qty
+          ? "only " + picked.length + " of " + qty +
+            " free no-claim account(s) hold this bundle"
+          : "";
+      return { picked, source, note };
+    }
+    if (picked.length < qty) {
+      // Never a short shipment. A "sold" claim cannot be handed back, so what
+      // was taken stays sold to THIS order: the next tick's resume returns it
+      // and only tops up the difference.
+      return {
+        error:
+          "only " + picked.length + " of " + qty + " no-claim account(s) " +
+          "claimed — no free no-claim account holds all " +
+          ((listing.requiredDrops || []).length || (set.items || []).length) +
+          " advertised item(s)",
+      };
+    }
+    return { picked, source };
+  }
 
   if (listing.unclaimedGame) {
     const shortfall = {};
@@ -337,6 +425,9 @@ async function deliverOrder(order, { dryRun }) {
     // operator completed the hand-over by hand, catch our records up rather
     // than leaving the units dangling forever.
     if (order.deliveredQty >= order.purchasedQty) {
+      // A unit the bot never messaged was handed over by a human, so its sale
+      // has not been recorded yet (a bot send records it straight away).
+      const byHand = mine.filter((u) => !u.messagedAt);
       const now = new Date();
       for (const u of mine) {
         if (!u.messagedAt) u.messagedAt = now;
@@ -345,6 +436,7 @@ async function deliverOrder(order, { dryRun }) {
       listing.markModified("units");
       await listing.save();
       await markSuppliedDelivered(listing, orderId);
+      await markNoclaimSold(listing, order, byHand);
       return { orderId, delivered: mine.length, source: "confirmed-on-g2g" };
     }
     if (mine.every((u) => u.messagedAt)) {
@@ -370,10 +462,14 @@ async function deliverOrder(order, { dryRun }) {
     // Re-reading credentials rather than trusting the cached copy is the same
     // rule the first attempt follows — a password can have been rotated since.
     if (!dryRun && chat.canSend && chat.canSend()) {
-      const retryCreds = await credentialsFor(
-        mine.map((u) => ({ login: u.login, accountId: u.accountId, ledgerId: u.contentId })),
-        { listing, orderId },
-      );
+      // A no-claim row's units are re-read off the no-claim ledger, never
+      // BotAccount (§8c) — see noclaimCredentialsFor.
+      const retryCreds = listing.noclaimStock
+        ? await noclaimCredentialsFor(listing, mine, orderId)
+        : await credentialsFor(
+            mine.map((u) => ({ login: u.login, accountId: u.accountId, ledgerId: u.contentId })),
+            { listing, orderId },
+          );
       const unreadableRetry = retryCreds.filter((c) => !c.password);
       if (unreadableRetry.length) {
         return {
@@ -409,6 +505,7 @@ async function deliverOrder(order, { dryRun }) {
         for (const u of mine) u.messagedAt = sentAt;
         listing.markModified("units");
         await listing.save();
+        await markNoclaimSold(listing, order, mine);
         return await confirmOnG2g(listing, orderId, mine.length, "retry-send");
       } catch (e) {
         // Units stay reserved to THIS order, so the next retry goes to the same
@@ -464,7 +561,13 @@ async function deliverOrder(order, { dryRun }) {
 
   // Credentials are re-read at delivery time, never trusted from the cached
   // unit copy — a password can have been rotated since the unit was reserved.
-  const creds = await credentialsFor(picked, { listing, orderId });
+  // A no-claim pick was read moments ago, off the no-claim ledger, by the claim
+  // itself, and that exact credential is what ships: credentialsFor's BotAccount
+  // lookups would resolve a pool login that also exists in the archive to
+  // SOMEONE ELSE's password (§8c).
+  const creds = listing.noclaimStock
+    ? picked.map((p) => unit(p, p.password))
+    : await credentialsFor(picked, { listing, orderId });
   const unreadable = creds.filter((c) => !c.password);
   if (unreadable.length) {
     // An offer-backed row has no accountId at all — contract B5 leaves it empty
@@ -594,6 +697,7 @@ async function deliverOrder(order, { dryRun }) {
   }
   listing.markModified("units");
   await listing.save();
+  await markNoclaimSold(listing, order, unitsForOrder(listing, orderId));
 
   return confirmOnG2g(listing, orderId, qty, stock.source);
 }
@@ -698,6 +802,46 @@ async function suppliedCredentialsFor(listing, picked, orderId) {
         extra: row.extra,
       },
       row.password,
+    );
+  });
+}
+
+// Credentials for a no-claim row's reserved units on a RETRY
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8c). They live on the no-claim
+// ledger and nowhere else, so — like an account listing's — they are re-read
+// through the resume half of the claim: the ledgers already sold to this order
+// come back, and nothing new is claimed while they do.
+//
+// Only a returned ledger that matches a reserved unit is used. A unit the
+// resume does not hand back keeps an empty password, which is what makes the
+// caller's "no readable password" gate park the order for a human: shipping a
+// different account to an order whose credential the operator may already have
+// pasted by hand gives the buyer two for the price of one.
+async function noclaimCredentialsFor(listing, units, orderId) {
+  const ncs = require("./noclaimStock");
+  // Thrown rather than returned: the tick records it as this order's error, in
+  // the words pickStock uses for a switched-off first claim.
+  if (!ncs.deliveryEnabled()) throw new Error(NOCLAIM_DELIVERY_OFF);
+  const DropSet = require("../models/DropSet");
+  const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
+  // No order id means the resume cannot identify anything, and a bare claim
+  // would sell a SECOND account to an order that already reserved one.
+  const rows =
+    set && orderId
+      ? await ncs.claimForSet(set, units.length, {
+          market: G2G_CLAIM_TAG,
+          listingId: String(listing._id),
+          orderId,
+          mode: "sold",
+        })
+      : [];
+  const byId = new Map(rows.map((r) => [String(r.ledgerId || ""), r]));
+  // Field by field: `units` are Mongoose sub-documents (see unit()).
+  return units.map((u) => {
+    const r = byId.get(String(u.contentId || ""));
+    return unit(
+      { login: (r && r.login) || u.login, ledgerId: u.contentId },
+      r ? r.password : "",
     );
   });
 }
@@ -946,6 +1090,13 @@ async function realStockFor(row, listedElsewhere) {
       .catch(() => []);
     return picked.length;
   }
+  // No-claim Shop listings (§8c) sit above the generic `set` branch, which
+  // counts the Drop Archive — CLAIMED drops a no-claim buyer can never be sold.
+  // A failed read throws, and syncStock already treats a throw as "cannot
+  // tell", so a DB hiccup never advertises 0 and delists a live offer.
+  if (row.noclaimStock) {
+    return require("./noclaimStock").stockForListing(row);
+  }
   if (row.set) {
     const DropSet = require("../models/DropSet");
     const { availableAccountsForSet } = require("../routes/shopRoutes");
@@ -984,6 +1135,19 @@ async function syncStock() {
     status: "active",
     $or: [{ origin: { $ne: "manual" } }, { accountOffer: { $ne: null } }],
   }).limit(200);
+  // No-claim Shop rows (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8c) are origin
+  // "manual" for the same reason. They come from their OWN query rather than a
+  // third $or branch: under the shared .limit(200) an extra branch could push
+  // existing rows out of the pass once the total grew past the cap.
+  const noclaimRows = await MarketplaceListing.find({
+    marketplace: "g2g",
+    status: "active",
+    noclaimStock: true,
+  }).limit(200);
+  const seen = new Set(rows.map((r) => String(r._id)));
+  for (const r of noclaimRows) {
+    if (!seen.has(String(r._id))) rows.push(r);
+  }
 
   const { loginsOnActiveListings } = require("./listedLogins");
   const listedElsewhere = await loginsOnActiveListings();

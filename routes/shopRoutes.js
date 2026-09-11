@@ -190,6 +190,10 @@ async function sellableAccountMap(ids) {
 // such account is one sellable unit (the buyer receives the whole account).
 // Sorted so the account that can deliver the most copies comes first.
 async function availableAccountsForSet(set) {
+  // A no-claim set (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) is stocked by
+  // the no-claim farm's UNCLAIMED drops; an archive account only holds claimed
+  // copies, which are worthless to its buyer — so none can deliver it.
+  if (set && set.stockSource === "noclaim") return [];
   const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
   if (!keys.length) return [];
   // Each item can promise an exact copy count (item.qty); only accounts that
@@ -242,6 +246,8 @@ async function availableAccountsForSet(set) {
 }
 
 function stockForSetFromHoldings(set, holdings) {
+  // No-claim sets never count archive holdings as stock (see above).
+  if (set && set.stockSource === "noclaim") return { stock: 0, topItems: [] };
   const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
   if (!keys.length) return { stock: 0, topItems: [] };
   const needByKey = new Map(
@@ -441,7 +447,12 @@ router.get("/shop/listings", requireAdmin, async (req, res) => {
     if (listingsCache.data && Date.now() - listingsCache.at < LISTINGS_TTL_MS) {
       return res.json({ success: true, listings: listingsCache.data });
     }
-    const sets = await DropSet.find({ listed: true, price: { $gt: 0 } })
+    const sets = await DropSet.find({
+      listed: true,
+      price: { $gt: 0 },
+      // No-claim sets sell on marketplaces only, never in this balance Shop.
+      stockSource: { $ne: "noclaim" },
+    })
       .sort({ updatedAt: -1 })
       .lean();
     // One DropLog aggregation + one botaccounts query for ALL bundles, instead
@@ -463,7 +474,8 @@ router.get("/shop/listings", requireAdmin, async (req, res) => {
 router.get("/shop/listings/:id", requireAdmin, async (req, res) => {
   try {
     const set = await DropSet.findById(req.params.id).lean();
-    if (!set || !set.listed) {
+    // A no-claim set is never a Shop listing, whatever its `listed` flag says.
+    if (!set || !set.listed || set.stockSource === "noclaim") {
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });
@@ -487,7 +499,8 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
   const buyerUsername = req.session.admin.username;
   try {
     const set = await DropSet.findById(req.params.id).lean();
-    if (!set || !set.listed) {
+    // Same as the detail route: a no-claim set cannot be bought here.
+    if (!set || !set.listed || set.stockSource === "noclaim") {
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });

@@ -101,6 +101,7 @@ test("by item: distinct accounts vs units, plus the per-status rollup", () => {
     released: 0,
     skipped: 0,
     removed: 0,
+    manual: 0,
   });
 });
 
@@ -141,6 +142,7 @@ test("by game: distinct accounts and items per game, with status rollup", () => 
     released: 0,
     skipped: 0,
     removed: 0,
+    manual: 0,
   });
   const r6 = games.find((g) => g.game === "Rainbow Six Siege");
   assert.strictEqual(r6.accounts, 1);

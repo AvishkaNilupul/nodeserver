@@ -32,6 +32,7 @@ const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
+const noclaimStockRoutes = require("./routes/noclaimStockRoutes");
 const farmSizingRoutes = require("./routes/farmSizingRoutes");
 const unclaimedAutoList = require("./utils/unclaimedAutoList");
 const unclaimedAllocator = require("./utils/unclaimedAllocator");
@@ -668,6 +669,9 @@ app.use(enforce2fa, noclaimFarmRoutes);
 // id and kills the server's copy, which is the one thing that stops delivery.
 app.use(enforce2fa, playerauctionsRoutes);
 app.use(enforce2fa, unclaimedAutoRoutes);
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): the Listings
+// page's No-claim picker, sets and stock. Every route inside is superadmin-only.
+app.use(enforce2fa, noclaimStockRoutes);
 // Fleet sizing: how many accounts each game should farm, and how many of them
 // should be on sale. Reads are always available; the one endpoint that spends
 // accounts dry-runs unless explicitly told to apply.
@@ -853,6 +857,15 @@ mongoose
     // on expiry and returns all-expired accounts to the pool. Self-guards on
     // autoFarm.unclaimedAutoList + the pause flag.
     unclaimedAutoList.start();
+    // No-claim Shop listings: lifecycle pass + holdings sweep, self-guarded by
+    // settings.noclaimShop. Guarded here because this callback's catch is the
+    // "MongoDB connection error" exit — a broken optional module must never
+    // crash-loop the whole server.
+    try {
+      require("./utils/noclaimListings").start();
+    } catch (err) {
+      console.error("noclaimListings failed to start:", err.message);
+    }
     // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
     // auto-list shelf from what the game actually sells. It MEASURES every pass
     // (so the panel and the history exist either way) but only ACTS when

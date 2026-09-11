@@ -468,6 +468,102 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, delivered: qty, source: "offer:" + offer.title };
   }
 
+  // NO-CLAIM SHOP LISTINGS (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b). The
+  // owner's hand-made listing over a no-claim DropSet: the accounts are claimed
+  // out of the no-claim farm when the order lands, through utils/noclaimStock —
+  // the ONE claim layer, which also refuses any account on another listing.
+  // Everything after the claim is the unclaimedGame branch below, send for send.
+  //
+  // It sits ABOVE the unclaimedGame branch and far above the autoClaimSet one on
+  // purpose: the row carries `set` (the no-claim set), and the set path ships
+  // CLAIMED Drop Archive accounts, which are worthless to a no-claim buyer.
+  // Required lazily so a row without the flag never loads the no-claim layer.
+  if (listing.noclaimStock) {
+    const ncs = require("./noclaimStock");
+    if (!ncs.deliveryEnabled()) {
+      return { orderId, skipped: "no-claim listing auto-delivery is off" };
+    }
+    const DropSet = require("../models/DropSet");
+    const set = await DropSet.findById(listing.set).lean();
+    // mode "sold" + this order's id is the resume anchor: a retry after a send
+    // that threw gets back the SAME accounts this order already took, never a
+    // fresh set (the e69b19d3 lesson). `dryRun` must reach the claim, or a dry
+    // run would sell the ledger for an order it never sends.
+    const picked = set
+      ? await ncs.claimForSet(set, qty, {
+          market: "eldorado",
+          listingId: String(listing._id),
+          orderId,
+          mode: "sold",
+          dryRun,
+        })
+      : [];
+    if (picked.length < qty) {
+      // Hold the order rather than ship a short account, and release nothing:
+      // what was taken stays sold to THIS order and the next tick resumes it.
+      const advertised =
+        (listing.requiredDrops || []).length || ((set && set.items) || []).length;
+      return {
+        orderId,
+        error:
+          "only " + picked.length + " of " + qty + " account(s) could be claimed" +
+          " — no free no-claim account holds all " + advertised +
+          " advertised item(s)" +
+          (set ? "" : " (the listing's no-claim set is missing)"),
+      };
+    }
+    const blocks = picked.map((p) => eldoradoDeliveryCode(p.login, p.password));
+    const message =
+      qty > 1
+        ? blocks
+            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
+            .join("\n\n")
+        : blocks[0];
+    if (dryRun) {
+      return {
+        orderId,
+        dryRun: true,
+        source: "noclaim-set:" + String(listing.set),
+        wouldSend:
+          qty + " account(s) [" + picked.map((p) => p.login).join(", ") + "], " +
+          message.length + " chars",
+        preview: message,
+      };
+    }
+    await mp.eldoradoSendOrderMessage(order, message);
+    await mp.eldoradoMarkDelivered(orderId);
+    listing.units = (listing.units || []).concat(
+      picked.map((p) => ({
+        contentId: p.ledgerId,
+        accountId: "",
+        login: p.login,
+        addedAt: new Date(),
+        deliveredAt: new Date(),
+        orderId,
+      })),
+    );
+    listing.markModified("units");
+    await listing.save();
+    // The sale stamp, only once the buyer has the account. The ledger has been
+    // "sold" to this order since the claim; this records the price. It is
+    // bookkeeping, not delivery, so a failure is logged and never turns an
+    // order the buyer already has into a failed one.
+    try {
+      await ncs.markSold(
+        picked.map((p) => p.ledgerId),
+        {
+          market: "eldorado",
+          priceUsd: eldoradoUnitPriceUsd(order, qty, listing.price),
+          orderId,
+          reason: "eldorado order " + orderId,
+        },
+      );
+    } catch (e) {
+      console.error("eldorado no-claim markSold " + orderId + ":", e.message);
+    }
+    return { orderId, delivered: qty, source: "noclaim-set:" + String(listing.set) };
+  }
+
   // Unclaimed-farm-backed offers resolve their stock at delivery time out of the
   // no-claim ledger rather than from pre-reserved units.
   if (listing.unclaimedGame) {
@@ -687,6 +783,26 @@ async function deliverOrder(order, { dryRun }) {
   return { orderId, delivered: qty };
 }
 
+// What ONE unit of an order sold for, for the no-claim sale ledger
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b): the order's own total over the
+// units it bought, else the listing's price. Nothing here read `totalPrice`
+// before (docs/ELDORADO-INTEGRATION-PLAN.md lists it on the order row), so its
+// shape is not pinned: a bare number and an {amount, currency} object are both
+// accepted, and anything else — or a currency that is not USD — falls back to
+// the listing price rather than record a guess.
+function eldoradoUnitPriceUsd(order, qty, listingPrice) {
+  const tp = order && order.totalPrice;
+  let paid = NaN;
+  if (typeof tp === "number" || typeof tp === "string") paid = Number(tp);
+  else if (tp && typeof tp === "object" && (!tp.currency || /^usd$/i.test(tp.currency))) {
+    paid = Number(tp.amount);
+  }
+  const n = Math.max(1, parseInt(qty, 10) || 1);
+  if (Number.isFinite(paid) && paid > 0) return Math.round((paid / n) * 100) / 100;
+  const own = Number(listingPrice);
+  return Number.isFinite(own) && own > 0 ? own : 0;
+}
+
 
 // Keep every claim-from-archive listing's advertised stock equal to what can
 // ACTUALLY be claimed, and take a listing off sale the moment that reaches zero.
@@ -715,12 +831,30 @@ async function syncBundleStock({ dryRun = false } = {}) {
       // published with while the owner's list drained underneath it — and the
       // "pause when dry" half of the feature would simply never happen.
       { accountOffer: { $ne: null }, status: "active" },
+      // No-claim Shop listings (contract §8b): claimed at sale out of the
+      // no-claim farm, whose stock moves with no order placed here.
+      { noclaimStock: true, status: "active" },
     ],
   });
   const changes = [];
   for (const row of rows) {
     let real;
-    if (row.accountOffer) {
+    if (row.noclaimStock) {
+      // Asked FIRST: a no-claim row carries `set` too, and the set branch below
+      // would count CLAIMED Drop Archive stock for it. noclaimStock already
+      // splits the shelf across every claim-at-sale row of the set, and THROWS
+      // on a failed read — which is not an empty shelf, so skip the row this
+      // pass rather than pause a live offer on a Mongo hiccup.
+      let n = null;
+      try {
+        n = await require("./noclaimStock").stockForListing(row);
+      } catch (e) {
+        console.error("eldorado no-claim stock count:", e.message);
+        continue;
+      }
+      if (typeof n !== "number" || !Number.isFinite(n)) continue;
+      real = n;
+    } else if (row.accountOffer) {
       // Ask the ledger exactly what the delivery path will ask it. A read that
       // FAILS must not answer 0: zero is what pauses a live offer, and a Mongo
       // hiccup is not an empty shelf. Skip the row and re-count next pass.
@@ -812,11 +946,16 @@ async function syncBundleStock({ dryRun = false } = {}) {
 // line, no SystemEvent, no lastError on the row. A PAID order parked by a
 // switch is not a routine skip. Matched on the wording the two reasons share
 // (deliverOrder:364 and :372) rather than listed one by one.
+//
+// "no free no-claim account" is the no-claim Shop listing's shortfall (contract
+// §8b) — the same paid-and-stuck state as "free in the no-claim farm", and the
+// same page. The no-claim kill switch ("no-claim listing auto-delivery is off")
+// is already covered by SWITCHED_OFF_SKIPS.
 const SWITCHED_OFF_SKIPS = /auto-delivery is off/i;
 const ALERT_REASONS = new RegExp(
   "out of stock|no listing row|no unsold account|ambiguous|cannot be " +
     "identified|no sellable|free in the no-claim farm|AccountOffer is " +
-    "missing|rendered empty|" +
+    "missing|rendered empty|no free no-claim account|" +
     SWITCHED_OFF_SKIPS.source,
   "i",
 );
@@ -851,7 +990,13 @@ async function alertUnfulfillable(order, why) {
         // The accounts are on the shelf and one toggle ships them, so the
         // standing postscript would send the owner hunting for stock that is
         // not missing. The guarantee is running either way.
-        (SWITCHED_OFF_SKIPS.test(String(why || ""))
+        // A no-claim listing's switch is a different toggle from the account
+        // listings' one; naming the wrong one sends the owner to the wrong page.
+        (/no-claim/i.test(String(why || "")) && SWITCHED_OFF_SKIPS.test(String(why || ""))
+          ? "The no-claim stock is there. Turn no-claim listing delivery back on " +
+            "(settings: noclaimShop.autoDeliver) and the next tick ships it — the " +
+            "delivery guarantee is running."
+          : SWITCHED_OFF_SKIPS.test(String(why || ""))
           ? "The accounts are on the shelf. Turn account-listing delivery back " +
             "on (Settings, or this offer's own toggle) and the next tick ships " +
             "it — the delivery guarantee is running."

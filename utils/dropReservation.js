@@ -28,6 +28,10 @@ function setKeys(set) {
 // preserving the "no two buyers get the same drops" guarantee at drop grain.
 // Returns true when the whole set is now reserved on the account.
 async function reserveSetOnAccount(accountId, set, opts = {}) {
+  // A no-claim set's stock is the no-claim farm (utils/noclaimStock.js), never
+  // the archive: reserving its items here would freeze claimed DropLog copies
+  // its buyer cannot use (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6).
+  if (set && set.stockSource === "noclaim") return false;
   const keys = setKeys(set);
   if (!keys.length) return false;
   const now = new Date();

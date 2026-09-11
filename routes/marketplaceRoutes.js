@@ -22,6 +22,13 @@ const mp = require("../utils/marketplaces");
 const epicnpc = require("../utils/epicnpcCatalog");
 const paCopy = require("../utils/playerauctionsCopy");
 const suppliedStock = require("../utils/suppliedStock");
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §7): a set
+// whose stock is the no-claim farm publishes and delists through its own layer.
+// Required lazily: those modules pull in the auto-lister and the fulfillers,
+// and a load failure there must never take this whole router — every archive
+// publish and delist — down with it. Only no-claim rows ever reach them.
+const noclaimListings = () => require("../utils/noclaimListings");
+const ncs = () => require("../utils/noclaimStock");
 const { isNoClaimGame } = require("../utils/settings");
 const { listingGame } = require("../utils/listingGame");
 const { logEvent } = require("../utils/systemLog");
@@ -878,6 +885,33 @@ async function markZeusxUnitsDelivered(row) {
   }
 }
 
+// A no-claim row's half of a delist (contract §7), answered as
+// `{ released, sold }`. The offer is already off the marketplace when this
+// runs, so — like the supplied-stock release — a failure must not become a 500
+// the owner retries against an offer that no longer exists. It answers zeros
+// plus the error, and logs it: those units stay committed to a dead listing.
+async function noclaimAfterDelist(row, outcome) {
+  try {
+    const r = (await noclaimListings().afterDelist(row, { outcome })) || {};
+    return { released: Number(r.released) || 0, sold: Number(r.sold) || 0 };
+  } catch (err) {
+    console.error("noclaim afterDelist:", err.message);
+    logEvent({
+      category: "noclaim_shop",
+      action: "delist-release-failed",
+      severity: "warn",
+      subject: String(row._id),
+      detail:
+        row.marketplace +
+        " no-claim listing is off sale (" +
+        outcome +
+        ") but its units could not be settled: " +
+        err.message,
+    });
+    return { released: 0, sold: 0, error: err.message };
+  }
+}
+
 // G1: render the hand-over text BEFORE anything goes live, and refuse the
 // publish when any unit renders empty.
 //
@@ -1008,6 +1042,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     if (!set) {
       return res.status(404).json({ success: false, message: "Set not found" });
     }
+    // A no-claim set sells no-claim farm accounts, never Drop Archive stock
+    // (the archive holds only CLAIMED drops, worthless to a no-claim buyer), so
+    // none of the per-market archive branches below may run for it.
+    const noclaimSet = !offer && !!set && set.stockSource === "noclaim";
     const targets = Array.isArray(body.marketplaces) ? body.marketplaces : [];
     if (!targets.length) {
       return res
@@ -1086,6 +1124,15 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     const results = {};
     for (const name of targets) {
       try {
+        // Refused before category resolution: a market the no-claim layer
+        // cannot deliver on must not cost a live category lookup first.
+        if (noclaimSet && !ncs().SUPPORTED_MARKETS.includes(name)) {
+          results[name] = {
+            success: false,
+            message: ncs().unsupportedMessage(name),
+          };
+          continue;
+        }
         // Feature A's load-bearing half: when the body omits this market's
         // category, resolve one server-side instead of refusing the publish.
         // A failure is scoped to this market — the loop is per-market and the
@@ -1106,6 +1153,22 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           }
         }
         const cat = (auto && auto.value) || {};
+        if (noclaimSet) {
+          // The whole publish (stock claim, vault feed, row) is the no-claim
+          // layer's; its answer is this market's result as-is.
+          results[name] = await noclaimListings().publishNoclaim(name, {
+            set,
+            body,
+            title,
+            description,
+            priceUsd,
+            gridImage,
+            coverPath: coverImagePath(set),
+            cat,
+            pubGame,
+          });
+          continue;
+        }
         let r;
         if (name === "gameflip") {
           const gfOpts = body.gameflip || {};
@@ -1974,6 +2037,9 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
         // the post-event markup is allowed to reprice — anything not marked
         // "auto" keeps whatever price it was given.
         origin: r.origin === "auto" ? "auto" : "manual",
+        // Stocked from the no-claim farm, not the Drop Archive — its `setId`
+        // is a no-claim set, so the page must not treat it as an archive row.
+        noclaimStock: !!r.noclaimStock,
         createdAt: r.createdAt,
       })),
     });
@@ -1994,6 +2060,28 @@ router.delete(
         return res
           .status(404)
           .json({ success: false, message: "Listing not found" });
+      }
+      // No-claim row (contract §7): what its layer did around this delist, and
+      // the verdict it is told — "delisted", or what delistOutcome read below.
+      let noclaim = null;
+      let noclaimOutcome = "delisted";
+      if (row.noclaimStock) {
+        // Units the platform's own vault already sold are settled FIRST:
+        // afterDelist hands every undelivered unit back to the farm, and a sale
+        // not yet seen would go back on the shelf and sell twice. A failed
+        // settle refuses the delist while nothing has moved yet.
+        try {
+          await noclaimListings().beforeDelist(row);
+        } catch (err) {
+          console.error("noclaim beforeDelist:", err.message);
+          return res.json({
+            success: false,
+            message:
+              "Not delisted — this no-claim listing's sales could not be " +
+              "settled first: " +
+              err.message,
+          });
+        }
       }
       try {
         if (row.marketplace === "gameflip") {
@@ -2050,6 +2138,11 @@ router.delete(
           // The ledger learns it too, so the panel counts the account sold
           // rather than parked in ZeusX's vault.
           if (zxSupplied) await markZeusxUnitsDelivered(row);
+          // A no-claim row's unit is the buyer's now: its layer marks it sold
+          // rather than releasing it.
+          if (row.noclaimStock) {
+            noclaim = await noclaimAfterDelist(row, outcome);
+          }
           // Finding out this way is still finding out it sold — the auto-farmer
           // should learn from it exactly as it would from the sale poller.
           try {
@@ -2068,8 +2161,10 @@ router.delete(
           return res.json({
             success: true,
             message: "Already sold on the marketplace — marked sold here",
+            ...(noclaim ? { noclaim } : {}),
           });
         }
+        noclaimOutcome = outcome;
         row.note =
           (row.note ? row.note + " " : "") + "gone from the marketplace";
       }
@@ -2170,6 +2265,11 @@ router.delete(
                 : ""),
         });
       }
+      // A no-claim row keeps accountId "" and has no accountOffer, so neither
+      // release above reaches it; its own layer hands the undelivered units back.
+      if (row.noclaimStock) {
+        noclaim = await noclaimAfterDelist(row, noclaimOutcome);
+      }
       res.json({
         success: true,
         // How many went back on the shelf — the owner's only signal that the
@@ -2186,6 +2286,7 @@ router.delete(
                     : returned + " account(s) returned to this shelf",
             }
           : {}),
+        ...(noclaim ? { noclaim } : {}),
       });
     } catch (err) {
       console.error("marketplace delist error:", err.message);

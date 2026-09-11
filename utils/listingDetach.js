@@ -150,6 +150,18 @@ async function removeSuppliedUnits(row, accId, login) {
 // the caller to surface. Never throws for expected marketplace failures; those
 // become warnings so a partial detach still reports what it could do.
 async function detachAccountFromListing(row, acc, opts = {}) {
+  // A no-claim listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) holds
+  // no-claim farm accounts whose units utils/noclaimListings owns. Every branch
+  // below is archive surgery — a republish would rebuild the product from the
+  // set's DropLog stock — so none of it may run on one.
+  if (row && row.noclaimStock) {
+    return {
+      detached: [],
+      warnings: [
+        "no-claim listing — units are managed by utils/noclaimListings",
+      ],
+    };
+  }
   const reason = opts.reason || "removed";
   const republish = opts.republish !== false;
   const detached = [];

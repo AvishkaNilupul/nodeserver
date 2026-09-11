@@ -394,7 +394,13 @@ async function retireFromLiveListings({ onProgress } = {}) {
 
   const live = await MarketplaceListing.find(
     { status: "active" },
-    { accountId: 1, accountLogin: 1, units: 1, accountOffer: 1 },
+    {
+      accountId: 1,
+      accountLogin: 1,
+      units: 1,
+      accountOffer: 1,
+      noclaimStock: 1,
+    },
   ).lean();
 
   for (const candidate of live) {
@@ -440,6 +446,23 @@ async function retireFromLiveListings({ onProgress } = {}) {
         " from its own supplied stock, and the same login is suspended in the " +
         "Drop Archive — check it in the Account listings tab. Left untouched: " +
         "the archive repair path does not apply to supplied stock.";
+      progress("warning — " + msg);
+      report.warnings.push(msg);
+      continue;
+    }
+    // A NO-CLAIM listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) is the
+    // same story: its units[].login are no-claim farm accounts owned by
+    // utils/noclaimListings, which re-reads each one live before it is
+    // delivered. The archive detach path would rebuild the product from its
+    // set's DropLog stock, so report it and leave it alone.
+    if (candidate.noclaimStock) {
+      const msg =
+        "no-claim listing " +
+        candidate._id +
+        " carries " +
+        unique.map((a) => a.login).join(", ") +
+        ", suspended in the Drop Archive — the no-claim lifecycle re-checks " +
+        "it live; left untouched";
       progress("warning — " + msg);
       report.warnings.push(msg);
       continue;

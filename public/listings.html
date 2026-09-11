@@ -425,6 +425,61 @@
         background: var(--accent);
         border-color: var(--accent);
       }
+      /* Picker header: title + the [Drop archive] [No-claim farm] switch. */
+      .pick-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px 10px;
+        flex-wrap: wrap;
+        margin: 0 0 14px;
+      }
+      .pick-head h2 {
+        margin: 0;
+      }
+      .seg {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        overflow: hidden;
+        background: var(--surface-2);
+      }
+      .seg-btn {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 11px;
+        cursor: pointer;
+      }
+      .seg-btn + .seg-btn {
+        border-left: 1px solid var(--line);
+      }
+      .seg-btn.on {
+        background: var(--accent);
+        color: #fff;
+      }
+      /* No-claim snapshot strip under the pickbar. */
+      .nc-strip {
+        font-size: 12px;
+        color: var(--muted);
+        margin: -2px 0 10px;
+      }
+      .nc-strip .nc-snap {
+        display: flex;
+        align-items: center;
+        gap: 6px 8px;
+        flex-wrap: wrap;
+      }
+      .nc-strip .btn {
+        padding: 3px 9px;
+        font-size: 12px;
+      }
+      .nc-strip .nc-hint {
+        margin-top: 4px;
+      }
       /* listings table */
       .listing {
         display: flex;
@@ -501,6 +556,19 @@
       .badge.auto {
         background: rgba(59, 130, 246, 0.14);
         color: #6ea8ff;
+      }
+      /* A listing whose stock is the no-claim farm (never the Shop, never the
+         Drop Archive) — docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §10. */
+      .badge.noclaim {
+        background: rgba(139, 92, 246, 0.14);
+        color: #7c3aed;
+      }
+      html[data-theme="dark"] .badge.noclaim {
+        color: #a78bfa;
+      }
+      .card h2 .badge {
+        margin-left: 2px;
+        vertical-align: 2px;
       }
       /* Per-marketplace chips on listing rows: link when live, muted when
          the market errored or was skipped. */
@@ -635,6 +703,139 @@
       .editing {
         border-color: var(--accent);
         box-shadow: 0 0 0 1px var(--accent);
+      }
+      /* ---------- Phone (the owner runs this page on an iPhone) ----------
+         CSS only; nothing above 720px changes. The overflow had one root:
+         body is a flex row, so .page (a flex item) and the 1fr grid columns
+         kept an automatic minimum = their content's min-content width. A
+         listing row's buttons (flex-shrink:0) and the pickers' nowrap names
+         set that width, so the page grew wider than the phone and the row's
+         .info was squeezed to one word per line. min-width:0 plus minmax(0,
+         ...) tracks let everything size to the screen, and the rows wrap
+         instead. Never body{overflow-x:hidden} — that hides the bug and
+         clips real content. */
+      @media (max-width: 720px) {
+        .page {
+          padding: 14px 12px 60px;
+          min-width: 0;
+        }
+        .grid {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 14px;
+        }
+        .card {
+          padding: 14px;
+          min-width: 0;
+        }
+        .tabbar {
+          flex-wrap: wrap;
+        }
+        .tabbar .tbtn {
+          flex: 1 1 auto;
+        }
+        /* Header rows (title + buttons) wrap instead of squeezing. */
+        .ls-head {
+          flex-wrap: wrap;
+        }
+        .ls-head .mp-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .pickbar {
+          flex-wrap: wrap;
+        }
+        .pickbar select {
+          flex: 1 1 100%;
+          width: 100%;
+          max-width: none;
+        }
+        .pickbar input {
+          min-width: 0;
+        }
+        .pick {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .pick .it {
+          min-width: 0;
+        }
+        .row2 {
+          grid-template-columns: minmax(0, 1fr) 130px;
+        }
+        /* iOS zooms into any field under 16px on focus and leaves the page
+           zoomed — which reads exactly like a page that overflows. */
+        .page input[type="text"],
+        .page input[type="number"],
+        .page input[type="search"],
+        .page select,
+        .page textarea {
+          font-size: 16px;
+        }
+        .list-toolbar input[type="search"] {
+          flex: 1 1 100%;
+          min-width: 0;
+          max-width: none;
+        }
+        /* A listing row becomes a two-row card: thumbs + info + price on
+           row 1, the buttons on row 2 at full width. */
+        .listing {
+          flex-wrap: wrap;
+          align-items: flex-start;
+          gap: 10px 12px;
+        }
+        .thumbs img:nth-child(n + 3),
+        .thumbs .noimg:nth-child(n + 3) {
+          display: none;
+        }
+        .listing .info {
+          flex: 1 1 0;
+          min-width: 0;
+        }
+        .listing .info .t {
+          overflow-wrap: anywhere;
+        }
+        .listing .info .d {
+          max-width: none;
+          white-space: normal;
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+          line-clamp: 2;
+          overflow: hidden;
+        }
+        .listing .mkt-chip {
+          max-width: 100%;
+          white-space: normal;
+        }
+        .listing .price {
+          flex: 0 0 auto;
+          margin-left: auto;
+          text-align: right;
+        }
+        .listing .ops {
+          flex: 1 1 100%;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        .listing .ops .btn {
+          flex: 1 1 auto;
+          padding: 8px 10px;
+        }
+        /* left:50% capped a long toast at half the screen; span it instead. */
+        .toast {
+          left: 12px;
+          right: 12px;
+          transform: none;
+          text-align: center;
+        }
+      }
+      @media (max-width: 520px) {
+        .pick {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .row2 {
+          grid-template-columns: minmax(0, 1fr);
+        }
       }
     </style>
   </head>
@@ -901,7 +1102,12 @@
         <div class="grid">
           <!-- Create / edit -->
           <section class="card" id="formCard">
-            <h2 id="formTitle">Create a listing</h2>
+            <h2>
+              <span id="formTitle">Create a listing</span>
+              <span class="badge noclaim" id="fSrcBadge" style="display: none"
+                >No-claim farm</span
+              >
+            </h2>
             <div class="field">
               <label for="fName">Title</label>
               <input
@@ -921,7 +1127,7 @@
             </div>
             <div class="row2 field">
               <div>
-                <label for="fPrice">Price (balance)</label>
+                <label for="fPrice" id="fPriceLabel">Price (balance)</label>
                 <input
                   type="number"
                   id="fPrice"
@@ -931,7 +1137,7 @@
                 />
               </div>
               <div style="display: flex; align-items: flex-end">
-                <span class="sub" style="margin: 0; font-size: 12px"
+                <span class="sub" id="fPriceHint" style="margin: 0; font-size: 12px"
                   >1 balance = your top-up unit</span
                 >
               </div>
@@ -963,9 +1169,31 @@
             </div>
           </section>
 
-          <!-- Picker -->
-          <section class="card">
-            <h2>Pick items from scanned drops</h2>
+          <!-- Picker. The switch picks where the items (and so the delivery
+               stock) come from: the Drop Archive (claimed drops, today) or the
+               no-claim farm (unclaimed drops, docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §10). -->
+          <section class="card" id="pickCard">
+            <div class="pick-head">
+              <h2>Pick items</h2>
+              <div class="seg" role="group" aria-label="Where the items come from">
+                <button
+                  type="button"
+                  class="seg-btn on"
+                  id="srcArchive"
+                  aria-pressed="true"
+                >
+                  Drop archive
+                </button>
+                <button
+                  type="button"
+                  class="seg-btn"
+                  id="srcNoclaim"
+                  aria-pressed="false"
+                >
+                  No-claim farm
+                </button>
+              </div>
+            </div>
             <div class="pickbar">
               <select id="fGame" title="Filter items by game">
                 <option value="">All games</option>
@@ -976,6 +1204,18 @@
                 placeholder="Search items by name…"
               />
             </div>
+            <div class="nc-strip" id="ncStrip" style="display: none">
+              <div class="nc-snap">
+                <span id="ncSnapText">Snapshot: loading…</span>
+                <button type="button" class="btn" id="ncRefreshBtn">
+                  Refresh stock
+                </button>
+              </div>
+              <div class="nc-hint">
+                Accounts already on auto-lister listings are never used. Every
+                sale re-checks the account live before it is handed over.
+              </div>
+            </div>
             <div class="pick" id="pickGrid">
               <div class="empty">Loading items…</div>
             </div>
@@ -985,6 +1225,7 @@
         <!-- Existing listings -->
         <section class="card" style="margin-top: 22px">
           <div
+            class="ls-head"
             style="
               display: flex;
               align-items: center;
@@ -1012,6 +1253,7 @@
             <button class="fchip on" data-lso="all">All sources</button>
             <button class="fchip" data-lso="mine">Mine</button>
             <button class="fchip" data-lso="auto">Auto</button>
+            <button class="fchip" data-lso="noclaim">No-claim</button>
             <span class="count" id="lsCount"></span>
           </div>
           <div id="listings">
@@ -1129,6 +1371,7 @@ Reliable Daily Rewards</textarea
 
         <section class="card" style="margin-top: 22px">
           <div
+            class="ls-head"
             style="
               display: flex;
               align-items: center;
@@ -1418,6 +1661,22 @@ Reliable Daily Rewards</textarea
         font-size: 12px;
         white-space: nowrap;
         text-decoration: underline;
+      }
+      /* No-claim set: how many farm accounts back the offer right now. The
+         modal is dark in both themes (--card is never defined), so the note
+         carries its own light colours instead of inheriting the page ink. */
+      .mp-nc-note {
+        font-size: 13px;
+        margin: 0 0 10px;
+        padding: 7px 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(167, 139, 250, 0.5);
+        background: rgba(139, 92, 246, 0.16);
+        color: #ede9fe;
+      }
+      .mp-nc-note.bad {
+        border-color: #fbbf24;
+        color: #fcd34d;
       }
       .mp-ext {
         border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -1720,6 +1979,9 @@ Reliable Daily Rewards</textarea
     <div class="mp-overlay" id="mpPubOverlay">
       <div class="mp-modal">
         <h3 id="mpPubTitle">Sell on marketplaces</h3>
+        <!-- Only for a no-claim set (mpApplyNoclaimDefaults): its stock is
+             the no-claim farm, not the Drop Archive. -->
+        <div class="mp-nc-note" id="mpNoclaimNote" style="display: none"></div>
         <div class="mp-row" id="mpPubTargets"></div>
         <label for="mpPubName">Title</label>
         <input type="text" id="mpPubName" maxlength="200" />
@@ -2280,10 +2542,123 @@ Reliable Daily Rewards</textarea
         return lo > 1 ? String(lo) : "";
       }
 
+      // ---- no-claim farm source: pure helpers ----
+      // docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §10. A set with stockSource
+      // "noclaim" is backed by the no-claim farm's UNCLAIMED drops: it is never
+      // sold by the Shop and never claims Drop Archive stock, it only sells on
+      // marketplaces. Everything no-claim on this page keys off this one test.
+      function isNoclaimSet(set) {
+        return !!(set && set.stockSource === "noclaim");
+      }
+      // Markets the no-claim layer can deliver on (contract §0): vault markets
+      // get accounts attached at publish, claim-at-sale ones claim per order.
+      // Everything else is refused server-side, so it is not offered here.
+      var NC_MARKETS = [
+        "gameflip",
+        "ggsel",
+        "digiseller",
+        "eldorado",
+        "playerauctions",
+        "g2g",
+      ];
+      // The /noclaim-stock routes (routes/noclaimStockRoutes.js) answer with
+      // the payload at the top level: {success, free, stale, ...}.
+      // GET /noclaim-stock/sets/:id/stock → counts (ncs.stockForSet).
+      function ncStockOf(j) {
+        var st = j || {};
+        return {
+          free: Number(st.free) || 0,
+          stale: Number(st.stale) || 0,
+          onAuto: Number(st.onAuto) || 0,
+          onManual: Number(st.onManual) || 0,
+        };
+      }
+      // Existing-listings stock text for a no-claim set.
+      function ncStockText(st) {
+        if (!st) return "";
+        return (
+          st.free +
+          " free in no-claim farm" +
+          (st.stale > 0 ? " · " + st.stale + " unverified" : "") +
+          (st.onAuto > 0 ? " · " + st.onAuto + " on auto-list" : "")
+        );
+      }
+      // Picker sub-line for a no-claim item row. `accounts` = free AND fresh
+      // holders; `stale` = free but not re-read recently.
+      function ncPickSubline(it) {
+        var onAuto = Number(it.onAuto) || 0;
+        var stale = Number(it.stale) || 0;
+        return (
+          (it.game || "Other rewards") +
+          " · " +
+          (Number(it.accounts) || 0) +
+          " free" +
+          (onAuto > 0 ? " · " + onAuto + " on auto-list" : "") +
+          (stale > 0 ? " · " + stale + " unverified" : "")
+        );
+      }
+      function ncAgo(t) {
+        var ms = t ? Date.now() - new Date(t).getTime() : NaN;
+        if (!isFinite(ms)) return "";
+        if (ms < 60000) return "just now";
+        var m = Math.round(ms / 60000);
+        if (m < 60) return m + " min ago";
+        var h = Math.round(m / 60);
+        if (h < 48) return h + " h ago";
+        return Math.round(h / 24) + " d ago";
+      }
+      // "Snapshot: X accounts read · updated <when>" from /noclaim-stock/summary.
+      function ncSnapText(s) {
+        s = s || {};
+        var read = Number(s.read) || 0;
+        var total = Number(s.accounts) || 0;
+        var last = s.lastSweep;
+        var when = ncAgo(
+          s.newestReadAt ||
+            (last && typeof last === "object" ? last.at || last.finishedAt : last) ||
+            null,
+        );
+        return (
+          "Snapshot: " +
+          read +
+          (total > read ? " of " + total : "") +
+          " account" +
+          ((total > read ? total : read) === 1 ? "" : "s") +
+          " read" +
+          (when ? " · updated " + when : "") +
+          (s.sweeping ? " · reading the farm…" : "")
+        );
+      }
+      // Identity of the picked items (key + promised copies). The debounced
+      // /noclaim-stock/copy call only runs when this changes, and an edit only
+      // sends `items` when it differs from what the set was opened with.
+      function ncItemsSig(items) {
+        return (items || [])
+          .map(function (s) {
+            return s.itemKey + "×" + (Number(s.qty) || 1);
+          })
+          .join("\n");
+      }
+
       // ---- state ----
       var selected = []; // [{itemKey,name,game,image,qty,qtyMax}]
       var catalog = []; // by-item rows
       var editId = null;
+      // Where the picker's items come from: "archive" (the Drop Archive, the
+      // only source before §10) or "noclaim" (the no-claim farm). Remembered
+      // per browser; storage can throw (private mode), which just means
+      // "archive".
+      var pickSource = "archive";
+      try {
+        if (localStorage.getItem("listingsPickSource") === "noclaim")
+          pickSource = "noclaim";
+      } catch (e) {}
+      // Sequence numbers: a reply for a source/filter the picker has since
+      // left must never repaint it.
+      var catalogSeq = 0;
+      var gamesSeq = 0;
+      // Items signature of the no-claim set being edited (null otherwise).
+      var ncEditSig = null;
       // Track whether the seller has hand-edited the title / description so the
       // auto-generated text never clobbers their own wording.
       var titleEdited = false;
@@ -2357,8 +2732,89 @@ Reliable Daily Rewards</textarea
         return lines.join("\n");
       }
       function refreshAuto() {
+        // No-claim copy is the server's (the engine's title/description and a
+        // suggested price) — debounced, see ncScheduleCopy.
+        if (pickSource === "noclaim") {
+          ncScheduleCopy();
+          return;
+        }
         if (!titleEdited) $("fName").value = buildAutoTitle();
         if (!noteEdited) $("fNote").value = buildAutoDescription();
+      }
+
+      // ---- no-claim auto copy ----
+      // POST /noclaim-stock/copy builds the title/description the auto-lister
+      // would write for these items plus a suggested price. Debounced 400 ms
+      // after the selection changes; renderSelected also runs on every picker
+      // repaint, so the signature — not the call — decides whether anything
+      // changed. Hand-edited text is never replaced; the price is only filled
+      // while it is still 0.
+      var ncCopyTimer = null;
+      var ncCopyPendingSig = null; // selection the queued call is for
+      var ncCopySig = null; // selection the fields were last built for
+      var ncCopySeq = 0;
+      var ncSuggest = null; // {price, floor} from the last copy
+      function ncPriceHint() {
+        if (!ncSuggest) return "Default USD price for Sell on…";
+        return (
+          "Suggested $" +
+          ncSuggest.price.toFixed(2) +
+          (ncSuggest.floor > 0 ? " · floor $" + ncSuggest.floor.toFixed(2) : "")
+        );
+      }
+      function ncScheduleCopy() {
+        var sig = ncItemsSig(selected);
+        if (ncCopyTimer && sig === ncCopyPendingSig) return;
+        clearTimeout(ncCopyTimer);
+        ncCopyTimer = null;
+        if (sig === ncCopySig) return;
+        ncCopyPendingSig = sig;
+        ncCopyTimer = setTimeout(function () {
+          ncCopyTimer = null;
+          ncRunCopy();
+        }, 400);
+      }
+      function ncApplyCopy(c) {
+        if (!titleEdited) $("fName").value = c.title || "";
+        if (!noteEdited) $("fNote").value = c.description || "";
+        var sug = Number(c.price) || 0;
+        ncSuggest =
+          sug > 0 ? { price: sug, floor: Number(c.floor) || 0 } : null;
+        if (sug > 0 && !(Number($("fPrice").value) > 0))
+          $("fPrice").value = String(Math.round(sug * 100) / 100);
+        $("fPriceHint").textContent = ncPriceHint();
+      }
+      function ncRunCopy() {
+        if (pickSource !== "noclaim") return;
+        var sig = ncItemsSig(selected);
+        if (sig === ncCopySig) return;
+        ncCopySig = sig;
+        var seq = ++ncCopySeq;
+        if (!selected.length) {
+          ncApplyCopy({ title: "", description: "" });
+          return;
+        }
+        api("/noclaim-stock/copy", {
+          method: "POST",
+          body: {
+            items: selected.map(function (s) {
+              return { itemKey: s.itemKey, qty: Number(s.qty) || 1 };
+            }),
+          },
+        })
+          .then(function (j) {
+            if (seq !== ncCopySeq || pickSource !== "noclaim") return;
+            ncApplyCopy(j || {});
+          })
+          .catch(function () {
+            // The route never fails on bad copy (it falls back itself), so
+            // this is the network: build it here rather than leave it blank.
+            if (seq !== ncCopySeq || pickSource !== "noclaim") return;
+            ncApplyCopy({
+              title: buildAutoTitle(),
+              description: buildAutoDescription(),
+            });
+          });
       }
       $("fName").addEventListener("input", function () {
         titleEdited = true;
@@ -2460,8 +2916,11 @@ Reliable Daily Rewards</textarea
       // ---- picker ----
       function renderPicker(rows) {
         var box = $("pickGrid");
+        var nc = pickSource === "noclaim";
         if (!rows.length) {
-          box.innerHTML = '<div class="empty">No matching items.</div>';
+          box.innerHTML = nc
+            ? '<div class="empty">No no-claim items match. Refresh stock re-reads the farm.</div>'
+            : '<div class="empty">No matching items.</div>';
           return;
         }
         box.innerHTML = rows
@@ -2476,12 +2935,14 @@ Reliable Daily Rewards</textarea
               esc(it.name || "Reward") +
               "</div>" +
               '<div class="gm">' +
-              esc(it.game || "Other rewards") +
-              " · " +
-              (it.accounts || 0) +
-              " acct" +
-              (it.accounts === 1 ? "" : "s") +
-              (qtyLabel(it) ? " · " + qtyLabel(it) + "\u00d7 per acct" : "") +
+              (nc
+                ? esc(ncPickSubline(it))
+                : esc(it.game || "Other rewards") +
+                  " · " +
+                  (it.accounts || 0) +
+                  " acct" +
+                  (it.accounts === 1 ? "" : "s") +
+                  (qtyLabel(it) ? " · " + qtyLabel(it) + "\u00d7 per acct" : "")) +
               "</div></div>" +
               (qtyLabel(it)
                 ? '<span class="qty">' + qtyLabel(it) + "\u00d7</span>"
@@ -2504,7 +2965,29 @@ Reliable Daily Rewards</textarea
       });
 
       var searchTimer = null;
+      // One by-item row → a picker row. Shared by both sources: the no-claim
+      // items route answers in the archive's /drops-archive/by-item shape.
+      function catalogRow(it) {
+        // qty = guaranteed copies per holding account (the minimum any
+        // account holds); qtyMax shows the range when accounts differ.
+        var lo = Number(it.minPerAcct) || 0;
+        var hi = Number(it.maxPerAcct) || 0;
+        if (!lo) {
+          var acc = Number(it.accounts) || 0;
+          var tot = Number(it.totalCount) || 0;
+          lo =
+            acc > 0
+              ? Math.max(1, Math.round(tot / acc))
+              : Math.max(1, tot);
+          hi = lo;
+        }
+        it.qty = Math.max(1, lo);
+        it.qtyMax = Math.max(it.qty, hi);
+        return it;
+      }
       function loadCatalog(search) {
+        if (pickSource === "noclaim") return ncLoadCatalog(search);
+        var seq = ++catalogSeq;
         var params = [];
         var g = $("fGame") ? $("fGame").value : "";
         if (g) params.push("game=" + encodeURIComponent(g));
@@ -2512,34 +2995,22 @@ Reliable Daily Rewards</textarea
         var qs = params.length ? "?" + params.join("&") : "";
         return api("/drops-archive/by-item" + qs)
           .then(function (j) {
-            catalog = (j.items || []).map(function (it) {
-              // qty = guaranteed copies per holding account (the minimum any
-              // account holds); qtyMax shows the range when accounts differ.
-              var lo = Number(it.minPerAcct) || 0;
-              var hi = Number(it.maxPerAcct) || 0;
-              if (!lo) {
-                var acc = Number(it.accounts) || 0;
-                var tot = Number(it.totalCount) || 0;
-                lo =
-                  acc > 0
-                    ? Math.max(1, Math.round(tot / acc))
-                    : Math.max(1, tot);
-                hi = lo;
-              }
-              it.qty = Math.max(1, lo);
-              it.qtyMax = Math.max(it.qty, hi);
-              return it;
-            });
+            if (seq !== catalogSeq) return;
+            catalog = (j.items || []).map(catalogRow);
             renderPicker(catalog);
           })
           .catch(function (e) {
+            if (seq !== catalogSeq) return;
             $("pickGrid").innerHTML =
               '<div class="empty">' + esc(e.message) + "</div>";
           });
       }
       function loadGames() {
+        if (pickSource === "noclaim") return ncLoadGames();
+        var seq = ++gamesSeq;
         return api("/drops-archive/by-game")
           .then(function (j) {
+            if (seq !== gamesSeq) return;
             var games = (j.games || [])
               .map(function (g) {
                 return g.game || "Other rewards";
@@ -2569,6 +3040,211 @@ Reliable Daily Rewards</textarea
         }, 250);
       });
 
+      // ---- picker source: Drop archive | No-claim farm ----
+      // The no-claim picker reads the holdings SNAPSHOT (utils/noclaimHoldings):
+      // `accounts` counts free holders whose live read is fresh. A sale still
+      // re-reads the account live before handing it over.
+      function ncLoadCatalog(search) {
+        var seq = ++catalogSeq;
+        var params = [];
+        var g = $("fGame").value;
+        if (g) params.push("game=" + encodeURIComponent(g));
+        if (search) params.push("search=" + encodeURIComponent(search));
+        var qs = params.length ? "?" + params.join("&") : "";
+        return api("/noclaim-stock/items" + qs)
+          .then(function (j) {
+            if (seq !== catalogSeq) return;
+            catalog = (j.items || []).map(catalogRow);
+            // Editing a no-claim set opens before this catalog arrives, so its
+            // qty steppers were capped from whatever catalog was loaded then.
+            selected.forEach(function (s) {
+              var c = catalog.find(function (x) {
+                return x.itemKey === s.itemKey;
+              });
+              if (c)
+                s.qtyMax = Math.max(
+                  Number(s.qty) || 1,
+                  Number(s.qtyMax) || 1,
+                  Number(c.qtyMax) || 1,
+                );
+            });
+            renderPicker(catalog);
+          })
+          .catch(function (e) {
+            if (seq !== catalogSeq) return;
+            catalog = [];
+            $("pickGrid").innerHTML =
+              '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+      function ncLoadGames() {
+        var seq = ++gamesSeq;
+        return api("/noclaim-stock/games")
+          .then(function (j) {
+            if (seq !== gamesSeq) return;
+            var sel = $("fGame");
+            var cur = sel.value;
+            sel.innerHTML =
+              '<option value="">All games</option>' +
+              (j.games || [])
+                .filter(function (g) {
+                  return g && g.game;
+                })
+                .map(function (g) {
+                  return (
+                    '<option value="' +
+                    attr(g.game) +
+                    '">' +
+                    esc(g.game + " · " + (Number(g.free) || 0) + " free") +
+                    "</option>"
+                  );
+                })
+                .join("");
+            // A refresh reloads this list under the owner's filter: keep it
+            // when the game is still there, fall back to All games when not.
+            sel.value = cur;
+            if (sel.selectedIndex < 0) sel.value = "";
+          })
+          .catch(function () {});
+      }
+
+      // The form follows the source: a no-claim set is saved through
+      // /noclaim-stock/sets, has no Shop draft/publish state and is priced in
+      // USD (it only ever sells on marketplaces).
+      function renderFormSource() {
+        var nc = pickSource === "noclaim";
+        $("fSrcBadge").style.display = nc ? "" : "none";
+        $("draftBtn").style.display = nc ? "none" : "";
+        if (nc) $("publishBtn").innerText = "Save listing";
+        else if (!editId) $("publishBtn").innerText = "Publish to shop";
+        $("fPriceLabel").textContent = nc ? "Price (USD)" : "Price (balance)";
+        $("fPriceHint").textContent = nc
+          ? ncPriceHint()
+          : "1 balance = your top-up unit";
+      }
+      function renderPickSource() {
+        var nc = pickSource === "noclaim";
+        $("srcArchive").classList.toggle("on", !nc);
+        $("srcNoclaim").classList.toggle("on", nc);
+        $("srcArchive").setAttribute("aria-pressed", nc ? "false" : "true");
+        $("srcNoclaim").setAttribute("aria-pressed", nc ? "true" : "false");
+        $("ncStrip").style.display = nc ? "" : "none";
+        $("pickSearch").placeholder = nc
+          ? "Search no-claim items by name…"
+          : "Search items by name…";
+        renderFormSource();
+      }
+      // Switch the picker's source and reload it. Callers own the selection:
+      // the switch buttons confirm and clear it, startEdit replaces it.
+      function setPickSource(src) {
+        src = src === "noclaim" ? "noclaim" : "archive";
+        if (src === pickSource) return;
+        pickSource = src;
+        try {
+          localStorage.setItem("listingsPickSource", src);
+        } catch (e) {}
+        ncCopySig = null;
+        ncSuggest = null;
+        catalog = [];
+        $("pickGrid").innerHTML = '<div class="empty">Loading items…</div>';
+        // The two sources name games differently; a filter from one would
+        // silently empty the other.
+        $("fGame").value = "";
+        renderPickSource();
+        loadGames();
+        loadCatalog($("pickSearch").value.trim());
+        if (src === "noclaim") ncLoadSummary();
+      }
+      function onPickSourceClick(src) {
+        if (src === pickSource) return;
+        var n = selected.length;
+        if (
+          n &&
+          !confirm("Switch source? The " + n + " picked item(s) will be cleared.")
+        )
+          return;
+        setPickSource(src);
+        // A set never changes source, so switching ends an edit outright;
+        // otherwise only the picked items go.
+        if (editId) resetForm();
+        else if (n) {
+          selected = [];
+          renderSelected();
+        }
+      }
+      $("srcArchive").addEventListener("click", function () {
+        onPickSourceClick("archive");
+      });
+      $("srcNoclaim").addEventListener("click", function () {
+        onPickSourceClick("noclaim");
+      });
+
+      // Snapshot strip + "Refresh stock": POST /noclaim-stock/refresh starts a
+      // sweep in the background (409 while one already runs — then we simply
+      // wait for that one), and /noclaim-stock/summary is polled every 5 s
+      // until it stops, for at most 3 minutes, then the picker reloads.
+      var ncSummary = null;
+      var ncPollTimer = null;
+      var ncPollUntil = 0;
+      function ncRenderStrip() {
+        $("ncSnapText").textContent = ncSnapText(ncSummary);
+        var b = $("ncRefreshBtn");
+        b.disabled = !!ncPollTimer;
+        b.textContent = ncPollTimer ? "Refreshing…" : "Refresh stock";
+      }
+      function ncLoadSummary() {
+        return api("/noclaim-stock/summary")
+          .then(function (j) {
+            ncSummary = j || {};
+            ncRenderStrip();
+            return ncSummary;
+          })
+          .catch(function (e) {
+            $("ncSnapText").textContent =
+              "Snapshot unavailable — " + (e.message || "error");
+            return null;
+          });
+      }
+      function ncPollTick() {
+        ncLoadSummary().then(function (s) {
+          if (s && s.sweeping && Date.now() < ncPollUntil) {
+            ncPollTimer = setTimeout(ncPollTick, 5000);
+            return;
+          }
+          ncPollTimer = null;
+          ncRenderStrip();
+          if (pickSource === "noclaim") {
+            ncLoadGames().then(function () {
+              loadCatalog($("pickSearch").value.trim());
+            });
+          }
+          // Every no-claim row's figure came from the snapshot just replaced.
+          var shown = lsRows.slice(0, lsShown).filter(isNoclaimSet);
+          listingsCache.forEach(function (set) {
+            if (isNoclaimSet(set)) set._stockLoaded = false;
+          });
+          fanoutStock(shown);
+        });
+      }
+      $("ncRefreshBtn").addEventListener("click", function () {
+        if (ncPollTimer) return;
+        var g = $("fGame").value;
+        ncPollUntil = Date.now() + 3 * 60 * 1000;
+        ncPollTimer = setTimeout(ncPollTick, 5000);
+        ncRenderStrip();
+        api("/noclaim-stock/refresh", {
+          method: "POST",
+          body: g ? { game: g } : {},
+        })
+          .then(function () {
+            toast("Re-reading the no-claim farm — this takes a few minutes");
+          })
+          .catch(function (e) {
+            // 409 = a sweep is already running: the poll waits for it.
+            toast(e.message || "Refresh failed");
+          });
+      });
+
       // ---- form actions ----
       function resetForm() {
         editId = null;
@@ -2583,6 +3259,8 @@ Reliable Daily Rewards</textarea
         $("cancelBtn").style.display = "none";
         $("fillImgBtn").style.display = "none";
         $("formCard").classList.remove("editing");
+        ncEditSig = null;
+        renderFormSource();
         renderSelected();
       }
       function collectBody(listed) {
@@ -2620,6 +3298,7 @@ Reliable Daily Rewards</textarea
         };
       }
       function save(listed) {
+        if (pickSource === "noclaim") return ncSave();
         var body = collectBody(listed);
         if (!body) return;
         var p;
@@ -2652,6 +3331,61 @@ Reliable Daily Rewards</textarea
             $("draftBtn").disabled = false;
           });
       }
+      // A no-claim set is saved, never "published to shop": it has no Shop
+      // state at all and sells through Sell on… only. Create → POST
+      // /noclaim-stock/sets; edit → PUT /noclaim-stock/sets/:id, which answers
+      // 409 to an ITEM change while a live listing still advertises the
+      // current items — so `items` is only sent when the owner changed them,
+      // and a title/price edit of a live listing always goes through.
+      function ncSave() {
+        var name = $("fName").value.trim();
+        if (!name) {
+          toast("Title is required");
+          $("fName").focus();
+          return;
+        }
+        if (!selected.length) {
+          toast("Add at least one item");
+          return;
+        }
+        var price = Number($("fPrice").value);
+        if (!isFinite(price) || price < 0) {
+          toast("Enter a valid price");
+          return;
+        }
+        var body = { name: name, note: $("fNote").value.trim(), price: price };
+        var items = selected.map(function (s) {
+          return { itemKey: s.itemKey, qty: Number(s.qty) || 1 };
+        });
+        var wasEdit = !!editId;
+        var p;
+        if (wasEdit) {
+          if (ncItemsSig(selected) !== ncEditSig) body.items = items;
+          p = api("/noclaim-stock/sets/" + encodeURIComponent(editId), {
+            method: "PUT",
+            body: body,
+          });
+        } else {
+          body.items = items;
+          p = api("/noclaim-stock/sets", { method: "POST", body: body });
+        }
+        $("publishBtn").disabled = true;
+        p.then(function () {
+          toast(
+            wasEdit
+              ? "Listing updated"
+              : "No-claim listing saved — Sell on… publishes it",
+          );
+          resetForm();
+          loadListings();
+        })
+          .catch(function (e) {
+            toast(e.message || "Save failed");
+          })
+          .finally(function () {
+            $("publishBtn").disabled = false;
+          });
+      }
       $("publishBtn").addEventListener("click", function () {
         save(true);
       });
@@ -2661,6 +3395,11 @@ Reliable Daily Rewards</textarea
       $("cancelBtn").addEventListener("click", resetForm);
 
       function startEdit(set) {
+        // The set decides the picker: a no-claim set's items can only come
+        // from the no-claim farm, an archive set's only from the archive.
+        // (setPickSource empties the catalog, so the qty caps below never
+        // come from the other source's rows; ncLoadCatalog raises them.)
+        setPickSource(isNoclaimSet(set) ? "noclaim" : "archive");
         editId = set.id;
         // Editing an existing listing: keep its saved title/note as-is.
         titleEdited = true;
@@ -2691,6 +3430,8 @@ Reliable Daily Rewards</textarea
         $("cancelBtn").style.display = "";
         $("fillImgBtn").style.display = "";
         $("formCard").classList.add("editing");
+        ncEditSig = isNoclaimSet(set) ? ncItemsSig(selected) : null;
+        renderFormSource();
         renderSelected();
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
@@ -2749,13 +3490,19 @@ Reliable Daily Rewards</textarea
             return imgTag(src);
           })
           .join("");
+        // A no-claim set has no Shop state (never listed, never a draft): its
+        // badge says where its stock is, and its figure is the farm's.
+        var nc = isNoclaimSet(set);
         var statusBadge;
-        if (!set.listed) statusBadge = '<span class="badge draft">Draft</span>';
+        if (nc) statusBadge = '<span class="badge noclaim">No-claim</span>';
+        else if (!set.listed)
+          statusBadge = '<span class="badge draft">Draft</span>';
         else if (set.stock <= 0)
           statusBadge = '<span class="badge out">Out of stock</span>';
         else statusBadge = '<span class="badge live">Listed</span>';
-        var stockTxt =
-          set.stock === null || set.stock === undefined
+        var stockTxt = nc
+          ? ncStockText(set.ncStock)
+          : set.stock === null || set.stock === undefined
             ? ""
             : set.stock +
               " in stock" +
@@ -2807,15 +3554,19 @@ Reliable Daily Rewards</textarea
           '<button class="btn" data-edit="' +
           attr(set.id) +
           '">Edit</button>' +
-          '<button class="btn" data-toggle="' +
-          attr(set.id) +
-          '">' +
-          (set.listed ? "Unlist" : "Publish") +
-          "</button>" +
+          // No Shop publish for a no-claim set, and no Account-listing copy:
+          // that copy's stock is pasted accounts, which is not this listing.
+          (nc
+            ? ""
+            : '<button class="btn" data-toggle="' +
+              attr(set.id) +
+              '">' +
+              (set.listed ? "Unlist" : "Publish") +
+              "</button>") +
           '<button class="btn" data-mp="' +
           attr(set.id) +
           '">Sell on…</button>' +
-          alCopyButton(set.id) +
+          (nc ? "" : alCopyButton(set.id)) +
           '<button class="btn danger" data-del="' +
           attr(set.id) +
           '">Delete</button>' +
@@ -2842,8 +3593,13 @@ Reliable Daily Rewards</textarea
       function lsMatches(set) {
         if (lsFilter === "listed" && !set.listed) return false;
         if (lsFilter === "draft" && set.listed) return false;
+        // "Draft" means the rows badged Draft; a no-claim set is never one
+        // (it has no Shop state) — the No-claim chip finds those.
+        if (lsFilter === "draft" && isNoclaimSet(set)) return false;
         if (lsOrigin === "mine" && isAuto(set)) return false;
         if (lsOrigin === "auto" && !isAuto(set)) return false;
+        // No-claim sets are hand-made (sourceType ""), so "Mine" keeps them.
+        if (lsOrigin === "noclaim" && !isNoclaimSet(set)) return false;
         var q = ($("lsSearch").value || "").toLowerCase();
         if (
           q &&
@@ -3017,6 +3773,22 @@ Reliable Daily Rewards</textarea
           if (i >= pending.length) return Promise.resolve();
           var set = pending[i++];
           set._stockLoading = true;
+          // A no-claim set's stock is the farm snapshot, never the archive's
+          // /fulfillment aggregation.
+          if (isNoclaimSet(set)) {
+            return api("/noclaim-stock/sets/" + set.id + "/stock")
+              .then(function (j) {
+                set.ncStock = ncStockOf(j);
+                set.stock = set.ncStock.free;
+                set._stockLoaded = true;
+                patchRow(set);
+              })
+              .catch(function () {})
+              .then(function () {
+                set._stockLoading = false;
+              })
+              .then(next);
+          }
           return api("/drops-archive/sets/" + set.id + "/fulfillment")
             .then(function (f) {
               set.stock = f.bundlesAvailable != null ? f.bundlesAvailable : 0;
@@ -3493,6 +4265,9 @@ Reliable Daily Rewards</textarea
       var mpOffer = null;
 
       function mpBuildDescription(set) {
+        // A no-claim set's note already IS the engine's listing copy (it came
+        // from /noclaim-stock/copy and lists the items) — no second list.
+        if (isNoclaimSet(set)) return String(set.note || "").trim();
         var lines = [set.note || "", "", "Includes:"];
         (set.items || []).forEach(function (i) {
           lines.push(
@@ -3506,6 +4281,9 @@ Reliable Daily Rewards</textarea
       }
 
       function renderPubTargets() {
+        // A no-claim set only sells where the no-claim layer can deliver
+        // (NC_MARKETS); the server refuses the rest, so they are not offered.
+        var nc = mpIsNoclaim();
         $("mpPubTargets").innerHTML = Object.keys(MP_LABELS)
           .map(function (mp) {
             // EpicNPC needs no API keys (it posts through your own browser
@@ -3513,16 +4291,21 @@ Reliable Daily Rewards</textarea
             var keyless = mp === "epicnpc";
             var ok =
               keyless || (mpStatus && mpStatus[mp] && mpStatus[mp].configured);
+            var ncOff = nc && NC_MARKETS.indexOf(mp) === -1;
             return (
               '<label class="mp-check" title="' +
-              (ok ? "" : "Set API keys first (Marketplace keys button)") +
+              (ncOff
+                ? "No-claim listings sell on Gameflip, GGSel, Plati, Eldorado, PlayerAuctions and G2G"
+                : ok
+                  ? ""
+                  : "Set API keys first (Marketplace keys button)") +
               '"><input type="checkbox" data-mptarget="' +
               attr(mp) +
               '"' +
-              (ok ? "" : " disabled") +
+              (ok && !ncOff ? "" : " disabled") +
               " />" +
               esc(MP_LABELS[mp]) +
-              (ok ? "" : " (no keys)") +
+              (ncOff ? " (not for no-claim)" : ok ? "" : " (no keys)") +
               "</label>"
             );
           })
@@ -3558,6 +4341,9 @@ Reliable Daily Rewards</textarea
                   (r.origin === "auto"
                     ? '<span class="badge auto">Auto</span>'
                     : '<span class="badge draft" title="Listed by you — automatic repricing never touches this">Mine · fixed price</span>') +
+                  (r.noclaimStock
+                    ? ' <span class="badge noclaim" title="Delivers no-claim farm accounts">No-claim</span>'
+                    : "") +
                   " — " +
                   (r.url
                     ? '<a href="' +
@@ -3623,12 +4409,91 @@ Reliable Daily Rewards</textarea
         $("mpZxOfferHint").style.display = mpOffer ? "" : "none";
       }
 
+      // No-claim sets (§10): every sale hands over a no-claim farm account, so
+      // delivery is automatic by construction — Gameflip's auto-deliver box is
+      // forced on and GGSel/Plati to "auto", all three locked. Like
+      // mpApplyOfferDefaults, what the controls held before is put back on the
+      // next open that is not a no-claim set, so the other tabs are untouched.
+      var mpNcSaved = null;
+      function mpIsNoclaim() {
+        return !mpOffer && isNoclaimSet(mpSet);
+      }
+      function mpUndoNoclaimDefaults() {
+        if (!mpNcSaved) return;
+        $("mpGfAuto").checked = mpNcSaved.gfAuto;
+        $("mpGgDelivery").value = mpNcSaved.gg;
+        $("mpDsDelivery").value = mpNcSaved.ds;
+        $("mpGfAuto").disabled = false;
+        $("mpGgDelivery").disabled = false;
+        $("mpDsDelivery").disabled = false;
+        mpNcSaved = null;
+      }
+      function mpApplyNoclaimDefaults() {
+        var nc = mpIsNoclaim();
+        if (nc) {
+          mpNcSaved = {
+            gfAuto: $("mpGfAuto").checked,
+            gg: $("mpGgDelivery").value,
+            ds: $("mpDsDelivery").value,
+          };
+          $("mpGfAuto").checked = true;
+          $("mpGgDelivery").value = "auto";
+          $("mpDsDelivery").value = "auto";
+          $("mpGfAuto").disabled = true;
+          $("mpGgDelivery").disabled = true;
+          $("mpDsDelivery").disabled = true;
+          // Panels of markets that cannot be ticked for this set.
+          $("mpZxBox").style.display = "none";
+          $("mpEpicBox").style.display = "none";
+        }
+        $("mpNoclaimNote").style.display = nc ? "" : "none";
+        $("mpNoclaimNote").classList.remove("bad");
+        if (nc) mpLoadNoclaimNote(mpSet);
+      }
+      // "No-claim stock: N free account(s) hold this bundle" — read from the
+      // snapshot each open and after a publish/delist in this modal.
+      function mpLoadNoclaimNote(set) {
+        var box = $("mpNoclaimNote");
+        box.textContent = "No-claim stock: checking…";
+        api("/noclaim-stock/sets/" + encodeURIComponent(set.id) + "/stock")
+          .then(function (j) {
+            if (mpSet !== set) return;
+            var st = ncStockOf(j);
+            box.textContent =
+              "No-claim stock: " +
+              st.free +
+              " free account(s) hold this bundle — each sale hands over one of them." +
+              (st.stale > 0
+                ? " " + st.stale + " more are unverified (Refresh stock re-reads them)."
+                : "");
+            box.classList.toggle("bad", !st.free);
+            // Keep the row behind the modal in step with what it just said.
+            if (listingsCache.indexOf(set) !== -1) {
+              set.ncStock = st;
+              set.stock = st.free;
+              set._stockLoaded = true;
+              patchRow(set);
+            }
+          })
+          .catch(function (e) {
+            if (mpSet !== set) return;
+            box.textContent =
+              "No-claim stock: could not be read — " + (e.message || "error");
+            box.classList.add("bad");
+          });
+      }
+
       function openPublishModal(set, offer) {
         mpSet = set;
         // Second argument only ever comes from the Account listings tab; every
         // existing call site passes one argument and lands on null.
         mpOffer = offer || null;
+        // Order matters: the offer defaults remember the GGSel select's value,
+        // so a no-claim lock must be lifted before they read it and applied
+        // after they have run.
+        mpUndoNoclaimDefaults();
         mpApplyOfferDefaults();
+        mpApplyNoclaimDefaults();
         $("mpPubTitle").innerText = 'Sell "' + set.name + '" on marketplaces';
         $("mpPubName").value = set.name || "";
         // The "Includes:" list and the price-term game come from the full item
@@ -4785,12 +5650,16 @@ Reliable Daily Rewards</textarea
                     ? "published" +
                       // An account listing's note says how many accounts
                       // left the shelf — and on ZeusX, any held for a check.
-                      (mpOffer && res[mp].note ? " (" + res[mp].note + ")" : "")
+                      // A no-claim one says how many farm accounts back it.
+                      ((mpOffer || mpIsNoclaim()) && res[mp].note
+                        ? " (" + res[mp].note + ")"
+                        : "")
                     : res[mp].message),
               );
             });
             toast(msgs.join(" · "));
             loadExtListings(mpSet.id);
+            if (mpIsNoclaim()) mpLoadNoclaimNote(mpSet);
             // Stock left the shelf and chips changed — show it on the tab.
             if (mpOffer) alLoad();
           })
@@ -4855,14 +5724,22 @@ Reliable Daily Rewards</textarea
             .then(function (j) {
               // An account listing's delist says what happened to its
               // account(s) — back on the shelf, sold, or held.
+              var ncBack = j.noclaim ? Number(j.noclaim.released) || 0 : 0;
+              var ncSold = j.noclaim ? Number(j.noclaim.sold) || 0 : 0;
               toast(
                 j.success
                   ? mpOffer && j.message
                     ? "Delisted — " + j.message
-                    : "Delisted"
+                    : ncBack || ncSold
+                      ? "Delisted — " +
+                        ncBack +
+                        " account(s) back in the no-claim farm" +
+                        (ncSold ? ", " + ncSold + " sold" : "")
+                      : "Delisted"
                   : j.message || "Delist failed",
               );
               if (mpSet) loadExtListings(mpSet.id);
+              if (mpIsNoclaim()) mpLoadNoclaimNote(mpSet);
             })
             .catch(function (err) {
               toast(err.message || "Delist failed");
@@ -6987,10 +7864,13 @@ Reliable Daily Rewards</textarea
 
       // ---- init ----
       if (alParams.get("tab")) switchTab(alParams.get("tab"));
+      // The remembered picker source decides what loadGames/loadCatalog read.
+      renderPickSource();
       resetForm();
       loadMe();
       loadGames();
       loadCatalog("");
+      if (pickSource === "noclaim") ncLoadSummary();
       loadListings();
       cLoadGames();
       cLoadCustomListings();

@@ -388,10 +388,32 @@ const ACCOUNT_LISTING_DEFAULTS = {
   lowStockWarnAt: 2, // Telegram warning when an offer drops to this
 };
 
+// ---------------------------------------------------------------------------
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §1e)
+// ---------------------------------------------------------------------------
+// TOP LEVEL, deliberately NOT inside autoFarm, for the same reason as
+// accountListings above: these switches gate the owner's hand-made no-claim
+// listings and a paid buyer's delivery, so a setAutoFarm write from the
+// Auto-farm tab must never be able to flip them as a side effect — even though
+// the stock is the no-claim farm. Read through getNoclaimShopSettings().
+const NOCLAIM_SHOP_DEFAULTS = {
+  enabled: true, // routes, UI, publishing, the lifecycle pass
+  autoDeliver: true, // kill switch over every no-claim claim
+  sweep: true, // background holding sweep
+  sweepPerTick: 30, // live inventory reads per sweep tick (1..200)
+  sweepEveryMin: 10, // (2..240)
+  maxAgeHours: 8, // snapshot older than this is "stale" (1..72)
+  refreshBudget: 120, // reads for an on-demand refresh (1..400)
+  topUp: true, // refill GGSel/Plati rows back to their quantity
+  healthPerPass: 20, // live re-checks of committed vault units per pass (0..100)
+  passEveryMin: 10, // lifecycle pass interval (2..120)
+};
+
 const DEFAULTS = {
   require2fa: false,
   autoFarm: AUTO_FARM_DEFAULTS,
   accountListings: ACCOUNT_LISTING_DEFAULTS,
+  noclaimShop: NOCLAIM_SHOP_DEFAULTS,
 };
 
 function loadSettings() {
@@ -827,6 +849,44 @@ function getAccountListingSettings() {
   };
 }
 
+// No-claim Shop switches (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §1e), read
+// fresh each call exactly the getAccountListingSettings way, for the same
+// reasons: one live settings edit stops every no-claim claim without a
+// restart, and the merge is load-bearing — loadSettings merges DEFAULTS only
+// SHALLOWLY, so a partial `noclaimShop` block would read every unwritten key
+// back as undefined, and an undefined `enabled` / `autoDeliver` reads as OFF on
+// a paid buyer's claim-at-sale delivery. Defaults go under the live values.
+//
+// Every number is clamped into the range the contract names, and a blank, null
+// or non-numeric value degrades to the default (the catalogMinutes rule above —
+// `num` alone would read a null as 0, because Number(null) is 0). These are
+// read budgets and timer intervals: a hand-typed 0 must not become a sweep that
+// reads nothing or a timer that fires continuously, and a hand-typed string
+// must not poison the gate.
+function noclaimShopInt(v, d, lo, hi) {
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.floor(n))) : d;
+}
+function getNoclaimShopSettings() {
+  const s = loadSettings();
+  const cur =
+    s.noclaimShop && typeof s.noclaimShop === "object" ? s.noclaimShop : {};
+  const D = NOCLAIM_SHOP_DEFAULTS;
+  return {
+    enabled: cur.enabled == null ? D.enabled : !!cur.enabled,
+    autoDeliver: cur.autoDeliver == null ? D.autoDeliver : !!cur.autoDeliver,
+    sweep: cur.sweep == null ? D.sweep : !!cur.sweep,
+    sweepPerTick: noclaimShopInt(cur.sweepPerTick, D.sweepPerTick, 1, 200),
+    sweepEveryMin: noclaimShopInt(cur.sweepEveryMin, D.sweepEveryMin, 2, 240),
+    maxAgeHours: noclaimShopInt(cur.maxAgeHours, D.maxAgeHours, 1, 72),
+    refreshBudget: noclaimShopInt(cur.refreshBudget, D.refreshBudget, 1, 400),
+    topUp: cur.topUp == null ? D.topUp : !!cur.topUp,
+    healthPerPass: noclaimShopInt(cur.healthPerPass, D.healthPerPass, 0, 100),
+    passEveryMin: noclaimShopInt(cur.passEveryMin, D.passEveryMin, 2, 120),
+  };
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -852,7 +912,9 @@ module.exports = {
   getCatalogConfig,
   setCatalogConfig,
   getAccountListingSettings,
+  getNoclaimShopSettings,
   UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
   ACCOUNT_LISTING_DEFAULTS,
+  NOCLAIM_SHOP_DEFAULTS,
 };

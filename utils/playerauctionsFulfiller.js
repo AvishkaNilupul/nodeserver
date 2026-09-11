@@ -490,6 +490,20 @@ async function sharersOfUnclaimedGame(listing) {
 // and take a healthy offer off sale. Deleted rather than left unused: an
 // unwired copy of a stock rule is the next thing to drift back in.
 async function stockFor(listing, claim, supplied = suppliedDeps) {
+  // A no-claim Shop listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b) is
+  // asked FIRST: it carries `set` too, and the archive branch below would count
+  // CLAIMED Drop Archive stock for it. noclaimStock already splits the shelf
+  // across every claim-at-sale row of the set, so this is the row's share and
+  // is not divided again here. A failed read THROWS, and a non-number is turned
+  // into one: syncUnclaimedStock skips the row on a throw and syncStock pushes
+  // nothing — a count we could not read is never reported as 0.
+  if (listing && listing.noclaimStock) {
+    const n = await require("./noclaimStock").stockForListing(listing);
+    if (typeof n !== "number" || !Number.isFinite(n)) {
+      throw new Error("no-claim stock count unreadable");
+    }
+    return n;
+  }
   // An account listing's stock is the offer's ledger. NOT its units: on a
   // supplied row every unit records a hand-over that already happened, so
   // counting them would report 0 the instant the first order lands and
@@ -580,6 +594,9 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
       // accountOffer is an ObjectId — casting "" throws a CastError that would
       // take the whole sweep down.
       { accountOffer: { $ne: null } },
+      // No-claim Shop listings (contract §8b): claimed at sale out of the
+      // no-claim farm, whose stock moves with no order placed here.
+      { noclaimStock: true },
     ],
   });
   const changes = [];
@@ -615,6 +632,11 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
             : isSuppliedRow(row)
               ? "hidden: this account listing has no accounts left — add more"
               : "hidden: no account still holds this set unclaimed in the Drop Archive";
+          // A no-claim row also carries `set`, so the reason above would read
+          // as a Drop Archive shortage and send the owner looking there.
+          if (row.noclaimStock) {
+            row.lastError = "hidden: no free no-claim account holds this bundle";
+          }
           await row.save();
         }
       }
@@ -857,8 +879,106 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
       onMessaged: () => markUnitsMessaged(row, orderId),
     });
     await markUnitsDelivered(row, orderId);
+    // A no-claim Shop order finished HERE still owes its sale stamp (contract
+    // §8b): the no-claim branch below reserved these units and then failed
+    // part-way, so its own markSold never ran.
+    if (row.noclaimStock) {
+      await markNoclaimSold(mine.map((u) => u.contentId), {
+        order,
+        orderId,
+        count: mine.length,
+        listingPrice: row.price,
+      });
+    }
     await syncStock(row);
     return { orderId, delivered: creds.length, messages: sent, resumed: true };
+  }
+
+  // --- No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b) ---
+  // The owner's hand-made listing over a no-claim DropSet: the accounts are
+  // claimed out of the no-claim farm when the order lands, through
+  // utils/noclaimStock — the ONE claim layer, which also refuses any account on
+  // another listing. Everything after the claim is the unclaimedGame branch
+  // below, step for step: reserve onto the row BEFORE the first message (the
+  // resume anchor), hand over, stamp delivered, re-sync the stock.
+  //
+  // BELOW the shared RESUME block, exactly where the unclaimedGame branch sits:
+  // a no-claim unit's contentId is its UnclaimedAccount ledger id, which
+  // credentialsForUnits already resolves, so a retry of a half-finished
+  // hand-over re-sends the SAME reserved accounts and never reaches this claim.
+  // And ABOVE everything that reads `set`: the row carries the no-claim set,
+  // and the autoClaimSet path would ship a CLAIMED Drop Archive account.
+  // Required lazily so a row without the flag never loads the no-claim layer.
+  if (row.noclaimStock) {
+    const ncs = require("./noclaimStock");
+    if (!ncs.deliveryEnabled()) {
+      return { orderId, skipped: "no-claim listing auto-delivery is off" };
+    }
+    const DropSet = require("../models/DropSet");
+    const set = await DropSet.findById(row.set).lean();
+    // mode "sold" + this order's id also resumes inside the claim layer, for a
+    // claim whose reserveOnListing never landed. `dryRun` must reach the
+    // claim, or a dry run would sell the ledger for an order it never sends.
+    const picked = set
+      ? await ncs.claimForSet(set, qty, {
+          market: "playerauctions",
+          listingId: String(row._id),
+          orderId,
+          mode: "sold",
+          dryRun,
+        })
+      : [];
+    if (picked.length < qty) {
+      // Hold the order rather than ship short, and release nothing: what was
+      // taken stays sold to THIS order and the next tick resumes it.
+      const advertised =
+        (row.requiredDrops || []).length || ((set && set.items) || []).length;
+      return {
+        orderId,
+        error:
+          "only " + picked.length + " of " + qty + " account(s) could be claimed" +
+          " — no free no-claim account holds all " + advertised +
+          " advertised item(s)" +
+          (set ? "" : " (the listing's no-claim set is missing)"),
+      };
+    }
+    if (dryRun) {
+      const msgs = copy.deliveryMessages(picked, { kind: "bundle" });
+      return {
+        orderId,
+        dryRun: true,
+        source: "noclaim-set:" + String(row.set),
+        wouldSend:
+          qty + " account(s) [" + picked.map((p) => p.login).join(", ") + "] in " +
+          msgs.length + " message(s)",
+        preview: msgs.join("\n---\n"),
+      };
+    }
+    await reserveOnListing(row, orderId, picked);
+    const sent = await handOver({
+      orderId,
+      accounts: picked,
+      kind: "bundle",
+      offerTitle,
+      itemCount: paItemCount(row),
+      onMessaged: () => markUnitsMessaged(row, orderId),
+    });
+    await markUnitsDelivered(row, orderId);
+    // Before the re-sync on purpose: a stock read that throws must not cost
+    // the sale its stamp.
+    await markNoclaimSold(picked.map((p) => p.ledgerId), {
+      order,
+      orderId,
+      count: qty,
+      listingPrice: row.price,
+    });
+    await syncStock(row);
+    return {
+      orderId,
+      delivered: qty,
+      messages: sent,
+      source: "noclaim-set:" + String(row.set),
+    };
   }
 
   // No-claim-farm-backed offers resolve stock at delivery time.
@@ -1004,6 +1124,33 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
   await markUnitsDelivered(row, orderId);
   await syncStock(row);
   return { orderId, delivered: qty, messages: sent };
+}
+
+// Stamp a no-claim Shop sale on its ledger rows once the buyer has the accounts
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b), at what ONE unit sold for: the
+// order's paid total — the same money paUnits reads — over the units it
+// bought, else the listing's own price. Bookkeeping, not delivery: the ledger
+// has been "sold" to this order since the claim, so a failure is logged and
+// never turns an order the buyer already has into a failed one.
+async function markNoclaimSold(ledgerIds, { order, orderId, count, listingPrice }) {
+  const ids = (ledgerIds || []).map((id) => String(id || "")).filter(Boolean);
+  if (!ids.length) return 0;
+  const paid = money(
+    order && order.detail && order.detail.orderInfo && order.detail.orderInfo.price,
+  );
+  const n = Math.max(1, parseInt(count, 10) || 1);
+  const priceUsd = paid > 0 ? Math.round((paid / n) * 100) / 100 : money(listingPrice);
+  try {
+    return await require("./noclaimStock").markSold(ids, {
+      market: "playerauctions",
+      priceUsd,
+      orderId,
+      reason: "playerauctions order " + orderId,
+    });
+  } catch (e) {
+    console.error("playerauctions no-claim markSold " + orderId + ":", e.message);
+    return 0;
+  }
 }
 
 // The orders list reports quantity as a string like "26 Other Skins", which is
@@ -1201,7 +1348,13 @@ async function alertUnfulfillable(order, why) {
       // the accounts are on the shelf and one toggle ships them, so the
       // standing postscript would send the owner hunting for stock that is not
       // missing. The guarantee is running either way.
-      (SWITCHED_OFF_SKIPS.test(String(why || ""))
+      // A no-claim listing's switch is a different toggle from the account
+      // listings' one; naming the wrong one sends the owner to the wrong page.
+      (/no-claim/i.test(String(why || "")) && SWITCHED_OFF_SKIPS.test(String(why || ""))
+        ? "The no-claim stock is there. Turn no-claim listing delivery back on " +
+          "(settings: noclaimShop.autoDeliver) and the next tick ships it — the " +
+          "delivery guarantee is running."
+        : SWITCHED_OFF_SKIPS.test(String(why || ""))
         ? "The accounts are on the shelf. Turn account-listing delivery back " +
           "on (Settings, or this listing's own toggle) and the next tick ships " +
           "it — the delivery guarantee is running."
