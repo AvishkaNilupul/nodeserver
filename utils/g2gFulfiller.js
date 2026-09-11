@@ -39,6 +39,7 @@ const G2G_CLAIM_TAG = "g2g";
 
 const DELIVER_TICK_MS = 60 * 1000;
 const STOCK_TICK_MS = 15 * 60 * 1000;
+const CONFIRM_SWEEP_MS = 5 * 60 * 1000;
 
 // Ceiling on a dry-run stock count, so a huge ledger never walks the whole
 // collection just to size one offer.
@@ -54,6 +55,10 @@ const alerted = new Set();
 // claim the paging slot above — an order refused during a rehearsal has to page
 // for real the moment dry run goes off.
 const shouted = new Set();
+
+// Orders we have already asked the owner to confirm on G2G after a verified
+// chat send (see alertSentAwaitingConfirm).
+const confirmAsked = new Set();
 
 function notify(text) {
   return require("./telegram")
@@ -146,6 +151,38 @@ async function markSuppliedDelivered(listing, orderId) {
     // The hand-over stands; the ledger row is already claimed to this order, so
     // nothing can re-sell it in the meantime.
   }
+}
+
+// Tell G2G how many units shipped, once the credential is verifiably in the
+// buyer's chat (every caller runs this only after messagedAt is stamped).
+//
+// delivered_qty still answers HTTP 500 to this client, and the owner confirms
+// those orders by hand on the G2G order page. So a refused count is NOT a
+// failed delivery and must never read as one: thrown as an error, it paged "the
+// bot cannot ship it — needs delivering by hand" about a buyer who already had
+// the account, which invites a second account going out.
+async function confirmOnG2g(listing, orderId, n, source) {
+  try {
+    await mp.g2gSetDeliveredQty(orderId, n);
+  } catch (e) {
+    return {
+      orderId,
+      sent: n,
+      awaitingConfirm: true,
+      source,
+      detail:
+        "the account IS in the buyer's chat, but G2G refused the delivered " +
+        "count (" + e.message + ")",
+    };
+  }
+  const now = new Date();
+  for (const u of unitsForOrder(listing, orderId)) {
+    if (!u.deliveredAt) u.deliveredAt = now;
+  }
+  listing.markModified("units");
+  await listing.save();
+  await markSuppliedDelivered(listing, orderId);
+  return { orderId, delivered: n, source };
 }
 
 // Compose the message for an order. A SendBird channel is shared across all of
@@ -317,13 +354,7 @@ async function deliverOrder(order, { dryRun }) {
       if (dryRun) {
         return { orderId, dryRun: true, wouldSend: "confirm only (already sent)" };
       }
-      await mp.g2gSetDeliveredQty(orderId, mine.length);
-      const now = new Date();
-      for (const u of mine) u.deliveredAt = now;
-      listing.markModified("units");
-      await listing.save();
-      await markSuppliedDelivered(listing, orderId);
-      return { orderId, delivered: mine.length, source: "confirm-only" };
+      return confirmOnG2g(listing, orderId, mine.length, "confirm-only");
     }
     // Reserved, but nothing has reached the buyer. The send lives further down,
     // in the stock-picking path — which this early return skips — so an order
@@ -378,13 +409,7 @@ async function deliverOrder(order, { dryRun }) {
         for (const u of mine) u.messagedAt = sentAt;
         listing.markModified("units");
         await listing.save();
-        await mp.g2gSetDeliveredQty(orderId, mine.length);
-        const doneAt = new Date();
-        for (const u of mine) u.deliveredAt = doneAt;
-        listing.markModified("units");
-        await listing.save();
-        await markSuppliedDelivered(listing, orderId);
-        return { orderId, delivered: mine.length, source: "retry-send" };
+        return await confirmOnG2g(listing, orderId, mine.length, "retry-send");
       } catch (e) {
         // Units stay reserved to THIS order, so the next retry goes to the same
         // buyer rather than spending fresh stock. A moderated-away message is
@@ -570,14 +595,7 @@ async function deliverOrder(order, { dryRun }) {
   listing.markModified("units");
   await listing.save();
 
-  await mp.g2gSetDeliveredQty(orderId, qty);
-  for (const u of listing.units || []) {
-    if (u.orderId === orderId && !u.deliveredAt) u.deliveredAt = stamp;
-  }
-  listing.markModified("units");
-  await listing.save();
-  await markSuppliedDelivered(listing, orderId);
-  return { orderId, delivered: qty, source: stock.source };
+  return confirmOnG2g(listing, orderId, qty, stock.source);
 }
 
 // The shape every caller of credentialsFor consumes: the four fields pickStock
@@ -792,7 +810,8 @@ async function deliverPendingOrders() {
     // one. Order 1788892037419NTQU (Rocket League, $2.18) sat reserved-but-
     // unsent with no error, no log line and no alert; the fulfiller re-parked
     // it every 60 seconds, perfectly happily, while the buyer waited.
-    const needsAHuman = r.error || alertsOperator(r.skipped) || r.pending;
+    const needsAHuman =
+      r.error || alertsOperator(r.skipped) || r.pending || r.awaitingConfirm;
     const why =
       r.error ||
       r.skipped ||
@@ -808,13 +827,21 @@ async function deliverPendingOrders() {
       const shoutId = String(order.orderItemId || "");
       if (shoutId && !shouted.has(shoutId)) {
         shouted.add(shoutId);
-        console.error("g2g deliver " + shoutId + " NOT delivered: " + why);
+        console.error(
+          "g2g deliver " + shoutId +
+            (r.awaitingConfirm ? " SENT in chat, confirm it on G2G: " : " NOT delivered: ") +
+            why,
+        );
       }
     }
     if (needsAHuman && !dryRun) {
-      await alertUnshippable(order, why, {
-        pending: !r.error && !r.skipped && !!r.pending,
-      });
+      if (r.awaitingConfirm && !r.error) {
+        await alertSentAwaitingConfirm(order, why);
+      } else {
+        await alertUnshippable(order, why, {
+          pending: !r.error && !r.skipped && !!r.pending,
+        });
+      }
     }
   }
   return { checked: orders.length, results };
@@ -866,6 +893,28 @@ async function alertUnshippable(order, why, { pending = false } = {}) {
       order.currency + " " + order.amount + "\n\n" +
       "Reason: " + why + "\n\n" +
       tail,
+  );
+}
+
+// The account reached the buyer's chat and only G2G's delivered count is
+// missing — the owner marks those delivered by hand. Deduped on its own set, not
+// `alerted`: an order that failed first and was sent later must still get THIS
+// page, because it is the one saying the buyer is served and nothing more
+// should go out. Under `alerted` the earlier "cannot ship" page was the last
+// word, which invites hand-delivering a second account.
+async function alertSentAwaitingConfirm(order, why) {
+  const id = String(order.orderItemId || "");
+  if (!id || confirmAsked.has(id)) return;
+  confirmAsked.add(id);
+  await notify(
+    "G2G order " + id + ": the account was SENT to the buyer in chat " +
+      "(verified in the channel).\n\n" +
+      String(order.title || "").slice(0, 120) + "\n" +
+      "Buyer id: " + order.buyerId + "   " +
+      order.currency + " " + order.amount + "\n\n" +
+      "Mark it Delivered on the G2G order page — G2G would not take the " +
+      "automatic count. Do NOT send another account; this buyer has theirs.\n\n" +
+      "Detail: " + why,
   );
 }
 
@@ -997,6 +1046,16 @@ function start() {
   // unconditionally is a no-op until the operator flips them on.
   loop(deliverPendingOrders, DELIVER_TICK_MS, 75 * 1000, "fulfiller");
   loop(syncStock, STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
+  loop(sweepConfirmedFarmOrders, CONFIRM_SWEEP_MS, 4 * 60 * 1000, "farm confirm sweep");
+}
+
+// Rent-farm orders the owner confirmed by hand on G2G leave the pending queue,
+// so this is the only thing that closes their rows (see
+// g2gFarmService.closeConfirmedFarmOrders).
+async function sweepConfirmedFarmOrders() {
+  const af = getAutoFarm() || {};
+  if (!af.g2gAutoDeliver) return { skipped: "g2gAutoDeliver is off" };
+  return farmService.closeConfirmedFarmOrders();
 }
 
 module.exports = {
@@ -1011,6 +1070,7 @@ module.exports = {
   deliverOrder,
   deliverPendingOrders,
   alertsOperator,
+  confirmOnG2g,
   realStockFor,
   syncStock,
 };

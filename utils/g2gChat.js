@@ -68,6 +68,103 @@ async function chatSessionToken() {
   return { sellerId, token, expiresAt: tokens[0].expires_at || 0 };
 }
 
+// Which of our channels is the private DM with this buyer? Returns null when
+// there is none yet.
+//
+// Only a 2-member `dm` channel whose members are us and the buyer ever
+// qualifies. Our seller account is also a member of G2G's seller SUPERGROUPS
+// (`g2g_sg_seller_game_items-2`, ~10,000 members), and a "channels that include
+// the buyer" query is not guaranteed to leave those out — taking `channels[0]`
+// blindly could post a credential to ten thousand strangers.
+function dmUrls(sellerId, buyerId) {
+  const me = String(sellerId);
+  const them = String(buyerId);
+  return ["g2g_dm_" + me + "_" + them, "g2g_dm_" + them + "_" + me];
+}
+
+function pickDmChannel(channels, sellerId, buyerId) {
+  const me = String(sellerId || "");
+  const them = String(buyerId || "");
+  if (!me || !them) return null;
+  const canonical = dmUrls(me, them);
+  const ok = (channels || []).filter((c) => {
+    if (!c || c.isSuper || c.isBroadcast) return false;
+    if (String(c.customType || "") !== "dm") return false;
+    if (Number(c.memberCount) !== 2) return false;
+    const ids = Array.isArray(c.members)
+      ? c.members.map((m) => String((m && m.userId) || "")).filter(Boolean)
+      : [];
+    // No member list to check: trust only G2G's own DM url shape.
+    if (!ids.length) return canonical.includes(String(c.url || ""));
+    return ids.includes(me) && ids.includes(them);
+  });
+  return ok.find((c) => canonical.includes(String(c.url || ""))) || ok[0] || null;
+}
+
+// Send and WAIT until SendBird has the message.
+//
+// `sendUserMessage` does not return a promise. In @sendbird/chat v4 it returns
+// a MessageRequestHandler (onPending / onFailed / onSucceeded only), so
+// `await channel.sendUserMessage(...)` came straight back with the handler
+// before anything left the process — and the `finally` below then disconnected
+// with the send still in flight. That, not chat moderation, is the likeliest
+// reading of order 1788892037419NTQU's "accepted by the SDK, never in the
+// channel": the owner has since confirmed with G2G support that chat hand-over
+// is allowed for Twitch Drops.
+const SEND_ACK_MS = 30000;
+
+function sendAndWait(channel, params) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          "G2G chat: SendBird did not acknowledge the message within " +
+            SEND_ACK_MS / 1000 + "s",
+        ),
+      );
+    }, SEND_ACK_MS);
+    try {
+      channel
+        .sendUserMessage(params)
+        .onSucceeded((m) => {
+          clearTimeout(timer);
+          resolve(m);
+        })
+        .onFailed((err) => {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String((err && err.message) || err)));
+        });
+    } catch (e) {
+      clearTimeout(timer);
+      reject(e);
+    }
+  });
+}
+
+// Is OUR exact message already in the channel? A retry must not put the
+// credential in front of the buyer twice: a send whose read-back failed may
+// have landed after all, and both callers retry a "dropped" send on their next
+// tick.
+function ourMessageIn(messages, sellerId, body) {
+  return (messages || []).some(
+    (m) =>
+      String((m && m.sender && m.sender.userId) || "") === String(sellerId) &&
+      String((m && m.message) || "") === body,
+  );
+}
+
+async function alreadyInChannel(channel, sellerId, body) {
+  const recent = await channel
+    .createPreviousMessageListQuery({ limit: 30, reverse: true })
+    .load();
+  return ourMessageIn(recent, sellerId, body);
+}
+
+// Messages SendBird acknowledged but that never showed up on read-back. Not
+// sent again from this process: re-sending a credential into the same channel
+// every 60s is worse than one human look. A restart allows one more try.
+const droppedSends = new Set();
+
 // Is the SDK actually installed? Kept as a function rather than a constant so
 // installing the dependency takes effect without a restart of this module's
 // require cache being reasoned about.
@@ -127,20 +224,53 @@ async function sendToBuyer(buyerId, text, { dryRun } = {}) {
   });
   try {
     await sb.connect(sellerId, token);
+    // `includeEmpty` is load-bearing. SendBird's list query leaves out channels
+    // with no messages by default, and a DM that exists but has never been
+    // written in is exactly what a fresh order has. Order 1789095953271SGMG
+    // (Sea of Thieves, $2.36) sat paid with `g2g_dm_5700688_1000423179` right
+    // there, empty, while this reported "no existing conversation with buyer".
+    // G2G's own chat client sets includeEmpty and filters by customType "dm" too.
     const query = sb.groupChannel.createMyGroupChannelListQuery({
+      includeEmpty: true,
+      customTypesFilter: ["dm"],
       userIdsFilter: { userIds: [buyer], includeMode: true, queryType: "OR" },
       limit: 20,
     });
-    const channels = await query.next();
-    const channel = (channels || [])[0];
+    let channel = pickDmChannel(await query.next(), sellerId, buyer);
     if (!channel) {
-      throw new Error(
-        "G2G chat: no existing conversation with buyer " + buyer +
-          " — G2G opens the channel when the buyer first messages, so this " +
-          "order needs a manual hand-over",
-      );
+      // No DM yet: open it the way G2G's own client does when the seller clicks
+      // Chat on an order (see marketplaces.g2gOpenDmChannel), then re-check
+      // that what came back really is a private 2-member DM before sending.
+      const url = await mp.g2gOpenDmChannel(buyer);
+      channel = pickDmChannel([await sb.groupChannel.getChannel(url)], sellerId, buyer);
+      if (!channel) {
+        throw new Error(
+          "G2G chat: the channel G2G opened (" + url + ") is not a private DM " +
+            "with buyer " + buyer + " — refusing to send a credential into it",
+        );
+      }
     }
-    const sent = await channel.sendUserMessage({ message: body });
+    if (await alreadyInChannel(channel, sellerId, body).catch(() => false)) {
+      return {
+        buyerId: buyer,
+        channelUrl: channel.url,
+        messageId: null,
+        confirmed: true,
+        alreadySent: true,
+        chars: body.length,
+      };
+    }
+    const dropKey = channel.url + "\n" + body;
+    if (droppedSends.has(dropKey)) {
+      const e = new Error(
+        "G2G chat: this exact message was acknowledged earlier but never " +
+          "appeared in the channel — not sending it again; hand this order " +
+          "over through the G2G order page.",
+      );
+      e.__g2gChatDropped = true;
+      throw e;
+    }
+    const sent = await sendAndWait(channel, { message: body });
 
     // sendUserMessage RESOLVING IS NOT PROOF THE BUYER GOT IT.
     //
@@ -173,20 +303,12 @@ async function sendToBuyer(buyerId, text, { dryRun } = {}) {
       try {
         const fresh = await chatSessionToken();
         await verifier.connect(fresh.sellerId, fresh.token);
-        const vq = verifier.groupChannel.createMyGroupChannelListQuery({
-          userIdsFilter: { userIds: [buyer], includeMode: true, queryType: "OR" },
-          limit: 5,
-        });
-        const vchans = await vq.next();
-        const vchannel = (vchans || []).find((c) => c.url === channel.url) || (vchans || [])[0];
+        // Fetch the exact channel we sent into, never "any channel with the
+        // buyer in it".
+        const vchannel = await verifier.groupChannel.getChannel(channel.url);
         if (vchannel) {
           const check = vchannel.createPreviousMessageListQuery({ limit: 10, reverse: true });
-          const recent = await check.load();
-          confirmed = (recent || []).some(
-            (m) =>
-              String((m.sender && m.sender.userId) || "") === String(sellerId) &&
-              String(m.message || "") === body,
-          );
+          confirmed = ourMessageIn(await check.load(), sellerId, body);
         }
       } finally {
         try {
@@ -201,11 +323,11 @@ async function sendToBuyer(buyerId, text, { dryRun } = {}) {
       confirmed = false;
     }
     if (!confirmed) {
+      droppedSends.add(dropKey);
       const e = new Error(
-        "G2G chat: the message was accepted by the SDK but is NOT in the " +
-          "channel on read-back — G2G moderates credential-shaped messages in " +
-          "chat. The buyer has NOT received it; hand this order over through " +
-          "the G2G order page.",
+        "G2G chat: SendBird acknowledged the message but it is NOT in the " +
+          "channel on read-back. Treat the buyer as NOT having it; hand this " +
+          "order over through the G2G order page.",
       );
       e.__g2gChatDropped = true;
       throw e;
@@ -234,5 +356,8 @@ module.exports = {
   // "Can we actually send?" is the SDK *and* a WebSocket to run it over. The
   // SDK alone was true on this host while every send failed.
   canSend: () => sdkAvailable() && ensureWebSocket(),
+  pickDmChannel,
+  sendAndWait,
   sendToBuyer,
+  __test: { ourMessageIn },
 };

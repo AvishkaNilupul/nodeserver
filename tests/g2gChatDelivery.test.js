@@ -91,7 +91,7 @@ test("REGRESSION: a reserved-but-unsent order retries the send", () => {
   );
   assert.match(branch, /chat\.canSend\(\)/, "must check whether chat can send now");
   assert.match(branch, /chat\.sendToBuyer\(/, "must actually retry the send");
-  assert.match(branch, /source: "retry-send"/);
+  assert.match(branch, /confirmOnG2g\(listing, orderId, mine\.length, "retry-send"\)/);
 });
 
 test("the retry re-reads credentials rather than trusting the reserved copy", () => {
