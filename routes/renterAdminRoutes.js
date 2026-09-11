@@ -43,6 +43,7 @@ const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
 const { decrypt, encrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
+const poolStock = require("../utils/poolStock");
 const {
   listStacks,
   requireStack,
@@ -2392,6 +2393,8 @@ async function gatherPoolEligibility() {
       hasPassword: !!c.hasPassword,
       passwordDecryptable,
       lastCheckStatus: c.lastCheckStatus,
+      claimedDrops: Number(c.dropCount) || 0,
+      unclaimedDrops: Number(c.unclaimedDropCount) || 0,
       deployedOnBot: deployedTokens.has(tok),
       hasSoldOrReservedDrops: soldTokens.has(tok),
       sellable: sellableTokens.has(tok),
@@ -2400,7 +2403,16 @@ async function gatherPoolEligibility() {
     };
     return { doc: c, facts, eligibility: poolAccountEligibility(facts) };
   });
-  return { candidates: out, eligible: out.filter((x) => x.eligibility.eligible).map((x) => x.doc) };
+  // Freshest-verified first, the same order autoFarmer.claimPoolAccounts uses:
+  // the most recent look at the inventory is the most trustworthy, and the
+  // natural order put the oldest imports — the re-imported web-token farm
+  // accounts — at the front of every rent-farm order.
+  const checkedAt = (d) => (d.lastCheckAt ? new Date(d.lastCheckAt).getTime() : 0);
+  const eligible = out
+    .filter((x) => x.eligibility.eligible)
+    .map((x) => x.doc)
+    .sort((a, b) => checkedAt(b) - checkedAt(a));
+  return { candidates: out, eligible };
 }
 
 // Move ONE pool account into a renter. Assumes it was found eligible; still
@@ -2416,6 +2428,19 @@ async function movePoolAccountToRenter(renter, host, doc, opts = {}) {
   const token = doc.clientSecret;
   const username = String(doc.username || "").trim();
   const lower = username.toLowerCase();
+
+  // Guard 0: the account must be EMPTY on Twitch at the moment it is handed
+  // over. The stored counts gatherPoolEligibility filtered on can be days old,
+  // and this is the one step that cannot be undone — the renter (or the
+  // rent-farm buyer) gets the login, and the renter's claiming bot claims every
+  // claimable drop in it within a minute. A refusal carries a `code` so the
+  // caller moves on to the next candidate; see utils/poolStock.placeFirstFresh.
+  const live = await poolStock.verifyFreshLive(doc);
+  if (!live.fresh) {
+    const e = new Error(live.reason);
+    e.code = live.code;
+    throw e;
+  }
 
   // Build the config entry BEFORE claiming: renterDefaultGames reads the config
   // off the host and can fail, and a failure here must not leave a claimed-but-
@@ -2447,7 +2472,9 @@ async function movePoolAccountToRenter(renter, host, doc, opts = {}) {
     { $set: { status: "claimed", claimedAt: new Date(), claimedNote: claimNote } },
   );
   if (!(claim.modifiedCount || claim.nModified)) {
-    throw new Error("was claimed by someone else");
+    const e = new Error("was claimed by someone else");
+    e.code = "claimed_elsewhere";
+    throw e;
   }
   await recordPoolUsage(doc._id, { event: "rented", actor: "renter-admin", note: claimNote });
 
@@ -2593,22 +2620,14 @@ router.post(
         });
       }
 
-      const picked = eligible.slice(0, n);
-      const added = [];
-      const skipped = [];
-      for (const doc of picked) {
-        // Re-validate at move time (close the select→move race).
-        const fresh = await AvailableAccount.findById(doc._id).lean();
-        if (!fresh || fresh.status !== "available") {
-          skipped.push({ username: doc.username, reason: "no longer available" });
-          continue;
-        }
-        try {
-          added.push(await movePoolAccountToRenter(renter, host, fresh));
-        } catch (e) {
-          skipped.push({ username: doc.username, reason: e.message || String(e) });
-        }
-      }
+      // Walks past accounts the live freshness check refuses (they hold drops,
+      // or their token died) to the next eligible one, instead of coming up
+      // short. Re-validates each at move time (closes the select→move race).
+      const { added, skipped } = await poolStock.placeFirstFresh(eligible, {
+        want: n,
+        recheck: (doc) => AvailableAccount.findById(doc._id).lean(),
+        place: (fresh) => movePoolAccountToRenter(renter, host, fresh),
+      });
 
       // Restart the renter's bot once so it picks up the new accounts.
       let restarted = false;

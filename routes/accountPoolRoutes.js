@@ -24,6 +24,7 @@ const { encrypt, decrypt } = require("../utils/secretBox");
 const { fetchInventory, fetchDropCampaigns } = require("../utils/twitchInventory");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { usageSince, summarizeUsageRows } = require("../utils/poolUsageWatcher");
+const poolStock = require("../utils/poolStock");
 
 const router = express.Router();
 
@@ -55,6 +56,7 @@ function publicAccount(a) {
     lastCheckStatus: a.lastCheckStatus || "",
     lastCheckError: a.lastCheckError || "",
     dropCount: a.dropCount || 0,
+    unclaimedDropCount: a.unclaimedDropCount || 0,
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
     usageCount: Number.isFinite(a.usageCount) ? a.usageCount : history.length,
@@ -603,9 +605,14 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
     }
     const now = new Date();
     try {
-      const { twitchId, login, drops } = await fetchInventory(acc.clientSecret);
+      const inv = await fetchInventory(acc.clientSecret);
+      const { twitchId, login, drops } = inv;
       if (twitchId) acc.twitchId = twitchId;
-      acc.dropCount = drops.length;
+      // Same rule as the background checker: dropCount is CLAIMED rewards,
+      // unclaimedDropCount is farmed stock still waiting to be claimed.
+      const holdings = poolStock.inventoryHoldings(inv);
+      acc.dropCount = holdings.claimed;
+      acc.unclaimedDropCount = holdings.unclaimed;
       // Inventory passing only means the token authenticates. Verify the
       // integrity-gated query a bot actually runs too, otherwise this button
       // green-lights tokens no bot can use (see utils/accountPoolChecker.js).
@@ -630,6 +637,13 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
         .catch((e) =>
           console.error("account-pool check: drop-archive upsert failed:", e.message),
         );
+      // Stock on an available account takes it out of the pool (utils/poolStock).
+      const held =
+        holdings.unclaimed > 0 && acc.status === "available"
+          ? await poolStock
+              .holdForStock(acc._id, holdings, { actor: "manual" })
+              .catch(() => false)
+          : false;
       res.json({
         success: true,
         status: acc.lastCheckStatus,
@@ -637,6 +651,9 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
         twitchId: acc.twitchId,
         login: login || acc.username,
         dropCount: drops.length,
+        unclaimedDropCount: holdings.unclaimed,
+        unclaimedGames: holdings.unclaimedGames,
+        held,
         drops: drops.slice(0, 300).map((d) => ({
           name: d.name,
           game: d.game,

@@ -1661,8 +1661,9 @@ const CHECKS = [
           n + " pristine pool account(s) eligible to be provisioned right now",
         detail:
           "Eligible means available, verified ok, has a password and a token, " +
-          "never hand-sold, not deployed, not on a listing and not assigned to " +
-          "a farm task — routes/renterAdminRoutes.gatherPoolEligibility, the " +
+          "holds no drops (claimed or farmed-but-unclaimed), never hand-sold, " +
+          "not deployed, not on a listing and not assigned to a farm task — " +
+          "routes/renterAdminRoutes.gatherPoolEligibility, the " +
           "same filter fulfilment uses. Each rent-farm sale holds one for the " +
           "whole window it sold.",
       };

@@ -40,6 +40,10 @@ test("each disqualifier rejects it (with a reason)", () => {
     ["unverified token", { lastCheckStatus: "" }],
     ["bad token", { lastCheckStatus: "token_invalid" }],
     ["integrity failed", { lastCheckStatus: "integrity_failed" }],
+    // The rent-farm incident of 2026-09-11: a re-imported web-token farm
+    // account with six unclaimed Overwatch drops and no DB trace at all.
+    ["holds unclaimed farmed drops", { unclaimedDrops: 6 }],
+    ["already has claimed drops", { claimedDrops: 1 }],
     ["deployed on operator bot", { deployedOnBot: true }],
     ["sold/reserved drops", { hasSoldOrReservedDrops: true }],
     ["sellable stock", { sellable: true }],
@@ -51,6 +55,18 @@ test("each disqualifier rejects it (with a reason)", () => {
     assert.strictEqual(r.eligible, false, name + " should be rejected");
     assert.ok(r.reason && r.reason.length > 0, name + " should carry a reason");
   }
+});
+
+test("zero or missing drop counts leave a pristine account eligible", () => {
+  // Rows checked before unclaimedDropCount existed have no such field at all.
+  for (const over of [{ claimedDrops: 0, unclaimedDrops: 0 }, { claimedDrops: undefined }, { unclaimedDrops: null }]) {
+    assert.strictEqual(poolAccountEligibility({ ...perfect(), ...over }).eligible, true);
+  }
+});
+
+test("the drop reason names what the account holds", () => {
+  assert.match(poolAccountEligibility({ ...perfect(), unclaimedDrops: 6 }).reason, /6 unclaimed/);
+  assert.match(poolAccountEligibility({ ...perfect(), claimedDrops: 2 }).reason, /2 claimed/);
 });
 
 test("missing/empty facts never crash and are ineligible", () => {

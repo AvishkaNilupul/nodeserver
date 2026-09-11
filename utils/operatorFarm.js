@@ -37,6 +37,7 @@ const AvailableAccount = require("../models/AvailableAccount");
 const hosts = require("./botHosts");
 const crypto = require("crypto");
 const { pickCount } = require("./renterPoolEligibility");
+const { placeFirstFresh } = require("./poolStock");
 const { normGame } = require("./gameLabel");
 const { createRenter } = require("./renters");
 const { logEvent } = require("./systemLog");
@@ -305,35 +306,31 @@ async function farmFreshAccounts({
       eligible.length
         ? "No quota room to add accounts."
         : "No eligible pristine pool accounts right now (need: available, " +
-            "verified token, has password, not deployed/sold/listed/assigned, " +
-            "and not already sold on this game).",
+            "verified token, has password, no drops in it (claimed or " +
+            "unclaimed), not deployed/sold/listed/assigned, and not already " +
+            "sold on this game).",
     );
   }
 
   const farmUntil = new Date(Date.now() + nDays * 86400000);
-  const picked = eligible.slice(0, n);
-  const added = [];
-  const skipped = [];
   const move = renterAdmin().movePoolAccountToRenter;
 
-  for (const doc of picked) {
-    // Re-validate at move time to close the select→move race, exactly as the
-    // from-pool route does.
-    const fresh = await AvailableAccount.findById(doc._id).lean();
-    if (!fresh || fresh.status !== "available") {
-      skipped.push({ username: doc.username, reason: "no longer available" });
-      continue;
-    }
-    try {
+  // movePoolAccountToRenter re-reads each account's Twitch inventory live and
+  // refuses one that holds anything — the buyer is promised a clean, empty
+  // account. placeFirstFresh then moves on to the next eligible account rather
+  // than leaving a paid order short, and re-validates each at move time to
+  // close the select→move race, exactly as the from-pool route does.
+  const { added, skipped } = await placeFirstFresh(eligible, {
+    want: n,
+    recheck: (doc) => AvailableAccount.findById(doc._id).lean(),
+    place: async (fresh) => {
       const login = await move(renter, host, fresh, {
         games: [gameName],
         farmUntil,
       });
-      added.push({ login, poolId: String(fresh._id) });
-    } catch (e) {
-      skipped.push({ username: doc.username, reason: e.message || String(e) });
-    }
-  }
+      return { login, poolId: String(fresh._id) };
+    },
+  });
 
   // Restart the holder's bot once so it picks up the new accounts (best effort:
   // a stopped bot stays stopped until the operator starts it).

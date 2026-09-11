@@ -57,6 +57,9 @@ const availableAccountSchema = new mongoose.Schema(
             // fine — and then every later doc.save() on that account threw,
             // which is why accountPoolChecker could not persist a result for
             // any of the 172 accounts that had ever been marked spent.
+            // "held" is written by utils/poolStock.holdForStock when a pool
+            // check finds farmed-but-unclaimed drops on an available account.
+            // It MUST be listed here for the same reason as "spent" above.
             enum: [
               "claimed",
               "released",
@@ -66,6 +69,7 @@ const availableAccountSchema = new mongoose.Schema(
               "sold",
               "spent",
               "deleted",
+              "held",
             ],
           },
           game: { type: String, default: "" },
@@ -118,7 +122,13 @@ const availableAccountSchema = new mongoose.Schema(
     // is what keeps the sweep from re-probing the whole claimable pool every ten
     // minutes: a row is re-probed once a day at most.
     existsProbeAt: { type: Date, default: null },
+    // CLAIMED rewards only (inv.drops) — see unclaimedDropCount for the rest.
     dropCount: { type: Number, default: 0 },
+    // Drops watched to 100% and never claimed (inv.inProgress): farmed stock,
+    // the thing the no-claim farm sells and a claiming bot destroys. An
+    // available account with any is held out of the pool
+    // (utils/poolStock.js). Absent on rows not checked since this existed.
+    unclaimedDropCount: { type: Number, default: 0 },
 
     source: { type: String, default: "" },
 

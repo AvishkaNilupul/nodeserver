@@ -13,6 +13,9 @@
 //   hasPassword          AvailableAccount.hasPassword
 //   passwordDecryptable  caller decrypted the stored password to a non-empty string
 //   lastCheckStatus      last pool check ("ok" | "" | "token_invalid" | ...)
+//   claimedDrops         AvailableAccount.dropCount — rewards already claimed
+//   unclaimedDrops       AvailableAccount.unclaimedDropCount — drops watched to
+//                        100% and never claimed (farmed stock)
 //   deployedOnBot        a BotAccount with this token has a non-empty configFile
 //   hasSoldOrReservedDrops a BotAccount with this token carries sold/reserved/connected drops
 //   sellable             a BotAccount with this token has a non-empty credPassword
@@ -29,6 +32,19 @@ function poolAccountEligibility(f) {
   if (!f.hasPassword || !f.passwordDecryptable) return reject("no usable password");
   if (f.lastCheckStatus !== "ok") {
     return reject("token not verified (" + (f.lastCheckStatus || "unchecked") + ")");
+  }
+  // "Hasn't been used" is decided by what the Twitch inventory holds, not only
+  // by our own DB traces: an account re-imported with a fresh pool row (the 500
+  // web-token farm accounts, 2026-09-08) has no trace anywhere and still held
+  // six unclaimed Overwatch drops when a rent-farm buyer received it. Farmed
+  // stock must never be handed out, and claimed rewards mean it is not fresh.
+  // These are the pool checker's last reading; movePoolAccountToRenter re-reads
+  // the inventory live before the hand-over (utils/poolStock.js).
+  if (Number(f.unclaimedDrops) > 0) {
+    return reject("holds " + f.unclaimedDrops + " unclaimed farmed drop(s)");
+  }
+  if (Number(f.claimedDrops) > 0) {
+    return reject("already has " + f.claimedDrops + " claimed drop(s)");
   }
   if (f.deployedOnBot) return reject("already on an operator bot");
   if (f.hasSoldOrReservedDrops) return reject("carries sold/reserved drops");

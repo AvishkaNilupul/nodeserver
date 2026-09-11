@@ -29,6 +29,7 @@ const dropScanner = require("./dropScanner");
 const botHosts = require("./botHosts");
 const { fetchInventory, fetchDropCampaigns } = require("./twitchInventory");
 const accountState = require("./twitchAccountState");
+const poolStock = require("./poolStock");
 
 const CHECK_DELAY_MS = Number(process.env.ACCOUNT_POOL_CHECK_DELAY_MS) || 1200;
 
@@ -41,7 +42,15 @@ const queue = [];
 // released — it's requeued while still "owned" so another worker takes it up
 // without a concurrent import re-adding it.)
 const queued = new Set();
-const state = { running: false, checked: 0, total: 0 };
+const state = {
+  running: false,
+  checked: 0,
+  total: 0,
+  // Periodic-sweep bookkeeping, surfaced by status() so the page can show that
+  // re-checking is actually happening rather than the operator assuming it is.
+  lastSweepAt: null,
+  lastSweepQueued: 0,
+};
 let coordinating = false;
 // Host ids helping with the current run, for the status endpoint / UI.
 let activeHosts = [];
@@ -156,7 +165,11 @@ async function checkOne(id, host) {
   // transport-fail (host died between the two calls), which throws before any
   // save so the account is left exactly as it was for a clean retry elsewhere.
   if (inv.twitchId) acc.twitchId = inv.twitchId;
-  acc.dropCount = inv.drops.length;
+  // dropCount has only ever counted CLAIMED rewards. Farmed-but-unclaimed drops
+  // are counted separately; an account holding any is stock, not supply.
+  const holdings = poolStock.inventoryHoldings(inv);
+  acc.dropCount = holdings.claimed;
+  acc.unclaimedDropCount = holdings.unclaimed;
   const integrity = await checkIntegrity(acc.clientSecret, host);
   acc.lastCheckAt = now;
   acc.lastCheckStatus = integrity.ok ? "ok" : "integrity_failed";
@@ -173,6 +186,16 @@ async function checkOne(id, host) {
       ),
     );
   await acc.save();
+  // An AVAILABLE account holding unclaimed drops is taken out of the pool, so
+  // no claiming bot gets to claim (and so destroy) them and no rent-farm buyer
+  // gets them for free. Guarded on status, so a claimed account is untouched.
+  if (holdings.unclaimed > 0 && acc.status === "available") {
+    await poolStock
+      .holdForStock(acc._id, holdings, { actor: "pool-check" })
+      .catch((e) =>
+        console.error("accountPoolChecker: stock hold failed for", id, e.message),
+      );
+  }
 }
 
 // One draining worker. `host` is null for the server (axios) worker or a host
@@ -284,7 +307,133 @@ function status() {
     // Remote hosts currently sharing the scan with the server (e.g. ["pi"]);
     // empty when everything is running on the server alone.
     scanHosts: activeHosts.slice(),
+    lastSweepAt: state.lastSweepAt || null,
+    lastSweepQueued: state.lastSweepQueued || 0,
   };
 }
 
-module.exports = { enqueue, status };
+/* --------------------------- the periodic sweep -------------------------- */
+//
+// Until this existed, the pool was checked ONLY on import or on an operator
+// clicking Check. Measured on prod 2026-09-07: of 3,235 pool accounts, ZERO had
+// been checked in the previous 7 days and 1,504 had not been checked in 30+.
+//
+// That is not merely stale bookkeeping. utils/autoFarmer.js readyPoolQuery()
+// counts an account as spendable supply when
+//
+//     lastCheckStatus: { $in: ["", "ok"] }
+//
+// and a row whose token died in July still reads "ok" forever. So the farm
+// engine's idea of how many accounts it can spend was derived from months-old
+// evidence, and the error only grows with intake — at 1,000 new accounts a week
+// the "ready pool" number becomes fiction.
+//
+// Throughput makes this cheap: two workers at CHECK_DELAY_MS pace drain roughly
+// 6,000 accounts an hour, so the entire pool re-verifies in about half an hour.
+// The batch cap exists to spread that across sweeps rather than to ration it.
+const SWEEP_INTERVAL_MS =
+  Number(process.env.ACCOUNT_POOL_SWEEP_MS) || 6 * 3600 * 1000;
+// How old a check has to be before it is re-run.
+const SWEEP_STALE_MS =
+  Number(process.env.ACCOUNT_POOL_SWEEP_STALE_MS) || 7 * 86400000;
+// Most accounts queued per sweep.
+const SWEEP_BATCH = Number(process.env.ACCOUNT_POOL_SWEEP_BATCH) || 600;
+// Let the app finish booting (and the drop scanner claim its hosts) first.
+const SWEEP_FIRST_DELAY_MS =
+  Number(process.env.ACCOUNT_POOL_SWEEP_FIRST_MS) || 5 * 60 * 1000;
+
+let sweepTimer = null;
+
+// One sweep. AVAILABLE accounts are queued before claimed ones, deliberately:
+// they are the rows readyPoolQuery() counts as spendable, so a wrong status
+// there is the one that actually mis-steers the farm engine. Claimed accounts
+// only fill whatever batch space is left over — the drop scanner already visits
+// those daily as part of the fleet.
+// `dryRun` returns how many accounts WOULD be queued without touching the
+// queue. Useful for previewing a sweep from a CLI before letting it run, and
+// it is what keeps the tests hermetic — a real sweep starts a drain that makes
+// live Twitch calls.
+async function sweepOnce({ dryRun = false } = {}) {
+  // A sweep while the queue is still draining would just pile on. Skip; the
+  // next tick picks it up. (A dry run reports regardless — it queues nothing,
+  // so there is nothing to pile on.)
+  if (!dryRun && (queue.length || coordinating)) return 0;
+  const cutoff = new Date(Date.now() - SWEEP_STALE_MS);
+  // A confirmed-suspended account cannot be re-checked into life, so it is
+  // excluded permanently rather than re-probed every sweep forever. Same rule
+  // the manual enqueue-unchecked route uses.
+  const stale = {
+    clientSecret: { $gt: "" },
+    lastCheckStatus: { $ne: "suspended" },
+    $or: [{ lastCheckAt: { $lt: cutoff } }, { lastCheckAt: null }],
+  };
+  try {
+    const ids = [];
+    const available = await AvailableAccount.find(
+      { ...stale, status: "available" },
+      { _id: 1 },
+    )
+      .sort({ lastCheckAt: 1 })
+      .limit(SWEEP_BATCH)
+      .lean();
+    ids.push(...available.map((r) => r._id));
+    if (ids.length < SWEEP_BATCH) {
+      const claimed = await AvailableAccount.find(
+        { ...stale, status: { $ne: "available" } },
+        { _id: 1 },
+      )
+        .sort({ lastCheckAt: 1 })
+        .limit(SWEEP_BATCH - ids.length)
+        .lean();
+      ids.push(...claimed.map((r) => r._id));
+    }
+    if (!ids.length) return 0;
+    if (dryRun) return ids.length;
+    const queuedCount = enqueue(ids);
+    state.lastSweepAt = new Date();
+    state.lastSweepQueued = queuedCount;
+    console.log(
+      "accountPoolChecker: periodic sweep queued " +
+        queuedCount +
+        " stale account(s) (" +
+        available.length +
+        " available-first)",
+    );
+    return queuedCount;
+  } catch (err) {
+    // Never let a sweep failure take the process down; the next tick retries.
+    console.error("accountPoolChecker sweep failed:", err.message);
+    return 0;
+  }
+}
+
+/** Start the periodic re-check. Idempotent. */
+function start() {
+  if (sweepTimer) return;
+  const tick = () => {
+    sweepOnce()
+      .catch(() => {})
+      .finally(() => {
+        sweepTimer = setTimeout(tick, SWEEP_INTERVAL_MS);
+        if (sweepTimer.unref) sweepTimer.unref();
+      });
+  };
+  sweepTimer = setTimeout(tick, SWEEP_FIRST_DELAY_MS);
+  if (sweepTimer.unref) sweepTimer.unref();
+}
+
+function stop() {
+  if (sweepTimer) clearTimeout(sweepTimer);
+  sweepTimer = null;
+}
+
+module.exports = {
+  enqueue,
+  status,
+  start,
+  stop,
+  sweepOnce,
+  SWEEP_INTERVAL_MS,
+  SWEEP_STALE_MS,
+  SWEEP_BATCH,
+};

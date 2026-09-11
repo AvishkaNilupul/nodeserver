@@ -317,7 +317,10 @@ or JSON:
   // "rejected" into a blank dash — which is why the ✗ chips below never
   // rendered and a dead token looked the same as one nobody had checked.
   function verifiedChip(a) {
-    if (a.lastCheckStatus === "ok") return '<span class="chip on" title="' + esc(a.lastCheckAt ? new Date(a.lastCheckAt).toLocaleString() : "") + '">✓ verified · ' + a.dropCount + ' drops</span>';
+    // Unclaimed = farmed drops still waiting to be claimed: stock, so the
+    // account is held out of the pool (utils/poolStock.js) instead of reused.
+    const unclaimed = a.unclaimedDropCount ? '<span class="chip warn" title="Farmed drops watched to 100% but never claimed — sellable stock. Held out of the pool so no bot claims them and no buyer gets them for free.">' + a.unclaimedDropCount + ' unclaimed</span>' : '';
+    if (a.lastCheckStatus === "ok") return '<span class="chip on" title="' + esc(a.lastCheckAt ? new Date(a.lastCheckAt).toLocaleString() : "") + '">✓ verified · ' + a.dropCount + ' drops</span>' + unclaimed;
     if (a.lastCheckStatus === "token_invalid") return '<span class="chip off" title="' + esc(a.lastCheckError || "") + '">✗ invalid</span>';
     if (a.lastCheckStatus === "integrity_failed") return '<span class="chip off" title="' + esc(a.lastCheckError || "Twitch accepts the token but refuses the integrity-gated drops query a bot runs. Needs re-running through device-auth — see Export needs-auth.") + '">✗ no device-auth</span>';
     if (a.lastCheckStatus === "error") return '<span class="chip warn" title="' + esc(a.lastCheckError || "") + '">check error</span>';
@@ -569,10 +572,14 @@ or JSON:
         acc.lastCheckStatus = r.status;
         acc.lastCheckAt = new Date().toISOString();
         acc.dropCount = r.dropCount || 0;
+        acc.unclaimedDropCount = r.unclaimedDropCount || 0;
+        if (r.held) acc.status = "claimed";
         if (r.twitchId) acc.twitchId = r.twitchId;
         render();
       }
-      if (r.status === "ok") {
+      if (r.status === "ok" && r.unclaimedDropCount) {
+        toast("Verified — " + r.dropCount + " claimed + " + r.unclaimedDropCount + " UNCLAIMED drop(s)" + (r.unclaimedGames && r.unclaimedGames.length ? " (" + r.unclaimedGames.join(", ") + ")" : "") + (r.held ? " — held out of the pool as stock" : ""));
+      } else if (r.status === "ok") {
         toast("Verified — " + r.dropCount + " drop(s) on Twitch right now");
       } else if (r.status === "token_invalid") {
         toast("Token invalid/expired — Twitch rejected it", true);
