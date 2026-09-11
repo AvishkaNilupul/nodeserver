@@ -43,7 +43,14 @@ const real = {
   ggselPublish: mp.ggselPublish,
   ggselDelist: mp.ggselDelist,
   ggRelease: ggFulfiller.releaseAccounts,
+  zeusxPublish: mp.zeusxPublish,
+  zeusxDelist: mp.zeusxDelist,
+  zeusxOffer: mp.zeusxOffer,
 };
+
+// Per-test ZeusX answers: what the hide does, and what reading the offer back
+// returns (an object, or an Error to throw).
+const zx = { hide: null, offer: null, published: 0 };
 
 const GG_AUTO = { categoryId: "999", delivery: "auto", quantity: 2 };
 
@@ -60,6 +67,17 @@ test.before(async () => {
   };
   ggFulfiller.releaseAccounts = async (ids) => {
     calls.released.push(ids);
+  };
+  mp.zeusxPublish = async () => {
+    zx.published += 1;
+    return { externalId: "zx-del-" + zx.published, url: "", qty: 1, note: "" };
+  };
+  mp.zeusxDelist = async () => {
+    if (zx.hide instanceof Error) throw zx.hide;
+  };
+  mp.zeusxOffer = async () => {
+    if (zx.offer instanceof Error) throw zx.offer;
+    return zx.offer;
   };
 
   const app = express();
@@ -93,6 +111,9 @@ test.after(async () => {
   Object.assign(mp, {
     ggselPublish: real.ggselPublish,
     ggselDelist: real.ggselDelist,
+    zeusxPublish: real.zeusxPublish,
+    zeusxDelist: real.zeusxDelist,
+    zeusxOffer: real.zeusxOffer,
   });
   ggFulfiller.releaseAccounts = real.ggRelease;
   if (server) await new Promise((r) => server.close(r));
@@ -342,4 +363,125 @@ test("delist does NOT take back an account already committed to a buyer", async 
   assert.equal(body.success, true);
   assert.equal(body.returned, 0, "a sale in flight keeps its account");
   assert.equal((await statuses(offer)).sold, 1, "still committed to the buyer");
+});
+
+// ---------------------------------------------------------------------------
+// ZeusX account listings: an account comes back ONLY when ZeusX shows it unsold.
+//
+// ZeusX hands an automatic offer's credential to the buyer by itself and no
+// poller of ours watches for that, so on ZeusX a "fed" ledger row cannot tell a
+// parked account from one a buyer already holds. Handing it back blind — which
+// is what every other market's delist does — would sell it a second time.
+// ---------------------------------------------------------------------------
+
+async function publishZeusxOne(offer) {
+  const res = await fetch(baseUrl + "/marketplaces/publish", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({
+      offerId: String(offer._id),
+      title: "Twitch drops account",
+      description: "Instant delivery",
+      price: 12,
+      marketplaces: ["zeusx"],
+      zeusx: { quantity: 1 },
+    }),
+  });
+  const json = await res.json();
+  assert.equal(json.results.zeusx.success, true, json.results.zeusx.message);
+  const row = await MarketplaceListing.findById(json.results.zeusx.id).lean();
+  assert.equal(row.units.length, 1);
+  return { id: String(row._id), ledgerId: String(row.units[0].contentId) };
+}
+
+const UNSOLD = { offer_status: "CREATED", quantity: 1, is_hidden: true };
+
+test("ZeusX: an offer ZeusX shows unsold hands its account back", async () => {
+  const offer = await offerWithStock();
+  const { id, ledgerId } = await publishZeusxOne(offer);
+  assert.deepEqual(await statuses(offer), { available: 5, fed: 1 });
+  zx.hide = null;
+  zx.offer = { ...UNSOLD };
+
+  const json = await delist(id);
+  assert.equal(json.success, true);
+  assert.equal(json.returned, 1);
+  assert.deepEqual(await statuses(offer), { available: 6 });
+  assert.equal((await SuppliedAccount.findById(ledgerId).lean()).market, "");
+  assert.equal((await MarketplaceListing.findById(id).lean()).status, "delisted");
+});
+
+test("ZeusX: an offer that sold keeps its account with the buyer and records the sale", async () => {
+  for (const soldOffer of [
+    { offer_status: "CREATED", quantity: 0 },
+    { offer_status: "CREATED", quantity: 1, offer_purchases: [{ id: "p1" }] },
+  ]) {
+    const offer = await offerWithStock();
+    const { id, ledgerId } = await publishZeusxOne(offer);
+    zx.hide = null;
+    zx.offer = soldOffer;
+
+    const json = await delist(id);
+    assert.equal(json.success, true);
+    assert.equal(json.returned, 0, "a sold account never goes back on sale");
+    assert.match(json.message, /sold on ZeusX/i);
+    const acct = await SuppliedAccount.findById(ledgerId).lean();
+    assert.equal(acct.status, "sold");
+    assert.ok(acct.deliveredAt, "the ledger records the delivery");
+    assert.equal((await MarketplaceListing.findById(id).lean()).status, "sold");
+  }
+});
+
+test("ZeusX: when ZeusX cannot confirm it unsold, the account stays out of stock", async () => {
+  for (const unclear of [
+    new Error("ZeusX offer: Request failed with status code 503"),
+    { offer_status: "SOLD_OUT", quantity: 1 },
+    { offer_status: "CREATED" },
+    null,
+  ]) {
+    const offer = await offerWithStock();
+    const { id, ledgerId } = await publishZeusxOne(offer);
+    zx.hide = null;
+    zx.offer = unclear;
+
+    const json = await delist(id);
+    assert.equal(json.success, true, "the delist itself still happened");
+    assert.equal(json.returned, 0);
+    assert.match(json.message, /kept out of stock/);
+    assert.equal(
+      (await SuppliedAccount.findById(ledgerId).lean()).status,
+      "fed",
+      "held, not handed back",
+    );
+    const row = await MarketplaceListing.findById(id).lean();
+    assert.equal(row.status, "delisted");
+    assert.match(row.note, /could not confirm it unsold/);
+  }
+});
+
+test("ZeusX: a sold offer that refuses the hide is still resolved as sold", async () => {
+  const offer = await offerWithStock();
+  const { id, ledgerId } = await publishZeusxOne(offer);
+  zx.hide = new Error("ZeusX delist: Offer cannot be modified");
+  zx.offer = { offer_status: "CREATED", quantity: 0 };
+
+  const json = await delist(id);
+  assert.equal(json.success, true);
+  assert.equal((await MarketplaceListing.findById(id).lean()).status, "sold");
+  assert.equal((await SuppliedAccount.findById(ledgerId).lean()).status, "sold");
+});
+
+test("ZeusX: a refused hide on an unsold offer is a failed delist, and nothing moves", async () => {
+  const offer = await offerWithStock();
+  const { id, ledgerId } = await publishZeusxOne(offer);
+  zx.hide = new Error("ZeusX delist: Unauthorized");
+  zx.offer = { ...UNSOLD, is_hidden: false };
+
+  const json = await delist(id);
+  assert.equal(json.success, false);
+  const row = await MarketplaceListing.findById(id).lean();
+  assert.equal(row.status, "active", "still on sale, so still active");
+  assert.match(row.lastError, /Unauthorized/);
+  assert.equal((await SuppliedAccount.findById(ledgerId).lean()).status, "fed");
+  zx.hide = null;
 });

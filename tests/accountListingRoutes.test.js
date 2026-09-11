@@ -41,6 +41,7 @@ const SystemEvent = require("../models/SystemEvent");
 const AccountOffer = require("../models/AccountOffer");
 const SuppliedAccount = require("../models/SuppliedAccount");
 const BotAccount = require("../models/BotAccount");
+const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const accountListingRoutes = require("../routes/accountListingRoutes");
 
@@ -469,6 +470,7 @@ test("every account-listings route requires a superadmin session", async () => {
     ["DELETE", "/account-listings/" + offer.id + "/accounts/" + accId],
     ["POST", "/account-listings/" + offer.id + "/accounts/" + accId + "/allow"],
     ["POST", "/account-listings/" + offer.id + "/cover-preview"],
+    ["POST", "/account-listings/from-set"],
   ];
   for (const [method, path] of routes) {
     const body = method === "GET" ? undefined : {};
@@ -559,4 +561,132 @@ test("offerStats keys reach the browser verbatim, including new ones", async () 
   } finally {
     stock.offerStats = real;
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /account-listings/from-set — a Shop / Custom listing copied into a
+// draft account listing (the Twitch-inventory "Create listing" path).
+//
+// What must never happen: the copy inheriting the set's STOCK (archive accounts
+// on a supplied shelf = one account sold by both paths), the copy going live
+// with nothing behind it, the set itself being changed, or one set turning into
+// several account listings that each hold part of the pasted accounts.
+// ---------------------------------------------------------------------------
+
+async function makeSet(extra = {}) {
+  return DropSet.create({
+    name: "Rust bundle — Hoodie, Pants (3 items)",
+    note: [
+      "This account includes 3 items from Rust:",
+      "• Hoodie (Rust)",
+      "• 2× Pants (Rust)",
+      "",
+      "Buyer receives one in-stock account holding every item listed above.",
+    ].join("\n"),
+    items: [
+      { itemKey: "hoodie|rust", name: "Hoodie", game: "Rust", image: "/drop-images/h.png" },
+      { itemKey: "pants|rust", name: "Pants", game: "Rust", image: "/drop-images/p.png", qty: 2 },
+    ],
+    price: 6.5,
+    listed: true,
+    ...extra,
+  });
+}
+
+test("from-set copies a Shop listing into a draft with an empty shelf", async () => {
+  const set = await makeSet();
+  const before = await DropSet.findById(set._id).lean();
+
+  const res = await call("POST", "/account-listings/from-set", {
+    body: { setId: String(set._id) },
+  });
+  assert.equal(res.status, 200);
+  const body = await json(res);
+  assert.equal(body.success, true);
+  assert.equal(body.existing, false);
+  const o = body.offer;
+  assert.equal(o.status, "draft", "nothing is on sale until accounts are pasted and published");
+  assert.equal(o.title, set.name);
+  assert.equal(o.game, "Rust");
+  assert.equal(o.priceUsd, 6.5);
+  assert.equal(o.sourceSetId, String(set._id));
+  assert.equal(o.description, set.note, "a note that lists the drops is the contract, kept verbatim");
+  assert.deepEqual(o.coverImages, ["/drop-images/h.png", "/drop-images/p.png"]);
+  assert.equal(o.createdBy, "root");
+
+  const stored = await AccountOffer.findById(o.id).lean();
+  assert.equal(String(stored.sourceSet), String(set._id));
+
+  // The set's stock is never copied and nothing is published by copying.
+  assert.equal(await SuppliedAccount.countDocuments({ offer: o.id }), 0);
+  assert.equal(await MarketplaceListing.countDocuments({ accountOffer: o.id }), 0);
+  const stats = (await json(await call("GET", "/account-listings/" + o.id))).stats;
+  assert.equal(stats.total, 0);
+
+  // The Shop listing itself is untouched — it stays on the Shop tab, as is.
+  const after = await DropSet.findById(set._id).lean();
+  assert.deepEqual(after, before);
+
+  // And the Account listings tab shows the copy, marked as one.
+  const list = await json(await call("GET", "/account-listings"));
+  const row = list.offers.find((x) => x.id === o.id);
+  assert.ok(row, "the copy is listed on the Account listings tab");
+  assert.equal(row.sourceSetId, String(set._id));
+
+  await new Promise((r) => setTimeout(r, 50));
+  const ev = await SystemEvent.findOne({
+    action: "account_offer_created",
+    subjectId: stored._id,
+  }).lean();
+  assert.ok(ev, "the copy is audited");
+  assert.match(ev.detail, /copied from Shop listing/);
+});
+
+test("from-set answers the existing copy; an archived copy does not count", async () => {
+  const set = await makeSet({ name: "Idempotent bundle" });
+  const first = await json(
+    await call("POST", "/account-listings/from-set", { body: { setId: String(set._id) } }),
+  );
+  const again = await json(
+    await call("POST", "/account-listings/from-set", { body: { setId: String(set._id) } }),
+  );
+  assert.equal(again.success, true);
+  assert.equal(again.existing, true);
+  assert.equal(again.offer.id, first.offer.id);
+  assert.equal(await AccountOffer.countDocuments({ sourceSet: set._id }), 1);
+
+  // An owner edit on the copy survives a later "Account listing" click — the
+  // click opens the offer, it does not reset it from the set.
+  await call("PUT", "/account-listings/" + first.offer.id, {
+    body: { priceUsd: 19, status: "active" },
+  });
+  const opened = await json(
+    await call("POST", "/account-listings/from-set", { body: { setId: String(set._id) } }),
+  );
+  assert.equal(opened.offer.id, first.offer.id);
+  assert.equal(opened.offer.priceUsd, 19);
+  assert.equal(opened.offer.status, "active");
+
+  // Archived = done with it: the next copy is a fresh draft.
+  const del = await call("DELETE", "/account-listings/" + first.offer.id);
+  assert.equal(del.status, 200);
+  const fresh = await json(
+    await call("POST", "/account-listings/from-set", { body: { setId: String(set._id) } }),
+  );
+  assert.equal(fresh.existing, false);
+  assert.notEqual(fresh.offer.id, first.offer.id);
+  assert.equal(fresh.offer.status, "draft");
+});
+
+test("from-set refuses a bad or unknown set id and creates nothing", async () => {
+  const count = await AccountOffer.countDocuments({});
+  const bad = await call("POST", "/account-listings/from-set", { body: { setId: "nope" } });
+  assert.equal(bad.status, 400);
+  const none = await call("POST", "/account-listings/from-set", { body: {} });
+  assert.equal(none.status, 400);
+  const missing = await call("POST", "/account-listings/from-set", {
+    body: { setId: new mongoose.Types.ObjectId().toString() },
+  });
+  assert.equal(missing.status, 404);
+  assert.equal(await AccountOffer.countDocuments({}), count);
 });

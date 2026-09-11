@@ -158,6 +158,27 @@ test("S4: only ACTIVE listings take a share, and a lone listing takes it all", a
   );
 });
 
+// A ZeusX account-listing offer holds the one account it was published with and
+// never claims again (automatic delivery, no relist), and an EpicNPC post is a
+// hand-delivered thread with nothing claimed at all. Taking a share each, ten
+// single-account ZeusX offers would cut an Eldorado offer to a sliver of the
+// accounts actually left on the shelf.
+test("S4: ZeusX and EpicNPC rows never draw on the shelf, so take no share", async () => {
+  const offer = await offerOf();
+  await paste(offer, 6);
+  const eld = await listingOn(offer, "eldorado");
+  const g2g = await listingOn(offer, "g2g");
+  for (let i = 0; i < 4; i += 1) await listingOn(offer, "zeusx");
+  await listingOn(offer, "epicnpc");
+
+  const shares = [
+    await supplied.stockFor(eld, { deps }),
+    await supplied.stockFor(g2g, { deps }),
+  ];
+  assert.deepEqual(shares, [3, 3], "the two claiming markets split the shelf");
+  assert.equal(shares[0] + shares[1], 6, "and never past it");
+});
+
 test("S4: another offer's listings never divide this shelf", async () => {
   const mine = await offerOf();
   const theirs = await offerOf();

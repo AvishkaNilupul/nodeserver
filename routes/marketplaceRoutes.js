@@ -416,19 +416,28 @@ function buildEpicListing(set, game) {
     "<ul>" + arr.map((t) => "<li>" + escHtml(t) + "</li>").join("") + "</ul>";
 
   const gameLabel = game || set.name || "Twitch Drops";
-  const title =
-    gameLabel + " Twitch Drops Account | " + count + "+ Unclaimed Rewards";
+  // Nothing to count — an account listing made by hand has no items — keeps
+  // its own title rather than announcing "0+ Unclaimed Rewards".
+  const title = count
+    ? gameLabel + " Twitch Drops Account | " + count + "+ Unclaimed Rewards"
+    : String(set.name || gameLabel + " Twitch Drops Account");
 
   const parts = [];
-  if (set.note) parts.push("<p>" + escHtml(set.note) + "</p>");
+  // Line breaks kept: a description is usually a multi-line item list, and
+  // the editor collapses a bare newline into one run-on paragraph.
+  if (set.note) {
+    parts.push("<p>" + escHtml(set.note).replace(/\r?\n/g, "<br>") + "</p>");
+  }
   // A short "Featured" teaser (first items) only when the full list is long
   // enough to warrant it, mirroring the seller's own listings.
   if (count > 10) {
     parts.push("<b>Featured Rewards</b>");
     parts.push(li(items.slice(0, 8).map(label)));
   }
-  parts.push("<b>Full Reward List (" + count + ")</b>");
-  parts.push(li(items.map(label)));
+  if (count) {
+    parts.push("<b>Full Reward List (" + count + ")</b>");
+    parts.push(li(items.map(label)));
+  }
   parts.push("<b>Information</b>");
   parts.push(
     li([
@@ -638,6 +647,235 @@ async function suppliedClaimRefusal(offer, want, market) {
     "Out of stock — this account listing has no available accounts left to " +
     "hand over"
   );
+}
+
+// Account listings on ZeusX. ZeusX's native "Automatic" delivery carries exactly
+// ONE credential per offer (game_account validates as a single object — the
+// auto-farm sells farmed accounts the same way, autoLister.publishZeusxShare),
+// so a quantity of N is N single-stock offers holding one account each. The
+// accounts leave the shelf here, at publish, like every market that holds the
+// credential itself: ZeusX hands one over the moment a buyer pays, with nothing
+// on our side in the loop.
+//
+// Before this an account listing went out as a plain "Coordinated" ZeusX offer
+// — nothing claimed, nothing delivered — so a ZeusX sale had to be handed over
+// by hand while the very same accounts stayed on sale everywhere else.
+//
+// One rule decides every failure: an account must never be on sale twice.
+//  - Stopped BEFORE the create call (no such ZeusX game, no price, no keys):
+//    nothing was sent, so every untried account goes back on the shelf.
+//  - Refused BY the create call (a 4xx, or ZeusX's own isSuccess:false): no
+//    offer was made, so the same.
+//  - Anything else from the create call (a 5xx, a timeout, no offer id):
+//    create-offer is known to answer 500 and STILL create the offer, so the
+//    credential may be live on ZeusX. That one account is held out of stock
+//    ("fed") and named, for the owner to check on ZeusX.
+// And the first failure of any kind stops the run: whatever broke one publish
+// (a rate limit, a revoked session) breaks the next, and each further attempt
+// risks another held account.
+function zeusxCreateMayHaveHappened(err) {
+  const msg = String((err && err.message) || "");
+  if (!/^ZeusX create/i.test(msg)) return false; // failed before the create
+  if (err && err.__zeusx) return false; // isSuccess:false — a clean refusal
+  const status = Number(err && err.status) || 0;
+  return !(status >= 400 && status < 500);
+}
+
+async function publishSuppliedZeusx({
+  offer,
+  zx,
+  title,
+  description,
+  priceUsd,
+  game,
+  cover,
+}) {
+  const qtyWanted = Math.max(1, parseInt(zx.quantity, 10) || 1);
+  const claimed = await suppliedStock.claimForListing(
+    String(offer._id),
+    qtyWanted,
+    { market: "zeusx" },
+  );
+  if (!claimed.length) {
+    return {
+      success: false,
+      message: await suppliedClaimRefusal(offer, qtyWanted, "zeusx"),
+    };
+  }
+  const listed = [];
+  const held = [];
+  let stopped = "";
+  for (const acc of claimed) {
+    if (stopped) break;
+    let r;
+    try {
+      r = await mp.zeusxPublish({
+        title,
+        description,
+        priceUsd,
+        game,
+        serviceCategoryId: zx.serviceCategoryId,
+        serviceCategoryBaseId: zx.serviceCategoryBaseId,
+        attributes: zx.attributes,
+        tags: zx.tags,
+        coverImagePath: cover,
+        deliveryDays: zx.deliveryDays,
+        deliveryHours: zx.deliveryHours,
+        // Email left empty exactly as the auto-farm's ZeusX share sends it:
+        // the pasted address is the account's recovery mail, which the
+        // default delivery text never hands a buyer either.
+        autoDeliverAccounts: [
+          { login: acc.login, password: acc.password, email: "" },
+        ],
+      });
+    } catch (err) {
+      stopped = err.message;
+      // Otherwise nothing reached ZeusX for this one, and it goes back on the
+      // shelf with the untried ones below.
+      if (zeusxCreateMayHaveHappened(err)) held.push(acc);
+      console.error(
+        "zeusx supplied publish failed for " + acc.login + ":",
+        err.message,
+      );
+      continue;
+    }
+    let doc = null;
+    try {
+      doc = await MarketplaceListing.create({
+        marketplace: "zeusx",
+        externalId: r.externalId,
+        url: r.url || "",
+        title,
+        description,
+        price: priceUsd,
+        status: "active",
+        note:
+          (r.note ? r.note + " " : "") +
+          "account listing: automatic delivery — " +
+          acc.login,
+        autoDeliver: true,
+        qtyTarget: 1,
+        ...offerRowFields(offer, [acc]),
+      });
+    } catch (e) {
+      // The ZeusX offer is live with this credential; only our row is
+      // missing. Handing the account back would put it on sale twice.
+      console.error("zeusx supplied row create failed:", e.message);
+    }
+    try {
+      await suppliedStock.markFed([acc.ledgerId], {
+        listing: doc ? doc._id : null,
+        market: "zeusx",
+      });
+    } catch (e) {
+      console.error("supplied markFed (zeusx):", e.message);
+    }
+    listed.push({ acc, r, doc });
+  }
+  // Held accounts are fed with no listing: out of stock, never handed back.
+  if (held.length) {
+    await suppliedStock
+      .markFed(
+        held.map((a) => a.ledgerId),
+        { market: "zeusx" },
+      )
+      .catch((e) => console.error("supplied markFed (zeusx held):", e.message));
+  }
+  // Every account the loop never sent (or that provably did not reach ZeusX)
+  // goes back on the shelf.
+  const sentIds = new Set(
+    listed.map((l) => String(l.acc.ledgerId)).concat(
+      held.map((a) => String(a.ledgerId)),
+    ),
+  );
+  const back = claimed
+    .map((c) => String(c.ledgerId))
+    .filter((id) => !sentIds.has(id));
+  if (back.length) {
+    await suppliedStock
+      .releaseClaim(back)
+      .catch((e) => console.error("supplied release (zeusx):", e.message));
+  }
+  const heldNote = held.length
+    ? " Held out of stock until you check ZeusX (the create answered an " +
+      "error but may have gone through): " +
+      held.map((a) => a.login).join(", ") +
+      "."
+    : "";
+  if (!listed.length) {
+    return {
+      success: false,
+      message: (stopped || "ZeusX listed nothing") + "." + heldNote,
+    };
+  }
+  const first = listed.find((l) => l.doc) || listed[0];
+  return {
+    success: true,
+    id: first.doc ? String(first.doc._id) : "",
+    externalId: first.r.externalId,
+    url: first.r.url || "",
+    note:
+      listed.length +
+      " automatic ZeusX offer(s), one account each" +
+      (stopped
+        ? " — stopped at " +
+          listed.length +
+          " of " +
+          claimed.length +
+          ": " +
+          stopped
+        : "") +
+      heldNote,
+  };
+}
+
+// Did a ZeusX account-listing offer's one unit reach a buyer? We run no sale
+// poller for ZeusX (it delivers an automatic offer on its own), so this is asked
+// once, at delist, before the account could be handed back to the shelf.
+//   "unsold"  only on positive evidence: the unit is still listed (quantity
+//             >= 1), no purchase is recorded when ZeusX sends that list, and
+//             the status is not a sale state;
+//   "sold"    on positive evidence the other way: quantity 0, or a purchase;
+//   "unknown" for anything else — a failed read included.
+// Measured on prod 2026-09-11: a live, unsold automatic offer reads
+// offer_status "CREATED", quantity 1 and, on the list endpoint,
+// offer_purchases [].
+async function zeusxUnitVerdict(offerId) {
+  let o = null;
+  try {
+    o = await mp.zeusxOffer(offerId);
+  } catch {
+    return "unknown";
+  }
+  if (!o || typeof o !== "object") return "unknown";
+  const qty =
+    o.quantity == null || o.quantity === "" ? NaN : Number(o.quantity);
+  const p = o.offer_purchases;
+  const bought = Array.isArray(p) ? p.length > 0 : Number(p) > 0;
+  if (bought || (Number.isFinite(qty) && qty <= 0)) return "sold";
+  const status = String(o.offer_status || "").toUpperCase();
+  const saleState =
+    /SOLD|COMPLET|DELIVER|PURCHAS|ORDER|CANCEL|CLOS|EXPIR|DELET|REMOV/.test(
+      status,
+    );
+  if (Number.isFinite(qty) && qty >= 1 && !saleState) return "unsold";
+  return "unknown";
+}
+
+// A ZeusX account-listing unit that reached a buyer: settle its ledger row as
+// sold, so it can never come back to the shelf and the panel counts it sold
+// instead of parked. Best-effort — the row's own status already says sold.
+async function markZeusxUnitsDelivered(row) {
+  const ids = (row.units || [])
+    .filter((u) => u && u.contentId)
+    .map((u) => String(u.contentId));
+  if (!ids.length) return 0;
+  try {
+    return await suppliedStock.markDelivered(ids, { market: "zeusx" });
+  } catch (e) {
+    console.error("supplied markDelivered (zeusx):", e.message);
+    return 0;
+  }
 }
 
 // G1: render the hand-over text BEFORE anything goes live, and refuse the
@@ -1333,6 +1571,20 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           });
         } else if (name === "zeusx") {
           const zx = body.zeusx || {};
+          if (offer) {
+            // An account listing: one automatic offer per pasted account,
+            // taken off the shelf now (publishSuppliedZeusx above).
+            results[name] = await publishSuppliedZeusx({
+              offer,
+              zx,
+              title,
+              description,
+              priceUsd,
+              game: zx.game || pubGame,
+              cover: gridImage || coverImagePath(set),
+            });
+            continue;
+          }
           r = await mp.zeusxPublish({
             title,
             description,
@@ -1573,13 +1825,41 @@ router.post(
   async (req, res) => {
     try {
       const body = req.body || {};
-      const set = await DropSet.findById(body.setId).lean();
+      // An account listing posts as well as a set. EpicNPC is a hand-delivered
+      // forum thread either way — nothing is claimed from the offer's shelf
+      // (utils/suppliedStock NON_SHARING_MARKETS) — so all the offer needs is
+      // its own text, plus the drops of the Shop / Custom listing it was
+      // copied from, when it was, for the reward lists.
+      const offerId = String(body.offerId || "").trim();
+      let offer = null;
+      let set = null;
+      if (offerId) {
+        offer = /^[a-f0-9]{24}$/i.test(offerId)
+          ? await AccountOffer.findById(offerId).lean()
+          : null;
+        if (!offer) {
+          return res
+            .status(404)
+            .json({ success: false, message: "Account listing not found" });
+        }
+        const source = offer.sourceSet
+          ? await DropSet.findById(offer.sourceSet).lean()
+          : null;
+        set = {
+          ...setLikeFromOffer(offer),
+          items: source && Array.isArray(source.items) ? source.items : [],
+        };
+      } else {
+        set = await DropSet.findById(body.setId).lean();
+      }
       if (!set) {
         return res
           .status(404)
           .json({ success: false, message: "Set not found" });
       }
-      const game = String(body.game || set.game || "").trim();
+      const game = String(
+        body.game || (offer ? offer.game : set.game) || "",
+      ).trim();
       const hit = epicnpc.nodeForGame(game);
       if (!hit) {
         return res.status(422).json({
@@ -1591,7 +1871,12 @@ router.post(
             : "No game given for this listing, so EpicNPC has nowhere to post it.",
         });
       }
-      const priceUsd = Number(body.price != null ? body.price : set.price) || 0;
+      let priceUsd = Number(body.price != null ? body.price : set.price) || 0;
+      // An account listing's own floor, as in the /publish route: there is no
+      // DropSet behind it for any other guard to read.
+      if (offer && Number(offer.minPriceUsd) > 0) {
+        priceUsd = Math.max(priceUsd, Number(offer.minPriceUsd));
+      }
       const service = body.service === "mm" ? "mm" : "free"; // default TG Free
       // EpicNPC gets its own house-style title + rich (HTML) body rather than
       // the generic set title/description.
@@ -1628,7 +1913,14 @@ router.post(
             hit.name +
             " (node " +
             hit.node +
-            ") — posted manually via bookmarklet",
+            ") — posted manually via bookmarklet" +
+            (offer
+              ? "; hand the account over yourself and remove it from the " +
+                "account listing's stock"
+              : ""),
+          // An account listing's row: no set, the offer instead, and no units
+          // — nothing is claimed for a hand-delivered forum post.
+          ...(offer ? offerRowFields(offer, []) : {}),
         });
         listingId = String(doc._id);
       }
@@ -1732,7 +2024,18 @@ router.delete(
         // Already gone or already sold is not a failed delist: the listing is off
         // sale, which is what was asked. Resolving the row here is what keeps it
         // from sitting active with an error forever, holding an account reserved.
-        const outcome = mp.delistOutcome(err.message);
+        let outcome = mp.delistOutcome(err.message);
+        // A ZeusX account-listing offer that already sold may refuse to be
+        // hidden in words delistOutcome does not know. ZeusX's own reading of
+        // the offer is the better witness there: if it shows the sale, the
+        // delist is answered, and the row must not sit active forever holding
+        // up the offer's archive.
+        const zxSupplied = row.marketplace === "zeusx" && !!row.accountOffer;
+        if (!outcome && zxSupplied) {
+          if ((await zeusxUnitVerdict(row.externalId)) === "sold") {
+            outcome = "sold";
+          }
+        }
         if (!outcome) {
           row.lastError = err.message.slice(0, 400);
           await row.save();
@@ -1744,6 +2047,9 @@ router.delete(
           row.qtyRemaining = 0;
           row.lastError = "";
           await row.save();
+          // The ledger learns it too, so the panel counts the account sold
+          // rather than parked in ZeusX's vault.
+          if (zxSupplied) await markZeusxUnitsDelivered(row);
           // Finding out this way is still finding out it sold — the auto-farmer
           // should learn from it exactly as it would from the sale poller.
           try {
@@ -1799,6 +2105,8 @@ router.delete(
       // skipped here too: those belong to a PAID order still mid-delivery, and
       // the fulfillers' resume path claims them back by that id.
       let returned = 0;
+      // ZeusX account listings only: why an account did NOT come back.
+      let zxVerdict = "";
       if (row.accountOffer) {
         const ledgerIds = [];
         for (const u of row.units || []) {
@@ -1812,19 +2120,39 @@ router.delete(
           if (!u || !u.contentId || u.deliveredAt) continue;
           ledgerIds.push(String(u.contentId));
         }
-        try {
-          // "fed" only: a credential parked in a marketplace vault dies with
-          // the offer and comes home. One committed to a buyer's order does
-          // NOT — delisting an offer does not cancel a sale someone paid for.
-          returned = await suppliedStock.releaseClaim(ledgerIds, {
-            statuses: ["fed"],
-          });
-        } catch (err) {
-          // The listing IS delisted by now; a failed hand-back must not turn
-          // that into a 500 the owner retries against a marketplace that no
-          // longer has the offer. The count then answers 0, which is the
-          // honest number, and the log line below records the miss.
-          console.error("supplied releaseClaim (delist):", err.message);
+        // ZeusX hands an automatic offer's credential over by itself and no
+        // poller of ours watches for it, so on ZeusX "fed" cannot tell a parked
+        // account from one a buyer already holds — handing it back blind would
+        // sell it a second time. Ask ZeusX first. The hide above has already
+        // run, so no purchase can land between that answer and this decision.
+        if (row.marketplace === "zeusx" && ledgerIds.length) {
+          zxVerdict = await zeusxUnitVerdict(row.externalId);
+        }
+        if (zxVerdict === "sold") {
+          row.status = "sold";
+          row.note = (row.note ? row.note + " " : "") + "— sold on ZeusX";
+          await row.save();
+          await markZeusxUnitsDelivered(row);
+        } else if (zxVerdict === "unknown") {
+          row.note =
+            (row.note ? row.note + " " : "") +
+            "— account kept out of stock: ZeusX could not confirm it unsold";
+          await row.save();
+        } else {
+          try {
+            // "fed" only: a credential parked in a marketplace vault dies with
+            // the offer and comes home. One committed to a buyer's order does
+            // NOT — delisting an offer does not cancel a sale someone paid for.
+            returned = await suppliedStock.releaseClaim(ledgerIds, {
+              statuses: ["fed"],
+            });
+          } catch (err) {
+            // The listing IS delisted by now; a failed hand-back must not turn
+            // that into a 500 the owner retries against a marketplace that no
+            // longer has the offer. The count then answers 0, which is the
+            // honest number, and the log line below records the miss.
+            console.error("supplied releaseClaim (delist):", err.message);
+          }
         }
         logEvent({
           category: "account-listings",
@@ -1834,7 +2162,12 @@ router.delete(
           detail:
             returned +
             " supplied account(s) returned to the shelf after delisting " +
-            row.marketplace,
+            row.marketplace +
+            (zxVerdict === "sold"
+              ? " (ZeusX shows it sold — kept with its buyer)"
+              : zxVerdict === "unknown"
+                ? " (ZeusX could not confirm it unsold — kept out of stock)"
+                : ""),
         });
       }
       res.json({
@@ -1844,7 +2177,13 @@ router.delete(
         ...(row.accountOffer
           ? {
               returned,
-              message: returned + " account(s) returned to this shelf",
+              message:
+                zxVerdict === "sold"
+                  ? "Already sold on ZeusX — the account stays with its buyer"
+                  : zxVerdict === "unknown"
+                    ? "Delisted — the account was kept out of stock because " +
+                      "ZeusX could not confirm it unsold"
+                    : returned + " account(s) returned to this shelf",
             }
           : {}),
       });

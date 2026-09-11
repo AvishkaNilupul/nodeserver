@@ -80,6 +80,16 @@ const NOTIFY_TIMEOUT_MS = 5000;
 // and so the same row keeps the same rank — on every pass.
 const SHARER_SCAN_MAX = 100;
 
+// Live listings that never draw on the shelf again once they are up, so they
+// must not take a share of it. A ZeusX account-listing offer holds exactly the
+// one account it was published with (automatic delivery carries a single
+// credential, and there is no relist), and an EpicNPC post is a hand-delivered
+// forum thread with nothing claimed at all. Counted as sharers they would only
+// shrink what every market that DOES claim from the shelf may advertise — one
+// ZeusX offer per account, so ten of them would cut an Eldorado offer's share to
+// a fraction of the accounts actually left.
+const NON_SHARING_MARKETS = ["zeusx", "epicnpc"];
+
 // How many anchored case-insensitive RegExps go into one $in when sweeping
 // BotAccount for a case-different login (F1b). Such a regex can only SCAN the
 // { login: 1 } index, never seek it, so the cost grows with the terms in one
@@ -380,11 +390,16 @@ async function shelfFor(listingOrOfferId, opts = {}) {
 // describes — the only guard that existed counted ACTIVE PlayerAuctions rows
 // alone (utils/playerauctionsFulfiller.js's old sharersOfAccountOffer, now
 // deleted in favour of this), so four markets still advertised the full shelf.
+// The one exception is NON_SHARING_MARKETS, which never draw on it again.
 async function sharerIds(offer, opts = {}) {
   const deps = opts.deps || {};
   const MarketplaceListing = dep("MarketplaceListing", deps);
   const rows = await MarketplaceListing.find(
-    { accountOffer: offer, status: "active" },
+    {
+      accountOffer: offer,
+      status: "active",
+      marketplace: { $nin: NON_SHARING_MARKETS },
+    },
     { _id: 1 },
   )
     .sort({ _id: 1 })
@@ -1077,6 +1092,7 @@ module.exports = {
   MARKETS,
   STATUSES,
   SHARER_SCAN_MAX,
+  NON_SHARING_MARKETS,
   REAL_DEPS,
   parseSuppliedAccounts,
   deliveryText,

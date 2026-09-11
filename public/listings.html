@@ -1299,7 +1299,11 @@ Reliable Daily Rewards</textarea
           <div class="mp-hint" style="margin-top: 4px">
             <b>Accounts</b> loads a listing's stock into the panel above.
             <b>Sell on…</b> publishes through the same marketplace modal the
-            other tabs use, with the offer standing in for a set.
+            other tabs use, with the offer standing in for a set. Listings made
+            with <b>Create listing</b> on the Twitch drops page — or copied
+            with a Shop / Custom row's <b>Account listing</b> button — land
+            here as drafts: <b>Edit</b>, paste the accounts, then
+            <b>Sell on…</b>.
           </div>
           <div class="list-toolbar">
             <input
@@ -1955,13 +1959,20 @@ Reliable Daily Rewards</textarea
         <div id="mpZxBox" style="display: none">
           <div class="mp-ext" style="border-bottom: 0">
             <b style="font-size: 13px">ZeusX placement</b>
-            <div class="mp-hint">
+            <div class="mp-hint" id="mpZxSetHint">
               ZeusX has no public API — the offer is created on your account
               with the stored seller session token (set it under “Marketplace
               keys → ZeusX”). The game's category is taken from the ZeusX game
               map in Auto-farm settings; delivery is coordinated (you hand the
               account over in ZeusX chat), so mark the account sold in Drop
               Archive after each sale.
+            </div>
+            <div class="mp-hint" id="mpZxOfferHint" style="display: none">
+              Account listing: each account becomes its own ZeusX offer with
+              <b>Automatic</b> delivery — ZeusX hands the login and password to
+              the buyer the moment they pay. <em>Quantity</em> is how many
+              accounts to list now; they leave this listing's stock straight
+              away, so no other marketplace can sell them.
             </div>
             <div class="mp-row" style="margin-top: 8px">
               <div style="flex: 1">
@@ -2804,6 +2815,7 @@ Reliable Daily Rewards</textarea
           '<button class="btn" data-mp="' +
           attr(set.id) +
           '">Sell on…</button>' +
+          alCopyButton(set.id) +
           '<button class="btn danger" data-del="' +
           attr(set.id) +
           '">Delete</button>' +
@@ -3031,6 +3043,11 @@ Reliable Daily Rewards</textarea
         var tg = e.target.closest("[data-toggle]");
         var dl = e.target.closest("[data-del]");
         var mpb = e.target.closest("[data-mp]");
+        var ta = e.target.closest("[data-toacct]");
+        if (ta) {
+          alFromSet(ta.dataset.toacct, ta);
+          return;
+        }
         if (mpb) {
           var mset = listingsCache.find((x) => x.id === mpb.dataset.mp);
           if (mset) openPublishModal(mset);
@@ -3584,11 +3601,34 @@ Reliable Daily Rewards</textarea
           .catch(function () {});
       }
 
+      // Account listings: the pasted accounts ARE the delivery, so GGSel starts
+      // on Auto — Manual would put up an offer with nothing behind it while the
+      // same accounts stay on sale everywhere else. The select keeps its value
+      // between opens, so whatever it held before an account listing took it
+      // over is put back on the next set-backed open: the Shop and Custom tabs
+      // behave exactly as they did.
+      var mpGgBeforeOffer = null;
+      function mpApplyOfferDefaults() {
+        var gg = $("mpGgDelivery");
+        if (mpOffer) {
+          if (mpGgBeforeOffer === null) mpGgBeforeOffer = gg.value;
+          gg.value = "auto";
+        } else if (mpGgBeforeOffer !== null) {
+          gg.value = mpGgBeforeOffer;
+          mpGgBeforeOffer = null;
+        }
+        // ZeusX sells an account listing one account per automatic offer,
+        // which is not what its set-backed hint describes.
+        $("mpZxSetHint").style.display = mpOffer ? "none" : "";
+        $("mpZxOfferHint").style.display = mpOffer ? "" : "none";
+      }
+
       function openPublishModal(set, offer) {
         mpSet = set;
         // Second argument only ever comes from the Account listings tab; every
         // existing call site passes one argument and lands on null.
         mpOffer = offer || null;
+        mpApplyOfferDefaults();
         $("mpPubTitle").innerText = 'Sell "' + set.name + '" on marketplaces';
         $("mpPubName").value = set.name || "";
         // The "Includes:" list and the price-term game come from the full item
@@ -4741,11 +4781,18 @@ Reliable Daily Rewards</textarea
               msgs.push(
                 (MP_LABELS[mp] || mp) +
                   ": " +
-                  (res[mp].success ? "published" : res[mp].message),
+                  (res[mp].success
+                    ? "published" +
+                      // An account listing's note says how many accounts
+                      // left the shelf — and on ZeusX, any held for a check.
+                      (mpOffer && res[mp].note ? " (" + res[mp].note + ")" : "")
+                    : res[mp].message),
               );
             });
             toast(msgs.join(" · "));
             loadExtListings(mpSet.id);
+            // Stock left the shelf and chips changed — show it on the tab.
+            if (mpOffer) alLoad();
           })
           .catch(function (err) {
             toast(err.message || "Publish failed");
@@ -4761,27 +4808,24 @@ Reliable Daily Rewards</textarea
       // send the pre-opened tab there. The seller clicks the one-time "EpicNPC
       // Filler" bookmarklet on that tab to fill the form, reviews, and posts.
       function openEpicBridge(body) {
-        // /marketplaces/epicnpc/prepare resolves a DropSet by setId; an
-        // account listing has none, so it is refused here rather than opening
-        // a browser tab that lands on a 404.
-        if (mpOffer) {
-          toast("EpicNPC isn't available for account listings");
-          return;
-        }
         var g = epicGameForSet();
         var win = window.open("about:blank", "_blank");
+        var req = {
+          game: g,
+          title: body.title,
+          description: body.description,
+          price: body.price,
+          service: "free",
+          tags: g,
+          record: true,
+        };
+        // Exactly one of the two ids, as on /publish: an account listing is
+        // addressed by its offer, a set by its id.
+        if (mpOffer) req.offerId = mpOffer.id;
+        else req.setId = mpSet.id;
         api("/marketplaces/epicnpc/prepare", {
           method: "POST",
-          body: {
-            setId: mpSet.id,
-            game: g,
-            title: body.title,
-            description: body.description,
-            price: body.price,
-            service: "free",
-            tags: g,
-            record: true,
-          },
+          body: req,
         })
           .then(function (j) {
             if (win) win.location.href = j.url;
@@ -4809,7 +4853,15 @@ Reliable Daily Rewards</textarea
             method: "DELETE",
           })
             .then(function (j) {
-              toast(j.success ? "Delisted" : j.message || "Delist failed");
+              // An account listing's delist says what happened to its
+              // account(s) — back on the shelf, sold, or held.
+              toast(
+                j.success
+                  ? mpOffer && j.message
+                    ? "Delisted — " + j.message
+                    : "Delisted"
+                  : j.message || "Delist failed",
+              );
               if (mpSet) loadExtListings(mpSet.id);
             })
             .catch(function (err) {
@@ -5282,6 +5334,7 @@ Reliable Daily Rewards</textarea
           '<button class="btn" data-cmp="' +
           attr(set.id) +
           '">Sell on…</button>' +
+          alCopyButton(set.id) +
           '<button class="btn danger" data-cdel="' +
           attr(set.id) +
           '">Delete</button>' +
@@ -5392,6 +5445,11 @@ Reliable Daily Rewards</textarea
         var mpB = e.target.closest("[data-cmp]");
         var delB = e.target.closest("[data-cdel]");
         var edB = e.target.closest("[data-cedit]");
+        var taB = e.target.closest("[data-toacct]");
+        if (taB) {
+          alFromSet(taB.dataset.toacct, taB);
+          return;
+        }
         if (edB) {
           var es = cSets.find(function (x) {
             return x.id === edB.dataset.cedit;
@@ -6617,6 +6675,11 @@ Reliable Daily Rewards</textarea
               ? '<span class="badge out">Archived</span>'
               : '<span class="badge draft">Draft</span>') +
           (o.game ? "<span>" + esc(o.game) + "</span>" : "") +
+          (o.sourceSetId
+            ? '<span title="Copied from a Shop / Custom listing: its drops ' +
+              "are described here, but the stock is only the accounts you " +
+              'paste in">Copied from a listing</span>'
+            : "") +
           // "N available" is the CLAIMABLE count, and the held-back rows are
           // named beside it rather than folded into it (G2) — stock that
           // exists but cannot be sold has to be visible, or the shelf just
@@ -6704,11 +6767,90 @@ Reliable Daily Rewards</textarea
               });
             if (gone) alSelectStock("");
             else alStockTitle();
+            alOpenRequested();
           })
           .catch(function (e) {
             alOffers = [];
             $("alListings").innerHTML =
               '<div class="empty">' + esc(e.message) + "</div>";
+          });
+      }
+
+      // ---- copies of Shop / Custom listings ----
+      // POST /account-listings/from-set turns a set into a DRAFT offer with the
+      // set's title, drops description and cover, and an EMPTY shelf — the
+      // set's stock is never copied (utils/offerFromSet.js). While an earlier
+      // copy is still around the server answers that one instead, so the same
+      // button also means "open this set's account listing".
+      function alCopyButton(setId) {
+        return (
+          '<button class="btn" data-toacct="' +
+          attr(setId) +
+          '" title="Also sell this bundle as your own accounts: copies it to ' +
+          "Account listings as a draft, where you paste the logins and " +
+          'publish">Account listing</button>'
+        );
+      }
+
+      function alOpenOffer(o) {
+        switchTab("accounts");
+        alEdit(o);
+      }
+
+      function alFromSet(setId, btn) {
+        if (!setId) return Promise.resolve();
+        if (btn) btn.disabled = true;
+        return api("/account-listings/from-set", {
+          method: "POST",
+          body: { setId: setId },
+        })
+          .then(function (j) {
+            var made = j.offer || {};
+            toast(
+              j.existing
+                ? "Opened its account listing"
+                : "Copied to Account listings — paste the accounts, then Sell on…",
+            );
+            return alLoad().then(function () {
+              var o =
+                alOffers.find(function (x) {
+                  return x.id === made.id;
+                }) || made;
+              if (o.id) alOpenOffer(o);
+            });
+          })
+          .catch(function (e) {
+            toast(e.message || "Could not copy it to Account listings");
+          })
+          .finally(function () {
+            if (btn) btn.disabled = false;
+          });
+      }
+
+      // Deep link from the Twitch drops page's "Create listing":
+      // /listings.html?tab=accounts&offer=<id> opens that account listing in
+      // the form, with its stock card ready for the pasted accounts. Consumed
+      // once, the way ?publishSet= is on the Shop tab.
+      var alParams = new window.URLSearchParams(window.location.search);
+      var alRequestedOffer = (alParams.get("offer") || "").trim();
+      var alRequestedOpened = false;
+      function alOpenRequested() {
+        if (!alRequestedOffer || alRequestedOpened) return;
+        alRequestedOpened = true;
+        var o = alOffers.find(function (x) {
+          return x.id === alRequestedOffer;
+        });
+        if (o) {
+          alOpenOffer(o);
+          return;
+        }
+        // Not in the loaded page of the list (it is capped) — ask for it.
+        api("/account-listings/" + encodeURIComponent(alRequestedOffer))
+          .then(function (j) {
+            if (j.offer) alOpenOffer(j.offer);
+          })
+          .catch(function (e) {
+            toast(e.message || "That account listing could not be opened");
           });
       }
 
@@ -6844,6 +6986,7 @@ Reliable Daily Rewards</textarea
       });
 
       // ---- init ----
+      if (alParams.get("tab")) switchTab(alParams.get("tab"));
       resetForm();
       loadMe();
       loadGames();

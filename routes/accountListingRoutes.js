@@ -21,6 +21,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const settings = require("../utils/settings");
 const DropLog = require("../models/DropLog");
+const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { buildPromoCoverImage } = require("../utils/setImage");
 
@@ -131,6 +132,9 @@ function offerOut(o) {
     coverServiceText: o.coverServiceText || "",
     coverBullets: strList(o.coverBullets, 8, 120),
     coverImages: strList(o.coverImages, 60, 500),
+    // The Shop / Custom listing this offer was copied from, "" when it was
+    // made by hand. Provenance for the panel only — never a stock source.
+    sourceSetId: o.sourceSet ? String(o.sourceSet) : "",
     createdBy: o.createdBy || "",
     createdAt: o.createdAt || null,
     updatedAt: o.updatedAt || null,
@@ -314,6 +318,67 @@ router.post("/account-listings", requireSuperadmin, async (req, res) => {
       detail: "account listing created (" + (doc.status || "draft") + ")",
     });
     res.json({ success: true, offer: offerOut(doc) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Copy a Shop / Custom listing (a DropSet) into a DRAFT account listing —
+// utils/offerFromSet.js says what is copied and, more to the point, what is
+// not: the set's stock never is. This is how a bundle built on the
+// Twitch-inventory page reaches this tab as well as the Shop tab (that page
+// calls this right after it creates the set), and it backs the "Account
+// listing" button on the Shop and Custom rows for sets made before that.
+//
+// Idempotent per set: while an earlier copy is still around (draft or active)
+// the same set answers THAT offer instead of a second one, so a double click, a
+// retry or a later visit never splits one bundle into two account listings with
+// half the pasted accounts each. An archived copy does not count — archiving is
+// how the owner says they are done with it.
+router.post("/account-listings/from-set", requireSuperadmin, async (req, res) => {
+  const d = deps(res);
+  if (!d) return;
+  // Lazy for the same reason as MODULES: a missing helper answers 503 on this
+  // one route instead of stopping the server from booting.
+  let fromSet;
+  try {
+    fromSet = require("../utils/offerFromSet");
+  } catch (err) {
+    return moduleUnavailable(res, "../utils/offerFromSet", err);
+  }
+  try {
+    const setId = String((req.body && req.body.setId) || "").trim();
+    if (!isId(setId))
+      return res.status(400).json({ success: false, message: "setId required" });
+    const set = await DropSet.findById(setId).lean();
+    if (!set)
+      return res.status(404).json({ success: false, message: "no such listing" });
+    const prior = await d.AccountOffer.findOne({
+      sourceSet: set._id,
+      status: { $ne: "archived" },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+    if (prior)
+      return res.json({ success: true, existing: true, offer: offerOut(prior) });
+    const doc = new d.AccountOffer(fromSet.offerFieldsFromSet(set));
+    doc.createdBy = usernameFromReq(req);
+    await doc.save();
+    logEvent({
+      category: "listings",
+      action: "account_offer_created",
+      actor: actorFromReq(req),
+      subject: doc.title || String(doc._id),
+      subjectId: doc._id,
+      game: doc.game || "",
+      detail:
+        "account listing copied from " +
+        (set.custom ? "Custom" : "Shop") +
+        ' listing "' +
+        String(set.name || setId).slice(0, 120) +
+        '" (draft, no accounts yet)',
+    });
+    res.json({ success: true, existing: false, offer: offerOut(doc) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

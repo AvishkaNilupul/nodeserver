@@ -58,6 +58,20 @@ const accountOfferSchema = new mongoose.Schema(
     coverBullets: { type: [String], default: [] },
     coverImages: { type: [String], default: [] },
 
+    // Provenance, never stock: the Shop / Custom listing (DropSet) this offer
+    // was copied from — the Twitch-inventory page's "Create listing" and the
+    // Listings page's "Account listing" button (utils/offerFromSet.js). Nothing
+    // reads it to find accounts; the stock is still only this offer's own
+    // SuppliedAccount rows. It exists so copying the same set twice opens the
+    // offer already made instead of a duplicate, and so the panel can say
+    // where a draft came from.
+    sourceSet: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DropSet",
+      default: null,
+      index: true,
+    },
+
     createdBy: { type: String, default: "" },
   },
   { timestamps: true },

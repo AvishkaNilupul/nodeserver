@@ -46,7 +46,7 @@ let mem;
 let server;
 let baseUrl;
 let cookie;
-const calls = { ggsel: [], digiseller: [], dsContent: [], funpay: [] };
+const calls = { ggsel: [], digiseller: [], dsContent: [], funpay: [], zeusx: [] };
 
 const real = {
   ggselPublish: mp.ggselPublish,
@@ -54,8 +54,13 @@ const real = {
   digisellerAddContent: mp.digisellerAddContent,
   digisellerDelist: mp.digisellerDelist,
   funpayPublish: mp.funpayPublish,
+  zeusxPublish: mp.zeusxPublish,
   ggClaim: ggFulfiller.claimAccountsForSet,
 };
+
+// Per-test ZeusX behaviour: `zeusxPlan[i]` decides what the i-th create does
+// ("ok", or an Error to throw). Empty = every create succeeds.
+let zeusxPlan = [];
 
 // A template made only of a placeholder a login:password paste cannot fill.
 // This is the real-world shape of the bug, not a contrived empty string.
@@ -81,6 +86,18 @@ test.before(async () => {
   mp.funpayPublish = async (args) => {
     calls.funpay.push(args);
     return { externalId: "fp-1", externalNode: "1234", url: "", note: "" };
+  };
+  mp.zeusxPublish = async (args) => {
+    const i = calls.zeusx.length;
+    calls.zeusx.push(args);
+    const step = zeusxPlan[i];
+    if (step instanceof Error) throw step;
+    return {
+      externalId: "zx-" + (i + 1),
+      url: "https://zeusx.com/offer/zx-" + (i + 1),
+      qty: 1,
+      note: "",
+    };
   };
 
   const app = express();
@@ -117,6 +134,7 @@ test.after(async () => {
     digisellerAddContent: real.digisellerAddContent,
     digisellerDelist: real.digisellerDelist,
     funpayPublish: real.funpayPublish,
+    zeusxPublish: real.zeusxPublish,
   });
   ggFulfiller.claimAccountsForSet = real.ggClaim;
   if (server) await new Promise((r) => server.close(r));
@@ -338,4 +356,257 @@ test("an ordinary DropSet-backed publish is untouched by both fixes", async () =
   assert.equal(calls.ggsel.length, 1);
   assert.deepEqual(calls.ggsel[0].products, ["archive_1:pw"]);
   ggFulfiller.claimAccountsForSet = real.ggClaim;
+});
+
+// ---------------------------------------------------------------------------
+// ZeusX — an account listing is one AUTOMATIC offer per pasted account.
+//
+// What must never happen: an account listing going out as a plain Coordinated
+// offer that claims nothing (a ZeusX sale then leaves the same account on sale
+// everywhere else), several accounts packed into one offer (ZeusX takes one
+// credential per offer), an account handed back to the shelf when ZeusX may
+// hold it (its create is known to answer 500 and still create the offer), or an
+// account stranded out of stock when ZeusX provably never received it.
+// ---------------------------------------------------------------------------
+
+function zxErr(message, extra = {}) {
+  return Object.assign(new Error(message), extra);
+}
+
+async function publishZeusx(offer, quantity) {
+  calls.zeusx.length = 0;
+  return publish({
+    offerId: String(offer._id),
+    marketplaces: ["zeusx"],
+    zeusx: { quantity },
+  });
+}
+
+test("ZeusX: one automatic offer per account, and those accounts leave the shelf", async () => {
+  const offer = await makeOffer();
+  await stock(offer);
+  zeusxPlan = [];
+
+  const results = await publishZeusx(offer, 3);
+  assert.equal(results.zeusx.success, true, results.zeusx.message);
+  assert.match(results.zeusx.note, /3 automatic ZeusX offer/);
+
+  assert.equal(calls.zeusx.length, 3);
+  const logins = new Set();
+  for (const c of calls.zeusx) {
+    assert.equal(c.autoDeliverAccounts.length, 1, "one credential per offer");
+    const a = c.autoDeliverAccounts[0];
+    assert.ok(a.login && a.password, "a real login and password reach ZeusX");
+    assert.equal(a.email, "", "the account's recovery mail is not handed over");
+    logins.add(a.login);
+  }
+  assert.equal(logins.size, 3, "three different accounts, never one twice");
+
+  const rows = await MarketplaceListing.find({
+    accountOffer: offer._id,
+    marketplace: "zeusx",
+  }).lean();
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.set, null);
+    assert.equal(r.origin, "manual", "owner stock is never auto-repriced");
+    assert.equal(r.autoDeliver, true);
+    assert.equal(r.accountId, "");
+    assert.equal(r.accountLogin, "");
+    assert.equal(r.units.length, 1);
+    assert.ok(logins.has(r.units[0].login));
+  }
+  assert.deepEqual(await statuses(offer), { available: 3, fed: 3 });
+  const fed = await SuppliedAccount.find({ offer: offer._id, status: "fed" }).lean();
+  assert.ok(fed.every((f) => f.market === "zeusx"));
+  assert.deepEqual(
+    new Set(fed.map((f) => String(f.listing))),
+    new Set(rows.map((r) => String(r._id))),
+    "each account points at its own ZeusX listing",
+  );
+});
+
+test("ZeusX: a failure before the create hands every account back and stops", async () => {
+  const offer = await makeOffer();
+  await stock(offer);
+  zeusxPlan = [
+    zxErr('ZeusX has no game called "Rocket League" in its Accounts catalog'),
+  ];
+
+  const results = await publishZeusx(offer, 3);
+  assert.equal(results.zeusx.success, false);
+  assert.match(results.zeusx.message, /no game called/);
+  assert.equal(calls.zeusx.length, 1, "the same error would hit every account");
+  assert.deepEqual(await statuses(offer), { available: 6 });
+  assert.equal(
+    await MarketplaceListing.countDocuments({ accountOffer: offer._id }),
+    0,
+  );
+});
+
+test("ZeusX: a create that may have gone through holds that ONE account out of stock", async () => {
+  const offer = await makeOffer();
+  await stock(offer);
+  zeusxPlan = [
+    "ok",
+    zxErr("ZeusX create: Request failed with status code 500", { status: 500 }),
+  ];
+
+  const results = await publishZeusx(offer, 3);
+  // The first account is live, the second may be live on ZeusX, the third was
+  // never sent.
+  assert.equal(results.zeusx.success, true);
+  assert.equal(calls.zeusx.length, 2, "the run stops at the first failure");
+  const heldLogin = calls.zeusx[1].autoDeliverAccounts[0].login;
+  assert.match(results.zeusx.note, /Held out of stock/);
+  assert.ok(results.zeusx.note.includes(heldLogin), "the held account is named");
+
+  assert.deepEqual(await statuses(offer), { available: 4, fed: 2 });
+  const held = await SuppliedAccount.findOne({
+    offer: offer._id,
+    loginLower: heldLogin.toLowerCase(),
+  }).lean();
+  assert.equal(held.status, "fed", "never back on the shelf while ZeusX may sell it");
+  assert.equal(held.market, "zeusx");
+  assert.equal(held.listing, null);
+  assert.equal(
+    await MarketplaceListing.countDocuments({ accountOffer: offer._id }),
+    1,
+  );
+});
+
+test("ZeusX: a create ZeusX refused outright hands the account back", async () => {
+  for (const refusal of [
+    zxErr("ZeusX create: Listed price is too low", { __zeusx: true }),
+    zxErr("ZeusX create: Too Many Requests", { status: 429 }),
+  ]) {
+    const offer = await makeOffer();
+    await stock(offer);
+    zeusxPlan = [refusal];
+    const results = await publishZeusx(offer, 2);
+    assert.equal(results.zeusx.success, false);
+    assert.equal(results.zeusx.message.includes("Held out of stock"), false);
+    assert.deepEqual(
+      await statuses(offer),
+      { available: 6 },
+      "a refused create made nothing, so nothing is held: " + refusal.message,
+    );
+  }
+});
+
+test("ZeusX: an empty shelf is refused before anything reaches ZeusX", async () => {
+  const offer = await makeOffer();
+  zeusxPlan = [];
+  const results = await publishZeusx(offer, 2);
+  assert.equal(results.zeusx.success, false);
+  assert.match(results.zeusx.message, /Out of stock/i);
+  assert.equal(calls.zeusx.length, 0);
+});
+
+test("ZeusX: a set-backed publish is still the one Coordinated offer it always was", async () => {
+  const set = await DropSet.create({ name: "Drops bundle", price: 12 });
+  zeusxPlan = [];
+  calls.zeusx.length = 0;
+  const results = await publish({
+    setId: String(set._id),
+    marketplaces: ["zeusx"],
+    zeusx: { quantity: 2 },
+  });
+  assert.equal(results.zeusx.success, true);
+  assert.equal(calls.zeusx.length, 1);
+  assert.equal(calls.zeusx[0].quantity, 2);
+  assert.equal(calls.zeusx[0].autoDeliverAccounts, undefined);
+  const row = await MarketplaceListing.findOne({ set: set._id, marketplace: "zeusx" }).lean();
+  assert.ok(row);
+  assert.equal(row.accountOffer, null);
+});
+
+// ---------------------------------------------------------------------------
+// EpicNPC — the browser bridge takes an account listing too.
+// ---------------------------------------------------------------------------
+
+async function prepareEpic(body) {
+  const res = await fetch(baseUrl + "/marketplaces/epicnpc/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: await res.json() };
+}
+
+function epicPayload(url) {
+  const enc = String(url).split("#epfill=")[1] || "";
+  const b64 = enc.replace(/-/g, "+").replace(/_/g, "/");
+  return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+}
+
+test("EpicNPC: an account listing copied from a set posts with that set's drops", async () => {
+  const set = await DropSet.create({
+    name: "RL bundle",
+    items: [
+      { itemKey: "octane decal|rocket league", name: "Octane Decal", game: "Rocket League" },
+      { itemKey: "wheels|rocket league", name: "Wheels", game: "Rocket League", qty: 2 },
+    ],
+    price: 12,
+  });
+  const offer = await makeOffer({
+    sourceSet: set._id,
+    description: "Line one\nLine two",
+  });
+
+  const { status, json } = await prepareEpic({
+    offerId: String(offer._id),
+    game: "Rocket League",
+    price: 15,
+    record: true,
+  });
+  assert.equal(status, 200, JSON.stringify(json));
+  assert.equal(json.success, true);
+  assert.match(json.url, /epicnpc\.com\/forums\/x\.913\//);
+
+  const payload = epicPayload(json.url);
+  assert.equal(payload.title, "Rocket League Twitch Drops Account | 2+ Unclaimed Rewards");
+  assert.match(payload.descHtml, /Line one<br>Line two/, "line breaks survive");
+  assert.match(payload.descHtml, /2× Wheels/, "the source set's drops are listed");
+
+  const row = await MarketplaceListing.findById(json.listingId).lean();
+  assert.equal(row.marketplace, "epicnpc");
+  assert.equal(String(row.accountOffer), String(offer._id));
+  assert.equal(row.set, null);
+  assert.equal(row.origin, "manual");
+  assert.deepEqual(row.units, [], "nothing is claimed for a hand-delivered post");
+  assert.match(row.note, /hand the account over yourself/);
+});
+
+test("EpicNPC: a hand-made account listing keeps its own title and its floor", async () => {
+  const offer = await makeOffer({
+    title: "Rocket League account, 40 drops",
+    minPriceUsd: 9,
+  });
+  const { status, json } = await prepareEpic({
+    offerId: String(offer._id),
+    game: "Rocket League",
+    price: 5,
+    record: true,
+  });
+  assert.equal(status, 200, JSON.stringify(json));
+  const payload = epicPayload(json.url);
+  assert.equal(payload.title, "Rocket League account, 40 drops", "no \"0+ Unclaimed Rewards\"");
+  assert.doesNotMatch(payload.descHtml, /Full Reward List/);
+  assert.equal(payload.priceUsd, 9, "the offer's own floor applies here too");
+  const row = await MarketplaceListing.findById(json.listingId).lean();
+  assert.equal(row.price, 9);
+});
+
+test("EpicNPC: an unknown account listing is a 404, and nothing is recorded", async () => {
+  const before = await MarketplaceListing.countDocuments({ marketplace: "epicnpc" });
+  const { status } = await prepareEpic({
+    offerId: new mongoose.Types.ObjectId().toString(),
+    game: "Rocket League",
+    record: true,
+  });
+  assert.equal(status, 404);
+  const bad = await prepareEpic({ offerId: "nope", game: "Rocket League", record: true });
+  assert.equal(bad.status, 404);
+  assert.equal(await MarketplaceListing.countDocuments({ marketplace: "epicnpc" }), before);
 });

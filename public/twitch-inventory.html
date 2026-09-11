@@ -387,9 +387,19 @@ function renderActive() {
   else render(lastCampaigns);
 }
 
-function setStatus(msg, cls) {
+// `link` ({ href, text }) is appended as a real anchor after the message —
+// built with the DOM, never innerHTML, because the message carries a set name
+// the operator typed.
+function setStatus(msg, cls, link) {
   statusEl.textContent = msg;
   statusEl.className = cls ? "status-" + cls : "";
+  if (link && link.href) {
+    const a = document.createElement("a");
+    a.className = "link";
+    a.href = link.href;
+    a.textContent = link.text || link.href;
+    statusEl.append(" ", a);
+  }
 }
 
 function cleanToken(raw) {
@@ -740,11 +750,37 @@ function buildAutoTitle(items) {
   return label + " bundle — " + head + more + " (" + total + " item" + (total === 1 ? "" : "s") + ")";
 }
 
+// The same bundle as an ACCOUNT listing too: a draft with these drops in its
+// description and an empty shelf, so it can be sold as the operator's own
+// accounts (Listings → Account listings → paste the logins → Sell on…). The
+// server copies the product only, never the set's stock, and answers the copy
+// it already made if there is one. Best-effort: the Shop listing already exists
+// by the time this runs, so a failure here is reported, never fatal.
+async function copyToAccountListings(setId) {
+  if (!setId) return { error: "the new set has no id" };
+  try {
+    const res = await fetch("/account-listings/from-set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ setId }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.success || !j.offer) {
+      return { error: j.message || "HTTP " + res.status };
+    }
+    return { offer: j.offer };
+  } catch (err) {
+    return { error: err.message || "network error" };
+  }
+}
+
 // Shared "Create listing" flow: POST item snapshots to the from-items endpoint,
 // which caches images and computes itemKeys. Raw image URLs (with any
 // {width}/{height} template) are sent as-is so the server caches them at full
 // size for a real Gameflip cover. The prompt is the "list it or not" step, and
 // pre-fills the same auto-generated title the manual Listings editor produces.
+// The set lands on the Shop tab and is then copied to Account listings.
 async function createSetFromItems(items, btn) {
   if (!items.length) { alert("Nothing to list here."); return false; }
   // Total counts copies (qty), so a campaign with four Supply Crate tiers
@@ -752,7 +788,12 @@ async function createSetFromItems(items, btn) {
   const total = items.reduce((n, i) => n + (Number(i.qty) || 1), 0);
   const countLabel = total + " item(s)" + (total !== items.length ? ` (${items.length} distinct)` : "");
   const defaultName = buildAutoTitle(items);
-  const name = prompt(`Create a listing — ${countLabel}.\n\nSet name:`, defaultName);
+  const name = prompt(
+    `Create a listing — ${countLabel}.\n\n` +
+      "It goes to Shop listings, and to Account listings as a draft " +
+      "(to sell your own accounts that hold these drops).\n\nListing name:",
+    defaultName,
+  );
   if (name === null) return; // cancelled = "not"
   const old = btn.textContent;
   let ok = false;
@@ -770,7 +811,29 @@ async function createSetFromItems(items, btn) {
     btn.textContent = "✓ Set created (" + total + ")";
     btn.classList.add("done");
     ok = true;
-    setStatus(`Created drop set "${j.set && j.set.name}" with ${countLabel}. Open the Listings/Shop page to price and publish it.`, "ok");
+    const setName = (j.set && j.set.name) || name.trim() || defaultName;
+    const acct = await copyToAccountListings(j.set && j.set.id);
+    if (acct.offer) {
+      setStatus(
+        `Created "${setName}" with ${countLabel} — it is in Shop listings, and ` +
+          "in Account listings as a draft: open it, paste your accounts, then Sell on…",
+        "ok",
+        {
+          href: "/listings.html?tab=accounts&offer=" + encodeURIComponent(acct.offer.id),
+          text: "Open in Account listings",
+        },
+      );
+    } else {
+      // The set itself was made, so this is not a failed create — just say
+      // which half is missing and how to finish it by hand.
+      setStatus(
+        `Created "${setName}" with ${countLabel} in Shop listings, but it could ` +
+          `not be added to Account listings (${acct.error}). Use its "Account ` +
+          'listing" button on the Listings page.',
+        "error",
+        { href: "/listings.html", text: "Open Listings" },
+      );
+    }
   } catch (err) {
     alert("Couldn't create the set: " + err.message);
     btn.disabled = false; btn.textContent = old;

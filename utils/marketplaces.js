@@ -3957,7 +3957,12 @@ function zxError(what, e) {
     (body && body.error && (body.error.description || body.error.message)) ||
     (body && body.message) ||
     e.message;
-  return new Error(what + ": " + String(msg).slice(0, 300));
+  const err = new Error(what + ": " + String(msg).slice(0, 300));
+  // Kept so a caller can tell a refused create (4xx: nothing was made) from one
+  // that may have gone through anyway — create-offer is known to answer 500
+  // and still create the offer.
+  err.status = (e.response && e.response.status) || 0;
+  return err;
 }
 
 // The API answers 200 with { isSuccess: false, error } for business failures.
