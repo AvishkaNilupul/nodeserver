@@ -147,6 +147,31 @@
     .ev { font-size:11px; padding:3px 8px; }
     .ilist .it { font-size:11px; }
   }
+
+  /* ---- Host health cards: the same panel the Bots page shows (bots, accounts,
+     enabled, running, drops, unhealthy + CPU / memory / disk / uptime), but for
+     every host at once, including the Contabo server. ---- */
+  .hosts-wrap { margin-top:18px; }
+  .hosts-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0 0 11px; }
+  .hosts-head h2 { font-size:15.5px; font-weight:750; }
+  .hosts-head .hint { font-size:12px; color:var(--muted); }
+  .hgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:14px; }
+  .hcard { background:var(--surface); border:1px solid var(--line); border-left:6px solid var(--green); border-radius:14px; padding:14px 16px; }
+  .hcard.off { border-left-color:var(--muted); border-left-style:dashed; }
+  .hcard .hh { display:flex; align-items:center; gap:9px; margin-bottom:12px; }
+  .hcard .hh b { font-size:14.5px; }
+  .htiles { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
+  .htile { background:var(--surface-2); border:1px solid var(--line); border-radius:11px; padding:10px 11px; min-width:0; }
+  .htile b { font-size:18px; font-weight:750; display:block; line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .htile span { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; display:block; margin-top:2px; }
+  .hres { display:grid; grid-template-columns:repeat(2,1fr); gap:9px; margin-top:9px; }
+  /* Resource values pack a "used / total" pair, so they run smaller than the
+     single-number count tiles above to fit without truncating on a phone. */
+  .hres .htile b { font-size:13px; letter-spacing:-.1px; }
+  .hbar { height:5px; background:var(--bg); border-radius:999px; overflow:hidden; margin-top:7px; }
+  .hbar i { display:block; height:100%; background:var(--accent); border-radius:999px; }
+  .hoff { font-size:12.5px; color:var(--muted); padding:8px 0 2px; }
+  @media (max-width:720px){ .hgrid{grid-template-columns:1fr;} }
 </style>
 </head>
 
@@ -186,6 +211,14 @@
       </div>
     </div>
     <div id="staleBox"></div>
+
+    <div class="hosts-wrap" id="hostsWrap">
+      <div class="hosts-head">
+        <h2>Hosts</h2>
+        <span class="hint">Bots, accounts and machine resources for every host — including the Contabo server.</span>
+      </div>
+      <div class="hgrid" id="hostGrid"><div class="hoff">Loading host health…</div></div>
+    </div>
 
     <div class="cards" id="cards"></div>
   </main>
@@ -603,7 +636,91 @@
       }
     }
 
-    el("refreshBtn").addEventListener("click", function () { load(true); });
+    // ---- Host health: the Bots-page panel (bots / accounts / enabled / running
+    // / drops / unhealthy + CPU / memory / disk / uptime), one card per host,
+    // for every host at once. Read-only. Each host's health + resource calls run
+    // independently, so a slow or offline Pi never blocks the Contabo card.
+    // Loaded on open / Refresh / when the tab regains focus — never on the 60s
+    // background poll, so it can't quietly hammer a remote host.
+    var hostsRunning = false;
+    function hnum(n) { n = Number(n) || 0; return n >= 1000 ? n.toLocaleString() : String(n); }
+    function hbytes(n) { if (n == null || isNaN(n)) return "—"; var u = ["B","KB","MB","GB","TB"], i = 0; n = Number(n); while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)) + " " + u[i]; }
+    function huptime(s) { if (s == null || isNaN(s)) return "—"; s = Math.floor(s); var d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60); if (d > 0) return d + "d " + h + "h"; if (h > 0) return h + "h " + m + "m"; return m + "m"; }
+    function hbar(p) { p = Math.max(0, Math.min(100, Number(p) || 0)); return '<div class="hbar"><i style="width:' + p.toFixed(0) + '%"></i></div>'; }
+    function htile(val, label, red) { return '<div class="htile"><b' + (red ? ' style="color:var(--red)"' : '') + '>' + val + '</b><span>' + esc(label) + '</span></div>'; }
+    function hrestile(val, label, barPct) { return '<div class="htile"><b>' + val + '</b><span>' + esc(label) + '</span>' + (barPct == null ? '' : hbar(barPct)) + '</div>'; }
+
+    async function hget(url) {
+      var r = await fetch(url, { credentials: "same-origin" });
+      if (r.status === 401) { location.href = "/admin-login.html"; throw new Error("unauth"); }
+      var j = {}; try { j = await r.json(); } catch (e) {}
+      if (!r.ok || j.success === false) throw new Error(j.message || ("HTTP " + r.status));
+      return j;
+    }
+
+    async function loadHosts() {
+      if (hostsRunning) return;
+      hostsRunning = true;
+      try {
+        var all = await hget("/bot-configs/all");
+        var arr = (all && all.hosts) || [];
+        var rows = await Promise.all(arr.map(async function (h) {
+          var bots = h.bots || [];
+          var accounts = 0, enabled = 0, running = 0;
+          bots.forEach(function (b) { accounts += (b.accountCount || 0); enabled += (b.enabledCount || 0); if (b.running) running++; });
+          var drops = 0, unhealthy = 0, stats = null, statAvail = false, statOffline = false;
+          try {
+            var hz = await hget("/bot-configs/health?host=" + encodeURIComponent(h.id));
+            var hm = hz.health || {};
+            Object.keys(hm).forEach(function (f) { drops += (hm[f].drops || 0); unhealthy += (hm[f].error || 0) + (hm[f].tokenInvalid || 0); });
+          } catch (e) {}
+          try {
+            var sz = await hget("/bot-configs/host-stats?host=" + encodeURIComponent(h.id));
+            if (sz.available !== false) { stats = sz.stats || {}; statAvail = true; }
+            else { statOffline = !!sz.offline; }
+          } catch (e) {}
+          return { id: h.id, label: h.label, online: h.online !== false, bots: bots.length, accounts: accounts, enabled: enabled, running: running, drops: drops, unhealthy: unhealthy, stats: stats, statAvail: statAvail, statOffline: statOffline };
+        }));
+        renderHosts(rows);
+      } catch (e) {
+        var g = el("hostGrid");
+        if (g) g.innerHTML = '<div class="hoff">Could not load host health: ' + esc((e && e.message) || e) + '</div>';
+      } finally {
+        hostsRunning = false;
+      }
+    }
+
+    function renderHosts(list) {
+      var g = el("hostGrid");
+      if (!g) return;
+      if (!list.length) { g.innerHTML = '<div class="hoff">No hosts configured.</div>'; return; }
+      g.innerHTML = list.map(function (h) {
+        var pill = h.online ? '<span class="pill s-ok sm">online</span>' : '<span class="pill s-unknown sm">offline</span>';
+        var tiles =
+          htile(hnum(h.bots), "Bots") + htile(hnum(h.accounts), "Accounts") + htile(hnum(h.enabled), "Enabled") +
+          htile(hnum(h.running), "Running") + htile(hnum(h.drops), "Drops") + htile(hnum(h.unhealthy), "Unhealthy", h.unhealthy > 0);
+        var res;
+        if (h.statAvail && h.stats) {
+          var s = h.stats;
+          var memPct = s.memTotal ? (s.memUsed / s.memTotal) * 100 : 0;
+          var diskPct = s.diskTotal ? (s.diskUsed / s.diskTotal) * 100 : 0;
+          res = '<div class="hres">' +
+            hrestile((s.cpu == null ? "—" : s.cpu + "%"), "CPU" + (s.ncpu ? " · " + s.ncpu + " cores" : ""), s.cpu) +
+            hrestile(hbytes(s.memUsed) + " / " + hbytes(s.memTotal), "Memory · " + memPct.toFixed(0) + "%", memPct) +
+            hrestile(hbytes(s.diskUsed) + " / " + hbytes(s.diskTotal), "Disk · " + diskPct.toFixed(0) + "%", diskPct) +
+            hrestile(huptime(s.uptime), "Uptime", null) +
+          '</div>';
+        } else {
+          res = '<div class="hoff">' + (h.statOffline ? "⚠️ Host offline — resource usage unavailable" : "Resource usage unavailable") + '</div>';
+        }
+        return '<div class="hcard' + (h.online ? '' : ' off') + '">' +
+          '<div class="hh"><b>' + esc(h.label) + '</b>' + pill + '</div>' +
+          '<div class="htiles">' + tiles + '</div>' + res +
+        '</div>';
+      }).join("");
+    }
+
+    el("refreshBtn").addEventListener("click", function () { load(true); loadHosts(); });
     el("consoleBtn").addEventListener("click", function () {
       location.href = "/market-console.html";
     });
@@ -642,10 +759,11 @@
     // moment the owner looks at it again.
     setInterval(function () { if (document.visibilityState === "visible") load(false); }, POLL_MS);
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "visible") load(false);
+      if (document.visibilityState === "visible") { load(false); loadHosts(); }
     });
 
     load(false);
+    loadHosts();
   })();
   </script>
 </body>
