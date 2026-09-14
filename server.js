@@ -66,6 +66,7 @@ const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
+const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
@@ -694,6 +695,11 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
+// Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
+// fires N parallel DropsPage_ClaimDropRewards mutations at one dropInstanceID
+// so Twitch's inventory service sees N distinct "devices" landing at once.
+// Each route self-guards with requireAdmin — enforce2fa gates it behind 2FA.
+app.use(enforce2fa, twitchClaimRoutes);
 app.use(requireAdmin, enforce2fa, aiChatRoutes);
 
 // =========================
