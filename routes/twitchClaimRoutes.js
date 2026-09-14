@@ -35,29 +35,65 @@ router.post("/admin/twitch-claim/inventory", requireAdmin, async (req, res) => {
   }
 });
 
-// POST /admin/twitch-claim/fire — the actual race. Takes the auth-token, the
-// dropInstanceID to hit, and the number of parallel workers. Returns the full
-// per-worker table plus the aggregated stats block the UI renders.
-router.post("/admin/twitch-claim/fire", requireAdmin, async (req, res) => {
+// POST /admin/twitch-claim/fire — kicks off the race in the background and
+// returns a jobId immediately. The browser then polls /fire/:jobId for the
+// result. We used to run the race synchronously inside the request, but at
+// big N (10k) the fire takes minutes and the reverse-proxy times the request
+// out with an HTML page long before spamClaim finishes.
+router.post("/admin/twitch-claim/fire", requireAdmin, (req, res) => {
   const token = String((req.body && req.body.authToken) || "").trim();
   const dropInstanceId = String(
     (req.body && req.body.dropInstanceId) || "",
   ).trim();
   const requested = Number((req.body && req.body.nParallel) || 20);
+  const who = req.session?.admin?.username || "?";
   if (!token) return bail(res, 400, "authToken required");
   if (!dropInstanceId) return bail(res, 400, "dropInstanceId required");
   if (!Number.isFinite(requested) || requested < 1)
     return bail(res, 400, "nParallel must be a positive number");
   const nParallel = Math.min(MAX_PARALLEL, Math.floor(requested));
-  try {
-    const out = await twitchClaim.spamClaim(token, dropInstanceId, nParallel);
-    res.json({ success: true, ...out });
-  } catch (err) {
-    res
-      .status(400)
-      .json({ success: false, message: err.message || String(err) });
-  }
+  const jobId = twitchClaim.startClaimJob(token, dropInstanceId, nParallel);
+  // Rare, admin-triggered, expensive — always log. Every phase inside
+  // spamClaim also logs on its own so we can trace warmup vs race.
+  console.log(
+    `[twitch-claim] fire start user=${who} n=${nParallel} drop=${dropInstanceId} job=${jobId}`,
+  );
+  res.json({ success: true, jobId, n: nParallel });
 });
+
+// GET /admin/twitch-claim/fire/:jobId — poll for a background job. Returns
+// the full spamClaim payload once status flips to "done".
+router.get(
+  "/admin/twitch-claim/fire/:jobId",
+  requireAdmin,
+  (req, res) => {
+    const job = twitchClaim.getClaimJob(String(req.params.jobId || ""));
+    if (!job) return bail(res, 404, "job not found (or expired)");
+    if (job.status === "running") {
+      return res.json({
+        success: true,
+        status: "running",
+        elapsedMs: Date.now() - job.startedAt,
+        n: job.n,
+        dropInstanceId: job.dropInstanceId,
+      });
+    }
+    if (job.status === "error") {
+      return res.json({
+        success: false,
+        status: "error",
+        message: job.error || "unknown error",
+        n: job.n,
+        dropInstanceId: job.dropInstanceId,
+      });
+    }
+    return res.json({
+      success: true,
+      status: "done",
+      ...job.result,
+    });
+  },
+);
 
 // POST /admin/twitch-claim/check — post-fire truth check: re-query inventory
 // and see whether Twitch flipped isClaimed on the drop we just spammed.

@@ -341,6 +341,44 @@
     fireBtn.disabled = state.firing;
   }
 
+  // Body-tolerant wrappers around fetch — read as text, JSON-parse ourselves,
+  // and if the body isn't JSON (typically an nginx HTML error page on a proxy
+  // timeout) surface an operator-friendly diagnosis instead of the raw
+  // "Unexpected token '<'" that a naked r.json() would throw.
+  async function safeJsonPost(url, body) {
+    try {
+      var r = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      var raw = await r.text();
+      try { return { ok: r.ok, data: JSON.parse(raw), status: r.status }; }
+      catch (_) {
+        var snip = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+        return { ok: false, data: null, status: r.status,
+          error: "HTTP " + r.status + " non-JSON body (proxy error page?): " + snip };
+      }
+    } catch (err) {
+      return { ok: false, data: null, error: err.message || String(err) };
+    }
+  }
+  async function safeJsonGet(url) {
+    try {
+      var r = await fetch(url, { credentials: "same-origin" });
+      var raw = await r.text();
+      try { return { ok: r.ok, data: JSON.parse(raw), status: r.status }; }
+      catch (_) {
+        var snip = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+        return { ok: false, data: null, status: r.status,
+          error: "HTTP " + r.status + " non-JSON body (proxy error page?): " + snip };
+      }
+    } catch (err) {
+      return { ok: false, data: null, error: err.message || String(err) };
+    }
+  }
+
   async function fetchInventory() {
     var token = tokenInput.value.trim();
     if (!token) {
@@ -407,20 +445,40 @@
     fireStatus.innerHTML =
       '<span class="spinner"></span> &nbsp; warming ' + n + ' clients & firing (own TCP+TLS each) ...';
     try {
-      var r = await fetch("/admin/twitch-claim/fire", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          authToken: token,
-          dropInstanceId: state.selected.dropInstanceId,
-          nParallel: n,
-        }),
+      // Kick off in the background — the server returns a jobId immediately
+      // so the browser is not holding the socket open for the whole race.
+      var kick = await safeJsonPost("/admin/twitch-claim/fire", {
+        authToken: token,
+        dropInstanceId: state.selected.dropInstanceId,
+        nParallel: n,
       });
-      var data = await r.json();
-      if (!r.ok || !data.success) {
-        fireStatus.textContent = "fire failed: " + (data.message || ("HTTP " + r.status));
+      if (!kick.ok || !kick.data || !kick.data.success) {
+        fireStatus.textContent = "fire failed to start: " + kick.error;
         return;
+      }
+      var jobId = kick.data.jobId;
+      // Poll every 1s until the job flips to done or error. No proxy timeout
+      // can murder us here — each poll is a tiny sub-second request.
+      var data = null;
+      while (true) {
+        await new Promise(function (r) { setTimeout(r, 1000); });
+        var pj = await safeJsonGet("/admin/twitch-claim/fire/" + encodeURIComponent(jobId));
+        if (!pj.ok || !pj.data) {
+          fireStatus.textContent = "poll failed: " + pj.error;
+          return;
+        }
+        if (pj.data.status === "running") {
+          fireStatus.innerHTML =
+            '<span class="spinner"></span> &nbsp; firing (' + Math.round(pj.data.elapsedMs / 1000)
+            + 's elapsed, n=' + pj.data.n + ') · job ' + jobId;
+          continue;
+        }
+        if (pj.data.status === "error" || pj.data.success === false) {
+          fireStatus.textContent = "fire failed: " + (pj.data.message || "unknown");
+          return;
+        }
+        data = pj.data;
+        break;
       }
       renderResults(data);
       fireStatus.textContent =

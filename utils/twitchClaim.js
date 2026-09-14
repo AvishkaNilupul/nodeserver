@@ -221,6 +221,8 @@ async function spamClaim(token, dropInstanceId, nParallel) {
 
   // Phase 1 — warmup, bounded concurrency (matches the python's ceiling).
   const warmCap = Math.min(500, Math.max(50, Math.floor(nParallel / 20)));
+  const warmStart = Date.now();
+  const warmResults = new Array(nParallel);
   await new Promise((resolveAll) => {
     let started = 0;
     let finished = 0;
@@ -229,16 +231,30 @@ async function spamClaim(token, dropInstanceId, nParallel) {
       while (inFlight < warmCap && started < nParallel) {
         const i = started++;
         inFlight++;
-        postGql(agents[i], workerHeaders[i], bodyBuf).finally(() => {
-          inFlight--;
-          finished++;
-          if (finished === nParallel) resolveAll();
-          else pump();
-        });
+        postGql(agents[i], workerHeaders[i], bodyBuf)
+          .then((r) => {
+            warmResults[i] = r;
+          })
+          .finally(() => {
+            inFlight--;
+            finished++;
+            if (finished === nParallel) resolveAll();
+            else pump();
+          });
       }
     }
     pump();
   });
+  const warmMs = Date.now() - warmStart;
+  let warmErrors = 0;
+  let warmNon200 = 0;
+  for (const r of warmResults) {
+    if (!r || r.error) warmErrors++;
+    else if (r.status !== 200) warmNon200++;
+  }
+  console.log(
+    `[twitch-claim] warmup n=${nParallel} cap=${warmCap} ms=${warmMs} errors=${warmErrors} non200=${warmNon200}`,
+  );
 
   // Phase 2 — the race.
   let openGate;
@@ -285,6 +301,16 @@ async function spamClaim(token, dropInstanceId, nParallel) {
   await Promise.all(workers);
   const raceElapsedMs =
     Number(process.hrtime.bigint() - raceStart) / 1e6;
+
+  let raceErrors = 0;
+  const raceStatuses = {};
+  for (const r of results) {
+    if (!r || r.error) raceErrors++;
+    else raceStatuses[r.status] = (raceStatuses[r.status] || 0) + 1;
+  }
+  console.log(
+    `[twitch-claim] race   n=${nParallel} ms=${Math.round(raceElapsedMs)} errors=${raceErrors} statuses=${JSON.stringify(raceStatuses)}`,
+  );
 
   for (const a of agents) a.destroy();
 
@@ -350,8 +376,62 @@ async function checkClaimState(token, dropIdOrInstance) {
   return { found: false };
 }
 
+// Async job registry — the fire route can outlast the reverse-proxy timeout
+// (nginx default 60s) at big N, so we run spamClaim in the background and let
+// the browser poll for the result instead of holding one long HTTP call open.
+// In-memory Map is fine here: jobs are user-triggered, rare, and lose value
+// after ~10 minutes anyway. A restart wipes them by design.
+const JOBS = new Map();
+const JOB_TTL_MS = 10 * 60 * 1000;
+
+function newJobId() {
+  return `${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
+}
+
+function pruneJobs() {
+  const now = Date.now();
+  for (const [id, j] of JOBS) {
+    if (now - j.updatedAt > JOB_TTL_MS) JOBS.delete(id);
+  }
+}
+
+function startClaimJob(token, dropInstanceId, nParallel) {
+  pruneJobs();
+  const id = newJobId();
+  const job = {
+    id,
+    status: "running",
+    n: nParallel,
+    dropInstanceId,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    result: null,
+    error: null,
+  };
+  JOBS.set(id, job);
+  // Fire-and-forget. Any throw lands on the job record, never on the router.
+  spamClaim(token, dropInstanceId, nParallel)
+    .then((out) => {
+      job.status = "done";
+      job.result = out;
+      job.updatedAt = Date.now();
+    })
+    .catch((err) => {
+      job.status = "error";
+      job.error = err && err.message ? err.message : String(err);
+      job.updatedAt = Date.now();
+    });
+  return id;
+}
+
+function getClaimJob(id) {
+  return JOBS.get(id) || null;
+}
+
 module.exports = {
   fetchClaimableDrops,
   spamClaim,
   checkClaimState,
+  startClaimJob,
+  getClaimJob,
 };
