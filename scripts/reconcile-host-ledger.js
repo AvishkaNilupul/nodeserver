@@ -19,11 +19,19 @@
 //   node scripts/reconcile-host-ledger.js --host pi
 //   ... add --apply to write. Without it, nothing is written.
 //   ... --json <path> dumps the full per-row classification for auditing.
+//   ... --only repoint,retire,renter limits WHICH categories --apply writes.
 //
 // WHAT IT WRITES (only ever these three fields)
 //   * live somewhere  -> repoint host/configFile/container (+ enabled, to match
 //                        the config entry). Real drift, worth correcting.
 //   * live nowhere    -> container:"", configFile:"", enabled:false.
+//   * held by a RENTER stack -> same cleared placement. A renter stack is not an
+//     operator home: addRenterAccountsToConfig writes RenterAccount, never
+//     BotAccount, and the renting recipe REQUIRES the operator placement to be
+//     cleared, because dedupeAccounts blocks on a non-empty configFile
+//     (routes/botConfigRoutes.js:250) and renterPoolEligibility reads the same
+//     field as "deployedOnBot". Pointing a row at a renter config would block
+//     that token from ever being re-added and hide it from the pool picker.
 // Rows are never deleted, and soldAt / suspendedAt / pool state are never
 // touched: a retired pointer is not a retired account.
 //
@@ -45,6 +53,7 @@ const hosts = require(path.join(APP, "utils", "botHosts"));
 const fleet = require(path.join(APP, "utils", "noclaimFleet"));
 const BotAccount = require(path.join(APP, "models", "BotAccount"));
 const UnclaimedAccount = require(path.join(APP, "models", "UnclaimedAccount"));
+const RenterBotStack = require(path.join(APP, "models", "RenterBotStack"));
 
 const arg = (n, d) => {
   const i = process.argv.indexOf("--" + n);
@@ -53,6 +62,8 @@ const arg = (n, d) => {
 const APPLY = process.argv.includes("--apply");
 const LEDGER_HOST = arg("host", "pi");
 const JSON_OUT = arg("json", "");
+const ONLY = arg("only", "").split(",").map((x) => x.trim()).filter(Boolean);
+const writes = (cat) => !ONLY.length || ONLY.includes(cat);
 const CFG_RE = /^config(_\d{1,3})?\.json$/;
 const p = (...a) => console.log("  ", ...a);
 const secretOf = (v) => String(v || "").trim();
@@ -71,7 +82,7 @@ function containerForFile(file) {
 // Every managed host's configs, in one readFiles round trip per host. Throws on
 // the first unreadable host/file: an incomplete index cannot be told apart from
 // a genuinely empty fleet, and the difference is whether we disable live rows.
-async function indexManagedHosts() {
+async function indexManagedHosts(renterFiles) {
   const index = new Map();
   const seen = [];
   for (const h of hosts.listHosts()) {
@@ -97,7 +108,8 @@ async function indexManagedHosts() {
         entries++;
         if (!index.has(k)) index.set(k, []);
         index.get(k).push({
-          kind: "managed",
+          kind: renterFiles.has(h.id + "/" + f) ? "renter" : "managed",
+          renter: renterFiles.has(h.id + "/" + f),
           host: h.id,
           file: f,
           container: containerForFile(f) || "",
@@ -145,6 +157,7 @@ async function indexNoClaimFleet(index) {
       if (!index.has(k)) index.set(k, []);
       index.get(k).push({
         kind: "noclaim",
+        renter: false,
         host: fleet.HOST_ID,
         file: "",
         container: fleet.containerFor(id),
@@ -160,12 +173,15 @@ async function indexNoClaimFleet(index) {
 // Pick the entry that decides where an account really lives: an enabled copy
 // beats a disabled one (a disabled entry is retirement residue — 237 such
 // duplicates exist across this fleet). Two ENABLED copies is a dupeGuard-class
-// problem, not a bookkeeping one, so those rows are reported and left alone.
+// problem, not a bookkeeping one, so those rows are reported and left alone —
+// and that check spans renter stacks too, which is how an operator bot and a
+// renter's bot farming the same token gets caught.
 function chooseHome(hits) {
   const on = hits.filter((h) => h.enabled);
   if (on.length > 1) return { conflict: true, hits: on };
-  if (on.length === 1) return { conflict: false, home: on[0] };
-  return { conflict: false, home: hits[0] };
+  // No enabled copy anywhere: an operator config still decides over a renter
+  // stack, because only the operator side owns these fields.
+  return { conflict: false, home: on[0] || hits.find((h) => !h.renter) || hits[0] };
 }
 
 // Container state per host, so the report can say whether the config a row
@@ -197,7 +213,10 @@ async function main() {
   await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
   console.log(`== reconcile BotAccount rows on host "${LEDGER_HOST}"   APPLY=${APPLY}`);
 
-  const { index, seen } = await indexManagedHosts();
+  const stacks = await RenterBotStack.find({}).select("host file").lean();
+  const renterFiles = new Set(stacks.map((s) => `${s.host}/${s.file}`));
+  p(`renter stacks (not operator homes): ${[...renterFiles].sort().join(", ") || "none"}`);
+  const { index, seen } = await indexManagedHosts(renterFiles);
   for (const s of seen) p("managed " + s);
   const ncBots = await indexNoClaimFleet(index);
   p(`no-claim fleet (${fleet.HOST_ID}): ${ncBots.length} bots, ${ncBots.reduce((a, b) => a + b.n, 0)} entries`);
@@ -219,7 +238,7 @@ async function main() {
     : [];
   const uaBy = new Map(ua.map((u) => [u.loginLower, u]));
 
-  const cat = { repoint: [], okAlready: [], retire: [], alreadyRetired: [], conflict: [] };
+  const cat = { repoint: [], okAlready: [], retire: [], alreadyRetired: [], conflict: [], renterHeld: [] };
   for (const r of rows) {
     const hits = index.get(secretOf(r.clientSecret)) || [];
     const u = uaBy.get(String(r.login || "").toLowerCase()) || null;
@@ -239,6 +258,16 @@ async function main() {
     const pick = chooseHome(hits);
     if (pick.conflict) { item.hits = pick.hits; cat.conflict.push(item); continue; }
     const h = pick.home;
+    if (h.renter) {
+      // A renter stack holds it. The operator placement must be EMPTY.
+      item.to = { configFile: "", container: "", enabled: false };
+      item.via = "renter";
+      item.renterAt = hits.filter((x) => x.renter).map((x) => `${x.host}/${x.file}`);
+      item.toState = stateOf(h.host, h.container);
+      const clean = !r.container && !r.configFile && r.enabled === false;
+      (clean ? cat.okAlready : cat.renterHeld).push(item);
+      continue;
+    }
     item.to = { host: h.host, configFile: h.file, container: h.container, enabled: h.enabled };
     item.via = h.kind;
     item.toState = stateOf(h.host, h.container);
@@ -263,6 +292,8 @@ async function main() {
   for (const [k, n] of tally(moved, (i) => `${i.from.host}/${i.from.container || "(none)"} [${i.fromState}] -> ${i.to.host}/${i.to.container || i.to.configFile || "(none)"} [${i.via}, ${i.toState}]  enabled ${i.from.enabled}->${i.to.enabled}`)) p(`     ${String(n).padStart(4)}  ${k}`);
   p(`LIVE, only enabled wrong: ${flagOnly.length}`);
   for (const [k, n] of tally(flagOnly, (i) => `${i.to.host}/${i.to.container} [${i.toState}]  enabled ${i.from.enabled}->${i.to.enabled}`)) p(`     ${String(n).padStart(4)}  ${k}`);
+  p(`HELD BY A RENTER STACK  : ${cat.renterHeld.length}  (clear the operator placement)`);
+  for (const [k, n] of tally(cat.renterHeld, (i) => `${i.from.host}/${i.from.container || "(none)"} [${i.fromState}] -> cleared;  renter stack ${i.renterAt.join(",")} [${i.toState}], enabled ${i.from.enabled}->false`)) p(`     ${String(n).padStart(4)}  ${k}`);
   p(`LIVE, already correct   : ${cat.okAlready.length}`);
   p(`ENABLED ON >1 HOST      : ${cat.conflict.length}  ${cat.conflict.length ? "<-- dupeGuard problem, NOT touched" : ""}`);
   for (const [k, n] of tally(cat.conflict, (i) => i.hits.map((h) => `${h.host}/${h.container || h.file} [${h.kind}, ${stateOf(h.host, h.container)}]`).join("  +  "))) p(`     ${String(n).padStart(4)}  ${k}`);
@@ -272,7 +303,7 @@ async function main() {
   const ucSplit = tally(cat.retire.concat(cat.alreadyRetired), (i) => i.unclaimed ? `UnclaimedAccount status=${i.unclaimed.status}${i.unclaimed.sold ? " sold" : ""}` : "no UnclaimedAccount row");
   p("orphans cross-referenced against UnclaimedAccount:");
   for (const [k, n] of ucSplit) p(`     ${String(n).padStart(4)}  ${k}`);
-  const total = cat.repoint.length + cat.okAlready.length + cat.conflict.length + cat.retire.length + cat.alreadyRetired.length;
+  const total = cat.repoint.length + cat.okAlready.length + cat.conflict.length + cat.retire.length + cat.alreadyRetired.length + cat.renterHeld.length;
   if (total !== rows.length) throw new Error(`conservation check failed: ${total} classified vs ${rows.length} rows`);
   p(`conservation ok: ${total} == ${rows.length}`);
 
@@ -287,12 +318,16 @@ async function main() {
   }
 
   console.log("\n== APPLYING ==");
+  if (ONLY.length) p(`--only ${ONLY.join(",")} — other categories are reported but not written`);
   const ops = [];
-  for (const it of cat.repoint) {
+  const written = [];
+  for (const it of writes("repoint") ? cat.repoint : []) {
     ops.push({ updateOne: { filter: { _id: new mongoose.Types.ObjectId(it._id) }, update: { $set: { host: it.to.host, configFile: it.to.configFile, container: it.to.container, enabled: it.to.enabled } } } });
   }
-  for (const it of cat.retire) {
+  written.push(...(writes("repoint") ? cat.repoint : []));
+  for (const it of [...(writes("retire") ? cat.retire : []), ...(writes("renter") ? cat.renterHeld : [])]) {
     ops.push({ updateOne: { filter: { _id: new mongoose.Types.ObjectId(it._id) }, update: { $set: { container: "", configFile: "", enabled: false } } } });
+    written.push(it);
   }
   if (!ops.length) return p("nothing to write");
   const res = await BotAccount.bulkWrite(ops, { ordered: false });
@@ -300,9 +335,9 @@ async function main() {
 
   // Read back: the write is only believed if the rows now say what we intended.
   let bad = 0;
-  const check = await BotAccount.find({ _id: { $in: [...cat.repoint, ...cat.retire].map((i) => new mongoose.Types.ObjectId(i._id)) } })
+  const check = await BotAccount.find({ _id: { $in: written.map((i) => new mongoose.Types.ObjectId(i._id)) } })
     .select("host configFile container enabled soldAt suspendedAt").lean();
-  const want = new Map([...cat.repoint, ...cat.retire].map((i) => [i._id, i]));
+  const want = new Map(written.map((i) => [i._id, i]));
   for (const r of check) {
     const w = want.get(String(r._id));
     const to = w.to;
