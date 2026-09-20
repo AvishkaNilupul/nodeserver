@@ -28,6 +28,10 @@ function setKeys(set) {
 // preserving the "no two buyers get the same drops" guarantee at drop grain.
 // Returns true when the whole set is now reserved on the account.
 async function reserveSetOnAccount(accountId, set, opts = {}) {
+  // A no-claim set's stock is the no-claim farm (utils/noclaimStock.js), never
+  // the archive: reserving its items here would freeze claimed DropLog copies
+  // its buyer cannot use (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6).
+  if (set && set.stockSource === "noclaim") return false;
   const keys = setKeys(set);
   if (!keys.length) return false;
   const now = new Date();
@@ -151,7 +155,7 @@ async function releaseAccountsForTag(accountIds, tag) {
 // Release one set's reservation from specific accounts (e.g. a Shop refund
 // frees only the refunded set's drops, leaving the buyer's other games on the
 // same account untouched). An optional `tag` narrows the release to rows
-// reserved by that claim owner, so e.g. a guardian fix on a FunPay listing
+// reserved by that claim owner, so e.g. a guardian fix on a listing
 // can't free drops a Shop buyer paid for.
 async function releaseSetForAccounts(accountIds, soldSetId, tag) {
   const ids = (Array.isArray(accountIds) ? accountIds : [accountIds])

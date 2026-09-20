@@ -20,16 +20,51 @@ const { encrypt, decrypt } = require("./secretBox");
 const FIELDS = {
   gameflip: ["apiKey", "apiSecret"],
   digiseller: ["sellerId", "apiKey"],
-  g2g: ["userId", "apiKey", "apiSecret"],
+  // G2G's Open API only accepts pushes for the *account* section, not the Game
+  // Items category where every Twitch Drops offer lives, and the account has no
+  // API key any more. So G2G is driven through its own internal seller API at
+  // sls.g2g.com, exactly like ZeusX: the operator supplies the refresh trio
+  // once and the server mints fresh access tokens from it forever via
+  // /user/refresh_access. See g2gRefreshAccess + utils/g2gSessionRefresher.
+  //
+  // `refresh_token`, `active_device_token` and `long_lived_token` are all set
+  // as ORDINARY COOKIES on g2g.com as well as living in local storage, so the
+  // operator can read them from either. The seller id is the numeric prefix of
+  // refresh_token ("<sellerId>.<secret>") and is also shown in the account menu.
+  g2g: ["userId", "refreshToken", "activeDeviceToken"],
   ggsel: ["apiKey"],
-  // FunPay has no API — the single credential is the account's session token.
-  funpay: ["golden_key"],
   // ZeusX has no public API either — the credential is the seller session's
   // access_token (~7-day life). The refresh_token is reusable (does not rotate),
   // so the server mints fresh access tokens from it via /user/exchange-token and
   // the operator never has to re-paste — see zeusxRefreshAccessToken +
   // utils/zeusxTokenRefresher.
   zeusx: ["accessToken", "refreshToken"],
+  // Eldorado has no usable public API either. Auth is cookie-based, so the one
+  // credential is the whole Cookie header copied from a signed-in seller
+  // session (DevTools -> Application -> Cookies -> eldorado.gg -> copy all).
+  // The server renews it in place via /authentication/refreshTokens, so this is
+  // a one-time paste — see eldoradoRefreshSession + utils/eldoradoSessionRefresher.
+  eldorado: ["cookie"],
+  // PlayerAuctions is the same shape as Eldorado — cookie auth, httpOnly
+  // session cookies, renewed in place via account-api /SignIn/RefreshToken.
+  // The one difference worth remembering: there is NO CSRF token here, so the
+  // whole credential really is just the Cookie header from a signed-in seller
+  // session (DevTools -> Network -> any request -> copy the Cookie header).
+  playerauctions: ["cookie"],
+};
+
+// Credentials a marketplace will USE if present but must not be blocked on.
+// `requireKeys` ignores these; `getKeys`/`setKeys` still round-trip them, so an
+// operator can supply one without it becoming a hard precondition.
+const OPTIONAL_FIELDS = {
+  // G2G's access token is deliberately NOT required. The server mints one from
+  // the refresh trio on its very first call, so asking an operator to copy a
+  // short-lived token only adds a value that can expire between the copy and
+  // the paste — and one more secret to move around for no gain. Stored if
+  // supplied, ignored if not.
+  // long_lived_token is genuinely optional: a session that was never
+  // "remember me"-d does not have one, and /user/refresh_access works without.
+  g2g: ["accessToken", "longLivedToken"],
 };
 
 const MARKETPLACES = Object.keys(FIELDS);
@@ -37,11 +72,15 @@ const MARKETPLACES = Object.keys(FIELDS);
 // ------------------------------------------------------------------
 // Key storage
 // ------------------------------------------------------------------
+function allFields(marketplace) {
+  return (FIELDS[marketplace] || []).concat(OPTIONAL_FIELDS[marketplace] || []);
+}
+
 function getKeys(marketplace) {
   const s = loadSettings();
   const stored = (s.marketplaces || {})[marketplace] || {};
   const out = {};
-  for (const f of FIELDS[marketplace] || []) {
+  for (const f of allFields(marketplace)) {
     out[f] = stored[f] ? decrypt(stored[f]) : "";
   }
   return out;
@@ -52,7 +91,7 @@ async function setKeys(marketplace, values) {
   const s = loadSettings();
   s.marketplaces = s.marketplaces || {};
   const cur = s.marketplaces[marketplace] || {};
-  for (const f of FIELDS[marketplace]) {
+  for (const f of allFields(marketplace)) {
     const v = values[f];
     if (typeof v !== "string") continue;
     const trimmed = v.trim();
@@ -108,6 +147,13 @@ function delistOutcome(message) {
   const m = String(message || "").toLowerCase();
   if (/\(sold\)|already sold/.test(m)) return "sold";
   if (/not found|http_status":\s*404/.test(m)) return "gone";
+  // Already off sale. Eldorado answers "To pause an offer it must be active"
+  // when the offer is not active, which is the delist goal already met — not a
+  // failure. Left unmatched it strands the row as active-with-an-error, holding
+  // its accounts reserved forever.
+  if (/must be active|already (paused|inactive|hidden|cancell?ed|delisted)/.test(m)) {
+    return "gone";
+  }
   return "";
 }
 
@@ -144,6 +190,54 @@ async function gameflipTest() {
     return { ok: true, detail: "Connected as " + (d.display_name || d.owner) };
   } catch (e) {
     throw apiError("Gameflip", e);
+  }
+}
+
+// Our own Gameflip owner id — the same string a listing row carries as
+// `owner` (priceScout maps it to `seller`). Market research uses it to drop
+// our own rows from "lowest competitor price": every unclaimed row sat at the
+// $0.75 floor because the lowest live listing for the game was OUR OWN row
+// and the pricer kept undercutting itself. Cached for an hour; returns "" on
+// any failure (no keys, network, unexpected shape) so callers can fall back
+// to the unfiltered lowest rather than fail a scan.
+let gfOwnerCache = { id: "", until: 0 };
+async function gameflipOwnerId() {
+  const now = Date.now();
+  if (gfOwnerCache.id && gfOwnerCache.until > now) return gfOwnerCache.id;
+  try {
+    const keys = requireKeys("gameflip");
+    const pick = (r) => String((((r || {}).data || {}).data || {}).owner || "");
+    // Each endpoint gets its OWN try. The fallback used to sit inside the same
+    // one, so when /account/me threw — which it does, live — the whole function
+    // fell to the outer catch and returned "" without ever asking
+    // /account/me/profile, the endpoint the rest of this file reads `owner` from
+    // perfectly happily (gameflipTest, gameflipListingIdsByStatus).
+    //
+    // The cost of that was not an error anywhere; it was silent and expensive.
+    // With no owner id, marketResearch cannot drop OUR rows from "the lowest
+    // live price", so `lowestOther` collapsed onto `lowest` on nearly every game
+    // — measured 2026-09-08, identical on 6 of 8 sampled games. Every pricer
+    // anchored on the cheapest rival was therefore anchoring on OUR OWN listing
+    // and undercutting it, one scan after another. That is the self-undercut
+    // spiral this function exists to stop.
+    let owner = "";
+    for (const path of ["/account/me/profile", "/account/me"]) {
+      try {
+        owner = pick(
+          await axios.get(GF_API + path, {
+            headers: gfHeaders(keys),
+            timeout: 20000,
+          }),
+        );
+      } catch {
+        owner = "";
+      }
+      if (owner) break;
+    }
+    if (owner) gfOwnerCache = { id: owner, until: now + 60 * 60 * 1000 };
+    return owner;
+  } catch {
+    return "";
   }
 }
 
@@ -262,10 +356,23 @@ async function gameflipPublish({
       );
     }
   }
-  try {
+  // PUTTING IT ON SALE MUST NOT BE TRUSTED BLINDLY.
+  //
+  // Under its rate limiter Gameflip answers 200 to this status patch and leaves
+  // the listing in "ready" — complete, public, and NOT purchasable. Every other
+  // status restore in this file already refuses to trust that 200 and reads the
+  // status back (gameflipReprice's restore, gfTakeOffSale, the cover swap, the
+  // photo prune). The create path was the one that did not, so a rate-limited
+  // publish returned success, the caller wrote an "active" row with the account
+  // attached, the chain counted a unit discharged — and nobody could buy it. The
+  // account's drops stayed reserved out of the sellable pool with nothing ever
+  // retiring the row.
+  //
+  // The limiter's window is minutes wide, so back off in tens of seconds.
+  const setStatus = async (value) => {
     await axios.patch(
       GF_API + "/listing/" + listingId,
-      [{ op: "replace", path: "/status", value: "onsale" }],
+      [{ op: "replace", path: "/status", value }],
       {
         headers: {
           ...gfHeaders(keys),
@@ -274,11 +381,47 @@ async function gameflipPublish({
         timeout: 20000,
       },
     );
-  } catch (e) {
-    // Listing exists but stayed a draft (e.g. no photo). Surface a hint.
+  };
+  let onsale = false;
+  let onsaleErr = null;
+  for (const w of [0, 20000, 60000]) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("onsale");
+    } catch (e) {
+      onsaleErr = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) === "onsale") {
+        onsale = true;
+        onsaleErr = null;
+        break;
+      }
+      onsaleErr = new Error(
+        'status settled on "ready" instead of "onsale" (rate-limited)',
+      );
+    } catch (e) {
+      onsaleErr = e;
+    }
+  }
+  if (!onsale) {
+    // Bin the draft, for the same reason the digital-goods failure above bins
+    // it: the credentials are already attached, so leaving it behind is
+    // invisible stock AND makes Gameflip reject the next attempt with "code for
+    // digital goods already exists". Discarding it also lets the caller's error
+    // path hand the account straight back to the pool.
+    await axios
+      .delete(GF_API + "/listing/" + listingId, {
+        headers: gfHeaders(keys),
+        timeout: 20000,
+      })
+      .catch(() => {});
     throw apiError(
-      "Gameflip created draft " + listingId + " but could not put it on sale",
-      e,
+      "Gameflip created " +
+        listingId +
+        " but could not put it on sale (draft discarded)",
+      onsaleErr || new Error("unknown error"),
     );
   }
   return {
@@ -451,11 +594,9 @@ async function gameflipReprice(
     }
     await gfUploadPhoto(keys, listingId, imagePath);
     if (stale.length) {
-      const delOps = stale.map((id) => ({
-        op: "replace",
-        path: "/photo/" + id + "/status",
-        value: "deleted",
-      }));
+      // Remove the map entry — a `replace .../status = "deleted"` is rejected
+      // 400 by Gameflip, which is why stale covers used to accumulate.
+      const delOps = stale.map((id) => ({ op: "remove", path: "/photo/" + id }));
       for (const w of [0, 15000, 45000]) {
         if (w) await new Promise((r) => setTimeout(r, w));
         try {
@@ -483,6 +624,51 @@ async function gameflipReprice(
         await swapCover();
       } catch (e) {
         throw apiError("Gameflip cover", e);
+      }
+    }
+    // "draft" and "ready" are NOT the same thing, and returning on both is why
+    // an unbuyable listing could be repriced and reported as fine.
+    //
+    //   draft — deliberately parked. Putting it on sale would override whoever
+    //           parked it, so leave it exactly as it is.
+    //   ready — complete, public, and NOT purchasable. Nobody parks a listing
+    //           in "ready"; it is where a previous onsale patch LANDED when the
+    //           rate limiter answered 200 and did nothing. Returning quietly
+    //           left it unbuyable forever, and onCampaignEnded then recorded the
+    //           reprice as a success and marked the post-event markup done.
+    //
+    // So a "ready" listing is put back, verified the same way every other
+    // restore in this file verifies, and a failure is raised rather than hidden.
+    if (live === "ready") {
+      let back = false;
+      let backErr = null;
+      for (const w of [0, 20000, 60000]) {
+        if (w) await new Promise((r) => setTimeout(r, w));
+        try {
+          await setStatus("onsale");
+        } catch (e) {
+          backErr = e;
+          continue;
+        }
+        try {
+          if ((await gameflipListingStatus(listingId)) === "onsale") {
+            back = true;
+            backErr = null;
+            break;
+          }
+          backErr = new Error('status stayed "ready" (rate-limited)');
+        } catch (e) {
+          backErr = e;
+        }
+      }
+      if (!back) {
+        throw new Error(
+          "Gameflip listing " +
+            listingId +
+            ' was found in "ready" (public but NOT purchasable) and could not be' +
+            " put back on sale — the reprice was applied but nobody can buy it. " +
+            ((backErr && backErr.message) || "unknown error"),
+        );
       }
     }
     return;
@@ -587,11 +773,9 @@ async function gameflipReplaceCover(listingId, imagePath) {
   try {
     await gfUploadPhoto(keys, listingId, imagePath);
     if (stale.length) {
-      const ops = stale.map((id) => ({
-        op: "replace",
-        path: "/photo/" + id + "/status",
-        value: "deleted",
-      }));
+      // Remove the map entry — a `replace .../status = "deleted"` is rejected
+      // 400 by Gameflip, which is why stale covers used to accumulate.
+      const ops = stale.map((id) => ({ op: "remove", path: "/photo/" + id }));
       // Gameflip's limiter rejects the delete right after an upload; a stale
       // photo left behind is cosmetic, so retry a few times and give up.
       for (const w of [0, 15000, 45000]) {
@@ -642,6 +826,115 @@ async function gameflipReplaceCover(listingId, imagePath) {
     }
   }
   if (uploadErr) throw uploadErr;
+}
+
+// Delete every gallery photo that is NOT the cover_photo — the stale grids left
+// behind when a cover was replaced but the limiter rejected the cleanup delete
+// (a stale-photo delete right after an upload is the exact case gameflipReplace-
+// Cover gives up on). A photo-status delete touches neither cover_photo, price,
+// nor status, so Gameflip accepts it while the listing is onsale; only if it is
+// ever rejected as an onsale edit do we retry inside an off-sale window and
+// restore, using the same verified restore as the cover swap. Idempotent — a
+// listing already down to just its cover returns { deleted: 0 }.
+async function gameflipDeleteNonCoverPhotos(listingId) {
+  const keys = requireKeys("gameflip");
+  const patch = (body) =>
+    axios.patch(GF_API + "/listing/" + listingId, body, {
+      headers: {
+        ...gfHeaders(keys),
+        "Content-Type": "application/json-patch+json",
+      },
+      timeout: 20000,
+    });
+  const setStatus = (v) =>
+    patch([{ op: "replace", path: "/status", value: v }]);
+  const readPhotos = async () => {
+    const cur = await axios.get(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+    const d = (cur.data || {}).data || {};
+    const ph = d.photo || {};
+    const ids = Object.keys(ph).filter(
+      (k) => k !== d.cover_photo && ph[k] && ph[k].status === "active",
+    );
+    return { ids, status: d.status };
+  };
+
+  const first = await readPhotos();
+  if (!first.ids.length) return { deleted: 0, remaining: 0 };
+  // Gameflip removes a gallery photo with a json-patch REMOVE of its map entry.
+  // (A `replace /photo/<id>/status = "deleted"` is rejected 400 "bad value" —
+  // that was the long-standing bug that let stale photos pile up.)
+  const delOps = first.ids.map((id) => ({ op: "remove", path: "/photo/" + id }));
+  // Backoff retries for the limiter, which 429s photo edits in bursts.
+  const tryDelete = async () => {
+    let err = null;
+    for (const w of [0, 15000, 45000, 90000]) {
+      if (w) await new Promise((r) => setTimeout(r, w));
+      try {
+        await patch(delOps);
+        return null;
+      } catch (e) {
+        err = e;
+        if (e.response && e.response.status === 429) continue;
+        return e; // non-429: surface (may be an onsale-edit rejection)
+      }
+    }
+    return err;
+  };
+
+  const onsale = first.status === "onsale";
+  let e1 = await tryDelete();
+  if (!e1) {
+    const after = await readPhotos();
+    return { deleted: first.ids.length - after.ids.length, remaining: after.ids.length };
+  }
+  // Non-429 failure. If it looks like an onsale-edit rejection, retry in an
+  // off-sale window; otherwise it is a real error.
+  const msg =
+    (e1.response && e1.response.data && JSON.stringify(e1.response.data)) ||
+    e1.message ||
+    "";
+  if (!onsale || !/onsale|status/i.test(msg)) {
+    throw apiError("Gameflip photo prune", e1);
+  }
+  await gfTakeOffSale(listingId, setStatus, "Gameflip photo prune");
+  const e2 = await tryDelete();
+  // Restore onsale with the same verified retry as gameflipReplaceCover.
+  let restored = false;
+  let restoreErr = null;
+  for (const w of [0, 20000, 60000, 120000]) {
+    if (w) await new Promise((r) => setTimeout(r, w));
+    try {
+      await setStatus("onsale");
+    } catch (e) {
+      restoreErr = e;
+      continue;
+    }
+    try {
+      if ((await gameflipListingStatus(listingId)) === "onsale") {
+        restored = true;
+        restoreErr = null;
+        break;
+      }
+      restoreErr = new Error('status settled on "ready" instead of "onsale" (rate-limited)');
+    } catch (e) {
+      restoreErr = e;
+    }
+  }
+  if (!restored) {
+    throw new Error(
+      "Gameflip listing " +
+        listingId +
+        " IS NOT BACK ON SALE after a photo prune — put it back on sale " +
+        "manually. " +
+        ((restoreErr && restoreErr.message) || "unknown error"),
+    );
+  }
+  if (e2) throw apiError("Gameflip photo prune", e2);
+  const after = await readPhotos();
+  return { deleted: first.ids.length - after.ids.length, remaining: after.ids.length };
 }
 
 async function gameflipDelist(listingId) {
@@ -1240,6 +1533,51 @@ async function digisellerProductStock(productId) {
   return (await digisellerProductStockDetailed(productId)).stock;
 }
 
+// Is this product still offered for sale? `/products/{id}/data` answers for a
+// DISABLED product exactly as it does for a live one (verified live 2026-09-06
+// on product 6078723: delisted, still reports num_in_stock 3), so the only
+// read that tells enabled from disabled is the seller's own goods list, whose
+// `visible` field is 1 for a live product and negative for a disabled one.
+// Returns true/false, or null when the state could not be read — callers must
+// treat null as "unknown", never as "it is down".
+async function digisellerProductVisible(productId, { maxPages = 15 } = {}) {
+  const want = String(productId);
+  try {
+    const keys = requireKeys("digiseller");
+    const token = await digisellerToken();
+    for (let page = 1; page <= maxPages; page++) {
+      const r = await axios.post(
+        DS_API + "/seller-goods?token=" + encodeURIComponent(token),
+        {
+          id_seller: Number(keys.sellerId),
+          order_col: "cntsell",
+          order_dir: "desc",
+          rows: 100,
+          page,
+          currency: "USD",
+          lang: "en-US",
+          show_hidden: 1,
+        },
+        { headers: { "Content-Type": "application/json" }, timeout: 30000 },
+      );
+      const d = r.data || {};
+      if (d.retval !== undefined && String(d.retval) !== "0") return null;
+      const rows = Array.isArray(d.rows) ? d.rows : [];
+      const hit = rows.find((p) => String(p && p.id_goods) === want);
+      if (hit) return Number(hit.visible) > 0;
+      if (!rows.length || page >= Number(d.pages || 1)) break;
+    }
+    // Not in the seller's own list at all — it cannot be on sale.
+    return false;
+  } catch (e) {
+    console.error(
+      "digiseller visibility unreadable for product " + productId + ": " +
+        (e.response ? "HTTP " + e.response.status : e.message),
+    );
+    return null;
+  }
+}
+
 // Disable sales for a product (soft delist).
 async function digisellerDelist(productId) {
   const token = await digisellerToken();
@@ -1296,7 +1634,7 @@ async function usdToRub() {
   return rubRate.value || RUB_FALLBACK;
 }
 
-// EN -> RU for the Russian-language fields GGSel/Digiseller/FunPay listings
+// EN -> RU for the Russian-language fields GGSel/Digiseller listings
 // carry alongside the English ones (we used to submit the same English text
 // into both). Uses Google's keyless gtx endpoint, translating line-by-line so
 // bullet-list descriptions keep their structure. Best-effort: on any failure
@@ -1866,6 +2204,45 @@ async function ggselFindOfferInList(keys, offerId) {
 
 // Returns { stock, reason } — see digisellerProductStockDetailed for the
 // contract. ggselOfferStock keeps the number-or-null shape callers expect.
+// Every offer on the GGSel account, all pages, whatever its state.
+//
+// The seller API's offer list is the only way to see an offer we did not create
+// — and on 2026-09-09 that mattered: 16 offers our database recorded as
+// `delisted` were still ACTIVE on GGSel with 145 sellable units behind them,
+// and 7 more (4 of them the owner's hand-made rent listings) had no row at all.
+// Nothing could have found either, because every reconcile we had started from
+// OUR rows and asked GGSel about each one. A row that does not exist is not a
+// row you can ask about.
+//
+// Returns the raw offer objects. `status` is GGSel's own word — "active",
+// "paused" or "draft" — and is the field to trust; `is_active` does not exist
+// on this payload, and code that tested for it silently classified every offer
+// as not-active.
+const GG_ALL_OFFERS_MAX_PAGES = 40;
+async function ggselAllOffers({ pageSize = 100, paceMs = 250 } = {}) {
+  const keys = requireKeys("ggsel");
+  const out = new Map();
+  for (let page = 1; page <= GG_ALL_OFFERS_MAX_PAGES; page++) {
+    let r;
+    try {
+      r = await axios.get(
+        GG_API + "/offers?page=" + page + "&limit=" + pageSize,
+        { headers: ggHeaders(keys), timeout: 30000 },
+      );
+    } catch (e) {
+      throw apiError("GGSel offer list", e);
+    }
+    const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
+    for (const o of rows) if (o && o.id != null) out.set(String(o.id), o);
+    const pg = (r.data && r.data.pagination) || {};
+    const more =
+      pg.has_next_page === undefined ? rows.length === pageSize : !!pg.has_next_page;
+    if (!more) break;
+    if (paceMs) await new Promise((z) => setTimeout(z, paceMs));
+  }
+  return [...out.values()];
+}
+
 async function ggselOfferStockDetailed(offerId) {
   const keys = requireKeys("ggsel");
   const errText = (e) =>
@@ -1903,6 +2280,58 @@ async function ggselOfferStockDetailed(offerId) {
 
 async function ggselOfferStock(offerId) {
   return (await ggselOfferStockDetailed(offerId)).stock;
+}
+
+// The offer's own on-sale state ("active" / "paused" / …). ggselDelist pauses
+// an offer, so this is how a caller proves the delist actually took. Stock is
+// NOT that proof: a paused offer keeps reporting the products still attached
+// to it. Returns "" / null when unreadable — never assume "down" from that.
+async function ggselOfferStatus(offerId) {
+  const keys = requireKeys("ggsel");
+  try {
+    const o = await ggselReadOffer(keys, offerId);
+    return String((o && o.status) || "");
+  } catch (e) {
+    try {
+      const row = await ggselFindOfferInList(keys, offerId);
+      // Absent from the seller's offer list entirely — it is not on sale.
+      if (!row) return "gone";
+      return String(row.status || "");
+    } catch {
+      console.error(
+        "ggsel status unreadable for offer " + offerId + ": " +
+          (e.response ? "HTTP " + e.response.status : e.message),
+      );
+      return null;
+    }
+  }
+}
+
+// The offer's current price in ROUBLES, or null when it cannot be read.
+//
+// Exists because GGSel's PATCH is unreliable about reporting success: a live
+// reprice canary got `504 Gateway Time-out` from nginx for an update whose
+// outcome was genuinely unknown. Without a way to read the price back, a
+// caller cannot tell "applied" from "not applied", so it cannot decide whether
+// to record the new price — and it would either leave the DB disagreeing with
+// the live offer or retry blindly. Mirrors ggselOfferStatus's shape, including
+// its fall back to the paginated offer list (an older offer is invisible to a
+// direct GET; see ggselFindOfferInList).
+async function ggselOfferPrice(offerId) {
+  const keys = requireKeys("ggsel");
+  const priceOf = (o) => {
+    const p = Number(o && o.price);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  };
+  try {
+    return priceOf(await ggselReadOffer(keys, offerId));
+  } catch {
+    try {
+      return priceOf(await ggselFindOfferInList(keys, offerId));
+    } catch {
+      return null;
+    }
+  }
 }
 
 // Products can only be attached to an autoselling offer — GGSel rejects
@@ -2035,9 +2464,882 @@ async function ggselDelist(offerId) {
 }
 
 // ------------------------------------------------------------------
-// G2G Open API
+// G2G (g2g.com)
+//
+// Two different APIs live under this heading; do not confuse them.
+//
+// 1. The **internal seller API** at sls.g2g.com — the one the g2g.com web app
+//    itself talks to, and the ONLY one that can touch our listings. Every
+//    Twitch-Drops offer we sell sits in `Digital Products > Gaming > Game
+//    Items > <game>` (service 0765978e-…439e), which the public Open API
+//    cannot serve. (Careful: the "Support Gift Card & Top Up Only" heading in
+//    G2G's docs is only an Apidog FOLDER label, not a documented restriction —
+//    it appears in no description anywhere. The real blockers are structural:
+//    `delivery_method_code` is an enum of exactly {instant_inventory,
+//    direct_top_up}; `POST /v2/orders/{id}/delivery` needs a `delivery_id` that
+//    only ever arrives in an `order.api_delivery` WEBHOOK, and this server
+//    exposes no webhook receiver; deliver-code `content` is validated against
+//    the offer's `code_label` columns, so a multi-line credential is rejected;
+//    no screenshot-upload endpoint exists anywhere in the API, and Game Items
+//    loses disputes without one; and PATCH cannot change title, description or
+//    status, so there is no API delist at all.) So the auto-lister and the
+//    fulfiller both run on this API, the same way Eldorado /
+//    PlayerAuctions do.
+//
+//    Auth is G2G's own token trio, NOT a cookie and NOT Firebase (Firebase is
+//    only the realtime/chat layer). Every request carries
+//
+//        authorization: <access_token>          <-- RAW. No "Bearer " prefix.
+//
+//    Sending "Bearer <token>" answers 401 {"message":"Unauthorized"}; the bare
+//    token answers 200. That one detail is the whole gate — it cost a probe to
+//    find, so it is asserted in tests/g2g.test.js.
+//
+//    The access_token is short-lived, so the durable credential is the refresh
+//    trio, pasted once from a signed-in browser (DevTools -> Application ->
+//    Local Storage -> www.g2g.com: `refresh_token`, `active_device_token`,
+//    optionally `long_lived_token`), plus the numeric seller id. The server
+//    mints fresh access tokens forever via POST /user/refresh_access — the same
+//    never-re-paste shape as zeusxRefreshAccessToken.
+//
+// 2. The **Open API** at open-api.g2g.com — HMAC-signed, key-based. Kept below
+//    only for the catalog pickers and the xlsx bulk-file generator that already
+//    use it (g2gServices/g2gBrands/g2gProducts/g2gAttributes + utils/g2gBulk).
+//    NOTE the account currently has NO API key at all (the table at
+//    g2g.com/offers/api is empty), so every one of those calls answers
+//    401 40100001 until the operator generates one. That is pre-existing and
+//    deliberate — nothing in the automation path depends on it.
 // ------------------------------------------------------------------
+const G2G_SLS = "https://sls.g2g.com";
+const G2G_WEB = "https://www.g2g.com";
+const G2G_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+
+// "Digital Products > Gaming > Game Items" — the service every Twitch Drops
+// offer of ours belongs to. The per-game brand id comes from the public catalog
+// (assets.g2g.com/offer/categories.json); see utils/g2gGames.js.
+const G2G_ITEMS_SERVICE = "0765978e-3fdf-48b4-bed3-184823aa439e";
+
+// G2G's floor for a Game Items offer. Mirrored in utils/pricing.js
+// MARKETPLACE_FLOORS.g2g — tests/pricing.test.js asserts the two agree.
+//
+// The rule G2G actually enforces is "(min_qty * unit_price) >= USD 1", not a
+// per-unit floor, and every offer we publish has min_qty 1 — so the effective
+// floor is a whole dollar. It was set to 0.50 from the product page and four
+// live publishes were rejected before the validator spelled it out.
+const G2G_MIN_PRICE = 1;
+
+// Offer statuses seen on live rows. "live" and "delisted" are the two we set.
+const G2G_STATUS = { LIVE: "live", DELISTED: "delisted" };
+
+function g2gError(what, e) {
+  const status = e && e.response && e.response.status;
+  const body = e && e.response && e.response.data;
+  let detail = "";
+  if (body && typeof body === "object") {
+    const msgs = Array.isArray(body.messages) ? body.messages : [];
+    detail =
+      msgs
+        .map((m) => (m && (m.text || m.message)) || "")
+        .filter(Boolean)
+        .join("; ") ||
+      body.message ||
+      JSON.stringify(body).slice(0, 300);
+  } else if (typeof body === "string") {
+    detail = body.slice(0, 300);
+  }
+  const err = new Error(
+    what + " failed" + (status ? " (HTTP " + status + ")" : "") +
+      (detail ? ": " + detail : ": " + (e && e.message)),
+  );
+  err.__g2g = true;
+  err.status = status;
+  throw err;
+}
+
+// Milliseconds until a JWT expires; Infinity when it carries no exp we can read
+// (so an unparseable token is never mistaken for an expired one).
+function g2gTokenMsLeft(token) {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(String(token).split(".")[1], "base64").toString("utf8"),
+    );
+    if (!payload.exp) return Infinity;
+    return payload.exp * 1000 - Date.now();
+  } catch {
+    return Infinity;
+  }
+}
+
+// Exchange the stored refresh trio for a fresh access token and save whatever
+// came back. G2G MAY rotate the refresh token on each call, so every value the
+// response carries is written back — that is safe whether it rotates or not.
+async function g2gRefreshAccess() {
+  const keys = getKeys("g2g");
+  if (!keys.refreshToken || !keys.userId) {
+    throw new Error(
+      "G2G refresh: no session stored — paste a G2G session once " +
+        "(Marketplace keys -> G2G) to enable auto-refresh",
+    );
+  }
+  let body;
+  try {
+    const r = await axios.post(
+      G2G_SLS + "/user/refresh_access",
+      {
+        user_id: String(keys.userId),
+        refresh_token: keys.refreshToken,
+        active_device_token: keys.activeDeviceToken || "",
+        long_lived_token: keys.longLivedToken || "",
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Origin: G2G_WEB,
+          Referer: G2G_WEB + "/",
+          "User-Agent": G2G_UA,
+        },
+        timeout: 20000,
+      },
+    );
+    body = r.data || {};
+  } catch (e) {
+    g2gError("G2G refresh", e);
+  }
+  const d = body.payload || body.data || body;
+  const access = d.access_token || d.accessToken;
+  if (!access) {
+    throw new Error(
+      "G2G refresh: no access_token in response: " +
+        JSON.stringify(body).slice(0, 200),
+    );
+  }
+  const next = { accessToken: access };
+  if (d.refresh_token) next.refreshToken = d.refresh_token;
+  if (d.active_device_token) next.activeDeviceToken = d.active_device_token;
+  if (d.long_lived_token) next.longLivedToken = d.long_lived_token;
+  await setKeys("g2g", next);
+  return access;
+}
+
+// Refresh proactively when the access token is within `withinMs` of expiry.
+// Returns true if it actually refreshed. Cheap to call often.
+async function g2gEnsureFreshToken(withinMs) {
+  const keys = getKeys("g2g");
+  if (!keys.refreshToken) return false;
+  const margin = Number(withinMs) || 10 * 60 * 1000; // default 10 minutes
+  if (keys.accessToken && g2gTokenMsLeft(keys.accessToken) > margin) {
+    return false;
+  }
+  await g2gRefreshAccess();
+  return true;
+}
+
+// One seller-API call. Refreshes-and-retries ONCE on 401: G2G's access token is
+// short-lived, so any call can 401 at any moment, and a pre-flight liveness
+// probe races that and loses (the same lesson eldRequest learned).
+async function g2gRequest(method, path, opts = {}) {
+  const keys = requireKeys("g2g");
+  const send = async (token) => {
+    return axios({
+      method,
+      url: G2G_SLS + path,
+      params: opts.params,
+      data: opts.body,
+      headers: {
+        // RAW token — a "Bearer " prefix here is a guaranteed 401.
+        authorization: token,
+        "Content-Type": "application/json",
+        Origin: G2G_WEB,
+        Referer: G2G_WEB + "/",
+        "User-Agent": G2G_UA,
+      },
+      timeout: opts.timeout || 30000,
+    });
+  };
+  let token = keys.accessToken;
+  if (!token) token = await g2gRefreshAccess();
+  let r;
+  try {
+    r = await send(token);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    if (status === 401 && !opts.__retried) {
+      let fresh;
+      try {
+        fresh = await g2gRefreshAccess();
+      } catch {
+        g2gError(opts.what || "G2G", e);
+      }
+      try {
+        r = await send(fresh);
+      } catch (e2) {
+        g2gError(opts.what || "G2G", e2);
+      }
+    } else {
+      g2gError(opts.what || "G2G", e);
+    }
+  }
+  const body = r.data || {};
+  // G2G answers 200 with an in-band error code for some failures.
+  if (body && body.code && Number(body.code) >= 4000) {
+    const msgs = Array.isArray(body.messages) ? body.messages : [];
+    throw new Error(
+      (opts.what || "G2G") +
+        " failed: " +
+        (msgs.map((m) => m && m.text).filter(Boolean).join("; ") ||
+          "code " + body.code),
+    );
+  }
+  return body.payload !== undefined ? body.payload : body;
+}
+
+// The seller id is part of nearly every path/param, so read it once.
+function g2gSellerId() {
+  const keys = requireKeys("g2g");
+  return String(keys.userId);
+}
+
+function g2gOfferUrl(offerId) {
+  return G2G_WEB + "/offer/" + encodeURIComponent(String(offerId || ""));
+}
+
+async function g2gTest() {
+  const seller = g2gSellerId();
+  const p = await g2gRequest("get", "/order/count-my-orders", {
+    params: { seller_id: seller },
+    what: "G2G test",
+  });
+  const counts = p || {};
+  const parts = [];
+  if (counts.preparing != null) parts.push(counts.preparing + " to deliver");
+  if (counts.delivering != null) parts.push(counts.delivering + " delivering");
+  return {
+    ok: true,
+    detail:
+      "Connected as seller " + seller +
+      (parts.length ? " — " + parts.join(", ") : ""),
+    data: counts,
+  };
+}
+
+// ---- offers -------------------------------------------------------
+
+// Every offer on the account. Paged; G2G caps limit at 100.
+async function g2gListOffers({ pageSize = 100, maxPages = 30, status } = {}) {
+  const seller = g2gSellerId();
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    // `page_size`, NOT `limit`. G2G ignores an unknown paging param and quietly
+    // serves its default 20 — and because the loop below stops as soon as a
+    // page comes back short, `limit` made this return only the FIRST 20 offers,
+    // for ever. Everything built on it inherited that: the shelf census saw a
+    // fifth of the account, and both publishers' "is this title already live?"
+    // check silently stopped protecting against duplicates past offer 20.
+    const params = { page, page_size: pageSize };
+    if (status) params.status = status;
+    const p = await g2gRequest(
+      "get",
+      "/v3/offer/seller/" + encodeURIComponent(seller) + "/my_offers",
+      { params, what: "G2G list offers" },
+    );
+    const rows = (p && (p.results || p.offers)) || [];
+    for (const o of rows) {
+      out.push({
+        offerId: o.offer_id,
+        title: o.title,
+        status: o.status,
+        currency: o.offer_currency || o.currency,
+        unitPrice: o.unit_price,
+        // available_qty is actual_qty minus what checkout is holding, so the
+        // number to write back when syncing stock is actual_qty.
+        availableQty: o.available_qty,
+        actualQty: o.actual_qty,
+        reservedQty: o.reserved_qty,
+        minQty: o.min_qty,
+        serviceId: o.service_id,
+        brandId: o.brand_id,
+        relationId: o.relation_id,
+        url: g2gOfferUrl(o.offer_id),
+      });
+    }
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
+async function g2gGetOffer(offerId) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  return g2gRequest("get", "/offer/" + encodeURIComponent(offerId), {
+    what: "G2G get offer",
+  });
+}
+
+// Partial update. G2G's PUT /offer/{id} wants the fields it is changing; send
+// only what the caller asked for so an unrelated field is never clobbered.
+async function g2gUpdateOffer(offerId, fields) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  const f = fields || {};
+  const body = {};
+  if (f.unitPrice != null && f.unitPrice !== "") {
+    const price = Number(f.unitPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error("G2G needs a price above 0");
+    }
+    if (price < G2G_MIN_PRICE) {
+      throw new Error("G2G's minimum price is " + G2G_MIN_PRICE.toFixed(2));
+    }
+    body.unit_price = price;
+  }
+  // Stock on a Game Items offer is actual_qty; available_qty is derived
+  // (actual minus whatever checkout is holding) and is not settable.
+  if (f.stock != null && f.stock !== "") {
+    const qty = Number(f.stock);
+    if (!Number.isFinite(qty) || qty < 0) {
+      throw new Error("G2G needs a stock of 0 or more");
+    }
+    body.actual_qty = Math.round(qty);
+  }
+  if (f.title != null) body.title = String(f.title).slice(0, 128);
+  if (f.description != null) {
+    body.description = String(f.description).slice(0, 5000);
+  }
+  if (f.status != null) body.status = String(f.status);
+  if (f.minQty != null) body.min_qty = Math.max(1, Number(f.minQty) || 1);
+  if (!Object.keys(body).length) {
+    throw new Error("G2G update: nothing to change");
+  }
+  body.seller_id = g2gSellerId();
+  const p = await g2gRequest("put", "/offer/" + encodeURIComponent(offerId), {
+    body,
+    what: "G2G update offer",
+  });
+  return { externalId: String((p && (p.offer_id || p.id)) || offerId) };
+}
+
+function g2gReprice(offerId, priceUsd) {
+  return g2gUpdateOffer(offerId, { unitPrice: priceUsd });
+}
+
+function g2gSetQuantity(offerId, qty) {
+  return g2gUpdateOffer(offerId, { stock: qty });
+}
+
+// Take an offer off sale. This is a STATUS change, never a delete: G2G keeps
+// the offer's history and sales count, and a deleted offer cannot be brought
+// back. g2gRelist is its exact inverse.
+async function g2gDelist(offerId) {
+  await g2gUpdateOffer(offerId, { status: G2G_STATUS.DELISTED });
+}
+
+async function g2gRelist(offerId) {
+  await g2gUpdateOffer(offerId, { status: G2G_STATUS.LIVE });
+}
+
+// The delivery methods and buyer purchase-form a (service, brand) pair allows.
+// Read this before publishing — the allowed set differs per game (Albion offers
+// Face to face trade / Island / Auction House) and G2G rejects an offer whose
+// delivery_method_ids are not in it.
+async function g2gProductSettings(serviceId, brandId) {
+  const p = await g2gRequest(
+    "get",
+    "/offer/product_settings/service/" +
+      encodeURIComponent(serviceId) +
+      "/brand/" +
+      encodeURIComponent(brandId) +
+      "/product_settings",
+    { what: "G2G product settings" },
+  );
+  const groups = (p && p.results) || [];
+  const byType = {};
+  for (const g of groups) byType[g.product_settings_type] = g.results || [];
+  const delivery = (byType.delivery_method || []).map((d) => ({
+    id: d.product_settings_id,
+    code: (d.product_settings && d.product_settings.code) || "",
+    label:
+      (d.product_settings &&
+        d.product_settings.label &&
+        d.product_settings.label.en) ||
+      "",
+  }));
+  return { delivery, purchaseForm: byType.purchase_form || [], raw: p };
+}
+
+// The per-(service, brand) product this offer hangs off. Every live offer
+// carries one and G2G rejects a create without it.
+async function g2gRelationId(serviceId, brandId) {
+  const p = await g2gRequest("get", "/offer/keyword_relation/search", {
+    params: { service_id: serviceId, brand_id: brandId },
+    what: "G2G relation",
+  });
+  const first = ((p && p.results) || [])[0];
+  return (first && first.relation_id) || "";
+}
+
+// The attribute collections a product demands — "Server", "Item Type",
+// "Platform" and so on. Each is a dropdown with an enumerated child list, and
+// `is_required` ones must all be answered or the create is rejected.
+async function g2gCollections(relationId) {
+  const p = await g2gRequest("get", "/offer/keyword_relation/collection/", {
+    params: { relation_id: relationId },
+    what: "G2G collections",
+  });
+  return ((p && p.results) || []).map((c) => ({
+    collectionId: c.collection_id,
+    label: (c.label && c.label.en) || c.collection_id,
+    required: !!c.is_required,
+    multiselect: !!c.is_multiselect,
+    sortOrder: c.sort_order,
+    values: (c.children || []).map((v) => ({
+      datasetId: v.dataset_id,
+      value: v.value || (v.label && v.label.en) || "",
+    })),
+  }));
+}
+
+// What attributes did WE last use for this game? The operator picked those by
+// hand on g2g.com, so they are the only trustworthy answer: the dropdowns are
+// per-game and their first entry is routinely wrong for us (Albion's first
+// server is "Albion Americas" while every offer we run is "Albion Asia").
+// Guessing files an offer under the wrong server, which is how the account
+// ended up with a Rainbow Six Siege bundle sitting in Rainbow Six Mobile.
+async function g2gAttributesFromOwnOffers(brandId, { limit = 60 } = {}) {
+  const mine = await g2gListOffers({ pageSize: limit, maxPages: 3 });
+  const match = mine.filter((o) => String(o.brandId) === String(brandId));
+  for (const row of match) {
+    let full;
+    try {
+      full = await g2gGetOffer(row.offerId);
+    } catch {
+      continue;
+    }
+    const attrs = (full && full.offer_attributes) || [];
+    if (attrs.length) {
+      return {
+        attributes: attrs,
+        collectionTree: full.offer_title_collection_tree || [],
+        relationId: full.relation_id || "",
+        fromOffer: row.offerId,
+      };
+    }
+  }
+  return null;
+}
+
+// Everything a create needs beyond title/price/stock, resolved from the live
+// catalog plus our own history. Throws with a precise, actionable message
+// rather than publishing something mis-filed.
+async function g2gResolveOfferShape({ serviceId, brandId }) {
+  const service = String(serviceId || G2G_ITEMS_SERVICE);
+  const brand = String(brandId || "");
+  const learned = await g2gAttributesFromOwnOffers(brand);
+  const relationId =
+    (learned && learned.relationId) || (await g2gRelationId(service, brand));
+  if (!relationId) {
+    throw new Error(
+      "G2G: no product (relation_id) for brand " + brand +
+        " under Game Items — this game cannot be listed there",
+    );
+  }
+  const collections = await g2gCollections(relationId);
+  const required = collections.filter((c) => c.required);
+  const attributes = (learned && learned.attributes) || [];
+  const answered = new Set(attributes.map((a) => a.collection_id));
+  const missing = required.filter((c) => !answered.has(c.collectionId));
+  if (missing.length) {
+    throw new Error(
+      "G2G needs " + missing.map((m) => m.label).join(" + ") +
+        " for this game and we have no offer of our own to copy it from. " +
+        "List one " + brand + " offer by hand on g2g.com first (choose " +
+        missing
+          .map(
+            (m) =>
+              m.label + ": one of " +
+              m.values.slice(0, 6).map((v) => v.value).join(" / ") +
+              (m.values.length > 6 ? " …" : ""),
+          )
+          .join("; ") +
+        "), and every later publish will copy it.",
+    );
+  }
+  return {
+    relationId,
+    attributes,
+    collectionTree: (learned && learned.collectionTree) || [],
+    learnedFrom: learned && learned.fromOffer,
+  };
+}
+
+// Create a Game Items offer. `serviceId`/`brandId` identify the game; the
+// legacy `productId` argument is accepted as the relation id so the existing
+// publish route keeps working.
+async function g2gPublish({
+  serviceId,
+  brandId,
+  relationId,
+  productId,
+  title,
+  description,
+  priceUsd,
+  qty,
+  minQty,
+  currency,
+  offerAttributes,
+  deliveryMethodIds,
+  collectionTree,
+  lowStockQty,
+}) {
+  const price = Number(priceUsd);
+  const service = String(serviceId || G2G_ITEMS_SERVICE);
+  const brand = String(brandId || "");
+  if (!brand) throw new Error("G2G brand_id is required (the game)");
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("G2G needs a price above 0");
+  }
+  if (price < G2G_MIN_PRICE) {
+    throw new Error("G2G's minimum price is " + G2G_MIN_PRICE.toFixed(2));
+  }
+  const stock = Math.max(1, Number(qty) || 1);
+
+  // A create without relation_id + the product's required attributes is
+  // rejected, and one with the WRONG attributes is worse: it goes live filed
+  // under another server or platform. Resolve both when the caller has not.
+  let relation = relationId || productId || "";
+  let attrs = offerAttributes;
+  let tree = collectionTree;
+  if (!relation || !Array.isArray(attrs) || !attrs.length) {
+    const shape = await g2gResolveOfferShape({ serviceId: service, brandId: brand });
+    relation = relation || shape.relationId;
+    if (!Array.isArray(attrs) || !attrs.length) attrs = shape.attributes;
+    if (!Array.isArray(tree) || !tree.length) tree = shape.collectionTree;
+  }
+
+  let dmIds = deliveryMethodIds;
+  if (!Array.isArray(dmIds) || !dmIds.length) {
+    // The product dictates which delivery methods are legal; take the first
+    // one it offers rather than guessing an id that will be rejected.
+    const settings = await g2gProductSettings(service, brand);
+    dmIds = settings.delivery.slice(0, 1).map((d) => d.id);
+    if (!dmIds.length) {
+      throw new Error(
+        "G2G: no delivery method available for this game — cannot publish",
+      );
+    }
+  }
+
+  // PUBLISHING IS TWO CALLS, AND THE FIRST ONE IS NOT THE OFFER.
+  //
+  // POST /offer does NOT create the offer you asked for. It answers 200 with a
+  // real-looking offer_id, and every content field comes back empty:
+  // title "", unit_price 0, actual_qty 0, delivery_method_ids []. It is an
+  // empty DRAFT shell, and calling it twice returns the SAME shell — which is
+  // how two different publishes ended up sharing one externalId, each pointing
+  // at an offer that does not exist. The content only lands with the PUT below,
+  // so a create that skips it silently publishes nothing at all.
+  const created = await g2gRequest("post", "/offer", {
+    body: { seller_id: g2gSellerId(), service_id: service, brand_id: brand },
+    what: "G2G create offer",
+  });
+  const offerId = created && (created.offer_id || created.id);
+  if (!offerId) {
+    throw new Error(
+      "G2G create: no offer id in response: " +
+        JSON.stringify(created).slice(0, 300),
+    );
+  }
+
+  const body = {
+    seller_id: g2gSellerId(),
+    service_id: service,
+    brand_id: brand,
+    relation_id: String(relation),
+    offer_type: "public",
+    title: String(title || "").slice(0, 128),
+    description: String(description || title || "").slice(0, 5000),
+    // `currency`, NOT `offer_currency` — the offer READS BACK as
+    // offer_currency, so a read-modify-write sends the wrong name and the
+    // write is rejected with "Missing mandatory parameter: currency".
+    currency: currency || "USD",
+    unit_price: price,
+    min_qty: Math.max(1, Number(minQty) || 1),
+    // Both, deliberately: actual_qty is the stock G2G stores, and a manual
+    // delivery_speed additionally demands `qty` ("Missing mandatory parameter:
+    // qty when delivery_speed is manual").
+    actual_qty: stock,
+    qty: stock,
+    low_stock_alert_qty: Number(lowStockQty) || 0,
+    delivery_method_ids: dmIds,
+    // "manual", never "instant". Instant is the only speed G2G's OPEN api
+    // accepts, which is exactly why the Open API cannot create these offers at
+    // all; the seller API wants the same value our own live offers carry.
+    delivery_speed: "manual",
+    delivery_speed_details: [{ min: 1, max: 2147483647, delivery_time: 10 }],
+    sales_territory_settings: { settings_type: "global", countries: [] },
+    status: G2G_STATUS.LIVE,
+  };
+  if (Array.isArray(attrs) && attrs.length) body.offer_attributes = attrs;
+  if (Array.isArray(tree) && tree.length) {
+    body.offer_title_collection_tree = tree;
+  }
+
+  await g2gRequest("put", "/offer/" + encodeURIComponent(offerId), {
+    body,
+    what: "G2G publish offer",
+  });
+
+  // Read back before claiming success. A 200 is not evidence that anything
+  // changed here — the create above proves it — and a listing row that records
+  // an offer which does not exist is worse than no row at all, because the
+  // next run reports it as correct.
+  const back = await g2gGetOffer(offerId).catch(() => null);
+  if (!back || !back.title) {
+    throw new Error(
+      "G2G publish: offer " + offerId + " did not read back as a live offer",
+    );
+  }
+  return { externalId: String(offerId), url: g2gOfferUrl(offerId) };
+}
+
+// ---- orders -------------------------------------------------------
+
+// The cheap poll: one small call that says whether anything needs doing.
+// `preparing` is the count of paid orders awaiting delivery.
+async function g2gOrderCounts() {
+  return g2gRequest("get", "/order/count-my-orders", {
+    params: { seller_id: g2gSellerId() },
+    what: "G2G order counts",
+  });
+}
+
+// Seller-side orders. NOTE the seller_id param is mandatory — omit it and G2G
+// answers 4001 "Missing mandatory parameter: buyer_id", which reads like a bug
+// report but just means "you didn't say which side you are".
+async function g2gOrders({ page = 1, pageSize = 30, status } = {}) {
+  const params = { seller_id: g2gSellerId(), page, limit: pageSize };
+  if (status) params.status = status;
+  const p = await g2gRequest("get", "/order/list_my_order", {
+    params,
+    what: "G2G orders",
+  });
+  const rows = (p && (p.results || p.orders)) || [];
+  return rows.map(g2gNormalizeOrder);
+}
+
+function g2gNormalizeOrder(o) {
+  return {
+    orderId: o.order_id,
+    orderItemId: o.order_item_id,
+    offerId: o.offer_id,
+    title: o.offer_title,
+    buyerId: o.buyer_id,
+    status: o.order_item_status,
+    sellerStatus: o.seller_sub_status,
+    purchasedQty: Number(o.purchased_qty) || 0,
+    deliveredQty: Number(o.delivered_qty) || 0,
+    refundedQty: Number(o.refunded_qty) || 0,
+    unitPrice: Number(o.unit_price) || 0,
+    amount: Number(o.amount) || 0,
+    currency: o.offer_currency || o.checkout_currency || "USD",
+    serviceId: o.service_id,
+    raw: o,
+  };
+}
+
+// Paid orders that still need delivering. `seller_sub_status: "to_deliver"` is
+// the signal the seller UI itself uses for its "Preparing" tab.
+async function g2gPendingOrders({ maxPages = 5, pageSize = 30 } = {}) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await g2gOrders({ page, pageSize });
+    for (const o of rows) {
+      if (
+        o.status === "preparing" ||
+        o.sellerStatus === "to_deliver" ||
+        (o.deliveredQty < o.purchasedQty && o.status === "delivering")
+      ) {
+        out.push(o);
+      }
+    }
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
+async function g2gOrder(orderItemId) {
+  if (!orderItemId) throw new Error("G2G order_item_id is required");
+  const p = await g2gRequest(
+    "get",
+    "/order/item/" + encodeURIComponent(orderItemId),
+    { params: { seller_id: g2gSellerId() }, what: "G2G order" },
+  );
+  return p;
+}
+
+// ---- delivery -----------------------------------------------------
+//
+// The lifecycle, read off a real completed order:
+//   start_deliver      "You have viewed the delivery details."
+//   mark_as_delivering "Delivery in progress."
+//   delivered_qty      "You delivered N quantity."
+//   (buyer confirms)   "Receipt of the item has been confirmed."  -> Completed
+//
+// delivered_qty is a COUNTER, not a hand-over channel — the delivery record
+// carries no content. The credential itself travels through G2G chat, which is
+// a Firebase Realtime Database and has no REST endpoint in the app's API map,
+// so the hand-over stays operator-assisted for now (see utils/g2gFulfiller.js).
+
+// EVERY order-item PUT wants seller_id in the QUERY STRING. A body-only call is
+// rejected with HTTP 400 "Missing mandatory parameter: seller_id" — verified
+// live on all three of these on 2026-09-09. Both callers wrapped these two in
+// `.catch(() => {})`, so the delivery state machine never advanced past
+// `preparing` and nobody saw a thing; the failure only surfaced downstream as a
+// 500 from delivered_qty, which is a valid response to "confirm an order that
+// was never marked as delivering".
+async function g2gStartDeliver(orderItemId) {
+  return g2gRequest(
+    "put",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/start_deliver",
+    {
+      params: { seller_id: g2gSellerId() },
+      body: { seller_id: g2gSellerId() },
+      what: "G2G start deliver",
+    },
+  );
+}
+
+async function g2gMarkDelivering(orderItemId) {
+  return g2gRequest(
+    "put",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/mark_as_delivering",
+    {
+      params: { seller_id: g2gSellerId() },
+      body: { seller_id: g2gSellerId() },
+      what: "G2G mark delivering",
+    },
+  );
+}
+
+async function g2gSetDeliveredQty(orderItemId, qty) {
+  const n = Math.max(1, Number(qty) || 1);
+  // seller_id goes in the QUERY as well as the body. Its siblings
+  // (start_deliver, mark_as_delivering) accept it in the body alone, but this
+  // endpoint answers HTTP 400 "Missing mandatory parameter: seller_id" to a
+  // body-only PUT — so the counter that tells G2G an order shipped was the one
+  // call in the chain that could never succeed. Sending it both ways satisfies
+  // whichever the endpoint actually reads and costs nothing if it ignores one.
+  return g2gRequest(
+    "put",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/delivered_qty",
+    {
+      params: { seller_id: g2gSellerId() },
+      body: { seller_id: g2gSellerId(), delivery_qty: n },
+      what: "G2G delivered qty",
+    },
+  );
+}
+
+async function g2gDeliveries(orderItemId) {
+  const p = await g2gRequest(
+    "get",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/deliveries",
+    { params: { seller_id: g2gSellerId() }, what: "G2G deliveries" },
+  );
+  return (p && p.results) || [];
+}
+
+// Proof of delivery. G2G only holds payment when a buyer does NOT confirm or
+// opens a case — a confirmed order completes with no proof at all (verified on
+// a real completed order, whose delivery_proofs is a 404). So this is a dispute
+// safety net, not a per-sale step.
+async function g2gDeliveryProofs(orderItemId) {
+  try {
+    const p = await g2gRequest(
+      "get",
+      "/order/item/" + encodeURIComponent(orderItemId) + "/delivery_proofs",
+      { params: { seller_id: g2gSellerId() }, what: "G2G delivery proofs" },
+    );
+    return (p && (p.results || p)) || [];
+  } catch (e) {
+    // "Could not find any uploaded delivery proof" is the normal answer for an
+    // order nobody disputed — a buyer-confirmed order completes with no proof
+    // at all. Match on the HTTP status, not on wording: g2gError renders G2G's
+    // message text and drops the 4041 code, and the text says "could not find",
+    // which a /not found/ regex silently misses.
+    if (e.status === 404 || /not\s*found|could not find/i.test(e.message)) {
+      return [];
+    }
+    throw e;
+  }
+}
+
+// ---- chat ---------------------------------------------------------
+
+// Create-or-fetch our own SendBird chat profile. The POST (unlike the GET at
+// the same path) is what returns `session_tokens`, which is how a server-side
+// sender authenticates to SendBird without a second stored credential.
+// See utils/g2gChat.js for why the token alone is not enough for SendBird REST.
+async function g2gChatProfile(userId) {
+  const id = String(userId || g2gSellerId());
+  return g2gRequest("post", "/chat/user", {
+    body: { user_id: id },
+    what: "G2G chat profile",
+  });
+}
+
+// Open the private DM between our seller account and `otherId`, returning its
+// SendBird channel url. Same endpoint and body G2G's own chat client sends
+// (createDmChannel in www.g2g.com/chat/js/app.*.js) when the seller clicks Chat
+// on an order. G2G's client also calls it to recover a failed send, so it is
+// safe on a DM that already exists.
+async function g2gOpenDmChannel(otherId) {
+  const me = g2gSellerId();
+  const other = String(otherId || "");
+  if (!other) throw new Error("G2G open chat: no buyer id");
+  const p = await g2gRequest("post", "/chat/channel", {
+    body: {
+      channel_id: me + "_" + other,
+      channel_name: "Direct Message Channel Between " + me + " and " + other,
+      inviter_id: me,
+      user_ids: [me, other],
+      channel_type: "dm",
+    },
+    what: "G2G open chat",
+  });
+  const url = p && p.channel_details && p.channel_details.channel_url;
+  if (!url) throw new Error("G2G open chat: no channel_url in the response");
+  return String(url);
+}
+
+
+// ---- legacy Open API (catalog pickers + the xlsx bulk-file generator) ------
+//
+// HMAC-signed, key-based, and scoped by G2G to Gift Card & Top Up products. It
+// cannot create or manage a Game Items offer, so nothing in the automation path
+// uses it — these four calls only feed the manual catalog dropdowns in
+// public/listings.html and utils/g2gBulk.js. They read their key bag directly
+// rather than through requireKeys("g2g"), because FIELDS.g2g now holds the
+// seller-session credential instead. With no API key on the account they answer
+// 401 40100001; that is expected and harmless.
 const G2G_API = "https://open-api.g2g.com";
+
+function g2gOpenApiKeys() {
+  const stored = (loadSettings().marketplaces || {}).g2g || {};
+  const read = (f) => (stored[f] ? decrypt(stored[f]) : "");
+  const keys = {
+    userId: read("userId"),
+    apiKey: read("apiKey"),
+    apiSecret: read("apiSecret"),
+  };
+  if (!keys.apiKey || !keys.apiSecret) {
+    throw new Error(
+      "G2G's Open API has no key on this account — generate one at " +
+        "g2g.com/offers/api if you need the catalog pickers. The listing and " +
+        "delivery automation does not use it.",
+    );
+  }
+  return keys;
+}
 
 function g2gHeaders(keys, urlPath) {
   const timestamp = String(Date.now());
@@ -2058,8 +3360,8 @@ function g2gHeaders(keys, urlPath) {
   };
 }
 
-async function g2gRequest(method, urlPath, body) {
-  const keys = requireKeys("g2g");
+async function g2gOpenRequest(method, urlPath, body) {
+  const keys = g2gOpenApiKeys();
   try {
     const r = await axios({
       method,
@@ -2074,21 +3376,17 @@ async function g2gRequest(method, urlPath, body) {
   }
 }
 
-async function g2gTest() {
-  const d = await g2gRequest("get", "/v2/store");
-  return { ok: true, detail: "Connected — store settings fetched", data: d };
+function g2gServices() {
+  return g2gOpenRequest("get", "/v2/services");
 }
 
-// Catalog browsing so the UI can walk service -> brand -> product -> attributes.
-function g2gServices() {
-  return g2gRequest("get", "/v2/services");
-}
 function g2gBrands(serviceId) {
-  return g2gRequest(
+  return g2gOpenRequest(
     "get",
     "/v2/services/" + encodeURIComponent(serviceId) + "/brands",
   );
 }
+
 async function g2gProducts(serviceId, brandId, categoryId) {
   // G2G treats category_id as mutually exclusive with service_id/brand_id
   // ("... is not required when category_id is exists"), and a category-only
@@ -2098,7 +3396,7 @@ async function g2gProducts(serviceId, brandId, categoryId) {
   const qs = new URLSearchParams();
   qs.set("service_id", serviceId);
   qs.set("brand_id", brandId);
-  const d = await g2gRequest("get", "/v2/products?" + qs.toString());
+  const d = await g2gOpenRequest("get", "/v2/products?" + qs.toString());
   if (categoryId) {
     const payload = d.payload || d.data || d;
     for (const key of Object.keys(payload)) {
@@ -2117,431 +3415,16 @@ async function g2gProducts(serviceId, brandId, categoryId) {
   }
   return d;
 }
+
 function g2gAttributes(productId) {
-  return g2gRequest(
+  return g2gOpenRequest(
     "get",
     "/v2/products/" + encodeURIComponent(productId) + "/attributes",
   );
 }
 
-// Create an offer. G2G offers hang off a catalog product, so the caller must
-// supply productId (+ any required attributes picked from g2gAttributes).
-async function g2gPublish({
-  productId,
-  title,
-  description,
-  priceUsd,
-  qty,
-  minQty,
-  currency,
-  offerAttributes,
-  deliveryMethodIds,
-}) {
-  const price = Number(priceUsd);
-  if (!productId) throw new Error("G2G product_id is required");
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("G2G needs a price above 0");
-  }
-  const body = {
-    product_id: String(productId),
-    title: String(title || "").slice(0, 128),
-    description: String(description || title || ""),
-    currency: currency || "USD",
-    unit_price: price,
-    min_qty: Number(minQty) || 1,
-    api_qty: Number(qty) || 1,
-    available_qty: Number(qty) || 1,
-    low_stock_alert_qty: 0,
-  };
-  if (Array.isArray(offerAttributes) && offerAttributes.length) {
-    body.offer_attributes = offerAttributes;
-  }
-  let dmIds = deliveryMethodIds;
-  if (!Array.isArray(dmIds) || !dmIds.length) {
-    // The catalog product dictates the allowed delivery methods; send them
-    // all so G2G doesn't reject the offer for missing delivery info.
-    try {
-      const a = await g2gAttributes(productId);
-      const p = a.payload || a.data || a;
-      dmIds = (p.delivery_method_list || [])
-        .map((m) => m.delivery_method_id)
-        .filter(Boolean);
-    } catch {
-      dmIds = [];
-    }
-  }
-  if (Array.isArray(dmIds) && dmIds.length) {
-    body.delivery_method_ids = dmIds;
-  }
-  let d;
-  try {
-    d = await g2gRequest("post", "/v2/offers", body);
-  } catch (err) {
-    if (/delivery_speed/i.test(err.message)) {
-      throw new Error(
-        "G2G's API only accepts instant-delivery offers (gift cards / top-ups " +
-          "or API-delivered stock). This product uses manual/gifting delivery, " +
-          "which G2G does not allow to be created through the API — create the " +
-          "offer once on g2g.com, after which price/stock can be managed here.",
-      );
-    }
-    throw err;
-  }
-  const payload = d.payload || d.data || d;
-  const offerId = payload.offer_id || payload.id;
-  if (!offerId) {
-    throw new Error(
-      "G2G create: no offer id in response: " + JSON.stringify(d).slice(0, 300),
-    );
-  }
-  return {
-    externalId: String(offerId),
-    url: "https://www.g2g.com/offer/" + offerId,
-  };
-}
-
-async function g2gDelist(offerId) {
-  await g2gRequest("delete", "/v2/offers/" + encodeURIComponent(offerId));
-}
-
-// Update mutable fields (price / stock / status) of an offer that already
-// exists on G2G. Unlike creating, updating an existing offer is allowed even
-// for delivery types the API won't let you *create* — so this is the supported
-// way to manage price and stock of offers listed on g2g.com from here.
-//
-// Verified against G2G's Open API (2026-07-21): PATCH /v2/offers/{id} with a
-// partial body — only the fields you send are changed. Price updates work on
-// any offer. `stock` maps to api_qty (the API-managed stock); note that
-// manual/gifting offers keep api_qty=0 and manage their real stock
-// (available_qty, which the API rejects as "no attributes to be updated") on
-// g2g.com — so stock updates here only apply to API-delivery offers.
-async function g2gUpdateOffer(offerId, fields) {
-  if (!offerId) throw new Error("G2G offer_id is required");
-  const f = fields || {};
-  const body = {};
-  if (f.unitPrice != null && f.unitPrice !== "") {
-    const price = Number(f.unitPrice);
-    if (!Number.isFinite(price) || price <= 0) {
-      throw new Error("G2G needs a price above 0");
-    }
-    body.unit_price = price;
-  }
-  if (f.stock != null && f.stock !== "") {
-    const qty = Number(f.stock);
-    if (!Number.isFinite(qty) || qty < 0) {
-      throw new Error("G2G needs a stock of 0 or more");
-    }
-    body.api_qty = Math.round(qty);
-  }
-  if (f.title != null) body.title = String(f.title).slice(0, 128);
-  if (f.description != null) body.description = String(f.description);
-  if (f.status != null) body.offer_status = String(f.status);
-  if (!Object.keys(body).length) {
-    throw new Error("G2G update: nothing to change");
-  }
-  const d = await g2gRequest(
-    "patch",
-    "/v2/offers/" + encodeURIComponent(offerId),
-    body,
-  );
-  const payload = d.payload || d.data || d;
-  return { externalId: String(payload.offer_id || payload.id || offerId) };
-}
-
-// Fetch one existing offer (current price/stock/status/etc.). Used by the bulk
-// updater to show what's live before changing it, and to safely diff after.
-async function g2gGetOffer(offerId) {
-  if (!offerId) throw new Error("G2G offer_id is required");
-  const d = await g2gRequest(
-    "get",
-    "/v2/offers/" + encodeURIComponent(offerId),
-  );
-  return d.payload || d.data || d;
-}
-
-// List the seller's own offers so the price updater can show them grouped by
-// game. G2G exposes this only as a POST search (there is no GET /v2/offers
-// list), so page through and return them all. brandId/serviceId let the UI
-// group per game; there's no working server-side product filter.
-async function g2gListOffers({ pageSize = 100, maxPages = 30 } = {}) {
-  const out = [];
-  for (let page = 1; page <= maxPages; page++) {
-    const d = await g2gRequest("post", "/v2/offers/search", {
-      page,
-      page_size: pageSize,
-    });
-    const p = d.payload || d.data || d;
-    const rows = p.results || p.offers || [];
-    for (const o of rows) {
-      out.push({
-        offerId: o.offer_id,
-        title: o.title,
-        status: o.status,
-        currency: o.currency,
-        unitPrice: o.unit_price,
-        availableQty: o.available_qty,
-        serviceId: o.service_id,
-        brandId: o.brand_id,
-      });
-    }
-    if (rows.length < pageSize) break;
-  }
-  return out;
-}
-
-// ------------------------------------------------------------------
-// FunPay — no public API, so the seller's own account is driven through
-// funpay.com using a stored session token. The `golden_key` cookie is
-// FunPay's persistent auth token; paste it from a signed-in FunPay browser
-// session (DevTools → Application → Cookies → funpay.com → golden_key). A lot
-// is created by scraping a fresh CSRF token from the offer editor, then
-// POSTing the very form the site itself submits (/lots/offerSave).
-// ------------------------------------------------------------------
-const FP_BASE = "https://funpay.com/en";
-const FP_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-
-function fpCookie(goldenKey, extra) {
-  const parts = ["golden_key=" + goldenKey];
-  if (extra) parts.push(extra);
-  return parts.join("; ");
-}
-
-// Forward EVERY cookie FunPay sets on the authenticated GET (PHPSESSID and any
-// others), not just PHPSESSID: offerSave rejects the POST with HTTP 428
-// (precondition required) unless the full cookie set from the page load is
-// present. The CSRF token is bound to this session, so the POST must reuse it.
-function fpSessionCookie(setCookie) {
-  const arr = Array.isArray(setCookie)
-    ? setCookie
-    : setCookie
-      ? [setCookie]
-      : [];
-  return arr
-    .map((c) => String(c).split(";")[0].trim())
-    .filter(Boolean)
-    .join("; ");
-}
-
-function fpUnescape(s) {
-  return String(s)
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?34;/g, '"')
-    .replace(/&#0?39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
-// A FunPay page carries its per-session CSRF token (and the logged-in user) in
-// <body data-app-data='{"csrf-token":"…","userId":…}'>. Parse it out.
-function fpParseApp(html) {
-  const out = { csrf: "", userId: "", username: "" };
-  const app =
-    /data-app-data="([^"]+)"/.exec(html) ||
-    /data-app-data='([^']+)'/.exec(html);
-  if (app) {
-    try {
-      const data = JSON.parse(fpUnescape(app[1]));
-      out.csrf = data["csrf-token"] || "";
-      out.userId = data.userId != null ? String(data.userId) : "";
-    } catch {
-      const m = /csrf-token[^a-f0-9]{0,12}([a-f0-9]{16,})/i.exec(app[1]);
-      if (m) out.csrf = m[1];
-    }
-  }
-  const uname = /class="user-link-name"[^>]*>([^<]+)</.exec(html);
-  if (uname) out.username = uname[1].trim();
-  return out;
-}
-
-// Read a single form field's current value out of raw editor HTML (handles
-// both <input value="…"> and <textarea>…</textarea>).
-function fpFieldValue(html, name) {
-  const esc = name.replace(/[[\]]/g, "\\$&");
-  const inp = new RegExp('name="' + esc + '"[^>]*\\bvalue="([^"]*)"', "i").exec(
-    html,
-  );
-  if (inp) return fpUnescape(inp[1]);
-  const ta = new RegExp(
-    'name="' + esc + '"[^>]*>([\\s\\S]*?)</textarea>',
-    "i",
-  ).exec(html);
-  return ta ? fpUnescape(ta[1]) : "";
-}
-
-// Parse every named field of the offer editor form (inputs, selects,
-// textareas) so a re-save can round-trip values we don't model — category
-// nodes differ in which extra fields they carry. Checkboxes/radios are
-// included only when checked (HTML form semantics: unchecked = omitted).
-function fpFormValues(html) {
-  const out = {};
-  const inputRe = /<input\b[^>]*>/gi;
-  let m;
-  while ((m = inputRe.exec(html))) {
-    const tag = m[0];
-    const name = /name="([^"]+)"/.exec(tag);
-    if (!name) continue;
-    const type = (
-      (/type="([^"]+)"/.exec(tag) || [])[1] || "text"
-    ).toLowerCase();
-    if (type === "submit" || type === "button" || type === "file") continue;
-    const val = /value="([^"]*)"/.exec(tag);
-    if (type === "checkbox" || type === "radio") {
-      if (/\bchecked\b/i.test(tag)) {
-        out[name[1]] = val ? fpUnescape(val[1]) : "on";
-      }
-      continue;
-    }
-    out[name[1]] = val ? fpUnescape(val[1]) : "";
-  }
-  const taRe = /<textarea\b[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/textarea>/gi;
-  while ((m = taRe.exec(html))) out[m[1]] = fpUnescape(m[2]);
-  const selRe = /<select\b[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/select>/gi;
-  while ((m = selRe.exec(html))) {
-    const opt = /<option\b[^>]*\bselected\b[^>]*>/i.exec(m[2]);
-    const v = opt && /value="([^"]*)"/.exec(opt[0]);
-    out[m[1]] = v ? fpUnescape(v[1]) : "";
-  }
-  return out;
-}
-
-function fpOfferIds(html) {
-  const ids = new Set();
-  // FunPay's trade page lists each offer as <a class="tc-item"
-  // data-offer="123…">; the edit URL is just offerEdit?node=N (no offer param),
-  // so the id lives in the data-offer attribute. Match that first, and keep the
-  // ?offer= URL form as a fallback for any other page shape.
-  const re = /data-offer="(\d+)"|[?&]offer=(\d+)/gi;
-  let m;
-  while ((m = re.exec(html))) ids.add(m[1] || m[2]);
-  return ids;
-}
-
-async function fpGet(pathOrUrl, goldenKey, session) {
-  const url = pathOrUrl.startsWith("http") ? pathOrUrl : FP_BASE + pathOrUrl;
-  const r = await axios.get(url, {
-    headers: {
-      Cookie: fpCookie(goldenKey, session),
-      "User-Agent": FP_UA,
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-    timeout: 30000,
-    maxRedirects: 5,
-    validateStatus: (s) => s >= 200 && s < 400,
-  });
-  return { html: String(r.data || ""), setCookie: r.headers["set-cookie"] };
-}
-
-function fpEncode(map) {
-  const p = new URLSearchParams();
-  for (const [k, v] of Object.entries(map)) {
-    if (v === undefined || v === null) continue;
-    p.append(k, String(v));
-  }
-  return p.toString();
-}
-
-async function fpPostOfferSave(goldenKey, session, body) {
-  const r = await axios.post(FP_BASE + "/lots/offerSave", fpEncode(body), {
-    headers: {
-      Cookie: fpCookie(goldenKey, session),
-      "User-Agent": FP_UA,
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest",
-      Accept: "application/json, text/javascript, */*; q=0.01",
-      // FunPay's precondition check needs a same-origin Referer/Origin.
-      Origin: "https://funpay.com",
-      Referer:
-        FP_BASE +
-        "/lots/offerEdit?node=" +
-        encodeURIComponent(body.node_id || ""),
-    },
-    timeout: 30000,
-    validateStatus: () => true,
-  });
-  // A non-2xx (notably 428 "precondition required" — missing cookies/headers)
-  // means the offer was NOT saved; never treat it as success.
-  if (r.status < 200 || r.status >= 300) {
-    throw new Error(
-      "FunPay offerSave returned HTTP " +
-        r.status +
-        (r.status === 428
-          ? " — session precondition failed (paste a fresh golden_key and retry)"
-          : ""),
-    );
-  }
-  let data = r.data;
-  if (typeof data === "string") {
-    try {
-      data = JSON.parse(data);
-    } catch {
-      data = { raw: data.slice(0, 400) };
-    }
-  }
-  // FunPay reports validation problems as { error: "<html…>" } or
-  // { errors: {...} }; a plain { done: true } (or a url) means success.
-  const errRaw = data && (data.error || data.msg);
-  const hasErr =
-    (errRaw && !data.done && !data.url) ||
-    (data && data.errors && Object.keys(data.errors).length && !data.done);
-  if (hasErr) {
-    const msg = String(errRaw || JSON.stringify(data.errors))
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 300);
-    throw new Error(msg || "FunPay rejected the offer");
-  }
-  return data;
-}
-
-// Load the offer editor for a category (optionally an existing offer) and
-// return the session + nonces needed to (re)save it.
-async function fpLoadEditor(goldenKey, nodeId, offerId) {
-  let p = "/lots/offerEdit?node=" + encodeURIComponent(nodeId || "");
-  if (offerId) p += "&offer=" + encodeURIComponent(offerId);
-  const { html, setCookie } = await fpGet(p, goldenKey);
-  const app = fpParseApp(html);
-  const csrf = app.csrf || fpFieldValue(html, "csrf_token");
-  if (!csrf) {
-    throw new Error(
-      "could not read FunPay CSRF token — the golden_key is likely expired",
-    );
-  }
-  return {
-    session: fpSessionCookie(setCookie),
-    csrf,
-    formCreatedAt: fpFieldValue(html, "form_created_at"),
-    nodeId: fpFieldValue(html, "node_id") || String(nodeId || ""),
-    html,
-  };
-}
-
-async function funpayTest() {
-  const keys = requireKeys("funpay");
-  try {
-    const { html } = await fpGet("/", keys.golden_key);
-    const app = fpParseApp(html);
-    if (!app.userId && !app.username) {
-      throw new Error(
-        "golden_key not accepted — copy a fresh one from a signed-in FunPay " +
-          "session (Cookies → funpay.com → golden_key)",
-      );
-    }
-    return {
-      ok: true,
-      detail: "Connected as " + (app.username || "user " + app.userId),
-    };
-  } catch (e) {
-    if (e.response) throw apiError("FunPay test", e);
-    throw new Error("FunPay test: " + e.message);
-  }
-}
-
-// USD -> arbitrary currency, cached ~6h. FunPay offers are priced in whatever
-// currency the seller's account uses, but the rest of the site works in USD, so
+// USD -> arbitrary currency, cached ~6h. Some marketplaces price in whatever
+// currency the seller account uses, but the rest of the site works in USD, so
 // convert at publish time when needed. USD is a 1:1 no-op; any other currency
 // uses the live rate, falling back to a static estimate if the FX lookup fails.
 let fxCache = { rates: null, until: 0 };
@@ -2566,248 +3449,6 @@ async function usdRate(currency) {
     /* fall through to fallback */
   }
   return (fxCache.rates && Number(fxCache.rates[cur])) || FX_FALLBACK[cur] || 1;
-}
-
-// Create a lot in a FunPay category (node). Returns { externalId, externalNode,
-// url, note }. The offer id isn't in the save response, so it's recovered by
-// diffing the category's offer ids before and after the create.
-//
-// The offer's price is in the FunPay account's own currency: pass `currency`
-// (USD/EUR/RUB) to convert the site's USD price at the live rate, or
-// `priceOverride` to set the amount in that currency directly (no conversion).
-async function funpayPublish({
-  nodeId,
-  title,
-  description,
-  priceUsd,
-  currency,
-  priceOverride,
-  amount,
-  active,
-  autoDelivery,
-  secrets,
-  paymentMsg,
-}) {
-  const keys = requireKeys("funpay");
-  const node = String(nodeId || "").trim();
-  if (!/^\d+$/.test(node)) {
-    throw new Error("FunPay category node id must be numeric (e.g. 2430)");
-  }
-  const cur = String(currency || "USD").toUpperCase();
-  let price = Number(priceOverride);
-  let fxNote = "";
-  if (!Number.isFinite(price) || price <= 0) {
-    if (cur === "USD") {
-      price = Number(priceUsd);
-    } else {
-      const rate = await usdRate(cur);
-      price = Math.round(Number(priceUsd) * rate * 100) / 100;
-      fxNote =
-        "Priced at " +
-        price +
-        " " +
-        cur +
-        " (~$" +
-        Number(priceUsd) +
-        " @ " +
-        rate.toFixed(4) +
-        " " +
-        cur +
-        "/$). ";
-    }
-  }
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("FunPay needs a price above 0");
-  }
-  const goldenKey = keys.golden_key;
-
-  let before = new Set();
-  try {
-    const { html } = await fpGet("/lots/" + node + "/trade", goldenKey);
-    before = fpOfferIds(html);
-  } catch {
-    /* non-fatal — we just won't be able to diff for the new id */
-  }
-
-  const editor = await fpLoadEditor(goldenKey, node);
-  // FunPay caps offer fields; over the limit it rejects the whole save with a
-  // generic "Please fill out every field." A 51-item bundle description runs
-  // ~1800 chars, so trim to a safe length (verified: 1500 saves, 1800 fails).
-  const t = String(title || "").slice(0, 200);
-  let d = String(description || "").slice(0, 1000);
-  if (String(description || "").length > 1000) d = d.slice(0, 997) + "…";
-  // Russian runs longer than English, so re-apply the cap after translating.
-  let dRu = await translateEnToRu(d);
-  if (dRu.length > 1000) dRu = dRu.slice(0, 997) + "…";
-  const lines = (
-    Array.isArray(secrets) ? secrets : String(secrets || "").split("\n")
-  )
-    .map((s) => String(s || "").trim())
-    .filter(Boolean);
-  const auto = !!autoDelivery && lines.length > 0;
-  const msg = (paymentMsg ? String(paymentMsg) : "").slice(0, 1500);
-
-  const body = {
-    csrf_token: editor.csrf,
-    form_created_at: editor.formCreatedAt,
-    offer_id: "0",
-    node_id: node,
-    location: "",
-    deleted: "",
-    "fields[summary][en]": t,
-    "fields[summary][ru]": t,
-    "fields[desc][en]": d,
-    "fields[desc][ru]": dRu,
-    "fields[payment_msg][en]": msg,
-    "fields[payment_msg][ru]": msg,
-    price: String(price),
-    amount: String(Math.max(1, parseInt(amount, 10) || 1)),
-  };
-  if (auto) {
-    body.auto_delivery = "on";
-    body.secrets = lines.join("\n");
-  }
-  // An unchecked "active" box is simply omitted (HTML form semantics), which
-  // saves the offer off-sale.
-  if (active !== false) body.active = "on";
-
-  await fpPostOfferSave(goldenKey, editor.session, body);
-
-  let offerId = "";
-  try {
-    const { html } = await fpGet("/lots/" + node + "/trade", goldenKey);
-    const after = fpOfferIds(html);
-    for (const id of after) {
-      if (!before.has(id)) {
-        offerId = id;
-        break;
-      }
-    }
-  } catch {
-    /* leave blank; the row still records, delist just needs the id */
-  }
-
-  return {
-    externalId: offerId || "node" + node + "-" + Date.now(),
-    externalNode: node,
-    url: offerId
-      ? "https://funpay.com/en/lots/offer?id=" + offerId
-      : "https://funpay.com/en/lots/" + node + "/trade",
-    note:
-      fxNote +
-      (auto ? "auto-delivery: " + lines.length + " item(s). " : "") +
-      (offerId
-        ? ""
-        : "Couldn't auto-detect the new offer id — delist it on FunPay manually."),
-  };
-}
-
-// FunPay has no per-field update, so taking an offer off sale means reloading
-// its editor and re-saving every current value with the `active` box dropped.
-async function funpayDelist(offerId, nodeId) {
-  const keys = requireKeys("funpay");
-  if (!offerId || /^node\d+-/.test(String(offerId))) {
-    throw new Error("no FunPay offer id on record — delist it on FunPay");
-  }
-  const goldenKey = keys.golden_key;
-  const editor = await fpLoadEditor(goldenKey, nodeId, offerId);
-  const h = editor.html;
-  const body = {
-    csrf_token: editor.csrf,
-    form_created_at: editor.formCreatedAt,
-    offer_id: String(offerId),
-    node_id: editor.nodeId,
-    location: fpFieldValue(h, "location"),
-    deleted: "",
-    "fields[summary][en]": fpFieldValue(h, "fields[summary][en]"),
-    "fields[summary][ru]": fpFieldValue(h, "fields[summary][ru]"),
-    "fields[desc][en]": fpFieldValue(h, "fields[desc][en]"),
-    "fields[desc][ru]": fpFieldValue(h, "fields[desc][ru]"),
-    "fields[payment_msg][en]": fpFieldValue(h, "fields[payment_msg][en]"),
-    "fields[payment_msg][ru]": fpFieldValue(h, "fields[payment_msg][ru]"),
-    price: fpFieldValue(h, "price"),
-    amount: fpFieldValue(h, "amount") || "1",
-    // `active` intentionally omitted → off sale.
-  };
-  await fpPostOfferSave(goldenKey, editor.session, body);
-}
-
-// Edit the UNDELIVERED auto-delivery pool of an existing FunPay offer: drop
-// the lines belonging to `removeLogins` (matched on the "login:" prefix of
-// each login:password secret) and append `addLines`. FunPay has no update
-// API, so this reloads the editor and re-saves every current field with the
-// new pool — the editor's secrets textarea is the source of truth for which
-// lines are still undelivered, which is what lets a caller tell "burned line
-// pulled from the pool" apart from "line already handed to a buyer".
-// `activate`: true/false forces the active box; null keeps its current state.
-// An offer whose pool ends up empty is saved off-sale (FunPay would otherwise
-// sell with nothing to deliver).
-async function funpayUpdateSecrets(
-  offerId,
-  nodeId,
-  { removeLogins = [], addLines = [], activate = null } = {},
-) {
-  const keys = requireKeys("funpay");
-  if (!offerId || /^node\d+-/.test(String(offerId))) {
-    throw new Error("no FunPay offer id on record — edit it on FunPay");
-  }
-  const goldenKey = keys.golden_key;
-  const editor = await fpLoadEditor(goldenKey, nodeId, offerId);
-  const form = fpFormValues(editor.html);
-  const pool = String(form.secrets || "")
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const prefixes = removeLogins
-    .map(
-      (l) =>
-        String(l || "")
-          .trim()
-          .toLowerCase() + ":",
-    )
-    .filter((p) => p.length > 1);
-  const kept = [];
-  const removedLines = [];
-  for (const line of pool) {
-    const burned = prefixes.some((p) => line.toLowerCase().startsWith(p));
-    (burned ? removedLines : kept).push(line);
-  }
-  const have = new Set(kept);
-  let added = 0;
-  for (const raw of addLines) {
-    const line = String(raw || "").trim();
-    if (!line || have.has(line)) continue;
-    kept.push(line);
-    have.add(line);
-    added++;
-  }
-  const wasActive = form.active != null;
-  const body = {
-    ...form,
-    csrf_token: editor.csrf,
-    form_created_at: form.form_created_at || editor.formCreatedAt,
-    offer_id: String(offerId),
-    node_id: form.node_id || editor.nodeId,
-    location: form.location || "",
-    deleted: "",
-    amount: form.amount || "1",
-  };
-  delete body.secrets;
-  delete body.auto_delivery;
-  delete body.active;
-  if (kept.length) {
-    body.auto_delivery = "on";
-    body.secrets = kept.join("\n");
-  }
-  const on = (activate === null ? wasActive : !!activate) && kept.length > 0;
-  if (on) body.active = "on";
-  await fpPostOfferSave(goldenKey, editor.session, body);
-  return {
-    removed: removedLines.length,
-    added,
-    pool: kept.length,
-    active: on,
-  };
 }
 
 // ------------------------------------------------------------------
@@ -2839,7 +3480,12 @@ function zxError(what, e) {
     (body && body.error && (body.error.description || body.error.message)) ||
     (body && body.message) ||
     e.message;
-  return new Error(what + ": " + String(msg).slice(0, 300));
+  const err = new Error(what + ": " + String(msg).slice(0, 300));
+  // Kept so a caller can tell a refused create (4xx: nothing was made) from one
+  // that may have gone through anyway — create-offer is known to answer 500
+  // and still create the offer.
+  err.status = (e.response && e.response.status) || 0;
+  return err;
 }
 
 // The API answers 200 with { isSuccess: false, error } for business failures.
@@ -3235,7 +3881,7 @@ async function zeusxResolveCategory(game, serviceCategoryId) {
 }
 
 // Automatic delivery: ZeusX itself hands the buyer the account the instant they
-// pay — the same model as the Gameflip/FunPay auto-delivery here, where the
+// pay — the same model as the Gameflip auto-delivery here, where the
 // marketplace holds the credential and releases it on payment (no chat, no
 // poller, works even if this server is offline at the sale). The credential
 // therefore has to ride on the offer at publish time.
@@ -3525,6 +4171,1981 @@ async function zeusxMyListings(pageIndex) {
   }
 }
 
+// ------------------------------------------------------------------
+// Eldorado.gg (no usable public API — the seller panel's own JSON endpoints)
+//
+// Eldorado DOES have an official "Seller API", but it is gated behind 50
+// completed orders and — verified 2026-09-06 by reading the full 125-path spec
+// at /swagger/seller/swagger.json — it is the SAME surface on the SAME host.
+// The gate unlocks the documentation, not capability, so there is nothing to
+// wait for. See docs/ELDORADO-INTEGRATION-PLAN.md.
+//
+// Auth is cookie-based: httpOnly session cookies plus a CSRF double-submit.
+// Every call must carry `X-XSRF-Token` whose value is the `__Host-XSRF-TOKEN`
+// cookie — note the `__Host-` prefix, reading a plain `XSRF-TOKEN` yields
+// nothing and the request 403s. This applies to GETs too whenever the jar holds
+// that cookie, which a real signed-in session always does.
+// POST /api/authentication/refreshTokens (no body) renews the session from the
+// cookie, so the operator pastes a session once and the refresher keeps it
+// alive — see utils/eldoradoSessionRefresher.
+//
+// Our product lists under Eldorado's native "Twitch Drops" category:
+// gameId 235 / category CustomItem. Its "Game" selector has only 13 values;
+// everything we farm that is not in that list goes under "Other" (id 11) with
+// the game name carried in the title, which is what the dominant sellers do.
+const ELD_BASE = "https://www.eldorado.gg";
+const ELD_GAME_ID = "235";
+const ELD_CATEGORY = "CustomItem";
+// Eldorado's TalkJS application. Stable; only used to address the chat API.
+const ELD_TALKJS_APP = "49mLECOW";
+// Eldorado rejects anything under $0.50 (appConstants.offerConstants).
+const ELD_MIN_PRICE = 0.5;
+
+function eldCookieJar(str) {
+  const jar = new Map();
+  for (const part of String(str || "").split(/;\s*/)) {
+    if (!part) continue;
+    const i = part.indexOf("=");
+    if (i < 1) continue;
+    jar.set(part.slice(0, i).trim(), part.slice(i + 1));
+  }
+  return jar;
+}
+
+function eldJarHeader(jar) {
+  return [...jar.entries()].map(([k, v]) => k + "=" + v).join("; ");
+}
+
+// Fold a response's set-cookie back into the jar so refreshed session cookies
+// survive. Returns true when anything actually changed (worth persisting).
+function eldAbsorbCookies(jar, setCookie) {
+  const arr = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+  let changed = false;
+  for (const line of arr) {
+    const pair = String(line).split(";")[0];
+    const i = pair.indexOf("=");
+    if (i < 1) continue;
+    const k = pair.slice(0, i).trim();
+    const v = pair.slice(i + 1);
+    if (jar.get(k) !== v) {
+      jar.set(k, v);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function eldXsrf(jar) {
+  const raw = jar.get("__Host-XSRF-TOKEN") || jar.get("XSRF-TOKEN") || "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function eldError(label, e) {
+  if (e && e.__eld) throw e;
+  const status = e && e.response && e.response.status;
+  const body = e && e.response && e.response.data;
+  let detail = "";
+  if (body && typeof body === "object" && Array.isArray(body.messages)) {
+    detail = body.messages.join("; ");
+  } else if (typeof body === "string" && body) {
+    detail = body.slice(0, 300);
+  }
+  if (status === 401) {
+    detail =
+      detail ||
+      "session not accepted — paste a fresh Eldorado cookie header from a " +
+        "signed-in browser session";
+  }
+  const err = new Error(
+    label + " failed" + (status ? " (HTTP " + status + ")" : "") +
+      (detail ? ": " + detail : e && e.message ? ": " + e.message : ""),
+  );
+  err.__eld = true;
+  err.status = status;
+  throw err;
+}
+
+// One request against the seller panel, carrying the stored jar and the CSRF
+// header. Persists renewed cookies back into settings.
+//
+// Eldorado's id token is short-lived, so ANY call can come back 401 at any
+// moment — a pre-flight "is the session alive?" probe races that and loses. So
+// a 401 refreshes the session and replays the request exactly once, which is
+// what makes a long-running tick survive token expiry without operator input.
+async function eldRequest(method, path, opts = {}) {
+  try {
+    return await eldRequestOnce(method, path, opts);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    const isRefresh = String(path).includes("authentication/refreshTokens");
+    if (status !== 401 || isRefresh || opts.__retried) throw e;
+    await eldoradoRefreshSession();
+    return await eldRequestOnce(method, path, { ...opts, __retried: true });
+  }
+}
+
+async function eldRequestOnce(method, path, opts = {}) {
+  const keys = requireKeys("eldorado");
+  const jar = eldCookieJar(keys.cookie);
+  const m = String(method).toUpperCase();
+  const headers = {
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Origin: ELD_BASE,
+    Referer: ELD_BASE + "/",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    Cookie: eldJarHeader(jar),
+    ...(opts.headers || {}),
+  };
+  // The header goes on EVERY request, not just mutations: once the jar carries
+  // a `__Host-XSRF-TOKEN` cookie, Eldorado 403s any request whose header does
+  // not match it — GETs included (caught live 2026-09-06 on /authentication/claims).
+  const xsrf = eldXsrf(jar);
+  if (xsrf) headers["X-XSRF-Token"] = xsrf;
+  let data = opts.data;
+  if (data && data.getHeaders) Object.assign(headers, data.getHeaders());
+  else if (data !== undefined && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const r = await axios({
+    method: m,
+    url: ELD_BASE + path,
+    data,
+    headers,
+    timeout: opts.timeout || 45000,
+    responseType: opts.responseType || "json",
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  if (eldAbsorbCookies(jar, r.headers["set-cookie"])) {
+    await setKeys("eldorado", { cookie: eldJarHeader(jar) });
+  }
+  return r.data;
+}
+
+async function eldoradoTest() {
+  try {
+    const claims = await eldRequest("GET", "/api/authentication/claims");
+    const counts = await eldRequest(
+      "GET",
+      "/api/v1/item-management/me/offers/state-count?category=" + ELD_CATEGORY,
+    ).catch(() => null);
+    return {
+      ok: true,
+      detail:
+        "Connected as " +
+        ((claims && claims.email) || "seller") +
+        (counts ? " — " + (counts.activeOffers || 0) + " active offers" : ""),
+    };
+  } catch (e) {
+    return { ok: false, detail: eldSafeMessage(e) };
+  }
+}
+
+function eldSafeMessage(e) {
+  try {
+    eldError("Eldorado", e);
+  } catch (wrapped) {
+    return wrapped.message;
+  }
+  return String((e && e.message) || e);
+}
+
+// The session cookie renews itself from the refresh cookie — no body, no
+// stored refresh token. Returns true when the jar actually moved.
+async function eldoradoRefreshSession() {
+  const keys = requireKeys("eldorado");
+  const jar = eldCookieJar(keys.cookie);
+  const before = eldJarHeader(jar);
+  try {
+    await eldRequest("POST", "/api/authentication/refreshTokens", { data: {} });
+  } catch (e) {
+    eldError("Eldorado session refresh", e);
+  }
+  const after = getKeys("eldorado").cookie || "";
+  return after !== before;
+}
+
+// Cheap liveness probe. eldRequest already refreshes-and-retries on any 401, so
+// this is a health check for the refresher tick, not the thing keeping calls alive.
+async function eldoradoEnsureFreshSession() {
+  try {
+    await eldRequest("GET", "/api/authentication/claims");
+    return false;
+  } catch (e) {
+    if (e && e.status && e.status !== 401) throw e;
+  }
+  await eldoradoRefreshSession();
+  await eldRequest("GET", "/api/authentication/claims");
+  return true;
+}
+
+// --- Category placement -------------------------------------------------
+// The "Game" selector for Twitch Drops is a fixed 13-value list. Anything not
+// on it (Overwatch, CoD, WoT, Marvel Rivals, Fortnite …) goes under "Other",
+// which is where the two dominant sellers put ~2/3 of their catalogue.
+let eldTradeEnvCache = { at: 0, list: null };
+
+async function eldoradoTradeEnvironments() {
+  if (eldTradeEnvCache.list && Date.now() - eldTradeEnvCache.at < 6 * 3600e3) {
+    return eldTradeEnvCache.list;
+  }
+  const lib = await eldRequest(
+    "GET",
+    "/api/library/" + ELD_GAME_ID + "/" + ELD_CATEGORY + "?locale=en-US",
+  );
+  const list = (lib && lib.tradeEnvironments) || [];
+  if (list.length) eldTradeEnvCache = { at: Date.now(), list };
+  return list;
+}
+
+function eldNorm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+const ELD_GAME_ALIASES = {
+  r6: "Rainbow Six Siege",
+  r6s: "Rainbow Six Siege",
+  rainbowsixsiegex: "Rainbow Six Siege",
+  tomclancysrainbowsixsiege: "Rainbow Six Siege",
+  eft: "Escape from Tarkov",
+  escapefromtarkov: "Escape from Tarkov",
+  pubgbattlegrounds: "PUBG",
+  playerunknownsbattlegrounds: "PUBG",
+  apex: "Apex Legends",
+  bdo: "Black Desert",
+  blackdesertonline: "Black Desert",
+  eve: "EVE Online",
+};
+
+// Resolve one of our game names onto a tradeEnvironment, falling back to
+// "Other". Returns { id, name, value } ready for the create payload.
+async function eldoradoResolveGame(game) {
+  const envs = await eldoradoTradeEnvironments();
+  const want = eldNorm(ELD_GAME_ALIASES[eldNorm(game)] || game);
+  const hit =
+    envs.find((e) => eldNorm(e.value) === want) ||
+    envs.find((e) => want && eldNorm(e.value) === eldNorm(ELD_GAME_ALIASES[want]));
+  const chosen = hit || envs.find((e) => eldNorm(e.value) === "other");
+  if (!chosen) throw new Error("Eldorado: could not resolve a Twitch Drops game slot");
+  return { id: String(chosen.id), name: chosen.name || "Game", value: chosen.value };
+}
+
+// --- Images -------------------------------------------------------------
+// A main image is MANDATORY on create ("Offer main image is missing." otherwise).
+// Upload first, then reference the bare filenames on the offer.
+async function eldoradoUploadImage(imagePath) {
+  const form = new FormData();
+  form.append("image", fs.createReadStream(imagePath));
+  let res;
+  try {
+    res = await eldRequest("POST", "/api/files/me/Offer", {
+      data: form,
+      timeout: 90000,
+    });
+  } catch (e) {
+    eldError("Eldorado image upload", e);
+  }
+  const paths = (res && res.localPaths) || [];
+  const pick = (kind) => {
+    const p = paths.find((x) => new RegExp(kind + "\\.[a-z]+$", "i").test(x));
+    return p ? p.split("/").pop() : "";
+  };
+  const img = {
+    smallImage: pick("Small"),
+    largeImage: pick("Large"),
+    originalSizeImage: pick("Original"),
+  };
+  if (!img.largeImage) throw new Error("Eldorado image upload returned no paths");
+  return img;
+}
+
+// --- Listing ------------------------------------------------------------
+function eldPrice(usd) {
+  const n = Number(usd);
+  if (!isFinite(n) || n <= 0) throw new Error("Eldorado: invalid price");
+  return Math.max(ELD_MIN_PRICE, Math.round(n * 100) / 100);
+}
+
+// Create one Twitch Drops offer. `quantity` is the stock (one unit = one
+// account), which is what makes this strictly better than the ZeusX
+// one-listing-per-account model.
+async function eldoradoPublish({
+  game,
+  title,
+  description,
+  priceUsd,
+  quantity = 1,
+  minQuantity = 1,
+  coverImagePath,
+  deliveryTime = "Minute20",
+  volumeDiscounts = [],
+  extraImagePaths = [],
+}) {
+  requireKeys("eldorado");
+  if (!title) throw new Error("Eldorado: a title is required");
+  if (!coverImagePath) {
+    throw new Error("Eldorado: a cover image is required (the API rejects offers without one)");
+  }
+  const env = await eldoradoResolveGame(game);
+  const mainOfferImage = await eldoradoUploadImage(coverImagePath);
+  const offerImages = [];
+  for (const p of (extraImagePaths || []).slice(0, 4)) {
+    try {
+      offerImages.push(await eldoradoUploadImage(p));
+    } catch (e) {
+      console.error("eldorado extra image failed:", e.message);
+    }
+  }
+  const details = {
+    offerTitle: String(title).slice(0, 160),
+    description: String(description || "").slice(0, 2000),
+    tradeEnvironmentValues: [{ id: env.id, name: env.name, value: env.value }],
+    offerAttributeIdValues: [],
+    attributes: [],
+    guaranteedDeliveryTime: deliveryTime,
+    pricing: {
+      pricePerUnit: { amount: eldPrice(priceUsd), currency: "USD" },
+      quantity: Math.max(1, parseInt(quantity, 10) || 1),
+      minQuantity: Math.max(1, parseInt(minQuantity, 10) || 1),
+      volumeDiscounts: volumeDiscounts || [],
+    },
+    mainOfferImage,
+    offerImages,
+  };
+  const augmentedGame = {
+    gameId: ELD_GAME_ID,
+    category: ELD_CATEGORY,
+    tradeEnvironmentId: env.id,
+  };
+  let created;
+  try {
+    created = await eldRequest("POST", "/api/v1/item-management/me/offers/item", {
+      data: { details, augmentedGame },
+    });
+  } catch (e) {
+    eldError("Eldorado publish", e);
+  }
+  return {
+    // `externalId` is the name every other connector returns and the shared
+    // publish route reads; `id` is kept for callers that already use it.
+    externalId: created && created.id,
+    id: created && created.id,
+    url: eldoradoOfferUrl(created),
+    raw: created,
+  };
+}
+
+function eldoradoOfferUrl(offer) {
+  if (!offer || !offer.id) return "";
+  return ELD_BASE + "/twitch-drops/i/" + ELD_GAME_ID + "?offerId=" + offer.id;
+}
+
+// Read an offer back. NOTE the endpoint is `/private`; `/details` is PUT-only.
+async function eldoradoOffer(offerId) {
+  try {
+    const r = await eldRequest(
+      "GET",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/private",
+    );
+    return (r && r.offer) || null;
+  } catch (e) {
+    eldError("Eldorado offer", e);
+  }
+}
+
+// Edit an existing offer in place (title / description / price / stock / game).
+// Reads the current offer and rewrites the same {details, augmentedGame} DTO the
+// create call takes, so an untouched field keeps its current value.
+async function eldoradoUpdateOffer(offerId, patch = {}) {
+  const cur = await eldoradoOffer(offerId);
+  if (!cur) throw new Error("Eldorado: offer " + offerId + " not found");
+  const env =
+    patch.game != null
+      ? await eldoradoResolveGame(patch.game)
+      : {
+          id: String(((cur.tradeEnvironmentValues || [])[0] || {}).id ?? "11"),
+          name: ((cur.tradeEnvironmentValues || [])[0] || {}).name || "Game",
+          value: ((cur.tradeEnvironmentValues || [])[0] || {}).value || "Other",
+        };
+  const details = {
+    offerTitle: String(
+      patch.title != null ? patch.title : cur.offerTitle || "",
+    ).slice(0, 160),
+    description: String(
+      patch.description != null ? patch.description : cur.description || "",
+    ).slice(0, 2000),
+    tradeEnvironmentValues: [{ id: env.id, name: env.name, value: env.value }],
+    offerAttributeIdValues: cur.offerAttributeIdValues || [],
+    attributes: cur.attributes || [],
+    guaranteedDeliveryTime:
+      patch.deliveryTime || cur.guaranteedDeliveryTime || "Minute20",
+    pricing: {
+      pricePerUnit: {
+        amount:
+          patch.priceUsd != null
+            ? eldPrice(patch.priceUsd)
+            : (cur.pricePerUnit && cur.pricePerUnit.amount) || ELD_MIN_PRICE,
+        currency: "USD",
+      },
+      quantity:
+        patch.quantity != null
+          ? Math.max(1, parseInt(patch.quantity, 10) || 1)
+          : cur.quantity,
+      minQuantity: patch.minQuantity != null ? patch.minQuantity : cur.minQuantity || 1,
+      volumeDiscounts: patch.volumeDiscounts || cur.volumeDiscounts || [],
+    },
+    mainOfferImage: patch.mainOfferImage || cur.mainOfferImage,
+    offerImages: patch.offerImages || cur.offerImages || [],
+  };
+  // NOTE: expireDate is deliberately NOT settable here. Offers auto-expire ~3
+  // weeks after creation, Eldorado exposes no renew endpoint, and sending
+  // expireDate through this DTO is silently IGNORED (verified live 2026-09-07 —
+  // the value comes back unchanged). Keeping a listing alive past its date means
+  // re-creating it, which is what the publisher scripts do when they treat a
+  // closed/expired offer as absent.
+  try {
+    await eldRequest(
+      "PUT",
+      "/api/v1/item-management/me/offers/item/" +
+        encodeURIComponent(offerId) +
+        "/details",
+      {
+        data: {
+          details,
+          augmentedGame: {
+            gameId: ELD_GAME_ID,
+            category: ELD_CATEGORY,
+            tradeEnvironmentId: env.id,
+          },
+        },
+      },
+    );
+  } catch (e) {
+    eldError("Eldorado update", e);
+  }
+  return await eldoradoOffer(offerId);
+}
+
+// Restock without rewriting the offer. The body is a BARE integer, not an
+// object — this is the lever the farm uses to keep stock in step.
+async function eldoradoSetQuantity(offerId, quantity) {
+  const q = Math.max(0, parseInt(quantity, 10) || 0);
+  try {
+    await eldRequest(
+      "PUT",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/quantity",
+      { data: q },
+    );
+  } catch (e) {
+    eldError("Eldorado set quantity", e);
+  }
+  return q;
+}
+
+async function eldoradoReprice(offerId, priceUsd) {
+  const amount = eldPrice(priceUsd);
+  try {
+    await eldRequest(
+      "PUT",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/price",
+      { data: { amount, currency: "USD" } },
+    );
+  } catch (e) {
+    eldError("Eldorado reprice", e);
+  }
+  return amount;
+}
+
+// Pausing takes the offer off the storefront and is reversible; DELETE is
+// permanent, so delisting pauses (same contract as the ZeusX connector).
+async function eldoradoDelist(offerId) {
+  const cur = await eldoradoOffer(offerId).catch(() => null);
+  if (cur && cur.offerState === "Paused") return;
+  try {
+    await eldRequest(
+      "POST",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/pause",
+    );
+  } catch (e) {
+    eldError("Eldorado delist", e);
+  }
+}
+
+async function eldoradoRelist(offerId) {
+  const cur = await eldoradoOffer(offerId).catch(() => null);
+  if (cur && cur.offerState === "Active") return;
+  try {
+    await eldRequest(
+      "POST",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/resume",
+    );
+  } catch (e) {
+    eldError("Eldorado relist", e);
+  }
+}
+
+async function eldoradoDeleteOffer(offerId) {
+  try {
+    await eldRequest(
+      "DELETE",
+      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId),
+    );
+  } catch (e) {
+    eldError("Eldorado delete", e);
+  }
+}
+
+async function eldoradoMyListings(pageIndex = 1, pageSize = 50) {
+  try {
+    return await eldRequest(
+      "GET",
+      "/api/v1/item-management/me/offers/me/search?pageIndex=" +
+        (parseInt(pageIndex, 10) || 1) +
+        "&pageSize=" +
+        (parseInt(pageSize, 10) || 50),
+    );
+  } catch (e) {
+    eldError("Eldorado listings", e);
+  }
+}
+
+// --- Orders + delivery ---------------------------------------------------
+// Eldorado has NO native credential vault for CustomItem (its auto-delivery is
+// a Roblox in-game trading bot), so the hand-over is a chat message followed by
+// marking the order delivered — which is exactly how the top seller on this
+// category posts a 35-second median delivery time.
+//
+// The chat is TalkJS. Everything needed to post into it is derivable
+// server-side (all verified live 2026-09-06 against the real chat iframe):
+//   nymId                 = sha1(order.sellerId).hex[:20] + "_n"   <-- NOTE the suffix
+//   conversation internal = sha1(order.talkJsConversationId).hex[:20]  (NO suffix)
+//   sessionId             = client-generated, any stable random id
+//   bearer token          = GET /api/conversations/me/authorize -> { token }
+// then POST {appApi}/{appId}//say/{conversationInternalId}/?sessionId=…
+
+function eldInternalId(externalId) {
+  return crypto.createHash("sha1").update(String(externalId)).digest("hex").slice(0, 20);
+}
+
+// TalkJS USER ids carry a trailing "_n" that conversation ids do not. Without it
+// the send is rejected with 404 {"error":"Sender does not exist"} — which is how
+// this was caught, on a live send test against a completed order (2026-09-06).
+function eldNymId(userId) {
+  return eldInternalId(userId) + "_n";
+}
+
+// Seller orders in one state, filtered server-side. `displayFilter` is REQUIRED
+// — omitting it returns 400. States: Paid | Disputed | Delivered | Received |
+// Completed | Canceled | PendingReview.
+async function eldoradoOrders({ orderState = "Paid", pageSize = 50 } = {}) {
+  const qs = new URLSearchParams({
+    displayFilter: "DisplaySellingOrders",
+    orderGroup: "Regular",
+    orderState,
+    pageSize: String(Math.min(50, Math.max(1, parseInt(pageSize, 10) || 50))),
+    pageDirection: "Next",
+  });
+  try {
+    const r = await eldRequest("GET", "/api/v1/orders/me/seller/orders?" + qs);
+    return (r && r.results) || [];
+  } catch (e) {
+    eldError("Eldorado orders", e);
+  }
+}
+
+// The fulfiller's queue: paid but not yet delivered.
+async function eldoradoPaidOrders(opts = {}) {
+  return eldoradoOrders({ ...opts, orderState: "Paid" });
+}
+
+async function eldoradoOrderStateCounts() {
+  try {
+    return await eldRequest("GET", "/api/orders/me/statesCount");
+  } catch (e) {
+    eldError("Eldorado order counts", e);
+  }
+}
+
+let eldTalkTokenCache = { at: 0, token: "" };
+
+async function eldoradoTalkjsToken(force) {
+  if (!force && eldTalkTokenCache.token && Date.now() - eldTalkTokenCache.at < 5 * 60e3) {
+    return eldTalkTokenCache.token;
+  }
+  let r;
+  try {
+    r = await eldRequest("GET", "/api/conversations/me/authorize");
+  } catch (e) {
+    eldError("Eldorado chat authorize", e);
+  }
+  const token = (r && r.token) || "";
+  if (!token) throw new Error("Eldorado chat: no TalkJS token returned");
+  eldTalkTokenCache = { at: Date.now(), token };
+  return token;
+}
+
+// One TalkJS session id per process is enough — it only correlates calls.
+const ELD_TALK_SESSION = crypto.randomUUID
+  ? crypto.randomUUID()
+  : crypto.randomBytes(16).toString("hex");
+
+// Post a message into an order's chat as the seller. `order` needs
+// `sellerId` and `talkJsConversationId` (both present on the order rows).
+async function eldoradoSendOrderMessage(order, text) {
+  if (!order || !order.talkJsConversationId) {
+    throw new Error("Eldorado chat: order has no talkJsConversationId");
+  }
+  const body = String(text || "").trim();
+  if (!body) throw new Error("Eldorado chat: refusing to send an empty message");
+  const token = await eldoradoTalkjsToken();
+  const conv = eldInternalId(order.talkJsConversationId);
+  const nymId = eldNymId(order.sellerId);
+  const url =
+    "https://app.talkjs.com/api/v0/" +
+    ELD_TALKJS_APP +
+    "//say/" +
+    conv +
+    "/?sessionId=" +
+    encodeURIComponent(ELD_TALK_SESSION);
+  const payload = {
+    text: body,
+    custom: undefined,
+    nymId,
+    // Makes a retry after a timeout safe — TalkJS dedupes on this.
+    idempotencyKey:
+      "eld-" + String(order.id || "") + "-" + crypto.createHash("sha1").update(body).digest("hex").slice(0, 12),
+  };
+  try {
+    const r = await axios.post(url, payload, {
+      headers: {
+        Authorization: "Bearer " + token,
+        "Content-Type": "application/json",
+        "x-talkjs-client-build": "jssdk-release-2946179",
+      },
+      timeout: 30000,
+    });
+    return r.data || { ok: true };
+  } catch (e) {
+    if (e && e.response && e.response.status === 401) {
+      // Token aged out mid-flight — mint a fresh one and retry once.
+      const fresh = await eldoradoTalkjsToken(true);
+      const r = await axios.post(url, payload, {
+        headers: {
+          Authorization: "Bearer " + fresh,
+          "Content-Type": "application/json",
+          "x-talkjs-client-build": "jssdk-release-2946179",
+        },
+        timeout: 30000,
+      });
+      return r.data || { ok: true };
+    }
+    eldError("Eldorado chat send", e);
+  }
+}
+
+// Never call this before the buyer actually has the credential.
+async function eldoradoMarkDelivered(orderId) {
+  try {
+    await eldRequest("PUT", "/api/orders/me/" + encodeURIComponent(orderId) + "/deliver");
+  } catch (e) {
+    eldError("Eldorado mark delivered", e);
+  }
+}
+
+// ------------------------------------------------------------------
+// PlayerAuctions
+// ------------------------------------------------------------------
+// Reverse-engineered private API behind member.playerauctions.com (an Angular
+// app). Full verified contract: docs/PLAYERAUCTIONS-INTEGRATION-PLAN.md.
+//
+// Five hosts, split by concern, all cookie-authenticated:
+//   user-api    — the member: messages, notifications, status, API keys
+//   offer-api   — offers, the game/item taxonomy, offer images
+//   order-api   — orders, order detail, delivery confirmation
+//   account-api — sign-in and token refresh
+//   public-api  — anonymous reference data (no credentials sent)
+//
+// Auth is cookie-only and there is NO CSRF token — the Angular bundle carries
+// Angular's stock XSRF names but PlayerAuctions never sets an XSRF-TOKEN
+// cookie, so no header is derived from it. Do not go looking for Eldorado's
+// `__Host-XSRF-TOKEN` equivalent here; it does not exist.
+//
+// The session cookies are httpOnly, so — as with Eldorado — the operator pastes
+// the whole Cookie header from a signed-in seller session once, and the server
+// renews it in place via POST account-api/api/SignIn/RefreshToken (empty body).
+const PA_USER_API = "https://user-api.playerauctions.com/api";
+const PA_OFFER_API = "https://offer-api.playerauctions.com/api";
+const PA_ORDER_API = "https://order-api.playerauctions.com/api";
+const PA_ACCOUNT_API = "https://account-api.playerauctions.com/api";
+const PA_MAIN_SITE = "https://www.playerauctions.com";
+const PA_MEMBER_SITE = "https://member.playerauctions.com";
+
+// PlayerAuctions rejects any trade whose price x minUnitPerOrder is under $5.
+const PA_MIN_PRICE = 5;
+// An order message is capped at 300 chars (50 for a brand-new member). The long
+// claim guide therefore lives in the offer's `instruction` field instead — see
+// paDeliveryMessage.
+const PA_MAX_MESSAGE = 300;
+// Writes are throttled server-side ("Operated too frequent"). Space them out.
+const PA_WRITE_GAP_MS = 25000;
+
+// deliveryGuarantee enum (GET offer-api/api/games/{id}/item/deliveryTimes).
+const PA_DELIVERY = {
+  min20: 5,
+  hour1: 101,
+  hour2: 4,
+  hour6: 106,
+  hour12: 12,
+  hour24: 3,
+  hour48: 6,
+  day7: 1,
+  day10: 102,
+};
+
+function paCookieJar(str) {
+  const jar = new Map();
+  for (const part of String(str || "").split(/;\s*/)) {
+    if (!part) continue;
+    const i = part.indexOf("=");
+    if (i < 1) continue;
+    jar.set(part.slice(0, i).trim(), part.slice(i + 1));
+  }
+  return jar;
+}
+
+function paJarHeader(jar) {
+  return [...jar.entries()].map(([k, v]) => k + "=" + v).join("; ");
+}
+
+// Fold a response's Set-Cookie back into the jar so a refreshed session sticks.
+// Returns true when something actually changed (worth persisting).
+function paAbsorbCookies(jar, setCookie) {
+  const arr = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+  let changed = false;
+  for (const line of arr) {
+    const pair = String(line).split(";")[0];
+    const i = pair.indexOf("=");
+    if (i < 1) continue;
+    const k = pair.slice(0, i).trim();
+    const v = pair.slice(i + 1);
+    if (jar.get(k) !== v) {
+      jar.set(k, v);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// PlayerAuctions answers HTTP 200 for business failures and hides the verdict in
+// the envelope, so every caller goes through this. Branching on the HTTP status
+// alone silently treats a rejected create as a success.
+function paUnwrap(label, body) {
+  if (body && typeof body === "object" && "isSuccess" in body) {
+    if (body.isSuccess === false) {
+      const err = new Error(
+        label +
+          " failed" +
+          (body.code ? " (code " + body.code + ")" : "") +
+          (body.message ? ": " + body.message : ""),
+      );
+      err.__pa = true;
+      err.paCode = body.code;
+      // code 1 is the write throttle — worth retrying, unlike a validation 400.
+      err.retryable = body.code === 1;
+      throw err;
+    }
+    return "data" in body ? body.data : body;
+  }
+  return body;
+}
+
+function paError(label, e) {
+  if (e && e.__pa) throw e;
+  const status = e && e.response && e.response.status;
+  const body = e && e.response && e.response.data;
+  let detail = "";
+  if (body && typeof body === "object" && body.message) detail = String(body.message);
+  else if (typeof body === "string" && body) detail = body.slice(0, 300);
+  if (status === 401) {
+    detail =
+      detail ||
+      "session not accepted — paste a fresh PlayerAuctions cookie header from " +
+        "a signed-in seller session";
+  }
+  if (status === 403) detail = detail || "account suspended";
+  if (status === 429) detail = detail || "rate limited";
+  const err = new Error(
+    label +
+      " failed" +
+      (status ? " (HTTP " + status + ")" : "") +
+      (detail ? ": " + detail : e && e.message ? ": " + e.message : ""),
+  );
+  err.__pa = true;
+  err.status = status;
+  err.retryable = status === 429;
+  throw err;
+}
+
+// One request against the seller API, carrying the stored jar. A 401 refreshes
+// the session and replays exactly once — PlayerAuctions' access token is short
+// lived, so any call can 401 at any moment and a pre-flight liveness probe
+// races that and loses (the lesson Eldorado taught).
+async function paRequest(method, base, path, opts = {}) {
+  const tokenWeUsed = paStoredAccessToken();
+  try {
+    return await paRequestOnce(method, base, path, opts);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    const isRefresh = String(path).includes("SignIn/RefreshToken");
+    if (status !== 401 || isRefresh || opts.__retried) throw e;
+    // Serialised across processes; may be a no-op if someone else refreshed
+    // first, in which case the retry simply picks up their jar.
+    await paRefreshOnce(tokenWeUsed);
+    return await paRequestOnce(method, base, path, { ...opts, __retried: true });
+  }
+}
+
+async function paRequestOnce(method, base, path, opts = {}) {
+  const keys = requireKeys("playerauctions");
+  const jar = paCookieJar(keys.cookie);
+  const m = String(method).toUpperCase();
+  const headers = {
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Origin: PA_MEMBER_SITE,
+    Referer: PA_MEMBER_SITE + "/",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    Cookie: paJarHeader(jar),
+    ...(opts.headers || {}),
+  };
+  let data = opts.data;
+  if (data && data.getHeaders) Object.assign(headers, data.getHeaders());
+  else if (data !== undefined && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const r = await axios({
+    method: m,
+    url: base + path,
+    data,
+    headers,
+    timeout: opts.timeout || 45000,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  if (paAbsorbCookies(jar, r.headers["set-cookie"])) {
+    await setKeys("playerauctions", { cookie: paJarHeader(jar) });
+  }
+  return r.data;
+}
+
+async function paGet(base, path, label) {
+  try {
+    return paUnwrap(label, await paRequest("GET", base, path));
+  } catch (e) {
+    return paError(label, e);
+  }
+}
+
+// The game and item taxonomy answers anonymously, so it must not be gated on
+// having a cookie. This matters more than it looks: the publishers ask "does
+// this game accept Item offers?" BEFORE any credential is needed, and the
+// auto-lister's per-game gate treats a thrown error as "not supported" — so
+// routing taxonomy through the authenticated path would quietly disable
+// PlayerAuctions listing for every game whenever the cookie lapsed.
+async function paPublicGet(base, path, label) {
+  try {
+    const r = await axios({
+      method: "GET",
+      url: base + path,
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        Origin: PA_MEMBER_SITE,
+        Referer: PA_MEMBER_SITE + "/",
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      },
+      timeout: 45000,
+    });
+    return paUnwrap(label, r.data);
+  } catch (e) {
+    return paError(label, e);
+  }
+}
+
+async function paSend(method, base, path, data, label) {
+  try {
+    return paUnwrap(label, await paRequest(method, base, path, { data }));
+  } catch (e) {
+    return paError(label, e);
+  }
+}
+
+async function playerauctionsTest() {
+  try {
+    const st = await paGet(PA_USER_API, "/User/status", "PlayerAuctions status");
+    const offers = await paGet(
+      PA_OFFER_API,
+      "/Offer/Offers?pageIndex=1&pageSize=1&sortField=null&sortOrder=null",
+      "PlayerAuctions offers",
+    ).catch(() => null);
+    const m = (st && st.members) || {};
+    return {
+      ok: true,
+      detail:
+        "Connected as " +
+        (m.nickName || "seller") +
+        (st && st.isSeller ? " (seller)" : "") +
+        (offers ? " — " + (offers.count || 0) + " active offers" : ""),
+    };
+  } catch (e) {
+    return { ok: false, detail: paSafeMessage(e) };
+  }
+}
+
+function paSafeMessage(e) {
+  try {
+    paError("PlayerAuctions", e);
+  } catch (wrapped) {
+    return wrapped.message;
+  }
+  return String((e && e.message) || e);
+}
+
+// The seller's own profile — memberId, nickname, seller level. `level` gates
+// two things that matter: proof-of-delivery screenshots (level 0 must attach
+// them) and the official API-key programme (level 2+).
+async function playerauctionsMe() {
+  return await paGet(PA_USER_API, "/User/status", "PlayerAuctions status");
+}
+
+async function playerauctionsSellerLevel() {
+  const st = await playerauctionsMe().catch(() => null);
+  const lvl = st && st.members ? st.members.level : null;
+  return Number.isFinite(lvl) ? lvl : 0;
+}
+
+// --- The refresh lock ---------------------------------------------------
+//
+// PlayerAuctions rotates the whole session on refresh, and presenting a spent
+// refresh token revokes the family. That makes a CONCURRENT refresh fatal, and
+// concurrency here is normal, not exotic: the pm2 server's fulfiller ticks every
+// 60s while a publishing script runs for an hour in its own process, both
+// reading the same jar out of settings.json. When the 30-minute access token
+// expires they 401 within moments of each other, both refresh, and the second
+// one kills the session. That is exactly how it died twice on 2026-09-07.
+//
+// PlayerAuctions' own web client has this problem across browser tabs and
+// solves it the same way — its HTTP interceptor carries a localStorage
+// refreshTokenLock with a 15s timeout and a 5s cool-down. This is the
+// server-side equivalent, using an atomic exclusive file create as the lock.
+//
+// The important half is not the lock but the RE-CHECK under it: if the stored
+// access token has changed since our request was built, somebody else already
+// refreshed and we simply use their result instead of spending the token again.
+const PA_LOCK_FILE = path.join(__dirname, ".playerauctions-refresh.lock");
+const PA_STAMP_FILE = path.join(__dirname, ".playerauctions-refresh.stamp");
+const PA_LOCK_TIMEOUT_MS = 30000;
+const PA_LOCK_POLL_MS = 250;
+// A second refresh this soon after a successful one is a stampede, not a real
+// need. Belt and braces alongside the token comparison: if a refresh ever fails
+// to change the stored token, the comparison cannot dedupe and only this can.
+// PlayerAuctions' own client carries the same idea as COOL_DOWN_PERIOD.
+const PA_COOLDOWN_MS = 15000;
+
+function paStoredAccessToken() {
+  try {
+    return paCookieJar(getKeys("playerauctions").cookie || "").get("Production_access_token") || "";
+  } catch {
+    return "";
+  }
+}
+
+function paLastRefreshAge() {
+  try {
+    return Date.now() - Number(fs.readFileSync(PA_STAMP_FILE, "utf8").trim());
+  } catch {
+    return null; // never refreshed on this host
+  }
+}
+
+function paStampRefresh() {
+  try {
+    fs.writeFileSync(PA_STAMP_FILE, String(Date.now()), "utf8");
+  } catch {
+    /* the stamp is an optimisation, not a correctness requirement */
+  }
+}
+
+function paLockAge() {
+  try {
+    return Date.now() - fs.statSync(PA_LOCK_FILE).mtimeMs;
+  } catch {
+    return null; // no lock
+  }
+}
+
+function paTryLock() {
+  try {
+    fs.closeSync(fs.openSync(PA_LOCK_FILE, "wx"));
+    return true;
+  } catch {
+    // A lock left behind by a killed process must not wedge every future
+    // refresh, so one older than the timeout is taken over.
+    const age = paLockAge();
+    if (age != null && age > PA_LOCK_TIMEOUT_MS) {
+      try {
+        fs.unlinkSync(PA_LOCK_FILE);
+        fs.closeSync(fs.openSync(PA_LOCK_FILE, "wx"));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
+function paUnlock() {
+  try {
+    fs.unlinkSync(PA_LOCK_FILE);
+  } catch {
+    /* already gone */
+  }
+}
+
+const paSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Refresh at most once across every process on this host. `tokenWeUsed` is the
+// access token the failed request carried; when the stored one no longer
+// matches it, another process has already refreshed and we skip straight to the
+// retry.
+// `doRefresh` exists so the serialisation can be tested without a live session;
+// production always uses the real refresh.
+async function paRefreshOnce(tokenWeUsed, doRefresh = playerauctionsRefreshSession) {
+  if (tokenWeUsed && paStoredAccessToken() !== tokenWeUsed) return false;
+
+  const deadline = Date.now() + PA_LOCK_TIMEOUT_MS;
+  while (!paTryLock()) {
+    if (Date.now() > deadline) break; // give up waiting; re-check below
+    await paSleep(PA_LOCK_POLL_MS);
+    // Whoever holds the lock may have finished in the meantime.
+    if (tokenWeUsed && paStoredAccessToken() !== tokenWeUsed) return false;
+  }
+  try {
+    // Re-check under the lock — the window between "lock is free" and "we hold
+    // it" is exactly where a double refresh would slip through.
+    if (tokenWeUsed && paStoredAccessToken() !== tokenWeUsed) return false;
+    const age = paLastRefreshAge();
+    if (age != null && age >= 0 && age < PA_COOLDOWN_MS) return false;
+    await doRefresh();
+    paStampRefresh();
+    return true;
+  } finally {
+    paUnlock();
+  }
+}
+
+// Read the JWT expiry out of the stored jar without calling PlayerAuctions.
+// Used by the self-check to report session health, because the obvious
+// alternative — "test the refresh" — destroys the session (see below).
+function playerauctionsTokenExpiry() {
+  const out = { access: null, refresh: null };
+  let cookie = "";
+  try {
+    cookie = getKeys("playerauctions").cookie || "";
+  } catch {
+    return out;
+  }
+  const jar = paCookieJar(cookie);
+  for (const [name, key] of [
+    ["Production_access_token", "access"],
+    ["Production_refresh_token", "refresh"],
+  ]) {
+    const raw = jar.get(name);
+    if (!raw) continue;
+    try {
+      const body = JSON.parse(
+        Buffer.from(String(raw).split(".")[1], "base64").toString("utf8"),
+      );
+      if (body && body.exp) out[key] = new Date(body.exp * 1000);
+    } catch {
+      /* a jar we cannot parse is not an error, just unknown */
+    }
+  }
+  return out;
+}
+
+// Renews the session from the refresh cookie. Body is an empty object; the new
+// cookies come back as Set-Cookie and are folded into the stored jar.
+//
+// ⚠ THIS IS DESTRUCTIVE TO EVERY OTHER COPY OF THE JAR.
+// PlayerAuctions rotates the WHOLE session on refresh: a success mints a new
+// session id (the `sid` claim changes) and invalidates every other copy of that
+// cookie, and presenting an already-spent refresh token reads as token reuse
+// and revokes the entire family — signing the operator's browser out with it.
+// Learned the hard way 2026-09-07: the same paste was installed on a laptop and
+// on prod, each refreshed once, and the account was signed out everywhere.
+//
+// Rule: exactly ONE host owns a given cookie, and only its session refresher
+// ever calls this. Never "test" it from a second machine.
+async function playerauctionsRefreshSession() {
+  const keys = requireKeys("playerauctions");
+  const before = paJarHeader(paCookieJar(keys.cookie));
+  try {
+    await paRequest("POST", PA_ACCOUNT_API, "/SignIn/RefreshToken", { data: {} });
+  } catch (e) {
+    paError("PlayerAuctions session refresh", e);
+  }
+  const after = getKeys("playerauctions").cookie || "";
+  return after !== before;
+}
+
+// Cheap liveness probe for the refresher tick. paRequest already refreshes and
+// replays on 401, so this is a health check, not the thing keeping calls alive.
+// Health check for the refresher tick — NOT a pre-flight probe.
+//
+// paRequest already refreshes-and-retries on 401, under the cross-process lock.
+// So this only has to answer "is the session usable?". The earlier version
+// called playerauctionsRefreshSession() DIRECTLY when the probe failed, which
+// bypassed the lock and spent the refresh token a second time — the exact
+// "a pre-flight liveness probe races the refresh and loses" trap the Eldorado
+// integration had already documented.
+//
+// Nothing on the hot path should call this: the fulfiller does not need it,
+// because its first real request refreshes on its own if it has to.
+async function playerauctionsEnsureFreshSession() {
+  const before = paStoredAccessToken();
+  await paRequest("GET", PA_USER_API, "/User/status");
+  return paStoredAccessToken() !== before;
+}
+
+// --- Taxonomy -----------------------------------------------------------
+// These endpoints answer anonymously, so they stay readable even when the
+// cookie has lapsed. Cached because they change on the order of months.
+let paGamesCache = { at: 0, list: null };
+
+async function playerauctionsGames() {
+  if (paGamesCache.list && Date.now() - paGamesCache.at < 12 * 3600e3) {
+    return paGamesCache.list;
+  }
+  const list = await paPublicGet(PA_OFFER_API, "/games", "PlayerAuctions games");
+  if (Array.isArray(list) && list.length) {
+    paGamesCache = { at: Date.now(), list };
+  }
+  return list || [];
+}
+
+function paNorm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+// Our farm's game names are not PlayerAuctions' storefront names. These are the
+// pairs that do not fall out of a normalised comparison.
+const PA_GAME_ALIASES = {
+  overwatch2: "Overwatch",
+  callofduty: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  cod: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  callofdutywarzone: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  modernwarfare: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  blackops7: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  r6: "Tom Clancys Rainbow Six Siege",
+  r6s: "Tom Clancys Rainbow Six Siege",
+  rainbowsixsiege: "Tom Clancys Rainbow Six Siege",
+  rainbowsixsiegex: "Tom Clancys Rainbow Six Siege",
+  tomclancysrainbowsixsiege: "Tom Clancys Rainbow Six Siege",
+  tomclancysrainbowsixsiegex: "Tom Clancys Rainbow Six Siege",
+  eft: "Escape From Tarkov",
+  escapefromtarkov: "Escape From Tarkov",
+  tarkov: "Escape From Tarkov",
+  halo: "Halo Infinite",
+  halocampaignevolved: "Halo Infinite",
+  rust: "RUST",
+  pubg: "PUBG: BATTLEGROUNDS",
+  pubgbattlegrounds: "PUBG: BATTLEGROUNDS",
+  playerunknownsbattlegrounds: "PUBG: BATTLEGROUNDS",
+  apex: "Apex Legends",
+  bdo: "Black Desert",
+  blackdesertonline: "Black Desert",
+  eve: "EVE Online",
+  wot: "World of Tanks",
+  lol: "League of Legends",
+  callofdutymodernwarfare: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  callofdutyblackops: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  callofdutywarzone2: "Call of Duty - Warzone / BO7 & All Legacy Versions",
+  cs2: "Counter-Strike 2",
+  counterstrike2: "Counter-Strike 2",
+  thefinals: "The Finals",
+  naraka: "NARAKA: BLADEPOINT",
+  narakabladepoint: "NARAKA: BLADEPOINT",
+};
+
+// Resolve one of our game names to a PlayerAuctions catalogue row.
+// Returns null when the game is not on PlayerAuctions at all.
+//
+// Our names come from Twitch campaign data and are usually MORE specific than
+// PlayerAuctions' storefront name — "NBA 2K27" vs their "NBA 2K",
+// "Call of Duty: Modern Warfare 4" vs their one giant
+// "Call of Duty - Warzone / BO7 & All Legacy Versions" row. So the useful
+// direction is mostly "is their name a prefix of ours?", not the reverse, and
+// a bare exact match resolves only a minority of the catalogue.
+async function playerauctionsResolveGame(game) {
+  const raw = String(game || "").trim();
+  if (!raw) return null;
+  const games = await playerauctionsGames();
+  const alias = (t) => PA_GAME_ALIASES[paNorm(t)];
+  const want = paNorm(alias(raw) || raw);
+  if (!want) return null;
+
+  // 1. Exact, after normalisation.
+  const exact = games.find((g) => paNorm(g.gameName) === want);
+  if (exact) return exact;
+
+  // 2. The part before a colon, through the alias map. This is what carries
+  //    every "Call of Duty: <subtitle>" onto their single Call of Duty row.
+  if (raw.includes(":")) {
+    const head = raw.split(":")[0].trim();
+    const mapped = alias(head);
+    if (mapped) {
+      const hit = games.find((g) => paNorm(g.gameName) === paNorm(mapped));
+      if (hit) return hit;
+    }
+  }
+
+  // 3. THEIR name is a prefix of ours — "NBA 2K" for our "NBA 2K27",
+  //    "Hunt: Showdown" for our "Hunt: Showdown 1896", "Overwatch" for
+  //    "Overwatch 2". Longest wins, so "Call of Duty Mobile" can never beat a
+  //    better match, and a very short storefront name cannot swallow
+  //    everything that happens to start with it.
+  const prefixes = games
+    .filter((g) => paNorm(g.gameName).length >= 4 && want.startsWith(paNorm(g.gameName)))
+    .sort((a, b) => paNorm(b.gameName).length - paNorm(a.gameName).length);
+  if (prefixes.length) return prefixes[0];
+
+  // 4. OURS is a prefix of theirs, or merely contained in it. Both are looser,
+  //    so they need a longer needle before they are allowed to fire.
+  if (want.length >= 6) {
+    const pre = games.find((g) => paNorm(g.gameName).startsWith(want));
+    if (pre) return pre;
+    const inc = games.find((g) => paNorm(g.gameName).includes(want));
+    if (inc) return inc;
+  }
+  return null;
+}
+
+// Does this game accept the product type we want to list under? Only 149 of
+// PlayerAuctions' ~400 games allow "item" — several games we farm (Rainbow Six,
+// Apex, Rocket League, Dead by Daylight, The Finals) are account-only, and an
+// Item offer for them is rejected. Callers must check before publishing.
+function paGameSupports(game, productType) {
+  const types = String((game && game.productType) || "")
+    .toLowerCase()
+    .split(",")
+    .map((s) => s.trim());
+  return types.includes(String(productType || "").toLowerCase());
+}
+
+// The item tree. NOTE the plural: /games/{id}/Items/categories is the tree,
+// while /games/{id}/Item/categories is a 404. Both spellings are load-bearing.
+async function playerauctionsItemCategories(gameId) {
+  return (
+    (await paPublicGet(
+      PA_OFFER_API,
+      "/games/" + encodeURIComponent(gameId) + "/Items/categories",
+      "PlayerAuctions item categories",
+    )) || []
+  );
+}
+
+async function playerauctionsServers(gameId) {
+  return (
+    (await paPublicGet(
+      PA_OFFER_API,
+      "/games/" + encodeURIComponent(gameId) + "/Item/servers",
+      "PlayerAuctions servers",
+    )) || []
+  );
+}
+
+async function playerauctionsDeliveryTimes(gameId) {
+  return (
+    (await paPublicGet(
+      PA_OFFER_API,
+      "/games/" + encodeURIComponent(gameId) + "/item/deliveryTimes",
+      "PlayerAuctions delivery times",
+    )) || []
+  );
+}
+
+// Pick the leaf item to file a drops bundle under, or refuse.
+//
+// PlayerAuctions' item trees are per-game and often narrow, so there is not
+// always an honest home for a Twitch-drops bundle. Real examples:
+//
+//   Overwatch      Skins > Other Skins          <- good
+//   Call of Duty   Bundle > Other Bundles       <- good (what the live offers use)
+//   Marvel Rivals  Twitch Drops > Twitch Drops  <- a literal category, perfect
+//   Fortnite       Ore > Copper Ore, Skins > Spider-Man, ...
+//   NBA 2K         VC > 15000 VC                <- currency only
+//   Palia          {id:-1, "Others", no subs}   <- a sentinel, not a category
+//
+// The first pass here filed Fortnite under "Copper Ore" and NBA 2K under
+// "15000 VC". Both were accepted by the API and both are wrong: a buyer
+// browsing NBA 2K currency would find a drops bundle. Mis-filing is worse than
+// not listing on a marketplace that penalises disputes, so this REFUSES
+// (returns null) unless it finds a defensible home, and the publishers report
+// the game as unlistable instead.
+// Roots that can honestly hold a cosmetic drops bundle, best first. Tree order
+// is not preference order — Fortnite lists "Weapons" before "Skins" — so these
+// are scored rather than scanned.
+const PA_ROOT_PREFERENCE = [
+  /twitch\s*drops?/i,
+  /drop/i,
+  /skin|cosmetic/i,
+  /coating|armou?r/i,
+  /bundle|pack/i,
+  /outfit|emote|spray|charm|banner|icon/i,
+  /weapon/i,
+];
+// Currency and hard-goods roots. A drops bundle filed under "15000 VC" or
+// "Copper Ore" is accepted by the API and is still wrong — a buyer browsing
+// NBA 2K currency should not find one.
+const PA_ROOT_DENY =
+  /^(vc|gold|coin|credit|currenc|cash|silver|gem|token|ore|crystal|powder|twine|material|mechanical)/i;
+
+function paRootScore(name) {
+  const n = String(name || "");
+  if (PA_ROOT_DENY.test(n.trim())) return -1;
+  for (let i = 0; i < PA_ROOT_PREFERENCE.length; i++) {
+    if (PA_ROOT_PREFERENCE[i].test(n)) return i;
+  }
+  return -1;
+}
+
+async function playerauctionsPickItemPath(gameId, hint) {
+  const tree = await playerauctionsItemCategories(gameId);
+  if (!tree.length) return null;
+  const want = paNorm(hint || "");
+  // id <= 0 is a sentinel row, not a real category; filing under it yields
+  // "Invalid Item Name" on create.
+  const roots = tree.filter((r) => Number(r.id) > 0);
+  if (!roots.length) return null;
+
+  const asLeaf = (root, sub) => ({
+    rootItem: root.id,
+    rootName: root.name,
+    itemId: sub ? sub.id : root.id,
+    itemName: sub ? sub.name : root.name,
+    itemPath: root.id + "|" + (sub ? sub.id : root.id),
+  });
+  const subsOf = (root) => (root.subCategorys || []).filter((x) => Number(x.id) > 0);
+
+  // 1. A category literally named for our product wins outright.
+  const native = roots.find((r) => /twitch\s*drops?/i.test(String(r.name || "")));
+  if (native) {
+    const subs = subsOf(native);
+    return asLeaf(native, subs[0] || null);
+  }
+
+  // 2. An explicit hint, anywhere in the tree.
+  if (want) {
+    for (const root of roots) {
+      for (const sub of subsOf(root)) {
+        if (paNorm(sub.name) === want || paNorm(sub.name).includes(want)) {
+          return asLeaf(root, sub);
+        }
+      }
+    }
+  }
+
+  // 3. The best-scoring cosmetic root. Its "Other ..." leaf if it has one —
+  //    the honest catch-all the hand-made listings on this account use — and
+  //    otherwise its first leaf, which is the same compromise the operator's
+  //    own live Halo offer makes (Armor Coatings > Funko). The ROOT is what
+  //    categorises the listing; the title carries the real product.
+  const ranked = roots
+    .map((r) => ({ root: r, score: paRootScore(r.name) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => a.score - b.score);
+  for (const { root } of ranked) {
+    const subs = subsOf(root);
+    if (!subs.length) return asLeaf(root, null);
+    const neutral = subs.find((x) => /^(other|misc|general|any)/i.test(String(x.name).trim()));
+    return asLeaf(root, neutral || subs[0]);
+  }
+
+  // No cosmetic root at all — a currency-only tree (NBA 2K) or nothing but the
+  // sentinel (Palia). Better no listing than a misfiled one.
+  return null;
+}
+
+// The delivery-guarantee enum is PER GAME, not global. Marvel Rivals and Palia
+// have no 20-minute tier at all, and sending customId 5 there is rejected with
+// "Delivery time can't be empty or error delivery time." So resolve the wanted
+// tier against the game's own list and fall back to the fastest it does offer —
+// a slower guarantee is a worse listing, but no listing is worse still.
+async function playerauctionsResolveDelivery(gameId, wanted) {
+  const tiers = await playerauctionsDeliveryTimes(gameId).catch(() => []);
+  const usable = tiers.filter((t) => t && t.isEnable !== false);
+  if (!usable.length) return wanted;
+  if (usable.some((t) => t.customId === Number(wanted))) return Number(wanted);
+  const fastest = usable
+    .slice()
+    .sort((a, b) => (a.convertToHour || 0) - (b.convertToHour || 0))[0];
+  return fastest ? fastest.customId : wanted;
+}
+
+// --- Offers -------------------------------------------------------------
+function playerauctionsOfferUrl(offer) {
+  if (!offer) return "";
+  if (offer.url) return offer.url;
+  const id = offer.offerId || offer.id || offer;
+  return PA_MAIN_SITE + "/i/" + encodeURIComponent(id) + "/";
+}
+
+// The seller-search filter that Cancel and HideOrDisplay both demand. Omitting
+// it 400s with "The keywords field is required.;The ProductType field is
+// required.;The ListingStatus field is required."
+function paSearchParameters() {
+  return { keywords: "", productType: "All", listingStatus: "Active" };
+}
+
+// PlayerAuctions rejects a title it does not like with a flat
+// "Title format error." and no detail. Every title on the account that DOES
+// work is plain ASCII, and the ones that failed all carried typographic
+// characters our own listing copy introduces — an em dash in "Fortnite Twitch
+// Drops (5 Items) — …", a "…" ellipsis, a "|" separator. So fold the
+// typography down to ASCII rather than dropping the listing.
+const PA_TITLE_FOLD = [
+  [/[\u2010-\u2015\u2212]/g, "-"],   // hyphens, en/em dashes, minus
+  [/\u2026/g, "..."],                 // ellipsis
+  [/[\u2018\u2019\u201B]/g, "'"],     // curly single quotes
+  [/[\u201C\u201D\u201F]/g, '"'],     // curly double quotes
+  [/[\u00D7\u2715\u2716]/g, "x"],     // multiplication signs
+  [/[\u00A0\u2007\u202F]/g, " "],     // non-breaking spaces
+  [/[|]/g, "-"],                      // pipe reads as a format error too
+];
+
+function paSanitizeTitle(title) {
+  let t = String(title || "");
+  for (const [re, to] of PA_TITLE_FOLD) t = t.replace(re, to);
+  // Accented letters fold to their base letter FIRST, so "Pok\u00e9mon" becomes
+  // "Pokemon" rather than losing the letter to "Pokmon" below. That is not
+  // cosmetic: the rent-farm fulfiller reads the game back out of our own
+  // title, and a dropped letter left six live Pok\u00e9mon GO offers unable to
+  // resolve their game at all.
+  t = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  // Anything still outside printable ASCII goes; a title is not worth failing
+  // a publish over.
+  t = t.replace(/[^\x20-\x7E]/g, "");
+  // Folding can leave doubled separators ("A - - B") and edge punctuation.
+  t = t.replace(/\s+/g, " ").replace(/(\s-)+\s-/g, " -").replace(/^[\s-]+|[\s-]+$/g, "");
+  return t.slice(0, 150).trim();
+}
+
+// Build the Item offer DTO. `isAgree`/`agreeCheck` are forced true because the
+// server reads them back as false, so a read-modify-write would drop the
+// Secure Seller Delivery Agreement and the write would be rejected.
+function paItemOfferBody({
+  gameId,
+  itemPath,
+  rootItem,
+  itemId,
+  categoryId = 0,
+  serverId = 0,
+  title,
+  description,
+  instruction = "",
+  priceUsd,
+  itemsPerUnit = 1,
+  totalUnit = 1,
+  minUnitPerOrder = 1,
+  offerDuration = 30,
+  deliveryGuarantee = PA_DELIVERY.min20,
+  discounts = [],
+  blobName,
+  screenShot,
+}) {
+  const price = Math.max(PA_MIN_PRICE, Number(priceUsd) || 0);
+  const body = {
+    gameId: Number(gameId),
+    itemPath: String(itemPath || ""),
+    rootItem: Number(rootItem),
+    itemId: Number(itemId),
+    categoryId: Number(categoryId) || 0,
+    serverId: Number(serverId) || 0,
+    title: paSanitizeTitle(title),
+    offerDesc: String(description || ""),
+    instruction: String(instruction || ""),
+    price,
+    itemsPerUnit: Number(itemsPerUnit) || 1,
+    totalUnit: Number(totalUnit) || 1,
+    minUnitPerOrder: Number(minUnitPerOrder) || 1,
+    offerDuration: Number(offerDuration) || 30,
+    deliveryGuarantee: Number(deliveryGuarantee),
+    discounts: discounts || [],
+    otherItem: "",
+    deliveryTime: 0,
+    isAgree: true,
+    agreeCheck: true,
+  };
+  if (blobName) body.blobName = blobName;
+  if (screenShot) body.screenShot = screenShot;
+  return body;
+}
+
+// Publish one Item offer. Resolves the game and the item leaf when the caller
+// did not pin them, so callers can pass a plain game name.
+async function playerauctionsPublish(opts = {}) {
+  requireKeys("playerauctions");
+  let { gameId, itemPath, rootItem, itemId } = opts;
+  if (!gameId) {
+    const g = await playerauctionsResolveGame(opts.game);
+    if (!g) throw new Error("PlayerAuctions has no game matching " + opts.game);
+    if (!paGameSupports(g, "item")) {
+      throw new Error(
+        "PlayerAuctions game " + g.gameName + " does not accept Item offers " +
+          "(allowed: " + g.productType + ")",
+      );
+    }
+    gameId = g.gameId;
+  }
+  if (!itemPath) {
+    const leaf = await playerauctionsPickItemPath(gameId, opts.itemHint);
+    if (!leaf) throw new Error("no item category found for PlayerAuctions game " + gameId);
+    itemPath = leaf.itemPath;
+    rootItem = leaf.rootItem;
+    itemId = leaf.itemId;
+  }
+  // Artwork is optional here (an Item offer publishes without one), so a failed
+  // upload must never cost us the listing.
+  let blobName = opts.blobName;
+  let screenShot = opts.screenShot;
+  if (!blobName && opts.coverImagePath) {
+    try {
+      // The upload answers {blobName, sasUri, created, length, verified} —
+      // note `sasUri`, not `url`. Missing it left every cover half-wired: the
+      // blob name was set but the offer carried no image URL.
+      const up = await playerauctionsUploadImage(opts.coverImagePath, gameId);
+      blobName = (up && (up.blobName || up.name)) || "";
+      screenShot = (up && (up.sasUri || up.url || up.imageUrl || up.path)) || "";
+    } catch (e) {
+      console.error("playerauctions image upload:", e.message);
+    }
+  }
+  const deliveryGuarantee = await playerauctionsResolveDelivery(
+    gameId,
+    opts.deliveryGuarantee != null ? opts.deliveryGuarantee : PA_DELIVERY.min20,
+  );
+  const body = paItemOfferBody({
+    ...opts,
+    gameId,
+    itemPath,
+    rootItem,
+    itemId,
+    deliveryGuarantee,
+    blobName,
+    screenShot,
+  });
+  const created = await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/offers/Item",
+    body,
+    "PlayerAuctions publish",
+  );
+  const offerId = paOfferIdOf(created);
+  return { offerId, id: offerId, url: playerauctionsOfferUrl(offerId), raw: created };
+}
+
+// Pull an offer id out of a storefront URL. Offer pages are
+// ".../<game>-items/294684983i!<slug>/", so the id is the digits before "i!".
+// The seller ORDERS list carries no offerId field at all — only the order's
+// title and a link on the detail — so this is how an order is tied back to the
+// listing row that knows how to fulfil it.
+function playerauctionsOfferIdFromUrl(url) {
+  const m = String(url || "").match(/\/(\d+)i!/);
+  return m ? m[1] : "";
+}
+
+// The create response has been seen as both a bare id and an object.
+function paOfferIdOf(created) {
+  if (created == null) return "";
+  if (typeof created === "number" || typeof created === "string") return String(created);
+  return String(created.offerId || created.id || "");
+}
+
+async function playerauctionsOffer(offerId) {
+  return await paGet(
+    PA_OFFER_API,
+    "/offers/Item/" + encodeURIComponent(offerId),
+    "PlayerAuctions offer",
+  );
+}
+
+// Update an offer.
+//
+// ⚠ PlayerAuctions implements an update as cancel-old + create-new, so this
+// returns a DIFFERENT offerId and the old one stops resolving. Callers MUST
+// persist the returned id — a stored externalId goes stale on every reprice or
+// restock, and a fulfiller pointed at a dead offer silently stops delivering.
+async function playerauctionsUpdateOffer(offerId, patch = {}) {
+  const cur = await playerauctionsOffer(offerId);
+  if (!cur) throw new Error("PlayerAuctions offer " + offerId + " not found");
+  const body = paItemOfferBody({
+    gameId: cur.gameId,
+    itemPath: cur.itemPath,
+    rootItem: cur.rootItem,
+    itemId: cur.itemId,
+    categoryId: cur.categoryId,
+    serverId: cur.serverId,
+    title: patch.title !== undefined ? patch.title : cur.title,
+    description: patch.description !== undefined ? patch.description : cur.offerDesc,
+    instruction: patch.instruction !== undefined ? patch.instruction : cur.instruction,
+    priceUsd: patch.priceUsd !== undefined ? patch.priceUsd : cur.price,
+    itemsPerUnit: patch.itemsPerUnit !== undefined ? patch.itemsPerUnit : cur.itemsPerUnit,
+    totalUnit: patch.totalUnit !== undefined ? patch.totalUnit : cur.totalUnit,
+    minUnitPerOrder:
+      patch.minUnitPerOrder !== undefined ? patch.minUnitPerOrder : cur.minUnitPerOrder,
+    offerDuration: patch.offerDuration !== undefined ? patch.offerDuration : cur.offerDuration,
+    deliveryGuarantee:
+      patch.deliveryGuarantee !== undefined ? patch.deliveryGuarantee : cur.deliveryGuarantee,
+    discounts: patch.discounts !== undefined ? patch.discounts : cur.discounts,
+    blobName: cur.blobName,
+    screenShot: cur.screenShot,
+  });
+  body.offerId = Number(offerId);
+  const res = await paSend(
+    "PUT",
+    PA_OFFER_API,
+    "/offers/Item",
+    body,
+    "PlayerAuctions update offer",
+  );
+  const newId = paOfferIdOf(res) || String(offerId);
+  return { offerId: newId, replaced: newId !== String(offerId), raw: res };
+}
+
+// Stock and price are ordinary field updates, but they inherit the new-id
+// behaviour above, so both return the id the caller must now store.
+async function playerauctionsSetQuantity(offerId, totalUnit) {
+  return await playerauctionsUpdateOffer(offerId, {
+    totalUnit: Math.max(0, parseInt(totalUnit, 10) || 0),
+  });
+}
+
+async function playerauctionsReprice(offerId, priceUsd) {
+  return await playerauctionsUpdateOffer(offerId, { priceUsd });
+}
+
+async function playerauctionsMyListings(pageIndex = 1, pageSize = 50) {
+  const res = await paGet(
+    PA_OFFER_API,
+    "/Offer/Offers?pageIndex=" + pageIndex + "&pageSize=" + pageSize +
+      "&sortField=null&sortOrder=null",
+    "PlayerAuctions listings",
+  );
+  return { count: (res && res.count) || 0, items: (res && res.items) || [] };
+}
+
+// Hide (delist) / display (relist). Pausing keeps the offer, unlike Cancel.
+async function playerauctionsHide(offerId) {
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/Offer/HideOrDisplay",
+    { flag: "hide", offerIds: [Number(offerId)], isAll: false, parameters: paSearchParameters() },
+    "PlayerAuctions hide offer",
+  );
+}
+
+async function playerauctionsDisplay(offerId) {
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/Offer/HideOrDisplay",
+    { flag: "display", offerIds: [Number(offerId)], isAll: false, parameters: paSearchParameters() },
+    "PlayerAuctions display offer",
+  );
+}
+
+async function playerauctionsDelist(offerId) {
+  return await playerauctionsHide(offerId);
+}
+
+async function playerauctionsRelist(offerId) {
+  return await playerauctionsDisplay(offerId);
+}
+
+// Permanent. Prefer hide() when the offer may come back.
+async function playerauctionsCancelOffer(offerId) {
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/Offer/Cancel",
+    { offerIds: [Number(offerId)], isAll: false, parameters: paSearchParameters() },
+    "PlayerAuctions cancel offer",
+  );
+}
+
+// Offer artwork. Optional — an Item offer publishes without one — but a listing
+// with a cover converts better, so the publishers attach one when they can.
+async function playerauctionsUploadImage(imagePath, gameId, { isTitle = true } = {}) {
+  const fd = new FormData();
+  fd.append("file", fs.createReadStream(imagePath));
+  if (gameId != null) fd.append("gameId", String(gameId));
+  if (isTitle) fd.append("type", "title");
+  return await paSend(
+    "POST",
+    PA_OFFER_API,
+    "/media/images",
+    fd,
+    "PlayerAuctions image upload",
+  );
+}
+
+// --- Orders -------------------------------------------------------------
+async function playerauctionsOrders({ pageIndex = 1, pageSize = 100 } = {}) {
+  const res = await paGet(
+    PA_ORDER_API,
+    "/Order/SellerOrders?pageIndex=" + pageIndex + "&pageSize=" + pageSize +
+      "&sortField=null&sortOrder=null",
+    "PlayerAuctions orders",
+  );
+  return { count: (res && res.count) || 0, items: (res && res.items) || [] };
+}
+
+async function playerauctionsOrderDetail(orderId) {
+  return await paGet(
+    PA_ORDER_API,
+    "/orderdetail/" + encodeURIComponent(orderId),
+    "PlayerAuctions order detail",
+  );
+}
+
+// An order is ours to ship when payment has settled and we have not already
+// claimed delivery.
+//
+// Deciding this from a status string alone is not safe, and the reason is
+// concrete: the coarse `status.orderStatus` reads "Pending Delivery" BOTH
+// before and after the seller claims delivery (verified on order 16458589,
+// whose display string had already moved to "Delivery Pending Buyer
+// Confirmation"). And no paid-but-unshipped order existed on the account while
+// this was reverse-engineered, so the exact display string for that state is
+// unobserved — guessing it would either miss every sale or re-ship every
+// completed one.
+//
+// So the authoritative check is the ORDER'S OWN EVENT LOG, which is a factual
+// record rather than a label: payment has settled, and no seller delivery claim
+// has been written. The status strings are used only as a cheap pre-filter to
+// avoid fetching detail for orders that obviously need nothing.
+
+// States that can never need shipping: unpaid, cancelled, refunded, or already
+// seen through to the end.
+// NOTE the absence of a bare "completed": a paid-and-awaiting-delivery order
+// could plausibly be labelled something like "Payment Completed", and matching
+// that would silently stop every delivery. Only delivery/order completion
+// excludes an order here.
+const PA_NOT_SHIPPABLE =
+  /(pending payment|payment failed|cancel|refund|fully completed|order completed|disputed)/i;
+// States that mean the seller has already handed over.
+const PA_ALREADY_SHIPPED = /(pending buyer|inspection|feedback|delivered)/i;
+
+// Event-log evidence.
+const PA_PAID_EVENT = /(payment settlement completed|payment verified|payment received)/i;
+const PA_DELIVERED_EVENT =
+  /(delivery claimed by seller|full delivery claimed|marked as delivered|delivery completed)/i;
+
+function paStatusStrings(order) {
+  const st = order && order.status;
+  return [
+    String((order && order.orderStatus) || ""),
+    String((st && st.orderStatus) || ""),
+    String((st && st.current) || (typeof st === "string" ? st : "")),
+  ].filter(Boolean);
+}
+
+// Cheap pre-filter over a LIST row. Deliberately permissive: anything not
+// obviously finished is worth one detail fetch, because a missed sale is far
+// more expensive than an extra GET.
+function playerauctionsNeedsDelivery(order) {
+  const strings = paStatusStrings(order);
+  if (strings.some((s) => PA_ALREADY_SHIPPED.test(s))) return false;
+  if (strings.some((s) => PA_NOT_SHIPPABLE.test(s))) return false;
+  return true;
+}
+
+// The authoritative check, against a full order detail.
+function playerauctionsDetailNeedsDelivery(detail) {
+  if (!detail) return false;
+  if (!playerauctionsNeedsDelivery(detail)) return false;
+  const logs = (detail.eventLogs || [])
+    .map((e) => String((e && e.content) || "").replace(/<[^>]+>/g, " "))
+    .join(" | ");
+  // Already handed over — never re-ship.
+  if (PA_DELIVERED_EVENT.test(logs)) return false;
+  // Payment has to have settled. When the log carries no payment event at all
+  // (an older order, or a shape we have not seen), fall back to the status
+  // strings rather than refusing to ship a genuine sale.
+  if (PA_PAID_EVENT.test(logs)) return true;
+  return paStatusStrings(detail).some((s) => /pending delivery|delivery pending/i.test(s));
+}
+
+// The delivery queue. The list endpoint carries a display status only, so every
+// candidate is confirmed against its order detail — which is also where the
+// event log and the guarantee clock live.
+async function playerauctionsPendingOrders(opts = {}) {
+  const { items } = await playerauctionsOrders(opts);
+  const out = [];
+  for (const o of items) {
+    if (!playerauctionsNeedsDelivery(o)) continue;
+    const detail = await playerauctionsOrderDetail(o.orderId).catch(() => null);
+    // A detail we could not read is not evidence of anything; skip rather than
+    // ship blind.
+    if (!detail) continue;
+    if (!playerauctionsDetailNeedsDelivery(detail)) continue;
+    out.push({ ...o, detail });
+  }
+  return out;
+}
+
+// --- Read-only console feeds --------------------------------------------
+// These exist so the operator never has to open PlayerAuctions in a browser.
+// That is not a convenience: signing in anywhere rotates the session id and
+// kills the server's copy, so the browser is the single thing that breaks
+// auto-delivery. Reading through the server's own session removes the reason
+// to go there at all.
+
+async function playerauctionsBalance() {
+  return await paGet(PA_USER_API, "/Disburse/detail", "PlayerAuctions balance");
+}
+
+async function playerauctionsMessages() {
+  return await paGet(PA_USER_API, "/User/Messages", "PlayerAuctions messages");
+}
+
+// The message INBOX: a paginated list of threads, distinct from
+// playerauctionsMessages() above, which is the /User/Messages BADGE COUNTER
+// ({messageCount, pendingCount, …}). Reading the counter as a list silently
+// reports zero buyer messages forever — that is why the console Messages tab
+// showed nothing. Items are {id, subject, memberName, sendTimeString, unRead,
+// isFromSystem}; the per-thread transcript is playerauctionsMessageThread().
+async function playerauctionsInbox({ pageIndex = 1, pageSize = 20 } = {}) {
+  return await paGet(
+    PA_USER_API,
+    "/messages/inbox?pageIndex=" + pageIndex + "&pageSize=" + pageSize,
+    "PlayerAuctions inbox",
+  );
+}
+
+async function playerauctionsMessageThread(id, isFromSystem = false) {
+  return await paGet(
+    PA_USER_API,
+    "/messages/detail?id=" + encodeURIComponent(id) + "&isFromSystem=" + !!isFromSystem,
+    "PlayerAuctions message",
+  );
+}
+
+async function playerauctionsNotifications({ pageIndex = 1, pageSize = 20 } = {}) {
+  return await paGet(
+    PA_USER_API,
+    "/User/Notifications?pageIndex=" + pageIndex + "&pageSize=" + pageSize,
+    "PlayerAuctions notifications",
+  );
+}
+
+// One cheap call the console opens on: who we are, how the session is doing,
+// what is on sale and what is waiting to ship.
+async function playerauctionsSnapshot() {
+  const out = { at: new Date().toISOString() };
+  const exp = playerauctionsTokenExpiry();
+  out.session = {
+    accessMinsLeft: exp.access ? Math.round((exp.access - Date.now()) / 60000) : null,
+    refreshMinsLeft: exp.refresh ? Math.round((exp.refresh - Date.now()) / 60000) : null,
+  };
+  const me = await playerauctionsMe();
+  const m = (me && me.members) || {};
+  out.seller = {
+    nickName: m.nickName,
+    memberId: m.memberId,
+    level: m.level,
+    role: m.role,
+    isSeller: !!(me && me.isSeller),
+  };
+  const offers = await playerauctionsMyListings(1, 50);
+  out.offers = { count: offers.count, items: offers.items };
+  const orders = await playerauctionsOrders({ pageSize: 100 });
+  const byStatus = {};
+  for (const o of orders.items) byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+  out.orders = { count: orders.count, byStatus, items: orders.items.slice(0, 40) };
+  out.pending = (await playerauctionsPendingOrders({ pageSize: 100 })).map((o) => ({
+    orderId: o.orderId,
+    title: o.orderTitle,
+    buyer: o.name,
+    price: o.price,
+    quantity: o.quantity,
+    createTime: o.createTime,
+    status: o.status,
+  }));
+  return out;
+}
+
+// --- Delivery -----------------------------------------------------------
+// The credential travels as an order message. PlayerAuctions caps a message at
+// 300 characters (50 for a brand-new member), which is why the long claim guide
+// belongs in the offer's `instruction` field and not in here.
+async function playerauctionsSendOrderMessage(orderId, content) {
+  const text = String(content || "");
+  if (text.length > PA_MAX_MESSAGE) {
+    throw new Error(
+      "PlayerAuctions message is " + text.length + " chars, over the " +
+        PA_MAX_MESSAGE + "-char limit — shorten it or move the detail into the " +
+        "offer's instruction field",
+    );
+  }
+  return await paSend(
+    "POST",
+    PA_USER_API,
+    "/messages",
+    { objectIdType: "Order", objectId: Number(orderId), content: text },
+    "PlayerAuctions send message",
+  );
+}
+
+// Mark an order delivered.
+//
+// ⚠ multipart, not JSON, and at seller level 0 PlayerAuctions REQUIRES 1-2
+// screenshots as proof of delivery. `proofImagePaths` is therefore mandatory in
+// practice for this account — see utils/playerauctionsProof.js, which renders
+// one. Never call this before the buyer actually has the credential.
+async function playerauctionsMarkDelivered(orderId, proofImagePaths = []) {
+  const fd = new FormData();
+  const paths = (Array.isArray(proofImagePaths) ? proofImagePaths : [proofImagePaths])
+    .filter(Boolean)
+    .slice(0, 2);
+  for (const p of paths) fd.append("images", fs.createReadStream(p));
+  return await paSend(
+    "POST",
+    PA_ORDER_API,
+    "/order/confirmdelivery/" + encodeURIComponent(orderId),
+    fd,
+    "PlayerAuctions mark delivered",
+  );
+}
+
 module.exports = {
   MARKETPLACES,
   FIELDS,
@@ -3532,14 +6153,16 @@ module.exports = {
   setKeys,
   keyStatus,
   // Live USD -> currency rate (cached ~6h). Used by the research scanner to
-  // bring FunPay's EUR-quoted pages back to USD.
+  // convert a foreign-currency marketplace page back to USD.
   usdRate,
   gameflipTest,
+  gameflipOwnerId,
   gameflipPublish,
   gameflipListingStatus,
   gameflipDelist,
   gameflipReprice,
   gameflipReplaceCover,
+  gameflipDeleteNonCoverPhotos,
   gameflipListingIdsByStatus,
   digisellerTest,
   digisellerCategories,
@@ -3553,34 +6176,73 @@ module.exports = {
   digisellerRemoveContent,
   digisellerProductStock,
   digisellerProductStockDetailed,
+  digisellerProductVisible,
   digisellerDelist,
+  // G2G — the seller-session connector (sls.g2g.com). See the block comment
+  // above G2G_SLS for why the Open API is not used for listing or delivery.
+  G2G_MIN_PRICE,
+  G2G_ITEMS_SERVICE,
+  G2G_STATUS,
+  g2gRefreshAccess,
+  g2gEnsureFreshToken,
+  g2gTokenMsLeft,
   g2gTest,
+  g2gOfferUrl,
+  g2gListOffers,
+  g2gGetOffer,
+  g2gPublish,
+  g2gUpdateOffer,
+  g2gReprice,
+  g2gSetQuantity,
+  g2gDelist,
+  g2gRelist,
+  g2gProductSettings,
+  g2gRelationId,
+  g2gCollections,
+  g2gAttributesFromOwnOffers,
+  g2gResolveOfferShape,
+  g2gOrderCounts,
+  g2gOrders,
+  g2gPendingOrders,
+  g2gOrder,
+  g2gStartDeliver,
+  g2gMarkDelivering,
+  g2gSetDeliveredQty,
+  g2gDeliveries,
+  g2gDeliveryProofs,
+  g2gSellerId,
+  g2gChatProfile,
+  g2gOpenDmChannel,
+  // G2G legacy Open API — catalog pickers + utils/g2gBulk only.
   g2gServices,
   g2gBrands,
   g2gProducts,
   g2gAttributes,
-  g2gPublish,
-  g2gUpdateOffer,
-  g2gGetOffer,
-  g2gListOffers,
-  g2gDelist,
   ggselTest,
   ggselCategories,
   ggselPublish,
   ggselUpdateOffer,
+  // GGSel prices in roubles, and ggselUpdateOffer takes `priceRub` only — so
+  // any caller repricing a GGSel row needs the rate. Callers already probe for
+  // this (`typeof mp.usdToRub === "function"` in unclaimedAutoList's reprice)
+  // and skip GGSel rows when it is missing, which it always was: every GGSel
+  // row in that path was silently unrepriceable. Exporting it closes that gap
+  // and lets scripts/reprice-listings.js convert without duplicating the rate
+  // fetch, its 6h cache, or the 90₽ fallback — a wrong rate here would mean
+  // prices off by ~90x in either direction.
+  usdToRub,
   ggselAddProducts,
   ggselOfferStock,
+  ggselAllOffers,
   ggselOfferStockDetailed,
+  ggselOfferStatus,
+  ggselOfferPrice,
   ggselStockField,
   ggselResolveCategoryId,
   ggselTitle,
   ggselEnableAutoselling,
   ggselFinalizeStock,
   ggselDelist,
-  funpayTest,
-  funpayPublish,
-  funpayDelist,
-  funpayUpdateSecrets,
   zeusxTest,
   zeusxRefreshAccessToken,
   zeusxEnsureFreshToken,
@@ -3595,4 +6257,77 @@ module.exports = {
   zeusxOfferUrl,
   zeusxResolveCategory,
   zeusxMenu,
+  eldoradoTest,
+  eldoradoRefreshSession,
+  eldoradoEnsureFreshSession,
+  eldoradoTradeEnvironments,
+  eldoradoResolveGame,
+  eldoradoUploadImage,
+  eldoradoPublish,
+  eldoradoOffer,
+  eldoradoOfferUrl,
+  eldoradoUpdateOffer,
+  eldoradoSetQuantity,
+  eldoradoReprice,
+  eldoradoDelist,
+  eldoradoRelist,
+  eldoradoDeleteOffer,
+  eldoradoMyListings,
+  eldoradoOrders,
+  eldoradoPaidOrders,
+  eldoradoOrderStateCounts,
+  eldoradoSendOrderMessage,
+  playerauctionsTest,
+  playerauctionsMe,
+  playerauctionsSellerLevel,
+  playerauctionsRefreshSession,
+  playerauctionsTokenExpiry,
+  paRefreshOnce,
+  paStoredAccessToken,
+  PA_COOLDOWN_MS,
+  playerauctionsEnsureFreshSession,
+  playerauctionsGames,
+  playerauctionsResolveGame,
+  playerauctionsItemCategories,
+  playerauctionsServers,
+  playerauctionsDeliveryTimes,
+  playerauctionsPickItemPath,
+  playerauctionsResolveDelivery,
+  playerauctionsPublish,
+  playerauctionsOffer,
+  playerauctionsOfferUrl,
+  playerauctionsOfferIdFromUrl,
+  paSanitizeTitle,
+  playerauctionsUpdateOffer,
+  playerauctionsSetQuantity,
+  playerauctionsReprice,
+  playerauctionsMyListings,
+  playerauctionsHide,
+  playerauctionsDisplay,
+  playerauctionsDelist,
+  playerauctionsRelist,
+  playerauctionsCancelOffer,
+  playerauctionsUploadImage,
+  playerauctionsOrders,
+  playerauctionsOrderDetail,
+  playerauctionsBalance,
+  playerauctionsMessages,
+  playerauctionsInbox,
+  playerauctionsMessageThread,
+  playerauctionsNotifications,
+  playerauctionsSnapshot,
+  playerauctionsPendingOrders,
+  playerauctionsNeedsDelivery,
+  playerauctionsDetailNeedsDelivery,
+  playerauctionsSendOrderMessage,
+  playerauctionsMarkDelivered,
+  PA_DELIVERY,
+  PA_MIN_PRICE,
+  PA_MAX_MESSAGE,
+  PA_WRITE_GAP_MS,
+  eldoradoMarkDelivered,
+  ELD_MIN_PRICE,
+  // exported for tests: the TalkJS internal-id derivations the chat send relies on
+  eldInternalId,
+  eldNymId,
 };

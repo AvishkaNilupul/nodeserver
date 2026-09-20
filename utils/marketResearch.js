@@ -12,12 +12,12 @@ const MarketResearch = require("../models/MarketResearch");
 const MarketResearchSnapshot = require("../models/MarketResearchSnapshot");
 const SaleSignal = require("../models/SaleSignal");
 const TwitchCampaign = require("../models/TwitchCampaign");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const {
   gameflipScout,
   gameflipSoldScout,
   platiScout,
   ggselScout,
-  funpayScout,
 } = require("./priceScout");
 const mp = require("./marketplaces");
 const settings = require("./settings");
@@ -160,57 +160,6 @@ function relevant(rows, game) {
   });
 }
 
-// FunPay node ids per game, learned from our own listings and overridable by
-// hand. FunPay has no cross-game search — each game's Twitch-drop category is a
-// separate page — so research can only see a game there once it knows the node.
-// Every FunPay listing we publish records its node (externalNode, needed for
-// delisting), which makes the map build itself for every game we already sell,
-// with autoFarm.funpayNodes covering anything not published yet.
-async function funpayNodeMap() {
-  const map = {};
-  try {
-    const af = settings.getAutoFarm();
-    const manual = (af && af.funpayNodes) || {};
-    for (const [g, node] of Object.entries(manual)) {
-      const n = String(node || "").trim();
-      if (g && n) map[String(g).toLowerCase()] = n;
-    }
-  } catch {
-    /* settings unreadable — fall back to whatever our listings teach us */
-  }
-  try {
-    const rows = await MarketplaceListing.find({
-      marketplace: "funpay",
-      externalNode: { $nin: ["", null] },
-    })
-      .select("set externalNode")
-      .lean();
-    if (rows.length) {
-      const sets = await DropSet.find({
-        _id: { $in: rows.map((r) => r.set) },
-      })
-        .select("coverGame items.game")
-        .lean();
-      const gameOf = {};
-      for (const s of sets) {
-        const g =
-          s.coverGame ||
-          (Array.isArray(s.items) && s.items[0] && s.items[0].game) ||
-          "";
-        if (g) gameOf[String(s._id)] = g.toLowerCase();
-      }
-      for (const r of rows) {
-        const g = gameOf[String(r.set)];
-        // A hand-set override wins over anything inferred.
-        if (g && !map[g]) map[g] = String(r.externalNode);
-      }
-    }
-  } catch (e) {
-    console.error("funpay node map:", e.message);
-  }
-  return map;
-}
-
 async function scanGame(game, campaignsByGame, ctx = {}) {
   const term = game + " twitch drops";
   const settle = (p) =>
@@ -218,13 +167,11 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
       (v) => v,
       () => [],
     );
-  const fpNode = (ctx.funpayNodes || {})[game.toLowerCase()] || "";
-  const [gfSold, gfActive, gg, pl, fp] = await Promise.all([
+  const [gfSold, gfActive, gg, pl] = await Promise.all([
     settle(gameflipSoldScout(term, MAX_SCAN_ROWS)),
     settle(gameflipScout(term)),
     settle(ggselScout(term)),
     settle(platiScout(term)),
-    fpNode ? settle(funpayScout(fpNode, ctx.usdPerEur || 1)) : Promise.resolve([]),
   ]);
   const cutoff = Date.now() - RECENT_DAYS * 86400000;
   const gfSoldRel = relevant(gfSold, game);
@@ -248,6 +195,17 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
     rows.length ? Math.min(...rows.map((r) => r.price)) : 0;
   const sumSold = (rows) => rows.reduce((a, r) => a + (Number(r.sold) || 0), 0);
 
+  // Lowest live Gameflip price that is NOT ours. `lowest` alone is what the
+  // unclaimed pricer used to undercut, and for OW/R6/MR the lowest live row
+  // was our own $0.75 listing — so it undercut itself to the floor forever.
+  // Our owner id is resolved once per scan (ctx.gfOwnerId); when it is
+  // unknown there is nothing to exclude and lowestOther equals lowest. When
+  // every relevant live row is ours, lowestOther is 0 ("no rival price").
+  const ownGf = String(ctx.gfOwnerId || "");
+  const gfOtherRel = ownGf
+    ? gfActiveRel.filter((r) => String(r.seller || "") !== ownGf)
+    : gfActiveRel;
+
   const markets = {
     gameflip: {
       soldRecent: soldRecentRows.length,
@@ -256,6 +214,7 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
       lastSoldAt: lastSold || null,
       active: gfActiveRel.length,
       lowest: lowestOf(gfActiveRel),
+      lowestOther: lowestOf(gfOtherRel),
       median: medianPrice(gfActiveRel),
       ...competitionOf({ gameflip: gfActiveRel }),
     },
@@ -274,20 +233,6 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
       ...competitionOf({ plati: plRel }),
     },
   };
-  // FunPay only appears for games whose node we know. Its rows need no
-  // relevance filter — the whole node IS this game's Twitch-drop market — and
-  // it publishes no sale counters, so it contributes competition and price
-  // only, never demand.
-  if (fpNode) {
-    markets.funpay = {
-      node: fpNode,
-      totalSold: 0,
-      active: fp.length,
-      lowest: lowestOf(fp),
-      median: medianPrice(fp),
-      ...competitionOf({ funpay: fp }),
-    };
-  }
 
   // Money the markets moved recently, as far as anything dates its sales.
   // Gameflip is the only one that does, so this is a floor on real turnover,
@@ -331,7 +276,6 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
     gameflip: gfActiveRel,
     ggsel: ggRel,
     plati: plRel,
-    funpay: fp,
   });
   const competitionScore = round1(100 * sat(comp.sellers, HALF_SELLERS));
   // Never negative: a crowded market is worth nothing, not less than nothing,
@@ -446,7 +390,38 @@ async function candidateGames() {
   return { games: [...names.values()], campaignsByGame: byGame };
 }
 
+// Unclaimed-farm (no-claim + web-token) stock per game, lowercase-keyed:
+// `stock` = ledger rows currently listed, `sold` = rows sold that way. These
+// accounts never appear in DropLog, so farmedAccounts cannot see them and the
+// research page showed a game with dozens of accounts on the shelf as if we
+// held nothing. Projected find + JS grouping — no $group on the shared tier.
+// `game` narrows to one game (case-insensitive exact) for the single-game
+// refresh path; omitted, it rolls up every game in one query.
+async function unclaimedStats(game) {
+  const q = { status: { $in: ["listed", "sold"] } };
+  if (game) {
+    const esc = String(game).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    q.game = new RegExp("^" + esc + "$", "i");
+  }
+  const rows = await UnclaimedAccount.find(q).select("game status").lean();
+  const by = {};
+  for (const r of rows) {
+    const k = String(r.game || "").trim().toLowerCase();
+    if (!k) continue;
+    const cur = by[k] || (by[k] = { stock: 0, sold: 0 });
+    if (r.status === "listed") cur.stock++;
+    else if (r.status === "sold") cur.sold++;
+  }
+  return by;
+}
+
 async function ownStats() {
+  let unclaimedBy = {};
+  try {
+    unclaimedBy = await unclaimedStats();
+  } catch (e) {
+    console.error("market research unclaimed rollup:", e.message);
+  }
   const [farm, sets, sold] = await Promise.all([
     DropLog.aggregate([
       { $match: { game: { $ne: "" } } },
@@ -530,7 +505,7 @@ async function ownStats() {
 
   // The same sales split by marketplace. This is the only demand signal that
   // exists at all for the markets nothing can scout: ZeusX publishes no
-  // keyword search, and Z2U and EpicNPC sit behind bot protection that a
+  // keyword search, and some markets sit behind bot protection that a
   // server-side fetch cannot pass. We cannot see their competitors — but we
   // can see what WE sell there, which is the number that decides where stock
   // should go next.
@@ -563,7 +538,7 @@ async function ownStats() {
   } catch (e) {
     console.error("market research per-market rollup:", e.message);
   }
-  return { farmBy, soldBy, activeBy, salesBy, marketBy };
+  return { farmBy, soldBy, activeBy, salesBy, marketBy, unclaimedBy };
 }
 
 // The comparison snapshot for every game: the newest one at least TREND_DAYS
@@ -614,27 +589,22 @@ async function priorSnapshots() {
 }
 
 // Everything a scan needs that is the same for every game, resolved once per
-// pass rather than per game: which FunPay node each game lives in, the FX rate
-// for FunPay's prices (its /en/ pages quote EUR), and the history each game is
-// compared against.
+// pass rather than per game: our own seller id and the history each game is
 async function scanContext() {
-  const ctx = { funpayNodes: {}, usdPerEur: 1, prior: {} };
+  const ctx = { prior: {}, gfOwnerId: "" };
+  // Our own Gameflip seller id, so scanGame can leave our rows out of the
+  // "lowest rival price". Resolved ONCE per pass (cached an hour inside mp);
+  // "" when Gameflip is not configured or unreachable, which scanGame treats
+  // as "nothing to exclude".
   try {
-    ctx.funpayNodes = await funpayNodeMap();
+    ctx.gfOwnerId = String((await mp.gameflipOwnerId()) || "");
   } catch (e) {
-    console.error("scan context funpay nodes:", e.message);
+    console.error("scan context gameflip owner:", e.message);
   }
   try {
     ctx.prior = await priorSnapshots();
   } catch (e) {
     console.error("scan context history:", e.message);
-  }
-  try {
-    // usdRate("EUR") gives EUR per USD; FunPay prices are EUR, so invert.
-    const eurPerUsd = await mp.usdRate("EUR");
-    if (eurPerUsd > 0) ctx.usdPerEur = 1 / eurPerUsd;
-  } catch (e) {
-    console.error("scan context fx:", e.message);
   }
   return ctx;
 }
@@ -719,6 +689,10 @@ async function runScan(opts = {}) {
             ownSales: (own.salesBy[k] || {}).sales || 0,
             ownRevenue: (own.salesBy[k] || {}).revenue || 0,
             ownByMarket: own.marketBy[k] || {},
+            // Unclaimed-farm shelf for this game (never in DropLog).
+            unclaimedStock: ((own.unclaimedBy || {})[k] || {}).stock || 0,
+            unclaimedSold: ((own.unclaimedBy || {})[k] || {}).sold || 0,
+            noClaim: !!settings.isNoClaimGame(game),
             markets: r.markets,
             observedRevenue: r.observedRevenue,
             sellers: r.sellers,
@@ -835,8 +809,19 @@ async function refreshGame(game) {
     demandScore: r.demandScore,
     competitionScore: r.competitionScore,
     opportunityScore: r.opportunityScore,
+    noClaim: !!settings.isNoClaimGame(game),
     scannedAt: new Date(),
   };
+  // This path skips the full own-side rollup, but the unclaimed shelf for ONE
+  // game is a single small projected find — cheap enough to keep it current
+  // here too rather than leave the last full scan's number in place.
+  try {
+    const u = (await unclaimedStats(game))[game.toLowerCase()] || {};
+    doc.unclaimedStock = u.stock || 0;
+    doc.unclaimedSold = u.sold || 0;
+  } catch (e) {
+    console.error("refresh unclaimed stats:", game, e.message);
+  }
   // recommend() reads farmedAccounts to say "farm more" vs "start farming",
   // and this path does not recompute the own-side stats — so read the ones the
   // last full scan stored rather than letting an absent field read as zero.
@@ -883,8 +868,8 @@ module.exports = {
   freshnessFor,
   velocityPerWeek,
   ownStats,
+  unclaimedStats,
   priorSnapshots,
   dueGames,
-  funpayNodeMap,
   recommend,
 };

@@ -25,17 +25,12 @@ const {
   invalidateExclusions,
 } = require("../utils/archiveExclusions");
 const archiveSnapshot = require("../utils/archiveSnapshot");
+const unclaimedAutoList = require("../utils/unclaimedAutoList");
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
 // listing, not sold to anyone yet.
-const MARKET_CLAIM_TAGS = [
-  "gameflip",
-  "ggsel",
-  "digiseller",
-  "funpay",
-  "zeusx",
-];
+const { MARKET_CLAIM_TAGS } = require("../utils/marketClaimTags");
 
 const router = express.Router();
 
@@ -860,6 +855,39 @@ router.post(
         warnings.push(...r.warnings);
       }
 
+      // Cross-mark into the Unclaimed farm. Handing this account to a buyer
+      // spends the WHOLE account, so any unclaimed-farm listing it still backs
+      // must come down too — not just the sold game. Flag the matching pool row
+      // manualSold=true and delist it from every unclaimed row it still backs
+      // right now (the same reactive path the no-claim / web-token consoles'
+      // manual-sold tick uses); the auto-list pass's own sweep stays as the
+      // backstop. Matched by the account's canonical clientSecret; a no-op when
+      // the account isn't pooled.
+      let unclaimedFlagged = 0;
+      let unclaimedDelisted = 0;
+      if (acc.clientSecret) {
+        const pooled = await AvailableAccount.findOne(
+          { clientSecret: acc.clientSecret },
+          { _id: 1, manualSold: 1 },
+        ).lean();
+        if (pooled) {
+          if (!pooled.manualSold) {
+            const r = await AvailableAccount.updateOne(
+              { _id: pooled._id },
+              { $set: { manualSold: true } },
+            ).catch(() => null);
+            unclaimedFlagged = (r && r.modifiedCount) || 0;
+          }
+          const removal = await unclaimedAutoList
+            .removeManualSoldOwner({
+              poolAccountId: String(pooled._id),
+              actor: "drops-archive mark-sold",
+            })
+            .catch(() => null);
+          unclaimedDelisted = (removal && removal.removed) || 0;
+        }
+      }
+
       bustDropCache();
       res.json({
         success: true,
@@ -869,10 +897,15 @@ router.post(
           " " +
           gameLabel +
           " drop(s) sold on " +
-          (acc.login || String(acc._id)),
+          (acc.login || String(acc._id)) +
+          (unclaimedFlagged || unclaimedDelisted
+            ? " (also removed from the Unclaimed farm)"
+            : ""),
         reserved: upd.modifiedCount,
         detached,
         warnings,
+        unclaimedFlagged,
+        unclaimedDelisted,
       });
     } catch (err) {
       console.error("drops-archive mark-sold error:", err.message);
@@ -1913,6 +1946,9 @@ function publicSet(s) {
       ? s.accountScopeLogins
       : [],
     sourceType: s.sourceType || "",
+    // "noclaim" = stocked by the no-claim farm, not this archive
+    // (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md).
+    stockSource: s.stockSource || "",
     sourceEventKey: s.sourceEventKey || "",
     sourceEventName: s.sourceEventName || "",
     sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
@@ -1962,6 +1998,7 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
               coverStyle: 1,
               coverGame: 1,
               sourceType: 1,
+              stockSource: 1,
               sourceEventName: 1,
               sourceCampaignIds: 1,
               updatedAt: 1,
@@ -1972,7 +2009,7 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
                 $map: {
                   input: { $slice: [{ $ifNull: ["$items", []] }, 4] },
                   as: "i",
-                  in: { $ifNull: ["$i.image", ""] },
+                  in: { $ifNull: ["$$i.image", ""] },
                 },
               },
             },
@@ -1993,6 +2030,7 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
             coverStyle: s.coverStyle || "grid",
             coverGame: s.coverGame || "",
             sourceType: s.sourceType || "",
+            stockSource: s.stockSource || "",
             sourceEventName: s.sourceEventName || "",
             sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
               ? s.sourceCampaignIds
@@ -2018,6 +2056,7 @@ router.get("/drops-archive/sets", requireSuperadmin, async (req, res) => {
           coverStyle: s.coverStyle || "grid",
           coverGame: s.coverGame || "",
           sourceType: s.sourceType || "",
+          stockSource: s.stockSource || "",
           sourceEventName: s.sourceEventName || "",
           sourceCampaignIds: Array.isArray(s.sourceCampaignIds)
             ? s.sourceCampaignIds
@@ -2311,6 +2350,29 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
       return res.status(404).json({ success: false, message: "Not found" });
     }
     const body = req.body || {};
+    // A no-claim set (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) is never a
+    // balance-Shop listing, and its items are no-claim drops chosen in the
+    // No-claim picker — the item editor below resolves keys against this
+    // archive instead. Refused before anything is changed; name, note and
+    // price still edit here.
+    const noclaim = set.stockSource === "noclaim";
+    if (noclaim && body.listed !== undefined && !!body.listed) {
+      return res.status(400).json({
+        success: false,
+        message: "A no-claim listing sells on marketplaces only — use Sell on…",
+      });
+    }
+    if (
+      noclaim &&
+      ["itemKeys", "addItemKeys", "removeItemKeys", "itemQuantities"].some(
+        (k) => body[k] !== undefined,
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Edit a no-claim listing's items from the No-claim picker",
+      });
+    }
     if (typeof body.name === "string" && body.name.trim()) {
       set.name = body.name.trim();
     }
@@ -2329,6 +2391,13 @@ router.put("/drops-archive/sets/:id", requireSuperadmin, async (req, res) => {
       set.price = Math.round(price * 100) / 100;
     }
     if (body.listed !== undefined) set.listed = !!body.listed;
+    // Keep a no-claim set's items exactly as the picker saved them: resolving
+    // them below would restyle unclaimed drops from the archive's claimed
+    // copies (and run an archive aggregation for nothing).
+    if (noclaim) {
+      await set.save();
+      return res.json({ success: true, set: publicSet(set) });
+    }
 
     let keys = set.items.map((i) => i.itemKey);
     if (Array.isArray(body.itemKeys)) keys = body.itemKeys;
@@ -2454,6 +2523,31 @@ router.get(
       const set = await DropSet.findById(req.params.id).lean();
       if (!set) {
         return res.status(404).json({ success: false, message: "Not found" });
+      }
+      // A no-claim set is stocked by the no-claim farm, which this archive
+      // never holds (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) — the DropLog
+      // aggregation below would count CLAIMED copies its buyer cannot use.
+      // Required lazily so this route loads, and every archive set answers
+      // exactly as before, even without the no-claim layer.
+      if (set.stockSource === "noclaim") {
+        const st = await require("../utils/noclaimStock").stockForSet(set);
+        return res.json({
+          success: true,
+          set: {
+            id: String(set._id),
+            name: set.name,
+            note: set.note || "",
+            price: Number(set.price) || 0,
+            listed: !!set.listed,
+          },
+          items: set.items || [],
+          accounts: [],
+          fullAccounts: st.covering,
+          bundlesAvailable: st.free,
+          bundlesHeld: st.onManual + st.onAuto,
+          bundlesMissingPassword: 0,
+          noclaim: st,
+        });
       }
       const keys = (set.items || []).map((i) => i.itemKey);
       if (!keys.length) {
@@ -2708,4 +2802,7 @@ function warmArchiveViews() {
 router.warmArchiveViews = warmArchiveViews;
 // Exported for tests only — see tests/archiveBustTargets.test.js.
 router.bustTargets = bustTargets;
+// For writers outside /drops-archive/* (routes/noclaimStockRoutes.js creates
+// and edits no-claim sets) whose change must show on the Listings page at once.
+router.bustSetsCache = () => bustDropCache(["sets:"]);
 module.exports = router;

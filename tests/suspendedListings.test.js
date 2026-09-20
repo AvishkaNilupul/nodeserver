@@ -51,14 +51,13 @@ const gone = (over = {}) => ({
 });
 
 test("a deleted account can be taken off sale on every platform", () => {
-  // Unlike dead-token, which only Digiseller (with a recorded unit) and FunPay
+  // Unlike dead-token, which only Digiseller (with a recorded unit)
   // can act on: the login is gone, so delisting is always a valid remedy.
   for (const marketplace of [
     "gameflip",
     "digiseller",
     "ggsel",
     "zeusx",
-    "funpay",
   ]) {
     const plan = fixPlanFor(gone(), {
       _id: "l1",

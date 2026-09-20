@@ -15,16 +15,119 @@ const AUTO_FARM_DEFAULTS = {
   accountsPerBot: 10, // accounts per container
   poolReserve: 20, // never draw the pool below this many ready accounts
   probeSize: 5, // batch size for unknown games (market test)
+  // Cold-start probing (utils/autoFarmer.js). Ships OFF. When on, a game that
+  // research scores below the demand floor is still farmed as a small probe
+  // batch IF its low score comes from an UNTESTED market (≈0 rival sellers) —
+  // a brand-new release nobody sells yet, not a proven dud. A game that scores
+  // low WITH real sellers keeps skipping. A winning probe graduates on its own
+  // (one real sale lifts it over the floor via salesBoost); a losing one is
+  // torn down by the stop-loss sweep and won't re-probe until the cooldown.
+  probeColdStart: false, // master switch for cold-start probing + stop-loss
+  probeMaxSellers: 1, // "untested" = at most this many distinct rival sellers
+  probeMaxGames: 8, // global cap on concurrent probe tasks (runaway guard)
+  probeMaxDays: 30, // stop-loss: expire a probe with 0 real sales after N days
+  probeCooldownDays: 90, // after a probe expires for a game, don't re-probe it for N days
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
   minHoursLeft: 12, // skip campaigns ending sooner than this
   // Games that CANNOT be sold via the normal click-claim-then-sell flow
-  // (Overwatch, Rainbow Six): the auto-farmer must NOT farm OR list them — they
-  // are handled by the standalone no-claim farming system instead. These are
-  // loose keywords matched as a SUBSTRING of the normalised game label (see
-  // isNoClaimGame), so "overwatch" also catches "Overwatch 2" and "rainbow six"
-  // catches "Tom Clancy's Rainbow Six Siege". Editable from that tab.
-  noClaimGames: ["overwatch", "rainbow six"],
+  // (Overwatch, Rainbow Six, Call of Duty): the auto-farmer must NOT farm OR
+  // list them — they are handled by the standalone no-claim farming system
+  // instead. These are loose keywords matched as a SUBSTRING of the normalised
+  // game label (see isNoClaimGame), so "overwatch" also catches "Overwatch 2",
+  // "rainbow six" catches "Tom Clancy's Rainbow Six Siege", and "call of duty"
+  // catches every CoD title (e.g. "Call of Duty: Warzone", "Call of Duty: Black
+  // Ops 6"). Editable from that tab.
+  noClaimGames: ["overwatch", "rainbow six", "call of duty"],
+  // Unclaimed-farms auto-listing (utils/unclaimedAutoList.js): auto-list and
+  // auto-sell accounts from the no-claim farm + web-token farm on the same
+  // marketplaces the auto-farmer uses. Ships ON per the owner's build request;
+  // pause from the Unclaimed farms tab (writes unclaimedAutoListPaused).
+  unclaimedAutoList: true,
+  // Unclaimed-farms v3 pricing / bundles / bulk knobs (docs/UNCLAIMED-BUNDLES-
+  // CONTRACT.md). Read through getUnclaimedPricing(); all live-editable.
+  unclaimedPriceFloorUsd: 0.75,
+  // Per-game floors keyed like noClaimGames (substring of the normalised
+  // label): { "overwatch": 1.5 }. Empty = only the absolute floor applies.
+  unclaimedGameFloors: {},
+  unclaimedItemStepPct: 15,
+  unclaimedItemCapMult: 2.5,
+  unclaimedFullEventBonusPct: 25,
+  // Periodic repricing of EXISTING live unclaimed rows. Ships OFF; the
+  // Bundles panel has a dry-run "Reprice" button either way.
+  unclaimedRepriceExisting: false,
+  unclaimedRepriceDriftPct: 20,
+  // Automatic campaign-scoped rebundle: every check tick, retitle any live
+  // gameflip/ggsel/eldorado no-claim listing that now under-advertises (its
+  // accounts farmed more items of the events it already sells), at the SAME
+  // price, with a 1-hour per-listing cooldown. Kill switch — ships OFF; the
+  // "Apply rebundle fixes" button in the Auto-list tab is the manual path.
+  unclaimedAutoRebundle: false,
+  // Gameflip "lot of N accounts" listings (utils/unclaimedLots.js). Ships OFF.
+  unclaimedGameflipLots: false,
+  unclaimedLotSize: 5,
+  unclaimedLotDiscountPct: 10,
+  // Consecutive empty inventory reads (>= 20 min apart) before a listed
+  // account counts as expired — one empty read used to delist + release.
+  unclaimedExpiryConfirmPasses: 2,
+  // Per-game marketplace restriction for unclaimed auto-listing, keyed like
+  // noClaimGames (substring of the normalised label): { "overwatch":
+  // ["gameflip"] } lists Overwatch ONLY on Gameflip and leaves the other
+  // accounts unlisted for manual bulk sale. Empty = every enabled market.
+  unclaimedGameMarkets: {},
+  // Per-game cap on auto-listed accounts (overrides the engine's default 70):
+  // { "overwatch": 25 }. Accounts above the cap stay unlisted = available for
+  // hand sales. 0 / missing = default cap.
+  unclaimedGameCaps: {},
+
+  // ---- Demand-driven fleet sizing (utils/farmSizing.js) --------------------
+  //
+  // Both farming systems used to size a game by a flat number: the auto-farmer
+  // capped every game at maxPerGame*2 no matter how well it sold, and the
+  // no-claim farm had no sizing at all (the operator typed the account count
+  // into a form). These keys turn on a coverage model instead — a game that
+  // sells N a week is sized to hold N * coverageDays/7 accounts, because a sold
+  // account is CONSUMED by the buyer.
+  //
+  // BOTH SWITCHES SHIP OFF. With them off every number below is inert and both
+  // systems behave exactly as they did before.
+
+  // Auto-farm: replace capForGame's flat `maxPerGame * 2` ceiling with the
+  // coverage target. The old cap becomes the FLOOR, so turning this on can only
+  // ever raise a game's ceiling, never lower it.
+  coverageSizing: false,
+  // Days of demand to keep on the shelf. 28 = four weeks (operator's choice
+  // 2026-09-08). Drop inventory is time-sensitive, so a long cover buys
+  // availability at the risk of holding stock that goes stale.
+  coverageDays: 28,
+  // Flat buffer on top of the computed cover, so a game that sells slowly but
+  // reliably keeps a few units on the shelf instead of rounding to nothing.
+  coverageSafetyStock: 6,
+  // Absolute ceiling the coverage model may ask for, per game. A blast-radius
+  // limit, not a business one: a corrupted sales count must not be able to
+  // drain the pool into a single game.
+  coverageMaxPerGame: 250,
+  // Per-game hard overrides on the auto-farm ceiling, keyed like noClaimGames
+  // (substring of the normalised label): { "rocket league": 120 }. An override
+  // WINS over both the legacy cap and the coverage model, in either direction —
+  // it is the operator saying "this many, I mean it". 0 / missing = automatic.
+  gameAccountCaps: {},
+
+  // No-claim farm: the fleet allocator (utils/unclaimedAllocator.js). OFF ships
+  // the whole thing in advisory mode — it computes and displays a plan and does
+  // nothing else. Turning it on lets the scheduler create and top up no-claim
+  // bots to close the gap on its own.
+  noclaimAutoSize: false,
+  // How often the allocator acts when noclaimAutoSize is on (minutes).
+  noclaimSizeIntervalMin: 60,
+  // The most accounts one allocator pass may claim, across all games. A rate
+  // limit, so a mis-measured game cannot empty the pool in one cycle.
+  noclaimSizeMaxPerRun: 60,
+  // Per-game overrides on the no-claim target, keyed like noClaimGames:
+  //   { "overwatch": { coverageDays: 21, safetyStock: 10, min: 40, max: 300 } }
+  // Any field may be omitted and falls back to the global value above.
+  noclaimGameSizing: {},
+
   // Games the auto-farmer may keep farming but must NEVER spend a FRESH pool
   // account on — World of Tanks and UFL sell too thin to be worth burning new
   // accounts. For these, the brain only ever REUSES accounts it has already
@@ -59,13 +162,6 @@ const AUTO_FARM_DEFAULTS = {
   platiCategoryId: "34187",
   platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
   ggselCategoryId: "",
-  // FunPay category ("node") per game, for market research only — FunPay has
-  // no cross-game search, so a game is invisible there until its node is
-  // known. The research scanner already learns nodes from our own FunPay
-  // listings (each one records the node it was published to), so this is only
-  // needed for games we have not published there yet.
-  //   { "overwatch 2": "2430", "rainbow six siege": "1813" }
-  funpayNodes: {},
   // ZeusX auto-listing. Off unless the owner turns it on; a game only
   // lists when zeusxGames has its category, e.g.
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }
@@ -78,6 +174,61 @@ const AUTO_FARM_DEFAULTS = {
   // one "Coordinated" offer for the whole share, handed over by hand and marked
   // sold from the Drop Archive. Only matters when zeusxAuto is also on.
   zeusxAutoDeliver: false,
+
+  // --- Eldorado.gg (utils/marketplaces.js + utils/eldoradoFulfiller.js) ---
+  // Publishes farmed bundles into Eldorado's native "Twitch Drops" category
+  // (gameId 235 / CustomItem) as ONE offer whose quantity is the account count.
+  // OFF by default.
+  eldoradoAuto: false,
+  // Auto-delivery. Eldorado has no credential vault for this category, so the
+  // fulfiller posts the login into the order's TalkJS chat and then marks the
+  // order delivered. Only matters when eldoradoAuto is also on.
+  eldoradoAutoDeliver: false,
+  // Safety valve for the delivery bot: when true it does everything except
+  // actually send the message and mark the order delivered, and logs what it
+  // WOULD have sent. Leave true until a live order has been watched end to end.
+  eldoradoDeliverDryRun: true,
+
+  // --- PlayerAuctions (utils/marketplaces.js + utils/playerauctionsFulfiller.js) ---
+  // Publishes farmed bundles as PlayerAuctions "Item" offers, one offer per
+  // event wave per game, totalUnit = the account count. OFF by default.
+  playerauctionsAuto: false,
+  // Auto-delivery. PlayerAuctions has no credential vault for Item offers
+  // (deliveryMethod is "Face to Face"), so the fulfiller posts the login into
+  // the order's message thread and then confirms delivery with a generated
+  // proof image. Only matters when playerauctionsAuto is also on.
+  playerauctionsAutoDeliver: false,
+  // Safety valve: when true the fulfiller does everything except send the
+  // message and confirm delivery, and logs what it WOULD have sent. Leave true
+  // until a live order has been watched end to end.
+  playerauctionsDeliverDryRun: true,
+  // Keep each offer's advertised totalUnit in step with stock we can actually
+  // ship. PlayerAuctions penalises late/failed delivery directly, so overselling
+  // is more expensive here than on other marketplaces.
+  playerauctionsSyncStock: true,
+
+  // --- G2G (utils/marketplaces.js + utils/g2gFulfiller.js) ---
+  // Publishes farmed bundles into G2G's Game Items category as ONE offer whose
+  // actual_qty is the account count. OFF by default.
+  g2gAuto: false,
+  // Auto-delivery. G2G's credential vault is a Game Accounts feature and is
+  // closed to Game Items, so the fulfiller drives G2G's manual-delivery state
+  // machine itself (start_deliver -> mark_as_delivering -> delivered_qty) and
+  // hands the credential over in buyer chat, which is SendBird. Sending needs
+  // the optional @sendbird/chat SDK; without it the fulfiller pushes the
+  // rendered credential to the operator on Telegram and waits, rather than
+  // telling G2G an order shipped when it has not. INDEPENDENT of g2gAuto — the
+  // 78 offers already on the account were made by hand and still need
+  // delivering.
+  g2gAutoDeliver: false,
+  // Safety valve: when true the fulfiller does everything except touch the
+  // order and hand the credential over, and logs what it WOULD have done. Leave
+  // true until a live order has been watched end to end.
+  g2gDeliverDryRun: true,
+  // Keep each offer's actual_qty in step with stock we can actually ship. G2G
+  // reserves against actual_qty during checkout, so a stale count sells
+  // accounts that are already gone.
+  g2gSyncStock: true,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign
@@ -103,6 +254,18 @@ const AUTO_FARM_DEFAULTS = {
   // holdback stays intact. 3 markets x 3 x 2 = 18 accounts on a full-market
   // game - the pool (180+ ready) supports this comfortably.
   perMarketStock: 3,
+  // Auto-farm EVENT bundles (utils/autoFarmBundles.js): a game's campaigns are
+  // waves of an event ("CAH Championship Week 1" then "Finals"), and the
+  // accounts that farmed several waves hold the whole event. When on, the
+  // stacked-bundle sweep sells that event as ONE complete bundle — titled with
+  // its event and waves, priced by the shared pricing engine with the
+  // full-event bonus and a sold floor — instead of the older blind union of
+  // every campaign the game ever ran. ON by default: the union it replaces was
+  // almost always refused by the holdings gate ("no free account holds the full
+  // stack"), so this is a strictly better use of the same sweep. Turn it OFF to
+  // get exactly the previous behaviour back.
+  // See docs/AUTOFARM-BUNDLES-CONTRACT.md.
+  autoFarmEventBundles: true,
   // Recycle sold-out accounts back into farming. OFF by default (opt-in): a
   // sold account's login:password is in the buyer's hands, so it is only reused
   // once it is fully spent, every drop the buyer bought is connected, the
@@ -119,9 +282,138 @@ const AUTO_FARM_DEFAULTS = {
   // owner is nudged by Telegram to re-mint their token. Never deletes anything.
   // ON by default. See reapDeadTokenAssignments in utils/autoFarmer.js.
   reapDeadAssignments: true,
+  // Stream Scout (utils/streamScout.js): gate bot wake/park on whether a
+  // qualifying stream is actually LIVE right now, not just the campaign
+  // calendar. Ships OFF. When on, a campaign whose game matches a
+  // streamGatedGames key is only farmed while one of its allowed channels is
+  // live — and the allow-list comes from the campaign's OWN ACL, so the signal
+  // matches exactly what the .NET bot watches (confirmed: it self-steers to
+  // campaign.Allow.Channels — see docs/STREAM-SCOUT-PLAN.md §13a). Fail toward
+  // farming everywhere: any uncertainty (Scout down/stale, no ACL) is treated
+  // as watchable, so a missing signal never blocks a wake or forces a park.
+  streamGate: false,
+  // Which games to gate. Keyed by a keyword matched as a SUBSTRING of the
+  // normalised game label (exactly like noClaimGames): { "rainbow six": {} }
+  // opts the game in and gates on the campaign's real ACL channels. Add
+  // { "channels": ["login", ...] } to force an explicit channel list instead of
+  // (or in addition to) the ACL. An EMPTY map means nothing is gated — zero
+  // behaviour change even with streamGate on.
+  streamGatedGames: {},
+  // Verify-earned before park: make the "finished" verdict require that each
+  // account actually HOLDS a drop for every one of its assigned games (checked
+  // against DropLog by game), not just that it earned SOME drop globally
+  // (rec.dropCount) — the correctness hole where a bot that never farmed its
+  // assigned game (e.g. no stream was ever live) could still be parked as
+  // "finished". Ships OFF: with it off the verdict is exactly as before. When
+  // on, the park bar is strictly higher, so the only failure direction is
+  // keeping a truly-finished bot up a bit longer (safe) — never stranding one.
+  // See docs/STREAM-SCOUT-PLAN.md §9 Phase 3 and utils/farmCompletion.js.
+  verifyEarnedBeforePark: false,
+  // Idle-no-campaign park (utils/botWaker.js parkIdleNoCampaignBots): park a
+  // RUNNING bot whose assigned games have NO active drop campaign at all — it
+  // has literally nothing to farm, so it is pure idle RAM. This is distinct from
+  // stopFinishedBots (which needs a FINISHED verdict and refuses to touch a
+  // never-started bot) and from the stream gate (which needs an active-but-dark
+  // campaign): it is the "deployed, nothing to farm" case, e.g. 50 fresh Rocket
+  // League accounts sitting idle after the RL campaign ended. Wakes via the
+  // normal new-campaign trigger. Ships OFF. Campaign presence is matched
+  // INCLUSIVELY (bidirectional substring, e.g. config "overwatch" ↔ campaign
+  // "Overwatch 2") so a farming bot is never mistaken for idle; no-claim games
+  // are excluded (they are owned by the no-claim system and wakeFinishedBots
+  // won't wake them). Fail toward farming: any uncertainty keeps the bot up.
+  parkIdleNoCampaignBots: false,
+  // No-claim auto power (utils/noclaimWatcher.js): the RAM-saving equivalent of
+  // the Stream Scout, but for the STANDALONE no-claim system's own containers
+  // (noclaim-bot-* on the Pi) rather than the managed bots. When on, it starts
+  // a game's no-claim bots only while a qualifying stream for that game (OW /
+  // R6) is actually live, and stops them (docker stop) during broadcast gaps or
+  // when the game has no active campaign at all — the biggest RAM win, since OW
+  // is dark most of the time. Which games it manages = noClaimGames (shared).
+  // Ships OFF: zero container activity until flipped on. Fail toward farming
+  // everywhere (any Twitch/catalog uncertainty keeps the bots up), stops only
+  // after a confident-dark hysteresis window, and it only auto-starts a bot it
+  // itself stopped (an operator Stop stays stopped) — so it never fights manual
+  // control. See utils/noclaimWatcher.js.
+  noClaimStreamGate: false,
+  // Master switch for the AI coworker's AUTONOMOUS actions (utils/coworkerActs.js).
+  // OFF by default: while false the coworker executes nothing itself and can only
+  // investigate and propose, exactly as before. Turning it on lets it perform the
+  // "auto"-tier capabilities (reversible, blast-radius-capped, fully audited);
+  // "confirm"-tier work always still goes through operator approval.
+  coworkerAutonomy: false,
+  // Master switch for the new lane engine (utils/farm2/*), the reorganised
+  // farm + list pipeline that replaces the legacy single-tick autoFarmer for
+  // the games it owns. OFF by default, so a deploy changes nothing: with it
+  // false the engine runs no cycles and utils/farm2/ownership.js reports that
+  // farm2 owns no game, leaving utils/autoFarmer.js in charge of everything
+  // exactly as before. Turning it on only activates the lanes that exist in
+  // the FarmLane collection, and only a lane in mode "live" takes a game away
+  // from the legacy engine — a "shadow" lane just observes and compares.
+  farm2Enabled: false,
+  // The lane engine is the MAIN engine: the supervisor creates a live lane for
+  // every game with a live campaign, so the legacy engine's per-campaign
+  // decision path decides nothing and its tick runs only the fleet-wide
+  // maintenance sweeps (completion, backfill, park/wake, reaping, recycling,
+  // repack, refill, stacked bundles). Requires farm2Enabled. OFF by default;
+  // flipped from the Auto farm engine page once the lanes have been trusted.
+  farm2Main: false,
+
+  // --- Public catalog v2 (routes/catalogRoutes.js + public/catalog.html) ---
+  // Storefront contact shown to catalog visitors (footer + the quote dialog's
+  // "Message on Telegram" button) and the preorder re-stamp cadence. Read
+  // through getCatalogConfig(), written ONLY through setCatalogConfig() from
+  // the catalog admin page (PUT /catalog/admin/config); all live-editable.
+  // Frozen shape: docs/CATALOG-V2-CONTRACT.md §6.
+  catalogContactTelegram: "", // public handle, no leading @ (empty = no link)
+  catalogContactDiscord: "", // Discord handle or invite (empty = hidden)
+  catalogReplyTime: "within a few hours", // quote-dialog reply-time promise
+  // How often the preorder sync loop re-stamps farm2 preorder sets with their
+  // task's accounts + the campaign's watch minutes, so a new pre-order card
+  // gets its ETA within minutes instead of the 6-hour variant sync. 0 = off.
+  catalogPreorderSyncMinutes: 10,
 };
 
-const DEFAULTS = { require2fa: false, autoFarm: AUTO_FARM_DEFAULTS };
+// ---------------------------------------------------------------------------
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md §B8)
+// ---------------------------------------------------------------------------
+// TOP LEVEL, deliberately NOT inside autoFarm: an account listing's stock is an
+// explicit list of accounts the owner pasted in, not farmed stock, so it must
+// not be reachable from the Auto-farm tab's patch surface — a setAutoFarm write
+// must never be able to switch owner-supplied delivery on or off as a side
+// effect. Read through getAccountListingSettings().
+const ACCOUNT_LISTING_DEFAULTS = {
+  enabled: true, // the tab + routes
+  autoDeliver: true, // global kill switch over every offer's own toggle
+  lowStockWarnAt: 2, // Telegram warning when an offer drops to this
+};
+
+// ---------------------------------------------------------------------------
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §1e)
+// ---------------------------------------------------------------------------
+// TOP LEVEL, deliberately NOT inside autoFarm, for the same reason as
+// accountListings above: these switches gate the owner's hand-made no-claim
+// listings and a paid buyer's delivery, so a setAutoFarm write from the
+// Auto-farm tab must never be able to flip them as a side effect — even though
+// the stock is the no-claim farm. Read through getNoclaimShopSettings().
+const NOCLAIM_SHOP_DEFAULTS = {
+  enabled: true, // routes, UI, publishing, the lifecycle pass
+  autoDeliver: true, // kill switch over every no-claim claim
+  sweep: true, // background holding sweep
+  sweepPerTick: 30, // live inventory reads per sweep tick (1..200)
+  sweepEveryMin: 10, // (2..240)
+  maxAgeHours: 8, // snapshot older than this is "stale" (1..72)
+  refreshBudget: 120, // reads for an on-demand refresh (1..400)
+  topUp: true, // refill GGSel/Plati rows back to their quantity
+  healthPerPass: 20, // live re-checks of committed vault units per pass (0..100)
+  passEveryMin: 10, // lifecycle pass interval (2..120)
+};
+
+const DEFAULTS = {
+  require2fa: false,
+  autoFarm: AUTO_FARM_DEFAULTS,
+  accountListings: ACCOUNT_LISTING_DEFAULTS,
+  noclaimShop: NOCLAIM_SHOP_DEFAULTS,
+};
 
 function loadSettings() {
   try {
@@ -163,11 +455,35 @@ function getAutoFarm() {
   return out;
 }
 
-async function setAutoFarm(patch) {
+async function setAutoFarm(patch, opts = {}) {
   const s = loadSettings();
   const cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  s.autoFarm = { ...AUTO_FARM_DEFAULTS, ...cur, ...(patch || {}) };
+  const next = { ...AUTO_FARM_DEFAULTS, ...cur, ...(patch || {}) };
+  s.autoFarm = next;
   await saveSettings(s);
+  // Audit which settings actually changed (before→after) — this is the record
+  // that was missing when purgeSuspended was found flipped with no trace of who.
+  // Best-effort and lazily-required so it can never break a settings write or
+  // fight module load order (settings.js is required very early).
+  try {
+    const changed = {};
+    for (const k of Object.keys(patch || {})) {
+      if (JSON.stringify(cur[k]) !== JSON.stringify(next[k]))
+        changed[k] = { from: cur[k], to: next[k] };
+    }
+    if (Object.keys(changed).length) {
+      require("./systemLog").logEvent({
+        category: "settings",
+        action: "settings_changed",
+        actor: opts.actor || "system",
+        subject: Object.keys(changed).join(","),
+        detail: "changed: " + Object.keys(changed).join(", "),
+        meta: changed,
+      });
+    }
+  } catch (e) {
+    /* never block a settings write on its audit */
+  }
   return s.autoFarm;
 }
 
@@ -209,6 +525,367 @@ function isReuseOnlyGame(game) {
   return list.some((x) => normGameName(x) === g);
 }
 
+// Stream-gate master switch + the opted-in game map, read fresh each call so a
+// live settings edit takes effect without a restart (the maxAutoBots pattern).
+function getStreamGate() {
+  const af = getAutoFarm();
+  return {
+    enabled: !!af.streamGate,
+    games:
+      af.streamGatedGames && typeof af.streamGatedGames === "object"
+        ? af.streamGatedGames
+        : {},
+  };
+}
+
+// The gate entry for a game, or null if the game is not opted into
+// stream-gating. Keyword matched as a SUBSTRING of the normalised label (like
+// isNoClaimGame), so "rainbow six" catches "Tom Clancy's Rainbow Six Siege".
+// The entry may carry an explicit { channels: [...] } override; an empty entry
+// ({}) means "gate on the campaign's own ACL channels".
+function streamGatedGameEntry(game) {
+  const games = getStreamGate().games;
+  const g = normGameName(game);
+  if (!g) return null;
+  for (const key of Object.keys(games)) {
+    const k = normGameName(key);
+    if (k && g.includes(k)) {
+      const val = games[key];
+      return val && typeof val === "object" ? val : {};
+    }
+  }
+  return null;
+}
+
+function isStreamGatedGame(game) {
+  return streamGatedGameEntry(game) != null;
+}
+
+// No-claim auto-power master switch, read fresh each call (live-editable, like
+// getStreamGate). The games it manages are noClaimGames — no separate list.
+function getNoClaimGate() {
+  return { enabled: !!getAutoFarm().noClaimStreamGate };
+}
+
+// AI coworker autonomy master switch, read fresh each call (live-editable), so
+// it can be revoked instantly without a restart if the coworker misbehaves.
+// Unclaimed-farms v3 pricing/bundle/bulk knobs, read fresh each call with the
+// seed defaults merged under the live values (a settings.json written before
+// v3 has none of these keys). Frozen shape: docs/UNCLAIMED-BUNDLES-CONTRACT.md.
+const UNCLAIMED_PRICING_DEFAULTS = {
+  floorUsd: 0.75,
+  // The highest price this business has EVER realised, across 217 sales, every
+  // marketplace and every bundle size (min $0.75, median $1.25, max $4.50).
+  // Above it a listing is not ambitious, it is unsold — a $11.75 Rainbow Six row
+  // went live on 2026-09-08 because the bundle pricer had a floor and no
+  // ceiling. Raise it only when a real sale proves a higher price.
+  ceilingUsd: 4.5,
+  gameFloors: {},
+  itemStepPct: 15,
+  itemCapMult: 2.5,
+  fullEventBonusPct: 25,
+  repriceExisting: false,
+  repriceDriftPct: 20,
+  lots: false,
+  lotSize: 5,
+  lotDiscountPct: 10,
+  expiryConfirmPasses: 2,
+  gameMarkets: {},
+  gameCaps: {},
+};
+function num(v, d) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+function getUnclaimedPricing() {
+  const af = getAutoFarm() || {};
+  const D = UNCLAIMED_PRICING_DEFAULTS;
+  return {
+    floorUsd: Math.max(0, num(af.unclaimedPriceFloorUsd, D.floorUsd)),
+    ceilingUsd: Math.max(0, num(af.unclaimedPriceCeilingUsd, D.ceilingUsd)),
+    gameFloors:
+      af.unclaimedGameFloors && typeof af.unclaimedGameFloors === "object"
+        ? af.unclaimedGameFloors
+        : {},
+    itemStepPct: Math.max(0, num(af.unclaimedItemStepPct, D.itemStepPct)),
+    itemCapMult: Math.max(1, num(af.unclaimedItemCapMult, D.itemCapMult)),
+    fullEventBonusPct: Math.max(0, num(af.unclaimedFullEventBonusPct, D.fullEventBonusPct)),
+    repriceExisting: af.unclaimedRepriceExisting == null ? D.repriceExisting : !!af.unclaimedRepriceExisting,
+    repriceDriftPct: Math.max(1, num(af.unclaimedRepriceDriftPct, D.repriceDriftPct)),
+    lots: af.unclaimedGameflipLots == null ? D.lots : !!af.unclaimedGameflipLots,
+    lotSize: Math.max(2, Math.floor(num(af.unclaimedLotSize, D.lotSize))),
+    lotDiscountPct: Math.min(90, Math.max(0, num(af.unclaimedLotDiscountPct, D.lotDiscountPct))),
+    expiryConfirmPasses: Math.max(1, Math.floor(num(af.unclaimedExpiryConfirmPasses, D.expiryConfirmPasses))),
+    gameMarkets:
+      af.unclaimedGameMarkets && typeof af.unclaimedGameMarkets === "object"
+        ? af.unclaimedGameMarkets
+        : {},
+    gameCaps:
+      af.unclaimedGameCaps && typeof af.unclaimedGameCaps === "object"
+        ? af.unclaimedGameCaps
+        : {},
+  };
+}
+
+// First matching key of a substring-keyed per-game map (same rule as
+// noClaimGames / gameFloorFor). Returns the value or undefined.
+function gameMapLookup(map, game) {
+  const g = normGameName(game);
+  if (!g || !map) return undefined;
+  for (const k of Object.keys(map)) {
+    const key = normGameName(k);
+    if (key && g.includes(key)) return map[k];
+  }
+  return undefined;
+}
+
+const UNCLAIMED_MARKETS = ["gameflip", "digiseller", "ggsel"];
+
+// Marketplaces an unclaimed game may be auto-listed on, or null for "every
+// enabled market" (no restriction configured).
+function gameMarketsFor(game) {
+  const v = gameMapLookup(getUnclaimedPricing().gameMarkets, game);
+  if (!Array.isArray(v)) return null;
+  const list = v
+    .map((m) => String(m || "").trim().toLowerCase())
+    .filter((m) => UNCLAIMED_MARKETS.includes(m));
+  return list.length ? [...new Set(list)] : null;
+}
+
+// Per-game auto-list cap, or 0 for "engine default".
+function gameCapFor(game) {
+  const v = gameMapLookup(getUnclaimedPricing().gameCaps, game);
+  const n = Math.floor(num(v, 0));
+  return n > 0 ? n : 0;
+}
+
+// Per-game unclaimed price floor: the first unclaimedGameFloors key that is a
+// SUBSTRING of the normalised game label (same matching rule as noClaimGames).
+// 0 when no key matches.
+function gameFloorFor(game) {
+  const floors = getUnclaimedPricing().gameFloors || {};
+  const g = normGameName(game);
+  if (!g) return 0;
+  for (const k of Object.keys(floors)) {
+    const key = normGameName(k);
+    if (key && g.includes(key)) return Math.max(0, num(floors[k], 0));
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Demand-driven fleet sizing
+// ---------------------------------------------------------------------------
+
+// Typed, clamped view of the sizing keys — the same read-side convention as
+// getUnclaimedPricing: engines never touch the raw `coverage*` / `noclaim*`
+// keys, so a hand-edited settings.json holding a string or a negative number
+// degrades to the default instead of poisoning an account count.
+//
+// The per-game accessors take a RAW game label and match it the noClaimGames
+// way (substring of the normalised label), so one "overwatch" entry covers
+// "Overwatch", "Overwatch 2" and the lowercase spellings all at once.
+// `af` is optional: callers that already hold the auto-farm settings object
+// (capForGame is handed one on every call) pass it in rather than making this
+// re-read settings.json, which loadSettings does from disk EVERY time. It also
+// makes the sizing policy a pure function of its input, so a test can hand it a
+// settings object instead of writing to the live file.
+function getFarmSizing(afIn) {
+  const af = afIn || getAutoFarm() || {};
+  const gameSizing =
+    af.noclaimGameSizing && typeof af.noclaimGameSizing === "object"
+      ? af.noclaimGameSizing
+      : {};
+  const perGame = (game, field, dflt) => {
+    const entry = gameMapLookup(gameSizing, game);
+    if (!entry || typeof entry !== "object") return dflt;
+    const n = num(entry[field], NaN);
+    return Number.isFinite(n) && n >= 0 ? n : dflt;
+  };
+
+  const coverageDays = Math.max(1, num(af.coverageDays, 28));
+  const safetyStock = Math.max(0, num(af.coverageSafetyStock, 6));
+  const maxPerGame = Math.max(1, Math.floor(num(af.coverageMaxPerGame, 250)));
+
+  return {
+    // Auto-farm side
+    enabled: af.coverageSizing == null ? false : !!af.coverageSizing,
+    coverageDays,
+    safetyStock,
+    maxPerGame,
+    gameCaps:
+      af.gameAccountCaps && typeof af.gameAccountCaps === "object"
+        ? af.gameAccountCaps
+        : {},
+
+    // No-claim side
+    autoSize: af.noclaimAutoSize == null ? false : !!af.noclaimAutoSize,
+    intervalMin: Math.max(5, Math.floor(num(af.noclaimSizeIntervalMin, 60))),
+    maxPerRun: Math.max(1, Math.floor(num(af.noclaimSizeMaxPerRun, 60))),
+    gameSizing,
+
+    // Per-game accessors the demand snapshot reads. Each falls back to the
+    // global value, so a partial override ({ "overwatch": { max: 300 } }) leaves
+    // every other field alone.
+    coverageDaysFor: (game) => perGame(game, "coverageDays", coverageDays),
+    safetyStockFor: (game) => perGame(game, "safetyStock", safetyStock),
+    minFor: (game) => perGame(game, "min", 0),
+    maxFor: (game) => perGame(game, "max", maxPerGame),
+  };
+}
+
+// Explicit per-game account ceiling for the AUTO-FARM, or 0 for "automatic".
+// Unlike every other per-game map here this one overrides in BOTH directions:
+// it is the operator naming a number, so it beats the legacy cap and the
+// coverage model alike.
+function gameAccountCapFor(game, afIn) {
+  const v = gameMapLookup(getFarmSizing(afIn).gameCaps, game);
+  const n = Math.floor(num(v, 0));
+  return n > 0 ? n : 0;
+}
+
+// Alias kept deliberately short because the demand snapshot passes this object
+// around as `cfg`; see utils/farmDemand.js unclaimedDemandSnapshot.
+function getNoclaimSizing() {
+  return getFarmSizing();
+}
+
+// Public catalog v2 storefront config (docs/CATALOG-V2-CONTRACT.md §6), read
+// fresh each call with the seed defaults under the live values, and normalised
+// on BOTH the read and the write path so the routes and the page never see a
+// raw "@handle ", an over-long string or a NaN interval.
+//   telegram: leading @ stripped, [A-Za-z0-9_] only, <= 64 chars
+//   discord / replyTime: trimmed, <= 80 chars; an empty replyTime falls back
+//     to the default
+//   preorderSyncMinutes: integer clamped 0..1440 (0 = loop off); blank or
+//     non-numeric = the default 10
+function catalogString(v) {
+  return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+}
+function catalogText(v, max) {
+  return catalogString(v).trim().slice(0, max).trim();
+}
+function catalogHandle(v) {
+  return catalogString(v)
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/[^A-Za-z0-9_]/g, "")
+    .slice(0, 64);
+}
+function catalogMinutes(v) {
+  const d = AUTO_FARM_DEFAULTS.catalogPreorderSyncMinutes;
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(1440, Math.max(0, Math.floor(n))) : d;
+}
+function getCatalogConfig() {
+  const af = getAutoFarm() || {};
+  return {
+    contactTelegram: catalogHandle(af.catalogContactTelegram),
+    contactDiscord: catalogText(af.catalogContactDiscord, 80),
+    replyTime:
+      catalogText(af.catalogReplyTime, 80) || AUTO_FARM_DEFAULTS.catalogReplyTime,
+    preorderSyncMinutes: catalogMinutes(af.catalogPreorderSyncMinutes),
+  };
+}
+
+// Apply a storefront-config patch. Accepts the public field names the admin
+// route receives (contactTelegram, contactDiscord, replyTime,
+// preorderSyncMinutes) — or their catalog* settings names — and writes ONLY
+// those four autoFarm keys through setAutoFarm (audited like any settings
+// write; pass opts.actor for the "who did it"). Keys absent from the patch are
+// left untouched, so a partial patch never resets the others. Resolves to the
+// normalised getCatalogConfig().
+async function setCatalogConfig(patch, opts = {}) {
+  const p = patch && typeof patch === "object" ? patch : {};
+  const pick = (pub, key) => (p[pub] !== undefined ? p[pub] : p[key]);
+  const upd = {};
+  const tg = pick("contactTelegram", "catalogContactTelegram");
+  if (tg !== undefined) upd.catalogContactTelegram = catalogHandle(tg);
+  const dc = pick("contactDiscord", "catalogContactDiscord");
+  if (dc !== undefined) upd.catalogContactDiscord = catalogText(dc, 80);
+  const rt = pick("replyTime", "catalogReplyTime");
+  if (rt !== undefined)
+    upd.catalogReplyTime =
+      catalogText(rt, 80) || AUTO_FARM_DEFAULTS.catalogReplyTime;
+  const mins = pick("preorderSyncMinutes", "catalogPreorderSyncMinutes");
+  if (mins !== undefined) upd.catalogPreorderSyncMinutes = catalogMinutes(mins);
+  if (Object.keys(upd).length) await setAutoFarm(upd, opts);
+  return getCatalogConfig();
+}
+
+function getCoworkerAutonomy() {
+  return { enabled: !!getAutoFarm().coworkerAutonomy };
+}
+
+// Account-listing switches (docs/ACCOUNT-LISTINGS-CONTRACT.md §B8), read fresh
+// each call so the owner can stop every account-listing delivery with one live
+// settings edit, without a restart and without touching any other market
+// (the getAutoFarm/maxAutoBots pattern).
+//
+// The merge is load-bearing, not decoration: loadSettings merges DEFAULTS only
+// SHALLOWLY, so a settings.json carrying a partial block — the shape a
+// hand-edit or a future single-key write produces — replaces the whole default
+// object and every unwritten key would come back undefined. `enabled` and
+// `autoDeliver` are the gates on a paid buyer's delivery, and undefined reads
+// as OFF, so a one-key edit could silently stop delivering. Defaults go under
+// the live values, and each value is clamped the getUnclaimedPricing way so a
+// hand-typed string degrades to the default instead of poisoning the gate.
+function getAccountListingSettings() {
+  const s = loadSettings();
+  const cur =
+    s.accountListings && typeof s.accountListings === "object"
+      ? s.accountListings
+      : {};
+  const D = ACCOUNT_LISTING_DEFAULTS;
+  return {
+    enabled: cur.enabled == null ? D.enabled : !!cur.enabled,
+    autoDeliver: cur.autoDeliver == null ? D.autoDeliver : !!cur.autoDeliver,
+    lowStockWarnAt: Math.max(
+      0,
+      Math.floor(num(cur.lowStockWarnAt, D.lowStockWarnAt)),
+    ),
+  };
+}
+
+// No-claim Shop switches (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §1e), read
+// fresh each call exactly the getAccountListingSettings way, for the same
+// reasons: one live settings edit stops every no-claim claim without a
+// restart, and the merge is load-bearing — loadSettings merges DEFAULTS only
+// SHALLOWLY, so a partial `noclaimShop` block would read every unwritten key
+// back as undefined, and an undefined `enabled` / `autoDeliver` reads as OFF on
+// a paid buyer's claim-at-sale delivery. Defaults go under the live values.
+//
+// Every number is clamped into the range the contract names, and a blank, null
+// or non-numeric value degrades to the default (the catalogMinutes rule above —
+// `num` alone would read a null as 0, because Number(null) is 0). These are
+// read budgets and timer intervals: a hand-typed 0 must not become a sweep that
+// reads nothing or a timer that fires continuously, and a hand-typed string
+// must not poison the gate.
+function noclaimShopInt(v, d, lo, hi) {
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.floor(n))) : d;
+}
+function getNoclaimShopSettings() {
+  const s = loadSettings();
+  const cur =
+    s.noclaimShop && typeof s.noclaimShop === "object" ? s.noclaimShop : {};
+  const D = NOCLAIM_SHOP_DEFAULTS;
+  return {
+    enabled: cur.enabled == null ? D.enabled : !!cur.enabled,
+    autoDeliver: cur.autoDeliver == null ? D.autoDeliver : !!cur.autoDeliver,
+    sweep: cur.sweep == null ? D.sweep : !!cur.sweep,
+    sweepPerTick: noclaimShopInt(cur.sweepPerTick, D.sweepPerTick, 1, 200),
+    sweepEveryMin: noclaimShopInt(cur.sweepEveryMin, D.sweepEveryMin, 2, 240),
+    maxAgeHours: noclaimShopInt(cur.maxAgeHours, D.maxAgeHours, 1, 72),
+    refreshBudget: noclaimShopInt(cur.refreshBudget, D.refreshBudget, 1, 400),
+    topUp: cur.topUp == null ? D.topUp : !!cur.topUp,
+    healthPerPass: noclaimShopInt(cur.healthPerPass, D.healthPerPass, 0, 100),
+    passEveryMin: noclaimShopInt(cur.passEveryMin, D.passEveryMin, 2, 120),
+  };
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -219,4 +896,24 @@ module.exports = {
   normGameName,
   isNoClaimGame,
   isReuseOnlyGame,
+  getStreamGate,
+  streamGatedGameEntry,
+  isStreamGatedGame,
+  getNoClaimGate,
+  getCoworkerAutonomy,
+  getUnclaimedPricing,
+  gameFloorFor,
+  gameMarketsFor,
+  gameCapFor,
+  getFarmSizing,
+  getNoclaimSizing,
+  gameAccountCapFor,
+  getCatalogConfig,
+  setCatalogConfig,
+  getAccountListingSettings,
+  getNoclaimShopSettings,
+  UNCLAIMED_MARKETS,
+  UNCLAIMED_PRICING_DEFAULTS,
+  ACCOUNT_LISTING_DEFAULTS,
+  NOCLAIM_SHOP_DEFAULTS,
 };

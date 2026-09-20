@@ -12,6 +12,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const { loginsOnActiveListings } = require("./listedLogins");
 const MarketResearch = require("../models/MarketResearch");
 const { gameflipDeliveryCode, GF_CLAIM_TAG } = require("./gameflipFulfiller");
 const {
@@ -19,9 +20,19 @@ const {
   DS_CLAIM_TAG,
 } = require("./digisellerFulfiller");
 const { ggselDeliveryCode, GG_CLAIM_TAG } = require("./ggselFulfiller");
+const pricingEngine = require("./pricing");
+const pricingEvidenceMod = require("./pricingEvidence");
+const { classifyKind } = require("./marketPricing");
 // ZeusX sells the same accounts, so its reservations need their own tag or a
 // release on one market would free stock another market is selling.
 const ZX_CLAIM_TAG = "zeusx";
+const ELD_CLAIM_TAG = "eldorado";
+const PA_CLAIM_TAG = "playerauctions";
+const { G2G_CLAIM_TAG } = require("./g2gFulfiller");
+// G2G files an offer under the GAME's own brand, and a miss returns null
+// rather than a nearest match — nine Rainbow Six bundles already sit under
+// "Rainbow Six Mobile" because someone approximated once.
+const { brandForGame } = require("./g2gGames");
 const {
   reserveSetOnAccount,
   releaseSetForAccounts,
@@ -29,7 +40,14 @@ const {
 } = require("./dropReservation");
 const settings = require("./settings");
 const mp = require("./marketplaces");
+// Event bundles: which of a game's farmed waves belong to the same Twitch
+// event, what the merged bundle promises, and what it is worth. Pure + read
+// only; it never publishes anything itself (docs/AUTOFARM-BUNDLES-CONTRACT.md).
+const autoFarmBundles = require("./autoFarmBundles");
+const paCopy = require("./playerauctionsCopy");
+const { isNoClaimGame } = require("./settings");
 const { decrypt } = require("./secretBox");
+const { sendTelegram } = require("./telegram");
 const { buildSetGridImage } = require("./setImage");
 // The stock side (twitchInventory.buildDrops) keys every earned drop through
 // itemKeyFor. Reuse the SAME function here so the campaign side's itemKeys are
@@ -42,12 +60,18 @@ const fsp = require("fs/promises");
 
 /* --------------------------- campaign details --------------------------- */
 
-// Normalise a label to bare alphanumerics for placeholder comparison
-// ("AC Black Flag Resynced" -> "acblackflagresynced").
+// Normalise a label for placeholder comparison, keeping letters/digits of ANY
+// script ("AC Black Flag Resynced" -> "acblackflagresynced"). Uses the Unicode
+// letter/number classes rather than [a-z0-9]: the old ASCII-only strip reduced
+// a fully non-Latin name to "" (e.g. Tanks Blitz's Cyrillic drop
+// "Аватар «Медаль хочу»" -> ""), which the empty-string check below then
+// misread as a placeholder — so every Cyrillic/CJK-named drop was silently
+// rejected and its campaign never listed. \p{L}\p{N} preserves those letters
+// so a real non-Latin item stays a real item.
 function normLabel(s) {
   return String(s || "")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
+    .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 // A benefit whose name is really just the game or campaign title is NOT a real
@@ -56,12 +80,21 @@ function normLabel(s) {
 // the campaign title itself). Real drops have specific reward names
 // ("Rustborne Swords", "Cheetah Claw Cat"). Refuse to treat a title as an item
 // so we never build a set around a fake itemKey that no account can ever hold.
-function looksLikeTitlePlaceholder(name, { game, campaignName }) {
+//
+// A name matching the GAME title is always an unresolved placeholder. A name
+// matching the CAMPAIGN title usually is too, EXCEPT when the campaign is
+// legitimately named after its single reward (ELDEN RING's "Sorcerer Rogier"
+// campaign hands out a "Sorcerer Rogier" drop). Real drops carry Twitch
+// artwork; unresolved placeholders don't — so a campaign-name match is only
+// treated as a placeholder when the benefit has no artwork (`hasImage`).
+function looksLikeTitlePlaceholder(name, { game, campaignName, hasImage = false }) {
   const n = normLabel(name);
   if (!n) return true;
   const g = normLabel(game);
+  if (g && n === g) return true;
   const c = normLabel(campaignName);
-  return (!!g && n === g) || (!!c && n === c);
+  if (c && n === c && !hasImage) return true;
+  return false;
 }
 
 // Turn a fetched campaign-details object into deduped item rows, dropping any
@@ -79,7 +112,9 @@ function resolveCampaignItems(camp, { game, campaignName }) {
       const b = e && e.benefit;
       if (!b || !b.name) continue;
       rawBenefits++;
-      if (looksLikeTitlePlaceholder(b.name, { game, campaignName })) continue;
+      const hasImage = !!String((b && b.imageAssetURL) || "").trim();
+      if (looksLikeTitlePlaceholder(b.name, { game, campaignName, hasImage }))
+        continue;
       // Build the itemKey game-token EXACTLY as the stock side does
       // (twitchInventory.buildDrops): prefer the game's displayName, then its
       // name, then the campaign's own game, then the task game — and normalise
@@ -211,7 +246,33 @@ function buildTitle({ game, items, campaignName }) {
 
 // House description: item list first, then the seller's standard sections
 // (check before buying / multi-purchase warning / activation window / pitch).
-function buildDescription({ game, items, campaignName, postEvent }) {
+// The closing support line names the marketplace the buyer is actually on —
+// "message me here on Gameflip" must never appear on a GGSel or Digiseller
+// product, and vice versa. marketplace is one of "gameflip", "digiseller",
+// "ggsel", "zeusx", "eldorado", "playerauctions", "g2g" (or anything else → a
+// neutral line with no site name).
+function buildDescription({
+  game,
+  items,
+  campaignName,
+  postEvent,
+  marketplace,
+  extraLines = [],
+}) {
+  const support = {
+    gameflip: "message me here on Gameflip",
+    digiseller: "message me here on Digiseller",
+    ggsel: "message me here on GGSel",
+    zeusx: "message me here on ZeusX",
+    eldorado: "message me here on Eldorado",
+    playerauctions: "message me here on PlayerAuctions",
+    g2g: "message me here on G2G",
+  };
+  const supportLine =
+    "Any issue or question — " +
+    (support[String(marketplace || "").toLowerCase()] ||
+      "message me here on the site") +
+    " before opening a dispute. I reply fast and always make it right.";
   const lines = [];
   if (postEvent) {
     lines.push(
@@ -226,6 +287,13 @@ function buildDescription({ game, items, campaignName, postEvent }) {
   } else if (campaignName) {
     lines.push(game + " — " + campaignName + " Twitch Drops.", "");
   }
+  // Facts the house template has no slot for — which event and waves an event
+  // bundle covers, which items arrive as several copies. Empty for every
+  // non-bundle listing, so those descriptions stay byte-identical.
+  const extras = (extraLines || [])
+    .map((l) => String(l == null ? "" : l).trim())
+    .filter(Boolean);
+  if (extras.length) lines.push(...extras, "");
   lines.push("Includes:");
   for (const i of items) {
     lines.push(
@@ -258,8 +326,7 @@ function buildDescription({ game, items, campaignName, postEvent }) {
     "\ud83d\ude80 Seller's comment: instant auto-delivery, farmed by me, " +
       "clean accounts. Check my profile for more Twitch drop bundles.",
     "",
-    "\ud83d\udcac Any issue or question — message me here on Gameflip " +
-      "before opening a dispute. I reply fast and always make it right.",
+    "\ud83d\udcac " + supportLine,
   );
   return lines.join("\n").slice(0, 5000);
 }
@@ -317,7 +384,20 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
   const sold = soldEnough
     ? Math.min(Number(gf.avgSoldPrice) || 0, MAX_ANCHOR_USD)
     : 0;
-  const rival = Number(gf.lowest) > 0 ? Number(gf.lowest) : 0;
+  // `lowestOther`, NOT `lowest`. `gf.lowest` is the cheapest live Gameflip row
+  // INCLUDING OUR OWN, so undercutting it by 5% every cycle undercuts
+  // ourselves: our listing becomes the new cheapest, the next publish anchors on
+  // that, and the price ratchets down to the $0.75 clamp regardless of what
+  // buyers actually pay. utils/marketResearch.js:252 was written for exactly
+  // this ("for OW/R6/MR the lowest live row was our own $0.75 listing — so it
+  // undercut itself to the floor forever"), utils/pricingEvidence.js:141 states
+  // the rule outright ("ONLY lowestOther may act as a rival"), and
+  // unclaimedBundles already obeys it. derivePrice was the one place left
+  // reading the wrong field.
+  //
+  // lowestOther is deliberately 0 when every live row is ours — which is "no
+  // rival", not "free" — and the branches below already treat 0 that way.
+  const rival = Number(gf.lowestOther) > 0 ? Number(gf.lowestOther) : 0;
 
   let base;
   if (rival > 0 && sold > 0) {
@@ -350,7 +430,62 @@ function derivePrice(research, { postEventMultiplier = 1 } = {}) {
   if (postEventMultiplier === 1 && rival > 0 && priced >= rival) {
     priced = Math.floor((rival - 0.01) * 4) / 4;
   }
-  return Math.max(0.75, priced);
+  // A FLOOR AND A CEILING. This used to clamp only the bottom, so the anchor cap
+  // was the sole bound on the way out — and it does not bind the rival branch
+  // (`rival * 0.95`) or survive the post-event multiplier, which multiplies
+  // AFTER it. A rival-polluted average could therefore publish a single-account
+  // bundle in double figures. Measured reality on this marketplace: 119 realised
+  // sales, median $1.25, highest ever $5.00. MAX_ANCHOR_USD already encodes the
+  // reason ("anything above this is a multi-account bundle, not our
+  // single-account product"); the output is held to the same bound.
+  return Math.min(MAX_ANCHOR_USD, Math.max(0.75, priced));
+}
+
+// `derivePrice` prices GAMEFLIP — it anchors on Gameflip's order book and on
+// Gameflip's realised sales, by design and with good reason (see the comment
+// above about a ruble floor setting a USD listing's price). But its answer was
+// then published verbatim to GGSel, Digiseller and ZeusX, which is the same
+// mistake pointing the other way: one number, six venues, and only one of them
+// was measured.
+//
+// The venues are not interchangeable. Our realised medians, prod 2026-09-09:
+// Gameflip $1.25 (n=172), Digiseller $1.28 (n=62), GGSel $0.75 (n=13). GGSel's
+// live rows had drifted to a median of $1.55 — more than twice what GGSel has
+// ever actually paid us, on a market whose rival median is $0.69. The owner's
+// reading of it, and the reason this exists: "ggsell market is so cheap so we
+// have to be as well."
+//
+// So translate the Gameflip price into the venue's own price level with the
+// shared engine's venue factor (utils/pricing.js), which is the ratio of the two
+// medians and needs no per-game lookup — only the venue's own realised sales.
+// A venue with fewer than `minSamples` sales returns a factor of exactly 1, so
+// the unproven venues (ZeusX, Eldorado, G2G, PlayerAuctions) are unaffected
+// until they have earned an opinion.
+//
+// TWO THINGS ARE NEVER TOUCHED:
+//   * Gameflip, because the base price is already its own.
+//   * Rent-farm listings. The owner's rule, same day: "renter listings are same
+//     price." A farming window is a different product at a different price
+//     level ($4.99-$6.00 against sub-$1 drop bundles), and the venue factor is
+//     computed from drop-bundle money that has no bearing on it.
+async function venuePrice(marketplace, basePriceUsd, { title = "" } = {}) {
+  const base = Number(basePriceUsd) || 0;
+  const venue = String(marketplace || "").toLowerCase();
+  if (!(base > 0) || !venue || venue === "gameflip") return base;
+  if (classifyKind(title) === "farm") return base;
+  try {
+    // No game is passed: the venue factor reads only the `platform` and
+    // `global` buckets, so the per-game lookup would be dead weight.
+    const ev = await pricingEvidenceMod.evidenceFor({ game: "", marketplace: venue });
+    const factor = pricingEngine.venueFactor(ev);
+    if (!(factor > 0) || factor === 1) return base;
+    const floor = pricingEngine.floorForMarketplace(venue);
+    return Math.max(floor, Math.round(base * factor * 100) / 100);
+  } catch {
+    // Evidence is a nicety, not a precondition for selling. An Atlas hiccup
+    // must not stop a publish, and the Gameflip price is a defensible fallback.
+    return base;
+  }
 }
 
 /* ------------------------------- publishing ------------------------------ */
@@ -473,19 +608,13 @@ async function verifiedHoldersForItems(task, items) {
 async function pickDeliveryAccounts(task, max, items) {
   const verified = await verifiedHoldersForItems(task, items);
   if (!verified.length) return [];
-  // Exclude any login already live on another active listing (accountLogin can
-  // be a comma/space-separated list on Plati/GGSel rows). Per-drop reservation
-  // covers committed sales; this also guards the window before a concurrent
-  // listing commits its reservation.
-  const used = new Set();
-  for (const r of await MarketplaceListing.find(
-    { status: "active" },
-    { accountLogin: 1 },
-  ).lean()) {
-    for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
-      if (l) used.add(l.toLowerCase());
-    }
-  }
+  // Exclude any login already live on another active listing — as its
+  // auto-delivery account OR as a unit fed to a stock product later
+  // (utils/listedLogins.js; this used to read accountLogin only, so every
+  // refilled account was invisible here). Per-drop reservation covers
+  // committed sales; this also guards the window before a concurrent listing
+  // commits its reservation.
+  const used = await loginsOnActiveListings();
   const out = [];
   for (const acc of verified) {
     if (out.length >= max) break;
@@ -649,6 +778,11 @@ async function publishGgselShare({
   accounts,
   categoryId,
 }) {
+  // Price this for GGSel, not for Gameflip. Done here rather than at the three
+  // call sites so a fourth cannot forget: the adapted number is what gets
+  // published AND what the row records, which is the only way the two stay in
+  // agreement.
+  price = await venuePrice("ggsel", price, { title });
   accounts = await reserveAccountsForPublish(accounts, set, GG_CLAIM_TAG);
   if (!accounts.length) {
     throw new Error(
@@ -708,7 +842,7 @@ function zeusxGameMapped(af, game) {
 //
 //  • ON: native ZeusX "Automatic" delivery — ZeusX carries the credential and
 //    hands it to the buyer the instant they pay (no chat, no manual step, like
-//    the Gameflip/FunPay auto-delivery here). ZeusX only accepts ONE credential
+//    the Gameflip auto-delivery here). ZeusX only accepts ONE credential
 //    per offer (game_account is a single object — verified live), so each
 //    reserved account becomes its own single-stock listing.
 async function publishZeusxShare({
@@ -807,6 +941,250 @@ async function publishZeusxShare({
   };
 }
 
+// Eldorado share. One offer whose QUANTITY is the number of reserved accounts
+// — Eldorado's Twitch Drops category is multi-stock, so unlike ZeusX we do not
+// need a listing per account. The reserved accounts ride along as the row's
+// `units`, which is what utils/eldoradoFulfiller.js hands out (and stamps) when
+// an order is paid. Delivery is a chat message, because Eldorado has no
+// credential vault for this category.
+async function publishEldoradoShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  // Same rule as PlayerAuctions: a claimed drop is worthless to the buyer for
+  // these games, so the auto-farm's archive can never back the listing.
+  if (isNoClaimGame(game)) {
+    throw new Error(
+      game + " is a no-claim game — sellable only from the unclaimed farm, " +
+        "not the auto-farm's claimed archive",
+    );
+  }
+  accounts = await reserveAccountsForPublish(accounts, set, ELD_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.eldoradoPublish({
+      game,
+      title,
+      description,
+      priceUsd: price,
+      quantity: accounts.length,
+      coverImagePath: img,
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "eldorado",
+      externalId: r.id,
+      url: r.url || "",
+      title,
+      description,
+      price,
+      status: "active",
+      origin: "auto",
+      note:
+        "auto-farm: " + accounts.length + " account(s), chat auto-delivery",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      units: accounts.map((a) => ({
+        contentId: "",
+        accountId: String(a.accountId),
+        login: a.login,
+        addedAt: new Date(),
+        deliveredAt: null,
+        orderId: "",
+      })),
+    });
+    return { externalId: r.id, url: r.url || "", qty: accounts.length };
+  });
+}
+
+// G2G share. Same multi-stock shape as Eldorado — ONE Game Items offer whose
+// actual_qty is the number of reserved accounts, with the accounts riding
+// along as the row's `units` for utils/g2gFulfiller.js to hand out.
+//
+// The one structural difference is the brand. G2G files an offer under a
+// (service, brand) pair where the brand IS the game, and there is no universal
+// "Twitch Drops" bucket to fall back to the way Eldorado has one. A game
+// without a hand-checked brand is skipped rather than approximated: the
+// account is already paying for one such guess, with nine Rainbow Six Siege
+// bundles filed under "Rainbow Six Mobile" where no drops buyer will ever see
+// them.
+async function publishG2gShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  // Same rule as Eldorado/PlayerAuctions: a claimed drop is worthless to the
+  // buyer for these games, so the auto-farm's archive can never back the
+  // listing.
+  if (isNoClaimGame(game)) {
+    throw new Error(
+      game + " is a no-claim game — sellable only from the unclaimed farm, " +
+        "not the auto-farm's claimed archive",
+    );
+  }
+  const brand = brandForGame(game);
+  if (!brand) throw new Error("no G2G brand for " + game);
+  accounts = await reserveAccountsForPublish(accounts, set, G2G_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  // g2gPublish REJECTS a sub-floor price outright, so the floor is applied
+  // here and carried onto the row — the same thing publishPlayerAuctionsShare
+  // does, and the reason the stored price must match what was really published.
+  const priceUsd = Math.max(mp.G2G_MIN_PRICE, price);
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.g2gPublish({
+      serviceId: mp.G2G_ITEMS_SERVICE,
+      brandId: brand.brandId,
+      title,
+      description,
+      priceUsd,
+      qty: accounts.length,
+      minQty: 1,
+      // Left to g2gPublish: the legal delivery methods are per (service,
+      // brand), so it reads the product settings and takes the first one G2G
+      // itself offers rather than us pinning an id that another game rejects.
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "g2g",
+      externalId: r.externalId,
+      url: r.url || "",
+      title,
+      description,
+      price: priceUsd,
+      status: "active",
+      origin: "auto",
+      note:
+        "auto-farm: " + accounts.length + " account(s), chat auto-delivery",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      units: accounts.map((a) => ({
+        contentId: "",
+        accountId: String(a.accountId),
+        login: a.login,
+        addedAt: new Date(),
+        // G2G's hand-over is several calls (start_deliver, then the chat
+        // message, then delivered_qty), so `messagedAt` marks the point past
+        // which a retry must re-confirm rather than re-send credentials.
+        messagedAt: null,
+        deliveredAt: null,
+        orderId: "",
+      })),
+    });
+    return { externalId: r.externalId, url: r.url || "", qty: accounts.length };
+  });
+}
+
+// PlayerAuctions publisher.
+//
+// Unlike Eldorado — whose Twitch Drops category takes every game, with the
+// unlisted ones going under "Other" — PlayerAuctions files a drops bundle under
+// the GAME's own Items category, and only 149 of its ~400 games accept Item
+// offers at all. Rainbow Six, Apex, Rocket League, Dead by Daylight and The
+// Finals are account-only there, so this can legitimately have nowhere to put a
+// share; the caller gates on playerauctionsGameEnabled() first.
+//
+// The long claim guide goes in the offer's `instruction` field rather than the
+// hand-over message, because PlayerAuctions caps an order message at 300
+// characters (utils/playerauctionsCopy explains the split).
+async function publishPlayerAuctionsShare({
+  set,
+  title,
+  description,
+  price,
+  img,
+  accounts,
+  game,
+}) {
+  // Overwatch / Rainbow Six / Call of Duty drops have to reach the buyer
+  // UNCLAIMED so they can connect and claim to their own game account. Every
+  // account this publisher can reach comes from the auto-farm, which CLAIMS as
+  // it farms — so for those games the stock is categorically wrong and the
+  // listing could never be honoured. They are sellable here only from an
+  // unclaimedGame-backed row fed by the no-claim farm.
+  if (isNoClaimGame(game)) {
+    throw new Error(
+      game + " is a no-claim game — sellable only from the unclaimed farm, " +
+        "not the auto-farm's claimed archive",
+    );
+  }
+  accounts = await reserveAccountsForPublish(accounts, set, PA_CLAIM_TAG);
+  if (!accounts.length) {
+    throw new Error(
+      "no account still held the full bundle unclaimed at publish time",
+    );
+  }
+  return withReservationRollback(accounts, set, async () => {
+    const r = await mp.playerauctionsPublish({
+      game,
+      title,
+      description,
+      instruction: paCopy.bundleInstruction(),
+      priceUsd: Math.max(mp.PA_MIN_PRICE, price),
+      itemsPerUnit: (set.items || []).length || 1,
+      totalUnit: accounts.length,
+      minUnitPerOrder: 1,
+      // A delivery bot can honour the fastest tier PlayerAuctions offers, and
+      // the guarantee is the main conversion lever on this marketplace.
+      deliveryGuarantee: mp.PA_DELIVERY.min20,
+      coverImagePath: img,
+    });
+    await MarketplaceListing.create({
+      set: set._id,
+      marketplace: "playerauctions",
+      externalId: r.offerId,
+      url: r.url || "",
+      title,
+      description,
+      price: Math.max(mp.PA_MIN_PRICE, price),
+      status: "active",
+      origin: "auto",
+      note:
+        "auto-farm: " + accounts.length + " account(s), message auto-delivery",
+      accountLogin: accounts.map((a) => a.login).join(", "),
+      qtyTarget: accounts.length,
+      units: accounts.map((a) => ({
+        contentId: "",
+        accountId: String(a.accountId),
+        login: a.login,
+        addedAt: new Date(),
+        deliveredAt: null,
+        orderId: "",
+      })),
+    });
+    return { externalId: r.offerId, url: r.url || "", qty: accounts.length };
+  });
+}
+
+// PlayerAuctions only accepts an Item offer when the game's catalogue row lists
+// "item" among its product types, so this is a real per-game gate, not a
+// formality.
+async function playerauctionsGameEnabled(game) {
+  try {
+    const g = await mp.playerauctionsResolveGame(game);
+    if (!g) return false;
+    return String(g.productType || "").toLowerCase().split(",").includes("item");
+  } catch {
+    return false;
+  }
+}
+
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
 // cost a market. On every sweep tick where the Gameflip listing is alive,
 // try to publish any secondary market that has no externalId yet, using
@@ -822,7 +1200,13 @@ async function retryMissingSecondaries(task) {
   // again (24 live tasks were in exactly that state, most with no error to
   // explain it). It retries on the same terms as the other secondaries.
   const zeusxMissing = !(L.zeusx && L.zeusx.externalId);
-  if (!platiMissing && !ggselMissing && !zeusxMissing) return null;
+  // G2G joins on the same terms, for the same reason: a session that had
+  // expired at publish time, or a flag switched on mid-campaign, would
+  // otherwise cost the market for the whole campaign.
+  const g2gMissing = !(L.g2g && L.g2g.externalId);
+  if (!platiMissing && !ggselMissing && !zeusxMissing && !g2gMissing) {
+    return null;
+  }
 
   const gfRow = await MarketplaceListing.findOne({
     marketplace: "gameflip",
@@ -855,6 +1239,7 @@ async function retryMissingSecondaries(task) {
       !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
     if (mapped) targets.push("zeusx");
   }
+  if (g2gMissing && af.g2gAuto && brandForGame(task.game)) targets.push("g2g");
   if (!targets.length) return null;
 
   const shares = {};
@@ -909,6 +1294,23 @@ async function retryMissingSecondaries(task) {
           retried.push("zeusx");
         } catch (err) {
           task.listing.zeusx = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
+      } else if (t === "g2g") {
+        try {
+          const r = await publishG2gShare({
+            ...base,
+            accounts,
+            game: task.game,
+          });
+          task.listing.g2g = { ...r, error: "" };
+          retried.push("g2g");
+        } catch (err) {
+          task.listing.g2g = {
             externalId: "",
             url: "",
             qty: 0,
@@ -1246,12 +1648,61 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     campaignName: task.campaignName,
     postEvent: false,
   });
-  const description = buildDescription({
-    game: task.game,
-    items,
-    campaignName: task.campaignName,
-    postEvent: false,
-  });
+  // One house description per marketplace: the closing support line names the
+  // site the buyer is actually on, so a GGSel/Digiseller/ZeusX product never
+  // tells a buyer to message the seller "on Gameflip".
+  const descriptions = {
+    gameflip: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "gameflip",
+    }),
+    digiseller: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "digiseller",
+    }),
+    ggsel: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "ggsel",
+    }),
+    zeusx: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "zeusx",
+    }),
+    eldorado: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "eldorado",
+    }),
+    playerauctions: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "playerauctions",
+    }),
+    g2g: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "g2g",
+    }),
+  };
+  const description = descriptions.gameflip;
 
   if (dryRun) {
     task.wouldList = { title, price, qty: split.listNow };
@@ -1297,11 +1748,36 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       zeusxGameMapped(af, task.game) ||
       !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
   }
+  // Eldorado needs no per-game mapping: its Twitch Drops category takes every
+  // game, with anything outside its 13-value list going under "Other".
+  const eldoradoEnabled = !!af.eldoradoAuto;
+  // PlayerAuctions DOES need a per-game check: a drops bundle is filed under
+  // the game's own Items category, and only 149 of its ~400 games accept Item
+  // offers (Rainbow Six, Apex, Rocket League, Dead by Daylight and The Finals
+  // are account-only there).
+  const paEnabled =
+    !!af.playerauctionsAuto && (await playerauctionsGameEnabled(task.game));
+  // G2G is gated like PlayerAuctions, not like Eldorado: an offer is filed
+  // under the game's own brand and there is no catch-all bucket, so a game
+  // with no hand-checked brand must never take a share of the accounts —
+  // it would burn them on a publish that is guaranteed to throw.
+  const g2gEnabled = !!af.g2gAuto && !!brandForGame(task.game);
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId) marketOrder.push("ggsel");
   if (zeusxEnabled) marketOrder.push("zeusx");
-  const shares = { gameflip: [], plati: [], ggsel: [], zeusx: [] };
+  if (eldoradoEnabled) marketOrder.push("eldorado");
+  if (paEnabled) marketOrder.push("playerauctions");
+  if (g2gEnabled) marketOrder.push("g2g");
+  const shares = {
+    gameflip: [],
+    plati: [],
+    ggsel: [],
+    zeusx: [],
+    eldorado: [],
+    playerauctions: [],
+    g2g: [],
+  };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
   });
@@ -1319,6 +1795,12 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       qty: q,
     })),
     price,
+    // The floor the Gameflip relist chain prices against. A relist inherits
+    // its predecessor's price verbatim and nothing else corrects it, so a
+    // chain born without a floor could drift below the researched price
+    // forever (Halo listed at $1.02 beside its $1.50 twin). 1,382 of 1,385
+    // sets on prod had none. The derived price IS the floor.
+    minPriceUsd: price,
     listed: false,
     custom: true,
     coverGame: task.game,
@@ -1345,6 +1827,9 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const plati = { externalId: "", url: "", qty: 0, error: "" };
   const ggsel = { externalId: "", url: "", qty: 0, error: "" };
   const zeusx = { externalId: "", url: "", qty: 0, error: "" };
+  const eldorado = { externalId: "", url: "", qty: 0, error: "" };
+  const playerauctions = { externalId: "", url: "", qty: 0, error: "" };
+  const g2g = { externalId: "", url: "", qty: 0, error: "" };
   try {
     // reserve → publish → (on throw) release the gameflip unit AND delete the
     // now-empty set (mirrors the no-deliver path above) so a failed publish
@@ -1380,7 +1865,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         const r = await publishPlatiShare({
           set,
           title,
-          description,
+          description: descriptions.digiseller,
           price,
           img,
           accounts: shares.plati,
@@ -1406,7 +1891,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         const r = await publishGgselShare({
           set,
           title,
-          description,
+          description: descriptions.ggsel,
           price,
           img,
           accounts: shares.ggsel,
@@ -1433,7 +1918,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         const r = await publishZeusxShare({
           set,
           title,
-          description,
+          description: descriptions.zeusx,
           price,
           img,
           accounts: shares.zeusx,
@@ -1451,6 +1936,80 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       zeusx.error = "no ZeusX category for " + task.game;
     } else {
       zeusx.error = "no spare account for this market yet";
+    }
+
+    if (eldoradoEnabled && shares.eldorado.length) {
+      try {
+        const r = await publishEldoradoShare({
+          set,
+          title,
+          description: descriptions.eldorado,
+          price,
+          img,
+          accounts: shares.eldorado,
+          game: task.game,
+        });
+        eldorado.externalId = r.externalId;
+        eldorado.url = r.url;
+        eldorado.qty = r.qty;
+      } catch (err) {
+        eldorado.error = err.message;
+      }
+    } else if (!af.eldoradoAuto) {
+      eldorado.error = "Eldorado auto-listing is switched off";
+    } else {
+      eldorado.error = "no spare account for this market yet";
+    }
+
+    if (paEnabled && shares.playerauctions.length) {
+      try {
+        const r = await publishPlayerAuctionsShare({
+          set,
+          title,
+          description: descriptions.playerauctions,
+          price,
+          img,
+          accounts: shares.playerauctions,
+          game: task.game,
+        });
+        playerauctions.externalId = r.externalId;
+        playerauctions.url = r.url;
+        playerauctions.qty = r.qty;
+      } catch (err) {
+        playerauctions.error = err.message;
+      }
+    } else if (!af.playerauctionsAuto) {
+      playerauctions.error = "PlayerAuctions auto-listing is switched off";
+    } else if (!paEnabled) {
+      playerauctions.error =
+        "PlayerAuctions has no Item category for " + task.game;
+    } else {
+      playerauctions.error = "no spare account for this market yet";
+    }
+
+    if (g2gEnabled && shares.g2g.length) {
+      try {
+        const r = await publishG2gShare({
+          set,
+          title,
+          description: descriptions.g2g,
+          price,
+          img,
+          accounts: shares.g2g,
+          game: task.game,
+        });
+        g2g.externalId = r.externalId;
+        g2g.url = r.url;
+        g2g.qty = r.qty;
+      } catch (err) {
+        g2g.error = err.message;
+      }
+    } else if (!af.g2gAuto) {
+      g2g.error = "G2G auto-listing is switched off";
+    } else if (!g2gEnabled) {
+      g2g.error = "no G2G brand for " + task.game;
+    } else {
+      g2g.error = "no spare account for this market yet";
     }
   } finally {
     if (img) await fsp.unlink(img).catch(() => {});
@@ -1486,6 +2045,9 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     plati,
     ggsel,
     zeusx,
+    eldorado,
+    playerauctions,
+    g2g,
     listedAt: new Date(),
     repricedAt: null,
     postEvent: false,
@@ -1513,125 +2075,26 @@ function stackedBundlePrice(basePrice, priorPrice) {
   return Math.max(base, round25(bumped));
 }
 
-// Publish a SECOND listing for a task whose accounts were reused across this
-// game's earlier campaigns: those accounts hold every prior bundle PLUS the
-// current one, so the stack sells as its own combined-bundle listing at a
-// combined price — while the task's main listing keeps selling the current
-// event solo from its other accounts.
+/* ------------------------- shared bundle publisher ----------------------- */
+
+// Publish one already-decided second listing for a task (an EVENT bundle or
+// the older cross-event stack) and record it on `task.stackListing`.
 //
-// Only accounts that verifiably hold EVERY item of the combined stack qualify
-// (the same holdings gate the solo listing uses), and pickDeliveryAccounts
-// already excludes anything attached to a live listing — so the stack is fed
-// exactly by the reused/held-back accounts, never by stock the solo listing
-// (or any other listing) is selling. Half of the qualifying stack is listed
-// now; the rest stays unlisted so the NEXT event can stack on top of it again.
-async function listStackedBundle(taskId, { dryRun = false } = {}) {
-  const task = await AutoFarmTask.findById(taskId);
-  if (!task) return { skipped: "task not found" };
-  if (task.stackListing && task.stackListing.externalId) {
-    return { skipped: "already listed" };
-  }
-  // The solo listing goes first — it anchors the current event's stock split.
-  if (!task.listing || !task.listing.externalId) {
-    return { skipped: "no solo listing yet" };
-  }
-
-  // Prior bundles: every OTHER auto-farm set this game has published.
-  const siblings = await AutoFarmTask.find(
-    {
-      game: task.game,
-      _id: { $ne: task._id },
-      "listing.setId": { $nin: ["", null] },
-    },
-    { "listing.setId": 1 },
-  ).lean();
-  const setIds = [
-    ...new Set(
-      siblings.map((t) => t.listing && t.listing.setId).filter(Boolean),
-    ),
-  ];
-  if (!setIds.length) return { skipped: "no prior campaign bundles" };
-  const priorSets = await DropSet.find({ _id: { $in: setIds } }).lean();
-  if (!priorSets.length) return { skipped: "prior sets gone" };
-
-  const current = await campaignItems(
-    task.campaignId,
-    task.game,
-    task.campaignName,
-  );
-  const items = stackItems([...priorSets, { items: current }]);
-  // The stack must actually be BIGGER than the solo bundle, or it's the same
-  // listing twice.
-  if (items.length <= current.length) {
-    return { skipped: "nothing extra to stack" };
-  }
-
-  const research = await MarketResearch.findOne({ game: task.game }).lean();
-  const priorPrice = priorSets.reduce(
-    (m, s) => Math.max(m, Number(s.price) || 0),
-    0,
-  );
-  const price = stackedBundlePrice(derivePrice(research), priorPrice);
-  const title = buildTitle({
-    game: task.game,
-    items,
-    campaignName: task.campaignName,
-  });
-  const description = buildDescription({
-    game: task.game,
-    items,
-    campaignName: task.campaignName,
-    postEvent: false,
-  });
-
-  // Candidate accounts: everything this GAME's auto-farm tasks ever assigned
-  // (the previous events' held-back stash lives on older tasks, not this one),
-  // minus anything currently assigned to a DIFFERENT game's live plan (its
-  // solo listing counts on those accounts). Deliberately never the manual
-  // fleet — that stash is the owner's to sell by hand.
-  const gameTasks = await AutoFarmTask.find(
-    { game: task.game },
-    { assignedAccounts: 1 },
-  ).lean();
-  const candidates = new Set();
-  for (const t of gameTasks) {
-    for (const u of t.assignedAccounts || []) {
-      const k = String(u).toLowerCase();
-      if (k) candidates.add(k);
-    }
-  }
-  for (const t of await AutoFarmTask.find(
-    { game: { $ne: task.game }, status: { $in: ["active", "planned"] } },
-    { assignedAccounts: 1 },
-  ).lean()) {
-    for (const u of t.assignedAccounts || []) {
-      candidates.delete(String(u).toLowerCase());
-    }
-  }
-  if (!candidates.size) return { skipped: "no candidate accounts" };
-
-  // Everyone who provably holds the WHOLE stack and isn't already on a live
-  // listing. List half, keep half for the next event's stack.
-  const eligible = await pickDeliveryAccounts(
-    { assignedAccounts: [...candidates] },
-    candidates.size,
-    items,
-  );
-  if (!eligible.length) {
-    return {
-      skipped: "no free account holds the full stack yet",
-      waiting: true,
-    };
-  }
-  const split = computeSplit(eligible.length);
-  const accounts = eligible.slice(0, split.listNow);
-
-  if (dryRun) {
-    return {
-      wouldList: { title, price, qty: accounts.length, items: items.length },
-    };
-  }
-
+// Extracted so both callers publish through the exact same path: the market
+// split, the Gameflip reservation and its rollback, the Plati/GGSel shares and
+// the bookkeeping row are all behaviour that was already load-bearing here and
+// must not fork. The caller owns everything ABOVE this line — which items, what
+// title, what price, and which accounts back them.
+async function publishStackedListing({
+  task,
+  set,
+  title,
+  descriptions,
+  price,
+  accounts,
+  split,
+}) {
+  const description = descriptions.gameflip;
   // Same market split as the solo flow: Gameflip first, then Plati, then GGSel.
   const af = settings.getAutoFarm();
   const platiEnabled = !!af.platiCategoryId;
@@ -1648,31 +2111,6 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   const shares = { gameflip: [], plati: [], ggsel: [] };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
-
-  const set = await DropSet.create({
-    name:
-      task.game +
-      " — stacked bundle (" +
-      (task.campaignName || task.campaignId) +
-      " + " +
-      priorSets.length +
-      " earlier event" +
-      (priorSets.length === 1 ? "" : "s") +
-      ")",
-    note:
-      "Auto-farmed Twitch drops, stacked across campaigns (" + task.game + ")",
-    items: items.map(({ itemKey, name, game, image, qty: q }) => ({
-      itemKey,
-      name,
-      game,
-      image,
-      qty: q,
-    })),
-    price,
-    listed: false,
-    custom: true,
-    coverGame: task.game,
   });
 
   let img = "";
@@ -1723,7 +2161,7 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
         const r = await publishPlatiShare({
           set,
           title,
-          description,
+          description: descriptions.digiseller,
           price,
           img,
           accounts: shares.plati,
@@ -1746,7 +2184,7 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
         const r = await publishGgselShare({
           set,
           title,
-          description,
+          description: descriptions.ggsel,
           price,
           img,
           accounts: shares.ggsel,
@@ -1800,6 +2238,611 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   };
   await task.save();
   return { listed: task.stackListing };
+}
+
+/* ---------------------------- event bundles ------------------------------ */
+
+// Plans describe a whole GAME and change only when a task or a campaign does,
+// so a sweep of fifty tasks must not rebuild them fifty times (four queries
+// each, on a shared-tier Atlas that bills bytes returned). One short-lived
+// cache per game, kept well under the sweep interval so a newly farmed wave is
+// picked up on the next tick rather than the next restart.
+const BUNDLE_PLAN_TTL_MS = 5 * 60 * 1000;
+const bundlePlanCache = new Map(); // normalised game -> { at, plans }
+
+// "Nobody holds this bundle yet" is the NORMAL answer, and it is the expensive
+// one: measured on prod 2026-09-08, 15 of 16 planned bundles had zero holders
+// because their waves were farmed by different accounts, and each of those
+// verdicts costs a DropLog aggregation. Every wave's task is swept, so without
+// this the same verdict is recomputed several times a tick, forever. Keyed by
+// the bundle's item signature, so the moment the bundle changes the cache
+// entry stops matching and a fresh answer is computed.
+const BUNDLE_WAIT_TTL_MS = 10 * 60 * 1000;
+const bundleWaitCache = new Map(); // eventKey|signature -> at
+
+async function eventBundlePlans(game, { fresh = false } = {}) {
+  const key = settings.normGameName(game);
+  const hit = bundlePlanCache.get(key);
+  if (!fresh && hit && Date.now() - hit.at < BUNDLE_PLAN_TTL_MS)
+    return hit.plans;
+  const plans = await autoFarmBundles.plansForGame(game);
+  bundlePlanCache.set(key, { at: Date.now(), plans });
+  return plans;
+}
+
+// Publish this task's EVENT as one bundle: every wave of it the auto-farm has
+// actually farmed, merged, titled as the event, priced on evidence.
+//
+// Returns null when the task belongs to no multi-wave event — that is the
+// signal for listStackedBundle to fall back to its older cross-event stack.
+// Any other return value (published, dry-run or a reasoned skip) is final.
+// Two publishers can reach the same event: the auto-farmer's stacked-bundle
+// sweep (once per active task) and this module's own event-bundle sweep. The
+// duplicate guard below is a read of the live rows followed by a write, so two
+// callers can sit inside that window at once and both publish. Same process,
+// so a Set is enough — and far cheaper than discovering the duplicate on a
+// marketplace, where taking one back is a manual delist.
+const eventBundleInFlight = new Set();
+
+/**
+ * Publish this task's EVENT as one bundle.
+ *
+ * `plan` may be passed by a caller that already computed it (the sweep does),
+ * which also removes the second source of truth: without it the sweep decides
+ * on a freshly computed plan and then publishes against a separately cached
+ * one.
+ *
+ * Returns null when the task belongs to no multi-wave event — the signal for
+ * listStackedBundle to fall back to its older cross-event stack. Any other
+ * return value is final.
+ */
+async function listEventBundle(task, { dryRun = false, plan = null } = {}) {
+  let resolved = plan;
+  if (!resolved) {
+    resolved = autoFarmBundles.planForTask(
+      task,
+      await eventBundlePlans(task.game),
+    );
+  }
+  if (!resolved) return null;
+  if (eventBundleInFlight.has(resolved.key)) {
+    return {
+      skipped: "another pass is already publishing this event",
+      waiting: true,
+    };
+  }
+  eventBundleInFlight.add(resolved.key);
+  try {
+    return await publishEventBundleFor(task, resolved, dryRun);
+  } finally {
+    eventBundleInFlight.delete(resolved.key);
+  }
+}
+
+async function publishEventBundleFor(task, plan, dryRun) {
+  // The bundle has to be strictly bigger than what this event ALREADY sells,
+  // or it is the same listing published twice.
+  //
+  // Measured against the biggest of the event's own solo sets, not the owner
+  // task's alone: any of the event's tasks may be chosen as the owner, and
+  // comparing against whichever one happened to be picked made the verdict
+  // depend on that arbitrary choice. onCampaignEnded also grows a solo set to
+  // the sibling union, so one wave's listing frequently already advertises the
+  // whole event — which is exactly the duplicate this refuses to publish.
+  let soloCount = 0;
+  try {
+    const siblings = await AutoFarmTask.find(
+      { _id: { $in: plan.taskIds } },
+      { "listing.setId": 1 },
+    ).lean();
+    const setIds = [
+      ...new Set(
+        siblings
+          .map((t) => String((t.listing && t.listing.setId) || ""))
+          .filter(Boolean),
+      ),
+    ];
+    if (setIds.length) {
+      const sets = await DropSet.find(
+        { _id: { $in: setIds } },
+        { items: 1 },
+      ).lean();
+      for (const set of sets) {
+        soloCount = Math.max(soloCount, ((set && set.items) || []).length);
+      }
+    }
+  } catch {
+    soloCount = 0;
+  }
+  if (plan.items.length <= soloCount) {
+    return {
+      skipped:
+        "the event bundle adds nothing over this event's own listings (" +
+        plan.items.length +
+        " vs " +
+        soloCount +
+        " items)",
+    };
+  }
+
+  // One live bundle per event. Every wave's task is swept, so without this the
+  // same event would be published once per wave — the duplicate-set sprawl
+  // that had three Halo sets competing over one pool of accounts.
+  const live = await autoFarmBundles.liveBundleForEvent(plan.key);
+  if (live) {
+    return {
+      skipped:
+        '"' +
+        plan.eventName +
+        '" is already selling as a bundle (' +
+        live.marketplace +
+        " " +
+        live.externalId +
+        ")",
+    };
+  }
+
+  const waitKey = plan.key + "|" + plan.signature;
+  const waitedAt = bundleWaitCache.get(waitKey);
+  if (waitedAt && Date.now() - waitedAt < BUNDLE_WAIT_TTL_MS) {
+    return {
+      skipped:
+        "still waiting for an account that holds the whole " +
+        plan.eventName +
+        " bundle",
+      waiting: true,
+    };
+  }
+
+  // Only accounts that provably hold EVERY item at the promised copy count,
+  // unconnected, unsold, and not already on a live listing — so the bundle can
+  // never take stock the wave listings are selling.
+  const eligible = await pickDeliveryAccounts(
+    { assignedAccounts: plan.logins },
+    plan.logins.length,
+    plan.items,
+  );
+  if (!eligible.length) {
+    bundleWaitCache.set(waitKey, Date.now());
+    return {
+      skipped:
+        "no free account holds the whole " + plan.eventName + " bundle yet",
+      waiting: true,
+    };
+  }
+  bundleWaitCache.delete(waitKey);
+  // Half now, half kept back: the next wave of the event bundles on top of it.
+  const split = computeSplit(eligible.length);
+  const accounts = eligible.slice(0, split.listNow);
+
+  const research = await MarketResearch.findOne({ game: task.game }).lean();
+  const soldFloorUsd = await autoFarmBundles.soldFloorForEvent(plan.key);
+  const priced = await autoFarmBundles.priceBundle({
+    plan,
+    game: task.game,
+    marketplace: "gameflip",
+    research,
+    soldFloorUsd,
+  });
+  // The shared engine, not derivePrice: this bundle's size, its completeness
+  // and what it has already sold for are all inputs, and derivePrice has none
+  // of them (it also anchors on gameflip.lowest, which is often our own row).
+  // If the engine is unavailable the old stacked price still applies — a
+  // bundle is never published at an invented number.
+  const price =
+    priced && Number(priced.price) > 0
+      ? Number(priced.price)
+      : stackedBundlePrice(derivePrice(research), soldFloorUsd);
+
+  const title = autoFarmBundles.bundleTitleFor(plan);
+  const describe = (marketplace) =>
+    buildDescription({
+      game: task.game,
+      items: plan.items,
+      campaignName: plan.eventName,
+      postEvent: false,
+      marketplace,
+      extraLines: autoFarmBundles.bundleDescriptionLinesFor(plan, marketplace),
+    });
+  const descriptions = {
+    gameflip: describe("gameflip"),
+    digiseller: describe("digiseller"),
+    ggsel: describe("ggsel"),
+  };
+
+  if (dryRun) {
+    return {
+      wouldList: {
+        title,
+        price,
+        qty: accounts.length,
+        items: plan.items.length,
+        event: plan.eventName,
+        waves: plan.labels,
+        full: plan.full,
+        priceBasis: (priced && priced.basis) || "fallback",
+      },
+    };
+  }
+
+  const set = await DropSet.create({
+    name: autoFarmBundles.bundleSetName(plan),
+    note: autoFarmBundles.bundleSetNote(plan),
+    items: plan.items.map(({ itemKey, name, game, image, qty }) => ({
+      itemKey,
+      name,
+      game,
+      image: image || "",
+      qty,
+    })),
+    price,
+    minPriceUsd: price,
+    listed: false,
+    custom: true,
+    coverGame: task.game,
+    sourceType: autoFarmBundles.SOURCE_TYPE,
+    sourceEventKey: plan.key,
+    sourceEventName: plan.eventName,
+    sourceCampaignIds: plan.campaignIds,
+    // Stock stays inside the accounts the auto-farmer assigned to this event's
+    // waves. Without the scope, a relist would resolve delivery against the
+    // whole archive and could hand out an account no task here ever farmed.
+    accountScopeLogins: plan.logins,
+  });
+
+  const out = await publishStackedListing({
+    task,
+    set,
+    title,
+    descriptions,
+    price,
+    accounts,
+    split,
+  });
+  // The plan is stale the moment a bundle publishes (those accounts are now on
+  // a live listing), so the next task of this game re-reads rather than
+  // re-publishing against a cached view.
+  bundlePlanCache.delete(settings.normGameName(task.game));
+  return out;
+}
+
+// Publish a SECOND listing for a task whose accounts were reused across this
+// game's earlier campaigns: those accounts hold every prior bundle PLUS the
+// current one, so the stack sells as its own combined-bundle listing at a
+// combined price — while the task's main listing keeps selling the current
+// event solo from its other accounts.
+//
+// Only accounts that verifiably hold EVERY item of the combined stack qualify
+// (the same holdings gate the solo listing uses), and pickDeliveryAccounts
+// already excludes anything attached to a live listing — so the stack is fed
+// exactly by the reused/held-back accounts, never by stock the solo listing
+// (or any other listing) is selling. Half of the qualifying stack is listed
+// now; the rest stays unlisted so the NEXT event can stack on top of it again.
+async function listStackedBundle(taskId, { dryRun = false } = {}) {
+  const task = await AutoFarmTask.findById(taskId);
+  if (!task) return { skipped: "task not found" };
+  if (task.stackListing && task.stackListing.externalId) {
+    return { skipped: "already listed" };
+  }
+  // The solo listing goes first — it anchors the current event's stock split.
+  if (!task.listing || !task.listing.externalId) {
+    return { skipped: "no solo listing yet" };
+  }
+
+  // Event bundles come first. A game's campaigns are WAVES of an event, and
+  // "Week 1 + Finals, complete" is a product; "this campaign plus every other
+  // campaign this game ever ran" is not, which is why the union below is
+  // usually refused by the holdings gate. Only a task belonging to no
+  // multi-wave event falls through to it.
+  if (settings.getAutoFarm().autoFarmEventBundles !== false) {
+    try {
+      const bundled = await listEventBundle(task, { dryRun });
+      if (bundled) return bundled;
+    } catch (e) {
+      console.error("autoLister event bundle failed:", e.message);
+    }
+  }
+
+  // Prior bundles: every OTHER auto-farm set this game has published.
+  const siblings = await AutoFarmTask.find(
+    {
+      game: task.game,
+      _id: { $ne: task._id },
+      "listing.setId": { $nin: ["", null] },
+    },
+    { "listing.setId": 1 },
+  ).lean();
+  const setIds = [
+    ...new Set(
+      siblings.map((t) => t.listing && t.listing.setId).filter(Boolean),
+    ),
+  ];
+  if (!setIds.length) return { skipped: "no prior campaign bundles" };
+  const priorSets = await DropSet.find({ _id: { $in: setIds } }).lean();
+  if (!priorSets.length) return { skipped: "prior sets gone" };
+
+  const current = await campaignItems(
+    task.campaignId,
+    task.game,
+    task.campaignName,
+  );
+  const items = stackItems([...priorSets, { items: current }]);
+  // The stack must actually be BIGGER than the solo bundle, or it's the same
+  // listing twice.
+  if (items.length <= current.length) {
+    return { skipped: "nothing extra to stack" };
+  }
+
+  const research = await MarketResearch.findOne({ game: task.game }).lean();
+  const priorPrice = priorSets.reduce(
+    (m, s) => Math.max(m, Number(s.price) || 0),
+    0,
+  );
+  const price = stackedBundlePrice(derivePrice(research), priorPrice);
+  const title = buildTitle({
+    game: task.game,
+    items,
+    campaignName: task.campaignName,
+  });
+  const descriptions = {
+    gameflip: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "gameflip",
+    }),
+    digiseller: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "digiseller",
+    }),
+    ggsel: buildDescription({
+      game: task.game,
+      items,
+      campaignName: task.campaignName,
+      postEvent: false,
+      marketplace: "ggsel",
+    }),
+  };
+
+  // Candidate accounts: everything this GAME's auto-farm tasks ever assigned
+  // (the previous events' held-back stash lives on older tasks, not this one),
+  // minus anything currently assigned to a DIFFERENT game's live plan (its
+  // solo listing counts on those accounts). Deliberately never the manual
+  // fleet — that stash is the owner's to sell by hand.
+  const gameTasks = await AutoFarmTask.find(
+    { game: task.game },
+    { assignedAccounts: 1 },
+  ).lean();
+  const candidates = new Set();
+  for (const t of gameTasks) {
+    for (const u of t.assignedAccounts || []) {
+      const k = String(u).toLowerCase();
+      if (k) candidates.add(k);
+    }
+  }
+  for (const t of await AutoFarmTask.find(
+    { game: { $ne: task.game }, status: { $in: ["active", "planned"] } },
+    { assignedAccounts: 1 },
+  ).lean()) {
+    for (const u of t.assignedAccounts || []) {
+      candidates.delete(String(u).toLowerCase());
+    }
+  }
+  if (!candidates.size) return { skipped: "no candidate accounts" };
+
+  // Everyone who provably holds the WHOLE stack and isn't already on a live
+  // listing. List half, keep half for the next event's stack.
+  const eligible = await pickDeliveryAccounts(
+    { assignedAccounts: [...candidates] },
+    candidates.size,
+    items,
+  );
+  if (!eligible.length) {
+    return {
+      skipped: "no free account holds the full stack yet",
+      waiting: true,
+    };
+  }
+  const split = computeSplit(eligible.length);
+  const accounts = eligible.slice(0, split.listNow);
+
+  if (dryRun) {
+    return {
+      wouldList: { title, price, qty: accounts.length, items: items.length },
+    };
+  }
+
+  const set = await DropSet.create({
+    name:
+      task.game +
+      " — stacked bundle (" +
+      (task.campaignName || task.campaignId) +
+      " + " +
+      priorSets.length +
+      " earlier event" +
+      (priorSets.length === 1 ? "" : "s") +
+      ")",
+    note:
+      "Auto-farmed Twitch drops, stacked across campaigns (" + task.game + ")",
+    items: items.map(({ itemKey, name, game, image, qty: q }) => ({
+      itemKey,
+      name,
+      game,
+      image,
+      qty: q,
+    })),
+    price,
+    minPriceUsd: price,
+    listed: false,
+    custom: true,
+    coverGame: task.game,
+  });
+
+  return publishStackedListing({
+    task,
+    set,
+    title,
+    descriptions,
+    price,
+    accounts,
+    split,
+  });
+}
+
+/* --------------------- event-bundle sweep (its own trigger) -------------- */
+
+// The stacked-bundle sweep in utils/autoFarmer.js reads ACTIVE tasks only, and
+// an event's waves are almost always COMPLETED by the time the whole event is
+// worth selling as one bundle. Measured on prod 2026-09-08: all 12 games with a
+// bundle were backed ENTIRELY by completed tasks, and only one of them had any
+// stackable active task at all — so riding on that sweep, the bundler would
+// essentially never fire. This is the bundler's own trigger, and the only
+// thing here that reaches completed work.
+//
+// Deliberately conservative: it publishes at most a few bundles per pass, only
+// ones no live row already sells, only where an account provably holds the
+// whole bundle, and never while the auto-farm is disabled or in dry run.
+const EVENT_BUNDLE_TICK_MS = 20 * 60 * 1000;
+const EVENT_BUNDLE_FIRST_TICK_MS = 5 * 60 * 1000;
+const EVENT_BUNDLE_MAX_PER_PASS = 3;
+let eventBundleStarted = false;
+
+// The task a bundle is recorded on. Any of the event's own tasks is truthful —
+// they all farmed a wave of it — so prefer one still active, then the most
+// recently touched. A task already carrying a stackListing is skipped rather
+// than overwritten: that field is the record of a listing it already published.
+async function ownerTaskForPlan(plan) {
+  const tasks = await AutoFarmTask.find({ _id: { $in: plan.taskIds } });
+  const free = tasks.filter(
+    (t) => !(t.stackListing && t.stackListing.externalId),
+  );
+  if (!free.length) return null;
+  free.sort(
+    (a, b) =>
+      (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) ||
+      new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0),
+  );
+  return free[0];
+}
+
+async function publishReadyEventBundles({
+  apply = true,
+  max = EVENT_BUNDLE_MAX_PER_PASS,
+} = {}) {
+  const af = settings.getAutoFarm();
+  if (!af.enabled) return { skipped: "auto-farm disabled", published: [] };
+  if (af.autoFarmEventBundles === false) {
+    return { skipped: "event bundles turned off", published: [] };
+  }
+  // The auto-farm's global dry run means "decide, but change nothing".
+  if (af.dryRun) apply = false;
+
+  const byGame = await autoFarmBundles.plansForAllGames();
+  const plans = [...byGame.values()].flat();
+  const out = {
+    plans: plans.length,
+    published: [],
+    skipped: [],
+    dryRun: !apply,
+  };
+  if (!plans.length) return out;
+
+  // Complete events first: they are the ones that carry the full-event price.
+  plans.sort(
+    (a, b) =>
+      Number(b.full) - Number(a.full) || b.items.length - a.items.length,
+  );
+  const live = await autoFarmBundles.liveBundlesForEvents(
+    plans.map((p) => p.key),
+  );
+
+  for (const plan of plans) {
+    if (out.published.length >= max) break;
+    if (live.has(plan.key)) {
+      out.skipped.push({ event: plan.eventName, why: "already selling" });
+      continue;
+    }
+    const task = await ownerTaskForPlan(plan);
+    if (!task) {
+      out.skipped.push({
+        event: plan.eventName,
+        why: "every task of this event already carries a bundle listing",
+      });
+      continue;
+    }
+    let r;
+    try {
+      r = await listEventBundle(task, { dryRun: !apply, plan });
+    } catch (e) {
+      console.error("event bundle " + plan.eventName + " failed:", e.message);
+      out.skipped.push({ event: plan.eventName, why: "failed: " + e.message });
+      continue;
+    }
+    if (r && r.listed) {
+      out.published.push({
+        game: task.game,
+        event: plan.eventName,
+        ...r.listed,
+      });
+      sendTelegram(
+        "📦 Auto-listed EVENT bundle — " +
+          task.game +
+          "\n" +
+          r.listed.title +
+          "\n$" +
+          r.listed.price +
+          " · qty " +
+          r.listed.qty +
+          "\n" +
+          (r.listed.url || ""),
+      ).catch(() => {});
+    } else if (r && r.wouldList) {
+      out.published.push({
+        game: task.game,
+        event: plan.eventName,
+        dryRun: true,
+        ...r.wouldList,
+      });
+    } else {
+      out.skipped.push({
+        event: plan.eventName,
+        why: (r && r.skipped) || "not part of a multi-wave event",
+      });
+    }
+  }
+  return out;
+}
+
+// Same shape as unclaimedAutoList.start(): re-arms in `finally`, so a thrown
+// pass never kills the loop, and unref'd so it can never hold the process open.
+function startEventBundleSweep() {
+  if (eventBundleStarted) return;
+  eventBundleStarted = true;
+  const tick = async () => {
+    try {
+      const r = await publishReadyEventBundles({});
+      if (r && r.published && r.published.length) {
+        console.log(
+          "event bundles: published " +
+            r.published.length +
+            " (" +
+            r.published.map((p) => p.event).join(", ") +
+            ")",
+        );
+      }
+    } catch (e) {
+      console.error("event bundle sweep error:", e.message);
+    } finally {
+      const t = setTimeout(tick, EVENT_BUNDLE_TICK_MS);
+      if (t.unref) t.unref();
+    }
+  };
+  const t = setTimeout(tick, EVENT_BUNDLE_FIRST_TICK_MS);
+  if (t.unref) t.unref();
 }
 
 /* --------------------------- campaign end flow --------------------------- */
@@ -1884,6 +2927,12 @@ function chooseStackItems(current, stacked, holderCount) {
 // compound, and cannot outrun the bundle. Items still stack — the bundle really
 // does grow — only its price stays tied to what the listing was actually
 // selling for.
+// How long a Gameflip relist may still be "pending" before the post-event markup
+// stops waiting for it. Long enough for a chain to republish (the fulfiller
+// retries on a 60s tick with backoff), short enough that a chain which never
+// relists cannot hold a task in the retry queue indefinitely.
+const POST_EVENT_RELIST_GRACE_MS = 24 * 60 * 60 * 1000;
+
 function postEventPrice(basePrice, { markup = POST_EVENT_MARKUP } = {}) {
   const base = Number(basePrice) > 0 ? Number(basePrice) : 1.0;
   return Math.max(0.75, round25(base * markup));
@@ -1967,6 +3016,14 @@ async function onCampaignEnded(taskId) {
     items,
     campaignName: task.campaignName,
     postEvent: true,
+    marketplace: "gameflip",
+  });
+  const ggselDescription = buildDescription({
+    game: task.game,
+    items,
+    campaignName: task.campaignName,
+    postEvent: true,
+    marketplace: "ggsel",
   });
 
   // Persist the (possibly grown, possibly unchanged) items + the marked-up
@@ -2048,9 +3105,12 @@ async function onCampaignEnded(taskId) {
     if (s.marketplace === "ggsel") {
       try {
         // Text-only PATCH — omitting priceRub leaves the GGSel price untouched.
-        await mp.ggselUpdateOffer(s.externalId, { title, description });
+        await mp.ggselUpdateOffer(s.externalId, {
+          title,
+          description: ggselDescription,
+        });
         s.title = title;
-        s.description = description;
+        s.description = ggselDescription;
         await s.save();
         secondaryUpdated++;
       } catch (e) {
@@ -2076,7 +3136,44 @@ async function onCampaignEnded(taskId) {
   task.listing.title = title;
   task.listing.price = price;
   task.listing.repricedAt = new Date();
-  task.listing.postEvent = true;
+  // MARK IT DONE — unless a relist is genuinely about to produce a row.
+  //
+  // Setting this even when no live row remains is DELIBERATE and must stay:
+  // autoFarmer.repriceEndedTasks filters on exactly this flag, and the comment
+  // there ("so this queue always drains rather than spinning on dead listings")
+  // is the reason. Removing it would put the queue back to grinding on listings
+  // that will never exist again.
+  //
+  // But "no ACTIVE row at this instant" is not the same as "no row will ever
+  // exist". A Gameflip chain mid-relist has a `sold` row still owing units, and
+  // a fresh listing lands moments later — marking the markup done in that window
+  // loses the whole +50% scarcity price permanently, because the retry queue
+  // will never look at the task again.
+  //
+  // So defer ONLY while a relist is genuinely pending, and only while it is
+  // RECENT. The recency bound is what preserves the drain: a chain that never
+  // relists stops qualifying after POST_EVENT_RELIST_GRACE_MS and the task
+  // leaves the queue exactly as it does today.
+  let relistPending = false;
+  if (!row) {
+    const owed = await MarketplaceListing.findOne(
+      {
+        set: mySet._id,
+        marketplace: "gameflip",
+        origin: "auto",
+        status: "sold",
+        qtyRemaining: { $gt: 0 },
+        updatedAt: {
+          $gte: new Date(Date.now() - POST_EVENT_RELIST_GRACE_MS),
+        },
+      },
+      { _id: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    relistPending = !!owed;
+  }
+  task.listing.postEvent = !relistPending;
   if (row && heldBack > 0) {
     task.listing.qty = (Number(task.listing.qty) || 0) + heldBack;
     task.listing.heldBack = 0;
@@ -2097,8 +3194,20 @@ async function onCampaignEnded(taskId) {
 }
 
 module.exports = {
+  // Exported so the no-claim guard on each is testable without driving a whole
+  // auto-farm task through the lister.
+  publishEldoradoShare,
+  publishPlayerAuctionsShare,
+  publishG2gShare,
   listActivatedTask,
   listStackedBundle,
+  listEventBundle,
+  publishEventBundleFor,
+  publishReadyEventBundles,
+  startEventBundleSweep,
+  ownerTaskForPlan,
+  eventBundlePlans,
+  publishStackedListing,
   stackedBundlePrice,
   onCampaignEnded,
   refillMarkets,
@@ -2109,6 +3218,7 @@ module.exports = {
   buildTitle,
   buildDescription,
   derivePrice,
+  venuePrice,
   stackItems,
   chooseStackItems,
   postEventPrice,
@@ -2119,6 +3229,12 @@ module.exports = {
   resolveCampaignItems,
   campaignItems,
   filterVerifiedHolders,
+  // Additive export for the lane engine's drop checker
+  // (utils/farm2/steps/verify.js). It reuses THIS holdings gate rather than
+  // running its own aggregation, so "does this account really hold the bundle?"
+  // has exactly one implementation across both engines. Read-only; no
+  // behaviour change to any existing caller.
+  verifiedHoldersForItems,
   // reserve→publish rollback (release stranded reservations on publish failure)
   withReservationRollback,
   // secondary-market publishing (used by ops scripts to rebuild bad products)

@@ -37,6 +37,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const accountState = require("./twitchAccountState");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
+const { logEvent } = require("./systemLog");
 
 // Statuses worth re-probing: Twitch refused the token, or the scan errored in a
 // way that may have been a suspension all along. "ok" accounts are never probed
@@ -340,7 +341,7 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
 /* ------------------------- 2b. retire from listings ----------------------- */
 
 // Does this listing row still sell `id`/`login`? Both the top-level pair (a
-// Gameflip auto-delivery offer, a FunPay pool line) and `units` (Digiseller /
+// Gameflip auto-delivery offer) and `units` (Digiseller /
 // GGSel per-unit bookkeeping) count. Pure so the matching is testable.
 function listingRefsAccount(row, id, login) {
   const wantId = String(id || "");
@@ -393,7 +394,13 @@ async function retireFromLiveListings({ onProgress } = {}) {
 
   const live = await MarketplaceListing.find(
     { status: "active" },
-    { accountId: 1, accountLogin: 1, units: 1 },
+    {
+      accountId: 1,
+      accountLogin: 1,
+      units: 1,
+      accountOffer: 1,
+      noclaimStock: 1,
+    },
   ).lean();
 
   for (const candidate of live) {
@@ -415,6 +422,51 @@ async function retireFromLiveListings({ onProgress } = {}) {
     }
     const unique = [...new Map(bad.map((a) => [String(a._id), a])).values()];
     if (!unique.length) continue;
+
+    // An ACCOUNT LISTING (docs/ACCOUNT-LISTINGS-CONTRACT.md) is not archive
+    // stock and must not be repaired as if it were. This sweep matches on
+    // units[].login, and an offer-backed row's units carry the owner's pasted
+    // logins — so a supplied login that also exists in the archive as a
+    // suspended BotAccount (exactly the conflict:"in-archive" case) would drag
+    // its listing into the detach path with hardRepublish: true. That path
+    // rebuilds the whole product from a DropSet the row does not have and
+    // refills it from archive stock it must never touch, costing a live
+    // product's URL and sales history to fix an account it does not own.
+    //
+    // The two collections merely share a login here; nothing proves the
+    // supplied account is the suspended one. So report it and let the owner
+    // decide in the Account listings tab, where the ledger row can be removed
+    // by hand. Not counted as a repaired listing — nothing was repaired.
+    if (candidate.accountOffer) {
+      const msg =
+        "account listing " +
+        candidate._id +
+        " sells " +
+        unique.map((a) => a.login).join(", ") +
+        " from its own supplied stock, and the same login is suspended in the " +
+        "Drop Archive — check it in the Account listings tab. Left untouched: " +
+        "the archive repair path does not apply to supplied stock.";
+      progress("warning — " + msg);
+      report.warnings.push(msg);
+      continue;
+    }
+    // A NO-CLAIM listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) is the
+    // same story: its units[].login are no-claim farm accounts owned by
+    // utils/noclaimListings, which re-reads each one live before it is
+    // delivered. The archive detach path would rebuild the product from its
+    // set's DropLog stock, so report it and leave it alone.
+    if (candidate.noclaimStock) {
+      const msg =
+        "no-claim listing " +
+        candidate._id +
+        " carries " +
+        unique.map((a) => a.login).join(", ") +
+        ", suspended in the Drop Archive — the no-claim lifecycle re-checks " +
+        "it live; left untouched";
+      progress("warning — " + msg);
+      report.warnings.push(msg);
+      continue;
+    }
 
     report.listings++;
     for (const acc of unique) {
@@ -580,6 +632,32 @@ async function purgeSuspended({ dryRun = false, onProgress } = {}) {
   report.deletedDrops = drops.deletedCount || 0;
   const del = await BotAccount.deleteMany({ _id: { $in: ids } });
   report.deletedAccounts = del.deletedCount || 0;
+  if (report.deletedAccounts) {
+    // The durable record that was missing when ~500 accounts vanished with no
+    // trace: exactly which suspended bot accounts the purge deleted, and when.
+    logEvent({
+      category: "suspended",
+      action: "purged",
+      actor: "system",
+      severity: "warn",
+      count: report.deletedAccounts,
+      detail:
+        "deleted " +
+        report.deletedAccounts +
+        " suspended bot account(s) + " +
+        report.deletedDrops +
+        " drop row(s); kept " +
+        kept.length,
+      meta: {
+        logins: doomed
+          .map((d) => d.acc.login)
+          .filter(Boolean)
+          .slice(0, 50),
+        deletedDrops: report.deletedDrops,
+        kept: kept.length,
+      },
+    });
+  }
   if (onProgress) {
     onProgress(
       "Purged " +
@@ -641,6 +719,29 @@ async function purgeSuspendedPool({ dryRun = false, onProgress } = {}) {
   report.deletedDrops = drops.deletedCount || 0;
   const res = await AvailableAccount.deleteMany({ _id: { $in: ids } });
   report.deleted = res.deletedCount || 0;
+  if (report.deleted) {
+    const delSet = new Set(ids.map(String));
+    logEvent({
+      category: "suspended",
+      action: "purged_pool",
+      actor: "system",
+      severity: "warn",
+      count: report.deleted,
+      detail:
+        "deleted " +
+        report.deleted +
+        " suspended pool account(s) + " +
+        report.deletedDrops +
+        " drop row(s)",
+      meta: {
+        usernames: rows
+          .filter((r) => delSet.has(String(r._id)))
+          .map((r) => r.usernameLower)
+          .filter(Boolean)
+          .slice(0, 50),
+      },
+    });
+  }
   if (onProgress) {
     onProgress(
       "Purged " +
@@ -710,6 +811,44 @@ async function sweep({
           ? " " + retired.warnings.length + " need(s) a manual look."
           : ""),
     ).catch(() => {});
+  }
+  // One audit row per sweep that actually did something (best-effort). A quiet
+  // sweep (all zeros) writes nothing, so the feed stays a record of real change.
+  try {
+    const newlyDead = (bots.suspended || 0) + (pool.suspended || 0);
+    const freed = (released && released.unassigned) || 0;
+    const delBots = (purged && purged.deletedAccounts) || 0;
+    const delPool = (purgedPool && purgedPool.deleted) || 0;
+    const detached = (retired && retired.detached) || 0;
+    if (newlyDead || freed || delBots || delPool || detached) {
+      logEvent({
+        category: "suspended",
+        action: "sweep",
+        actor: "tick",
+        severity: newlyDead ? "warn" : "info",
+        count: newlyDead,
+        detail:
+          "confirmed gone: " +
+          (bots.suspended || 0) +
+          " bot / " +
+          (pool.suspended || 0) +
+          " pool; slots freed: " +
+          freed +
+          (delBots || delPool
+            ? "; deleted " + delBots + " bot + " + delPool + " pool"
+            : ""),
+        meta: {
+          newlyDeadBots: bots.suspended || 0,
+          newlyDeadPool: pool.suspended || 0,
+          releasedSlots: freed,
+          purgedBots: delBots,
+          purgedPool: delPool,
+          retiredListings: detached,
+        },
+      });
+    }
+  } catch {
+    /* audit is best-effort */
   }
   return { bots, pool, released, evicted, retired, purged, purgedPool };
 }
