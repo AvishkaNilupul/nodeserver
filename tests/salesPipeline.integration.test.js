@@ -251,7 +251,7 @@ test("game matching is case-insensitive", async () => {
 test("ownStats splits our own sales per game and per marketplace", async () => {
   await signal({ source: "listing_sold", account: null, marketplace: "zeusx", priceUsd: 7 });
   await signal({ source: "listing_sold", account: null, marketplace: "zeusx", priceUsd: 3 });
-  await signal({ source: "listing_sold", account: null, marketplace: "funpay", priceUsd: 5 });
+  await signal({ source: "listing_sold", account: null, marketplace: "g2g", priceUsd: 5 });
   // Shelf-filling must not appear anywhere in the rollups either.
   await signal({ source: "drop_reserved", account: new mongoose.Types.ObjectId() });
 
@@ -262,15 +262,15 @@ test("ownStats splits our own sales per game and per marketplace", async () => {
   const byMarket = own.marketBy["overwatch 2"];
   assert.equal(byMarket.zeusx.sales, 2);
   assert.equal(byMarket.zeusx.revenue, 10);
-  assert.equal(byMarket.funpay.sales, 1);
+  assert.equal(byMarket.g2g.sales, 1);
 });
 
 test("the per-market rollup is how unscoutable markets stay visible", async () => {
-  // ZeusX publishes no keyword search; Z2U and EpicNPC sit behind bot
-  // protection. Our own sales there are the only signal that can exist.
-  await signal({ source: "listing_sold", account: null, marketplace: "z2u", priceUsd: 12 });
+  // ZeusX publishes no keyword search, so our own sales there are the only
+  // signal that can exist.
+  await signal({ source: "listing_sold", account: null, marketplace: "zeusx", priceUsd: 12 });
   const own = await research.ownStats();
-  assert.equal(own.marketBy["overwatch 2"].z2u.revenue, 12);
+  assert.equal(own.marketBy["overwatch 2"].zeusx.revenue, 12);
 });
 
 // ------------------------------------------------------- history
@@ -369,24 +369,6 @@ test("a forced scan takes every game, uncapped", async () => {
   const many = Array.from({ length: 150 }, (_, i) => "Game " + i);
   const due = await research.dueGames(many, {}, true);
   assert.equal(due.length, 150);
-});
-
-// ------------------------------------------------- funpay node map
-
-test("funpay nodes are learned from our own listings", async () => {
-  // FunPay has no cross-game search, so a game is invisible there until its
-  // category node is known — and every listing we publish already records one.
-  const set = await makeSet(["Overwatch 2"]);
-  await makeListing(set, { marketplace: "funpay", externalNode: "2430" });
-  const map = await research.funpayNodeMap();
-  assert.equal(map["overwatch 2"], "2430");
-});
-
-test("listings with no recorded node are ignored", async () => {
-  const set = await makeSet(["Lost Ark"]);
-  await makeListing(set, { marketplace: "funpay", externalNode: "" });
-  const map = await research.funpayNodeMap();
-  assert.equal(map["lost ark"], undefined);
 });
 
 // -------------------------------------------------- recommendation

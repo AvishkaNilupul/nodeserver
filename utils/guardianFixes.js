@@ -3,16 +3,11 @@
 // A finding tells a human WHAT would burn a buyer; this module is the HOW of
 // putting it right without leaving the page:
 //
-//   replace (funpay)   swap a burned / dead account out of the offer's
-//                      UNDELIVERED auto-delivery pool for a freshly claimed
-//                      one. FunPay's own editor is the source of truth for
-//                      which lines are still undelivered, so this also tells
-//                      apart "burned line pulled before anyone bought it"
-//                      from "line already delivered — this was a real sale,
-//                      just restock".
+//   replace (qty)      swap a burned / dead account out of a Digiseller
+//                      product's delivery units for a freshly claimed one.
 //   reserve            re-reserve a listing's drops under its own claim tag
-//                      (claim-mismatch where the drops are simply free). On
-//                      FunPay a genuine conflict falls back to replace.
+//                      (claim-mismatch where the drops are simply free). If
+//                      a genuine conflict is reported instead.
 //   detach (qty)       stop tracking an account on a Plati/GGSel listing row
 //                      whose unit the platform already delivered (the low-
 //                      severity "likely a completed sale" findings).
@@ -27,7 +22,6 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
-const fpFulfiller = require("./funpayFulfiller");
 const guardian = require("./marketplaceGuardian");
 const mp = require("./marketplaces");
 const accountState = require("./twitchAccountState");
@@ -70,15 +64,6 @@ function fixPlanFor(f, listing) {
   switch (f.type) {
     case "redeemed-drops":
       if (!active || !f.accountId) return null;
-      if (lst.marketplace === "funpay") {
-        return {
-          action: "replace",
-          label: "Replace account",
-          hint:
-            "Pull this account's line out of the FunPay auto-delivery pool " +
-            "(if a buyer hasn't taken it yet) and feed in a fresh account.",
-        };
-      }
       if (isQtyListing(lst)) {
         return {
           action: "detach",
@@ -106,15 +91,6 @@ function fixPlanFor(f, listing) {
       }
       return null;
     case "dead-token":
-      if (active && f.accountId && lst.marketplace === "funpay") {
-        return {
-          action: "replace",
-          label: "Replace account",
-          hint:
-            "Pull this account's line out of the FunPay auto-delivery pool " +
-            "and feed in a fresh account with a live token.",
-        };
-      }
       // Digiseller can drop a single delivery unit, but only one whose
       // content_id we captured at feed time — the API has no way to list a
       // product's existing content, so units fed before that bookkeeping
@@ -154,7 +130,7 @@ function fixPlanFor(f, listing) {
       // The login is gone from Twitch, so every platform has the same remedy:
       // get it off the listing, whatever "off" means there (Gameflip delists and
       // republishes from healthy stock, Digiseller drops the delivery unit,
-      // GGSel/FunPay hand it back to the auto-feed). The suspension sweep does
+      // GGSel hands it back to the auto-feed). The suspension sweep does
       // this by itself — the button exists for the cases where its surgery
       // could not finish, e.g. the marketplace was down at the time.
       if (active && (f.accountId || f.accountLogin)) {
@@ -195,7 +171,7 @@ function fixPlanFor(f, listing) {
           label: "Fix reservation",
           hint:
             "Re-reserve this game's drops for this listing. If another sale " +
-            "really holds them, a FunPay account is replaced instead.",
+            "really holds them, the conflict is reported instead.",
         };
       }
       return null;
@@ -305,108 +281,7 @@ async function fixReplace(f, listing) {
   if (listing.marketplace === "digiseller") {
     return fixReplaceDigisellerUnit(f, listing);
   }
-  if (listing.marketplace !== "funpay") {
-    throw httpError(400, "Replace is only supported for FunPay listings");
-  }
-  const set = await DropSet.findById(listing.set).lean();
-  if (!set) throw httpError(400, "The listing's drop set no longer exists");
-  const bad = await BotAccount.findById(f.accountId, {
-    login: 1,
-    credUsername: 1,
-  }).lean();
-  const badLogins = [
-    ...new Set(
-      [bad && bad.login, bad && bad.credUsername, f.accountLogin]
-        .map((s) => String(s || "").trim())
-        .filter(Boolean),
-    ),
-  ];
-  if (!badLogins.length) {
-    throw httpError(
-      400,
-      "Cannot identify the account's login to pull its delivery line",
-    );
-  }
-  const badLabel = badLogins[0];
-  const fresh = await claimFreshAccount(set, f.accountId);
-  let upd;
-  try {
-    upd = await mp.funpayUpdateSecrets(listing.externalId, listing.externalNode, {
-      removeLogins: badLogins,
-      addLines: fresh ? [fresh.line] : [],
-      activate: listing.status === "active",
-    });
-  } catch (e) {
-    if (fresh) await fpFulfiller.releaseAccounts([fresh.accountId]);
-    throw e;
-  }
-  if (!upd.removed && !fresh) {
-    throw httpError(
-      400,
-      "Account " +
-        badLabel +
-        "'s line was already delivered to a buyer, and no unsold account " +
-        "holds this bundle to restock with — nothing to change.",
-    );
-  }
-  // Reservation bookkeeping on the bad account:
-  //  - redeemed-drops with the line still in the pool: nobody bought it, so
-  //    free this set's FunPay reservation (its connected drops stay
-  //    unsellable on their own).
-  //  - redeemed-drops already delivered: a real sale — the buyer owns those
-  //    drops, keep the reservation.
-  //  - dead-token: keep the reservation as a quarantine either way. Released,
-  //    the account would go straight back into the sellable pool and could be
-  //    re-claimed by any channel with a possibly-wrong password; a rescan
-  //    that clears the token frees a human to release it from the pool page.
-  if (f.type === "redeemed-drops" && upd.removed > 0) {
-    await releaseSetForAccounts(
-      [f.accountId],
-      String(set._id),
-      guardian.CLAIM_TAGS.funpay,
-    );
-  }
-  await swapOnListing(listing, f.accountId, badLabel, fresh);
-  let msg;
-  if (upd.removed > 0 && fresh) {
-    msg =
-      "Replaced " +
-      badLabel +
-      " with " +
-      fresh.login +
-      " on FunPay " +
-      listing.externalId +
-      " — the burned line was pulled from the undelivered pool (now " +
-      upd.pool +
-      " line(s)).";
-  } else if (!upd.removed && fresh) {
-    msg =
-      badLabel +
-      "'s line was already delivered (a real sale) — restocked FunPay " +
-      listing.externalId +
-      " with " +
-      fresh.login +
-      " (pool now " +
-      upd.pool +
-      " line(s)).";
-  } else {
-    msg =
-      "Pulled " +
-      badLabel +
-      "'s line from FunPay " +
-      listing.externalId +
-      "; no unsold account holds this bundle, so nothing replaced it" +
-      (upd.pool === 0 ? " — the offer is now off sale (empty pool)." :
-        " (pool now " + upd.pool + " line(s)).");
-  }
-  if (f.type === "dead-token") {
-    msg +=
-      " " +
-      badLabel +
-      " stays reserved as a quarantine — rescan it and release it from the " +
-      "account pool if its password still works.";
-  }
-  return msg;
+  throw httpError(400, "Replace is only supported for Digiseller listings");
 }
 
 async function fixReserve(f, listing) {
@@ -431,9 +306,6 @@ async function fixReserve(f, listing) {
       tag +
       ")."
     );
-  }
-  if (listing.marketplace === "funpay") {
-    return await fixReplace(f, listing);
   }
   throw httpError(
     409,

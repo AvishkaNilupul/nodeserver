@@ -53,7 +53,7 @@ const marketResearchSchema = new mongoose.Schema(
     ownSales: { type: Number, default: 0 },
     ownRevenue: { type: Number, default: 0 },
     // Those sales split by marketplace: { zeusx: { sales, revenue }, ... }.
-    // For ZeusX, Z2U and EpicNPC this is the ONLY demand signal that exists —
+    // For ZeusX this is the ONLY demand signal that exists —
     // ZeusX publishes no keyword search and the other two sit behind bot
     // protection a server-side fetch cannot pass, so their competitors are
     // unobservable. What we sell there is still measurable, and it is the
@@ -77,6 +77,13 @@ const marketResearchSchema = new mongoose.Schema(
     competitionScore: { type: Number, default: 0 },
     opportunityScore: { type: Number, default: 0, index: true },
     recommendation: { type: String, default: "" },
+    // Unclaimed farms (no-claim + web-token) stock for this game: accounts
+    // currently attached to an unclaimed auto-listing, and units sold that way.
+    // DropLog never sees those accounts, so farmedAccounts cannot count them.
+    unclaimedStock: { type: Number, default: 0 },
+    unclaimedSold: { type: Number, default: 0 },
+    // True when the game is on settings.noClaimGames (farmed unclaimed).
+    noClaim: { type: Boolean, default: false },
     scannedAt: { type: Date, default: null },
   },
   { timestamps: true },

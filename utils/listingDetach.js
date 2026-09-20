@@ -9,7 +9,7 @@
 //
 // Each marketplace needs different handling because "the account is on this
 // listing" means different things:
-//   funpay      — a login:password line in the offer's auto-delivery pool.
+//   (qty)       — a delivery unit on a Digiseller / GGSel product.
 //   gameflip    — the account's credentials are baked into the live auto-
 //                 delivery code, so the whole offer must come down (and can be
 //                 republished with a fresh account to keep the sale slot).
@@ -84,6 +84,56 @@ async function detachAccountFromRow(listing, accountId, login) {
   );
 }
 
+// Settle an ACCOUNT LISTING's stock ledger for one account, and drop the
+// matching units[] entries from the listing row. Returns how many ledger rows
+// were marked removed.
+//
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md) are the fourth stock
+// mode: the accounts are an explicit list the owner pasted in, held in
+// models/SuppliedAccount and keyed from `units[].contentId`. Such a row keeps
+// `accountId` / `accountLogin` EMPTY on purpose, so every branch below can only
+// reach the platform side of the detach — nothing there would ever stop the
+// account being claimed by the next publish, and the same login would go on
+// sale again the moment stock was topped up.
+//
+// This writes models/SuppliedAccount directly, which utils/suppliedStock
+// otherwise owns, because the shared claim layer has no "remove": its
+// releaseClaim puts a row BACK on the shelf, which is the exact opposite of
+// what a detach means — the account has just been sold, suspended or reclaimed.
+// Scoped to this offer, and never to a row already marked sold, so it cannot
+// rewrite sale evidence.
+async function removeSuppliedUnits(row, accId, login) {
+  const SuppliedAccount = require("../models/SuppliedAccount");
+  const lower = String(login || "").trim().toLowerCase();
+  const ids = [];
+  for (const u of row.units || []) {
+    if (!u || !u.contentId) continue;
+    const byLogin = lower && String(u.login || "").toLowerCase() === lower;
+    const byId = accId && String(u.contentId) === accId;
+    if (byLogin || byId) ids.push(String(u.contentId));
+  }
+  if (!ids.length) return { matched: 0, removed: 0 };
+  const r = await SuppliedAccount.updateMany(
+    {
+      _id: { $in: ids },
+      offer: row.accountOffer,
+      status: { $in: ["available", "fed"] },
+    },
+    { $set: { status: "removed" } },
+  );
+  // Pull the units whatever the ledger said: an already-sold row is not stock
+  // either, and utils/listedLogins.js reads units[].login to decide whether a
+  // login is still on sale somewhere.
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    { $pull: { units: { contentId: { $in: ids } } } },
+  );
+  return {
+    matched: ids.length,
+    removed: Number(r && (r.modifiedCount || r.nModified)) || 0,
+  };
+}
+
 // Detach `acc` ({ _id, login }) from a single active listing `row`.
 // Options:
 //   reason    — short phrase stamped into the row's note ("sold manually",
@@ -100,6 +150,18 @@ async function detachAccountFromRow(listing, accountId, login) {
 // the caller to surface. Never throws for expected marketplace failures; those
 // become warnings so a partial detach still reports what it could do.
 async function detachAccountFromListing(row, acc, opts = {}) {
+  // A no-claim listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) holds
+  // no-claim farm accounts whose units utils/noclaimListings owns. Every branch
+  // below is archive surgery — a republish would rebuild the product from the
+  // set's DropLog stock — so none of it may run on one.
+  if (row && row.noclaimStock) {
+    return {
+      detached: [],
+      warnings: [
+        "no-claim listing — units are managed by utils/noclaimListings",
+      ],
+    };
+  }
   const reason = opts.reason || "removed";
   const republish = opts.republish !== false;
   const detached = [];
@@ -109,65 +171,95 @@ async function detachAccountFromListing(row, acc, opts = {}) {
   const accId = acc && acc._id ? String(acc._id) : "";
 
   try {
-    if (row.marketplace === "funpay") {
-      // Pull only this account's line out of the undelivered pool. FunPay has no
-      // update API, so this reloads the editor and re-saves every field with the
-      // account's line dropped; an emptied pool is saved off sale.
-      const keptIds = splitCsv(row.accountId).filter((x) => !accId || x !== accId);
-      const keptLogins = splitCsv(row.accountLogin).filter(
-        (x) => !login || x.toLowerCase() !== login.toLowerCase(),
-      );
-      let upd = null;
+    // The ledger first, before any marketplace branch and whatever the
+    // marketplace is — it is the only half of an account listing's detach that
+    // is the same everywhere, and the only one that stops the account being
+    // sold a second time. The platform side still runs below: delisting a
+    // Gameflip/ZeusX offer whose code carries these credentials, or pulling a
+    // pool line, is right for a supplied account too.
+    if (row.accountOffer) {
       try {
-        upd = await mp.funpayUpdateSecrets(row.externalId, row.externalNode, {
-          removeLogins: login ? [login] : [],
-          activate: null, // keep current state; goes off sale if pool empties
-        });
+        const res = await removeSuppliedUnits(row, accId, login);
+        if (res.matched) {
+          detached.push(
+            label +
+              " (account listing: " +
+              (login || "the account") +
+              (res.removed
+                ? " marked removed — it can no longer be claimed)"
+                : " was already sold — its unit was dropped)"),
+          );
+        } else {
+          warnings.push(
+            label +
+              ": nothing in this account listing's stock references " +
+              (login || "that account") +
+              " — its ledger was left alone.",
+          );
+        }
       } catch (e) {
-        // Leave the row referencing the account: our tracking must keep
-        // matching the still-live offer so it isn't silently double-sold.
         warnings.push(
           label +
-            ": could not pull the FunPay delivery line (" +
+            ": could not update the account listing's stock ledger (" +
             (e.message || e) +
-            ") — remove it on FunPay manually.",
-        );
-        return { detached, warnings };
-      }
-      const emptied = upd.pool === 0;
-      const set = {
-        accountId: keptIds.join(","),
-        accountLogin: keptLogins.join(", "),
-      };
-      if (emptied) {
-        set.status = "delisted";
-        set.note = "account " + reason + " — FunPay pool emptied, off sale";
-      }
-      await MarketplaceListing.updateOne({ _id: row._id }, { $set: set });
-      if (!upd.removed) {
-        warnings.push(
-          label +
-            ": " +
+            ") — " +
             (login || "the account") +
-            "'s delivery line was already handed to a buyer — it may already be sold there.",
+            " may still be claimable, check the Account listings tab.",
         );
       }
-      detached.push(
-        label +
-          (emptied
-            ? " (delisted — pool emptied)"
-            : " (line pulled, pool now " + upd.pool + ")"),
-      );
-    } else if (row.marketplace === "gameflip" && row.autoDeliver) {
+    }
+    if (row.marketplace === "gameflip" && row.autoDeliver) {
       // The live Gameflip listing carries this account's credentials in its
       // delivery code — it must come down, then the chain optionally continues
       // with a fresh account if one exists.
-      await mp.gameflipDelist(row.externalId).catch(() => {});
-      await MarketplaceListing.updateOne(
-        { _id: row._id },
-        { $set: { status: "delisted", note: "account " + reason + " — delisted" } },
-      );
-      detached.push(label + " (delisted)");
+      //
+      // THE FAILURE MUST NOT BE SWALLOWED. This used to be
+      // `.catch(() => {})` followed by an unconditional `status: "delisted"`.
+      // gameflipDelist throws on any error — and a 429 from Gameflip's silent
+      // rate limiter is the documented common case — so a delist that failed
+      // left the offer LIVE on Gameflip, still selling the credentials of an
+      // account we had just banned, suspended or sold elsewhere, while our side
+      // recorded it as down. Nothing retries a row that is already "delisted",
+      // so it stayed live until somebody noticed by hand.
+      //
+      // Now: only a delist that actually succeeded is recorded as one. A failed
+      // one leaves the row ACTIVE and stamps the reason, so the watcher keeps
+      // seeing it, the health page counts it, and the next pass tries again.
+      let delisted = true;
+      let delistErr = "";
+      try {
+        await mp.gameflipDelist(row.externalId);
+      } catch (e) {
+        delisted = false;
+        delistErr = String((e && e.message) || e).slice(0, 200);
+      }
+      if (delisted) {
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          { $set: { status: "delisted", note: "account " + reason + " — delisted" } },
+        );
+        detached.push(label + " (delisted)");
+      } else {
+        await MarketplaceListing.updateOne(
+          { _id: row._id },
+          {
+            $set: {
+              lastError:
+                "STILL LIVE — delist failed for an account that is " + reason +
+                ": " + delistErr,
+            },
+          },
+        );
+        warnings.push(
+          label +
+            " — COULD NOT DELIST. The Gameflip listing is STILL LIVE and still " +
+            "carries this account's credentials: " + delistErr,
+        );
+        // Return rather than fall through: republishing a replacement while the
+        // original is still up would put TWO live listings on the same set, one
+        // of them still selling the credentials of the account we are removing.
+        return { detached, warnings };
+      }
       const set = row.set ? await DropSet.findById(row.set).lean() : null;
       if (set && republish) {
         let img = "";
@@ -202,6 +294,10 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       }
     } else if (
       row.marketplace === "digiseller" &&
+      // Never an account listing: its units[].contentId is a SuppliedAccount
+      // id, not a Digiseller content_id (the real one lives on the ledger row),
+      // so this would ask Digiseller to delete content that does not exist.
+      !row.accountOffer &&
       (row.units || []).some(
         (u) => u && String(u.accountId) === accId && u.contentId,
       )
@@ -237,7 +333,12 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       row.marketplace === "ggsel"
     ) {
       await detachAccountFromRow(row, accId, login);
-      if (opts.hardRepublish) {
+      // republishQtyListing rebuilds the product from the row's DropSet and
+      // refills it from ARCHIVE stock. An account listing has neither, so a
+      // hard republish would trade a live product's URL and sales history for a
+      // replacement it cannot fill. The ledger surgery above is the whole
+      // detach here; the fed unit is reported below instead.
+      if (opts.hardRepublish && !row.accountOffer) {
         const res = await republishQtyListing(row, { reason });
         for (const w of res.warnings) warnings.push(w);
         if (res.delisted) {
@@ -319,7 +420,12 @@ async function detachAccountFromListing(row, acc, opts = {}) {
         );
         detached.push(label + " (quantity now " + keptLogins.length + ")");
       }
-    } else {
+    } else if (!row.accountOffer) {
+      // Not for an account listing on a claim-at-sale market (Eldorado,
+      // PlayerAuctions, G2G): the offer there is a bare quantity, the
+      // credentials never left our side, and the ledger row is "removed" by
+      // now, so no delivery can pick it. This warning would send the owner
+      // hunting on the platform for something that is not there.
       warnings.push(
         label + " still references this account — remove it there manually",
       );

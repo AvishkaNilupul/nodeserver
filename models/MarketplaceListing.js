@@ -7,7 +7,21 @@ const marketplaceListingSchema = new mongoose.Schema(
     set: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "DropSet",
-      required: true,
+      // Required for every listing whose stock is the Drop Archive — the set IS
+      // what gets claimed at delivery. A row backed by the no-claim AUTO-lister
+      // (`unclaimedGame`) has no DropSet at all: it claims by GAME out of
+      // UnclaimedAccount, and pointing it at some near-enough set would just
+      // mislabel what the buyer receives.
+      // An account listing (accountOffer, below) has none either, for the same
+      // reason plus a sharper one: a fulfiller picks its branch by asking
+      // `row.set` FIRST, so a set left on an offer-backed row would quietly
+      // deliver somebody else's archive account against the owner's stock.
+      // An owner-made no-claim row (`noclaimStock`, below) is the opposite
+      // case: it KEEPS its set (a DropSet with stockSource "noclaim"), so the
+      // set stays required for it.
+      required: function () {
+        return !this.unclaimedGame && !this.accountOffer;
+      },
       index: true,
     },
     marketplace: {
@@ -17,9 +31,9 @@ const marketplaceListingSchema = new mongoose.Schema(
         "digiseller",
         "g2g",
         "ggsel",
-        "funpay",
-        "epicnpc",
         "zeusx",
+        "eldorado",
+        "playerauctions",
       ],
       required: true,
       index: true,
@@ -27,7 +41,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     externalId: { type: String, required: true },
     // Who created this listing. "auto" = published by the auto-farmer
     // (utils/autoLister.js) or by the relist chain succeeding an auto listing;
-    // "manual" = published by the owner from the Listings page.
+    // "manual" = published by the owner from the Listings page;
+    // "unclaimed" = published by the unclaimed-farms auto-lister
+    // (utils/unclaimedAutoList.js) for a no-claim / web-token farm account.
+    // Only "auto" rows are ever repriced.
     //
     // This is what scopes automatic price changes: the post-event scarcity
     // markup only ever touches origin:"auto" rows, so the owner's own hand-made
@@ -36,11 +53,11 @@ const marketplaceListingSchema = new mongoose.Schema(
     // which is the safe way to be wrong.
     origin: {
       type: String,
-      enum: ["auto", "manual"],
+      enum: ["auto", "manual", "unclaimed"],
       default: "manual",
       index: true,
     },
-    // FunPay has no per-offer API: delisting re-saves the offer's editor form,
+    // Some markets have no per-offer API: delisting re-saves the editor form,
     // which needs the category node id. Stored here at publish time.
     externalNode: { type: String, default: "" },
     url: { type: String, default: "" },
@@ -48,10 +65,36 @@ const marketplaceListingSchema = new mongoose.Schema(
     // Kept so a sold auto-delivery listing can be relisted identically.
     description: { type: String, default: "" },
     price: { type: Number, default: 0 },
+    // The lowest price this listing is KNOWN to hold on this marketplace —
+    // learned from a refusal, not configured.
+    //
+    // It is an upper bound on the platform's true minimum, not the minimum
+    // itself: all a rejection proves is that the price we asked for was too low
+    // and the one the offer already carries is not. That is the useful bound
+    // anyway, since the point is to stop asking for something impossible.
+    //
+    // GGSel enforces a per-CATEGORY minimum price and publishes it nowhere: it
+    // is absent from the offers payload and from /categories (whose fields are
+    // id, title, content_type, fee, payment_fee, tree, has_children — checked
+    // live 2026-09-09). The only way to find it is to be told no, as a
+    // FAILED_TO_SAVE / "Cannot set price less than the category minimum price"
+    // on the write. Recording it here stops the next price sweep re-attempting a
+    // price the platform has already rejected, and — more importantly — stops a
+    // healthy listing carrying a permanent lastError, which is how a real error
+    // ends up buried among fake ones.
+    //
+    // 0 means "nothing has been refused yet", not "no minimum exists".
+    venueMinPriceUsd: { type: Number, default: 0 },
     currency: { type: String, default: "USD" },
     status: {
       type: String,
-      enum: ["active", "sold", "delisted", "error"],
+      // "removed" is written by utils/gameflipFulfiller's retire path when a
+      // listing is gone from the marketplace for good (404 / expired /
+      // cancelled). It was missing here: findOneAndUpdate skips validation so
+      // the value landed in the DB fine — 33 rows carry it — and then every
+      // later doc.save() on one of those rows threw. Exactly the shape of the
+      // AvailableAccount "spent" enum bug, which made 172 accounts unsaveable.
+      enum: ["active", "sold", "delisted", "error", "removed"],
       default: "active",
       index: true,
     },
@@ -69,11 +112,97 @@ const marketplaceListingSchema = new mongoose.Schema(
           accountId: { type: String, default: "" },
           login: { type: String, default: "" },
           addedAt: { type: Date, default: Date.now },
+          // Eldorado stock bookkeeping: one unit = one reserved account behind
+          // the offer's quantity. Stamped when that unit is actually handed to
+          // a buyer, which is what makes redelivery of an order impossible.
+          deliveredAt: { type: Date, default: null },
+          orderId: { type: String, default: "" },
+          // PlayerAuctions only: a hand-over there can be SEVERAL messages plus
+          // a separate confirm-delivery call, so "credential sent" and "order
+          // marked delivered" are distinct states. Stamped once the messages
+          // have landed, so a retry whose confirm-delivery failed re-confirms
+          // instead of sending the buyer their credentials a second time.
+          messagedAt: { type: Date, default: null },
         },
       ],
       default: [],
     },
     note: { type: String, default: "" },
+    // Eldorado listings whose stock is NOT the auto-farm pool but the unclaimed
+    // / no-claim farm ledger (models/UnclaimedAccount). When set, the Eldorado
+    // fulfiller claims a sellable account for THIS game out of that ledger at
+    // delivery time instead of consuming a pre-reserved `units[]` entry. This is
+    // how the no-claim Overwatch bots feed an Eldorado offer directly.
+    unclaimedGame: { type: String, default: "", index: true },
+    // What this listing ADVERTISES, with counts — the contract the buyer agreed
+    // to. A no-claim-backed row picks its stock by game at delivery time, so
+    // without this there is nothing to check the picked account against: Eldorado
+    // order 99d443eb was filled from a 10-item CAH listing with a 7-item account
+    // carrying ONE of the two advertised Esports Loot Boxes. When set, the
+    // fulfillers refuse any account that does not hold every entry (counts
+    // included) unclaimed, and the stock sync advertises only accounts that do.
+    // Empty = undeclared, and delivery keeps its pre-gate behaviour, so this can
+    // be turned on one listing at a time as each item list is confirmed.
+    requiredDrops: {
+      type: [
+        {
+          _id: false,
+          name: { type: String, default: "" },
+          qty: { type: Number, default: 1 },
+        },
+      ],
+      default: [],
+    },
+    // Bundle listings whose stock is the Drop Archive rather than the no-claim
+    // farm: claim accounts holding this row's `set` at delivery time instead of
+    // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.
+    autoClaimSet: { type: Boolean, default: false, index: true },
+    // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): this
+    // row's stock is the no-claim farm, claimed through utils/noclaimStock.js
+    // (vault markets at publish, claim-at-sale markets when an order lands).
+    // The row keeps `set` (a DropSet with stockSource "noclaim") so the Listings
+    // page and the delete guard still see it, but every consumer checks THIS
+    // flag before `set`, `unclaimedGame` or `autoClaimSet`.
+    noclaimStock: { type: Boolean, default: false, index: true },
+    // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): a fourth stock mode.
+    // This row's stock is not the Drop Archive and not the no-claim farm but an
+    // explicit list of accounts the owner pasted in, held one row per account in
+    // models/SuppliedAccount and claimed one per sale by utils/suppliedStock.
+    // Mutually exclusive with `set`, `unclaimedGame` and `autoClaimSet`.
+    //
+    // Such a row carries no `set` because reserveSetOnAccount cannot represent an
+    // account outside the archive at all — it refuses anything without a DropLog
+    // row for every itemKey (utils/dropReservation.js), so a pasted account can
+    // never be reserved and no existing claim path can reach it. That is the
+    // whole reason this is a mode and not a flag on DropSet.
+    //
+    // It also leaves `accountId` / `accountLogin` empty on purpose. Those two are
+    // exactly the fields marketplaceGuardian.runChecks indexes duplicates off, and
+    // one offer's accounts all sell under one listing, so filling them would raise
+    // a duplicate finding on every single pass — burying the real ones the way the
+    // permanent-lastError problem did a few fields up. The logins live in `units[]`
+    // instead, which is where utils/listedLogins.js reads them, so a supplied login
+    // still cannot also be sold by an archive-backed listing.
+    //
+    // And no `requiredDrops`. That gate checks a picked account against DropLog;
+    // a supplied account has no DropLog rows, so an enabled gate would refuse
+    // every delivery — with a paid buyer waiting — rather than catch anything.
+    // Supplied stock is TRUSTED, not verified: the owner's own description is the
+    // contract, because the owner is also the one who supplied the accounts.
+    accountOffer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AccountOffer",
+      default: null,
+      index: true,
+    },
+    // Paused by the stock sync because nothing claimable was left, as opposed to
+    // paused deliberately by the operator. Only rows carrying this flag are ever
+    // resumed automatically.
+    autoPaused: { type: Boolean, default: false },
+    // When the campaign-scoped auto-rebundle last retitled this listing to the
+    // fuller set its accounts had farmed. A one-hour cooldown reads this so the
+    // automatic pass can never put a listing into an off-sale/on-sale loop.
+    rebundledAt: { type: Date, default: null },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while
@@ -107,8 +236,119 @@ const marketplaceListingSchema = new mongoose.Schema(
     // negative sales, and without persisting it at all a failed feed would
     // make the same shortfall count as a new sale on every single pass.
     lastStock: { type: Number, default: null },
+    // Unclaimed Gameflip LOT rows (utils/unclaimedLots.js): one listing that
+    // delivers lotSize separate accounts (units[] holds their logins). 0 = a
+    // normal single-unit / quantity row.
+    lotSize: { type: Number, default: 0 },
+    lotId: { type: String, default: "", index: true },
+    // Gameflip rent-farm buffer: this row is a pre-provisioned "Automatic
+    // Farming" offer. It sells a rental WINDOW, not stock — it has no DropSet
+    // to claim against and must never reach the ordinary stock fulfiller.
+    //
+    // Gameflip has no post-sale hook: the account is baked into the listing as
+    // an auto-delivered digital code and handed over the instant the buyer pays,
+    // so unlike Eldorado / PlayerAuctions / G2G there is nothing to provision
+    // INTO at sale time. The account is claimed and attached BEFORE the sale and
+    // waits in the buffer; the window is stamped when the buyer PAYS, never at
+    // publish, so an offer that sat unsold for six days still delivers its full
+    // term (docs/GAMEFLIP-RENT-FARM-CONTRACT.md).
+    //
+    // WHY THIS IS AN EXPLICIT FLAG AND NOT A TITLE REGEX
+    // The other three rent-farm services match on the title (FARM_TITLE,
+    // /\bAutomatic\s+Farming\b/i, in utils/eldoradoFarmService.js) because they
+    // are reading an ORDER off a marketplace and the title is genuinely all they
+    // are given — they then need a GAME_ALIASES table to undo the storefront's
+    // spelling. Here we CREATE the row ourselves, so we can record what it is
+    // instead of inferring it back out of a string we wrote.
+    //
+    // It also has to be a flag because it is a routing decision, and a regex is
+    // wrong in both directions. A false positive: the owner hand-makes a listing
+    // named "… Automatic Farming …" and an ordinary bundle sale is diverted into
+    // the buffered-sale lane, which would re-stamp a rental window on an account
+    // nobody rented — the same class of mistake as repricing a manual listing,
+    // which is why `origin` exists a few fields up. A false negative: a rent-farm
+    // sale falls through to publishAutoDelivery, which demands one account
+    // holding a whole DropSet and fails "Out of stock — no unsold account holds
+    // this whole bundle". That is exactly how the five original Gameflip
+    // rent-farm offers became unsellable and had to be taken down.
+    rentFarm: { type: Boolean, default: false, index: true },
+    // The single game the buffered account is pinned to, and the term the buyer
+    // is BUYING, in days (120 / 180 / 365). The term is stored because it cannot
+    // be recovered at sale time from the account: a buffered account is
+    // provisioned with a deliberately long placeholder window (365d) purely so
+    // renterExpiry never tears it down while its offer is live, and on sale
+    // farmUntil is re-stamped to now + rentFarmDays — DOWN, for every term
+    // shorter than the placeholder. The buyer paid for N days from purchase, not
+    // for whatever was left of our placeholder.
+    rentFarmGame: { type: String, default: "" },
+    rentFarmDays: { type: Number, default: 0 },
+    // The pool account (AvailableAccount _id) parked behind this offer, so an
+    // unsold offer that is delisted, expires or 404s hands back exactly THAT
+    // account and nothing else. Releasing by anything broader — the set, the
+    // game, a tag — is how this codebase once freed drops a buyer had already
+    // paid for; a release must name its account. Empty on any row that is not a
+    // buffered offer.
+    rentFarmPoolId: { type: String, default: "" },
+    // Sale-handling lease. The sale claim used to be taken by CLEARING
+    // rentFarmPoolId — which destroyed the only pointer to the account before
+    // any of the work had happened, so a transient Atlas rejection mid-sale left
+    // farmUntil at publish+365 (a straight shortfall on the term the buyer
+    // bought) with no way to retry and nothing naming the account. The claim is
+    // now a lease that keeps the pointer; the pointer is cleared only once the
+    // window is actually stamped.
+    rentFarmSaleClaimedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
+
+// Best-effort audit: log every listing CREATION into the unified activity log
+// (utils/systemLog.js), in one place, covering all publish paths (auto-lister +
+// relist chain + manual). All listing creates go through .create()/.save(), so a
+// save hook catches them; insertMany is never used for listings. pre-save stashes
+// isNew; post-save fires AFTER the write, never throws and is never awaited — a
+// logging failure can never affect the listing. systemLog is required lazily to
+// avoid any model load-order cycle.
+// Mongoose 9 (kareem 3) dropped callback-style middleware: a pre("save") hook is
+// never passed a `next` — it must be synchronous (return undefined) or async
+// (return a promise). The old `function (next) { …; next(); }` form threw
+// `TypeError: next is not a function` on EVERY MarketplaceListing.save()/.create(),
+// which silently broke all auto-listing publishes and post-event reprices (doc
+// saves), while query updates (updateOne/findOneAndUpdate) kept working and hid it.
+marketplaceListingSchema.pre("save", function () {
+  try {
+    this.$locals.wasNew = this.isNew;
+  } catch {
+    /* ignore */
+  }
+});
+marketplaceListingSchema.post("save", function (doc) {
+  try {
+    if (!doc.$locals || !doc.$locals.wasNew) return;
+    require("../utils/systemLog").logEvent({
+      category: "listings",
+      action: "published",
+      actor: doc.origin === "auto" ? "autoLister" : "system",
+      subject: doc.marketplace || "",
+      subjectId: doc._id,
+      count: 1,
+      detail:
+        (doc.origin || "manual") +
+        " " +
+        (doc.marketplace || "") +
+        " listing" +
+        (doc.price ? " $" + doc.price : "") +
+        (doc.accountLogin ? " (" + doc.accountLogin + ")" : ""),
+      meta: {
+        marketplace: doc.marketplace,
+        origin: doc.origin,
+        externalId: doc.externalId,
+        setId: String(doc.set || ""),
+        price: doc.price,
+      },
+    });
+  } catch {
+    /* audit is best-effort */
+  }
+});
 
 module.exports = mongoose.model("MarketplaceListing", marketplaceListingSchema);

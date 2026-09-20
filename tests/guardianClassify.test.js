@@ -93,7 +93,7 @@ test("a unit holding none of the set reads as released, not partial", () => {
       { key: "a", by: null },
       { key: "b", by: null },
     ]),
-    "funpay",
+    "zeusx",
   );
   assert.equal(r.reservation.kind, "released");
   assert.equal(r.reservation.held, 0);
@@ -103,26 +103,26 @@ test("a conflict outranks a partial shortfall", () => {
   const r = classify(
     ["a", "b", "c"],
     logs([
-      { key: "a", by: "funpay" },
+      { key: "a", by: "zeusx" },
       { key: "b", by: null },
       { key: "c", by: "digiseller" },
     ]),
-    "funpay",
+    "zeusx",
   );
   assert.equal(r.reservation.kind, "conflict");
   assert.equal(r.reservation.otherTag, "digiseller");
 });
 
-// The 11 false highs: FunPay/ZeusX completed sales. Ownership, not the
+// The 11 false highs: completed sales on a qty market. Ownership, not the
 // marketplace name, is what says the buyer redeemed it.
 test("drops redeemed while still reserved to this listing are a delivered sale", () => {
   const r = classify(
     ["a", "b"],
     logs([
-      { key: "a", by: "funpay", connected: true },
-      { key: "b", by: "funpay", connected: true },
+      { key: "a", by: "zeusx", connected: true },
+      { key: "b", by: "zeusx", connected: true },
     ]),
-    "funpay",
+    "zeusx",
   );
   assert.equal(r.redeemed.delivered, true);
   assert.equal(r.reservation, null);
@@ -132,7 +132,7 @@ test("drops redeemed under another tag are a burned unit", () => {
   const r = classify(
     ["a"],
     logs([{ key: "a", by: "ggsel", connected: true }]),
-    "funpay",
+    "zeusx",
   );
   assert.equal(r.redeemed.delivered, false);
 });
@@ -141,7 +141,7 @@ test("drops redeemed while reserved by nobody are a burned unit", () => {
   const r = classify(
     ["a"],
     logs([{ key: "a", by: null, connected: true }]),
-    "funpay",
+    "zeusx",
   );
   assert.equal(r.redeemed.delivered, false);
 });
@@ -150,10 +150,10 @@ test("one drop redeemed outside the listing burns the whole unit", () => {
   const r = classify(
     ["a", "b"],
     logs([
-      { key: "a", by: "funpay", connected: true },
+      { key: "a", by: "zeusx", connected: true },
       { key: "b", by: "gameflip", connected: true },
     ]),
-    "funpay",
+    "zeusx",
   );
   assert.equal(r.redeemed.delivered, false);
 });
@@ -162,10 +162,10 @@ test("redeemed item names are de-duplicated for the message", () => {
   const r = classify(
     ["a", "b"],
     logs([
-      { key: "a", by: "funpay", connected: true, name: "chest" },
-      { key: "b", by: "funpay", connected: true, name: "chest" },
+      { key: "a", by: "zeusx", connected: true, name: "chest" },
+      { key: "b", by: "zeusx", connected: true, name: "chest" },
     ]),
-    "funpay",
+    "zeusx",
   );
   assert.deepEqual(r.redeemed.items, ["chest"]);
 });
