@@ -152,7 +152,7 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   if (
     current &&
     Number(current.remaining) >= want &&
-    current.running !== false
+    (current.running !== false || !Number(current.accounts))
   ) {
     return { renter, stack: current, moved: false };
   }

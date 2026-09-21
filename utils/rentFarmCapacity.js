@@ -66,8 +66,12 @@ async function snapshot() {
   // This module's own header says it exists because "every dial said fine".
   // Counting slots on containers that are not running is that same failure,
   // wearing a different hat.
-  const live = stacks.filter((s) => s.running !== false);
-  const dead = stacks.filter((s) => s.running === false);
+  // Same rule the picker uses (renterBotStacks.chooseAvailableStack): a stopped
+  // but EMPTY stack is merely un-started and its slots are genuinely usable —
+  // the provision path writes the accounts and then starts the container. Only
+  // a stopped stack that already HOLDS accounts is dead capacity.
+  const live = stacks.filter((s) => s.running !== false || !s.used);
+  const dead = stacks.filter((s) => s.running === false && s.used > 0);
   return {
     stacks,
     offlineHosts: offlineHosts.map((h) => h.label || h.id),

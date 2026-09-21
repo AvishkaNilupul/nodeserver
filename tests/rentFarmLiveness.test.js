@@ -33,9 +33,12 @@ test("a stopped stack is never chosen, however much room it has", () => {
 });
 
 test("every stack stopped means NO stack, not the emptiest corpse", () => {
+  // OCCUPIED stopped stacks: these hold real buyers who are not farming, and
+  // must never take another order. (An EMPTY stopped stack is a different
+  // thing — merely un-started — and is covered by its own test below.)
   const picked = chooseAvailableStack([
-    { host: "contabo", file: "config_03.json", capacity: 100, accounts: 0, remaining: 100, running: false },
-    { host: "contabo", file: "config_04.json", capacity: 100, accounts: 0, remaining: 100, running: false },
+    { host: "contabo", file: "config_03.json", capacity: 100, accounts: 12, remaining: 88, running: false },
+    { host: "contabo", file: "config_04.json", capacity: 100, accounts: 4, remaining: 96, running: false },
   ]);
   assert.strictEqual(picked, null);
 });
@@ -221,16 +224,16 @@ test("REGRESSION: dead stacks do not pad the free-slot count", async () => {
   const { mod, restore } = loadCapacity({
     bots: [
       { host: "contabo", file: "config_02.json", capacity: 100, accounts: 26, remaining: 74, running: true },
-      { host: "contabo", file: "config_03.json", capacity: 100, accounts: 0, remaining: 100, running: false },
-      { host: "contabo", file: "config_04.json", capacity: 100, accounts: 0, remaining: 100, running: false },
-      { host: "contabo", file: "config_05.json", capacity: 100, accounts: 0, remaining: 100, running: false },
-      { host: "contabo", file: "config_06.json", capacity: 100, accounts: 0, remaining: 100, running: false },
+      { host: "contabo", file: "config_03.json", capacity: 100, accounts: 25, remaining: 75, running: false },
+      { host: "contabo", file: "config_04.json", capacity: 100, accounts: 25, remaining: 75, running: false },
+      { host: "contabo", file: "config_05.json", capacity: 100, accounts: 25, remaining: 75, running: false },
+      { host: "contabo", file: "config_06.json", capacity: 100, accounts: 25, remaining: 75, running: false },
     ],
   });
   try {
     const s = await mod.snapshot();
     assert.strictEqual(s.totalFree, 74, "only slots that can actually farm");
-    assert.strictEqual(s.deadFree, 400, "and the dead ones are REPORTED, not dropped");
+    assert.strictEqual(s.deadFree, 300, "and the dead ones are REPORTED, not dropped");
     assert.deepStrictEqual(s.deadStacks, [
       "contabo/config_03.json",
       "contabo/config_04.json",
@@ -239,7 +242,7 @@ test("REGRESSION: dead stacks do not pad the free-slot count", async () => {
     ]);
     const text = mod.describe(s);
     assert.match(text, /STOPPED/, "the operator must see WHY the slots vanished");
-    assert.match(text, /400 further slot\(s\)/);
+    assert.match(text, /300 further slot\(s\)/);
   } finally { restore(); }
 });
 
@@ -254,4 +257,36 @@ test("unknown liveness still counts — the alarm must not cry wolf on a slow ho
     assert.strictEqual(s.totalFree, 40);
     assert.strictEqual(s.deadFree, 0);
   } finally { restore(); }
+});
+
+// ---------------------------------------------- the empty-stack exception
+
+test("an EMPTY stopped stack is still eligible — otherwise capacity can never grow", () => {
+  // provisionEmptyConfig deliberately creates a stack with no container, and
+  // startConfigContainer refuses an empty config (an accountless bot spins in a
+  // login-retry loop). If "stopped" disqualified it, a fresh stack could never
+  // be chosen and never be started, so once every running stack filled, orders
+  // would fail with no_stack_room and there would be no way to add capacity.
+  const picked = chooseAvailableStack([
+    { host: "contabo", file: "config_07.json", capacity: 50, accounts: 0, remaining: 50, running: false },
+  ]);
+  assert.ok(picked, "a brand-new empty stack must be usable");
+  assert.strictEqual(picked.file, "config_07.json");
+});
+
+test("a stopped stack that HOLDS accounts is still refused — that is the real trap", () => {
+  // 2026-09-20: 13 paid orders went into a registered stack whose container was
+  // never started. The tell was that it already held buyers and was not running.
+  const picked = chooseAvailableStack([
+    { host: "contabo", file: "config_03.json", capacity: 50, accounts: 26, remaining: 24, running: false },
+  ]);
+  assert.strictEqual(picked, null);
+});
+
+test("a RUNNING stack is preferred over an empty stopped one", () => {
+  const picked = chooseAvailableStack([
+    { host: "contabo", file: "config_07.json", capacity: 50, accounts: 0, remaining: 50, running: false },
+    { host: "contabo", file: "config_04.json", capacity: 50, accounts: 40, remaining: 10, running: true },
+  ]);
+  assert.strictEqual(picked.file, "config_04.json", "fullest-first still puts the live stack first");
 });
