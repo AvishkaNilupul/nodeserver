@@ -263,7 +263,21 @@ async function rentalStackOptions() {
         const files = hostStacks
           .map((stack) => stack.file)
           .filter((file) => existing.has(file));
-        const raws = await hosts.readFiles(host, files);
+        // Container liveness, asked ONCE per host and in parallel with the
+        // config read (same budget, no extra round trip). A stack's free slots
+        // are only real if something is actually reading the file: a
+        // registered-but-stopped stack advertises its entire capacity and farms
+        // nothing. That is how 13 paid orders landed in a container that did
+        // not exist (2026-09-20) and how 26 more piled into the one running
+        // stack while four stopped ones offered 400 "free" slots.
+        //
+        // A FAILED dockerPs must NOT read as "stopped" — an unreachable or slow
+        // host is not a dead stack. It yields null, and the picker treats null
+        // as eligible (see renterBotStacks.chooseAvailableStack).
+        const [raws, states] = await Promise.all([
+          hosts.readFiles(host, files),
+          hosts.dockerPs(host).catch(() => null),
+        ]);
         const rows = [];
         for (const stack of hostStacks) {
           const raw = raws[stack.file];
@@ -275,7 +289,16 @@ async function rentalStackOptions() {
               Array.isArray(data.TwitchSettings.TwitchUsers)
                 ? data.TwitchSettings.TwitchUsers
                 : [];
-            rows.push({ ...stack, accounts: users.length });
+            const container = containerForFile(stack.file);
+            const st = states && container ? states[container] : null;
+            rows.push({
+              ...stack,
+              accounts: users.length,
+              container: container || null,
+              running: states
+                ? !!(st && /^running/i.test(String(st.state || "")))
+                : null,
+            });
           } catch {
             /* an unreadable stack is not offered for assignment */
           }
@@ -299,6 +322,10 @@ async function rentalStackOptions() {
         capacity,
         accounts: stack.accounts,
         remaining: Math.max(0, capacity - stack.accounts),
+        // Carried through so the picker and the capacity alarm can both tell a
+        // stack with room from a stack that can actually farm. null = unknown.
+        container: stack.container || null,
+        running: stack.running,
       });
     }
   }

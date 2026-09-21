@@ -190,7 +190,18 @@ function assertCapacity(current, additions, capacity) {
 // do not spread a handful of accounts across many running containers.
 function chooseAvailableStack(stacks) {
   return (Array.isArray(stacks) ? stacks : [])
-    .filter((stack) => Number(stack.remaining) > 0)
+    // Room is not enough — something has to be READING the config. A stopped
+    // container advertises its whole capacity and farms nothing, so a paid
+    // rent-farm order routed there is money taken for no service (2026-09-20:
+    // 13 orders, 30h, dropCount:0 the only tell).
+    //
+    // `running === false` is the ONLY value that disqualifies. `null` means we
+    // could not ask the host (slow link, dockerPs failed) and must stay
+    // eligible: an unreachable host is not a dead stack, and refusing it would
+    // take every rent-farm offer off sale whenever the Pi blinks. Rows from
+    // callers that never set the flag are `undefined` and also stay eligible,
+    // so this is backward-compatible with every existing caller.
+    .filter((stack) => Number(stack.remaining) > 0 && stack.running !== false)
     .slice()
     .sort((a, b) => {
       const aLocal = hostId(a.host) === "local" ? 1 : 0;

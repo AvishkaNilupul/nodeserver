@@ -18,7 +18,7 @@
 // WHY IT ONLY ALERTS, AND DOES NOT TAKE OFFERS OFF SALE
 // Pausing a rent-farm offer at zero capacity is the obviously "safe" move, and it
 // was deliberately not built. Five of the nine live rent-farm offers are on
-// Gameflip, which exposes no relist call (`z2uRelist`, `g2gRelist`, `zeusxRelist`,
+// Gameflip, which exposes no relist call (`g2gRelist`, `zeusxRelist`,
 // `eldoradoRelist` and `playerauctionsRelist` all exist; there is no Gameflip
 // equivalent). An automatic pause with no tested automatic resume trades a
 // visible, recoverable failure for silent, permanent lost revenue. So: warn early,
@@ -55,11 +55,25 @@ async function snapshot() {
     used: Number(b.accounts) || 0,
     capacity: Number(b.capacity) || 0,
     remaining: Math.max(0, Number(b.remaining) || 0),
+    // null = the host could not be asked. Only an explicit false is "dead".
+    running: b.running,
   }));
+  // Free slots on a STOPPED container are not capacity: an order routed there
+  // is money taken for no service. They are reported SEPARATELY rather than
+  // silently dropped, so the operator reads "400 slots exist but are dead"
+  // instead of watching the headline total quietly shrink with no explanation.
+  //
+  // This module's own header says it exists because "every dial said fine".
+  // Counting slots on containers that are not running is that same failure,
+  // wearing a different hat.
+  const live = stacks.filter((s) => s.running !== false);
+  const dead = stacks.filter((s) => s.running === false);
   return {
     stacks,
     offlineHosts: offlineHosts.map((h) => h.label || h.id),
-    totalFree: stacks.reduce((n, s) => n + s.remaining, 0),
+    totalFree: live.reduce((n, s) => n + s.remaining, 0),
+    deadFree: dead.reduce((n, s) => n + s.remaining, 0),
+    deadStacks: dead.map((s) => s.host + "/" + s.file),
     totalCapacity: stacks.reduce((n, s) => n + s.capacity, 0),
     readable: stacks.length,
   };
@@ -76,10 +90,20 @@ function describe(snap) {
   const lines = snap.stacks
     .slice()
     .sort((a, b) => b.remaining - a.remaining)
-    .map((s) => "  " + s.host + "/" + s.file + "  " + s.used + "/" + s.capacity);
+    .map(
+      (s) =>
+        "  " + s.host + "/" + s.file + "  " + s.used + "/" + s.capacity +
+        (s.running === false
+          ? "  (container STOPPED — these slots do not count)"
+          : ""),
+    );
   return (
     snap.totalFree + " free slot(s) across " + snap.readable + " stack(s)\n" +
     lines.join("\n") +
+    (snap.deadFree
+      ? "\n\n" + snap.deadFree + " further slot(s) sit on STOPPED stacks and are " +
+        "NOT counted: " + snap.deadStacks.join(", ")
+      : "") +
     (snap.offlineHosts.length
       ? "\n\nhost(s) offline and NOT counted: " + snap.offlineHosts.join(", ")
       : "")

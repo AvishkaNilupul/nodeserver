@@ -54,6 +54,23 @@ const renterAccountSchema = new mongoose.Schema(
     },
     lastScanError: { type: String, default: "" },
     dropCount: { type: Number, default: 0 },
+
+    // Farming-progress bookkeeping, mirroring BotAccount.inProgressCount.
+    //
+    // dropCount counts CLAIMED rewards only and never goes down, so on its own
+    // it can prove an account NEVER farmed but never that it STOPPED: a bot
+    // that has lost its stream and a bot happily at 11/30 minutes are the same
+    // row. The scanner already receives this in the very same Twitch response
+    // it uses for dropCount, so persisting it costs no extra API call.
+    //
+    // 26 paid rent-farm buyers sat on a stack producing nothing for ~47h
+    // (2026-09-21) precisely because no field here could tell the two apart.
+    inProgressCount: { type: Number, default: 0, index: true },
+    inProgressGames: { type: [String], default: [] },
+    // When the two fields above were last recomputed. Deliberately distinct
+    // from lastScanAt, which also moves on a FAILED scan — a stale snapshot
+    // must never be read as a fresh zero.
+    farmingSnapshotAt: { type: Date, default: null, index: true },
   },
   { timestamps: true },
 );
