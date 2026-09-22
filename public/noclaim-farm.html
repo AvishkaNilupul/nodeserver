@@ -69,6 +69,25 @@
   .bot .row .sp { margin-left:auto; display:flex; gap:6px; align-items:center; }
   .bot .body { border-top:1px solid var(--line); padding: 12px 14px; display:none; background:var(--surface-2); }
   .bot.open .body { display:block; }
+
+  /* Game groups: bots are grouped into one collapsible card per game, so a
+     fleet of 20+ bots reads as a handful of games instead of one long flat
+     list. The per-bot .bot rows are unchanged and live inside .gbots — the
+     6s poll still diffs them in place. --gaccent is a per-game colour set in
+     JS (a hash of the name) so every game keeps a stable dot + edge. */
+  .gamegroup { border:1px solid var(--line); border-radius:14px; margin-bottom:14px; overflow:hidden; background:var(--surface); }
+  .gamegroup .ghead { display:flex; align-items:center; gap:10px; padding:12px 15px; cursor:pointer; user-select:none; -webkit-user-select:none; background:var(--surface-2); border-left:3px solid var(--gaccent,var(--accent)); }
+  .gamegroup .ghead:hover { background:var(--line); }
+  .gamegroup .gchev { font-size:10px; color:var(--muted); transition:transform .15s; width:11px; text-align:center; flex-shrink:0; }
+  .gamegroup.collapsed .gchev { transform:rotate(-90deg); }
+  .gamegroup .gdot { width:9px; height:9px; border-radius:50%; background:var(--gaccent,var(--accent)); flex-shrink:0; }
+  .gamegroup .gname { font-weight:700; font-size:14.5px; overflow-wrap:anywhere; }
+  .gamegroup .gsum { margin-left:auto; display:flex; align-items:center; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+  .gamegroup .gsum .cnt { color:var(--muted); font-size:12.5px; white-space:nowrap; }
+  .gamegroup .gbots { padding:12px 14px; }
+  .gamegroup .gbots .bot:last-child { margin-bottom:0; }
+  .gamegroup.collapsed .gbots { display:none; }
+  .botstoolbar { display:flex; gap:6px; margin-left:auto; }
   .tabs { display:flex; gap:6px; margin-bottom:10px; }
   .tab { font-size:12px; padding:5px 11px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--muted); cursor:pointer; font-weight:600; }
   .tab.active { background:var(--accent); color:#fff; border-color:transparent; }
@@ -133,6 +152,14 @@
     .tagrow { gap: 6px; }
     .tabs { flex-wrap: wrap; gap: 5px; }
     .tab { padding: 6px 10px; }
+
+    /* Game cards: keep the name + chevron on line one, let the summary chips
+       wrap to their own line instead of colliding with the name. */
+    .gamegroup .ghead { padding: 11px 12px; flex-wrap: wrap; }
+    .gamegroup .gsum { margin-left: 0; flex-basis: 100%; justify-content: flex-start; }
+    .gamegroup .gbots { padding: 10px; }
+    .botstoolbar { width: 100%; margin-left: 0; }
+    .botstoolbar .btn { flex: 1 1 auto; }
 
     /* Bot rows: name/meta on the first line, status + action buttons wrap
        onto their own line instead of being squeezed off the right edge. */
@@ -247,7 +274,12 @@
 
   <!-- Bots -->
   <div class="panel">
-    <div class="hd"><b>Bots</b> <span class="muted" id="botsCount" style="margin-left:auto;"></span></div>
+    <div class="hd"><b>Bots</b> <span class="muted" id="botsCount"></span>
+      <span class="botstoolbar">
+        <button class="btn ghost sm" id="expandAllBtn" type="button">Expand all</button>
+        <button class="btn ghost sm" id="collapseAllBtn" type="button">Collapse all</button>
+      </span>
+    </div>
     <div class="bd"><div id="bots"><div class="muted">Loading…</div></div></div>
   </div>
 
@@ -371,15 +403,104 @@ function wireBot(wrap,id){
   });
 }
 
+// --- game grouping ---------------------------------------------------------
+// Bots are grouped into one card per game. Each card is a stable DOM node keyed
+// by a slug of the game name; the per-bot rows inside it are still diffed in
+// place by the 6s poll (renderBotRows), so an expanded row or a live Logs pane
+// is never torn down when a card re-renders.
+function gameOf(b){ return b.game||'(any)'; }
+function slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'game'; }
+// Stable per-game accent: hash the name to a hue so a game keeps its colour.
+function hueFor(s){ var h=0,str=String(s||'');for(var i=0;i<str.length;i++){h=(h*31+str.charCodeAt(i))>>>0;}return h%360; }
+function botStatus(b){ if(b.running)return'running'; if(b.containerState==='exited')return'stopped'; if(b.containerState==='none')return'building'; return'other'; }
+
+// Which game cards the operator has collapsed, remembered across reloads.
+function loadCollapsed(){ try{ return JSON.parse(localStorage.getItem('noclaimCollapsedGames')||'{}')||{}; }catch(e){ return {}; } }
+function saveCollapsed(o){ try{ localStorage.setItem('noclaimCollapsedGames',JSON.stringify(o)); }catch(e){} }
+function isGroupCollapsed(k){ return !!loadCollapsed()[k]; }
+function setGroupCollapsed(k,val){ var o=loadCollapsed(); if(val)o[k]=1; else delete o[k]; saveCollapsed(o); }
+function currentGames(){ var s={}; (allBots||[]).forEach(function(b){ s[gameOf(b)]=1; }); return Object.keys(s); }
+function setAllGroupsCollapsed(val){
+  var o=loadCollapsed();
+  currentGames().forEach(function(k){ if(val)o[k]=1; else delete o[k]; });
+  saveCollapsed(o);
+  document.querySelectorAll('#bots .gamegroup').forEach(function(w){ w.classList.toggle('collapsed',val); });
+}
+
+function groupSummaryHtml(list){
+  var running=0,building=0,stopped=0,accounts=0;
+  list.forEach(function(b){ accounts+=(b.accounts||0); var s=botStatus(b); if(s==='running')running++; else if(s==='building')building++; else if(s==='stopped')stopped++; });
+  var h='<span class="cnt">'+list.length+' bot'+(list.length===1?'':'s')+' · '+accounts+' acct'+(accounts===1?'':'s')+'</span>';
+  if(running) h+='<span class="chip on">'+running+' running</span>';
+  if(building) h+='<span class="chip warn">'+building+' building</span>';
+  if(stopped) h+='<span class="chip off">'+stopped+' stopped</span>';
+  return h;
+}
+
+function wireGroup(gwrap,gameKey){
+  gwrap.querySelector('.ghead').addEventListener('click',function(){
+    var col=!gwrap.classList.contains('collapsed');
+    gwrap.classList.toggle('collapsed',col);
+    setGroupCollapsed(gameKey,col);
+  });
+}
+
 function renderBots(bots,force){
   var el=$('bots');
   // Drop any placeholder ("Loading…" / error / "no bots") before diffing.
-  Array.prototype.slice.call(el.children).forEach(function(ch){ if(!ch.classList.contains('bot')) ch.remove(); });
+  Array.prototype.slice.call(el.children).forEach(function(ch){ if(!ch.classList.contains('gamegroup')) ch.remove(); });
   if(!bots.length){ el.innerHTML='<div class="muted">No bots yet. Create one above.</div>'; return; }
+
+  // Bucket bots by game, cards laid out alphabetically so they don't reshuffle
+  // as statuses change under the 6s poll.
+  var groups={}, order=[];
+  bots.forEach(function(b){ var k=gameOf(b); if(!groups[k]){ groups[k]=[]; order.push(k); } groups[k].push(b); });
+  order.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+
+  var seen={}, created=false;
+  order.forEach(function(k){
+    var sg=slug(k); seen[sg]=1;
+    var list=groups[k];
+    var gwrap=el.querySelector('.gamegroup[data-game="'+sg+'"]');
+    if(!gwrap){
+      created=true;
+      gwrap=document.createElement('div');
+      gwrap.className='gamegroup'; gwrap.setAttribute('data-game',sg);
+      gwrap.style.setProperty('--gaccent','hsl('+hueFor(k)+' 68% 55%)');
+      gwrap.innerHTML=
+        '<div class="ghead">'+
+          '<span class="gchev">▾</span><span class="gdot"></span>'+
+          '<span class="gname"></span>'+
+          '<span class="gsum"></span>'+
+        '</div>'+
+        '<div class="gbots"></div>';
+      el.appendChild(gwrap);
+      wireGroup(gwrap,k);
+    }
+    if(isGroupCollapsed(k)) gwrap.classList.add('collapsed');
+    gwrap.querySelector('.gname').textContent=k;
+    gwrap.querySelector('.gsum').innerHTML=groupSummaryHtml(list);
+    renderBotRows(gwrap.querySelector('.gbots'),list,force);
+  });
+
+  // Drop cards whose game no longer has any bots.
+  Array.prototype.slice.call(el.querySelectorAll('.gamegroup')).forEach(function(w){
+    if(!seen[w.getAttribute('data-game')]) w.remove();
+  });
+  // A newly created card lands at the end; re-append every card in sorted
+  // order so it slots into place. Moving an existing node keeps its children,
+  // listeners and open rows intact. Only runs when a card was actually added.
+  if(created) order.forEach(function(k){ var w=el.querySelector('.gamegroup[data-game="'+slug(k)+'"]'); if(w) el.appendChild(w); });
+}
+
+// Per-bot rows within one game card. This is the original in-place diff — it
+// keeps an expanded row's body and only re-reads an open Logs pane on the poll
+// — scoped to the card's .gbots host instead of the whole list.
+function renderBotRows(host,bots,force){
   var seen={};
   bots.forEach(function(b){
     seen[b.id]=1;
-    var wrap=el.querySelector('.bot[data-bot="'+b.id+'"]');
+    var wrap=host.querySelector('.bot[data-bot="'+b.id+'"]');
     if(!wrap){
       wrap=document.createElement('div');
       wrap.className='bot'; wrap.setAttribute('data-bot',b.id);
@@ -393,11 +514,12 @@ function renderBots(bots,force){
           '</span>'+
         '</div>'+
         '<div class="body" id="body-'+b.id+'"></div>';
-      el.appendChild(wrap);
+      host.appendChild(wrap);
       wireBot(wrap,b.id);
     }
-    wrap.querySelector('.g').textContent=b.game||'(any)';
-    wrap.querySelector('.meta').textContent='bot #'+b.id+' · '+b.accounts+' account'+(b.accounts===1?'':'s');
+    // The game lives on the card header now, so the row leads with the bot #.
+    wrap.querySelector('.g').textContent='bot #'+b.id;
+    wrap.querySelector('.meta').textContent=b.accounts+' account'+(b.accounts===1?'':'s');
     var st=wrap.querySelector('.st'), chip=stChip(b);
     if(st.innerHTML!==chip) st.innerHTML=chip;
     var open=!!openBots[b.id];
@@ -412,7 +534,7 @@ function renderBots(bots,force){
     // exactly what made the old rebuild-everything poll so expensive.
     else if(open && openBots[b.id].tab==='logs') refreshLogs(b.id);
   });
-  Array.prototype.slice.call(el.querySelectorAll('.bot')).forEach(function(w){
+  Array.prototype.slice.call(host.querySelectorAll('.bot')).forEach(function(w){
     if(!seen[w.getAttribute('data-bot')]) w.remove();
   });
 }
@@ -731,6 +853,8 @@ $('createBtn').onclick=async function(){
   finally{ this.disabled=false; }
 };
 $('refreshBtn').onclick=function(){ loadState(true); loadPool(); loadAuto(); loadSpentHistory(); };
+$('expandAllBtn').onclick=function(){ setAllGroupsCollapsed(false); };
+$('collapseAllBtn').onclick=function(){ setAllGroupsCollapsed(true); };
 
 // --- spent (sold / connected) ---
 // A candidate is one account flagged sold (DB) or connected (live Twitch). The
