@@ -241,6 +241,23 @@
     <div class="stat"><b id="stImg">–</b><span>Image</span></div>
   </div>
 
+  <!-- My own (personal) bots -->
+  <div class="panel" id="minePanel" style="border-color:var(--accent);">
+    <div class="hd" style="background:rgba(79,70,229,0.06);border-top-left-radius:14px;border-top-right-radius:14px;">
+      <b>⭐ My own bots</b>
+      <span class="muted" style="margin-left:auto;">personal — farmed, drops left unclaimed, kept OUT of the auto-sell pipeline</span>
+    </div>
+    <div class="bd">
+      <div class="form-row" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+        <div style="flex:1 1 240px;"><label for="mineUser">Twitch username</label><input id="mineUser" placeholder="e.g. mikesolarwave913zg" autocapitalize="off" autocomplete="off" spellcheck="false" style="width:100%;" /></div>
+        <div><label for="mineGame">Game</label><select id="mineGame" style="min-width:180px;"></select></div>
+        <button class="btn primary" id="mineAddBtn">Add &amp; farm</button>
+      </div>
+      <div class="muted" id="mineHint" style="margin-top:9px;">Type a username — it pulls that account's token + Twitch ID automatically and starts a dedicated no-claim bot just for it. It keeps farming (drops left unclaimed) and is fenced off so the auto-lister never puts it on sale.</div>
+      <div id="mineBots" style="margin-top:14px;"><div class="muted">No personal bots yet.</div></div>
+    </div>
+  </div>
+
   <!-- Auto power -->
   <div class="panel">
     <div class="hd"><b>Auto power</b> <span class="muted" style="margin-left:auto;">start/stop bots on live streams to save RAM</span></div>
@@ -339,12 +356,15 @@ var pollT=null;
 async function loadState(force){
   try{
     var j=await api('/api/noclaim-farm/state');
-    $('stBots').textContent=j.bots.length;
-    $('stRunning').textContent=j.bots.filter(b=>b.running).length;
+    var bots=j.bots||[];
+    var personalN=bots.filter(function(b){return b.personal;}).length;
+    var fleetN=bots.length-personalN;
+    $('stBots').textContent=bots.length;
+    $('stRunning').textContent=bots.filter(function(b){return b.running;}).length;
     $('stImg').textContent=j.imageBuilt?'ready':(j.provisioning?'building…':'none');
-    $('botsCount').textContent=j.bots.length+' bot'+(j.bots.length===1?'':'s')+(j.provisioning?' · building…':'');
-    allBots=j.bots||[];
-    renderBots(j.bots,force);
+    $('botsCount').textContent=fleetN+' bot'+(fleetN===1?'':'s')+(personalN?' · '+personalN+' personal':'')+(j.provisioning?' · building…':'');
+    allBots=bots;
+    renderBots(bots,force);
     // keep polling only while something is building/running
     var active=j.provisioning||j.bots.some(b=>b.running);
     if(active&&!pollT) pollT=setInterval(function(){ loadState(); },6000);
@@ -445,7 +465,25 @@ function wireGroup(gwrap,gameKey){
   });
 }
 
+// Split the sweep: personal ("my own") bots render in their own section and are
+// filtered OUT of the shared game-grouped fleet, so a bot never shows in both.
 function renderBots(bots,force){
+  bots=bots||[];
+  renderMine(bots.filter(function(b){return b.personal;}),force);
+  renderFleet(bots.filter(function(b){return !b.personal;}),force);
+}
+
+// Personal bots: a flat list of the same per-bot rows (expand / tabs / logs all
+// behave the same), rendered into the My-own panel above the fleet.
+function renderMine(list,force){
+  var host=$('mineBots'); if(!host) return;
+  if(!list.length){ host.innerHTML='<div class="muted">No personal bots yet. Add one above.</div>'; return; }
+  // Drop the placeholder before the in-place diff (renderBotRows prunes only .bot rows).
+  Array.prototype.slice.call(host.children).forEach(function(ch){ if(!ch.classList.contains('bot')) ch.remove(); });
+  renderBotRows(host,list,force);
+}
+
+function renderFleet(bots,force){
   var el=$('bots');
   // Drop any placeholder ("Loading…" / error / "no bots") before diffing.
   Array.prototype.slice.call(el.children).forEach(function(ch){ if(!ch.classList.contains('gamegroup')) ch.remove(); });
@@ -518,7 +556,8 @@ function renderBotRows(host,bots,force){
       wireBot(wrap,b.id);
     }
     // The game lives on the card header now, so the row leads with the bot #.
-    wrap.querySelector('.g').textContent='bot #'+b.id;
+    // Personal bots get a star so they still read as "mine" in their section.
+    wrap.querySelector('.g').textContent=(b.personal?'⭐ ':'')+'bot #'+b.id;
     wrap.querySelector('.meta').textContent=b.accounts+' account'+(b.accounts===1?'':'s');
     var st=wrap.querySelector('.st'), chip=stChip(b);
     if(st.innerHTML!==chip) st.innerHTML=chip;
@@ -832,9 +871,12 @@ function renderGames(){
   el.querySelectorAll('button').forEach(function(b){ b.onclick=function(){ games.splice(+b.getAttribute('data-i'),1); saveGames(); }; });
 }
 function fillGameSelect(){
-  var sel=$('game'); var cur=sel.value;
-  sel.innerHTML = games.map(g=>'<option value="'+esc(g)+'">'+esc(g)+'</option>').join('');
-  if(cur) sel.value=cur;
+  ['game','mineGame'].forEach(function(gid){
+    var sel=$(gid); if(!sel) return; var cur=sel.value;
+    sel.innerHTML = games.map(function(g){return '<option value="'+esc(g)+'">'+esc(g)+'</option>';}).join('');
+    if(cur) sel.value=cur;
+    else if(gid==='mineGame'){ var ow=games.find(function(g){return /overwatch/i.test(g);}); if(ow) sel.value=ow; }
+  });
 }
 async function saveGames(){
   try{ var j=await api('/api/noclaim-farm/games',{method:'POST',body:JSON.stringify({games:games})}); games=j.games||[]; renderGames(); fillGameSelect(); toast('Saved.'); }
@@ -850,6 +892,21 @@ $('createBtn').onclick=async function(){
     toast(j.message||'Created.'); $('createHint').textContent='';
     await loadState(); await loadPool();
   }catch(e){ toast('Create failed: '+e.message); $('createHint').textContent=''; }
+  finally{ this.disabled=false; }
+};
+
+// My own (personal) bot — resolve a username to its token/ID server-side and
+// start a dedicated no-claim bot for it.
+$('mineAddBtn').onclick=async function(){
+  var user=$('mineUser').value.trim(), game=$('mineGame').value;
+  if(!user){ toast('Enter a username.'); return; }
+  if(!game){ toast('Add a no-claim game first.'); return; }
+  this.disabled=true; $('mineHint').textContent='Looking up '+user+' and starting a personal bot…';
+  try{ var j=await api('/api/noclaim-farm/personal-bots',{method:'POST',body:JSON.stringify({username:user,game:game})});
+    toast(j.message||'Created.'); $('mineUser').value='';
+    $('mineHint').textContent=(j.fenced?'Fenced from the sale pipeline (manualSold). ':'')+'Building on the host — it appears below once its container is up.';
+    await loadState(true); await loadPool();
+  }catch(e){ toast('Add failed: '+e.message); $('mineHint').textContent='Add failed: '+e.message; }
   finally{ this.disabled=false; }
 };
 $('refreshBtn').onclick=function(){ loadState(true); loadPool(); loadAuto(); loadSpentHistory(); };
