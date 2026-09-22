@@ -78,6 +78,11 @@ const configPath = (id) => botDir(id) + "/Configuration/config.json";
 // clear BOTH so manual control always wins.
 const markerPath = (id) => botDir(id) + "/.autostopped";
 const operatorMarkerPath = (id) => botDir(id) + "/.operatoroff";
+// `.personal` = the operator's OWN bot. Purely a label the console reads to show
+// it in the "My own" section (and the add-by-username path fences its account
+// from the auto-lister with manualSold). The watcher and containers ignore it,
+// and it is independent of the two auto-power markers above.
+const personalMarkerPath = (id) => botDir(id) + "/.personal";
 
 // One TwitchUsers entry from a pool account doc. `Id` MUST be the real numeric
 // Twitch user id — WatchRequest.GetPayload does Int32.Parse on it, so a
@@ -444,6 +449,58 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
   });
 }
 
+// --- Personal ("my own") bots ----------------------------------------------
+
+// Flag / unflag a bot as the operator's personal one (a `.personal` marker file,
+// the same mechanism as the auto-power markers). The console lists personal bots
+// in their own section; nothing in the farming path depends on it.
+async function setPersonal(id, on) {
+  const p = personalMarkerPath(id);
+  if (on)
+    await sh(`mkdir -p ${hosts.shq(botDir(id))} && touch ${hosts.shq(p)}`, {
+      timeout: 15000,
+    });
+  else await sh(`rm -f ${hosts.shq(p)}`, { timeout: 15000 });
+  return !!on;
+}
+
+// Which no-claim bot config(s), if any, already hold this ClientSecret. The same
+// token in two configs makes the login fight itself for the Twitch session (a
+// dupeGuard violation), so the add-by-username path checks this before writing a
+// new config. Best-effort: a config that will not parse is skipped, exactly like
+// the dupe scan in scripts/noclaim-readd-sold-batch.js.
+async function findSecretInConfigs(secret) {
+  const s = String(secret || "");
+  if (!s) return [];
+  const { bots } = await readFleet();
+  const ids = bots.map((b) => b.id).filter(Boolean);
+  if (!ids.length) return [];
+  const script = ids
+    .map(
+      (id) =>
+        `echo "__CFG__${id}__"; cat ${hosts.shq(configPath(id))} 2>/dev/null || true`,
+    )
+    .join("; ");
+  const out = await sh(script, { timeout: 45000 });
+  const found = [];
+  for (const chunk of out.split("__CFG__")) {
+    const m = chunk.match(/^([0-9]+)__/);
+    if (!m) continue;
+    let cfg;
+    try {
+      cfg = JSON.parse(chunk.slice(m[0].length).trim());
+    } catch {
+      continue;
+    }
+    for (const u of (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [])
+      if (u && String(u.ClientSecret) === s) {
+        found.push(m[1]);
+        break;
+      }
+  }
+  return found;
+}
+
 module.exports = {
   HOST_ID,
   BASE,
@@ -463,6 +520,7 @@ module.exports = {
   configPath,
   markerPath,
   operatorMarkerPath,
+  personalMarkerPath,
   buildConfig,
   soldGameExclusion,
   readyPoolQuery,
@@ -475,4 +533,6 @@ module.exports = {
   createBotFromAccounts,
   createBot,
   topUpBot,
+  setPersonal,
+  findSecretInConfigs,
 };
