@@ -20,6 +20,10 @@
 //  - Thread decay: the container keeps logging, but for a shrinking pool of
 //    accounts — per-account watch threads die (401 waves) and never respawn.
 //    Neither trigger above catches this; see the dedicated section below.
+//  - Stale build: the container logs every minute, never crashes and keeps
+//    every account "active" — yet runs an image too old to be credited. None
+//    of the three triggers above can see it; see "Stale-build + disk" below.
+//  - Full disk on a bot host, which silently stops every container on it.
 //
 // State is in-memory only and resets on server restart (same tradeoff
 // dropScanner.js makes for its session counters) — acceptable here since a
@@ -91,17 +95,51 @@ const CRASH_PATTERNS = [
   /out of memory/i,
 ];
 
+// ---------------------------------------------------------------------------
+// Stale-build + disk detection
+// ---------------------------------------------------------------------------
+// 2026-09-23: every rent-farm and auto-farm bot on contabo had been running a
+// June 2026 image — pulled from Docker Hub as "avishkarex/twitchbot:latest" —
+// that predates Twitch dropping `completedRewardCampaigns`. The bots logged
+// every minute, never crashed and kept every account's thread alive, so the
+// silence, crash and decay checks all read healthy while not one account was
+// credited a minute for days. Buyers noticed first.
+//
+// Two tells, either one is enough:
+//  - the container's image is not the host's current FARM_IMAGE (the
+//    local-only tag utils/botUpdater.js builds). Parked bots count: they are
+//    woken with a plain `docker start`, which reuses the image they were
+//    created with, so a stale parked bot wakes broken.
+//  - its logs carry the old build's progress line "Progress: X/Y minutes";
+//    current sources print "Waiting N seconds... X/Y minutes watched." instead.
+// No-claim bots (noclaim-bot-*) run their own image and are not compared.
+//
+// Same day, an emptied no-claim bot spun on its login prompt and wrote a 186GB
+// log; at 100% disk every container on the host stopped being able to write.
+// Nothing alerted, so the disk is checked too.
+const BUILD_ENABLED = process.env.BOT_BUILD_CHECK_DISABLED !== "1";
+const BUILD_INTERVAL_MS =
+  Number(process.env.BOT_BUILD_INTERVAL_MS) || 60 * 60 * 1000; // hourly
+const FARM_IMAGE = process.env.BOT_FARM_IMAGE || "twitchbot-farm:latest";
+const DISK_ALERT_PCT = Number(process.env.BOT_DISK_ALERT_PCT) || 85;
+const OLD_BUILD_PATTERN = /\bProgress: \d+\/\d+ minutes\b/;
+
 const state = {
   enabled: process.env.BOT_HEALTH_DISABLED !== "1",
   lastTickAt: null,
   lastError: "",
   lastDecayAt: 0, // epoch ms of the last decay scan (0 => run on first tick)
+  lastBuildScanAt: 0, // epoch ms of the last stale-build/disk scan
 };
 
 // `${hostId}:${container}` -> tracking entry
 const tracked = new Map();
 // `${hostId}:${container}` -> decay tracking entry (last counts + cooldown)
 const decayTracked = new Map();
+// hostId -> { signature, lastAlertAt, stale, missingImage, expectedId }
+const buildTracked = new Map();
+// hostId -> { pct, alerting, lastAlertAt }
+const diskTracked = new Map();
 let timer = null;
 let started = false;
 
@@ -134,20 +172,51 @@ async function checkContainer(host, container, now) {
 
   const hash = tailHash(logs);
   const isCrashing = CRASH_PATTERNS.some((re) => re.test(logs));
+  const oldBuild = isOldBuildLog(logs);
   let entry = tracked.get(k);
+  const firstSighting = !entry;
   if (!entry) {
     entry = {
       hash,
       sameSince: now,
       stuckSince: null,
       crashing: isCrashing,
+      oldBuild,
       lastCheckedAt: now,
       lastStuckAlertAt: 0,
       lastCrashAlertAt: 0,
+      lastOldBuildAlertAt: 0,
     };
     tracked.set(k, entry);
-    return; // first sighting — nothing to compare against yet
   }
+  // Visible from the very first tail, unlike silence — so no baseline needed.
+  entry.oldBuild = oldBuild;
+  if (oldBuild && now - (entry.lastOldBuildAlertAt || 0) > REMINDER_MS) {
+    entry.lastOldBuildAlertAt = now;
+    logEvent({
+      category: "bots",
+      action: "stale_build",
+      actor: "healthMonitor",
+      severity: "error",
+      host: host.id,
+      container,
+      detail: "logs show the pre-July build's 'Progress: X/Y minutes' line",
+    });
+    await sendTelegram(
+      "🧱 " +
+        host.label +
+        "/" +
+        container +
+        " is running an OLD bot build: its logs show \"Progress: X/Y minutes\" " +
+        "(current builds print \"... minutes watched\"). That build watches " +
+        "streams without ever being credited. Recreate it on " +
+        FARM_IMAGE +
+        " (Bots page rollout, or docker compose up -d --force-recreate " +
+        container +
+        ").",
+    ).catch(() => {});
+  }
+  if (firstSighting) return; // nothing to compare against yet for silence
 
   entry.crashing = isCrashing;
   entry.lastCheckedAt = now;
@@ -439,6 +508,187 @@ async function decayScanHost(host, now) {
   }
 }
 
+// --- stale-build + disk helpers (pure; exported for unit tests) -----------
+
+function isOldBuildLog(logText) {
+  return OLD_BUILD_PATTERN.test(logText || "");
+}
+
+// Farm bots are the compose-managed "twitchbot" / "twitchbotx<N>" containers.
+// No-claim bots and one-off containers (the updater's testrun) are not.
+function isFarmBot(name) {
+  return name === "twitchbot" || /^twitchbotx\d+$/.test(name);
+}
+
+// Parse `docker inspect -f '{{.Name}}|{{.Image}}|{{.State.Status}}'` output.
+function parseBotImages(stdout) {
+  const rows = [];
+  for (const line of String(stdout || "").split("\n")) {
+    const parts = line.trim().split("|");
+    if (parts.length < 3 || !parts[0]) continue;
+    rows.push({
+      name: parts[0].replace(/^\//, ""),
+      imageId: parts[1],
+      status: parts[2],
+    });
+  }
+  return rows;
+}
+
+// Farm bots whose image is not the host's current farm image (by id, so a
+// retag or rollout is compared on content, not on the name it was created
+// with). Returns [] when the expected id is unknown — that case is reported
+// separately as a missing image, never as "every bot is stale".
+function staleBuilds(rows, expectedId) {
+  if (!expectedId) return [];
+  return rows
+    .filter((r) => isFarmBot(r.name) && r.imageId && r.imageId !== expectedId)
+    .map((r) => ({ name: r.name, running: r.status === "running" }))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true }),
+    );
+}
+
+function diskPct(stats) {
+  if (!stats || !stats.diskTotal || stats.diskUsed == null) return null;
+  return Math.round((stats.diskUsed / stats.diskTotal) * 1000) / 10;
+}
+
+// One read per host (never a per-container SSH loop): the expected image id
+// plus every farm-bot container's image id and state.
+async function buildScanHost(host, now) {
+  if (host.runtime === "native") return; // no docker images to compare
+  const script =
+    "echo \"EXPECTED $(docker image inspect -f '{{.Id}}' " +
+    hosts.shq(FARM_IMAGE) +
+    ' 2>/dev/null)"; ' +
+    "ids=$(docker ps -aq --filter name=twitchbot); " +
+    '[ -n "$ids" ] && docker inspect -f ' +
+    "'{{.Name}}|{{.Image}}|{{.State.Status}}' $ids; true";
+  let out;
+  try {
+    out = (await hosts.runShell(host, script, { timeout: 60000 })).stdout || "";
+  } catch {
+    return; // host unreachable — not a build signal
+  }
+  const lines = out.split("\n");
+  const expLine = lines.find((l) => l.startsWith("EXPECTED")) || "";
+  const expectedId = expLine.replace(/^EXPECTED\s*/, "").trim();
+  const rows = parseBotImages(
+    lines.filter((l) => !l.startsWith("EXPECTED")).join("\n"),
+  );
+  const missingImage = !expectedId && rows.some((r) => isFarmBot(r.name));
+  const stale = staleBuilds(rows, expectedId);
+  const signature =
+    (missingImage ? "MISSING;" : "") +
+    stale.map((s) => s.name + (s.running ? "*" : "")).join(",");
+
+  const prev = buildTracked.get(host.id) || { signature: "", lastAlertAt: 0 };
+  const entry = {
+    signature,
+    lastAlertAt: prev.lastAlertAt,
+    stale,
+    missingImage,
+    expectedId,
+    checkedAt: now,
+  };
+  buildTracked.set(host.id, entry);
+
+  if (!signature) {
+    if (prev.signature) {
+      await sendTelegram(
+        "✅ " + host.label + ": every farm bot is on the current " + FARM_IMAGE + " build again.",
+      ).catch(() => {});
+    }
+    return;
+  }
+  // Re-alert when the set of stale bots changes, else only as a reminder.
+  if (signature === prev.signature && now - prev.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+
+  const running = stale.filter((s) => s.running).map((s) => s.name);
+  const parked = stale.filter((s) => !s.running).map((s) => s.name);
+  const parts = [];
+  if (missingImage) {
+    parts.push(
+      "no local " +
+        FARM_IMAGE +
+        " image — any farm bot created or recreated here will fail to start " +
+        "(build it with the Bots page rollout)",
+    );
+  }
+  if (running.length) {
+    parts.push(running.length + " RUNNING on an older build: " + running.join(", "));
+  }
+  if (parked.length) {
+    parts.push(
+      parked.length + " parked on an older build (they wake broken): " + parked.join(", "),
+    );
+  }
+  logEvent({
+    category: "bots",
+    action: "stale_build",
+    actor: "healthMonitor",
+    severity: running.length || missingImage ? "error" : "warn",
+    host: host.id,
+    detail: parts.join("; "),
+  });
+  await sendTelegram(
+    "🧱 " +
+      host.label +
+      ": " +
+      parts.join(". ") +
+      ". Fix: the Bots page rollout recreates running AND parked bots; for one " +
+      "bot, docker compose up -d --force-recreate <bot>.",
+  ).catch(() => {});
+}
+
+async function diskCheckHost(host, now) {
+  let stats;
+  try {
+    stats = await hosts.hostStats(host);
+  } catch {
+    return; // host unreachable — not a disk signal
+  }
+  const pct = diskPct(stats);
+  if (pct == null) return;
+  const prev = diskTracked.get(host.id) || { alerting: false, lastAlertAt: 0 };
+  const entry = {
+    pct,
+    alerting: pct >= DISK_ALERT_PCT,
+    lastAlertAt: prev.lastAlertAt,
+    checkedAt: now,
+  };
+  diskTracked.set(host.id, entry);
+  if (!entry.alerting) {
+    if (prev.alerting) {
+      await sendTelegram("✅ " + host.label + " disk is back to " + pct + "% used.").catch(() => {});
+    }
+    return;
+  }
+  if (prev.alerting && now - prev.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+  logEvent({
+    category: "bots",
+    action: "disk_full",
+    actor: "healthMonitor",
+    severity: pct >= 95 ? "error" : "warn",
+    host: host.id,
+    detail: pct + "% used (" + host.dir + ")",
+  });
+  await sendTelegram(
+    "💾 " +
+      host.label +
+      " disk is " +
+      pct +
+      "% full (" +
+      host.dir +
+      "). At 100% every bot on this host loses the ability to write and " +
+      "farming stops. Usual cause is a runaway container log; find it with: " +
+      "sudo du -ah /var/lib/docker/containers | sort -rh | head",
+  ).catch(() => {});
+}
+
 async function tick() {
   state.lastTickAt = new Date();
   if (state.enabled) {
@@ -462,6 +712,22 @@ async function tick() {
         }
       } catch (e) {
         state.lastError = e.message || String(e);
+      }
+    }
+    // Stale-build + disk pass: hourly, one cheap read per host. These catch
+    // the two silent failures that stopped rent/auto farming for days in
+    // 2026-09 (an old image that no longer accrues progress, and a host disk
+    // at 100%) — both look like "bot is up, just not farming" otherwise.
+    if (BUILD_ENABLED && now - state.lastBuildScanAt >= BUILD_INTERVAL_MS) {
+      state.lastBuildScanAt = now;
+      for (const h of hosts.listHosts()) {
+        const host = hosts.resolveHost(h.id);
+        try {
+          await buildScanHost(host, now);
+          await diskCheckHost(host, now);
+        } catch (e) {
+          state.lastError = e.message || String(e);
+        }
       }
     }
   }
@@ -519,6 +785,27 @@ function status() {
           : null,
       })),
     },
+    build: {
+      enabled: BUILD_ENABLED,
+      image: FARM_IMAGE,
+      intervalMs: BUILD_INTERVAL_MS,
+      lastScanAt: state.lastBuildScanAt
+        ? new Date(state.lastBuildScanAt).toISOString()
+        : null,
+      hosts: Array.from(buildTracked.entries()).map(([id, v]) => ({
+        host: id,
+        missingImage: !!v.missingImage,
+        stale: v.stale || [],
+      })),
+    },
+    disk: {
+      alertPct: DISK_ALERT_PCT,
+      hosts: Array.from(diskTracked.entries()).map(([id, v]) => ({
+        host: id,
+        pct: v.pct,
+        alerting: !!v.alerting,
+      })),
+    },
   };
 }
 
@@ -531,7 +818,14 @@ module.exports = {
   countActiveUsernames,
   isDecayed,
   parseUptimeMs,
-  // Orchestration entrypoint exposed for integration tests (drives one decay
+  isOldBuildLog,
+  isFarmBot,
+  parseBotImages,
+  staleBuilds,
+  diskPct,
+  // Orchestration entrypoints exposed for integration tests (each drives one
   // scan of a host against an injectable `hosts` layer).
   decayScanHost,
+  buildScanHost,
+  diskCheckHost,
 };

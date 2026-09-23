@@ -45,8 +45,13 @@ async function getRentedConfigSet() {
   }
 }
 
-// Default image used when a new bot can't inherit one from an existing service.
-const DEFAULT_IMAGE = "twitchbot-noclaim:latest";
+// Farm bots (rent-farm + auto-farm) run the LOCAL-ONLY image the Bots-page
+// rollout (utils/botUpdater.js) builds and maintains. Never a Docker Hub name:
+// "avishkarex/twitchbot" on Docker Hub is a stale pre-July build that watches
+// without being credited, and a missing local tag would silently pull it.
+// Inheriting only this image family means a service left on another tag can
+// never be copied into a new bot.
+const DEFAULT_IMAGE = "twitchbot-farm:latest";
 // Hard cap on accounts accepted in one paste, as a sanity/DoS guard.
 const MAX_BULK_ACCOUNTS = 2000;
 
@@ -387,7 +392,7 @@ function addServiceToComposeText(raw, container, file) {
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
     const svc = doc.services[key];
-    if (svc && typeof svc.image === "string" && svc.image && !/^avishkarex\/twitchbot/.test(svc.image)) {
+    if (svc && typeof svc.image === "string" && /^twitchbot-farm(:|$)/.test(svc.image)) {
       image = svc.image;
       break;
     }
@@ -2069,6 +2074,7 @@ module.exports.parseGamesList = parseGamesList;
 module.exports.dedupeAccounts = dedupeAccounts;
 module.exports.validFile = validFile;
 module.exports.containerForFile = containerForFile;
+module.exports.addServiceToComposeText = addServiceToComposeText;
 module.exports.addAccountsToConfig = addAccountsToConfig;
 module.exports.addRenterAccountsToConfig = addRenterAccountsToConfig;
 module.exports.provisionEmptyConfig = provisionEmptyConfig;

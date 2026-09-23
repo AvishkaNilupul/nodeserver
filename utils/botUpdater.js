@@ -7,22 +7,45 @@
 // host's running bots one at a time. The moment a bot fails its post-update
 // health check, that one bot is rolled straight back to the previous image
 // and the entire rollout stops — every bot not yet reached (on this host or
-// the next) is left exactly as it was.
+// the next) is left exactly as it was. Parked (stopped) bots are then rebuilt
+// on the new image WITHOUT being started, so a later wake gets the new build.
 const axios = require("axios");
 
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
 
 const DEFAULT_REPO = "Alorf/TwitchDropsBot";
-const IMAGE = "avishkarex/twitchbot";
+// Deliberately a LOCAL-ONLY name. The old "avishkarex/twitchbot" also exists
+// on Docker Hub as a stale June 2026 build that predates Twitch dropping
+// `completedRewardCampaigns`; any `compose up` on a host without the local tag
+// silently pulled it, and every rent-farm and auto-farm bot on contabo watched
+// streams for days without being credited (2026-09-23). A name that exists
+// nowhere remote can only fail loudly when missing, never pull a broken build.
+const IMAGE = "twitchbot-farm";
 const BUILD_TIMEOUT = 20 * 60 * 1000; // git clone + docker build, esp. on a Pi
 const SETTLE_MS = 12000; // time to let a recreated/test container start logging
+// How long the isolated sanity test may take to show the per-account loop
+// running (login + campaign evaluation), polled every TEST_POLL_MS.
+const TEST_WINDOW_MS = 90 * 1000;
+const TEST_POLL_MS = 10 * 1000;
 const BAD_LOG_PATTERNS = [
   /no users? found/i,
   /unhandled exception/i,
   /fatal error/i,
   /failed to start/i,
+  // The broken pre-July build's progress line. Current sources print
+  // "Waiting N seconds... X/Y minutes watched." and never this; seeing it
+  // means the image is the one that watches without ever being credited.
+  /\bProgress: \d+\/\d+ minutes\b/,
 ];
+// Proof the bot got past login and is evaluating campaigns for its accounts.
+const GOOD_LOG_PATTERN =
+  /\[TwitchUser - [^\]]+\] (?:Checking "|Current drop campaign|Waiting \d+ seconds|No campaign found|No broadcaster|Campaign ")/;
+// The shape every farm bot container runs with (see botFactory's compose
+// service). INSIDE_DOCKER only moves the config path to /app/Configuration;
+// the mount and the env var must agree or the bot finds "no users" and spins
+// on its login prompt. Root so the bot can write its mounted config back.
+const CONTAINER_CONFIG_PATH = "/app/Configuration/config.json";
 
 const state = {
   running: false,
@@ -123,6 +146,57 @@ function looksUnhealthy(logText) {
   return BAD_LOG_PATTERNS.some((re) => re.test(logText || ""));
 }
 
+// Positive evidence, not just the absence of known errors: a build that
+// starts, logs nothing wrong and never reaches the per-account loop would
+// otherwise pass the sanity test.
+function looksHealthy(logText) {
+  return !looksUnhealthy(logText) && GOOD_LOG_PATTERN.test(logText || "");
+}
+
+// Rebuild a stopped container from its (updated) compose service WITHOUT
+// starting it, keeping its restart policy. Parked bots are woken later with a
+// plain `docker start` (utils/botWaker.js, utils/hostWatchdog.js), which reuses
+// whatever image the container was created with — so a rollout that only
+// recreated RUNNING bots left every parked one on the old build (2026-09-23:
+// twitchbotx8 woke on the broken image hours after the fix). The policy must
+// be put back because hostWatchdog treats a never-run `restart=always`
+// container as dead and would start it.
+async function refreshParkedContainer(host, container) {
+  const shq = hosts.shq;
+  const pol = await hosts.runShell(
+    host,
+    "docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' " + shq(container),
+    { timeout: 20000 },
+  );
+  const policy = (pol.stdout || "").trim() || "no";
+  const compose = await detectComposeCmd(host);
+  await hosts.runShell(
+    host,
+    "cd " +
+      shq(host.dir) +
+      " && " +
+      compose +
+      " up --no-start --force-recreate --no-deps " +
+      shq(container),
+    { timeout: 180000 },
+  );
+  await hosts.runShell(
+    host,
+    "docker update --restart=" + shq(policy) + " " + shq(container) + " > /dev/null",
+    { timeout: 20000 },
+  );
+  return policy;
+}
+
+async function detectComposeCmd(host) {
+  const r = await hosts.runShell(
+    host,
+    "docker compose version > /dev/null 2>&1 && echo 'docker compose' || echo docker-compose",
+    { timeout: 20000 },
+  );
+  return (r.stdout || "").trim() || "docker compose";
+}
+
 // A real config on this host with at least one account, so the sanity-test
 // container actually exercises a login rather than trivially "succeeding" on
 // an empty config (the zero-account case is a known bug, not a health check).
@@ -193,15 +267,10 @@ async function buildAndRolloutHost(host, tag, repo) {
     " && git checkout --force FETCH_HEAD && git reset --hard FETCH_HEAD";
   await hosts.runShell(host, cloneScript, { timeout: BUILD_TIMEOUT });
 
-  log(host.label, "patching Dockerfile (INSIDE_DOCKER=false)");
-  await hosts.runShell(
-    host,
-    "cd " +
-      shq(dir) +
-      " && sed -i 's/ENV INSIDE_DOCKER=true/ENV INSIDE_DOCKER=false/' " +
-      "TwitchDropsBot.Console/Dockerfile",
-    { timeout: 15000 },
-  );
+  // The Dockerfile is built as-is (ENV INSIDE_DOCKER=true). This used to be
+  // patched to false to match an /app/config.json mount; farm bots now mount
+  // their config at /app/Configuration/config.json with INSIDE_DOCKER=true,
+  // and the image default should agree with the containers that run it.
 
   const backupTag =
     IMAGE + ":pre-update-" + new Date().toISOString().slice(0, 10);
@@ -259,35 +328,59 @@ async function buildAndRolloutHost(host, tag, repo) {
       timeout: 10000,
     })
     .catch(() => {});
-  const hostConfigPath = host.dir.replace(/\/+$/, "") + "/" + testFile;
+  const baseDir = host.dir.replace(/\/+$/, "");
+  const hostConfigPath = baseDir + "/" + testFile;
+  // Test against a COPY: the test container runs as root with a writable
+  // config, and must never be able to rewrite a live bot's file.
+  const testCopy = baseDir + "/.testrun-config.json";
   await hosts.runShell(
     host,
-    "docker run -d --name twitchbot-testrun -v " +
-      shq(hostConfigPath + ":/app/config.json") +
+    "cp " + shq(hostConfigPath) + " " + shq(testCopy) + " && chmod 600 " + shq(testCopy),
+    { timeout: 15000 },
+  );
+  // Same shape as a real farm bot (root, INSIDE_DOCKER, /app/Configuration
+  // mount) so the test exercises what production will actually run.
+  await hosts.runShell(
+    host,
+    "docker run -d --name twitchbot-testrun --user 0:0 -e INSIDE_DOCKER=true " +
+      "--log-opt max-size=10m --log-opt max-file=1 -v " +
+      shq(testCopy + ":" + CONTAINER_CONFIG_PATH) +
       " " +
       shq(imageTag),
     { timeout: 30000 },
   );
-  await new Promise((r) => setTimeout(r, SETTLE_MS));
-  const testLogs = await hosts
-    .runShell(host, "docker logs twitchbot-testrun 2>&1 | tail -n 150", {
-      timeout: 15000,
-    })
-    .then((r) => r.stdout)
-    .catch(() => "");
+  let testLogs = "";
+  const deadline = Date.now() + TEST_WINDOW_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, TEST_POLL_MS));
+    testLogs = await hosts
+      .runShell(host, "docker logs twitchbot-testrun 2>&1 | tail -n 200", {
+        timeout: 15000,
+      })
+      .then((r) => r.stdout)
+      .catch(() => "");
+    if (looksUnhealthy(testLogs) || looksHealthy(testLogs)) break;
+  }
   await hosts
-    .runShell(host, "docker rm -f twitchbot-testrun > /dev/null 2>&1 || true", {
-      timeout: 10000,
-    })
+    .runShell(
+      host,
+      "docker rm -f twitchbot-testrun > /dev/null 2>&1; rm -f " + shq(testCopy),
+      { timeout: 15000 },
+    )
     .catch(() => {});
 
-  if (looksUnhealthy(testLogs)) {
+  if (!looksHealthy(testLogs)) {
     throw new Error(
       host.label +
         ": sanity test failed — the new image (" +
         tag +
-        ") looks broken against a real config. Nothing live was touched. " +
-        "Last logs: " +
+        ") " +
+        (looksUnhealthy(testLogs)
+          ? "logged a known failure"
+          : "never reached the per-account loop within " +
+            TEST_WINDOW_MS / 1000 +
+            "s") +
+        " against a real config. Nothing live was touched. Last logs: " +
         testLogs.slice(-400),
     );
   }
@@ -299,18 +392,19 @@ async function buildAndRolloutHost(host, tag, repo) {
   );
 
   const states = await hosts.dockerPs(host).catch(() => ({}));
+  const isBot = (name) => name === "twitchbot" || /^twitchbotx\d+$/.test(name);
   const running = Object.keys(states)
+    .filter((name) => isBot(name) && states[name].state === "running")
+    .sort((a, b) => natKey(a) - natKey(b));
+  const parked = Object.keys(states)
     .filter(
       (name) =>
-        (name === "twitchbot" || /^twitchbotx\d+$/.test(name)) &&
-        states[name].state === "running",
+        isBot(name) && /^(exited|created)$/i.test(states[name].state || ""),
     )
     .sort((a, b) => natKey(a) - natKey(b));
 
   if (!running.length) {
     log(host.label, "no running bots on this host to recreate");
-    await setAppliedVersion(host.id, tag, sourceRepo);
-    return;
   }
 
   for (const container of running) {
@@ -356,6 +450,32 @@ async function buildAndRolloutHost(host, tag, repo) {
       );
     }
     log(host.label, container + " looks healthy on the new image");
+  }
+
+  // Parked bots: rebuilt on the new image but left stopped. A failure here
+  // does not roll back the live bots (they already passed their checks); it
+  // is logged so the stale container can be fixed by hand.
+  let refreshed = 0;
+  for (const container of parked) {
+    try {
+      const policy = await refreshParkedContainer(host, container);
+      refreshed++;
+      log(
+        host.label,
+        container + " (parked) rebuilt on the new image, still stopped, restart=" + policy,
+      );
+    } catch (e) {
+      log(
+        host.label,
+        "WARNING: could not rebuild parked " +
+          container +
+          " — it will wake on the OLD image until recreated: " +
+          (e.message || String(e)).split("\n")[0].slice(0, 200),
+      );
+    }
+  }
+  if (parked.length) {
+    log(host.label, refreshed + "/" + parked.length + " parked bots moved to the new image");
   }
 
   await setAppliedVersion(host.id, tag, sourceRepo);
@@ -621,4 +741,8 @@ module.exports = {
   appliedVersions,
   start,
   status,
+  // exported for tests
+  IMAGE,
+  looksUnhealthy,
+  looksHealthy,
 };
