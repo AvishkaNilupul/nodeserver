@@ -1185,6 +1185,50 @@ async function playerauctionsGameEnabled(game) {
   }
 }
 
+// Eldorado refuses a create with HTTP 400 once a category holds 100 active
+// offers ("Maximum of 100 active offers is allowed.") or once the day's
+// creation quota is spent ("Offer creation limits exceeded."). Neither clears
+// for hours, and the secondaries retry runs every few minutes per task, so
+// after one of those answers the retry leaves Eldorado alone for a while
+// instead of spending a create on every task every run.
+const ELD_LIMIT_RE = /maximum of \d+ active offers|offer creation limits exceeded/i;
+const ELD_LIMIT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let eldoradoLimitUntil = 0;
+
+// Does this task need a (new) Eldorado share? Eldorado's share was only ever
+// taken in the round-robin of the FIRST publish, behind Gameflip, Digiseller,
+// GGSel and ZeusX — and an early-bird publish rarely has more than the four
+// finished accounts ahead of it. So most games never reached Eldorado: 6 of the
+// 19 listings in the two weeks to 2026-09-23 (both of that day's) recorded "no
+// spare account for this market yet", and nothing ever asked again.
+//
+// A share that SOLD OUT is missing too. Eldorado closes an offer when its last
+// unit sells, and refillMarkets never tops an Eldorado share up, so a game that
+// sold its few accounts there stayed off Eldorado for the rest of the campaign
+// while more finished accounts sat free. Its row is retired as "sold" (and the
+// offer paused, in case it is somehow still live) so the new share gets a row
+// of its own; a "sold" row still referenced by the task means a replacement is
+// owed. A share the owner delisted, or one that was removed, is NOT missing —
+// republishing it would overrule a decision made on purpose.
+async function eldoradoShareMissing(L) {
+  const id = L && L.eldorado && L.eldorado.externalId;
+  if (!id) return true;
+  const row = await MarketplaceListing.findOne({
+    marketplace: "eldorado",
+    externalId: String(id),
+  });
+  if (!row) return false;
+  if (row.status === "sold") return true;
+  if (row.status !== "active") return false;
+  const units = row.units || [];
+  if (!units.length || units.some((u) => !u.deliveredAt)) return false;
+  await mp.eldoradoDelist(String(id)).catch(() => {});
+  row.status = "sold";
+  row.lastError = "sold out — every unit delivered; a fresh share replaces it";
+  await row.save();
+  return true;
+}
+
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
 // cost a market. On every sweep tick where the Gameflip listing is alive,
 // try to publish any secondary market that has no externalId yet, using
@@ -1204,7 +1248,22 @@ async function retryMissingSecondaries(task) {
   // expired at publish time, or a flag switched on mid-campaign, would
   // otherwise cost the market for the whole campaign.
   const g2gMissing = !(L.g2g && L.g2g.externalId);
-  if (!platiMissing && !ggselMissing && !zeusxMissing && !g2gMissing) {
+  // Eldorado too — see eldoradoShareMissing. No-claim games never take an
+  // auto-farm share there (publishEldoradoShare refuses them), so they are not
+  // asked at all rather than recording that refusal on every run.
+  const afNow = settings.getAutoFarm();
+  const eldoradoMissing =
+    !!afNow.eldoradoAuto &&
+    !isNoClaimGame(task.game) &&
+    Date.now() >= eldoradoLimitUntil &&
+    (await eldoradoShareMissing(L));
+  if (
+    !platiMissing &&
+    !ggselMissing &&
+    !zeusxMissing &&
+    !g2gMissing &&
+    !eldoradoMissing
+  ) {
     return null;
   }
 
@@ -1240,6 +1299,7 @@ async function retryMissingSecondaries(task) {
     if (mapped) targets.push("zeusx");
   }
   if (g2gMissing && af.g2gAuto && brandForGame(task.game)) targets.push("g2g");
+  if (eldoradoMissing) targets.push("eldorado");
   if (!targets.length) return null;
 
   const shares = {};
@@ -1311,6 +1371,38 @@ async function retryMissingSecondaries(task) {
           retried.push("g2g");
         } catch (err) {
           task.listing.g2g = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
+      } else if (t === "eldorado") {
+        try {
+          const r = await publishEldoradoShare({
+            ...base,
+            // The Gameflip row's copy tells the buyer to message the seller
+            // "on Gameflip"; Eldorado gets its own support line, exactly as the
+            // first publish builds it.
+            description: buildDescription({
+              game: task.game,
+              items: (set.items || []).map((i) =>
+                i && typeof i.toObject === "function" ? i.toObject() : i,
+              ),
+              campaignName: task.campaignName,
+              postEvent: !!L.postEvent,
+              marketplace: "eldorado",
+            }),
+            accounts,
+            game: task.game,
+          });
+          task.listing.eldorado = { ...r, error: "" };
+          retried.push("eldorado");
+        } catch (err) {
+          if (ELD_LIMIT_RE.test(String((err && err.message) || ""))) {
+            eldoradoLimitUntil = Date.now() + ELD_LIMIT_COOLDOWN_MS;
+          }
+          task.listing.eldorado = {
             externalId: "",
             url: "",
             qty: 0,
@@ -3212,6 +3304,7 @@ module.exports = {
   onCampaignEnded,
   refillMarkets,
   retryMissingSecondaries,
+  eldoradoShareMissing,
   isAutoOwned,
   // exported for tests
   listingIsLive,

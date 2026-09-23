@@ -242,7 +242,10 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
   const lifetime = markets.ggsel.totalSold + markets.plati.totalSold;
   // Typical price across every live listing anywhere, so a game that only
   // sells on the Russian markets still gets a price signal.
-  const typicalPrice = medianPrice([...gfActiveRel, ...ggRel, ...plRel, ...fp]);
+  // (FunPay's rows used to join this median; the scout went with the FunPay
+  // integration on 2026-09-20 and its `fp` left behind threw a ReferenceError
+  // on every game, so no research was saved from then until this fix.)
+  const typicalPrice = medianPrice([...gfActiveRel, ...ggRel, ...plRel]);
 
   // GGSel and Plati never date a sale, but their lifetime counters move, and
   // the previous scan recorded where they stood. The difference is real units
