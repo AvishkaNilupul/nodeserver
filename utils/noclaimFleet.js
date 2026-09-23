@@ -326,7 +326,7 @@ async function createBotFromAccounts(id, accounts, game) {
     `if [ -d ${hosts.shq(SRC_DIR + "/.git")} ]; then cd ${hosts.shq(SRC_DIR)} && git fetch --depth 1 origin ${BRANCH} && git checkout -f ${BRANCH} && git reset --hard origin/${BRANCH}; else rm -rf ${hosts.shq(SRC_DIR)} && git clone --depth 1 -b ${BRANCH} ${hosts.shq(REPO)} ${hosts.shq(SRC_DIR)}; fi`,
     `if ! docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1; then cd ${hosts.shq(SRC_DIR)} && docker build -f TwitchDropsBot.Console/Dockerfile -t ${hosts.shq(IMAGE)} .; fi`,
     `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
-    `docker run -d --name ${hosts.shq(containerFor(id))} --restart unless-stopped --user 0:0 ` +
+    `docker run -d --name ${hosts.shq(containerFor(id))} --restart unless-stopped --log-opt max-size=10m --log-opt max-file=3 --user 0:0 ` +
       `-e INSIDE_DOCKER=true -v ${hosts.shq(botDir(id) + "/Configuration")}:/app/Configuration ` +
       `-v ${hosts.shq(botDir(id) + "/logs")}:/app/logs ${hosts.shq(IMAGE)}`,
     `echo "[$(date -u +%FT%TZ)] bot ${id} started"`,

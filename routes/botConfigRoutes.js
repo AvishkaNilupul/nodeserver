@@ -46,7 +46,7 @@ async function getRentedConfigSet() {
 }
 
 // Default image used when a new bot can't inherit one from an existing service.
-const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
+const DEFAULT_IMAGE = "twitchbot-noclaim:latest";
 // Hard cap on accounts accepted in one paste, as a sanity/DoS guard.
 const MAX_BULK_ACCOUNTS = 2000;
 
@@ -387,7 +387,7 @@ function addServiceToComposeText(raw, container, file) {
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
     const svc = doc.services[key];
-    if (svc && typeof svc.image === "string" && svc.image) {
+    if (svc && typeof svc.image === "string" && svc.image && !/^avishkarex\/twitchbot/.test(svc.image)) {
       image = svc.image;
       break;
     }
@@ -396,6 +396,8 @@ function addServiceToComposeText(raw, container, file) {
   doc.services[container] = {
     image,
     container_name: container,
+    environment: ["INSIDE_DOCKER=true"],
+    user: "0:0",
     restart: "always",
     // Caps each container's own stdout/stderr log (separate from the app's
     // internal log files under ./logs) so a bot stuck retrying in a tight
@@ -408,7 +410,7 @@ function addServiceToComposeText(raw, container, file) {
       driver: "json-file",
       options: { "max-size": "10m", "max-file": "3" },
     },
-    volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
+    volumes: ["./" + file + ":/app/Configuration/config.json", "./logs:/app/logs"],
   };
 
   const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });

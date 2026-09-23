@@ -13,7 +13,7 @@ const {
   markDeployedPoolAccountsClaimed,
 } = require("./poolPasswords");
 
-const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
+const DEFAULT_IMAGE = "twitchbot-noclaim:latest";
 const FILE_RE = /^config(_\d{1,3})?\.json$/;
 
 // config.json -> twitchbot ; config_02.json -> twitchbotx2
@@ -63,7 +63,7 @@ function addServiceToComposeText(raw, container, file) {
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
     const svc = doc.services[key];
-    if (svc && typeof svc.image === "string" && svc.image) {
+    if (svc && typeof svc.image === "string" && svc.image && !/^avishkarex\/twitchbot/.test(svc.image)) {
       image = svc.image;
       break;
     }
@@ -72,12 +72,14 @@ function addServiceToComposeText(raw, container, file) {
   doc.services[container] = {
     image,
     container_name: container,
+    environment: ["INSIDE_DOCKER=true"],
+    user: "0:0",
     restart: "always",
     logging: {
       driver: "json-file",
       options: { "max-size": "10m", "max-file": "3" },
     },
-    volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
+    volumes: ["./" + file + ":/app/Configuration/config.json", "./logs:/app/logs"],
   };
 
   return {

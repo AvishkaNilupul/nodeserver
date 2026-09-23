@@ -54,7 +54,7 @@ const FILE = arg("cfg");
 const DEST = arg("dest-cfg", FILE);
 const SRC_ID = arg("from", "pi");
 const DST_ID = arg("to", "contabo");
-const IMAGE = arg("image", "avishkarex/twitchbot:latest");
+const IMAGE = arg("image", "twitchbot-noclaim:latest");
 const DEDUPE = process.argv.includes("--dedupe");
 const CFG_RE = /^config(_\d{1,3})?\.json$/;
 const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
@@ -148,9 +148,11 @@ async function main() {
     composeDoc.services[DST_CONTAINER] = {
       image: IMAGE,
       container_name: DST_CONTAINER,
+      environment: ["INSIDE_DOCKER=true"],
+      user: "0:0",
       restart: "always",
       logging: { driver: "json-file", options: { "max-size": "10m", "max-file": "3" } },
-      volumes: [`./${DEST}:/app/config.json`, "./logs:/app/logs"],
+      volumes: [`./${DEST}:/app/Configuration/config.json`, "./logs:/app/logs"],
     };
     await hosts.composeWrite(dst, composeName, yaml.dump(composeDoc, { lineWidth: -1 }));
     const check = await hosts.runShell(dst, `cd ${hosts.shq(dst.dir)} && docker compose config -q && echo COMPOSE_OK`);
