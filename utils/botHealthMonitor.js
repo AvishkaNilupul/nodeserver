@@ -29,6 +29,7 @@ const crypto = require("crypto");
 
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
+const { logEvent } = require("./systemLog");
 
 const CHECK_INTERVAL_MS =
   Number(process.env.BOT_HEALTH_INTERVAL_MS) || 15 * 60 * 1000; // 15m
@@ -371,6 +372,15 @@ async function checkDecay(host, container, psState, now) {
     } catch {
       // fall through and alert about the failed auto-heal
     }
+    logEvent({
+      category: "bots",
+      action: "stall_restart",
+      actor: "healthMonitor",
+      severity: restarted ? "warn" : "error",
+      host: host.id,
+      container,
+      detail: stat + (restarted ? " — auto-restarted" : " — auto-restart FAILED"),
+    });
     await sendTelegram(
       (restarted ? "🔄 " : "🔴 ") +
         head +
@@ -384,6 +394,15 @@ async function checkDecay(host, container, psState, now) {
             "."),
     ).catch(() => {});
   } else {
+    logEvent({
+      category: "bots",
+      action: "stall_detected",
+      actor: "healthMonitor",
+      severity: "warn",
+      host: host.id,
+      container,
+      detail: stat,
+    });
     await sendTelegram(
       "⚠️ " +
         head +
