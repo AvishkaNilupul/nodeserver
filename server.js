@@ -69,6 +69,7 @@ const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
 const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
+const digitalOceanRoutes = require("./routes/digitalOceanRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
@@ -424,6 +425,13 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
+// DigitalOcean droplet creator (public/do-servers.html): spins up / lists /
+// destroys droplets that auto-deploy the twitch claim bot. Superadmin-only —
+// it spends real money and destroys infra, same tier as the Bots page.
+app.get("/do-servers.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "do-servers.html"));
+});
+
 // Combined Unclaimed farms tab: auto-list panel + the two farm consoles
 // embedded as sections (?embed=1 hides each page's own sidebar).
 app.get("/unclaimed-farms.html", requireSuperadmin, enforce2fa, async (req, res) => {
@@ -710,6 +718,9 @@ app.use(enforce2fa, twitchFollowRoutes);
 // so Twitch's inventory service sees N distinct "devices" landing at once.
 // Each route self-guards with requireAdmin — enforce2fa gates it behind 2FA.
 app.use(enforce2fa, twitchClaimRoutes);
+// DigitalOcean droplet creator API (routes/digitalOceanRoutes.js). Each route
+// self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
+app.use(enforce2fa, digitalOceanRoutes);
 app.use(requireAdmin, enforce2fa, aiChatRoutes);
 
 // =========================

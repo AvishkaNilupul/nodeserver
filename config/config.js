@@ -37,4 +37,19 @@ module.exports = {
     userAgent: process.env.AGENTROUTER_USER_AGENT || "codex_cli_rs/0.20.0",
     originator: process.env.AGENTROUTER_ORIGINATOR || "codex_cli_rs",
   },
+
+  // DigitalOcean droplet creator (utils/digitalOcean.js, routes/digitalOceanRoutes.js,
+  // public/do-servers.html). All optional: when `token` is unset the feature
+  // reports "not configured" instead of crashing boot. `botScriptPath` is the
+  // absolute path to the twitch claim bot's source on THIS host — it carries
+  // live secrets and must live OUTSIDE this repo (see docs/DIGITALOCEAN-SERVER-CREATOR.md).
+  DIGITALOCEAN: {
+    token: process.env.DO_TOKEN || "",
+    sshKeyId: process.env.DO_SSH_KEY_ID || "",
+    sshKeyPath: process.env.DO_SSH_KEY_PATH || "",
+    botScriptPath: process.env.DO_BOT_SCRIPT_PATH || "",
+    defaultRegion: process.env.DO_DEFAULT_REGION || "nyc1",
+    defaultSize: process.env.DO_DEFAULT_SIZE || "s-2vcpu-4gb",
+    defaultImage: process.env.DO_DEFAULT_IMAGE || "ubuntu-24-04-x64",
+  },
 };

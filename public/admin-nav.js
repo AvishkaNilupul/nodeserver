@@ -128,6 +128,15 @@
           superOnly: true,
         },
         {
+          href: "/do-servers.html",
+          label: "DO servers",
+          icon:
+            '<rect x="2" y="2" width="20" height="8" rx="2"></rect>' +
+            '<rect x="2" y="14" width="20" height="8" rx="2"></rect>' +
+            '<path d="M6 6h.01M6 18h.01"></path>',
+          superOnly: true,
+        },
+        {
           href: "/farm2.html",
           label: "Auto farm engine",
           icon:
