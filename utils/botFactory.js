@@ -7,6 +7,7 @@ const crypto = require("crypto");
 
 const hosts = require("./botHosts");
 const BotAccount = require("../models/BotAccount");
+const { logEvent } = require("./systemLog");
 const {
   fillBotPasswordsFromPool,
   markDeployedPoolAccountsClaimed,
@@ -237,6 +238,25 @@ async function createBot(host, poolAccounts, game, opts = {}) {
     }
   }
 
+  logEvent({
+    category: "bots",
+    action: "created",
+    actor: "system",
+    host: host.id,
+    container: slot.container,
+    game: game || "",
+    count: users.length,
+    detail: started
+      ? "started"
+      : startError || "config written, not started",
+    meta: {
+      file: slot.file,
+      logins: users
+        .map((u) => u.Login)
+        .filter(Boolean)
+        .slice(0, 50),
+    },
+  });
   return {
     host: host.id,
     file: slot.file,
@@ -318,6 +338,25 @@ async function addAccountsToBot(host, file, poolAccounts, game) {
       file,
     );
   }
+  if (fresh.length) {
+    logEvent({
+      category: "bots",
+      action: "accounts_added",
+      actor: "system",
+      host: host.id,
+      container: containerForFile(file),
+      game: game || "",
+      count: fresh.length,
+      detail: "added " + fresh.length + ", merged " + merged.length,
+      meta: {
+        file,
+        logins: fresh
+          .map((u) => u.Login)
+          .filter(Boolean)
+          .slice(0, 50),
+      },
+    });
+  }
   return {
     added: fresh.length,
     merged: merged.length,
@@ -384,6 +423,15 @@ async function deleteBot(host, file, container) {
   } catch (e) {
     steps.push("mirror disable failed: " + (e.message || e));
   }
+  logEvent({
+    category: "bots",
+    action: "deleted",
+    actor: "system",
+    host: host.id,
+    container,
+    detail: steps.join(", "),
+    meta: { file },
+  });
   return steps.join(", ");
 }
 
