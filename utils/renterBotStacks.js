@@ -117,6 +117,48 @@ async function requireStack(host, file) {
   return row;
 }
 
+// Soft lookup for display: the enabled stack row for (host, file), or null.
+// Unlike requireStack this never throws, so a caller that only wants to SHOW a
+// stack's capacity (e.g. the renter detail payload) degrades to null instead of
+// breaking the whole response when a row is somehow absent.
+async function findStack(host, file) {
+  await ensureExistingStacks();
+  return RenterBotStack.findOne({
+    host: hostId(host),
+    file: String(file || ""),
+    enabled: true,
+  }).lean();
+}
+
+// Validate an operator-supplied capacity. Returns a whole number within the
+// schema bounds [1, 100], or null when the input is not a usable integer. The
+// route turns null into a clear 400; keeping this pure lets it be unit-tested.
+function normalizeCapacity(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  if (i < 1 || i > 100) return null;
+  return i;
+}
+
+// Change an existing enabled stack's capacity. This is the ONLY place capacity
+// is mutated — registration and backfill create rows via $setOnInsert and never
+// touch a capacity an operator has since chosen. Returns the updated row, or
+// null when no enabled stack matches. Throws on an out-of-range capacity.
+async function setStackCapacity(host, file, capacity) {
+  const cap = normalizeCapacity(capacity);
+  if (cap == null) {
+    const err = new Error("Capacity must be a whole number between 1 and 100.");
+    err.code = "bad_capacity";
+    throw err;
+  }
+  return RenterBotStack.findOneAndUpdate(
+    { host: hostId(host), file: String(file || ""), enabled: true },
+    { $set: { capacity: cap } },
+    { new: true },
+  ).lean();
+}
+
 function assertCapacity(current, additions, capacity) {
   const used = Math.max(0, Math.floor(Number(current) || 0));
   const fresh = Math.max(0, Math.floor(Number(additions) || 0));
@@ -173,6 +215,9 @@ module.exports = {
   registerStack,
   listStacks,
   requireStack,
+  findStack,
+  normalizeCapacity,
+  setStackCapacity,
   assertCapacity,
   chooseAvailableStack,
   dedicatedConfigSet,
