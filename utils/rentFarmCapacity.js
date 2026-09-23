@@ -97,8 +97,13 @@ function describe(snap) {
     .map(
       (s) =>
         "  " + s.host + "/" + s.file + "  " + s.used + "/" + s.capacity +
+        // Same split as snapshot(): stopped-and-occupied is dead, but
+        // stopped-and-EMPTY is merely un-started — its slots ARE counted,
+        // because the first delivery writes the accounts and starts it.
         (s.running === false
-          ? "  (container STOPPED — these slots do not count)"
+          ? s.used > 0
+            ? "  (container STOPPED — these slots do not count)"
+            : "  (not started yet — starts on its first delivery; counted)"
           : ""),
     );
   return (
