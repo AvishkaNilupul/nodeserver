@@ -135,7 +135,8 @@ Module._load = function (request, parent, isMain) {
 };
 const al = require(path.join(ROOT, "utils", "autoLister.js"));
 const ef = require(path.join(ROOT, "utils", "eldoradoFulfiller.js"));
-Module._load = origLoad;
+// The hook stays installed: both modules also require lazily at call time
+// (systemLog, telegram), and those must get the stubs too.
 
 /* ------------------------------ helpers ------------------------------ */
 
@@ -408,6 +409,36 @@ test("renewExpiringOffers: renews only the due ACTIVE offers", async () => {
   assert.strictEqual(r.failed.length, 0);
   assert.strictEqual(mp.offers.get("paused").offerState, "Paused");
   assert.strictEqual(mp.offers.get("later").expireDate, "2026-10-20T18:00:00");
+});
+
+test("reportKeepAlive states real counts, and pages only when something failed", async () => {
+  reset();
+  ML.findOneImpl = () => null;
+  mp.offers.set("ok1", { offerState: "Active", expireDate: "2026-09-27T18:00:00" });
+  const r = await ef.renewExpiringOffers({ now: Date.UTC(2026, 8, 24, 0) });
+  await ef.reportKeepAlive(r);
+  const ev = calls.find(([k]) => k === "event");
+  assert.ok(ev, "a SystemEvent is written for the pass");
+  // r.due is a COUNT — the first prod pass logged "renewed 75/undefined".
+  assert.match(ev[1].detail, /^renewed 1\/1 Eldorado offer/);
+  assert.doesNotMatch(ev[1].detail, /undefined/);
+  assert.ok(!calls.some(([k]) => k === "telegram"), "a clean pass pages nobody");
+
+  calls.length = 0;
+  await ef.reportKeepAlive({
+    scanned: 3,
+    due: 2,
+    renewed: [{ offerId: "a", ok: true }],
+    skipped: [],
+    failed: [{ offerId: "b", title: "Stuck offer", state: "Paused", ok: false }],
+  });
+  const tg = calls.find(([k]) => k === "telegram");
+  assert.ok(tg, "a failure pages the owner");
+  assert.match(tg[1], /left 1 offer\(s\) PAUSED/);
+  assert.match(tg[1], /Stuck offer/);
+  const ev2 = calls.find(([k]) => k === "event");
+  assert.strictEqual(ev2[1].severity, "warn");
+  assert.match(ev2[1].detail, /^renewed 1\/2 .*failed 1/);
 });
 
 test("the keep-alive is started with the fulfiller and has a kill switch", () => {

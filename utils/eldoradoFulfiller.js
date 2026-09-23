@@ -1314,7 +1314,7 @@ async function renewExpiringOffers({ dryRun = false, now = Date.now() } = {}) {
 // until someone resumes it by hand.
 async function reportKeepAlive(r) {
   console.log(
-    "eldorado keep-alive: renewed " + r.renewed.length + " of " + r.due.length +
+    "eldorado keep-alive: renewed " + r.renewed.length + " of " + r.due +
       " expiring offer(s)" +
       (r.skipped.length ? ", skipped " + r.skipped.length : "") +
       (r.failed.length ? ", FAILED " + r.failed.length : ""),
@@ -1333,7 +1333,7 @@ async function reportKeepAlive(r) {
       severity: r.failed.length ? "warn" : "info",
       count: r.renewed.length,
       detail:
-        "renewed " + r.renewed.length + "/" + r.due.length + " Eldorado offer(s) near expiry" +
+        "renewed " + r.renewed.length + "/" + r.due + " Eldorado offer(s) near expiry" +
         (r.skipped.length ? "; skipped " + r.skipped.length : "") +
         (r.failed.length ? "; failed " + r.failed.length : ""),
       meta: {
@@ -1442,6 +1442,7 @@ module.exports = {
   syncBundleStock,
   renewExpiringOffers,
   renewOffer,
+  reportKeepAlive,
   offersDueForRenewal,
   eldoradoExpiryMs,
   // Exported for the S3 regression: the predicate is what decides whether a
