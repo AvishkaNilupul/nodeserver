@@ -549,6 +549,21 @@ function staleBuilds(rows, expectedId) {
     );
 }
 
+// The one image id every farm bot on the host runs, or "" when they differ or
+// there are none. When the farm tag goes missing, this is the build the bots
+// are still on — and the id to put the tag back on, if it is a farm build.
+function sharedImageId(rows) {
+  const ids = new Set(
+    rows.filter((r) => isFarmBot(r.name) && r.imageId).map((r) => r.imageId),
+  );
+  return ids.size === 1 ? Array.from(ids)[0] : "";
+}
+
+// Docker's 12-character short form of "sha256:<hex>", accepted by docker tag.
+function shortImageId(id) {
+  return String(id || "").replace(/^sha256:/, "").slice(0, 12);
+}
+
 function diskPct(stats) {
   if (!stats || !stats.diskTotal || stats.diskUsed == null) return null;
   return Math.round((stats.diskUsed / stats.diskTotal) * 1000) / 10;
@@ -590,6 +605,9 @@ async function buildScanHost(host, now) {
     stale,
     missingImage,
     expectedId,
+    // Last id the farm tag was seen on here; outlives the tag being removed.
+    lastFarmId: expectedId || prev.lastFarmId || "",
+    label: host.label,
     checkedAt: now,
   };
   buildTracked.set(host.id, entry);
@@ -609,13 +627,51 @@ async function buildScanHost(host, now) {
   const running = stale.filter((s) => s.running).map((s) => s.name);
   const parked = stale.filter((s) => !s.running).map((s) => s.name);
   const parts = [];
+  let fix =
+    "Fix: the Bots page rollout recreates running AND parked bots; for one " +
+    "bot, docker compose up -d --force-recreate <bot>.";
   if (missingImage) {
-    parts.push(
-      "no local " +
-        FARM_IMAGE +
-        " image — any farm bot created or recreated here will fail to start " +
-        "(build it with the Bots page rollout)",
-    );
+    // 2026-09-23: a hand-run `docker rmi` took the tag off the server while
+    // its 16 bots kept running the image under another name. Recreating a bot
+    // cannot fix that (compose would try to pull the tag from Docker Hub), and
+    // a rollout is a rebuild; putting the tag back is one command. Advise it
+    // only with proof the bots' image IS a farm build — the tag's own id here
+    // before it vanished, or another host's farm tag — never a stale pull.
+    const id = sharedImageId(rows);
+    let proof = "";
+    if (id && prev.lastFarmId === id) {
+      proof = "the build " + FARM_IMAGE + " pointed at before it disappeared";
+    } else if (id) {
+      for (const [hostId, e] of buildTracked) {
+        if (hostId !== host.id && e.expectedId === id) {
+          proof = "the same build as " + FARM_IMAGE + " on " + e.label;
+          break;
+        }
+      }
+    }
+    if (proof) {
+      const n = rows.filter((r) => isFarmBot(r.name)).length;
+      parts.push(
+        "the " +
+          FARM_IMAGE +
+          " tag is gone, but all " +
+          n +
+          " farm bots here still run " +
+          shortImageId(id) +
+          " (" +
+          proof +
+          "), so nothing is down — only a farm bot created or recreated here " +
+          "would fail to start",
+      );
+      fix = "Fix, no restart needed: docker tag " + shortImageId(id) + " " + FARM_IMAGE;
+    } else {
+      parts.push(
+        "no local " +
+          FARM_IMAGE +
+          " image — any farm bot created or recreated here will fail to start",
+      );
+      fix = "Fix: build it with the Bots page rollout, which recreates running AND parked bots.";
+    }
   }
   if (running.length) {
     parts.push(running.length + " RUNNING on an older build: " + running.join(", "));
@@ -633,14 +689,7 @@ async function buildScanHost(host, now) {
     host: host.id,
     detail: parts.join("; "),
   });
-  await sendTelegram(
-    "🧱 " +
-      host.label +
-      ": " +
-      parts.join(". ") +
-      ". Fix: the Bots page rollout recreates running AND parked bots; for one " +
-      "bot, docker compose up -d --force-recreate <bot>.",
-  ).catch(() => {});
+  await sendTelegram("🧱 " + host.label + ": " + parts.join(". ") + ". " + fix).catch(() => {});
 }
 
 async function diskCheckHost(host, now) {
@@ -822,6 +871,8 @@ module.exports = {
   isFarmBot,
   parseBotImages,
   staleBuilds,
+  sharedImageId,
+  shortImageId,
   diskPct,
   // Orchestration entrypoints exposed for integration tests (each drives one
   // scan of a host against an injectable `hosts` layer).

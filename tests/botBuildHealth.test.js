@@ -196,6 +196,87 @@ test("a host with farm bots but no farm image is flagged as missing, not as all-
   assert.strictEqual(events[0].severity, "error");
 });
 
+test("the shared image id is the one every farm bot runs, else empty", () => {
+  const rows = mon.parseBotImages(
+    [
+      "/twitchbotx3|sha256:aa|running",
+      "/twitchbotx7|sha256:aa|created",
+      "/noclaim-bot-4|sha256:zz|running",
+    ].join("\n"),
+  );
+  assert.strictEqual(mon.sharedImageId(rows), "sha256:aa", "no-claim bots don't count");
+  rows.push({ name: "twitchbotx8", imageId: "sha256:bb", status: "running" });
+  assert.strictEqual(mon.sharedImageId(rows), "");
+  assert.strictEqual(mon.sharedImageId([]), "");
+  assert.strictEqual(
+    mon.shortImageId("sha256:fdd990dd54f1bb71956365baf97ec0c9621488c08451d5d9df0118bf80b45e82"),
+    "fdd990dd54f1",
+  );
+});
+
+test("a farm tag removed by hand names the one-line re-tag, not a rebuild", async () => {
+  reset();
+  const h = host("m1");
+  const id = "sha256:fdd990dd54f1bb71956365baf97ec0c9621488c08451d5d9df0118bf80b45e82";
+  let expected = id;
+  const rows = [
+    ["twitchbotx3", id, "running"],
+    ["twitchbotx7", id, "created"],
+  ];
+  hosts.runShell = async () => ({ stdout: inspectOut(expected, rows) });
+  const t0 = 50 * 24 * HOUR;
+  await mon.buildScanHost(h, t0);
+  assert.strictEqual(sent.length, 0, "healthy host");
+
+  expected = ""; // `docker rmi twitchbot-farm:latest` — the image stays, held by the bots
+  await mon.buildScanHost(h, t0 + HOUR);
+  assert.strictEqual(sent.length, 1);
+  assert.match(sent[0], /tag is gone, but all 2 farm bots here still run fdd990dd54f1/);
+  assert.match(sent[0], /pointed at before it disappeared/);
+  assert.match(sent[0], /Fix, no restart needed: docker tag fdd990dd54f1 twitchbot-farm:latest$/);
+  assert.doesNotMatch(sent[0], /force-recreate|rollout/);
+  assert.strictEqual(events[0].severity, "error");
+
+  await mon.buildScanHost(h, t0 + 7 * HOUR + HOUR);
+  assert.strictEqual(sent.length, 2, "the reminder still carries the proof");
+  assert.match(sent[1], /docker tag fdd990dd54f1 twitchbot-farm:latest$/);
+
+  expected = id; // re-tagged
+  await mon.buildScanHost(h, t0 + 9 * HOUR);
+  assert.match(sent[2], /^✅ M1: every farm bot is on the current/);
+});
+
+test("with no history here, another host's farm tag on the same id is the proof", async () => {
+  reset();
+  const id = "sha256:0123456789abcdef";
+  hosts.runShell = async () => ({ stdout: inspectOut(id, [["twitchbotx2", id, "running"]]) });
+  await mon.buildScanHost(host("m2peer"), 51 * 24 * HOUR);
+  hosts.runShell = async () => ({ stdout: inspectOut("", [["twitchbotx5", id, "running"]]) });
+  await mon.buildScanHost(host("m2"), 51 * 24 * HOUR);
+  assert.strictEqual(sent.length, 1);
+  assert.match(sent[0], /same build as twitchbot-farm:latest on M2PEER/);
+  assert.match(sent[0], /docker tag 0123456789ab twitchbot-farm:latest$/);
+});
+
+test("an image with no proof of being a farm build is never offered for a re-tag", async () => {
+  reset();
+  // One image, but nothing says it is a farm build (a stale Docker Hub pull
+  // looks exactly like this) — and bots split across two images.
+  for (const [hostId, rows] of [
+    ["m3", [["twitchbotx2", "sha256:unproven", "running"]]],
+    ["m4", [["twitchbotx2", "sha256:a1", "running"], ["twitchbotx3", "sha256:b2", "exited"]]],
+  ]) {
+    hosts.runShell = async () => ({ stdout: inspectOut("", rows) });
+    await mon.buildScanHost(host(hostId), 52 * 24 * HOUR);
+  }
+  assert.strictEqual(sent.length, 2);
+  for (const msg of sent) {
+    assert.match(msg, /no local twitchbot-farm:latest image/);
+    assert.match(msg, /Fix: build it with the Bots page rollout/);
+    assert.doesNotMatch(msg, /docker tag|force-recreate/);
+  }
+});
+
 test("a host with no farm bots and no farm image stays quiet", async () => {
   reset();
   const h = host("b4");
