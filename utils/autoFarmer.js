@@ -259,6 +259,42 @@ function readyPoolQuery() {
     // path has always excluded these; this keeps the auto-farmer, farm2 (which
     // composes this query) and the recycler on one definition of "ready".
     manualSold: { $ne: true },
+    // An account holding farmed-but-UNCLAIMED drops is stock, not supply: every
+    // auto-farm bot claims all claimable drops within a minute of starting, which
+    // destroys no-claim-game stock (Rainbow Six / Overwatch items are only
+    // sellable unclaimed). The pool checker normally takes such accounts out of
+    // the pool (utils/poolStock.holdForStock), but anything that puts one back as
+    // "available" opens a window before the next check — on 2026-09-23 backfill
+    // claimed 16 of them into CONTROL Resonant / REMATCH bots inside that window.
+    // Absent/null counts as 0, so never-checked rows are unaffected.
+    unclaimedDropCount: { $not: { $gt: 0 } },
+  };
+}
+
+// Only a claim the auto-farm itself made is the auto-farm's to hand back. The
+// three recycle paths below (task retirement, the retro-reaper, probe expiry)
+// used to flip ANY claimed pool row among a task's accounts back to
+// "available" — including rows other subsystems hold on purpose: unclaimed
+// stock held by utils/poolStock ("unclaimed stock — …"), no-claim bot accounts
+// ("noclaim-farm:…"), spent/sold notes, renter leases, audit quarantines and
+// personal (manualSold) accounts. The retro-reaper re-runs over EVERY completed
+// task on EVERY tick, so held stock was released and re-held about every 23
+// minutes (a "📦 Account pool check" Telegram each time, ~315 in 10 days), and
+// backfill claimed some of it into claiming bots in between.
+const AUTO_FARM_CLAIM_NOTE = /^auto-farm( backfill)?:/i;
+
+function isAutoFarmClaimNote(note) {
+  return AUTO_FARM_CLAIM_NOTE.test(String(note || ""));
+}
+
+function recyclableClaimQuery(logins) {
+  return {
+    usernameLower: {
+      $in: [...new Set((logins || []).map((u) => String(u).toLowerCase()))],
+    },
+    status: "claimed",
+    claimedNote: AUTO_FARM_CLAIM_NOTE,
+    manualSold: { $ne: true },
   };
 }
 
@@ -2705,18 +2741,15 @@ async function reapRetiredBots(af, host, progress) {
         (u) => !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
       );
       if (back.length) {
+        // Auto-farm's own claims only — see recyclableClaimQuery. This pass
+        // re-reads every completed task on every tick, so anything it wrongly
+        // matches is released again ~every 23 minutes.
         const poolRows = await AvailableAccount.find(
-          {
-            usernameLower: { $in: back.map((u) => u.toLowerCase()) },
-            status: "claimed",
-          },
+          recyclableClaimQuery(back),
           { _id: 1 },
         ).lean();
         const r = await AvailableAccount.updateMany(
-          {
-            usernameLower: { $in: back.map((u) => u.toLowerCase()) },
-            status: "claimed",
-          },
+          recyclableClaimQuery(back),
           {
             $set: {
               status: "available",
@@ -3074,18 +3107,13 @@ async function completeEndedTasks() {
           );
         }
         if (back.length) {
+          // Auto-farm's own claims only — see recyclableClaimQuery.
           const poolRows = await AvailableAccount.find(
-            {
-              usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
-              status: "claimed",
-            },
+            recyclableClaimQuery(back),
             { _id: 1 },
           ).lean();
           const r = await AvailableAccount.updateMany(
-            {
-              usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
-              status: "claimed",
-            },
+            recyclableClaimQuery(back),
             {
               $set: {
                 status: "available",
@@ -3246,13 +3274,13 @@ async function expireStaleProbes(af, progress) {
           (u) => !sold.has(String(u).toLowerCase()),
         );
         if (back.length) {
-          const lower = back.map((u) => String(u).toLowerCase());
+          // Auto-farm's own claims only — see recyclableClaimQuery.
           const poolRows = await AvailableAccount.find(
-            { usernameLower: { $in: lower }, status: "claimed" },
+            recyclableClaimQuery(back),
             { _id: 1 },
           ).lean();
           const r = await AvailableAccount.updateMany(
-            { usernameLower: { $in: lower }, status: "claimed" },
+            recyclableClaimQuery(back),
             {
               $set: {
                 status: "available",
@@ -4840,6 +4868,8 @@ module.exports = {
   activeAutoBotCount,
   autoSeatCapacity,
   readyPoolQuery,
+  isAutoFarmClaimNote,
+  recyclableClaimQuery,
   WILDCARD_CREDIT_CAP,
   COUNT_MANUAL_AS_COVERAGE,
   // Additive export so the per-campaign decision can be driven directly by a

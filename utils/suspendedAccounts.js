@@ -102,45 +102,55 @@ async function propagateSuspensionToPool(logins) {
 async function classifyBotAccounts({ limit = 0, onProgress } = {}) {
   const q = BotAccount.find(
     { lastScanStatus: { $in: PROBE_SCAN_STATUSES }, login: { $gt: "" } },
-    { login: 1, _id: 1 },
+    { login: 1, _id: 1, suspendedAt: 1 },
   ).lean();
   if (limit > 0) q.limit(limit);
   const rows = await q;
   if (!rows.length) return { probed: 0, suspended: 0, alive: 0, unknown: 0 };
   const verdicts = await accountState.probeAccounts(rows.map((r) => r.login));
   const gone = [];
+  const goneAgain = [];
   const goneLogins = [];
   let alive = 0;
   let unknown = 0;
   for (const r of rows) {
     const v = verdicts.get(r.login);
     if (v === accountState.GONE) {
-      gone.push(r._id);
+      // A row that already carries suspendedAt was confirmed gone before and has
+      // only flapped back to token_invalid since (the drop scanner re-reads dead
+      // accounts, and an inconclusive probe there used to demote them). It is
+      // not a new ban: stamping it "now" moved its ban date forward every day
+      // and re-announced it in Telegram every day (velvet36phoenix409249, daily
+      // since at least 2026-08-26).
+      if (r.suspendedAt) goneAgain.push(r._id);
+      else gone.push(r._id);
       goneLogins.push(r.login);
     } else if (v === accountState.EXISTS) alive++;
     else unknown++;
   }
+  const verdict = {
+    lastScanStatus: "suspended",
+    lastScanError: "Account no longer exists on Twitch (suspended or deleted)",
+  };
   if (gone.length) {
     await BotAccount.updateMany(
       { _id: { $in: gone } },
-      {
-        $set: {
-          lastScanStatus: "suspended",
-          suspendedAt: new Date(),
-          lastScanError:
-            "Account no longer exists on Twitch (suspended or deleted)",
-        },
-      },
+      { $set: { ...verdict, suspendedAt: new Date() } },
     );
-    await propagateSuspensionToPool(goneLogins);
   }
+  if (goneAgain.length) {
+    await BotAccount.updateMany({ _id: { $in: goneAgain } }, { $set: verdict });
+  }
+  if (goneLogins.length) await propagateSuspensionToPool(goneLogins);
   if (onProgress) {
     onProgress(
       "Suspension check: " +
         rows.length +
         " bad-token account(s) probed — " +
         gone.length +
-        " gone, " +
+        " newly gone" +
+        (goneAgain.length ? " (+" + goneAgain.length + " already known)" : "") +
+        ", " +
         alive +
         " still exist (re-auth those), " +
         unknown +
@@ -168,13 +178,19 @@ async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
   const stale = new Date(Date.now() - PROBE_TTL_MS);
   const rows = await AvailableAccount.find(
     {
+      // A row already confirmed gone is never re-probed: a ban does not un-ban
+      // (the pool checker's sweep excludes these for the same reason). Without
+      // this the daily re-probe found the same ~72 dead rows "gone" again every
+      // day, re-stamped suspendedAt to now — so every one of them looked banned
+      // "this week", forever — and re-announced all of them in Telegram daily.
+      lastCheckStatus: { $ne: "suspended" },
       $or: [
         { lastCheckStatus: { $in: PROBE_CHECK_STATUSES } },
         { existsProbeAt: null },
         { existsProbeAt: { $lt: stale } },
       ],
     },
-    { usernameLower: 1 },
+    { usernameLower: 1, suspendedAt: 1 },
   )
     .sort({ existsProbeAt: 1 })
     .limit(limit > 0 ? limit : POOL_PROBE_CAP)
@@ -184,26 +200,31 @@ async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
     rows.map((r) => r.usernameLower),
   );
   const gone = [];
+  const goneAgain = [];
   let alive = 0;
   let unknown = 0;
   for (const r of rows) {
     const v = verdicts.get(r.usernameLower);
-    if (v === accountState.GONE) gone.push(r._id);
+    if (v === accountState.GONE) (r.suspendedAt ? goneAgain : gone).push(r._id);
     else if (v === accountState.EXISTS) alive++;
     else unknown++;
   }
   const now = new Date();
+  const verdict = {
+    lastCheckStatus: "suspended",
+    lastCheckError: "Account no longer exists on Twitch (suspended or deleted)",
+  };
   if (gone.length) {
     await AvailableAccount.updateMany(
       { _id: { $in: gone } },
-      {
-        $set: {
-          lastCheckStatus: "suspended",
-          suspendedAt: now,
-          lastCheckError:
-            "Account no longer exists on Twitch (suspended or deleted)",
-        },
-      },
+      { $set: { ...verdict, suspendedAt: now } },
+    );
+  }
+  // Confirmed gone before (it keeps its original ban date and is not news).
+  if (goneAgain.length) {
+    await AvailableAccount.updateMany(
+      { _id: { $in: goneAgain } },
+      { $set: verdict },
     );
   }
   // Stamped for every row we got a definite answer about, gone or not, so the
