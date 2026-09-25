@@ -23,10 +23,23 @@ const botFactory = require("./botFactory");
 const botWaker = require("./botWaker");
 const mp = require("./marketplaces");
 const settings = require("./settings");
+const farmSizing = require("./farmSizing");
 const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
+const { normGame } = require("./gameLabel");
+const {
+  buildDecisionInputs,
+  buildReuseInputs,
+  withReuseInputs,
+} = require("./decisionInputs");
+// Ownership boundary with the new lane engine (utils/farm2/*). Required
+// directly rather than through utils/farm2/index.js so this stays a leaf
+// dependency: ownership.js pulls in only ./settings, and reads the FarmLane
+// model lazily, so there is no load-order coupling and no require cycle back
+// into this file.
+const farm2Ownership = require("./farm2/ownership");
 const DropSet = require("../models/DropSet");
 const catalogRoutes = require("../routes/catalogRoutes");
 const { stampPreorderSet } = require("./catalogPreorder");
@@ -74,7 +87,25 @@ const INTERNAL_SALE_WEIGHT = 18;
 // twenty at $0.30, and the account cost of farming them is identical. The
 // factor is clamped hard in both directions — price is a tilt on demand, never
 // a substitute for the evidence that anyone is buying at all.
-const REFERENCE_SALE_USD = 2.5;
+//
+// RECALIBRATED 2026-09-07: was 2.5, which was never measured against reality.
+// The actual median realised sale across every priced row on record is $1.25
+// (n=209; see the calibration table in utils/pricing.js), so a $2.50 reference
+// declared the TYPICAL sale to be half-price and handed almost every game the
+// 0.6 floor. Measured on prod: 19 of the 49 games with own-sales evidence were
+// already pinned at the floor, and the other 24 read neutral only because
+// their price was never recorded — an accident, not a judgement.
+//
+// That accident was about to end. Manual mark-sold now captures price (it was
+// 71% of all sales and recorded none), so those 24 games were about to acquire
+// real prices of $0.75-$1.42 and drop to 0.6 as well — quietly cutting demand
+// ~40% across the fleet, and pushing games under DEMAND_HALF, at exactly the
+// moment the operator is scaling intake up. A constant meant as a gentle tilt
+// had become a near-universal penalty.
+//
+// At $1.25 the tilt does what it says again: $1.25 is neutral, $0.75 is
+// genuinely below normal, $2.50+ genuinely above.
+const REFERENCE_SALE_USD = 1.25;
 const PRICE_FACTOR_MIN = 0.6;
 const PRICE_FACTOR_MAX = 2;
 
@@ -148,6 +179,7 @@ const RETRYABLE = new Set([
   "skip_host_offline",
   "skip_already_covered", // covered accounts may sell — demand reopens
   "skip_reuse_only", // reuse-only game — retries once one of its own accounts recycles back to the pool
+  "skip_probe_budget", // cold-start candidate held off by the concurrency budget — retries when a probe slot frees
 ]);
 
 const state = {
@@ -220,6 +252,13 @@ function readyPoolQuery() {
     status: "available",
     clientSecret: { $gt: "" },
     lastCheckStatus: { $in: ["", "ok"] },
+    // An account the operator handed to a buyer by hand is NOT supply: the buyer
+    // holds the login AND password, so farming it again just re-sells an account
+    // somebody already owns outright (the soldGames block can't help — the buyer
+    // can sign in and take whatever the next campaign farms). The no-claim claim
+    // path has always excluded these; this keeps the auto-farmer, farm2 (which
+    // composes this query) and the recycler on one definition of "ready".
+    manualSold: { $ne: true },
   };
 }
 
@@ -617,17 +656,88 @@ function salesOf(internalSales) {
   };
 }
 
-function capForGame(af, internalSales = 0) {
+// COVERAGE SIZING (2026-09-08, settings.coverageSizing, ships OFF).
+//
+// The clamp above is a FLAT ceiling: at maxPerGame 30 a game that sold 15 units
+// and a game that sold 200 are both capped at 60. Measured on prod the same
+// week: Overwatch 202 sales in 30 days, Rocket League 83, Brawlhalla 69 — all
+// treated identically to a game that sold 15, so past ~15 sales a game's own
+// success bought it nothing.
+//
+// With the switch on, the ceiling becomes what the game's real sell rate would
+// justify holding (utils/farmSizing.coverageTarget: a sold account is consumed
+// by the buyer, so N sales a week burns N accounts a week). Three properties
+// make this safe to turn on:
+//
+//   * the legacy cap is the FLOOR, never the ceiling — switching on can only
+//     raise a game's headroom, so no game shrinks;
+//   * `coverageMaxPerGame` bounds it absolutely, because a mis-measured game
+//     must not be able to drain the pool;
+//   * it is only a CEILING. The demand tiers still decide the target, the
+//     coverage gate still subtracts stock we already hold, and fairShare, the
+//     pool reserve and container capacity all still bind afterwards. Raising a
+//     cap does not spend an account.
+//
+// `game` is optional and everything degrades without it: no game means no
+// per-game override and no coverage lookup, i.e. exactly the old behaviour.
+// That is why every existing caller keeps working unchanged.
+function capForGame(af, internalSales = 0, game = "") {
   const base = Math.max(1, Number(af.maxPerGame) || 1);
   const { count } = salesOf(internalSales);
-  return Math.min(
+  const legacy = Math.min(
     base + Math.floor(count * SALES_CAP_BONUS_PER_SALE),
     base * SALES_CAP_MULT_MAX,
   );
+
+  // Read the sizing policy OUT OF THE `af` WE WERE GIVEN, not from a fresh
+  // settings read. `af` is the auto-farm settings object the caller already
+  // loaded for this decision, so this keeps one decision on one consistent
+  // snapshot and saves a disk read per campaign per tick.
+  let cfg = null;
+  try {
+    cfg = settings.getFarmSizing ? settings.getFarmSizing(af) : null;
+  } catch {
+    /* settings unreadable — fail closed to the legacy cap */
+  }
+  if (!cfg) return legacy;
+
+  // An explicit per-game number is the operator overriding the model. It wins
+  // over BOTH the legacy cap and the coverage target, in either direction.
+  if (game) {
+    try {
+      const override = settings.gameAccountCapFor(game, af);
+      if (override > 0) return override;
+    } catch {
+      /* fall through to the automatic path */
+    }
+  }
+
+  if (!cfg.enabled) return legacy;
+
+  const perWeek = farmSizing.salesPerWeek(count, SALES_WINDOW_MS / 86400000);
+  const covered = farmSizing.coverageTarget({
+    salesPerWeek: perWeek,
+    coverageDays: game ? cfg.coverageDaysFor(game) : cfg.coverageDays,
+    safetyStock: game ? cfg.safetyStockFor(game) : cfg.safetyStock,
+    min: legacy,
+    max: game ? Math.max(legacy, cfg.maxFor(game)) : Math.max(legacy, cfg.maxPerGame),
+  });
+  // A game with no sales at all gets nothing from the coverage model, so guard
+  // the max() rather than trusting it to have returned the floor.
+  return Math.max(legacy, covered || 0);
 }
 
-function demandAllocation(research, af, internalSales = 0) {
-  const cap = capForGame(af, internalSales);
+function demandAllocation(research, af, internalSales = 0, opts = {}) {
+  // The caller gates probing on the global budget + per-game cooldown; when it
+  // passes nothing (or probeColdStart is off) probing is simply allowed, which
+  // preserves the original unknown-game probe behaviour exactly.
+  const probeAllowed = opts.probeAllowed !== false;
+  // `opts.game` is what lets the per-game override and the coverage model apply.
+  // Omitting it is not a bug in a caller — it degrades to the flat legacy cap,
+  // which is what every caller got before coverage sizing existed. The replay
+  // harness deliberately passes it so a replayed decision is scored against the
+  // same ceiling the live engine used.
+  const cap = capForGame(af, internalSales, opts.game || "");
   const sales = salesOf(internalSales);
   const pf = priceFactor(sales.avgPrice);
   // Own sales are the strongest evidence there is, tilted by what they were
@@ -638,6 +748,14 @@ function demandAllocation(research, af, internalSales = 0) {
     sales.count > 0 ? INTERNAL_SALE_WEIGHT * Math.log1p(sales.count) * pf : 0;
   const priceNote =
     sales.avgPrice > 0 ? " at $" + sales.avgPrice.toFixed(2) + " avg" : "";
+  const probeBatch = (tierNote, coldStart) => ({
+    cap,
+    target: Math.min(af.probeSize, cap),
+    tierNote,
+    probe: true,
+    coldStart: !!coldStart,
+    effective: Math.round(salesBoost),
+  });
   if (!research || research.scannedAt == null) {
     if (salesBoost >= DEMAND_HALF) {
       // No market data but our own sales history says it sells.
@@ -656,12 +774,14 @@ function demandAllocation(research, af, internalSales = 0) {
         effective: Math.round(salesBoost),
       };
     }
+    // No market data at all — the original unknown-game probe. When the budget
+    // or cooldown blocks it (cold-start feature on), fall through to a skip.
+    if (probeAllowed) return probeBatch("no market data — probe batch", false);
     return {
-      cap,
-      target: Math.min(af.probeSize, cap),
-      tierNote: "no market data — probe batch",
-      probe: true,
+      skip: true,
+      demand: Math.round(salesBoost),
       effective: Math.round(salesBoost),
+      probeBlocked: true,
     };
   }
   const market = Number(research.demandScore || 0);
@@ -690,6 +810,33 @@ function demandAllocation(research, af, internalSales = 0) {
       tierNote: "demand " + d + salesNote + " (moderate) — half allocation",
       effective: d,
     };
+  }
+  // Below the demand floor. Normally a skip — but a low score can mean two very
+  // different things. With real rivals selling it, the market has spoken: skip.
+  // With ~no sellers, the market is simply UNTESTED (a brand-new release nobody
+  // lists yet), so the score is a cold-start artefact, not proof it won't sell.
+  // When cold-start probing is on and the budget/cooldown allow it, probe such
+  // a game with a small batch and let real sales decide. One sale lifts it over
+  // the floor via salesBoost and it graduates on its own; none in 30 days and
+  // the stop-loss sweep tears it down.
+  const sellers = Number(research.sellers || 0);
+  if (af.probeColdStart && sellers <= Number(af.probeMaxSellers || 0)) {
+    // A probe candidate: untested market, not a proven dud. Probe it unless the
+    // global budget or the post-failure cooldown says not right now (in which
+    // case it's a probeBlocked skip, not a "doesn't sell" skip).
+    if (probeAllowed) {
+      return probeBatch(
+        "demand " +
+          d +
+          " but only " +
+          sellers +
+          " rival seller" +
+          (sellers === 1 ? "" : "s") +
+          " — untested market, probing",
+        true,
+      );
+    }
+    return { skip: true, demand: d, effective: d, probeBlocked: true };
   }
   return { skip: true, demand: d, effective: d };
 }
@@ -742,6 +889,10 @@ async function claimPoolAccounts(
   { preferGame = "", recycledOnly = false } = {},
 ) {
   const claimed = [];
+  const noteMatch = String(note || "").match(
+    /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
+  );
+  const targetGame = normGame(preferGame || (noteMatch && noteMatch[1]) || "");
   const passes = [];
   if (preferGame) {
     const esc = String(preferGame).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -753,7 +904,11 @@ async function claimPoolAccounts(
   for (const extra of passes) {
     while (claimed.length < n) {
       const doc = await AvailableAccount.findOneAndUpdate(
-        { ...readyPoolQuery(), ...extra },
+        {
+          ...readyPoolQuery(),
+          ...extra,
+          ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+        },
         {
           $set: {
             status: "claimed",
@@ -765,15 +920,12 @@ async function claimPoolAccounts(
       );
       if (!doc) break;
       claimed.push(doc);
-      const match = String(note || "").match(
-        /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
-      );
       await recordPoolUsage(doc._id, {
         event: "claimed",
         actor: "auto-farm",
         note,
-        game: preferGame || (match && match[1]) || "",
-        campaignId: (match && match[2]) || "",
+        game: preferGame || (noteMatch && noteMatch[1]) || "",
+        campaignId: (noteMatch && noteMatch[2]) || "",
       });
     }
     if (claimed.length >= n) break;
@@ -831,36 +983,53 @@ async function unrecyclableLogins(logins) {
   const BotAccount = require("../models/BotAccount");
   const DropLog = require("../models/DropLog");
   const MarketplaceListing = require("../models/MarketplaceListing");
-  const [soldRows, dropSold, dropConnected, listedRows] = await Promise.all([
-    BotAccount.find(
-      { login: { $in: logins }, soldAt: { $ne: null } },
-      { login: 1 },
-    )
-      .lean()
-      .catch(() => []),
-    DropLog.distinct("login", {
-      login: { $in: logins },
-      soldAt: { $ne: null },
-    }).catch(() => []),
-    DropLog.distinct("login", {
-      login: { $in: logins },
-      connected: true,
-    }).catch(() => []),
-    // Accounts attached to a live listing are promised stock a buyer can
-    // purchase at any moment. Back in the pool they would be re-claimed and
-    // redeployed while on sale — a bot logged in and rewriting the config of
-    // an account mid-handover to a buyer.
-    MarketplaceListing.find(
-      { status: "active", accountLogin: { $ne: "" } },
-      { accountLogin: 1 },
-    )
-      .lean()
-      .catch(() => []),
-  ]);
+  const RenterAccount = require("../models/RenterAccount");
+  const [soldRows, dropSold, dropConnected, listedRows, leasedRows] =
+    await Promise.all([
+      BotAccount.find(
+        { login: { $in: logins }, soldAt: { $ne: null } },
+        { login: 1 },
+      )
+        .lean()
+        .catch(() => []),
+      DropLog.distinct("login", {
+        login: { $in: logins },
+        soldAt: { $ne: null },
+      }).catch(() => []),
+      DropLog.distinct("login", {
+        login: { $in: logins },
+        connected: true,
+      }).catch(() => []),
+      // Accounts attached to a live listing are promised stock a buyer can
+      // purchase at any moment. Back in the pool they would be re-claimed and
+      // redeployed while on sale — a bot logged in and rewriting the config of
+      // an account mid-handover to a buyer.
+      MarketplaceListing.find(
+        { status: "active", accountLogin: { $ne: "" } },
+        { accountLogin: 1 },
+      )
+        .lean()
+        .catch(() => []),
+      // An account RENTED OUT to a renter is invisible to every check above
+      // by construction: the renting recipe clears its BotAccount placement
+      // and disables it (guard 2) and pulls it from every AutoFarmTask
+      // (guard 4), so nothing here would spare it — and recycling one hands a
+      // LEASED account back to the sellable pool while the renter is still
+      // paying for it. Found 2026-09-20: four of renter bulkfarm2's accounts
+      // had been recycled mid-lease, two then listed for sale. Erring towards
+      // "leave it claimed" is the rule this function already follows.
+      RenterAccount.find(
+        { login: { $in: logins }, enabled: true, farmEndedAt: null },
+        { login: 1 },
+      )
+        .lean()
+        .catch(() => []),
+    ]);
   const out = new Set();
   for (const r of soldRows) out.add(String(r.login || "").toLowerCase());
   for (const l of dropSold) out.add(String(l || "").toLowerCase());
   for (const l of dropConnected) out.add(String(l || "").toLowerCase());
+  for (const r of leasedRows) out.add(String(r.login || "").toLowerCase());
   const wanted = new Set(lower);
   for (const r of listedRows) {
     for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
@@ -1431,10 +1600,32 @@ async function expireStalePlans() {
 
 // The most recent task for this game that owns bots we can restart —
 // weekly campaigns reuse infrastructure instead of burning new accounts.
+// THE SOURCE MUST HOLD ACCOUNTS, not just bots.
+//
+// This picked the newest task that owns bots, full stop. That makes an empty
+// reuse row a permanent trap: a task written with bots and `assignedAccounts:
+// []` becomes the next campaign's reuse source, that campaign inherits zero,
+// writes another empty row with the same bots, and the chain never recovers.
+//
+// Measured on prod 2026-09-08. Albion Online ran at 60 accounts through
+// 2026-08-31, dropped to 8 and then 0 on 09-01, and every one of the 15 tasks
+// since inherited 0 — while three containers went on farming it (450 drops
+// across 288 accounts in the last week alone). None of it could be listed,
+// because a task with no assigned accounts can never produce a listing
+// (utils/autoLister.js verifiedHoldersForItems returns [] on an empty set). The
+// same trap had caught Halo Infinite (3 tasks), Rainbow Six (2) and EVE (1).
+//
+// Requiring the source to hold at least one account both stops the chain
+// forming and HEALS one already formed: the query simply skips the empty rows
+// and finds the last good one, whose accounts are still on those same warm
+// bots. Everything downstream re-verifies (holdings against DropLog, exclusion
+// of logins already on another live listing), so reaching further back can
+// surface a stale account but never sell one twice.
 async function reusableTaskForGame(game) {
   return AutoFarmTask.findOne({
     game,
     "bots.0": { $exists: true },
+    "assignedAccounts.0": { $exists: true },
     status: { $in: ["active", "completed", "stopped"] },
   })
     .sort({ createdAt: -1 })
@@ -1520,11 +1711,23 @@ async function processCampaign(c, ctx) {
     return !prior || prior.decision !== decision;
   }
 
+  // The inputs the sellability gate saw, snapshotted once `alloc` is known
+  // (below) and written by EVERY record() call on every path — including the
+  // ones that never wrote internalSales. The lane engine's replay reads it
+  // instead of reconstructing (utils/decisionInputs.js).
+  let recordedInputs = null;
   async function record(fields) {
     // upsert keeps the unique (game, campaignId) index happy on retries
     return AutoFarmTask.findOneAndUpdate(
       { game, campaignId: c.campaignId },
-      { $set: { ...base, ...fields, decidedAt: new Date() } },
+      {
+        $set: {
+          ...base,
+          ...fields,
+          ...(recordedInputs ? { decisionInputs: recordedInputs } : {}),
+          decidedAt: new Date(),
+        },
+      },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
   }
@@ -1540,52 +1743,95 @@ async function processCampaign(c, ctx) {
   // The task log records the plain count, which is what the AutoFarmTask
   // schema has always stored and what every alert reads.
   const internalSales = sales.count;
-  const alloc = demandAllocation(research, af, sales);
+  // Cold-start probing budget + per-game cooldown (both inert unless
+  // af.probeColdStart). The global budget caps how many DIFFERENT games probe
+  // at once — a runaway guard for a calendar full of new releases. The cooldown
+  // keeps a game the stop-loss already gave up on from being re-probed for a
+  // while. A game already probing is never blocked by its own budget slot (the
+  // count excludes it), so an in-flight probe is never re-skipped mid-run.
+  let probeAllowed = true;
+  // Blocked purely by the concurrency budget (retryable) vs. by the
+  // post-failure cooldown (terminal for the cooldown window).
+  let probeBudgetBlocked = false;
+  if (af.probeColdStart) {
+    const cooldownCut = new Date(
+      Date.now() - Math.max(0, Number(af.probeCooldownDays) || 0) * 86400000,
+    );
+    const recentlyFailed = await AutoFarmTask.exists({
+      game,
+      probeOutcome: "expired",
+      completedAt: { $gte: cooldownCut },
+    });
+    const otherProbes = await AutoFarmTask.countDocuments({
+      decision: "probe",
+      status: { $in: ["active", "planned"] },
+      game: { $ne: game },
+    });
+    const underBudget = otherProbes < (Number(af.probeMaxGames) || 0);
+    probeAllowed = !recentlyFailed && underBudget;
+    probeBudgetBlocked = !recentlyFailed && !underBudget;
+  }
+  const alloc = demandAllocation(research, af, sales, { probeAllowed, game });
+  recordedInputs = buildDecisionInputs({
+    research,
+    sales,
+    af,
+    probeAllowed,
+    probeBudgetBlocked,
+    floor: alloc.probe ? 0 : marketStockFloor(af),
+  });
   if (alloc.skip) {
-    await record({
-      decision: "skip_low_demand",
-      status: "skipped",
-      reason:
-        "Effective demand " +
+    // A cold-start candidate held off by the BUDGET is queued, not rejected —
+    // record a RETRYABLE decision so it flows into a probe slot the moment one
+    // frees (a probe graduates or the stop-loss expires one). Cooldown holds and
+    // genuine low demand stay terminal. Never claim "items don't sell" about a
+    // game we simply chose not to probe yet.
+    const budgetHold = alloc.probeBlocked && probeBudgetBlocked;
+    const decision = budgetHold ? "skip_probe_budget" : "skip_low_demand";
+    const reason = alloc.probeBlocked
+      ? budgetHold
+        ? "Untested market — " +
+          (Number(af.probeMaxGames) || 0) +
+          " probes already running (budget full); queued, retries when a slot frees."
+        : "Untested market, but within the post-failure cooldown — no accounts spent."
+      : "Effective demand " +
         alloc.demand +
         " (market research + " +
         internalSales +
-        " own recent sales) — items for this game don't sell; not worth pool accounts.",
-      demandScore: alloc.demand,
-      hadResearch: true,
-      internalSales,
-    });
-    await tg(
-      "🤖 Auto-farm SKIP — " +
-        game +
-        "\nEffective demand " +
-        alloc.demand +
-        " (items not salable). No accounts spent.",
-    );
-    return { decision: "skip_low_demand" };
-  }
-  const demandScore = research ? Number(research.demandScore || 0) : null;
-
-  // 2) Time gate. Forced games (af.forceGames — e.g. EWC daily R6 drops) skip
-  // this: their campaigns are deliberately short, so the ends-soon rule would
-  // otherwise skip every one.
-  const hrs = hoursLeft(c.endAt);
-  if (hrs < af.minHoursLeft && !isForcedGame(game, af)) {
+        " own recent sales) — items for this game don't sell; not worth pool accounts.";
     await record({
-      decision: "skip_ends_soon",
+      decision,
       status: "skipped",
-      reason:
-        "Campaign ends in " +
-        Math.max(0, Math.round(hrs)) +
-        "h (< " +
-        af.minHoursLeft +
-        "h) — too late to farm meaningfully.",
-      demandScore,
+      reason,
+      demandScore: alloc.demand,
       hadResearch: !!research,
       internalSales,
     });
-    return { decision: "skip_ends_soon" };
+    // A budget hold re-decides every tick, so telegraphing it would spam. Only
+    // announce the terminal verdicts.
+    if (!budgetHold) {
+      await tg(
+        "🤖 Auto-farm SKIP — " +
+          game +
+          "\n" +
+          (alloc.probeBlocked
+            ? "Untested market — probing held off (cooldown). No accounts spent."
+            : "Effective demand " +
+              alloc.demand +
+              " (items not salable). No accounts spent."),
+      );
+    }
+    return { decision };
   }
+  const demandScore = research ? Number(research.demandScore || 0) : null;
+
+  // 2) Time window. Computed here, but the ends-soon SKIP is DEFERRED to step 4b
+  // (after the reuse-first block). A short campaign can still be farmed by
+  // RESTARTING already-warm bots — they carry accumulated watch-time and finish
+  // a drop that fresh accounts never could in a few hours — so the 12h floor must
+  // gate only the FRESH-account path, not reuse. Forced games (af.forceGames)
+  // bypass it entirely, at step 4b.
+  const hrs = hoursLeft(c.endAt);
 
   // 3) Host gate.
   if (!hostOnline) {
@@ -1598,6 +1844,7 @@ async function processCampaign(c, ctx) {
         " unreachable — will retry next tick.",
       demandScore,
       hadResearch: !!research,
+      internalSales,
     });
     return { decision: "skip_host_offline" };
   }
@@ -1639,12 +1886,28 @@ async function processCampaign(c, ctx) {
       (reusable.assignedAccounts || []).length +
       " accounts instead of spending new pool accounts.";
     if (af.dryRun) {
+      // The reuse inputs, beside the sellability snapshot (utils/
+      // decisionInputs.js). Dry-run computes no spoken-for set, so `free` is
+      // recorded as null — not recorded, rather than 0.
+      if (recordedInputs) {
+        recordedInputs = withReuseInputs(
+          recordedInputs,
+          buildReuseInputs({
+            sourceTaskId: reusable._id,
+            sourceHeld: (reusable.assignedAccounts || []).length,
+            free: null,
+            competitors: null,
+            dryRun: true,
+          }),
+        );
+      }
       await record({
         decision: "reuse_existing",
         status: "planned",
         reason,
         demandScore,
         hadResearch: !!research,
+        internalSales,
         bots: bots.map((b) => ({ ...b, reused: true })),
         plannedAccounts: 0,
       });
@@ -1670,23 +1933,46 @@ async function processCampaign(c, ctx) {
     // buyer pays and there is nothing to fulfil. The bots really are shared;
     // the sellable stock is not.
     const spokenFor = new Set();
+    // Which live tasks hold any of the reused task's accounts — recorded
+    // beside the count so the lane engine's comparison can tell a rule
+    // difference from a world that moved (utils/decisionInputs.js).
+    const reuseHeld = new Set(
+      (reusable.assignedAccounts || []).map((u) => String(u).toLowerCase()),
+    );
+    const reuseCompetitors = [];
     for (const other of await AutoFarmTask.find(
       { status: { $in: ["active", "planned"] }, _id: { $ne: reusable._id } },
       { assignedAccounts: 1 },
     ).lean()) {
+      let overlaps = false;
       for (const u of other.assignedAccounts || []) {
         spokenFor.add(String(u).toLowerCase());
+        if (reuseHeld.has(String(u).toLowerCase())) overlaps = true;
       }
+      if (overlaps) reuseCompetitors.push(other._id);
     }
     const mine = (reusable.assignedAccounts || []).filter(
       (u) => !spokenFor.has(String(u).toLowerCase()),
     );
+    if (recordedInputs) {
+      recordedInputs = withReuseInputs(
+        recordedInputs,
+        buildReuseInputs({
+          sourceTaskId: reusable._id,
+          sourceHeld: (reusable.assignedAccounts || []).length,
+          free: mine.length,
+          competitors: reuseCompetitors,
+          dryRun: false,
+        }),
+      );
+    }
     const reuseTask = await record({
       decision: "reuse_existing",
       status: started.length ? "active" : "failed",
       reason,
       demandScore,
       hadResearch: !!research,
+      internalSales,
       bots: bots.map((b) => ({ ...b, reused: true, shared: true })),
       assignedAccounts: mine,
       plannedAccounts: mine.length,
@@ -1725,7 +2011,17 @@ async function processCampaign(c, ctx) {
       Math.max(0, (Number(alloc.target) || 0) - mine.length),
       budgetMap.get(key) || 0,
     );
-    if (started.length && Number.isFinite(topUp) && topUp >= 1) {
+    // Fresh top-up accounts start from zero watch-time, so on a short campaign
+    // (below the 12h floor) they can't finish the drop — topping up there would
+    // waste pool accounts on a window they can't complete. Reuse alone still
+    // farms the event. Forced games keep their existing top-up behaviour.
+    const topUpAllowed = hrs >= af.minHoursLeft || isForcedGame(game, af);
+    if (
+      started.length &&
+      Number.isFinite(topUp) &&
+      topUp >= 1 &&
+      topUpAllowed
+    ) {
       try {
         reuseTask.plannedAccounts = topUp;
         const r = await executeTask(reuseTask, ctx, { append: true });
@@ -1747,6 +2043,29 @@ async function processCampaign(c, ctx) {
         (c.name || c.campaignId),
     );
     return { decision: "reuse_existing" };
+  }
+
+  // 4b) Time gate — FRESH-account path only. Reuse already returned above, so
+  // reaching here means the only way to farm this campaign is to spend FRESH
+  // pool accounts, which cannot finish a drop that ends in a few hours. A short
+  // campaign for a game with no warm bots to reuse stops here rather than burning
+  // accounts on a window it can't complete. Forced games bypass (their campaigns
+  // are deliberately short and farmed by design).
+  if (hrs < af.minHoursLeft && !isForcedGame(game, af)) {
+    await record({
+      decision: "skip_ends_soon",
+      status: "skipped",
+      reason:
+        "Campaign ends in " +
+        Math.max(0, Math.round(hrs)) +
+        "h (< " +
+        af.minHoursLeft +
+        "h) and no warm bots to reuse — too late to farm with fresh accounts.",
+      demandScore,
+      hadResearch: !!research,
+      internalSales,
+    });
+    return { decision: "skip_ends_soon" };
   }
 
   // 5) Coverage gate: how much of this game's demand is ALREADY covered by
@@ -1920,7 +2239,10 @@ async function processCampaign(c, ctx) {
       : "";
   const reason =
     (alloc.probe
-      ? "New game with no sales history — farming a small probe batch to test the market. "
+      ? (alloc.coldStart
+          ? alloc.tierNote +
+            " — farming a small probe batch to test the market. "
+          : "New game with no sales history — farming a small probe batch to test the market. ")
       : alloc.tierNote + ". ") +
     "Plan: " +
     accounts +
@@ -1990,11 +2312,15 @@ async function executeTask(task, ctx, { append = false } = {}) {
   if (!host) throw new Error("No farm host configured");
   const game = task.game;
 
-  // Ceiling is the sales-boosted maximum, not the flat base: plannedAccounts
-  // was already capped by capForGame at decision time.
+  // Ceiling is the game's OWN cap, re-read at execution time. plannedAccounts
+  // was already capped by capForGame when the plan was made, so this is a
+  // re-check, not the policy — but it has to be the SAME ceiling or it silently
+  // overrides it: with a per-game cap or coverage sizing raising a game above
+  // the flat `maxPerGame * SALES_CAP_MULT_MAX`, that flat product would clip a
+  // legitimate plan on its way to the pool.
   const want = Math.min(
     task.plannedAccounts || 0,
-    af.maxPerGame * SALES_CAP_MULT_MAX,
+    capForGame(af, await internalSalesForGame(game).catch(() => 0), game),
   );
   if (want < 1) throw new Error("Task has no planned accounts");
 
@@ -2183,6 +2509,11 @@ async function executeTask(task, ctx, { append = false } = {}) {
         assignedAccounts: finalAccounts,
         error: error.trim(),
         executedAt: new Date(),
+        // Anchor the stop-loss clock the first time a probe goes active, and
+        // never move it again (backfill re-stamps executedAt, this survives).
+        ...(ok && task.decision === "probe" && !task.probeStartedAt
+          ? { probeStartedAt: new Date() }
+          : {}),
       },
     },
   );
@@ -2789,6 +3120,14 @@ async function completeEndedTasks() {
         /* best-effort — accounts stay claimed, owner can release manually */
       }
     }
+    // A probe whose campaign ends with 0 real sales failed its test — stamp the
+    // cooldown marker so a later campaign for the same game isn't re-probed
+    // straight away (expireStaleProbes reads probeOutcome). A probe that sold at
+    // least once leaves no marker: its own sales lift future campaigns over the
+    // demand floor and it graduates to a normal farm.
+    if (t.decision === "probe" && salesOf(await internalSalesForGame(t.game)).count === 0) {
+      t.probeOutcome = "expired";
+    }
     t.status = "completed";
     t.completedAt = new Date();
     await t.save().catch(() => {});
@@ -2799,7 +3138,7 @@ async function completeEndedTasks() {
       campaignId: t.campaignId,
       taskId: t._id,
       count: (t.assignedAccounts || []).length,
-      reason: "campaign ended",
+      reason: t.probeOutcome === "expired" ? "probe ended — 0 sales" : "campaign ended",
       actor: "completeEndedTasks",
     });
     // Event over = supply fixed: apply the post-event scarcity markup and
@@ -2835,6 +3174,150 @@ async function completeEndedTasks() {
     );
   }
   return completed;
+}
+
+// Stop-loss for cold-start probes (utils/settings.js probeColdStart). A probe
+// whose Twitch campaign ends within the window is already torn down and marked
+// by completeEndedTasks; this sweep catches the rarer probe whose campaign is
+// still LIVE past probeMaxDays (long-running or permanent drop campaigns), so a
+// losing bet can't tie up accounts forever. 0 real sales = failed → stop the
+// bots, release the accounts to the pool, and stamp the cooldown marker. A
+// probe that has sold at least once is left alone (its sales graduate it).
+async function expireStaleProbes(af, progress) {
+  if (!af.probeColdStart) return 0;
+  const maxDays = Math.max(1, Number(af.probeMaxDays) || 30);
+  const cutoff = new Date(Date.now() - maxDays * 86400000);
+  const stale = await AutoFarmTask.find({
+    status: "active",
+    decision: "probe",
+    probeStartedAt: { $ne: null, $lte: cutoff },
+  });
+  if (!stale.length) return 0;
+  let expired = 0;
+  for (const t of stale) {
+    // Still selling? leave it — the stop-loss only fires on a cold trail.
+    if (salesOf(await internalSalesForGame(t.game)).count > 0) continue;
+    // Never touch a container a co-tenant task shares: switching just this
+    // probe's accounts off needs the per-account FavouriteGames edit
+    // completeEndedTasks does, and doing it wrong is what caused the
+    // duplicate-container loop. Defer those to the normal campaign-end path.
+    const others = await AutoFarmTask.find(
+      { status: "active", _id: { $ne: t._id } },
+      { bots: 1 },
+    ).lean();
+    const sharedKeys = new Set();
+    for (const o of others)
+      for (const b of o.bots || []) sharedKeys.add(b.host + "|" + b.container);
+    if ((t.bots || []).some((b) => sharedKeys.has(b.host + "|" + b.container))) {
+      progress(
+        "Probe stop-loss: " +
+          t.game +
+          " past " +
+          maxDays +
+          "d with 0 sales but shares a container — deferring to campaign end.",
+      );
+      continue;
+    }
+    const stopped = [];
+    for (const b of t.bots || []) {
+      const h = hosts.resolveHost(b.host);
+      if (!h) continue;
+      try {
+        await botFactory.stopContainer(h, b.container);
+        stopped.push(b.container);
+      } catch {
+        /* container may already be gone */
+      }
+      if (af.deleteFinishedBots !== false) {
+        try {
+          await botFactory.deleteBot(h, b.file, b.container);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    // Release the accounts to the pool — except any a buyer already holds (0
+    // sales makes this rare, but a connected/sold drop still spares it).
+    let recycled = 0;
+    if (t.assignedAccounts && t.assignedAccounts.length) {
+      try {
+        const sold = await unrecyclableLogins(t.assignedAccounts);
+        const back = t.assignedAccounts.filter(
+          (u) => !sold.has(String(u).toLowerCase()),
+        );
+        if (back.length) {
+          const lower = back.map((u) => String(u).toLowerCase());
+          const poolRows = await AvailableAccount.find(
+            { usernameLower: { $in: lower }, status: "claimed" },
+            { _id: 1 },
+          ).lean();
+          const r = await AvailableAccount.updateMany(
+            { usernameLower: { $in: lower }, status: "claimed" },
+            {
+              $set: {
+                status: "available",
+                claimedAt: null,
+                claimedNote: "recycled — probe expired (0 sales)",
+              },
+            },
+          );
+          recycled = (r && r.modifiedCount) || 0;
+          if (recycled) {
+            await recordPoolUsage(
+              poolRows.map((row) => row._id),
+              {
+                event: "recycled",
+                actor: "auto-farm",
+                game: t.game,
+                note: "probe expired — 0 sales in " + maxDays + "d",
+              },
+            );
+          }
+        }
+      } catch {
+        /* best-effort — accounts stay claimed, owner can release manually */
+      }
+    }
+    t.status = "completed";
+    t.completedAt = new Date();
+    t.probeOutcome = "expired";
+    await t.save().catch(() => {});
+    expired++;
+    await recordAutoFarmEvent({
+      type: "task_completed",
+      game: t.game,
+      campaignId: t.campaignId,
+      taskId: t._id,
+      count: (t.assignedAccounts || []).length,
+      reason: "probe expired — 0 sales in " + maxDays + "d",
+      actor: "expireStaleProbes",
+    });
+    progress(
+      "Probe stop-loss: " +
+        t.game +
+        " — " +
+        maxDays +
+        "d, 0 sales. Stopped " +
+        stopped.length +
+        " bot(s), recycled " +
+        recycled +
+        " account(s).",
+    );
+    await tg(
+      "🤖 Auto-farm PROBE EXPIRED — " +
+        t.game +
+        "\nNo sales in " +
+        maxDays +
+        " days. Stopped the probe" +
+        (recycled
+          ? " and recycled " + recycled + " account(s) to the pool"
+          : "") +
+        ". Won't re-probe for " +
+        (Number(af.probeCooldownDays) || 0) +
+        " days.",
+    );
+  }
+  return expired;
 }
 
 /* -------------------------------- tick --------------------------------- */
@@ -2956,6 +3439,8 @@ async function runOnce() {
     // further down.
     const woken = [];
     const parked = [];
+    const parkedIdle = [];
+    const parkedNoCampaign = [];
     for (const h of hosts.listHosts()) {
       try {
         const w = await botWaker.wakeFinishedBots(h.id, { progress });
@@ -2963,6 +3448,30 @@ async function runOnce() {
       } catch (e) {
         progress(
           "Wake check failed on " + h.id + ": " + (e.message || e),
+          "warn",
+        );
+      }
+      // Stream-gate idle park (utils/streamScout.js): park bots that are only
+      // waiting for a broadcast. Self-guards on af.streamGate (cheap no-op when
+      // off) and is INDEPENDENT of stopFinishedBots below — it parks idle-waiting
+      // bots, not finished ones.
+      try {
+        const p = await botWaker.parkIdleBots(h.id, { progress });
+        for (const x of p.parked) parkedIdle.push({ ...x, host: h.id });
+      } catch (e) {
+        progress(
+          "Idle-stream park failed on " + h.id + ": " + (e.message || e),
+          "warn",
+        );
+      }
+      // Idle-no-campaign park (utils/botWaker.js): park bots whose games have no
+      // active campaign at all. Self-guards on af.parkIdleNoCampaignBots.
+      try {
+        const p = await botWaker.parkIdleNoCampaignBots(h.id, { progress });
+        for (const x of p.parked) parkedNoCampaign.push({ ...x, host: h.id });
+      } catch (e) {
+        progress(
+          "Idle-no-campaign park failed on " + h.id + ": " + (e.message || e),
           "warn",
         );
       }
@@ -3000,6 +3509,34 @@ async function runOnce() {
           parked.map((x) => x.host + "/" + x.container).join(", ") +
           "\nThey restart automatically when a new campaign for their games " +
           "goes live.",
+      );
+    }
+    if (parkedIdle.length) {
+      const accts = parkedIdle.reduce((s, x) => s + (x.accounts || 0), 0);
+      await tg(
+        "📺 Stream-gate — parked " +
+          parkedIdle.length +
+          " bot(s) waiting for a broadcast, holding " +
+          accts +
+          " account(s), freeing roughly " +
+          Math.round(parkedIdle.length * 130) +
+          " MB: " +
+          parkedIdle.map((x) => x.host + "/" + x.container).join(", ") +
+          "\nThey restart automatically the moment an assigned channel goes live.",
+      );
+    }
+    if (parkedNoCampaign.length) {
+      const accts = parkedNoCampaign.reduce((s, x) => s + (x.accounts || 0), 0);
+      await tg(
+        "🅿️ Idle-no-campaign — parked " +
+          parkedNoCampaign.length +
+          " bot(s) with nothing to farm, holding " +
+          accts +
+          " account(s), freeing roughly " +
+          Math.round(parkedNoCampaign.length * 130) +
+          " MB: " +
+          parkedNoCampaign.map((x) => x.host + "/" + x.container).join(", ") +
+          "\nThey restart automatically when a campaign for their games starts.",
       );
     }
 
@@ -3063,6 +3600,7 @@ async function runOnce() {
       existingRows.map((row) => [row.game + "|" + row.campaignId, row]),
     );
     let noClaimSkipped = 0;
+    let farm2Skipped = 0;
     for (const c of live) {
       if (!c.game) continue;
       // No-claim games (Overwatch, Rainbow Six) are handled by the standalone
@@ -3071,6 +3609,20 @@ async function runOnce() {
       // for such a game is left to its normal lifecycle (leave existing as-is).
       if (settings.isNoClaimGame(c.game)) {
         noClaimSkipped++;
+        continue;
+      }
+      // Games owned by the new lane engine (utils/farm2/*) are farmed there
+      // instead. Same contract as the no-claim skip directly above: no NEW task
+      // is created here, while any already-active task keeps its normal
+      // lifecycle under this engine — so flipping a lane to "live" can never
+      // strand a campaign that is already mid-flight.
+      //
+      // isOwned() is synchronous and answers from a 30s cache, and every
+      // uncertainty (engine stopped, master switch off, lane table unreadable,
+      // cache cold) resolves to NOT owned so this engine keeps covering the
+      // game. See the fail-safe note at the top of utils/farm2/ownership.js.
+      if (farm2Ownership.isOwned(c.game)) {
+        farm2Skipped++;
         continue;
       }
       const existing = existingByKey.get(c.game + "|" + c.campaignId);
@@ -3100,14 +3652,32 @@ async function runOnce() {
           " no-claim campaign(s) (Overwatch/Rainbow Six) — handled by the " +
           "standalone no-claim farming system.",
       );
+    if (farm2Skipped)
+      progress(
+        "Skipped " +
+          farm2Skipped +
+          " campaign(s) owned by the lane engine (" +
+          farm2Ownership.ownedKeys().join(", ") +
+          ").",
+      );
     progress(candidates.length + " campaign(s) to decide this tick.");
 
+    // The tick-level twin of reusableTaskForGame, and it must apply the SAME
+    // rule — processCampaign prefers this map over that function, so a
+    // divergence here is the one that reaches production.
+    //
+    // `assignedAccounts.0` is the load-bearing condition: without it an empty
+    // reuse row (bots, no accounts) becomes the next campaign's source, that
+    // campaign inherits zero and writes another empty row, and the game can
+    // never recover. Albion Online sat in exactly that trap for 15 consecutive
+    // tasks; see reusableTaskForGame for the measurement.
     const reusableMap = new Map();
     const candidateGames = new Set(candidates.map((c) => c.game));
     for (const task of autoTasks) {
       if (
         candidateGames.has(task.game) &&
         ["active", "completed", "stopped"].includes(task.status) &&
+        (task.assignedAccounts || []).length > 0 &&
         !reusableMap.has(task.game)
       ) {
         reusableMap.set(task.game, task);
@@ -3198,10 +3768,17 @@ async function runOnce() {
     for (const t of autoTasks) {
       for (const b of t.bots || []) autoKeys.add(b.host + "|" + b.file);
     }
-    progress("Sweeping manual bot configs to identify the stash\u2026");
-    const farmMap = hostOnline
-      ? await manualFarmMap(autoKeys)
-      : { map: new Map(), wildcard: new Set(), logins: new Set() };
+    // The stash sweep reads every config on every host — the most expensive
+    // read in the tick — and feeds only the coverage gate of the campaigns
+    // decided below. With nothing to decide (every game owned by the lane
+    // engine, or simply a quiet calendar) it is skipped.
+    if (candidates.length) {
+      progress("Sweeping manual bot configs to identify the stash\u2026");
+    }
+    const farmMap =
+      hostOnline && candidates.length
+        ? await manualFarmMap(autoKeys)
+        : { map: new Map(), wildcard: new Set(), logins: new Set() };
     progress(
       "Stash sweep done: " +
         farmMap.logins.size +
@@ -3249,7 +3826,9 @@ async function runOnce() {
     const requests = [];
     for (const c of candidates) {
       const info = infoMap.get(c.campaignId);
-      const alloc = demandAllocation(info.research, af, info.sales);
+      const alloc = demandAllocation(info.research, af, info.sales, {
+        game: c.game,
+      });
       if (alloc.skip) {
         requests.push({ key: c.campaignId, want: 0, weight: 0 });
       } else {
@@ -3391,6 +3970,14 @@ async function runOnce() {
       } catch (e) {
         progress("Recycle failed: " + e.message, "warn");
       }
+      // Probe stop-loss (opt-in): give up a cold-start probe that has run
+      // probeMaxDays with 0 real sales. No-op unless af.probeColdStart.
+      try {
+        const gaveUp = await expireStaleProbes(af, progress);
+        if (gaveUp) progress("Probe stop-loss: gave up on " + gaveUp + " probe(s).");
+      } catch (e) {
+        progress("Probe stop-loss failed: " + e.message, "warn");
+      }
       // Repack sweep: merge half-empty auto containers back together.
       try {
         await repackAutoBots(af, host, progress);
@@ -3443,8 +4030,18 @@ async function runOnce() {
         // (there is no product to top up), so without this the market would
         // stay unlisted forever. Retry it here \u2014 once the original cause is
         // cleared it self-heals, binding spare accounts to a fresh product.
+        //
+        // Games owned by a LIVE lane (utils/farm2/*) re-list through the lane's
+        // own publish/secondaries job, which calls this same helper on its own
+        // retry clock. Two callers on one task would race two Plati/GGSel
+        // creates. isOwned() fails safe to false (engine off/stopped, cache
+        // cold), so this engine keeps re-listing every game until a lane is
+        // really live. Refill above is deliberately NOT gated: it tops up stock
+        // on an existing product and the lane has no equivalent.
         try {
-          const retried = await autoListerR.retryMissingSecondaries(t);
+          const retried = farm2Ownership.isOwned(t.game)
+            ? null
+            : await autoListerR.retryMissingSecondaries(t);
           if (retried) {
             progress("Re-listed " + t.game + " on: " + retried.join(", "));
             await tg(
@@ -3481,8 +4078,18 @@ async function runOnce() {
         { "listing.externalId": { $exists: false } },
       ],
     }).lean();
+    let farm2ListSkipped = 0;
     for (const t of unlisted) {
       if (af.dryRun && t.wouldList && t.wouldList.title) continue; // previewed
+      // Games owned by a LIVE lane (utils/farm2/*) are listed by the lane's
+      // own publish/primary job — same listActivatedTask, own retry clock,
+      // gated on a fresh holdings check. Listing here as well would race two
+      // Gameflip creates on one task. Same fail-safe as the decision skip
+      // above: any uncertainty reads as NOT owned and this sweep lists it.
+      if (farm2Ownership.isOwned(t.game)) {
+        farm2ListSkipped++;
+        continue;
+      }
       try {
         progress("Auto-listing " + t.game + " on Gameflip\u2026");
         const r = await autoLister.listActivatedTask(t._id, {
@@ -3553,6 +4160,16 @@ async function runOnce() {
           ).catch(() => {});
         }
       }
+    }
+
+    if (farm2ListSkipped) {
+      progress(
+        "Left " +
+          farm2ListSkipped +
+          " unlisted task(s) to the lane engine (" +
+          farm2Ownership.ownedKeys().join(", ") +
+          ").",
+      );
     }
 
     // Stacked-bundle sweep: tasks whose reused accounts hold earlier
@@ -3883,6 +4500,8 @@ async function backfillActiveTasks(af, host, progress) {
     Math.floor(Math.max(0, readyNow - af.poolReserve) / 2),
   );
   let added = 0;
+  // Per-pass memo for capForGame's sales input (see the ceiling below).
+  const backfillSales = new Map();
   for (const task of worthTopping) {
     if (added >= backfillCap) {
       progress(
@@ -3892,12 +4511,39 @@ async function backfillActiveTasks(af, host, progress) {
       );
       break;
     }
+    // A probe is a deliberately small market test (target = probeSize) — never
+    // top it up to the market-shelf floor the way a proven farm is stocked, or
+    // backfill would silently inflate every probe to marketStockFloor the tick
+    // after it is created (decision path already exempts probes; this is the
+    // matching exemption on the backfill side).
+    const floor = task.decision === "probe" ? 0 : marketStockFloor(af);
+    // The ceiling is the game's OWN cap, not the flat fleet maximum.
+    //
+    // This used to be a hard `af.maxPerGame * SALES_CAP_MULT_MAX`. Backfill is
+    // where most of the pool actually goes (measured on prod: 140 of 174 claims
+    // in a day), so a flat 60 here silently overrode every per-game decision
+    // made upstream — a game with a raised cap could be decided at 120 and then
+    // be topped up only to 60, and the operator's own `gameAccountCaps`
+    // override was ignored entirely. capForGame is the single ceiling both
+    // engines use; backfill has to read it too or it is the real policy.
+    //
+    // Sales are looked up once per GAME per pass, not once per task: several
+    // tasks share a game and internalSalesForGame is a full aggregation.
+    let gameSales = backfillSales.get(task.game);
+    if (gameSales === undefined) {
+      gameSales = await internalSalesForGame(task.game).catch(() => ({
+        count: 0,
+        revenue: 0,
+        avgPrice: 0,
+      }));
+      backfillSales.set(task.game, gameSales);
+    }
     const target = Math.min(
       Math.max(
         Number(task.targetAccounts) || Number(task.plannedAccounts) || 0,
-        marketStockFloor(af),
+        floor,
       ),
-      af.maxPerGame * SALES_CAP_MULT_MAX,
+      capForGame(af, gameSales, task.game),
     );
     // Count only accounts that can still farm. The sweep above normally has
     // already unassigned the suspended ones, but this is the check that must not
@@ -4139,6 +4785,14 @@ function start() {
 }
 
 module.exports = {
+  // exported for the read-only allocation forecast (utils/allocationForecast.js).
+  // The forecast reuses the SAME clamp-chain helpers the tick uses so its numbers
+  // match the engine by construction; all are pure/DB-only (no host SSH).
+  countReadyPool,
+  marketStockFloor,
+  researchForGame,
+  archiveHoldersByGame,
+  ownedAccounts,
   start,
   runOnce,
   rescanAll,
@@ -4161,4 +4815,41 @@ module.exports = {
   mapWithConcurrency,
   createSeatCounter,
   buildDecisionHostState,
+  // Additive export for the lane engine's decide step (utils/farm2/steps/decide.js),
+  // so a LIVE lane makes its decision on the same freshly-rescanned research this
+  // engine would have used. Shadow lanes deliberately call researchForGame instead,
+  // because a re-scan is a real side effect. No behaviour change here.
+  freshResearchForGame,
+  // Additive export for the lane engine's reuse-first check. Without it the lane
+  // engine had no reuse path at all and always reached for FRESH pool accounts,
+  // so a recurring campaign on a game that already has warm bots would have spent
+  // real accounts and new containers to do worse than reusing what is running.
+  // Caught by the shadow trial before any lane went live. Read-only query.
+  reusableTaskForGame,
+  // Additive exports for the lane engine's downstream gates
+  // (utils/farm2/steps/decide.js). The lane previously implemented only the
+  // sellability stage and reuse-first, so on any campaign this engine settles
+  // with the host, time, coverage, pool-floor, capacity or reuse-only gate a
+  // live lane would have carried on and spent. These let the lane run the SAME
+  // gates from the SAME helpers instead of re-deriving them. All are read-only
+  // (probeHost, manualFarmMap and autoSeatCapacity read the host, never write
+  // to it). No behaviour change to this engine.
+  probeHost,
+  isForcedGame,
+  manualFarmMap,
+  activeAutoBotCount,
+  autoSeatCapacity,
+  readyPoolQuery,
+  WILDCARD_CREDIT_CAP,
+  COUNT_MANUAL_AS_COVERAGE,
+  // Additive export so the per-campaign decision can be driven directly by a
+  // test (tests/farm2DecisionInputs.test.js exercises the real record() path on
+  // the two branches that need no host). runOnce is unchanged.
+  processCampaign,
+  // Additive export for the lane engine's candidate filter (utils/farm2/lane.js):
+  // which skips are re-decided every tick. The lane used to re-decide EVERY
+  // campaign every cycle (5,400 decide rows a day on prod, one campaign decided
+  // 177 times); it now re-decides on exactly this engine's triggers, from this
+  // engine's own set, so the two cannot drift.
+  RETRYABLE,
 };

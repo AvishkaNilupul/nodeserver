@@ -40,6 +40,7 @@ const { fetchInventory, itemKeyFor } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 const accountState = require("./twitchAccountState");
 const suspendedAccounts = require("./suspendedAccounts");
+const { logEvent } = require("./systemLog");
 const { stopFarmingGame } = require("./farmControl");
 
 // Marketplace claim tags: a DropLog reserved with one of these is merely
@@ -47,13 +48,9 @@ const { stopFarmingGame } = require("./farmControl");
 // (a shop username, "manual", a bulk-order tag, an operator name) means the
 // game actually SOLD. Farming must stop on sold/connected games, but a
 // listed-but-unsold game must keep farming so its stock keeps stacking.
-const MARKET_CLAIM_TAGS = [
-  "gameflip",
-  "ggsel",
-  "digiseller",
-  "funpay",
-  "zeusx",
-];
+// Reservation tags written by the marketplace fulfillers (one shared list —
+// see utils/marketClaimTags.js for why this must not be copy-pasted).
+const { MARKET_CLAIM_TAGS } = require("./marketClaimTags");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // How long a worker whose host just went unreachable waits before re-probing.
@@ -398,9 +395,50 @@ async function upsertDrops(accountId, accountModel, login, drops) {
 // leaves it due and backs the worker off. Every other outcome, including a real
 // Twitch rejection, is recorded on the row exactly as the single-machine path
 // always did.
+
+// Audit only MEANINGFUL account-health transitions (ban / bad-token / recovery),
+// never routine scans or transient "error" flaps. Best-effort, fire-and-forget.
+function logStatusChange(acc, prev, worker) {
+  try {
+    const next = acc.lastScanStatus;
+    if (next === prev) return;
+    let action = null;
+    let severity = "warn";
+    if (next === "suspended" && prev !== "suspended") action = "suspended";
+    else if (
+      next === "token_invalid" &&
+      prev !== "token_invalid" &&
+      prev !== "suspended"
+    )
+      action = "token_invalid";
+    else if (
+      next === "ok" &&
+      (prev === "token_invalid" || prev === "suspended")
+    ) {
+      action = "recovered";
+      severity = "info";
+    }
+    if (!action) return;
+    logEvent({
+      category: "accounts",
+      action,
+      actor: "scanner",
+      severity,
+      subject: acc.login || "",
+      subjectId: acc._id,
+      host: worker && worker.host ? worker.host.id || "" : "",
+      container: acc.container || "",
+      detail: (prev || "?") + " → " + next,
+    });
+  } catch {
+    /* never break a scan on its audit */
+  }
+}
+
 async function scanAccount(acc, worker) {
   const host = worker.host.transport === "local" ? null : worker.host;
   const now = new Date();
+  const prevStatus = acc.lastScanStatus;
   let inv;
   try {
     inv = await fetchInventory(acc.clientSecret, { host });
@@ -435,6 +473,7 @@ async function scanAccount(acc, worker) {
       }
     }
     await acc.save();
+    logStatusChange(acc, prevStatus, worker);
     worker.errors++;
     state.sessionErrors++;
     state.lastError = acc.lastScanError;
@@ -500,11 +539,17 @@ async function scanAccount(acc, worker) {
     }
   }
   acc.dropCount = await DropLog.countDocuments({ account: acc._id });
-  // Farming-progress bookkeeping (see BotAccount.inProgressCount). Only
-  // UNCLAIMED entries count as work left: a claimed drop is already in the
-  // account's inventory and needs no further watch time. Recorded, not acted
-  // on — read the caveat on the schema fields before anything stops a bot.
-  const pending = (inProgress || []).filter((d) => !d.claimed);
+  // Farming-progress bookkeeping (see BotAccount.inProgressCount). "Pending" =
+  // work still left, which means unclaimed AND not yet complete. A claimed drop
+  // is already in inventory; a drop at 100% but UNCLAIMED is also done farming —
+  // no-claim games (Overwatch/R6) never claim, and esports/event drops arrive
+  // with requiredMinutes=0 so they land complete instantly. Counting those kept
+  // finished no-claim bots looking permanently "working", so they never parked
+  // (this is exactly why twitchbotx20 read as farming when it was done). A drop
+  // is pending only while it still needs watch time: required>0 and current<required.
+  const pending = (inProgress || []).filter(
+    (d) => !d.claimed && (d.required || 0) > 0 && (d.current || 0) < d.required,
+  );
   acc.inProgressCount = pending.length;
   acc.inProgressGames = [
     ...new Set(pending.map((d) => d.game).filter(Boolean)),
@@ -541,6 +586,7 @@ async function scanAccount(acc, worker) {
   acc.lastScanStatus = "ok";
   acc.lastScanError = "";
   await acc.save();
+  logStatusChange(acc, prevStatus, worker);
   worker.newDrops += newDrops;
   state.sessionNewDrops += newDrops;
   return { ok: true, newDrops, total: acc.dropCount };
