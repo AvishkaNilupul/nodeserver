@@ -1990,6 +1990,26 @@ async function processCampaign(c, ctx) {
     const mine = (reusable.assignedAccounts || []).filter(
       (u) => !spokenFor.has(String(u).toLowerCase()),
     );
+    // Give the reused accounts this game back (completeEndedTasks took it off
+    // and disabled the ones left with none — see utils/reuseRearm), then
+    // restart the bots whose config changed: `docker start` above is a no-op on
+    // a running container and a bot reads its config only at startup.
+    if (started.length && mine.length) {
+      const rearm = await require("./reuseRearm").rearmReusedAccounts({
+        bots,
+        logins: mine,
+        game,
+      });
+      if (rearm.error) progress("Reuse re-arm skipped: " + rearm.error, "warn");
+      for (const cb of rearm.changedBots || []) {
+        await hosts
+          .dockerContainer(hosts.resolveHost(cb.host), "restart", cb.container)
+          .catch((e) => progress("Restart " + cb.container + " failed: " + e.message, "warn"));
+      }
+      if (rearm.rearmed) {
+        progress("Re-armed " + rearm.rearmed + " reused account(s) for " + game + ".");
+      }
+    }
     if (recordedInputs) {
       recordedInputs = withReuseInputs(
         recordedInputs,
