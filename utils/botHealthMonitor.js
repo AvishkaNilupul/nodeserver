@@ -571,6 +571,45 @@ function diskPct(stats) {
 
 // One read per host (never a per-container SSH loop): the expected image id
 // plus every farm-bot container's image id and state.
+// Why this image id may carry the farm tag: the id the tag pointed at on this
+// host before it vanished, or another host's live farm tag. "" = no proof — a
+// stale Docker Hub pull looks exactly like a farm build from the outside.
+function farmBuildProof(hostId, id, prev) {
+  if (!id) return "";
+  if (prev && prev.lastFarmId === id) {
+    return "the build " + FARM_IMAGE + " pointed at before it disappeared";
+  }
+  for (const [otherId, e] of buildTracked) {
+    if (otherId !== hostId && e.expectedId === id) {
+      return "the same build as " + FARM_IMAGE + " on " + e.label;
+    }
+  }
+  return "";
+}
+
+const FULL_IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
+// One Telegram per host per day about automatic restores; every restore is
+// still logged as a SystemEvent.
+const RESTORE_TELL_MS = 24 * 60 * 60 * 1000;
+const restoreToldAt = new Map();
+
+// `docker tag <id> twitchbot-farm:latest`, then read the tag back. True only
+// when it now resolves to exactly `id`.
+async function restoreFarmTag(host, id) {
+  if (!FULL_IMAGE_ID.test(String(id || ""))) return false;
+  try {
+    const r = await hosts.runShell(
+      host,
+      "docker tag " + hosts.shq(id) + " " + hosts.shq(FARM_IMAGE) +
+        " && docker image inspect -f '{{.Id}}' " + hosts.shq(FARM_IMAGE),
+      { timeout: 30000 },
+    );
+    return String((r && r.stdout) || "").trim() === id;
+  } catch {
+    return false;
+  }
+}
+
 async function buildScanHost(host, now) {
   if (host.runtime === "native") return; // no docker images to compare
   const script =
@@ -588,17 +627,34 @@ async function buildScanHost(host, now) {
   }
   const lines = out.split("\n");
   const expLine = lines.find((l) => l.startsWith("EXPECTED")) || "";
-  const expectedId = expLine.replace(/^EXPECTED\s*/, "").trim();
+  let expectedId = expLine.replace(/^EXPECTED\s*/, "").trim();
   const rows = parseBotImages(
     lines.filter((l) => !l.startsWith("EXPECTED")).join("\n"),
   );
-  const missingImage = !expectedId && rows.some((r) => isFarmBot(r.name));
+  const prev = buildTracked.get(host.id) || { signature: "", lastAlertAt: 0 };
+  let missingImage = !expectedId && rows.some((r) => isFarmBot(r.name));
+  // Put a vanished tag back when it is PROVEN to be the farm build. On the
+  // main server the tag keeps disappearing on its own: 2026-09-27 05:28:56
+  // UTC docker logged `untag twitchbot-farm:latest` two seconds after the
+  // hosting provider's agent.service restarted (it restarts ~daily), and the
+  // 09-23 loss sits next to another agent restart. Nothing of ours removes it.
+  // The re-tag is the exact one-liner the alert below would ask a human for,
+  // under the same proof, and it restarts nothing.
+  let restoredFrom = "";
+  if (missingImage && process.env.BOT_FARM_TAG_AUTORESTORE !== "0") {
+    const id = sharedImageId(rows);
+    const proof = farmBuildProof(host.id, id, prev);
+    if (proof && (await restoreFarmTag(host, id))) {
+      expectedId = id;
+      missingImage = false;
+      restoredFrom = proof;
+    }
+  }
   const stale = staleBuilds(rows, expectedId);
   const signature =
     (missingImage ? "MISSING;" : "") +
     stale.map((s) => s.name + (s.running ? "*" : "")).join(",");
 
-  const prev = buildTracked.get(host.id) || { signature: "", lastAlertAt: 0 };
   const entry = {
     signature,
     lastAlertAt: prev.lastAlertAt,
@@ -611,6 +667,29 @@ async function buildScanHost(host, now) {
     checkedAt: now,
   };
   buildTracked.set(host.id, entry);
+
+  if (restoredFrom) {
+    logEvent({
+      category: "bots",
+      action: "farm_tag_restored",
+      actor: "healthMonitor",
+      severity: "warn",
+      host: host.id,
+      detail:
+        FARM_IMAGE + " was missing; put back on " + shortImageId(expectedId) +
+        " (" + restoredFrom + "). Nothing was restarted.",
+    });
+    const told = restoreToldAt.get(host.id) || 0;
+    if (now - told >= RESTORE_TELL_MS) {
+      restoreToldAt.set(host.id, now);
+      await sendTelegram(
+        "🧱 " + host.label + ": the " + FARM_IMAGE + " tag had gone from the host " +
+          "again (it vanishes right after the hosting agent restarts) — put it back " +
+          "automatically on " + shortImageId(expectedId) + ", the build every farm " +
+          "bot here already runs. Nothing was restarted.",
+      ).catch(() => {});
+    }
+  }
 
   if (!signature) {
     if (prev.signature) {
@@ -638,17 +717,7 @@ async function buildScanHost(host, now) {
     // only with proof the bots' image IS a farm build — the tag's own id here
     // before it vanished, or another host's farm tag — never a stale pull.
     const id = sharedImageId(rows);
-    let proof = "";
-    if (id && prev.lastFarmId === id) {
-      proof = "the build " + FARM_IMAGE + " pointed at before it disappeared";
-    } else if (id) {
-      for (const [hostId, e] of buildTracked) {
-        if (hostId !== host.id && e.expectedId === id) {
-          proof = "the same build as " + FARM_IMAGE + " on " + e.label;
-          break;
-        }
-      }
-    }
+    const proof = farmBuildProof(host.id, id, prev);
     if (proof) {
       const n = rows.filter((r) => isFarmBot(r.name)).length;
       parts.push(
