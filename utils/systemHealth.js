@@ -394,15 +394,39 @@ const CHECKS = [
       const liveIds = new Set(live.map((o) => String(o.id)));
       const rows = await MarketplaceListing.find(
         { marketplace: "eldorado", status: "active" },
-        { externalId: 1, title: 1, price: 1 },
+        { externalId: 1, title: 1, price: 1, autoPaused: 1 },
       )
         .limit(2000)
         .lean();
+      // Every active row — auto-paused ones too — still owns its offer, so an
+      // Active offer behind one is tracked, not "no listing row".
       const rowIds = new Set(rows.map((r) => String(r.externalId)));
+
+      // Offers on the offline hold (autoFarm.eldoradoOfflineHold) are a manual
+      // line on purpose: the fulfiller sends the canned reply and the operator
+      // hands the goods over, so "no listing row" is their designed state.
+      // Parsed the way eldoradoFulfiller.eldoradoOfflineHold does — a hold with
+      // no message is off.
+      let holdOffers = new Set();
+      try {
+        const hold = (ctx.dep("settings").getAutoFarm() || {}).eldoradoOfflineHold;
+        if (hold && String(hold.message || "").trim() && Array.isArray(hold.offers)) {
+          holdOffers = new Set(hold.offers.map((o) => String(o)));
+        }
+      } catch {
+        /* settings unreadable — judge every offer, as before */
+      }
+      const manualLine = [];
 
       const problems = [];
 
       for (const r of rows) {
+        // An auto-paused row is one the stock sync paused itself ("paused: no
+        // claimable stock") and resumes on its own when stock returns; it keeps
+        // status "active" by design, so Eldorado not showing it Active is the
+        // intended state, not drift. Counting it made the board fail on two such
+        // R6 offers on 2026-09-27.
+        if (r.autoPaused) continue;
         if (!liveIds.has(String(r.externalId))) {
           problems.push({
             kind: "we say active, Eldorado does not",
@@ -435,6 +459,10 @@ const CHECKS = [
           continue;
         }
         if (!rowIds.has(String(o.id))) {
+          if (holdOffers.has(String(o.id))) {
+            manualLine.push(title.slice(0, 70));
+            continue;
+          }
           problems.push({
             kind: "sellable bundle offer with no listing row",
             offer: String(o.id),
@@ -444,6 +472,10 @@ const CHECKS = [
       }
 
       const n = problems.length;
+      const manualNote = manualLine.length
+        ? " " + manualLine.length + " offline-hold offer(s) with no listing row " +
+          "are a manual line and not counted: " + manualLine.join("; ").slice(0, 160) + "."
+        : "";
       return {
         status: n ? "fail" : "ok",
         measured: n,
@@ -457,7 +489,9 @@ const CHECKS = [
         detail:
           "Read from Eldorado's own offer list. A rent-farm offer is matched by " +
           "TITLE rather than by a listing row, so it is checked against the real " +
-          "resolver instead of being counted as untracked.",
+          "resolver instead of being counted as untracked. Auto-paused rows " +
+          "(paused by the stock sync, resumed by it) are not drift." +
+          manualNote,
         items: capItems(problems),
       };
     },
@@ -697,6 +731,7 @@ const CHECKS = [
           unclaimedGame: 1,
           set: 1,
           origin: 1,
+          accountLogin: 1,
         },
       ).sort({ _id: 1 })
           .lean();
@@ -767,7 +802,7 @@ const CHECKS = [
               status: { $in: audit.SELLABLE_STATUSES },
               soldAt: null,
             };
-        const candidates = await UnclaimedAccount.find(query, {
+        const fields = {
           login: 1,
           game: 1,
           drops: 1,
@@ -776,9 +811,33 @@ const CHECKS = [
           // to null, every verdict degrades to the DB union, and this check
           // silently becomes the very thing it is meant to replace.
           poolAccountId: 1,
-        })
-          .limit(STALE_CANDIDATE_POOL)
-          .lean();
+        };
+        // A Gameflip live unit carries ONE account's credentials and Gameflip
+        // hands exactly that account to the buyer, so it is the only candidate
+        // that matters. Its ledger row is `listed` — never one of the spare
+        // SELLABLE_STATUSES the query above matches — so every live unit read
+        // "no sellable ledger row for this game/set" (6 false fails on
+        // 2026-09-27, each backed by an account the unclaimed engine re-reads
+        // every pass). Judge the attached row; no spare can stand in for it.
+        const attached =
+          listing.marketplace === "gameflip" && listing.accountLogin
+            ? await UnclaimedAccount.find(
+                {
+                  source: "noclaim",
+                  status: "listed",
+                  soldAt: null,
+                  listingExternalIds: String(listing.externalId),
+                },
+                fields,
+              )
+                .limit(3)
+                .lean()
+            : [];
+        const candidates = attached.length
+          ? attached
+          : await UnclaimedAccount.find(query, fields)
+              .limit(STALE_CANDIDATE_POOL)
+              .lean();
 
         // The ledger-only pass is an ordering hint, never a verdict: ledger
         // `drops[]` is whatever the last no-claim scan wrote (3-6 items on rows
@@ -827,7 +886,7 @@ const CHECKS = [
           marketplace: listing.marketplace,
           externalId: listing.externalId,
           title: String(listing.title || "").slice(0, 120),
-          game: listing.unclaimedGame || "",
+          game: listing.unclaimedGame || (candidates[0] && candidates[0].game) || "",
           advertised: (listing.requiredDrops || []).length,
           candidates: candidates.length,
           missing: candidates.length

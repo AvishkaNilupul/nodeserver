@@ -333,7 +333,22 @@ async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
     : await b.reusableTaskForGame(verdict.game);
   if (!reusable) throw new Error("reuse target task no longer exists");
 
-  const bots = (reusable.bots || []).filter((x) => x.container);
+  // Only the bots decide found alive. decide.reuseCandidate drops retired bots
+  // (container deleted from the Bots page, config renamed .done-*) and hands
+  // the survivors over as verdict.reuseBots, but this step re-read the task and
+  // used every bot it ever listed: the retired one was restarted (and failed)
+  // and then recorded on the new row, so it rode along into every later reuse
+  // of the game — contabo twitchbotx34, deleted 2026-09-21, was still being
+  // copied onto new Marvel Rivals rows on 09-26, where the Auto-farm tab flagged
+  // it "expected container is missing". A verdict without the list (a row
+  // decided before it existed) keeps every bot, exactly as before.
+  const decidedLive =
+    Array.isArray(verdict.reuseBots) && verdict.reuseBots.length
+      ? new Set(verdict.reuseBots.map((c) => String(c)))
+      : null;
+  const bots = (reusable.bots || []).filter(
+    (x) => x.container && (!decidedLive || decidedLive.has(String(x.container))),
+  );
   if (!bots.length) throw new Error("reuse target has no bots left");
 
   // Recompute the deliverable account set at EXECUTION time — the decide-time

@@ -3012,7 +3012,7 @@ async function completeEndedTasks() {
     // Containers other ACTIVE tasks still use must survive this task ending.
     const others = await AutoFarmTask.find(
       { status: "active", _id: { $ne: t._id } },
-      { bots: 1 },
+      { bots: 1, game: 1, assignedAccounts: 1 },
     ).lean();
     const sharedKeys = new Set();
     for (const o of others) {
@@ -3021,6 +3021,21 @@ async function completeEndedTasks() {
     const mine = new Set(
       (t.assignedAccounts || []).map((u) => String(u).toLowerCase()),
     );
+    // Accounts another ACTIVE task for the SAME game still farms. A recurring
+    // campaign's next wave is reused onto the same accounts, and when that
+    // reuse lands BEFORE this wave ends, stripping the game here (and disabling
+    // the ones left with none) switched the new wave off the moment the old one
+    // closed — RavenQuest "September 05" (18/18), SMITE 2 "Sept Wk 4" (14/14)
+    // and Active Matter "Week II" (18/42) all sat disabled from their first
+    // hour on 2026-09-25/26. Their game stays and they are not recycled.
+    const endedGame = String(t.game || "").trim().toLowerCase();
+    const stillNeeded = new Set();
+    for (const o of others) {
+      if (String(o.game || "").trim().toLowerCase() !== endedGame) continue;
+      for (const u of o.assignedAccounts || []) {
+        stillNeeded.add(String(u).toLowerCase());
+      }
+    }
     const stopped = [];
     const removed = [];
     const trimmed = [];
@@ -3049,6 +3064,13 @@ async function completeEndedTasks() {
           let changed = 0;
           for (const u of users) {
             if (!u || !mine.has(String(u.Login || "").toLowerCase())) continue;
+            if (stillNeeded.has(String(u.Login || "").toLowerCase())) {
+              // The next wave of this game farms it — leave it armed.
+              if (u.Enabled !== false) {
+                stillEnabled.add(String(u.Login || "").toLowerCase());
+              }
+              continue;
+            }
             const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
             const next = own.filter(
               (f) =>
@@ -3117,8 +3139,21 @@ async function completeEndedTasks() {
           (u) =>
             !sold.has(String(u).toLowerCase()) &&
             // Still running for a co-tenant task — see `stillEnabled` above.
-            !stillEnabled.has(String(u).toLowerCase()),
+            !stillEnabled.has(String(u).toLowerCase()) &&
+            // Assigned to the next wave of this game — see `stillNeeded`.
+            !stillNeeded.has(String(u).toLowerCase()),
         );
+        if (stillNeeded.size) {
+          const kept = t.assignedAccounts.filter((u) =>
+            stillNeeded.has(String(u).toLowerCase()),
+          ).length;
+          if (kept) {
+            progress(
+              "Kept " + kept + " account(s) armed for " + t.game +
+                ": the next wave of the same game farms them.",
+            );
+          }
+        }
         if (stillEnabled.size) {
           progress(
             "Kept " +
