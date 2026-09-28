@@ -14,12 +14,10 @@ const MarketResearch = require("../models/MarketResearch");
 const dsFulfiller = require("../utils/digisellerFulfiller");
 const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
-const fpFulfiller = require("../utils/funpayFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const guardianFixes = require("../utils/guardianFixes");
 const marketResearch = require("../utils/marketResearch");
 const mp = require("../utils/marketplaces");
-const epicnpc = require("../utils/epicnpcCatalog");
 const paCopy = require("../utils/playerauctionsCopy");
 const suppliedStock = require("../utils/suppliedStock");
 // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §7): a set
@@ -131,10 +129,8 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "g2g") r = await mp.g2gTest();
     else if (name === "ggsel") r = await mp.ggselTest();
     else if (name === "zeusx") r = await mp.zeusxTest();
-    else if (name === "funpay") r = await mp.funpayTest();
     else if (name === "eldorado") r = await mp.eldoradoTest();
     else if (name === "playerauctions") r = await mp.playerauctionsTest();
-    else if (name === "z2u") r = await mp.z2uTest();
     else {
       return res
         .status(400)
@@ -402,69 +398,6 @@ function buildDescription(set) {
     ),
   ];
   return lines.join("\n").trim();
-}
-
-// EpicNPC listings follow a house style (verified against the seller's own
-// live listings): a "<Game> Twitch Drops Account | N+ Unclaimed Rewards" title
-// and a body with Featured/Full reward lists, an Information checklist and a
-// Payment section. Built as HTML because the bridge drops it straight into the
-// XenForo (Froala) editor, which converts it to BBCode on submit. Returns
-// { title, descHtml }.
-function buildEpicListing(set, game) {
-  const escHtml = (s) =>
-    String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  const items = (set.items || []).filter((i) => i && i.name);
-  const count = items.length;
-  const label = (i) => ((i.qty || 1) > 1 ? i.qty + "× " : "") + i.name;
-  const li = (arr) =>
-    "<ul>" + arr.map((t) => "<li>" + escHtml(t) + "</li>").join("") + "</ul>";
-
-  const gameLabel = game || set.name || "Twitch Drops";
-  // Nothing to count — an account listing made by hand has no items — keeps
-  // its own title rather than announcing "0+ Unclaimed Rewards".
-  const title = count
-    ? gameLabel + " Twitch Drops Account | " + count + "+ Unclaimed Rewards"
-    : String(set.name || gameLabel + " Twitch Drops Account");
-
-  const parts = [];
-  // Line breaks kept: a description is usually a multi-line item list, and
-  // the editor collapses a bare newline into one run-on paragraph.
-  if (set.note) {
-    parts.push("<p>" + escHtml(set.note).replace(/\r?\n/g, "<br>") + "</p>");
-  }
-  // A short "Featured" teaser (first items) only when the full list is long
-  // enough to warrant it, mirroring the seller's own listings.
-  if (count > 10) {
-    parts.push("<b>Featured Rewards</b>");
-    parts.push(li(items.slice(0, 8).map(label)));
-  }
-  if (count) {
-    parts.push("<b>Full Reward List (" + count + ")</b>");
-    parts.push(li(items.map(label)));
-  }
-  parts.push("<b>Information</b>");
-  parts.push(
-    li([
-      "✔ Instant delivery",
-      "✔ Original Twitch account included",
-      "✔ Rewards are unclaimed — simply connect your own linked account",
-      "✔ Change the account details after purchase if you wish",
-      "✔ Safe and easy redemption",
-    ]),
-  );
-  parts.push("<b>Payment</b>");
-  parts.push(
-    "<p>PayPal Friends &amp; Family / Crypto (USDT, LTC, etc.)<br>" +
-      "Middleman accepted (buyer covers MM fees if requested)</p>",
-  );
-  parts.push(
-    "<p>Feel free to message me if you have any questions or would like " +
-      "screenshots before purchasing.</p>",
-  );
-  return { title, descHtml: parts.join("") };
 }
 
 // Render a promo cover for the custom-listing form and return it inline as a
@@ -951,7 +884,6 @@ function bodyCategoryGiven(name, body) {
     const cats = (body.digiseller || {}).categories;
     return Array.isArray(cats) && cats.length > 0;
   }
-  if (name === "funpay") return !!(body.funpay && body.funpay.nodeId);
   if (name === "g2g") return !!(body.g2g && body.g2g.brandId);
   return true;
 }
@@ -1505,133 +1437,6 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             instructions: gg.instructions,
             coverImagePath: ggCover,
           });
-        } else if (name === "funpay") {
-          const fp = body.funpay || {};
-          // FunPay's picker is a bare numeric box typed from memory, so the
-          // resolved node from the settings map is usually the better answer;
-          // a typed one still wins.
-          const fpNode = fp.nodeId || cat.node || cat.nodeId || "";
-          if (!fpNode) {
-            results[name] = {
-              success: false,
-              message: "Pick a FunPay category (node id) first",
-            };
-            continue;
-          }
-          if (fp.delivery === "auto") {
-            // Real auto-delivery: reserve up to `amount` farmed accounts that
-            // hold the whole bundle, attach each as one FunPay secret line
-            // (login:password), and let FunPay hand one to each buyer. The
-            // connect guide is sent as the offer's after-payment message.
-            const qtyWanted = Math.max(1, parseInt(fp.amount, 10) || 1);
-            const claimed = offer
-              ? await suppliedStock.claimForListing(
-                  String(offer._id),
-                  qtyWanted,
-                  { market: "funpay" },
-                )
-              : await fpFulfiller.claimAccountsForSet(set, qtyWanted);
-            if (!claimed.length) {
-              results[name] = {
-                success: false,
-                message: offer
-                  ? await suppliedClaimRefusal(offer, qtyWanted, "funpay")
-                  : "Out of stock — no unsold account holds this whole " +
-                    "bundle, so there is nothing to auto-deliver",
-              };
-              continue;
-            }
-            // No G1 guard here on purpose: FunPay is fed funpayDeliveryLine(),
-            // not the offer's template (a multi-line render would be split into
-            // several bogus secrets), and that line always carries the login.
-            try {
-              r = await mp.funpayPublish({
-                nodeId: fpNode,
-                title,
-                description,
-                priceUsd,
-                currency: fp.currency,
-                priceOverride: fp.priceOverride,
-                amount: claimed.length,
-                active: fp.active !== false,
-                autoDelivery: true,
-                // FunPay joins its secrets with "\n" and hands ONE LINE to
-                // each buyer (utils/marketplaces.js:3786), so a supplied
-                // account is fed as the same login:password line the archive
-                // path uses — the offer's multi-line delivery template would
-                // be split into several bogus secrets.
-                secrets: offer
-                  ? claimed.map((c) =>
-                      fpFulfiller.funpayDeliveryLine(c.login, c.password),
-                    )
-                  : claimed.map((c) => c.line),
-                paymentMsg: fpFulfiller.funpayPaymentGuide(),
-              });
-            } catch (err) {
-              if (offer) {
-                await suppliedStock.releaseClaim(
-                  claimed.map((c) => c.ledgerId),
-                );
-              } else {
-                await fpFulfiller.releaseAccounts(
-                  claimed.map((c) => c.accountId),
-                );
-              }
-              throw err;
-            }
-            const doc = await MarketplaceListing.create({
-              set: set._id,
-              marketplace: "funpay",
-              externalId: r.externalId,
-              externalNode: r.externalNode || "",
-              url: r.url || "",
-              title,
-              description,
-              price: priceUsd,
-              status: "active",
-              note:
-                (r.note ? r.note + " " : "") +
-                "auto-delivery: " +
-                claimed.length +
-                " account(s)",
-              autoDeliver: true,
-              accountId: claimed.map((c) => c.accountId).join(","),
-              accountLogin: claimed.map((c) => c.login).join(", "),
-              ...(offer ? offerRowFields(offer, claimed) : {}),
-            });
-            if (offer) {
-              // The lines are inside FunPay's secret pool now — see the
-              // Digiseller note above.
-              try {
-                await suppliedStock.markFed(
-                  claimed.map((c) => c.ledgerId),
-                  { listing: doc._id, market: "funpay" },
-                );
-              } catch (e) {
-                console.error("supplied markFed (funpay):", e.message);
-              }
-            }
-            results[name] = {
-              success: true,
-              id: String(doc._id),
-              externalId: r.externalId,
-              url: r.url || "",
-              note: doc.note,
-            };
-            continue;
-          }
-          r = await mp.funpayPublish({
-            nodeId: fpNode,
-            title,
-            description,
-            priceUsd,
-            currency: fp.currency,
-            priceOverride: fp.priceOverride,
-            amount: fp.amount,
-            active: fp.active !== false,
-            autoDelivery: false,
-            paymentMsg: fp.paymentMsg,
-          });
         } else if (name === "zeusx") {
           const zx = body.zeusx || {};
           if (offer) {
@@ -1780,28 +1585,6 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             note: r.note || "",
           };
           continue;
-        } else if (name === "z2u") {
-          // z2uBulkPublish answers { reply, rows, gameName } with NO offer id,
-          // and externalId is what every later sale poll, stock sync and
-          // delist joins on. A row with an empty externalId is worse than no
-          // row: it can never be reconciled and can never be delisted, so it
-          // would sit "active" forever over stock nothing is holding.
-          results[name] = {
-            success: false,
-            message:
-              "Z2U publishing has no offer id to record — use the Z2U shelf " +
-              "keeper",
-          };
-          logEvent({
-            category: "marketplace",
-            action: "z2u-publish-refused",
-            severity: "warn",
-            subject: title,
-            detail:
-              "manual publish to Z2U refused: z2uBulkPublish returns no " +
-              "offer id to store as externalId",
-          });
-          continue;
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -1819,7 +1602,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           note: r.note || "",
           // An offer-backed row carries no set, so without this the schema's
           // widened `set` requirement would refuse it. The claim-at-sale
-          // markets (Eldorado, PlayerAuctions, G2G, Z2U) take their supplied
+          // markets (Eldorado, PlayerAuctions, G2G) take their supplied
           // account when the order arrives, so units[] is empty here.
           ...(offer ? offerRowFields(offer, []) : {}),
         });
@@ -1842,166 +1625,6 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
-
-// EpicNPC Filler browser extension download. The extension packages the same
-// fill logic as the bookmarklet but runs automatically when a compose tab
-// opened from "Sell on EpicNPC" loads — no bookmark click needed. Served as a
-// stored zip built from the checked-in extension/ sources so it can never
-// drift from the repo.
-router.get(
-  "/marketplaces/epicnpc/extension.zip",
-  requireSuperadmin,
-  async (req, res) => {
-    try {
-      const { buildStoredZip } = require("../utils/storedZip");
-      const dir = path.join(__dirname, "..", "extension", "epicnpc-filler");
-      const files = [];
-      for (const name of await fsp.readdir(dir)) {
-        files.push({
-          name: "epicnpc-filler/" + name,
-          data: await fsp.readFile(path.join(dir, name)),
-        });
-      }
-      const zip = buildStoredZip(files);
-      res.setHeader("Content-Type", "application/zip");
-      res.setHeader(
-        "Content-Disposition",
-        'attachment; filename="epicnpc-filler.zip"',
-      );
-      res.send(zip);
-    } catch (err) {
-      console.error("epicnpc extension zip error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
-    }
-  },
-);
-
-// EpicNPC bridge: EpicNPC has no seller API and is bot-protected, so the server
-// can't post the listing. Instead it resolves the game's forum node and builds
-// the compose deep-link with the listing payload in the URL hash; the frontend
-// opens it in a new tab and the one-time bookmarklet fills the form in the
-// seller's own logged-in EpicNPC session. Optionally records the listing so it
-// shows in the "published on marketplaces" list.
-router.post(
-  "/marketplaces/epicnpc/prepare",
-  requireSuperadmin,
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      // An account listing posts as well as a set. EpicNPC is a hand-delivered
-      // forum thread either way — nothing is claimed from the offer's shelf
-      // (utils/suppliedStock NON_SHARING_MARKETS) — so all the offer needs is
-      // its own text, plus the drops of the Shop / Custom listing it was
-      // copied from, when it was, for the reward lists.
-      const offerId = String(body.offerId || "").trim();
-      let offer = null;
-      let set = null;
-      if (offerId) {
-        offer = /^[a-f0-9]{24}$/i.test(offerId)
-          ? await AccountOffer.findById(offerId).lean()
-          : null;
-        if (!offer) {
-          return res
-            .status(404)
-            .json({ success: false, message: "Account listing not found" });
-        }
-        const source = offer.sourceSet
-          ? await DropSet.findById(offer.sourceSet).lean()
-          : null;
-        set = {
-          ...setLikeFromOffer(offer),
-          items: source && Array.isArray(source.items) ? source.items : [],
-        };
-      } else {
-        set = await DropSet.findById(body.setId).lean();
-      }
-      if (!set) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Set not found" });
-      }
-      const game = String(
-        body.game || (offer ? offer.game : set.game) || "",
-      ).trim();
-      const hit = epicnpc.nodeForGame(game);
-      if (!hit) {
-        return res.status(422).json({
-          success: false,
-          message: game
-            ? '"' +
-              game +
-              '" has no EpicNPC forum — pick another game or skip EpicNPC for this listing.'
-            : "No game given for this listing, so EpicNPC has nowhere to post it.",
-        });
-      }
-      let priceUsd = Number(body.price != null ? body.price : set.price) || 0;
-      // An account listing's own floor, as in the /publish route: there is no
-      // DropSet behind it for any other guard to read.
-      if (offer && Number(offer.minPriceUsd) > 0) {
-        priceUsd = Math.max(priceUsd, Number(offer.minPriceUsd));
-      }
-      const service = body.service === "mm" ? "mm" : "free"; // default TG Free
-      // EpicNPC gets its own house-style title + rich (HTML) body rather than
-      // the generic set title/description.
-      const epic = buildEpicListing(set, game);
-      const title = epic.title;
-      const payload = {
-        title,
-        priceUsd,
-        descHtml: epic.descHtml,
-        description: buildDescription(set), // plain-text fallback
-        tier: String(body.tier || "account"),
-        tags: String(body.tags || game).slice(0, 200),
-        service,
-        owner: "Yes",
-      };
-      const url = epicnpc.buildComposeUrl(hit.node, payload);
-
-      let listingId = "";
-      if (body.record) {
-        // Bridge posts are manual, so there's no real external id yet; record a
-        // placeholder so the row is trackable and dedupable by set+game+node.
-        const doc = await MarketplaceListing.create({
-          set: set._id,
-          marketplace: "epicnpc",
-          externalId: "epicnpc:" + hit.node + ":" + Date.now(),
-          externalNode: String(hit.node),
-          url: "https://www.epicnpc.com/forums/x." + hit.node + "/",
-          title,
-          description: payload.description,
-          price: priceUsd,
-          status: "active",
-          note:
-            "bridge post to " +
-            hit.name +
-            " (node " +
-            hit.node +
-            ") — posted manually via bookmarklet" +
-            (offer
-              ? "; hand the account over yourself and remove it from the " +
-                "account listing's stock"
-              : ""),
-          // An account listing's row: no set, the offer instead, and no units
-          // — nothing is claimed for a hand-delivered forum post.
-          ...(offer ? offerRowFields(offer, []) : {}),
-        });
-        listingId = String(doc._id);
-      }
-
-      res.json({
-        success: true,
-        node: hit.node,
-        epicName: hit.name,
-        game,
-        url,
-        listingId,
-      });
-    } catch (err) {
-      console.error("epicnpc prepare error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
-    }
-  },
-);
 
 // External listings, optionally for one set.
 router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
@@ -2092,8 +1715,6 @@ router.delete(
           await mp.g2gDelist(row.externalId);
         } else if (row.marketplace === "ggsel") {
           await mp.ggselDelist(row.externalId);
-        } else if (row.marketplace === "funpay") {
-          await mp.funpayDelist(row.externalId, row.externalNode);
         } else if (row.marketplace === "zeusx") {
           await mp.zeusxDelist(row.externalId);
         } else if (row.marketplace === "eldorado") {
@@ -2102,11 +1723,6 @@ router.delete(
           // Hide, not Cancel: hiding keeps the offer so it can be relisted,
           // while Cancel is permanent.
           await mp.playerauctionsDelist(row.externalId);
-        } else if (row.marketplace === "z2u") {
-          // off_line, not delete: Z2U keeps a deactivated offer (and its stock)
-          // so the shelf keeper can put it back when stock returns, while a
-          // delete is permanent and loses the offer id the row is joined on.
-          await mp.z2uDelist(row.externalId);
         }
       } catch (err) {
         // Already gone or already sold is not a failed delist: the listing is off
@@ -2177,8 +1793,6 @@ router.delete(
           await ggFulfiller.releaseAccounts(row.accountId.split(","));
         } else if (row.marketplace === "digiseller") {
           await dsFulfiller.releaseAccounts(row.accountId.split(","));
-        } else if (row.marketplace === "funpay") {
-          await fpFulfiller.releaseAccounts(row.accountId.split(","));
         } else {
           // Scoped to THIS row's set: a tag-wide Gameflip release frees every
           // "gameflip"-reserved drop on the account, including a different
@@ -2189,7 +1803,7 @@ router.delete(
       // S1 (docs/ACCOUNT-LISTINGS-FIXES-3.md): the release above can never
       // reach owner-supplied stock. An account-listing row leaves `accountId`
       // empty on purpose (contract B5), so that gate is unreachable for it, and
-      // the accounts fed to a GGSel/Plati/FunPay vault at publish time stay
+      // the accounts fed to a GGSel/Plati vault at publish time stay
       // "fed" forever: excluded from stockFor, with no UI control to bring them
       // back and no other path that ever would. Twenty accounts published to
       // GGSel and then delisted were silently destroyed.
