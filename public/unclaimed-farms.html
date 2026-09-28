@@ -718,7 +718,7 @@ function renderGameRows(g){
     '<span class="chip" title="per-game auto-list cap (unclaimedGameCaps)">cap '+(cap?esc(cap):'default')+'</span>'+
     '<span class="chip" title="allowed marketplaces (unclaimedGameMarkets)">markets: '+esc(mk)+'</span>'+
     '<span class="muted" style="font-weight:500;">'+events.length+' event'+(events.length===1?'':'s')+' · '+sets.length+' bundle'+(sets.length===1?'':'s')+'</span>'+
-    '<button type="button" class="btn ghost sm" data-exportheld="'+esc(g.game||'')+'"'+(held&&g.game?'':' disabled')+' title="Export login:password lines for the held (unlisted) accounts of this game — audited">Export held creds</button>'+
+    '<button type="button" class="btn ghost sm" data-exportheld="'+esc(g.game||'')+'"'+(held&&g.game?'':' disabled')+' title="Sell held (unlisted) accounts of this game by hand: you choose how many; they are marked SOLD before their login:password lines are shown, so no listing can sell them again, and they leave their bots on the next run — audited">Sell held by hand</button>'+
     '</div></td></tr>';
   if(!sets.length) return head+'<tr><td></td><td colspan="7" class="muted">No bundles listed for this game yet.</td></tr>';
   return head+sets.map(function(s){
@@ -789,34 +789,45 @@ async function loadLots(){
   }
 }
 
-// ---- Export held creds (manual bulk sale) -----------------------------------
-// POST /export-creds {game} answers text/plain login:password lines (header
-// X-Exported-Count), so this bypasses the JSON helper: readonly textarea +
-// Copy + Download .txt.
+// ---- Sell held by hand (manual bulk sale) ------------------------------------
+// POST /export-creds {game, dryRun:true} answers how many held accounts are free;
+// {game, count} MARKS that many SOLD and answers their text/plain login:password
+// lines (header X-Exported-Count), so the sale bypasses the JSON helper:
+// readonly textarea + Copy + Download .txt.
 
 async function exportHeldCreds(game, btn){
   game=String(game||'').trim();
   if(!game) return;
   if(btn) btn.disabled=true;
-  bundleToast('exporting held creds for '+game+'…');
   try{
-    var r=await fetch('/api/unclaimed-auto/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({game:game})});
+    var probe=await api('/api/unclaimed-auto/export-creds',{method:'POST',body:JSON.stringify({game:game,dryRun:true})});
+    var free=Number(probe&&probe.free)||0;
+    if(!free){ bundleToast('No free held '+game+' accounts to sell right now.'); return; }
+    var ans=prompt(free+' held '+game+' account'+(free===1?'':'s')+' can be sold by hand.\n\nHow many are you selling? They are marked SOLD now (no listing can sell them again) and leave their bots on the next run.', String(Math.min(10,free)));
+    if(ans==null) return;
+    var n=parseInt(ans,10);
+    if(!(n>=1)){ bundleToast('Enter how many accounts (1–'+Math.min(free,Number(probe.max)||200)+').'); return; }
+    n=Math.min(n,free,Number(probe.max)||200);
+    if(!confirm('Mark '+n+' '+game+' account'+(n===1?'':'s')+' SOLD and show their logins?\n\nThis is a sale: they come off every listing and leave their bots on the next run (recycler).')) return;
+    bundleToast('selling '+n+' held '+game+' account'+(n===1?'':'s')+' by hand…');
+    var r=await fetch('/api/unclaimed-auto/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({game:game,count:n})});
     if(!r.ok){ var msg='HTTP '+r.status; try{ var ej=await r.json(); if(ej&&ej.message) msg=ej.message; }catch(e){} throw new Error(msg); }
     var text=await r.text();
-    var n=parseInt(r.headers.get('X-Exported-Count'),10);
-    if(!isFinite(n)) n=text.split(/\r?\n/).filter(Boolean).length;
+    var got=parseInt(r.headers.get('X-Exported-Count'),10);
+    if(!isFinite(got)) got=text.split(/\r?\n/).filter(Boolean).length;
     var skipped=parseInt(r.headers.get('X-Skipped-No-Password'),10);
-    showBundleCreds(game, text, n, isFinite(skipped)?skipped:0);
-    bundleToast('exported '+n+' credential'+(n===1?'':'s')+' for '+game);
-  }catch(e){ bundleToast('Export failed: '+e.message); }
+    var lost=parseInt(r.headers.get('X-Taken-Meanwhile'),10);
+    showBundleCreds(game, text, got, isFinite(skipped)?skipped:0);
+    bundleToast('sold '+got+' by hand for '+game+(isFinite(lost)&&lost?' ('+lost+' taken by another channel meanwhile)':''));
+  }catch(e){ bundleToast('Hand sale failed: '+e.message); }
   finally{ if(btn) btn.disabled=false; }
 }
 
 function showBundleCreds(game, text, count, skipped){
   var box=$('bdCreds'); if(!box) return;
   box.classList.add('show');
-  box.innerHTML='<div class="row"><b style="font-size:13px;">Held credentials — '+esc(game)+'</b>'+
-    '<span class="muted">'+count+' line'+(count===1?'':'s')+' · login:password'+(skipped?' · '+skipped+' without password skipped':'')+' · this export is audited</span>'+
+  box.innerHTML='<div class="row"><b style="font-size:13px;">Sold by hand — '+esc(game)+'</b>'+
+    '<span class="muted">'+count+' line'+(count===1?'':'s')+' · login:password · marked SOLD — they leave their bots on the next run'+(skipped?' · '+skipped+' without password skipped':'')+' · audited</span>'+
     '<button type="button" class="btn ghost sm" id="bdCredsCopyBtn" style="margin-left:auto;">Copy</button>'+
     '<button type="button" class="btn ghost sm" id="bdCredsDlBtn">Download .txt</button>'+
     '<button type="button" class="btn ghost sm" id="bdCredsCloseBtn">Close</button></div>'+

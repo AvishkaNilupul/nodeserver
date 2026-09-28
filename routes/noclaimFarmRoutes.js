@@ -602,6 +602,88 @@ router.post(
   },
 );
 
+// Bulk HAND SALE from one bot (owner, 2026-09-28): "Copy unsold" hands out
+// logins but reserves nothing, so the Eldorado shop offer or the auto-lister
+// could sell the same accounts minutes later (19 went to two buyers on
+// 2026-09-18). This picks `count` free accounts of the bot and MARKS THEM SOLD
+// before answering with their logins (unclaimedAutoList.handSellAccounts); the
+// next auto-list run takes them out of the bot to the recycler.
+// Body: { count (1-70), format: "lp" (default) | "lpc" (with the client token) }.
+router.post(
+  "/api/noclaim-farm/bots/:id/hand-sell",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      const count = parseInt((req.body || {}).count, 10);
+      if (!(count >= 1 && count <= MAX_PER_BOT)) {
+        return res.status(400).json({
+          success: false,
+          message: "count required: how many accounts you are selling (1-" + MAX_PER_BOT + ")",
+        });
+      }
+      const withSecret = (req.body || {}).format === "lpc";
+      const raw = await sh(
+        `[ -f ${hosts.shq(configPath(id))} ] && cat ${hosts.shq(configPath(id))} || echo ''`,
+        { timeout: 15000 },
+      );
+      if (!raw) return res.status(404).json({ success: false, message: "No such bot." });
+      const cfg = JSON.parse(raw);
+      const game = (cfg.FavouriteGames || [])[0] || "";
+      const gameNorm = settings.normGameName(game);
+      const users = ((cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || []).filter(
+        (u) => u && u.ClientSecret && u.Login,
+      );
+      const pools = await AvailableAccount.find(
+        { clientSecret: { $in: users.map((u) => u.ClientSecret) } },
+        { clientSecret: 1, status: 1, manualSold: 1, listed: 1, claimedNote: 1, soldGames: 1, password: 1 },
+      ).lean();
+      const poolBySecret = new Map(pools.map((p) => [p.clientSecret, p]));
+      const out = [];
+      const skipped = { notFree: 0, noPassword: 0, taken: 0 };
+      for (const u of users) {
+        if (out.length >= count) break;
+        const p = poolBySecret.get(u.ClientSecret);
+        if (
+          !p ||
+          p.status !== "claimed" ||
+          p.manualSold === true ||
+          p.listed === true ||
+          /^(sold|spent|rented)/i.test(String(p.claimedNote || "").trim()) ||
+          (p.soldGames || []).some((g) => settings.normGameName(g) === gameNorm)
+        ) {
+          skipped.notFree++;
+          continue;
+        }
+        let pw = "";
+        try {
+          pw = p.password ? decrypt(p.password) || "" : "";
+        } catch {
+          pw = "";
+        }
+        if (!pw) {
+          skipped.noPassword++;
+          continue;
+        }
+        const [r] = await unclaimedAutoList.handSellAccounts(
+          [{ login: u.Login, poolAccountId: String(p._id), game, botId: id, container: containerFor(id), twitchId: String(u.Id || "") }],
+          { game, actor: actorFromReq(req) || "operator", reason: "hand sale from no-claim bot " + id },
+        );
+        if (!r || !r.sold) {
+          if (r && /listing|ledger|taken|pool row/.test(r.why)) skipped.taken++;
+          else skipped.notFree++;
+          continue;
+        }
+        out.push(u.Login + ":" + pw + (withSecret ? ":" + u.ClientSecret : ""));
+      }
+      res.json({ success: true, game, sold: out.length, asked: count, skipped, lines: out });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
 // Manual "listed" tick — memory only, so the operator can see at a glance
 // which accounts are on sale. The account keeps farming; nothing else changes.
 router.post(

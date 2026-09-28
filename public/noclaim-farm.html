@@ -639,6 +639,31 @@ function exportAccounts(id,fmt){
   toast('Exported '+d.accounts.length+' account(s) as TXT.');
 }
 
+// Sell by hand: the server marks the accounts SOLD first, then answers their
+// logins — copying alone reserved nothing (19 accounts went to two buyers on
+// 2026-09-18). The clipboard write happens after a request, which iOS refuses,
+// so copyToClipboard falls back to a selectable box.
+async function handSell(id,c,btn){
+  var d=acctCache[id];
+  var free=d?d.accounts.filter(function(a){ return !a.manualSold&&!a.listed&&!a.notForSale; }).length:0;
+  if(!free){ toast('No unsold, unlisted accounts on this bot.'); return; }
+  var ans=prompt(free+' account'+(free===1?'':'s')+' on this bot can be sold by hand.\n\nHow many are you selling? They are marked SOLD now (no listing can sell them again) and leave the bot on the next auto-list run.', String(Math.min(5,free)));
+  if(ans==null) return;
+  var n=parseInt(ans,10);
+  if(!(n>=1)){ toast('Enter how many accounts (1–'+free+').'); return; }
+  n=Math.min(n,free);
+  if(!confirm('Mark '+n+' account'+(n===1?'':'s')+' of bot '+id+' SOLD and copy their logins?\n\nThis is a sale: they leave the bot on the next auto-list run (recycler).')) return;
+  if(btn) btn.disabled=true;
+  try{
+    var r=await api('/api/noclaim-farm/bots/'+id+'/hand-sell',{method:'POST',body:JSON.stringify({count:n})});
+    var lines=(r&&r.lines)||[];
+    if(!lines.length){ toast('Nothing was sold — every account was taken or not free.'); }
+    else copyToClipboard(lines.join('\n'),lines.length+' sold account'+(lines.length===1?'':'s')+' (login:pass)');
+    await loadAccounts(id,c);
+  }catch(e){ toast('Hand sale failed: '+e.message); }
+  finally{ if(btn) btn.disabled=false; }
+}
+
 async function loadAccounts(id,c){
   try{ var j=await api('/api/noclaim-farm/bots/'+id+'/accounts');
     acctCache[id]={game:j.game||'',accounts:j.accounts||[]};
@@ -649,7 +674,8 @@ async function loadAccounts(id,c){
             '<button class="btn ghost sm" data-exp="txt">Export TXT</button>'+
             '<button class="btn ghost sm" data-exp="json">Export JSON</button>'+
             '<button class="btn ghost sm" data-exp="copy">Copy user:pass</button>'+
-            '<button class="btn ghost sm" data-exp="copyunsold" title="Only accounts not sold (by hand or on a marketplace) and not on any listing">Copy unsold</button>'+
+            '<button class="btn ghost sm" data-exp="copyunsold" title="Only accounts not sold (by hand or on a marketplace) and not on any listing. Copying reserves NOTHING — to sell, use Sell by hand">Copy unsold</button>'+
+            '<button class="btn sm" data-handsell="1" title="Sell accounts of this bot by hand: you choose how many; they are marked SOLD before their login:pass lines are copied, so no listing can sell them again, and they leave the bot on the next auto-list run (recycler)">Sell by hand</button>'+
           '</div>';
     h+='<div class="tw wide"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th style="width:52px;"></th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
     j.accounts.forEach(function(a,idx){
@@ -667,6 +693,8 @@ async function loadAccounts(id,c){
     c.querySelectorAll('button[data-exp]').forEach(function(btn){
       btn.onclick=function(){ exportAccounts(id,btn.getAttribute('data-exp')); };
     });
+    var hs=c.querySelector('button[data-handsell]');
+    if(hs) hs.onclick=function(){ handSell(id,c,hs); };
     // Per-row copy. Reads the row straight out of acctCache and writes the
     // clipboard synchronously in the tap — no await in between (iOS rule).
     c.querySelectorAll('button.rowcopy').forEach(function(btn){

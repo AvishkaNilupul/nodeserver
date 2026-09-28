@@ -3575,6 +3575,139 @@ async function retireSoldFromBots(cands, poolBySecret) {
 
 // Delist a set of rows (used by the operator override). Marks each row
 // delisted after the platform confirms, records failures in lastError.
+// ---------------------------------------------------------------------------
+// Bulk hand sale (owner, 2026-09-28)
+// ---------------------------------------------------------------------------
+// The owner sells a batch by hand (a chat buyer, a bulk deal). Copying logins
+// reserved nothing: the Eldorado shop offer and the auto-lister could sell the
+// same accounts minutes later — 19 went to two buyers on 2026-09-18 — and
+// "Export held creds" re-exported accounts already sold by hand. So a hand sale
+// marks each account SOLD before its login is handed out, under the same
+// compare-and-set every seller uses, and exactly one channel wins it:
+//   1. it is on no active listing;
+//   2. its ledger (one row per login) goes skipped/released/expired -> "sold"
+//      (soldMarket "manual"); a login with no ledger gets a new "sold" row, and
+//      a racing claimer's row makes this one back off;
+//   3. the pool row gets the Sold tick (manualSold + soldGames, listed off),
+//      only while still claimed and unticked — otherwise step 2 is undone.
+// Nothing sells it again: the scan skips manualSold, the owner's shop listings
+// refuse a sold ledger or a manualSold row, and the next scan takes it out of
+// its bot and hands it to the recycler (retireSoldFromBots, "sold by hand").
+// `accounts`: [{ login, poolAccountId, game?, botId?, container?, twitchId? }].
+// Returns one { login, poolAccountId, sold, why, ledgerId } per account.
+const HAND_FREE_STATUSES = ["skipped", "released", "expired"];
+
+async function handSellAccounts(accounts, { game = "", actor = "", reason = "" } = {}) {
+  const gameNorm = settings.normGameName(game);
+  const out = [];
+  for (const a of accounts || []) {
+    const login = String((a && a.login) || "").trim();
+    const loginLower = login.toLowerCase();
+    const res = { login, poolAccountId: String((a && a.poolAccountId) || ""), sold: false, why: "" };
+    out.push(res);
+    if (!loginLower || !res.poolAccountId) {
+      res.why = "no login or pool row";
+      continue;
+    }
+    if ((await activeListingsForLogin(login)).length) {
+      res.why = "on a listing";
+      continue;
+    }
+    const now = new Date();
+    const fields = {
+      status: "sold",
+      soldAt: now,
+      soldMarket: "manual",
+      soldPriceUsd: 0,
+      lastCheckedAt: now,
+      note: "sold by hand" + (reason ? " — " + reason : "") + (actor ? " (" + actor + ")" : ""),
+    };
+    const rows = await UnclaimedAccount.find({ source: "noclaim", loginLower }).lean();
+    if (rows.length > 1) {
+      res.why = "two ledger rows — check by hand";
+      continue;
+    }
+    let commit;
+    if (rows[0]) {
+      const l = rows[0];
+      if (!HAND_FREE_STATUSES.includes(l.status)) {
+        res.why = "ledger " + l.status;
+        continue;
+      }
+      const r = await UnclaimedAccount.updateOne({ _id: l._id, status: l.status }, { $set: fields });
+      if (!r || !r.modifiedCount) {
+        res.why = "taken meanwhile";
+        continue;
+      }
+      commit = { id: l._id, prior: l };
+    } else {
+      const doc = await UnclaimedAccount.create({
+        source: "noclaim",
+        login,
+        loginLower,
+        game: (a && a.game) || game,
+        poolAccountId: res.poolAccountId,
+        botId: String((a && a.botId) || ""),
+        container: String((a && a.container) || ""),
+        twitchId: String((a && a.twitchId) || ""),
+        ...fields,
+      });
+      const n = await UnclaimedAccount.countDocuments({ source: "noclaim", loginLower });
+      if (n > 1) {
+        await UnclaimedAccount.deleteOne({ _id: doc._id, status: "sold" }).catch(() => {});
+        res.why = "taken meanwhile";
+        continue;
+      }
+      commit = { id: doc._id, created: true };
+    }
+    const p = await AvailableAccount.updateOne(
+      { _id: res.poolAccountId, status: "claimed", manualSold: { $ne: true }, listed: { $ne: true } },
+      {
+        $set: { manualSold: true, listed: false },
+        ...(gameNorm ? { $addToSet: { soldGames: gameNorm } } : {}),
+      },
+    );
+    if (!p || !p.modifiedCount) {
+      if (commit.created) {
+        await UnclaimedAccount.deleteOne({ _id: commit.id, status: "sold" }).catch(() => {});
+      } else {
+        const prior = commit.prior;
+        await UnclaimedAccount.updateOne(
+          { _id: commit.id, status: "sold" },
+          {
+            $set: {
+              status: prior.status,
+              soldAt: prior.soldAt || null,
+              soldMarket: prior.soldMarket || "",
+              soldPriceUsd: Number(prior.soldPriceUsd) || 0,
+              lastCheckedAt: prior.lastCheckedAt || null,
+              note: prior.note || "",
+            },
+          },
+        ).catch(() => {});
+      }
+      res.why = "pool row not free (sold, listed or not claimed)";
+      continue;
+    }
+    res.sold = true;
+    res.ledgerId = String(commit.id);
+  }
+  const sold = out.filter((x) => x.sold).length;
+  if (sold) {
+    logEvent({
+      category: "unclaimed",
+      action: "hand_sold",
+      actor: actor || "operator",
+      game: game || "",
+      count: sold,
+      detail:
+        sold + " account(s) sold by hand" + (reason ? " (" + reason + ")" : "") +
+        " — marked sold before the logins were handed out; they leave their bots on the next run",
+    });
+  }
+  return out;
+}
+
 async function delistRowsForAccount(rows) {
   const results = [];
   for (const row of rows) {
@@ -5311,6 +5444,7 @@ module.exports = {
   SUCCESSOR_MAX_READS,
   soldRetireReason,
   retireSoldFromBots,
+  handSellAccounts,
   removeFromBotConfig,
   takeOutOfBots,
   markOwnerListed,

@@ -15,6 +15,8 @@ const engine = require("../utils/unclaimedAutoList");
 const audit = require("../utils/unclaimedListingAudit");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
+const AvailableAccount = require("../models/AvailableAccount");
+const { loginsOnActiveListings } = require("../utils/listedLogins");
 const DropSet = require("../models/DropSet");
 const MarketResearch = require("../models/MarketResearch");
 
@@ -1012,38 +1014,73 @@ router.post("/api/unclaimed-auto/pricing", requireSuperadmin, async (req, res) =
   }
 });
 
-// Bulk credential export for hand sales: the HELD (status "skipped") ledgers
-// of one game — accounts that still hold their unclaimed drops but sit on no
-// auto-listing (over the cap, or freed from a marketplace). text/plain
-// `login:password` lines, audited by count only. Optional ?source=noclaim
-// and ?status=skipped|listed (default skipped — listed accounts are on sale and
-// must not be hand-sold without the manual-sold tick).
+// Bulk HAND SALE of one game's held accounts (owner, 2026-09-28). The held
+// ("skipped") ledgers still hold their unclaimed drops and sit on no listing.
+// Each exported account is MARKED SOLD before its login is handed out
+// (engine.handSellAccounts): before, the export reserved nothing, re-exported
+// accounts already sold by hand, and the Eldorado shop offer could sell the
+// same accounts a minute later. The next scan takes them out of their bots.
+// Body: { game, count (1-200, required unless dryRun), dryRun, format:
+// "lp" login:password (default) | "lpc" login:password:clientSecret }.
+// dryRun answers JSON { free } — how many could be sold now — and changes
+// nothing. The sale answers text/plain lines, audited by count.
+const HAND_SALE_MAX = 200;
+
 router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, res) => {
   try {
     const body = req.body || {};
     const game = String(body.game || "").trim();
     if (!game) return res.status(400).json({ success: false, message: "game required" });
-    const status = body.status === "listed" ? "listed" : "skipped";
-    const source = body.source === "noclaim" ? body.source : "";
-    const limit = Math.min(2000, Math.max(1, parseInt(body.limit, 10) || 500));
+    const dryRun = body.dryRun === true;
+    const count = parseInt(body.count, 10);
+    if (!dryRun && !(count >= 1 && count <= HAND_SALE_MAX)) {
+      return res.status(400).json({
+        success: false,
+        message: "count required: how many accounts you are selling (1-" + HAND_SALE_MAX + ")",
+      });
+    }
+    const withSecret = body.format === "lpc";
     const want = settings.normGameName(game);
-    const filter = { status };
-    if (source) filter.source = source;
-    const ledgers = await UnclaimedAccount.find(filter, {
-      login: 1,
-      game: 1,
-      source: 1,
-      poolAccountId: 1,
-      drops: 1,
-      bundleLabel: 1,
-    })
-      .sort({ updatedAt: -1 })
+    const ledgers = await UnclaimedAccount.find(
+      { status: "skipped", source: "noclaim" },
+      { login: 1, loginLower: 1, game: 1, source: 1, poolAccountId: 1, botId: 1, container: 1, twitchId: 1, drops: 1, lastCheckedAt: 1 },
+    )
       .limit(4000)
       .lean();
-    const mine = ledgers.filter((l) => settings.normGameName(l.game) === want).slice(0, limit);
+    const mine = ledgers.filter((l) => settings.normGameName(l.game) === want);
+    const pools = mine.length
+      ? await AvailableAccount.find(
+          { _id: { $in: mine.map((l) => l.poolAccountId).filter(Boolean) } },
+          { status: 1, manualSold: 1, listed: 1, claimedNote: 1, soldGames: 1, clientSecret: 1, password: 1, credPasswordEnc: 1 },
+        ).lean()
+      : [];
+    const poolById = new Map(pools.map((p) => [String(p._id), p]));
+    const onListing = await loginsOnActiveListings();
+    // Free = what a buyer could still get and nobody else is selling: pool row
+    // claimed, not ticked sold or listed, not spent/rented, not sold for this
+    // game, with a password and token; the login on no active listing.
+    const free = mine.filter((l) => {
+      const p = poolById.get(String(l.poolAccountId || ""));
+      if (!p || p.status !== "claimed" || p.manualSold === true || p.listed === true) return false;
+      if (/^(sold|spent|rented)/i.test(String(p.claimedNote || "").trim())) return false;
+      if ((p.soldGames || []).some((g) => settings.normGameName(g) === want)) return false;
+      if (!p.clientSecret || !(p.password || p.credPasswordEnc)) return false;
+      return !onListing.has(String(l.loginLower || l.login || "").toLowerCase());
+    });
+    // The fullest accounts first (the latest read), freshest read breaking ties.
+    free.sort(
+      (a, b) =>
+        (b.drops || []).length - (a.drops || []).length ||
+        new Date(b.lastCheckedAt || 0).getTime() - new Date(a.lastCheckedAt || 0).getTime(),
+    );
+    if (dryRun) return res.json({ success: true, game, free: free.length, max: HAND_SALE_MAX });
+
+    const actor = actorFromReq(req) || "admin";
     const lines = [];
     let skippedNoPw = 0;
-    for (const l of mine) {
+    let lost = 0;
+    for (const l of free) {
+      if (lines.length >= count) break;
       let cred = null;
       try {
         cred = await engine.credentialForLedger(l);
@@ -1054,20 +1091,32 @@ router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, r
         skippedNoPw++;
         continue;
       }
-      lines.push(cred.login + ":" + cred.password);
+      const [r] = await engine.handSellAccounts(
+        [{ login: l.login, poolAccountId: l.poolAccountId, game: l.game, botId: l.botId, container: l.container, twitchId: l.twitchId }],
+        { game, actor, reason: "bulk hand sale from the Unclaimed farms page" },
+      );
+      if (!r || !r.sold) {
+        lost++;
+        continue;
+      }
+      const p = poolById.get(String(l.poolAccountId)) || {};
+      lines.push(cred.login + ":" + cred.password + (withSecret ? ":" + (p.clientSecret || "") : ""));
     }
     logEvent({
       category: "unclaimed",
       action: "creds_exported",
-      actor: (req.session && req.session.admin && req.session.admin.username) || "admin",
+      actor,
       game,
       count: lines.length,
-      detail: status + " " + (source || "all") + " accounts exported for manual bulk sale (" + lines.length + ", " + skippedNoPw + " without password)",
+      detail:
+        lines.length + " held account(s) sold by hand and exported (" + count + " asked, " +
+        skippedNoPw + " without password, " + lost + " taken by another channel meanwhile)",
     });
     res.set("Content-Type", "text/plain; charset=utf-8");
     res.set("Cache-Control", "no-store");
     res.set("X-Exported-Count", String(lines.length));
     res.set("X-Skipped-No-Password", String(skippedNoPw));
+    res.set("X-Taken-Meanwhile", String(lost));
     res.send(lines.join("\n") + (lines.length ? "\n" : ""));
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
