@@ -603,10 +603,12 @@ test("Eldorado: rows without the flag take their old path and never load the no-
   const env = eldEnv({ rows: [listing], unclaimed });
 
   await withStubbed("../utils/eldoradoFulfiller", env.stubs, async (e, h) => {
+    // The old by-game path — which, since 2026-09-28, holds an order whose
+    // offer declares no item list instead of shipping any account of the game.
     const out = await e.deliverOrder({ id: "eo-8", offerId: "e-2", purchaseQuantity: 1 }, { dryRun: false });
-    assert.deepStrictEqual(out, { orderId: "eo-8", delivered: 1, source: "unclaimed:Overwatch" });
-    assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 1, "claimed off the unclaimed ledger");
-    assert.strictEqual(listing.units[0].contentId, "U1");
+    assert.strictEqual(out.orderId, "eo-8");
+    assert.match(out.error, /declares no item list/);
+    assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 0, "nothing claimed off the unclaimed ledger");
 
     const archiveRow = row({ marketplace: "eldorado", externalId: "e-3", autoClaimSet: true, set: "SET-OLD" });
     env.Listing.find = () => {
@@ -948,11 +950,12 @@ test("PlayerAuctions: rows without the flag take their old path and never load t
   const env = paEnv({ rows: [listing], unclaimed });
 
   await withStubbed("../utils/playerauctionsFulfiller", env.stubs, async (pa, h) => {
+    // The old by-game path — which, since 2026-09-28, holds an order whose
+    // offer declares no item list instead of shipping any account of the game.
     const out = await pa.deliverOrder(paOrder("po-6"), { dryRun: false });
-    assert.strictEqual(out.delivered, 1);
-    assert.strictEqual(out.source, "unclaimed:Overwatch");
-    assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 1, "claimed off the unclaimed ledger");
-    assert.strictEqual(listing.units[0].contentId, "U1");
+    assert.ok(!out.delivered, JSON.stringify(out));
+    assert.match(String(out.error || ""), /declares no item list/);
+    assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 0, "nothing claimed off the unclaimed ledger");
 
     const n = await pa.stockFor(
       { unclaimedGame: "Overwatch", externalId: "pa-1" },

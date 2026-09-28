@@ -636,7 +636,9 @@ async function deliverOrder(order, { dryRun }) {
             ? " holding all " + (listing.requiredDrops || []).length +
               " advertised item(s)" +
               (shortfall.detail ? " — short of: " + shortfall.detail : "")
-            : ""),
+            : shortfall.detail
+              ? " — " + shortfall.detail
+              : ""),
       };
     }
     const message = eldoradoAccountsMessage(picked, qty);

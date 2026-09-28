@@ -1023,7 +1023,9 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
             ? " holding all " + (row.requiredDrops || []).length +
               " advertised item(s)" +
               (shortfall.detail ? " — short of: " + shortfall.detail : "")
-            : ""),
+            : shortfall.detail
+              ? " — " + shortfall.detail
+              : ""),
       };
     }
     if (dryRun) {
