@@ -139,7 +139,7 @@ function fakeById(value) {
 // The unclaimedGame ledger. `find` answers the resume query (status "sold")
 // with nothing and the candidate scan with `candidates`.
 function fakeUnclaimed({ candidates = [], byId = {} } = {}) {
-  const calls = { find: [], findOneAndUpdate: [], findById: [] };
+  const calls = { find: [], findOneAndUpdate: [], findById: [], updateMany: [] };
   const chain = (v) => {
     const p = Promise.resolve(v);
     p.sort = () => p;
@@ -156,6 +156,10 @@ function fakeUnclaimed({ candidates = [], byId = {} } = {}) {
     async findOneAndUpdate(q, u) {
       calls.findOneAndUpdate.push({ q, u });
       return { _id: q._id };
+    },
+    async updateMany(q, u) {
+      calls.updateMany.push({ q, u });
+      return { modifiedCount: 1 };
     },
     findById(id) {
       calls.findById.push(String(id));
@@ -620,6 +624,30 @@ test("Eldorado: rows without the flag take their old path and never load the no-
     assert.strictEqual(env.arch.availableAccountsForSet.calls.length, 1, "archive rows still count the archive");
 
     assert.strictEqual(h.ncsLoads(), 0, "a row without the flag must never load utils/noclaimStock");
+  });
+});
+
+test("Eldorado: a by-game sale records what each account sold for", async () => {
+  const listing = row({
+    _id: "L-UG2",
+    marketplace: "eldorado",
+    externalId: "e-4",
+    unclaimedGame: "Overwatch",
+    price: 1,
+    requiredDrops: [{ name: "Sun Tea Icon", qty: 1 }],
+  });
+  const unclaimed = fakeUnclaimed({ candidates: [{ _id: "U7", login: "ug_seven" }] });
+  const env = eldEnv({ rows: [listing], unclaimed });
+  await withStubbed("../utils/eldoradoFulfiller", env.stubs, async (e) => {
+    const out = await e.deliverOrder(
+      { id: "eo-9", offerId: "e-4", purchaseQuantity: 1, totalPrice: { amount: 1.21, currency: "USD" } },
+      { dryRun: false },
+    );
+    assert.strictEqual(out.delivered, 1, JSON.stringify(out));
+    const stamp = unclaimed.calls.updateMany.find((c) => c.u.$set && "soldPriceUsd" in c.u.$set);
+    assert.ok(stamp, "the sale price is stamped on the ledger");
+    assert.deepStrictEqual(stamp.q._id, { $in: ["U7"] });
+    assert.strictEqual(stamp.u.$set.soldPriceUsd, 1.21, "what the buyer paid per account");
   });
 });
 

@@ -667,6 +667,17 @@ async function deliverOrder(order, { dryRun }) {
     );
     listing.markModified("units");
     await listing.save();
+    // What each account sold for — the by-game claim stamped the sale with no
+    // money, so the ledger's revenue for these offers was mostly $0 (owner,
+    // 2026-09-28). Bookkeeping only: a failure never fails a delivered order.
+    try {
+      await UnclaimedAccount.updateMany(
+        { _id: { $in: picked.map((p) => p.ledgerId) }, status: "sold", soldPriceUsd: { $in: [0, null] } },
+        { $set: { soldPriceUsd: eldoradoUnitPriceUsd(order, qty, listing.price), soldMarket: "eldorado" } },
+      );
+    } catch (e) {
+      console.error("eldorado by-game sale price " + orderId + ":", e.message);
+    }
     return { orderId, delivered: qty, source: "unclaimed:" + listing.unclaimedGame };
   }
 
