@@ -990,6 +990,7 @@ router.post(
         { timeout: 15000 },
       );
       let released = 0;
+      let left = 0;
       if (raw) {
         const cfg = JSON.parse(raw);
         const secrets = (
@@ -999,17 +1000,39 @@ router.post(
           .map((u) => u.ClientSecret)
           .filter(Boolean);
         if (secrets.length) {
-          const r = await AvailableAccount.updateMany(
-            { clientSecret: { $in: secrets } },
-            {
-              $set: { status: "available", claimedAt: null, claimedNote: "" },
-            },
-          );
-          released = r.modifiedCount || 0;
-          if (released) {
-            const rows = await AvailableAccount.find({ clientSecret: { $in: secrets } }, { _id: 1 }).lean();
-            await recordPoolUsage(rows.map((row) => row._id), { event: "released", actor: "noclaim" });
+          // Only accounts that are the no-claim farm's own and free go back to
+          // the pool (owner, 2026-09-28). This used to set EVERY account in the
+          // config "available" — ones on sale, sold ones and ones another system
+          // had claimed — and every other system trusts the pool.
+          const personal =
+            String(
+              await sh(`[ -f ${hosts.shq(botDir(id) + "/.personal")} ] && echo yes || echo no`, { timeout: 10000 }),
+            ).trim() === "yes";
+          const plan = await releasePlan(secrets, { personal });
+          const blockers = Object.entries(plan.blocked).filter(([, n]) => n > 0);
+          if (blockers.length) {
+            return res.status(409).json({
+              success: false,
+              blocked: plan.blocked,
+              message:
+                "Bot #" + id + " still holds " +
+                blockers.map(([why, n]) => n + " " + why).join(", ") +
+                " — nothing was released. Sold accounts leave on the next auto-list run; delist or sell the ones on sale first.",
+            });
           }
+          if (plan.release.length) {
+            const r = await AvailableAccount.updateMany(
+              { _id: { $in: plan.release }, status: "claimed" },
+              {
+                $set: { status: "available", claimedAt: null, claimedNote: "", manualSold: false, listed: false },
+              },
+            );
+            released = r.modifiedCount || 0;
+            if (released) {
+              await recordPoolUsage(plan.release, { event: "released", actor: "noclaim" });
+            }
+          }
+          left = plan.left;
         }
       }
       await sh(
@@ -1022,14 +1045,65 @@ router.post(
         actor: actorFromReq(req),
         subject: containerFor(id),
         count: released,
-        detail: "released " + released + " account(s) back to the pool",
+        detail:
+          "released " + released + " account(s) back to the pool" +
+          (left ? "; " + left + " left as they were (owned by another system)" : ""),
       });
-      res.json({ success: true, released });
+      res.json({ success: true, released, left });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
   },
 );
+
+// Which accounts of a bot being released may go back to the pool, and what
+// blocks the release (owner, 2026-09-28). Blocked — nothing is released — by an
+// account on a listing (ledger listed/manual, or the Listed tick), a sale not
+// yet taken out of the bot (a sold ledger that is not history from before the
+// account was re-deployed, a spent/sold note, or the Sold tick outside a
+// personal bot), or a rental. Released: claimed rows the no-claim farm itself
+// claimed ("noclaim-farm:…"), and a personal bot's fenced accounts. Anything
+// else — a row another system owns, or one already back in the pool — is left
+// exactly as it is.
+async function releasePlan(secrets, { personal = false } = {}) {
+  const rows = await AvailableAccount.find(
+    { clientSecret: { $in: secrets } },
+    { status: 1, claimedNote: 1, claimedAt: 1, manualSold: 1, listed: 1 },
+  ).lean();
+  const ledgers = await UnclaimedAccount.find(
+    { poolAccountId: { $in: rows.map((r) => String(r._id)) }, status: { $in: ["listed", "manual", "sold"] } },
+    { poolAccountId: 1, status: 1, soldAt: 1 },
+  ).lean();
+  const ledgerByPool = new Map(ledgers.map((l) => [String(l.poolAccountId), l]));
+  const blocked = { "on sale": 0, "sold, not yet taken out": 0, rented: 0 };
+  const release = [];
+  let left = 0;
+  for (const r of rows) {
+    const note = String(r.claimedNote || "").trim();
+    const l = ledgerByPool.get(String(r._id));
+    const history =
+      l && l.status === "sold" && l.soldAt && r.claimedAt &&
+      new Date(r.claimedAt).getTime() > new Date(l.soldAt).getTime();
+    if ((l && (l.status === "listed" || l.status === "manual")) || (r.listed === true && !personal)) {
+      blocked["on sale"]++;
+      continue;
+    }
+    if ((l && l.status === "sold" && !history) || /^(spent|sold)/i.test(note) || (r.manualSold === true && !personal)) {
+      blocked["sold, not yet taken out"]++;
+      continue;
+    }
+    if (/^rented to/i.test(note)) {
+      blocked.rented++;
+      continue;
+    }
+    if (r.status === "claimed" && (/^noclaim-farm:/i.test(note) || (personal && r.manualSold === true))) {
+      release.push(r._id);
+    } else {
+      left++;
+    }
+  }
+  return { release, blocked, left };
+}
 
 // ===========================================================================
 // SPENT accounts (sold / connected) — scan, remove, and view.

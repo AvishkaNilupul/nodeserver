@@ -409,10 +409,11 @@ function wireBot(wrap,id){
     btn.addEventListener('click',async function(e){
       e.stopPropagation();
       var act=btn.getAttribute('data-act');
-      if(act==='release' && !confirm('Release bot #'+id+'? Stops it, returns its accounts to the pool, deletes its config.')) return;
+      if(act==='release' && !confirm('Release bot #'+id+'? Stops it, deletes its config, and returns its free no-claim accounts to the pool.\n\nRefused while it still holds accounts on sale, sold ones not yet taken out, or rented ones. Accounts another system owns are left as they are.')) return;
+      if(act==='stop' && !confirm('Stop bot #'+id+'? It stays stopped — auto power will not start it again — until you press Restart.')) return;
       btn.disabled=true;
       try{ var j=await api('/api/noclaim-farm/bots/'+id+'/'+act,{method:'POST'});
-        var msg={restart:'Restarted — every account re-spun.',stop:'Stopped.',release:'Released — '+(j.released||0)+' account(s) back to pool.'};
+        var msg={restart:'Restarted — every account re-spun.',stop:'Stopped.',release:'Released — '+(j.released||0)+' account(s) back to pool'+(j.left?' ('+j.left+' owned by another system left as they were)':'')+'.'};
         toast(msg[act]||'Done.');
         // Restart keeps the bot (and its expanded drawer); stop/release drop it.
         if(act!=='restart') delete openBots[id];
@@ -707,6 +708,7 @@ async function loadAccounts(id,c){
     c.querySelectorAll('input.msold').forEach(function(cb){
       cb.onchange=async function(){
         var secret=cb.getAttribute('data-secret');
+        if(!cb.checked && !confirm('Clear the Sold tick? The account becomes sellable again by the auto-lister and your shop listings (if it is still in its bot). Only do this if it was ticked by mistake.')){ cb.checked=true; return; }
         cb.disabled=true;
         try{
           var r=await api('/api/noclaim-farm/accounts/'+encodeURIComponent(secret)+'/manual-sold',{method:'POST',body:JSON.stringify({sold:cb.checked})});
@@ -899,7 +901,10 @@ async function loadGames(){
 function renderGames(){
   var el=$('gamesTags');
   el.innerHTML = games.length ? games.map((g,i)=>'<span class="tag">'+esc(g)+'<button data-i="'+i+'">×</button></span>').join('') : '<span class="muted">none</span>';
-  el.querySelectorAll('button').forEach(function(b){ b.onclick=function(){ games.splice(+b.getAttribute('data-i'),1); saveGames(); }; });
+  el.querySelectorAll('button').forEach(function(b){ b.onclick=function(){
+    var g=games[+b.getAttribute('data-i')];
+    if(!confirm('Remove "'+g+'" from the no-claim games?\n\nThe regular auto-farmer will then farm AND CLAIM '+g+' drops, which makes them unsellable here.')) return;
+    games.splice(+b.getAttribute('data-i'),1); saveGames(); }; });
 }
 function fillGameSelect(){
   ['game','mineGame'].forEach(function(gid){
