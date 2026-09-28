@@ -33,7 +33,6 @@ const {
 const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
-const coverage = require("./unclaimedCoverage");
 const copy = require("./playerauctionsCopy");
 const proof = require("./playerauctionsProof");
 const farmService = require("./playerauctionsFarmService");
@@ -53,19 +52,7 @@ const TICK_MS = 60 * 1000;
 // offer, so this runs far less often than the delivery tick.
 const STOCK_SYNC_MS = 30 * 60 * 1000;
 
-const PA_SELLABLE_STATUSES = ["released", "skipped"];
-
-// Ceiling on the stock an unclaimed-backed offer may advertise. The count comes
-// from a dry-run claim, which resolves a credential per candidate, so it is
-// bounded rather than "however many the farm holds".
-const UNCLAIMED_STOCK_MAX = 25;
-
-// Most live inventory reads one call to claimUnclaimedForGame may make. Bounds
-// the Twitch fan-out of both delivery and the periodic stock sync.
-const LIVE_CHECK_MAX = 40;
-// Ceiling for a Drop-Archive stock COUNT. Deliberately NOT UNCLAIMED_STOCK_MAX:
-// that is a claim batch size, and reusing it here would quietly cut every
-// bundle mirror from ~130 advertised units to 25. Matches the publishers' cap.
+// Ceiling for a Drop-Archive stock COUNT. Matches the publishers' cap.
 const ARCHIVE_STOCK_MAX = 200;
 
 // How many drops the buyer was promised, for the delivery-proof receipt.
@@ -149,150 +136,30 @@ async function unclaimedOnly(set, candidates) {
   return candidates.filter((c) => !spent.has(c.login));
 }
 
-// --- Stock source 2: the no-claim farm ----------------------------------
-// Only "released" and "skipped" rows are sellable: "listed" means the account is
-// already a stock unit on ANOTHER marketplace and selling it here would ship
-// that listing's drops too; "sold"/"expired"/"removed" are spent or gone.
+// --- Stock source 2: the no-claim farm BY GAME (retired) -----------------
+// A row with `unclaimedGame` used to claim "an Overwatch account" out of the
+// no-claim ledger when an order landed. It saw only LEDGERED accounts (most of
+// the farm has no ledger row — why the two Overwatch offers here sat hidden),
+// never booked what a sale was worth, and needed a coverage gate of its own.
+// Every no-claim offer now sells through a no-claim SET — the `noclaimStock`
+// branch of deliverOrder, through utils/noclaimStock (owner, 2026-09-28: "move
+// every offer to that path"). A by-game row counts 0 stock, so the stock sweep
+// keeps it hidden, and an order on one is held and paged, never filled. An
+// order a previous attempt already reserved units for still finishes through
+// the shared RESUME block in deliverOrder.
+const BY_GAME_RETIRED =
+  "by-game offers are retired — move this offer to a no-claim set " +
+  "(Listings → Shop listings) to sell it";
+
 function unclaimedGameFilter(game) {
   const base = String(game || "").trim().replace(/\s*2$/, "");
   return new RegExp("^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
-// `requiredDrops` is the listing's advertised item list. With it set, an account
-// qualifies only when it holds every entry (counts included) and none of them is
-// already claimed. Picking by game alone is what filled a 10-item Overwatch CAH
-// order with a 7-item account on Eldorado (order 99d443eb, 2026-09-07); the two
-// PlayerAuctions rows backed by that same ledger advertise the same bundles.
-async function claimUnclaimedForGame(
-  game,
-  want,
-  { orderId, offerId, dryRun, requiredDrops, shortfall },
-) {
-  const {
-    credentialForLedger,
-    manualSoldOwnerKeys,
-    filterManualSoldLedgers,
-    activeListingsForLogin,
-  } = require("./unclaimedAutoList");
-
-  const n = Math.max(1, parseInt(want, 10) || 1);
-  const required = coverage.requiredCounts(requiredDrops);
-  // An offer that declares no item list cannot be checked, so it never
-  // auto-delivers (owner, 2026-09-28): picking by game alone shipped whatever
-  // the ledger had. No stock, and the reason says how to turn it back on.
-  if (!required.size) {
-    if (shortfall) {
-      shortfall.detail =
-        "this offer declares no item list (requiredDrops) — declare what it sells to deliver it";
-    }
-    return [];
-  }
-  // A coverage gate rejects most candidates on their drops alone, so read a
-  // deeper slice — otherwise rare stock reads as no stock.
-  const scan = required.size ? Math.max(n * 6, 200) : n * 6;
-  const candidates = await UnclaimedAccount.find({
-    source: "noclaim",
-    game: unclaimedGameFilter(game),
-    status: { $in: PA_SELLABLE_STATUSES },
-    soldAt: null,
-  })
-    .sort({ lastCheckedAt: -1 })
-    .limit(scan)
-    .lean();
-
-  // Try the accounts the ledger already vouches for first; the rest stay in the
-  // queue because the ledger is only a partial snapshot and DropLog may still
-  // prove them out. This is ordering, not filtering.
-  const { covering, short } = coverage.partitionByCoverage(candidates, required);
-  const ordered = covering.concat(short);
-
-  // An owner the operator has already hand-sold is off limits even though the
-  // ledger row still looks free.
-  const usable = filterManualSoldLedgers(
-    ordered,
-    await manualSoldOwnerKeys(ordered),
-  );
-  const rejected = [];
-  // Live verification is one Twitch call per candidate, and this same function
-  // is what the 15-minute stock sync uses to count stock — so on a big ledger an
-  // unbounded walk would fan out hundreds of GQL reads per sync. Cap the live
-  // checks; the ledger-covering candidates are walked first, so the cap costs
-  // nothing until stock is genuinely scarce, and under-counting stock is the
-  // safe direction to be wrong.
-  let liveChecks = 0;
-
-  const out = [];
-  for (const row of usable) {
-    if (out.length >= n) break;
-    const live = await activeListingsForLogin(row.login).catch(() => []);
-    if (live && live.length) continue;
-
-    // The gate: hold every advertised item, and hold them UNCLAIMED. A claimed
-    // drop has already been connected to whoever the farm account was linked
-    // to, so shipping it sells the buyer nothing.
-    if (required.size) {
-      if (liveChecks >= LIVE_CHECK_MAX) break;
-      liveChecks += 1;
-      // Live Twitch inventory, not the ledger: an expired wave silently drops
-      // out of what the buyer can claim, and only Twitch knows that.
-      const verdict = await coverage.liveCoverage(row, required);
-      // Handing an account over needs a LIVE read: the database fallback is a
-      // snapshot that has missed expired waves before (order 99d443eb). Counting
-      // stock (dryRun) may still lean on it, so a Pi hiccup does not flap every
-      // offer's quantity — but nothing ships on it.
-      if (!verdict.ok || (verdict.degraded && !dryRun)) {
-        rejected.push({ row, verdict });
-        continue;
-      }
-    }
-
-    const cred = await credentialForLedger(row);
-    if (!cred.login || !cred.password) continue;
-
-    if (dryRun) {
-      out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
-      continue;
-    }
-    // Atomic: the status guard is what stops two ticks (or two orders) taking
-    // the same account.
-    const now = new Date();
-    const taken = await UnclaimedAccount.findOneAndUpdate(
-      { _id: row._id, status: { $in: PA_SELLABLE_STATUSES }, soldAt: null },
-      {
-        $set: {
-          status: "sold",
-          soldAt: now,
-          market: "playerauctions",
-          note: "playerauctions order " + (orderId || ""),
-          lastCheckedAt: now,
-        },
-        $addToSet: { listingExternalIds: String(offerId || "") },
-      },
-      { new: true },
-    );
-    if (!taken) continue;
-    out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
-  }
-  // Say WHY the stock fell short, in terms of the advertised items — "no
-  // Overwatch accounts" would be wrong and unactionable when what is actually
-  // missing is the second wave's loot box.
-  if (shortfall && out.length < n && rejected.length) {
-    shortfall.detail = coverage.summarizeMissing(
-      rejected.map((r) => r.verdict.missing),
-    );
-    const unread = rejected.filter((r) => r.verdict.degraded && r.verdict.ok).length;
-    if (unread) {
-      shortfall.detail =
-        (shortfall.detail ? shortfall.detail + "; " : "") +
-        unread + " account(s) could not be read live — held, not shipped on stale data";
-    }
-    const claimed = rejected.filter((r) => r.verdict.claimed.length);
-    if (claimed.length) {
-      shortfall.claimed =
-        claimed.length + " account(s) already had an advertised drop CLAIMED";
-    }
-  }
-  return out;
+// Kept for the scripts that still call it: never claims, always explains.
+async function claimUnclaimedForGame(game, want, { shortfall } = {}) {
+  if (shortfall) shortfall.detail = BY_GAME_RETIRED;
+  return [];
 }
 
 // --- Stock source 3: an owner-supplied account list ----------------------
@@ -471,36 +338,12 @@ async function markUnitsDelivered(listing, orderId) {
 // resolve to any listing at all.
 // What an offer may honestly advertise right now.
 //
-// For a pre-reserved offer that is the units nobody has been given yet. For an
-// unclaimed-backed offer it is NOT: those rows resolve their stock out of the
-// no-claim ledger at delivery time and every unit on the row is a record of a
-// hand-over that already happened, so `undeliveredUnits` is 0 the instant the
-// first order lands — which advertised nothing while the farm still held a
-// shelf full of sellable accounts. Ask the ledger the same question the
-// delivery path asks it.
-// `claim` is injectable so the rule can be tested without Mongo, the same way
-// paRefreshOnce takes its refresher.
-// How many ACTIVE listings draw on the same no-claim game pool. Two offers
-// backed by "Overwatch" both see the same 11 sellable accounts, so reporting 11
-// on each advertises 22 — and the second buyer to arrive cannot be served.
-// Splitting the pool is the honest number.
-async function sharersOfUnclaimedGame(listing) {
-  if (!listing.unclaimedGame) return 1;
-  try {
-    const n = await MarketplaceListing.countDocuments({
-      marketplace: "playerauctions",
-      status: "active",
-      unclaimedGame: listing.unclaimedGame,
-    });
-    return Math.max(1, n);
-  } catch {
-    // Never let a bookkeeping lookup change what stockFor reports. Falling back
-    // to "one listing" reproduces the behaviour from before the split existed,
-    // which is the conservative direction: it cannot hide stock we do have.
-    return 1;
-  }
-}
-
+// For a pre-reserved offer that is the units nobody has been given yet. For a
+// by-game (`unclaimedGame`) offer it is 0: that path is retired (see
+// claimUnclaimedForGame), and its units are records of hand-overs that already
+// happened, not stock. `claim` no longer does anything; it stays so the
+// callers' `supplied` argument keeps its place.
+//
 // The account-listing split used to live here too, as sharersOfAccountOffer:
 // it counted the ACTIVE PlayerAuctions rows on the offer and divided. S4 moved
 // that job into utils/suppliedStock.stockFor, which counts the active rows on
@@ -548,18 +391,8 @@ async function stockFor(listing, claim, supplied = suppliedDeps) {
     ).slice(0, ARCHIVE_STOCK_MAX);
     return (await unclaimedOnly(set, cands)).length;
   }
-  if (!listing.unclaimedGame) return undeliveredUnits(listing).length;
-  const free = await (claim || claimUnclaimedForGame)(
-    listing.unclaimedGame,
-    UNCLAIMED_STOCK_MAX,
-    {
-      dryRun: true,
-      offerId: listing.externalId,
-      requiredDrops: listing.requiredDrops,
-    },
-  );
-  const share = await sharersOfUnclaimedGame(listing);
-  return share > 1 ? Math.floor(free.length / share) : free.length;
+  if (listing.unclaimedGame) return 0;
+  return undeliveredUnits(listing).length;
 }
 
 // `supplied` is threaded through to stockFor only so an account-listing test
@@ -648,7 +481,7 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
           );
           row.autoPaused = true;
           row.lastError = row.unclaimedGame
-            ? "hidden: no sellable " + row.unclaimedGame + " stock in the no-claim farm"
+            ? "hidden: " + BY_GAME_RETIRED
             : isSuppliedRow(row)
               ? "hidden: this account listing has no accounts left — add more"
               : "hidden: no account still holds this set unclaimed in the Drop Archive";
@@ -1001,61 +834,13 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
     };
   }
 
-  // No-claim-farm-backed offers resolve stock at delivery time.
+  // A by-game offer (retired — see claimUnclaimedForGame). An order a previous
+  // attempt already reserved units for finished in the RESUME block above;
+  // anything else is held for a hand-over, and the operator is paged.
   if (row.unclaimedGame) {
-    const shortfall = {};
-    const picked = await claimUnclaimedForGame(row.unclaimedGame, qty, {
-      orderId,
-      offerId: row.externalId,
-      dryRun,
-      requiredDrops: row.requiredDrops,
-      shortfall,
-    });
-    if (picked.length < qty) {
-      // Hold the order rather than ship short: a waiting buyer is recoverable,
-      // an account missing advertised items is a dispute.
-      return {
-        orderId,
-        error:
-          "only " + picked.length + " of " + qty + " sellable " +
-          row.unclaimedGame + " account(s) free in the no-claim farm" +
-          ((row.requiredDrops || []).length
-            ? " holding all " + (row.requiredDrops || []).length +
-              " advertised item(s)" +
-              (shortfall.detail ? " — short of: " + shortfall.detail : "")
-            : shortfall.detail
-              ? " — " + shortfall.detail
-              : ""),
-      };
-    }
-    if (dryRun) {
-      const msgs = copy.deliveryMessages(picked, { kind: "bundle" });
-      return {
-        orderId,
-        dryRun: true,
-        source: "unclaimed:" + row.unclaimedGame,
-        wouldSend:
-          qty + " account(s) [" + picked.map((p) => p.login).join(", ") + "] in " +
-          msgs.length + " message(s)",
-        preview: msgs.join("\n---\n"),
-      };
-    }
-    await reserveOnListing(row, orderId, picked);
-    const sent = await handOver({
-      orderId,
-      accounts: picked,
-      kind: "bundle",
-      offerTitle,
-      itemCount: paItemCount(row),
-      onMessaged: () => markUnitsMessaged(row, orderId),
-    });
-    await markUnitsDelivered(row, orderId);
-    await syncStock(row);
     return {
       orderId,
-      delivered: qty,
-      messages: sent,
-      source: "unclaimed:" + row.unclaimedGame,
+      skipped: "by-game " + row.unclaimedGame + " offer — " + BY_GAME_RETIRED,
     };
   }
 
@@ -1347,6 +1132,7 @@ const alertedOrders = new Set();
 const SWITCHED_OFF_SKIPS = /disabled in settings|auto-delivery is off/;
 const ALERT_SKIPS = new RegExp(
   "no listing row|manual-delivery listing|ambiguous listing title|" +
+    "by-game offers are retired|" +
     SWITCHED_OFF_SKIPS.source,
 );
 
@@ -1380,6 +1166,9 @@ async function alertUnfulfillable(order, why) {
         ? "The accounts are on the shelf. Turn account-listing delivery back " +
           "on (Settings, or this listing's own toggle) and the next tick ships " +
           "it — the delivery guarantee is running."
+        : /by-game offers are retired/.test(String(why || ""))
+        ? "Deliver this one by hand — the delivery guarantee is running. Then " +
+          "move the offer to a no-claim set or delist it, so it takes no more orders."
         : "This one needs delivering by hand, and the delivery guarantee is " +
           "running. Offers made directly on PlayerAuctions have no listing row " +
           "here, so the bot does not know what stock backs them."),
@@ -1437,7 +1226,6 @@ module.exports = {
   releaseAccounts,
   undeliveredUnits,
   paItemCount,
-  sharersOfUnclaimedGame,
   // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md B5).
   isSuppliedRow,
   suppliedDeps,

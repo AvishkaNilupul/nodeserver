@@ -41,10 +41,6 @@ const DELIVER_TICK_MS = 60 * 1000;
 const STOCK_TICK_MS = 15 * 60 * 1000;
 const CONFIRM_SWEEP_MS = 5 * 60 * 1000;
 
-// Ceiling on a dry-run stock count, so a huge ledger never walks the whole
-// collection just to size one offer.
-const STOCK_MAX = 500;
-
 // The refusal for a no-claim row whose delivery switch is off
 // (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §0). One spelling for both places
 // that refuse — the first claim and a retry's re-read.
@@ -293,22 +289,23 @@ async function pickStock(listing, order, { dryRun }) {
     return { picked, source };
   }
 
+  // A by-game offer (retired — see eldoradoFulfiller.claimUnclaimedForGame):
+  // only an order a previous attempt already took accounts for is finished;
+  // anything else is held for a hand-over.
   if (listing.unclaimedGame) {
     const shortfall = {};
     const picked = await eld.claimUnclaimedForGame(listing.unclaimedGame, qty, {
       orderId: order.orderItemId,
-      offerId: order.offerId,
       dryRun,
-      requiredDrops: listing.requiredDrops,
       shortfall,
       market: G2G_CLAIM_TAG,
     });
     if (picked.length < qty) {
       return {
         error:
-          "only " + picked.length + " of " + qty + " sellable " +
-          listing.unclaimedGame + " account(s) free in the no-claim farm" +
-          (shortfall.detail ? " — short of: " + shortfall.detail : ""),
+          "no sellable stock on this by-game " + listing.unclaimedGame + " offer" +
+          (picked.length ? " (" + picked.length + " of " + qty + " account(s) already taken for this order)" : "") +
+          " — " + (shortfall.detail || "by-game offers are retired"),
       };
     }
     return { picked, source: "unclaimed:" + listing.unclaimedGame };
@@ -1079,24 +1076,18 @@ async function realStockFor(row, listedElsewhere) {
   if (row.accountOffer) {
     return require("./suppliedStock").stockFor(row);
   }
-  if (row.unclaimedGame) {
-    const picked = await eld
-      .claimUnclaimedForGame(row.unclaimedGame, STOCK_MAX, {
-        dryRun: true,
-        offerId: row.externalId,
-        requiredDrops: row.requiredDrops,
-        market: G2G_CLAIM_TAG,
-      })
-      .catch(() => []);
-    return picked.length;
-  }
   // No-claim Shop listings (§8c) sit above the generic `set` branch, which
   // counts the Drop Archive — CLAIMED drops a no-claim buyer can never be sold.
   // A failed read throws, and syncStock already treats a throw as "cannot
-  // tell", so a DB hiccup never advertises 0 and delists a live offer.
+  // tell", so a DB hiccup never advertises 0 and delists a live offer. Above
+  // the by-game test too, as in pickStock: a set row that still carries an old
+  // `unclaimedGame` sells from its set.
   if (row.noclaimStock) {
     return require("./noclaimStock").stockForListing(row);
   }
+  // A by-game offer has nothing it may sell (retired — see
+  // eldoradoFulfiller.claimUnclaimedForGame): 0 takes it off sale.
+  if (row.unclaimedGame) return 0;
   if (row.set) {
     const DropSet = require("../models/DropSet");
     const { availableAccountsForSet } = require("../routes/shopRoutes");

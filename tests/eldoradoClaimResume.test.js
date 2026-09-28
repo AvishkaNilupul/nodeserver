@@ -18,8 +18,13 @@
 // The order id was in `note` the whole time. It was simply never read back.
 //
 // PlayerAuctions does NOT have this bug and the contrast is the proof: its
-// unclaimed path calls `reserveOnListing(row, orderId, picked)` BEFORE handOver,
-// so the anchor exists before anything can throw.
+// claim-at-sale path calls `reserveOnListing(row, orderId, picked)` BEFORE
+// handOver, so the anchor exists before anything can throw.
+//
+// Since 2026-09-28 the by-game path is RETIRED (every no-claim offer sells
+// through a no-claim set): claimUnclaimedForGame never claims a new account.
+// The resume stays — an order the old claim already took accounts for is still
+// owed exactly those accounts.
 const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -46,22 +51,17 @@ test("REGRESSION: a claim looks for what a previous attempt already took", () =>
   assert.match(claimFn, /const resumed = \[\];/);
 });
 
-test("a fully-resumable order claims NOTHING new", () => {
-  // The whole point: if the previous attempt already took everything the order
-  // needs, the walk below must not run at all.
-  assert.match(claimFn, /if \(resumed\.length >= n\) return resumed\.slice\(0, n\);/);
-  assert.ok(
-    claimFn.indexOf("if (resumed.length >= n) return") <
-      claimFn.indexOf("const candidates = await UnclaimedAccount.find"),
-    "the early return must come BEFORE the candidate scan, or it still spends reads",
-  );
+test("the retired claim takes NOTHING new — it returns what this order already holds", () => {
+  // No candidate scan and no claim write is left: an order with nothing taken
+  // yet is held for a hand-over instead of being filled from the ledger.
+  assert.match(claimFn, /return resumed\.slice\(0, n\);\n\}/);
+  assert.doesNotMatch(claimFn, /const candidates = await UnclaimedAccount\.find/);
+  assert.doesNotMatch(claimFn, /findOneAndUpdate|updateOne|updateMany|\.create\(/);
 });
 
-test("a partial resume tops up only the difference", () => {
-  // Seeding the accumulator is what makes the `out.length >= n` break count the
-  // resumed accounts. Starting from [] again would re-claim the full quantity.
-  assert.match(claimFn, /const out = resumed\.slice\(\);/);
-  assert.doesNotMatch(claimFn, /\n  const out = \[\];/, "out must not start empty");
+test("a partial resume is never topped up — the shortfall says why", () => {
+  // Topping up was the old claim's job, and the old claim is gone.
+  assert.match(claimFn, /if \(resumed\.length < n && shortfall\) shortfall\.detail = BY_GAME_RETIRED;/);
 });
 
 test("the resume is skipped on a dry run", () => {
@@ -87,16 +87,19 @@ test("an unreadable resumed account is not silently replaced", () => {
 
 /* ------------------------- the ordering it fixes ------------------------- */
 
-test("the note really is the only anchor a failed send leaves behind", () => {
-  // If the claim ever stops writing the order id into `note`, the resume above
-  // silently finds nothing and the bug is back with no test failing.
-  assert.match(claimFn, /note: market \+ " order " \+ \(orderId \|\| ""\)/);
+test("the resume reads the anchor the old claim wrote, per market", () => {
+  // The old claim stamped `note: market + " order " + orderId` and `market`
+  // (G2G passes market "g2g" through this same function). Reading anything
+  // else would find nothing, and a paid order would be held instead of finished.
+  assert.match(claimFn, /\{ orderId, dryRun, shortfall, market = "eldorado" \}/);
+  assert.match(claimFn, /note: market \+ " order " \+ String\(orderId\)/);
 });
 
 test("PlayerAuctions still reserves BEFORE it sends", () => {
   // The contrast that proves the diagnosis, and a guard on the safer design:
-  // if this ordering is ever flipped, PA grows the same bug.
-  const at = PA.indexOf("if (row.unclaimedGame) {");
+  // if this ordering is ever flipped, PA grows the same bug. The no-claim set
+  // branch is the claim-at-sale path now (the by-game one is retired).
+  const at = PA.indexOf("if (row.noclaimStock) {\n    const ncs");
   const seg = PA.slice(at, at + 3000);
   const reserve = seg.indexOf("await reserveOnListing(row, orderId, picked)");
   const send = seg.indexOf("await handOver({");

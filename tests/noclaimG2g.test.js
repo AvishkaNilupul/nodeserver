@@ -632,6 +632,42 @@ test("realStockFor counts a no-claim row through noclaimStock, never the archive
   assert.strictEqual(env.shop.availableAccountsForSet.calls.length, 0);
 });
 
+test("realStockFor: a set row that still carries an old unclaimedGame counts from its set; a by-game row counts 0", async () => {
+  // The set test comes first in realStockFor, as it does in pickStock. The
+  // by-game path is retired (2026-09-28), so reading the flag first would put
+  // a working set offer on 0 and delist it.
+  const both = noclaimRow({ unclaimedGame: "Overwatch" });
+  const env = makeEnv({ rows: [both], ncs: { stock: 4 } });
+  const n = await withStubbed(env.stubs, (g) => g.realStockFor(both, new Set()));
+  assert.strictEqual(n, 4);
+  assert.deepStrictEqual(env.ncs.calls.stockForListing, [both]);
+
+  const byGame = row({ unclaimedGame: "Overwatch", requiredDrops: [{ name: "Loot box", qty: 1 }] });
+  const env2 = makeEnv({ rows: [byGame], ncs: { stock: 4 } });
+  const m = await withStubbed(env2.stubs, (g) => g.realStockFor(byGame, new Set()));
+  assert.strictEqual(m, 0, "a by-game offer advertises nothing");
+  assert.strictEqual(env2.eld.claimUnclaimedForGame.calls.length, 0, "nothing is even counted");
+  assert.strictEqual(env2.ncs.calls.stockForListing.length, 0);
+});
+
+test("pickStock: a by-game row is held with the reason — only what the order already holds comes back", async () => {
+  const byGame = row({ unclaimedGame: "Overwatch", requiredDrops: [{ name: "Loot box", qty: 1 }] });
+  const env = makeEnv({ rows: [byGame] });
+  env.eld.claimUnclaimedForGame = spy(async (game, want, opts) => {
+    opts.shortfall.detail = "by-game offers are retired — move this offer to a no-claim set";
+    return [];
+  });
+  env.stubs["../utils/eldoradoFulfiller"] = env.eld;
+  const r = await withStubbed(env.stubs, (g) =>
+    g.pickStock(byGame, { orderItemId: "g-9", offerId: "g-7", purchasedQty: 1 }, { dryRun: false }),
+  );
+  assert.match(r.error, /^no sellable stock on this by-game Overwatch offer — by-game offers are retired/);
+  const [, , opts] = env.eld.claimUnclaimedForGame.calls[0];
+  assert.strictEqual(opts.orderId, "g-9", "the claim can only resume THIS order");
+  assert.strictEqual(opts.market, "g2g");
+  assert.strictEqual(env.ncs.calls.claimForSet.length, 0);
+});
+
 test("syncStock selects no-claim rows, pushes their count, and delists at zero", async () => {
   const live = noclaimRow({ externalId: "g-7" });
   const env = makeEnv({ rows: [live], ncs: { stock: 3 }, af: { g2gAuto: true, g2gDeliverDryRun: false } });

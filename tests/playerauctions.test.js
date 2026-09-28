@@ -304,19 +304,15 @@ test("an already-claimed drop is never handed to a buyer", async () => {
   }
 });
 
-test("two offers on the same no-claim pool split it, not double it", async () => {
-  // Both the CAH offer and the 26-item offer are backed by "Overwatch" and see
-  // the same 11 sellable accounts. Reporting 11 on each advertises 22, and the
-  // second buyer cannot be served.
-  const ML = require("../models/MarketplaceListing");
-  const realCount = ML.countDocuments;
-  ML.countDocuments = async () => 2;
-  try {
-    const fakeClaim = async () => Array.from({ length: 11 }, (_, i) => ({ login: "a" + i }));
-    const n = await fulfiller.stockFor({ unclaimedGame: "Overwatch", externalId: "1" }, fakeClaim);
-    assert.strictEqual(n, 5, "11 accounts across 2 listings should report 5, not 11");
-  } finally {
-    ML.countDocuments = realCount;
+test("two by-game offers on the same pool advertise nothing, not double it", async () => {
+  // Both the CAH offer and the 26-item offer were backed by "Overwatch" and
+  // saw the same 11 sellable accounts — reporting 11 on each advertised 22.
+  // The by-game path is retired (2026-09-28): each reports 0, and a no-claim
+  // SET offer's shelf is split across its offers by noclaimStock.
+  const fakeClaim = async () => Array.from({ length: 11 }, (_, i) => ({ login: "a" + i }));
+  for (const externalId of ["1", "2"]) {
+    const n = await fulfiller.stockFor({ unclaimedGame: "Overwatch", externalId }, fakeClaim);
+    assert.strictEqual(n, 0);
   }
 });
 

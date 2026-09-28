@@ -13,8 +13,10 @@
 //  3. The sale is stamped (ncs.markSold) only after the buyer has the account.
 //  4. The stock sweeps count a no-claim row with ncs.stockForListing, and a
 //     count that FAILS skips the row: 0 is what takes a live offer off sale.
-//  5. A row without the flag takes exactly the path it took before, and never
-//     even loads the no-claim layer.
+//  5. A row without the flag never even loads the no-claim layer: an archive
+//     row takes exactly the path it took before, and a by-game row (retired
+//     2026-09-28) is held — only an order a previous attempt already took
+//     accounts for is still finished.
 //
 // No Mongo, no network. utils/noclaimStock.js is being written alongside this
 // file and may not exist yet, so the harness resolves a stub for it by hand.
@@ -137,8 +139,8 @@ function fakeById(value) {
 }
 
 // The unclaimedGame ledger. `find` answers the resume query (status "sold")
-// with nothing and the candidate scan with `candidates`.
-function fakeUnclaimed({ candidates = [], byId = {} } = {}) {
+// with `resumed` and the candidate scan with `candidates`.
+function fakeUnclaimed({ candidates = [], resumed = [], byId = {} } = {}) {
   const calls = { find: [], findOneAndUpdate: [], findById: [], updateMany: [] };
   const chain = (v) => {
     const p = Promise.resolve(v);
@@ -151,7 +153,8 @@ function fakeUnclaimed({ candidates = [], byId = {} } = {}) {
     calls,
     find(q) {
       calls.find.push(q);
-      return chain(q && q.status === "sold" ? [] : candidates);
+      if (q && q.status === "sold") return chain(resumed.filter((r) => !q.note || r.note === q.note));
+      return chain(candidates);
     },
     async findOneAndUpdate(q, u) {
       calls.findOneAndUpdate.push({ q, u });
@@ -595,7 +598,7 @@ test("Eldorado: syncBundleStock counts a no-claim row with stockForListing, and 
   }
 });
 
-test("Eldorado: rows without the flag take their old path and never load the no-claim layer", async () => {
+test("Eldorado: a by-game row is held, archive rows keep their path, and neither loads the no-claim layer", async () => {
   const listing = row({
     _id: "L-UG",
     marketplace: "eldorado",
@@ -607,12 +610,14 @@ test("Eldorado: rows without the flag take their old path and never load the no-
   const env = eldEnv({ rows: [listing], unclaimed });
 
   await withStubbed("../utils/eldoradoFulfiller", env.stubs, async (e, h) => {
-    // The old by-game path — which, since 2026-09-28, holds an order whose
-    // offer declares no item list instead of shipping any account of the game.
+    // The by-game path is retired (2026-09-28): the order is held — and the
+    // operator paged ("no sellable") — even with a free account on the ledger.
     const out = await e.deliverOrder({ id: "eo-8", offerId: "e-2", purchaseQuantity: 1 }, { dryRun: false });
     assert.strictEqual(out.orderId, "eo-8");
-    assert.match(out.error, /declares no item list/);
+    assert.match(out.error, /^no sellable stock on this by-game Overwatch offer — by-game offers are retired/);
+    assert.strictEqual(e.alertsOperator(out.error), true, "a paid order on it pages the operator");
     assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 0, "nothing claimed off the unclaimed ledger");
+    assert.strictEqual(env.mp.eldoradoSendOrderMessage.calls.length, 0, "nothing sent");
 
     const archiveRow = row({ marketplace: "eldorado", externalId: "e-3", autoClaimSet: true, set: "SET-OLD" });
     env.Listing.find = () => {
@@ -627,7 +632,7 @@ test("Eldorado: rows without the flag take their old path and never load the no-
   });
 });
 
-test("Eldorado: a by-game sale records what each account sold for", async () => {
+test("Eldorado: a by-game order a previous attempt already took accounts for is finished, and records its price", async () => {
   const listing = row({
     _id: "L-UG2",
     marketplace: "eldorado",
@@ -636,7 +641,13 @@ test("Eldorado: a by-game sale records what each account sold for", async () => 
     price: 1,
     requiredDrops: [{ name: "Sun Tea Icon", qty: 1 }],
   });
-  const unclaimed = fakeUnclaimed({ candidates: [{ _id: "U7", login: "ug_seven" }] });
+  // U7 was sold to this order by the old claim, whose send then threw. The
+  // retired path still owes the buyer those accounts — and only those: U8 is
+  // free on the ledger and stays so.
+  const unclaimed = fakeUnclaimed({
+    resumed: [{ _id: "U7", login: "ug_seven", status: "sold", market: "eldorado", note: "eldorado order eo-9" }],
+    candidates: [{ _id: "U8", login: "ug_eight" }],
+  });
   const env = eldEnv({ rows: [listing], unclaimed });
   await withStubbed("../utils/eldoradoFulfiller", env.stubs, async (e) => {
     const out = await e.deliverOrder(
@@ -644,10 +655,19 @@ test("Eldorado: a by-game sale records what each account sold for", async () => 
       { dryRun: false },
     );
     assert.strictEqual(out.delivered, 1, JSON.stringify(out));
+    assert.deepStrictEqual(unclaimed.calls.find.map((q) => q.note), ["eldorado order eo-9"], "one read: the resume");
+    assert.strictEqual(unclaimed.calls.find[0].market, "eldorado");
+    assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 0, "nothing new claimed");
+    assert.deepStrictEqual(listing.units.map((u) => u.login), ["ug_seven"]);
     const stamp = unclaimed.calls.updateMany.find((c) => c.u.$set && "soldPriceUsd" in c.u.$set);
     assert.ok(stamp, "the sale price is stamped on the ledger");
     assert.deepStrictEqual(stamp.q._id, { $in: ["U7"] });
     assert.strictEqual(stamp.u.$set.soldPriceUsd, 1.21, "what the buyer paid per account");
+
+    // A second order with nothing taken yet is held, never filled from the farm.
+    const held = await e.deliverOrder({ id: "eo-10", offerId: "e-4", purchaseQuantity: 1 }, { dryRun: false });
+    assert.match(held.error, /by-game offers are retired/);
+    assert.strictEqual(env.mp.eldoradoSendOrderMessage.calls.length, 1, "only the resumed order was sent");
   });
 });
 
@@ -965,7 +985,7 @@ test("PlayerAuctions: stockFor and the stock sweep take a no-claim row's number 
   }
 });
 
-test("PlayerAuctions: rows without the flag take their old path and never load the no-claim layer", async () => {
+test("PlayerAuctions: a by-game row is held and counts nothing, and never loads the no-claim layer", async () => {
   const listing = row({
     _id: "P-UG",
     marketplace: "playerauctions",
@@ -978,18 +998,21 @@ test("PlayerAuctions: rows without the flag take their old path and never load t
   const env = paEnv({ rows: [listing], unclaimed });
 
   await withStubbed("../utils/playerauctionsFulfiller", env.stubs, async (pa, h) => {
-    // The old by-game path — which, since 2026-09-28, holds an order whose
-    // offer declares no item list instead of shipping any account of the game.
+    // The by-game path is retired (2026-09-28): the order is held and the
+    // operator paged, even with a free account on the ledger; the offer counts
+    // no stock, so the sweep keeps it hidden.
     const out = await pa.deliverOrder(paOrder("po-6"), { dryRun: false });
     assert.ok(!out.delivered, JSON.stringify(out));
-    assert.match(String(out.error || ""), /declares no item list/);
+    assert.match(String(out.skipped || ""), /^by-game Overwatch offer — by-game offers are retired/);
+    assert.strictEqual(pa.alertsOperator(out.skipped), true, "a paid order on it pages the operator");
+    assert.strictEqual(unclaimed.calls.find.length, 0, "the ledger is not even read");
     assert.strictEqual(unclaimed.calls.findOneAndUpdate.length, 0, "nothing claimed off the unclaimed ledger");
 
     const n = await pa.stockFor(
       { unclaimedGame: "Overwatch", externalId: "pa-1" },
       async () => [{ login: "a" }, { login: "b" }],
     );
-    assert.strictEqual(n, 2);
+    assert.strictEqual(n, 0, "a by-game offer advertises nothing");
     assert.strictEqual(await pa.stockFor({ externalId: "x", units: [{ deliveredAt: null }] }), 1);
 
     assert.strictEqual(h.ncsLoads(), 0, "a row without the flag must never load utils/noclaimStock");

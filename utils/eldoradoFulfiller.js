@@ -25,7 +25,6 @@ const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const farmService = require("./eldoradoFarmService");
-const coverage = require("./unclaimedCoverage");
 
 // Distinct from the Shop / Gameflip / GGSel / Digiseller tags so the same
 // account can never be handed out twice across platforms.
@@ -136,26 +135,22 @@ async function releaseAccounts(accountIds, claimTag = ELD_CLAIM_TAG) {
 }
 
 
-// --- Stock source 2: the unclaimed / no-claim farm ------------------------
-// Some Eldorado offers are not backed by the auto-farm pool at all — their
-// stock is the no-claim farm's own accounts (models/UnclaimedAccount, fed by
-// the noclaim-bot-* containers). Those rows carry the unclaimed drops and a
-// pointer to the credential owner, so they can be handed to a buyer directly.
-// A listing opts into this by setting `unclaimedGame`.
+// --- Stock source 2: the no-claim farm BY GAME (retired) -----------------
+// A row with `unclaimedGame` used to pick "an Overwatch account" out of the
+// no-claim ledger when an order landed. That path saw only LEDGERED accounts
+// (most of the farm has no ledger row, so its offers sat hidden), never booked
+// what a sale was worth, and needed a coverage gate of its own that once
+// shipped on stale data. Every no-claim offer now sells through a no-claim SET
+// instead — the `noclaimStock` branch of deliverOrder, through
+// utils/noclaimStock: the whole farm, a live read of the set, fail closed, the
+// sale stamped (owner, 2026-09-28: "move every offer to that path").
 //
-// Only "released" and "skipped" rows are sellable: "listed" means the account is
-// already a stock unit on ANOTHER marketplace and selling it here would ship
-// that listing's drops too; "sold"/"expired"/"removed" are spent or gone.
-const ELD_SELLABLE_STATUSES = ["released", "skipped"];
-
-// Ceiling on the stock an unclaimed-backed offer may advertise. The count comes
-// from a dry-run claim, which resolves a credential per candidate, so it is
-// bounded rather than "however many the farm holds".
-const UNCLAIMED_STOCK_MAX = 80;
-
-// Most live inventory reads one call to claimUnclaimedForGame may make. Bounds
-// the Twitch fan-out of both delivery and the periodic stock sync.
-const LIVE_CHECK_MAX = 40;
+// What is left of this path only FINISHES an order a previous attempt already
+// took accounts for. It never claims a new account, and a by-game row counts 0
+// stock, so every market's stock sync keeps such an offer off sale.
+const BY_GAME_RETIRED =
+  "by-game offers are retired — move this offer to a no-claim set " +
+  "(Listings → Shop listings) to sell it";
 
 function unclaimedGameFilter(game) {
   // The ledger holds both "Overwatch" and "overwatch" (and callers may pass
@@ -164,48 +159,31 @@ function unclaimedGameFilter(game) {
   return new RegExp("^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
-// Pick (and optionally claim) sellable no-claim accounts for a game.
-// `dryRun` selects without mutating anything.
-//
-// `requiredDrops` is the listing's advertised item list. When it is set, an
-// account only qualifies if it holds EVERY entry (counts included) and none of
-// them is already claimed — picking by game alone is what shipped a 7-item
-// account against a 10-item CAH listing on order 99d443eb. `shortfall` is filled
-// in with why the stock fell short, so the caller can say it out loud.
+// The accounts a previous attempt already took for this order, and nothing
+// more. `shortfall.detail` says why the rest cannot come from here.
 async function claimUnclaimedForGame(
   game,
   want,
-  { orderId, offerId, dryRun, requiredDrops, shortfall, market = "eldorado" },
+  { orderId, dryRun, shortfall, market = "eldorado" },
 ) {
-  const {
-    credentialForLedger,
-    manualSoldOwnerKeys,
-    filterManualSoldLedgers,
-    activeListingsForLogin,
-  } = require("./unclaimedAutoList");
-
   const n = Math.max(1, parseInt(want, 10) || 1);
 
   // RESUME WHATEVER A PREVIOUS ATTEMPT ALREADY TOOK FOR THIS ORDER.
   //
-  // The claim further down is atomic and PERMANENT: it flips the ledger row to
-  // status "sold" and stamps this order's id into `note`. But the record that
+  // The old claim was atomic and PERMANENT: it flipped the ledger row to
+  // status "sold" and stamped this order's id into `note`. But the record that
   // links those accounts back to the order lives in MarketplaceListing.units,
   // and that is written only AFTER the credential has been sent. So a send that
-  // throws — a TalkJS 5xx, a timeout, an order row with no conversation id —
+  // threw — a TalkJS 5xx, a timeout, an order row with no conversation id —
   // left the accounts sold, no unit row, and nothing at all tying the two
-  // together. The caller's "already handled" guard asks
-  // `listing.units.some(u => u.orderId === orderId)`, finds nothing, and the
-  // next 60-second tick claims a BRAND NEW set. Eldorado order e69b19d3 retried
-  // 25 times; every failing attempt spent more of the no-claim ledger and
-  // orphaned what it spent, because nothing can find a sold row whose order was
-  // never recorded anywhere else.
+  // together. Eldorado order e69b19d3 retried 25 times, and every failing
+  // attempt spent more of the no-claim ledger.
   //
-  // The note was always the anchor — it simply was never read back. Reading it
-  // makes the claim idempotent per order, so a retry re-sends to the same buyer
-  // with the SAME accounts instead of burning the ledger again.
+  // The note is the anchor. Reading it back re-sends the SAME accounts to the
+  // same buyer — the one thing a retired path still owes an order it started.
   const resumed = [];
   if (orderId && !dryRun) {
+    const { credentialForLedger } = require("./unclaimedAutoList");
     const prior = await UnclaimedAccount.find({
       status: "sold",
       market,
@@ -216,9 +194,8 @@ async function claimUnclaimedForGame(
     for (const row of prior) {
       const cred = await credentialForLedger(row);
       // An account we cannot read a password for is no use to the buyer, but it
-      // is still spent — leaving it out here would make the top-up below claim a
-      // replacement, which is the very double-spend this block exists to stop.
-      // Report the shortfall instead.
+      // is still spent — it drops out and the order is held, never topped up
+      // with a replacement.
       if (!cred.login || !cred.password) continue;
       resumed.push({
         ledgerId: String(row._id),
@@ -226,134 +203,9 @@ async function claimUnclaimedForGame(
         password: cred.password,
       });
     }
-    if (resumed.length >= n) return resumed.slice(0, n);
   }
-
-  const required = coverage.requiredCounts(requiredDrops);
-  // An offer that declares no item list cannot be checked, so it never
-  // auto-delivers (owner, 2026-09-28): picking by game alone shipped whatever
-  // the ledger had. No stock, and the reason says how to turn it back on.
-  // Accounts a previous attempt already claimed for this order still go out.
-  if (!required.size) {
-    if (shortfall) {
-      shortfall.detail =
-        "this offer declares no item list (requiredDrops) — declare what it sells to deliver it";
-    }
-    return resumed.slice(0, n);
-  }
-  // With a coverage gate most candidates are rejected on their drops alone, so
-  // read a deeper slice of the ledger — otherwise a listing whose stock is rare
-  // reads as out of stock while covering accounts sit just past the cut.
-  const scan = required.size ? Math.max(n * 6, 200) : n * 6;
-  const candidates = await UnclaimedAccount.find({
-    source: "noclaim",
-    game: unclaimedGameFilter(game),
-    status: { $in: ELD_SELLABLE_STATUSES },
-    soldAt: null,
-  })
-    .sort({ lastCheckedAt: -1 })
-    .limit(scan)
-    .lean();
-
-  // Try the accounts the ledger already vouches for first; the rest stay in the
-  // queue because the ledger is only a partial snapshot and DropLog may still
-  // prove them out. This is ordering, not filtering.
-  const { covering, short } = coverage.partitionByCoverage(candidates, required);
-  const ordered = covering.concat(short);
-
-  // An owner the operator has already hand-sold is off limits even though the
-  // ledger row still looks free.
-  const usable = filterManualSoldLedgers(
-    ordered,
-    await manualSoldOwnerKeys(ordered),
-  );
-  const rejected = [];
-  // Live verification is one Twitch call per candidate, and this same function
-  // is what the 15-minute stock sync uses to count stock — so on a big ledger an
-  // unbounded walk would fan out hundreds of GQL reads per sync. Cap the live
-  // checks; the ledger-covering candidates are walked first, so the cap costs
-  // nothing until stock is genuinely scarce, and under-counting stock is the
-  // safe direction to be wrong.
-  let liveChecks = 0;
-
-  // Seeded with anything a previous attempt already claimed for this order, so
-  // the walk below only ever tops up the difference.
-  const out = resumed.slice();
-  for (const row of usable) {
-    if (out.length >= n) break;
-    // Never ship an account that is live on another marketplace's listing.
-    const live = await activeListingsForLogin(row.login).catch(() => []);
-    if (live && live.length) continue;
-
-    // The gate: hold every advertised item, and hold them UNCLAIMED. A claimed
-    // drop has already been connected to whoever the farm account was linked
-    // to, so shipping it sells the buyer nothing.
-    if (required.size) {
-      if (liveChecks >= LIVE_CHECK_MAX) break;
-      liveChecks += 1;
-      // Live Twitch inventory, not the ledger: an expired wave silently drops
-      // out of what the buyer can claim, and only Twitch knows that.
-      const verdict = await coverage.liveCoverage(row, required);
-      // Handing an account over needs a LIVE read: the database fallback is a
-      // snapshot that has missed expired waves before (order 99d443eb). Counting
-      // stock (dryRun) may still lean on it, so a Pi hiccup does not flap every
-      // offer's quantity — but nothing ships on it.
-      if (!verdict.ok || (verdict.degraded && !dryRun)) {
-        rejected.push({ row, verdict });
-        continue;
-      }
-    }
-
-    const cred = await credentialForLedger(row);
-    if (!cred.login || !cred.password) continue;
-
-    if (dryRun) {
-      out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
-      continue;
-    }
-    // Atomic: the status guard is what stops two ticks (or two orders) taking
-    // the same account.
-    const now = new Date();
-    const taken = await UnclaimedAccount.findOneAndUpdate(
-      { _id: row._id, status: { $in: ELD_SELLABLE_STATUSES }, soldAt: null },
-      {
-        $set: {
-          status: "sold",
-          soldAt: now,
-          // Which shop actually took this unit. Defaulted rather than hardcoded
-          // so another fulfiller can reuse this claim path verbatim — a copy of
-          // it would drift, and the drift would be an oversold account.
-          market,
-          note: market + " order " + (orderId || ""),
-          lastCheckedAt: now,
-        },
-        $addToSet: { listingExternalIds: String(offerId || "") },
-      },
-      { new: true },
-    );
-    if (!taken) continue;
-    out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
-  }
-  // Say WHY the stock fell short, in terms of the advertised items — "no
-  // Overwatch accounts" would be wrong and unactionable when what is actually
-  // missing is the second wave's loot box.
-  if (shortfall && out.length < n && rejected.length) {
-    shortfall.detail = coverage.summarizeMissing(
-      rejected.map((r) => r.verdict.missing),
-    );
-    const unread = rejected.filter((r) => r.verdict.degraded && r.verdict.ok).length;
-    if (unread) {
-      shortfall.detail =
-        (shortfall.detail ? shortfall.detail + "; " : "") +
-        unread + " account(s) could not be read live — held, not shipped on stale data";
-    }
-    const claimed = rejected.filter((r) => r.verdict.claimed.length);
-    if (claimed.length) {
-      shortfall.claimed =
-        claimed.length + " account(s) already had an advertised drop CLAIMED";
-    }
-  }
-  return out;
+  if (resumed.length < n && shortfall) shortfall.detail = BY_GAME_RETIRED;
+  return resumed.slice(0, n);
 }
 
 function undeliveredUnits(listing) {
@@ -613,32 +465,23 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, delivered: qty, source: "noclaim-set:" + String(listing.set) };
   }
 
-  // Unclaimed-farm-backed offers resolve their stock at delivery time out of the
-  // no-claim ledger rather than from pre-reserved units.
+  // A by-game offer (retired — see claimUnclaimedForGame). Only an order a
+  // previous attempt already took accounts for is finished here; anything else
+  // is held for a hand-over, and the operator is paged ("no sellable").
   if (listing.unclaimedGame) {
     const shortfall = {};
     const picked = await claimUnclaimedForGame(listing.unclaimedGame, qty, {
       orderId,
-      offerId,
       dryRun,
-      requiredDrops: listing.requiredDrops,
       shortfall,
     });
     if (picked.length < qty) {
-      // Hold the order rather than ship a short account: the buyer waiting is
-      // recoverable, an account missing half the advertised items is a dispute.
       return {
         orderId,
         error:
-          "only " + picked.length + " of " + qty + " sellable " +
-          listing.unclaimedGame + " account(s) free in the no-claim farm" +
-          ((listing.requiredDrops || []).length
-            ? " holding all " + (listing.requiredDrops || []).length +
-              " advertised item(s)" +
-              (shortfall.detail ? " — short of: " + shortfall.detail : "")
-            : shortfall.detail
-              ? " — " + shortfall.detail
-              : ""),
+          "no sellable stock on this by-game " + listing.unclaimedGame + " offer" +
+          (picked.length ? " (" + picked.length + " of " + qty + " account(s) already taken for this order)" : "") +
+          " — " + (shortfall.detail || BY_GAME_RETIRED),
       };
     }
     const message = eldoradoAccountsMessage(picked, qty);
@@ -911,14 +754,8 @@ async function syncBundleStock({ dryRun = false } = {}) {
       if (typeof n !== "number" || !Number.isFinite(n)) continue;
       real = n;
     } else if (row.unclaimedGame) {
-      // Ask the ledger exactly what the delivery path would ask it.
-      real = (
-        await claimUnclaimedForGame(row.unclaimedGame, UNCLAIMED_STOCK_MAX, {
-          dryRun: true,
-          offerId: row.externalId,
-          requiredDrops: row.requiredDrops,
-        }).catch(() => [])
-      ).length;
+      // A by-game offer has nothing it may sell (retired): 0 takes it off sale.
+      real = 0;
     } else {
       const set = await DropSet.findById(row.set).lean();
       if (!set) continue;

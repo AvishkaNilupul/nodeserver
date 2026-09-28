@@ -2,14 +2,14 @@
 // full — both found on production on 2026-09-07, both invisible to every check
 // the system had. No Mongo, no network.
 //
-//   1. Stock. An offer backed by `unclaimedGame` resolves its accounts out of
+//   1. Stock. An offer backed by `unclaimedGame` resolved its accounts out of
 //      the no-claim ledger at DELIVERY time, so everything in its `units[]` is
 //      a record of a hand-over that already happened. PlayerAuctions' stock
 //      sync counted `undeliveredUnits` anyway, which is 0 the instant the first
 //      order lands: the very first sale advertised the offer down to zero while
-//      seventeen sellable Overwatch accounts sat in the farm. Eldorado never
-//      had the bug (its unclaimed branch returns before the quantity call) and
-//      that asymmetry is what made the rule visible.
+//      seventeen sellable Overwatch accounts sat in the farm. (Since
+//      2026-09-28 the by-game path is retired and such an offer counts 0 on
+//      purpose — the no-claim set path counts the farm.)
 //
 //   2. Activation. GGSel answers batch_activate 2xx and can still leave the
 //      offer in "draft". `ggselFinalizeStock` is the only thing that re-reads
@@ -36,23 +36,26 @@ test("a pre-reserved offer still advertises the units nobody has been given", as
   assert.strictEqual(await pa.stockFor(listing), 2);
 });
 
-test("an unclaimed-backed offer asks the ledger, not its own delivery history", async () => {
-  // Exactly the live shape after one order: every unit delivered, so the old
-  // undeliveredUnits count is 0 — and the farm still holds sixteen.
+test("a by-game offer advertises nothing — the path is retired, whatever its units say", async () => {
+  // By-game offers were retired on 2026-09-28 (every no-claim offer sells
+  // through a no-claim set, whose stock is noclaimStock.stockForListing). Its
+  // units are records of hand-overs, and an undelivered-looking one must not
+  // read as stock either.
   const listing = {
     externalId: "295599462",
     unclaimedGame: "Overwatch",
-    units: [{ login: "sold-already", deliveredAt: new Date(), orderId: "1" }],
+    units: [
+      { login: "sold-already", deliveredAt: new Date(), orderId: "1" },
+      { login: "never-delivered", deliveredAt: null },
+    ],
   };
-  assert.strictEqual(pa.undeliveredUnits(listing).length, 0, "precondition");
-
-  const claim = async (game, want, opts) => {
-    assert.strictEqual(game, "Overwatch");
-    assert.ok(want > 1, "must ask for more than one so stock can exceed 1");
-    assert.strictEqual(opts.dryRun, true, "a stock probe must never claim");
+  let asked = 0;
+  const claim = async () => {
+    asked++;
     return new Array(16).fill(0).map((_, i) => ({ login: "free" + i }));
   };
-  assert.strictEqual(await pa.stockFor(listing, claim), 16);
+  assert.strictEqual(await pa.stockFor(listing, claim), 0);
+  assert.strictEqual(asked, 0, "the ledger is not even asked");
 });
 
 test("an unclaimed-backed offer with an empty farm advertises nothing", async () => {
