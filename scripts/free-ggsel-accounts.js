@@ -1,29 +1,33 @@
-// delist-ggsel-everything.js — owner 2026-09-28: "delist everything on GGSel and
-// Plati, we will fix that later".
+// free-ggsel-accounts.js — owner 2026-09-28: "leave Plati and GGSel, get the
+// accounts listed there and sell them on other platforms, put a block on those
+// two — we will use them later when they are fixed".
 //
 // The GGSel seller account is BLOCKED: every offer edit answers 422 "User is
-// blocked", and batch_pause answers 200 + a job id but never applies. What
-// still works is archiving an offer's products (its delivery codes):
-// DELETE /offers/{id}/products {product_ids} → the product reads "archived"
-// seconds later, and an offer with no in-stock product cannot be bought. So,
-// for EVERY GGSel offer (ours or not, active or paused) holding in-stock
-// products:
-//   1. our active row for it, if any, is marked delisted FIRST — the guardian
-//      and the no-claim engine read GGSel stock, and would otherwise count the
-//      vanishing codes as sales. A no-claim row's listed ledgers are parked
-//      "skipped" (held) and their owner tick cleared, which is what the
-//      engine's reconcile does for a market that was switched off;
-//   2. every in-stock product is archived, then read back;
-//   3. a product confirmed archived was unsold at that moment, so its
-//      account's (account, set, "ggsel") drop reservation is released — unless
-//      that account is live on another market's listing of the set. A code
-//      whose account cannot be matched to a reservation is archived only.
-// The offers stay listed on GGSel at 0 stock until the account is unblocked.
+// blocked", and batch_pause answers 200 + a job id but never applies — so an
+// offer cannot be paused or hidden. What still works is archiving an offer's
+// products (its delivery codes): DELETE /offers/{id}/products {product_ids}
+// → the product reads "archived" seconds later. That takes OUR accounts out of
+// GGSel's vault, which is what lets them sell elsewhere without a second buyer
+// ever receiving them from GGSel once the account is unblocked.
 //
-// Run ON PROD from the repo root: node scripts/delist-ggsel-everything.js [--apply]
+// Scope: only GGSel offers WE made (a MarketplaceListing row of ours, any
+// status) and never a rent-farm service offer. Offers made by hand on the GGSel
+// dashboard are left alone. For each such offer that still holds in-stock codes:
+//   1. our ACTIVE row is marked delisted FIRST — the guardian and the no-claim
+//      engine read GGSel stock, and would otherwise count the vanishing codes as
+//      sales. A no-claim row's listed ledgers are parked "skipped" (held) and
+//      their owner tick cleared, which is what the engine's reconcile does for a
+//      market that was switched off;
+//   2. every in-stock code is archived, then read back;
+//   3. a code confirmed archived was unsold at that moment, so its account's
+//      (account, set, "ggsel") drop reservation is released — unless the account
+//      is live on another market's listing of that set. The offers themselves
+//      stay on GGSel (at 0 stock) for the owner to reuse once it is fixed.
+//
+// Run ON PROD from the repo root: node scripts/free-ggsel-accounts.js [--apply]
 // Dry run by default (reads only). Serial, ~1 s between GGSel calls. Undo
-// data: /root/_rehome_work/ggsel_everything_before_<ts>.json (rows, ledgers,
-// every product archived, every reservation field reset).
+// data: /root/_rehome_work/ggsel_accounts_before_<ts>.json (rows, ledgers,
+// every code archived, every reservation field reset).
 const path = require("path");
 process.chdir(path.join(__dirname, ".."));
 const req = (m) => require(m.startsWith("./") ? path.join(__dirname, "..", m) : m);
@@ -108,15 +112,19 @@ const loginOf = (value) => {
   const plan = [];
   for (const [i, o] of offers.entries()) {
     const ext = String(o.id);
+    if (!rowsByExt.has(ext)) continue; // not ours — never read, never touched
     let prods = [];
     try { prods = (await products(ext)).filter((p) => p.status === "in_stock"); } catch (e) { log("products unreadable for", ext, String(e.message).slice(0, 60)); continue; }
     if (!prods.length) continue;
     const rs = rowsByExt.get(ext) || [];
+    // Ours only (see header): no row → a hand-made offer, left alone; a
+    // rent-farm service offer sells a farming window, not these accounts.
+    if (!rs.length || rs.some((r) => r.rentFarm) || /automatic\s+farming/i.test(String(o.title_en || o.title_ru || ""))) continue;
     plan.push({ ext, status: String(o.status || ""), title: String(o.title_en || o.title_ru || "").slice(0, 70), rows: rs.map((r) => ({ id: String(r._id), status: r.status, set: r.set ? String(r.set) : "", origin: r.origin || "", rentFarm: !!r.rentFarm })), products: prods.map((p) => ({ id: p.id, login: loginOf(p.value) })) });
     if ((i + 1) % 100 === 0) log(`read ${i + 1}/${offers.length} offers, ${plan.length} hold stock`);
   }
   const codes = plan.reduce((n, p) => n + p.products.length, 0);
-  const untracked = plan.filter((p) => !p.rows.length).length;
+  const notOurs = offers.filter((o) => !rowsByExt.has(String(o.id))).length;
   const activeRows = plan.flatMap((p) => p.rows.filter((r) => r.status === "active"));
   const noclaimRows = activeRows.filter((r) => r.origin === "unclaimed");
 
@@ -128,10 +136,10 @@ const loginOf = (value) => {
   const ledgers = noclaimRows.length
     ? await Ledgers.find({ status: "listed", market: "ggsel" }).project({ drops: 0 }).toArray()
     : [];
-  const backup = `/root/_rehome_work/ggsel_everything_before_${TS}.json`;
+  const backup = `/root/_rehome_work/ggsel_accounts_before_${TS}.json`;
   fs.mkdirSync("/root/_rehome_work", { recursive: true });
   fs.writeFileSync(backup, JSON.stringify({ at: new Date(), apply: APPLY, plan, rows: rows.filter((r) => r.status === "active"), ledgers, reservations: drops }, null, 0));
-  log(`${APPLY ? "APPLY" : "DRY RUN"}: ${offers.length} GGSel offers, ${plan.length} still hold ${codes} in-stock codes (${untracked} offers with no row of ours); ${activeRows.length} active rows to mark delisted (${noclaimRows.length} no-claim, ${ledgers.length} listed ledgers to hold). Backup ${backup}`);
+  log(`${APPLY ? "APPLY" : "DRY RUN"}: ${offers.length} GGSel offers, ${plan.length} of ours still hold ${codes} in-stock codes (${notOurs} hand-made offers left alone); ${activeRows.length} active rows to mark delisted (${noclaimRows.length} no-claim, ${ledgers.length} listed ledgers to hold). Backup ${backup}`);
   if (!APPLY) { await mongoose.disconnect(); return; }
 
   // Reservation lookup: set|login → account ids reserved with tag ggsel.
@@ -147,7 +155,7 @@ const loginOf = (value) => {
     for (const r of p.rows.filter((x) => x.status === "active")) {
       await Listings.updateOne(
         { _id: new mongoose.Types.ObjectId(r.id), status: "active" },
-        { $set: { status: "delisted", lastError: "", note: `delisted ${TS.slice(0, 8)}: GGSel taken off by the owner — codes archived (seller account blocked, the offer itself cannot be paused)` } },
+        { $set: { status: "delisted", lastError: "", note: `delisted ${TS.slice(0, 8)}: GGSel blocked by the owner — our codes archived so the accounts sell elsewhere (seller account blocked; the offer stays on GGSel at 0 stock)` } },
       );
       out.rowsDelisted++;
       if (r.origin === "unclaimed" && r.set) {
@@ -191,10 +199,10 @@ const loginOf = (value) => {
     if (out.offers % 50 === 0) log(`confirmed ${out.offers}/${plan.length}: codes archived ${out.codesArchived}, released ${out.released}`);
   }
   out.deleteErrors = plan.filter((p) => p.deleteError).map((p) => ({ ext: p.ext, why: p.deleteError })).slice(0, 20);
-  logEvent({ category: "listings", action: "ggsel_delisted_all", actor: "claude (owner: delist everything on GGSel)", count: out.released, detail: `GGSel emptied: ${out.offers} offers, ${out.codesArchived} codes archived (${out.codesNotConfirmed} not confirmed), ${out.rowsDelisted} rows delisted, ${out.ledgersHeld} no-claim ledgers held, ${out.released} reservations released, ${out.unmatched} codes with no reservation, ${out.keptLiveElsewhere} kept (live elsewhere). Undo: ${backup}` });
+  logEvent({ category: "listings", action: "ggsel_accounts_freed", actor: "claude (owner: sell GGSel accounts elsewhere)", count: out.released, detail: `GGSel accounts freed: ${out.offers} offers, ${out.codesArchived} codes archived (${out.codesNotConfirmed} not confirmed), ${out.rowsDelisted} rows delisted, ${out.ledgersHeld} no-claim ledgers held, ${out.released} reservations released, ${out.unmatched} codes with no reservation, ${out.keptLiveElsewhere} kept (live elsewhere). Undo: ${backup}` });
   await wait(1500);
   log("DONE", JSON.stringify(out));
-  fs.writeFileSync(`/root/_rehome_work/ggsel_everything_result_${TS}.json`, JSON.stringify(out, null, 1));
+  fs.writeFileSync(`/root/_rehome_work/ggsel_accounts_result_${TS}.json`, JSON.stringify(out, null, 1));
   await mongoose.disconnect();
 })().catch(async (e) => {
   console.error("FATAL", e && e.stack ? e.stack.split("\n").slice(0, 4).join(" | ") : e);

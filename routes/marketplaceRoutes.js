@@ -951,6 +951,22 @@ router.get(
   },
 );
 
+// Plati and GGSel are BLOCKED by the owner (2026-09-28: both seller accounts
+// are blocked; "put a block on those two, we will use them later when they are
+// fixed"). While a market's switch is off (autoFarm.platiEnabled /
+// ggselEnabled), no account is spent on it — not by the automatic listers and
+// not by hand from here either. Turning the switch back on in Superadmin →
+// Auto-farm settings lifts the block.
+function marketBlockedReason(name) {
+  if (name === "digiseller" && typeof mp.digisellerTakesNewStock === "function" && !mp.digisellerTakesNewStock()) {
+    return "Plati is blocked — switched off in Auto-farm settings (the Plati seller account is blocked). Nothing is listed there until it is switched back on.";
+  }
+  if (name === "ggsel" && typeof mp.ggselTakesNewStock === "function" && !mp.ggselTakesNewStock()) {
+    return "GGSel is blocked — switched off in Auto-farm settings (the GGSel seller account is blocked). Nothing is listed there until it is switched back on.";
+  }
+  return "";
+}
+
 router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
   try {
     const body = req.body || {};
@@ -1056,6 +1072,13 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     const results = {};
     for (const name of targets) {
       try {
+        // A blocked market (see marketBlockedReason) takes nothing, by hand
+        // either — refused before any account is claimed or reserved.
+        const blocked = marketBlockedReason(name);
+        if (blocked) {
+          results[name] = { success: false, message: blocked };
+          continue;
+        }
         // Refused before category resolution: a market the no-claim layer
         // cannot deliver on must not cost a live category lookup first.
         if (noclaimSet && !ncs().SUPPORTED_MARKETS.includes(name)) {
@@ -1941,6 +1964,10 @@ router.post(
           success: false,
           message: "Content upload is only for Digiseller products",
         });
+      }
+      const blocked = marketBlockedReason("digiseller");
+      if (blocked) {
+        return res.status(409).json({ success: false, message: blocked });
       }
       const body = req.body || {};
       let lines;
