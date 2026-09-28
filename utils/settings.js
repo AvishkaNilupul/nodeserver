@@ -161,6 +161,16 @@ const AUTO_FARM_DEFAULTS = {
   // GGSel picks per game automatically; this is only a manual override.
   platiCategoryId: "34187",
   platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
+  // Plati (Digiseller) on/off for every AUTOMATIC lister — the auto-farm
+  // lister, the no-claim auto-lister, the guardian's auto-feed and the
+  // no-claim top-up. OFF = no new product and no new account goes to Plati;
+  // listings already there are left exactly as they are. A blank category
+  // above can never turn Plati off (it falls back to the default), so this is
+  // the switch. Set false on prod 2026-09-28 while the seller account is
+  // blocked ("продавец товара заблокирован"): nothing listed there can sell.
+  // A blocked seller also stops new listings on its own (marketplaces.js
+  // digisellerTakesNewStock), whatever this says.
+  platiEnabled: true,
   ggselCategoryId: "",
   // ZeusX auto-listing. Off unless the owner turns it on; a game only
   // lists when zeusxGames has its category, e.g.

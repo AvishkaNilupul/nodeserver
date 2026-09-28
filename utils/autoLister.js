@@ -58,6 +58,23 @@ const accountState = require("./twitchAccountState");
 
 const fsp = require("fs/promises");
 
+// Plati (Digiseller) takes new stock — a new product, or more delivery codes
+// on one — only while the owner's switch is on (autoFarm.platiEnabled) and
+// the seller account is not blocked (mp.digisellerTakesNewStock). A blocked
+// seller's products cannot be bought: every account split onto Plati then is
+// stock taken off the markets that do sell.
+function platiTakesNewStock(af) {
+  if (!af.platiCategoryId || af.platiEnabled === false) return false;
+  return typeof mp.digisellerTakesNewStock === "function" ? mp.digisellerTakesNewStock() : true;
+}
+
+// Why a listing got no Plati share, for its plati.error.
+function platiOffReason(af) {
+  if (!af.platiCategoryId) return "no Plati category id in auto-farm settings";
+  if (af.platiEnabled === false) return "Plati is switched off in auto-farm settings";
+  return "Plati seller account is blocked — nothing is listed there";
+}
+
 /* --------------------------- campaign details --------------------------- */
 
 // Normalise a label for placeholder comparison, keeping letters/digits of ANY
@@ -1236,7 +1253,11 @@ async function eldoradoShareMissing(L) {
 // from the stored Gameflip listing row so all markets stay identical.
 async function retryMissingSecondaries(task) {
   const L = task.listing || {};
-  const platiMissing = !(L.plati && L.plati.externalId);
+  // A Plati share is only "missing" while Plati can take new stock: switched
+  // off or blocked, every task would otherwise look incomplete and retry it
+  // on each sweep.
+  const platiMissing =
+    !(L.plati && L.plati.externalId) && platiTakesNewStock(settings.getAutoFarm());
   const ggselMissing = !(L.ggsel && L.ggsel.externalId);
   // ZeusX was added after this retry existed, so it was only ever attempted in
   // the same second as the initial publish: a task listed before ZeusX was
@@ -1578,9 +1599,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- Plati (Digiseller): live stock read, then add codes to the product.
+  // Never while Plati is switched off or its seller account is blocked.
   if (
     L.plati &&
     L.plati.externalId &&
+    platiTakesNewStock(settings.getAutoFarm()) &&
     (await listingIsLive("digiseller", L.plati.externalId))
   ) {
     try {
@@ -1821,7 +1844,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // is only ever attached to one market, so a sale on one platform can never
   // hand out an account a buyer on another platform already received.
   const af = settings.getAutoFarm();
-  const platiEnabled = !!af.platiCategoryId;
+  const platiEnabled = platiTakesNewStock(af);
   // Per-game category: own-history match first, then catalog search for the
   // game's "Twitch Drops" section, then its Accounts section. The settings
   // value is only a manual override / last resort.
@@ -1970,7 +1993,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         plati.error = err.message;
       }
     } else if (!platiEnabled) {
-      plati.error = "no Plati category id in auto-farm settings";
+      plati.error = platiOffReason(af);
     } else {
       plati.error = "no spare account for this market yet";
     }
@@ -2189,7 +2212,7 @@ async function publishStackedListing({
   const description = descriptions.gameflip;
   // Same market split as the solo flow: Gameflip first, then Plati, then GGSel.
   const af = settings.getAutoFarm();
-  const platiEnabled = !!af.platiCategoryId;
+  const platiEnabled = platiTakesNewStock(af);
   let ggselCategoryId = "";
   try {
     ggselCategoryId = await mp.ggselResolveCategoryId(task.game);
@@ -2266,7 +2289,7 @@ async function publishStackedListing({
         plati.error = err.message;
       }
     } else if (!platiEnabled) {
-      plati.error = "no Plati category id in auto-farm settings";
+      plati.error = platiOffReason(af);
     } else {
       plati.error = "no spare account for this market yet";
     }
@@ -3307,6 +3330,8 @@ module.exports = {
   eldoradoShareMissing,
   isAutoOwned,
   // exported for tests
+  platiTakesNewStock,
+  platiOffReason,
   listingIsLive,
   buildTitle,
   buildDescription,

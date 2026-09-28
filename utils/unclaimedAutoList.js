@@ -1239,10 +1239,19 @@ async function inventoryForCandidate(cand) {
 // The enabled marketplaces for a game, in split-priority order. ZeusX is NOT
 // included: it is a manual hand-over market for the auto-farm and has no
 // auto-sell path, so unclaimed stock is not published there.
+// Plati may take new stock only while the owner's switch is on
+// (autoFarm.platiEnabled) and the seller account is not blocked — a blocked
+// seller's products cannot be bought, and 52 of the 100 listed accounts once
+// sat there unsellable. mp.digisellerTakesNewStock knows the block.
+function platiTakesNewStock(af) {
+  if (!af.platiCategoryId || af.platiEnabled === false) return false;
+  return typeof mp.digisellerTakesNewStock === "function" ? mp.digisellerTakesNewStock() : true;
+}
+
 async function enabledMarketsForGame(game) {
   const af = settings.getAutoFarm();
   const markets = ["gameflip"];
-  if (af.platiCategoryId) markets.push("digiseller");
+  if (platiTakesNewStock(af)) markets.push("digiseller");
   let ggselCategoryId = "";
   try {
     ggselCategoryId = await mp.ggselResolveCategoryId(game);

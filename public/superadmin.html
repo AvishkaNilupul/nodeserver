@@ -732,6 +732,24 @@
           </label>
         </div>
         <div class="switch" style="margin-top: 10px">
+          <input type="checkbox" id="afPlatiEnabled" />
+          <label
+            for="afPlatiEnabled"
+            style="
+              margin: 0;
+              text-transform: none;
+              font-size: 13.5px;
+              color: var(--ink);
+            "
+          >
+            Auto-list on Plati (Digiseller) &mdash; the auto-farm lister, the
+            no-claim auto-lister and the auto-feed may put new accounts on
+            Plati. Off = no new Plati product and no new account goes there;
+            listings already on Plati stay. While the Plati seller account is
+            blocked, nothing new goes there even when this is on.
+          </label>
+        </div>
+        <div class="switch" style="margin-top: 10px">
           <input type="checkbox" id="afDeleteFinishedBots" />
           <label
             for="afDeleteFinishedBots"
@@ -1514,6 +1532,7 @@
           $("afPlatiCategoryId").value = st.platiCategoryId || "";
           $("afGgselCategoryId").value = st.ggselCategoryId || "";
           $("afZeusxAuto").checked = !!st.zeusxAuto;
+          $("afPlatiEnabled").checked = st.platiEnabled !== false;
           $("afZeusxGames").value = Object.keys(st.zeusxGames || {}).length
             ? JSON.stringify(st.zeusxGames)
             : "";
@@ -1556,6 +1575,7 @@
             platiCategoryId: $("afPlatiCategoryId").value,
             ggselCategoryId: $("afGgselCategoryId").value,
             zeusxAuto: $("afZeusxAuto").checked,
+            platiEnabled: $("afPlatiEnabled").checked,
             zeusxGames: $("afZeusxGames").value,
           });
           showMsg("Auto-farm settings saved.", "ok");

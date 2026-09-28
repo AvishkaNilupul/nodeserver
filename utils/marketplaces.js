@@ -1456,10 +1456,93 @@ async function digisellerRemoveContent(productId, contentId) {
 // shows num_in_stock). Reading with the seller token is what lets the guardian
 // auto-feed digiseller listings.
 //
+// A BLOCKED seller account ("продавец товара заблокирован") refuses every
+// product read at once, and the guardian alone reads every live Plati product
+// on each pass — about 230 refusals a pass, 40% of the error log on
+// 2026-09-27. The first refusal pauses product reads for DS_BLOCK_PAUSE_MS:
+// inside that window a read answers from memory with the same `stock: null`
+// and the same reason, so every caller behaves exactly as before (the guardian
+// still files its one market-wide finding), but no request goes out and
+// nothing is logged. The first read after the window is a real one, so an
+// unblocked account is noticed within one window. Only the seller-level
+// refusal trips it: a single deleted product ("товар не найден") is that
+// product's problem, not the market's.
+const DS_BLOCK_PAUSE_MS = 30 * 60 * 1000;
+const DS_SELLER_BLOCKED_RE = /продавец\s+товара\s+заблокирован|seller\b.*\bblocked/i;
+let dsBlocked = null; // { since, until, reason, skipped } — last seen blocked
+
+function dsNoteBlocked(reason, now = Date.now()) {
+  // A read already in flight when the pause began: nothing new to say.
+  if (dsBlocked && now < dsBlocked.until) return;
+  const again = !!dsBlocked;
+  const skipped = again ? dsBlocked.skipped : 0;
+  dsBlocked = {
+    since: again ? dsBlocked.since : now,
+    until: now + DS_BLOCK_PAUSE_MS,
+    reason,
+    skipped: 0,
+  };
+  console.error(
+    "digiseller: seller account blocked (" +
+      reason +
+      ") — " +
+      (again ? "still blocked; " : "") +
+      "pausing Plati product reads for " +
+      Math.round(DS_BLOCK_PAUSE_MS / 60000) +
+      " min" +
+      (again ? " (" + skipped + " reads skipped in the last pause)" : "") +
+      ".",
+  );
+}
+
+function dsNoteReadable() {
+  if (!dsBlocked) return;
+  console.error(
+    "digiseller: product reads work again — the seller account was blocked since " +
+      new Date(dsBlocked.since).toISOString() +
+      ".",
+  );
+  dsBlocked = null;
+}
+
+// What this process last saw of the Plati seller account. `blocked` stays true
+// from the first seller-level refusal until a read succeeds again; `paused` is
+// whether reads are currently answered from memory.
+function digisellerBlockState(now = Date.now()) {
+  if (!dsBlocked) {
+    return { blocked: false, paused: false, since: null, until: null, reason: "", skipped: 0 };
+  }
+  return {
+    blocked: true,
+    paused: now < dsBlocked.until,
+    since: new Date(dsBlocked.since),
+    until: new Date(dsBlocked.until),
+    reason: dsBlocked.reason,
+    skipped: dsBlocked.skipped,
+  };
+}
+
+// May an AUTOMATIC lister put new stock on Plati — a new product, or new
+// delivery codes on an existing one? No when the owner switched Plati off
+// (settings autoFarm.platiEnabled === false) or the seller account was last
+// seen blocked: a blocked seller's products cannot be bought, so every account
+// sent there is stock taken off the markets that do sell. Listings already on
+// Plati are not touched by this; it only gates what is added.
+function digisellerTakesNewStock() {
+  if (dsBlocked) return false;
+  const s = loadSettings() || {};
+  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
+  return af.platiEnabled !== false;
+}
+
 // Returns { stock, reason }: `stock` is the unit count, or null when it could
 // not be determined, in which case `reason` says why in a form fit to show an
 // operator. Callers that only need the number use digisellerProductStock.
 async function digisellerProductStockDetailed(productId) {
+  if (dsBlocked && Date.now() < dsBlocked.until) {
+    dsBlocked.skipped++;
+    return { stock: null, reason: dsBlocked.reason };
+  }
   let qs = "";
   try {
     const token = await digisellerToken();
@@ -1483,6 +1566,12 @@ async function digisellerProductStockDetailed(productId) {
     // hid a blocked seller behind a low-severity auto-feed warning.
     if (d.retval !== undefined && String(d.retval) !== "0") {
       const reason = "Digiseller refused the read: " + dsErrorText(d);
+      // The whole seller account is blocked: one line per pause, not one per
+      // product (see DS_BLOCK_PAUSE_MS).
+      if (DS_SELLER_BLOCKED_RE.test(reason)) {
+        dsNoteBlocked(reason);
+        return { stock: null, reason };
+      }
       console.error(
         "digiseller stock unreadable for product " +
           productId +
@@ -1494,6 +1583,8 @@ async function digisellerProductStockDetailed(productId) {
       );
       return { stock: null, reason };
     }
+    // Digiseller answered the read, so the seller account is not blocked.
+    dsNoteReadable();
     const p = d.product || d.content || d;
     // Only trust real numeric stock fields: booleans coerce to 0/1 and
     // num_in_lock counts locked (not sellable) units, so both would make the
@@ -6176,6 +6267,8 @@ module.exports = {
   digisellerRemoveContent,
   digisellerProductStock,
   digisellerProductStockDetailed,
+  digisellerBlockState,
+  digisellerTakesNewStock,
   digisellerProductVisible,
   digisellerDelist,
   // G2G — the seller-session connector (sls.g2g.com). See the block comment

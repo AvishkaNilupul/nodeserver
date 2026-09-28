@@ -155,6 +155,9 @@ function withEngine({ ledgers = [], pool = [], listings = [], sets = [], invento
       get: (_t, k) => {
         if (typeof k === "symbol" || k === "then") return undefined;
         if (k === "delistOutcome") return delistOutcome;
+        // Synchronous, and Plati open — the engine's market pick before the
+        // Plati switch existed (tests/platiOffSwitch.test.js covers the switch).
+        if (k === "digisellerTakesNewStock") return () => true;
         return (...args) => {
           mpCalls.push(String(k) + (args[0] !== undefined && typeof args[0] !== "object" ? ":" + args[0] : ""));
           if (mp[k]) return mp[k](...args);

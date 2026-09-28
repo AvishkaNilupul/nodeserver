@@ -1130,6 +1130,15 @@ async function feedListing(row, seenKeys, refusals) {
     }
     return 0;
   }
+  // Plati switched off, or its seller account blocked: the read and the sale
+  // bookkeeping above still run, but no new account is fed onto the product.
+  if (
+    row.marketplace === "digiseller" &&
+    typeof mp.digisellerTakesNewStock === "function" &&
+    !mp.digisellerTakesNewStock()
+  ) {
+    return 0;
+  }
   let claimed;
   let fulfiller = null;
   if (supplied) {
